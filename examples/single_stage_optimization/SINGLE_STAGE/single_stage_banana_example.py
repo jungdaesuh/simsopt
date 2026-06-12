@@ -2137,11 +2137,16 @@ class DeferredSurfaceXYZTensorFourier:
         self.stellsym = bool(stellsym)
         self.quadpoints_phi = np.asarray(quadpoints_phi, dtype=np.float64)
         self.quadpoints_theta = np.asarray(quadpoints_theta, dtype=np.float64)
-        self._dofs = _as_runtime_array(dofs)
+        # The runtime dof attribute must not be named ``_dofs``: native
+        # Optimizable dof-lineage traversal (``Optimizable.x``) reads
+        # ``opt._dofs.free_x`` directly, and an instance attribute named
+        # ``_dofs`` would shadow the ``__getattr__`` delegation to the
+        # materialized surface's DOFs object.
+        self._runtime_dofs = _as_runtime_array(dofs)
         self._materialized_surface = None
 
     def _host_dofs(self):
-        return np.asarray(host_array(self._dofs), dtype=np.float64)
+        return np.asarray(host_array(self._runtime_dofs), dtype=np.float64)
 
     def _materialize_surface(self):
         if self._materialized_surface is None:
@@ -2157,20 +2162,46 @@ class DeferredSurfaceXYZTensorFourier:
         return self._materialized_surface
 
     def get_dofs(self):
-        return self._dofs
+        return self._runtime_dofs
 
     def set_dofs(self, dofs):
-        self._dofs = _as_runtime_array(dofs)
+        self._runtime_dofs = _as_runtime_array(dofs)
         if self._materialized_surface is not None:
             self._materialized_surface.set_dofs(self._host_dofs())
 
     @property
     def x(self):
-        return self._dofs
+        return self._runtime_dofs
 
     @x.setter
     def x(self, dofs):
         self.set_dofs(dofs)
+
+    @property
+    def local_x(self):
+        return self._materialize_surface().local_x
+
+    @local_x.setter
+    def local_x(self, value):
+        # Native ``Optimizable.x`` assignment writes ``opt.local_x`` on every
+        # dof-lineage member; route it through the materialized surface and
+        # refresh the runtime dofs so traced JAX consumers stay in sync.
+        surface = self._materialize_surface()
+        surface.local_x = value
+        self._runtime_dofs = _as_runtime_array(surface.get_dofs())
+
+    @property
+    def local_full_x(self):
+        return self._materialize_surface().local_full_x
+
+    @local_full_x.setter
+    def local_full_x(self, value):
+        # Native ``Optimizable.full_x`` assignment writes
+        # ``opt.local_full_x`` per lineage member; without this write-through
+        # the assignment would silently land on a dead instance attribute.
+        surface = self._materialize_surface()
+        surface.local_full_x = value
+        self._runtime_dofs = _as_runtime_array(surface.get_dofs())
 
     def __getattr__(self, name):
         return getattr(self._materialize_surface(), name)

@@ -1028,3 +1028,119 @@ class TestSingleStageOuterLoopGpuProof:
 # ``_run_single_stage_script_results`` defined above is intentionally
 # kept here as the single source of truth — the new file imports it
 # rather than duplicating ~200 lines of subprocess plumbing.
+
+
+class TestDeferredSurfaceNativeDofLineage:
+    """Pin the native Optimizable dof-lineage contract of the deferred surface.
+
+    The full-state target lane (ondevice/optax/optimistix with the penalty
+    constraint method) consumes CPU-order ``JF.x``, whose getter reads
+    ``opt._dofs.free_x`` and whose setter writes ``opt.local_x`` on every
+    dof-lineage member, including the deferred surface proxy. Production job
+    54335305 crashed with ``AttributeError: 'jaxlib._jax.ArrayImpl' object
+    has no attribute 'free_x'`` because the proxy's runtime dof attribute
+    shadowed that delegation.
+    """
+
+    @staticmethod
+    def _build_deferred_surface():
+        from examples.single_stage_optimization.SINGLE_STAGE import (
+            single_stage_banana_example as single_stage_example,
+        )
+        from simsopt.geo import SurfaceXYZTensorFourier
+
+        quadpoints_phi = np.linspace(0.0, 1.0, 8, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 8, endpoint=False)
+        template = SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            nfp=2,
+            stellsym=True,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        return single_stage_example.DeferredSurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            nfp=2,
+            stellsym=True,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            dofs=np.asarray(template.get_dofs(), dtype=np.float64),
+        )
+
+    def test_native_lineage_getter_reads_materialized_dofs(self):
+        deferred = self._build_deferred_surface()
+        free_x = deferred._dofs.free_x
+        np.testing.assert_allclose(
+            np.asarray(free_x, dtype=np.float64),
+            np.asarray(deferred.local_x, dtype=np.float64),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_native_lineage_round_trip_through_composite_x(self):
+        from simsopt._core.optimizable import Optimizable
+
+        deferred = self._build_deferred_surface()
+
+        class _LineageConsumer(Optimizable):
+            def __init__(self, surface):
+                super().__init__(depends_on=[surface])
+
+            def J(self):
+                return 0.0
+
+        consumer = _LineageConsumer(deferred)
+        baseline = np.asarray(consumer.x, dtype=np.float64).copy()
+        assert baseline.size > 0
+
+        perturbed = baseline + 0.125
+        consumer.x = perturbed
+        np.testing.assert_allclose(
+            np.asarray(consumer.x, dtype=np.float64),
+            perturbed,
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(deferred.get_dofs(), dtype=np.float64),
+            np.asarray(
+                deferred._materialize_surface().get_dofs(), dtype=np.float64
+            ),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_native_lineage_full_x_round_trip(self):
+        from simsopt._core.optimizable import Optimizable
+
+        deferred = self._build_deferred_surface()
+
+        class _LineageConsumer(Optimizable):
+            def __init__(self, surface):
+                super().__init__(depends_on=[surface])
+
+            def J(self):
+                return 0.0
+
+        consumer = _LineageConsumer(deferred)
+        baseline = np.asarray(consumer.full_x, dtype=np.float64).copy()
+        assert baseline.size > 0
+
+        perturbed = baseline - 0.0625
+        consumer.full_x = perturbed
+        np.testing.assert_allclose(
+            np.asarray(consumer.full_x, dtype=np.float64),
+            perturbed,
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(deferred.get_dofs(), dtype=np.float64),
+            np.asarray(
+                deferred._materialize_surface().get_dofs(), dtype=np.float64
+            ),
+            rtol=0.0,
+            atol=0.0,
+        )
