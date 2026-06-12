@@ -926,3 +926,30 @@ seed-contract drift, not a GPU fault:
 These init rows are at SHA `5572edb95`; production matrix rows continue at
 `521fa05f1` via jobs `54341531` (CPU, running on a full `--mem=0` regular
 node) and `54335306` (CUDA, pending with `mem=114944M`).
+
+## Production Ondevice Compile Blowup Confirmed At Full-Node Scale
+
+Full-node production CPU job `54341531` (`-q regular --exclusive --mem=0`,
+`ReqMem=487802M`, SHA `521fa05f1`) failed after 3:32:54. Slurm step
+`54341531.0` recorded MaxRSS `442848468K` (about 422 GiB) and the target-lane
+child died with repeated
+`LLVM ERROR: Unable to allocate section memory!` from XLA's
+`contiguous_section_memory_manager` (subprocess exit `-6`), while the scipy
+reference lane had completed normally. The ondevice outer-optimizer graph at
+production budgets (`maxiter=1500`, `boozer_bfgs_maxiter=1500`,
+`boozer_newton_maxiter=50`, polish `run`) therefore exceeds the largest
+Perlmutter CPU node during XLA compilation; this elevates the known
+monolithic `jit(run)` compile blowup from an allocation-sizing issue to a
+feasibility boundary. GPU nodes have 256 GiB hosts, so pending ondevice CUDA
+job `54335306` cannot fit either and was placed on hold pending bisection.
+
+Follow-ups planned via the parameterized launchers:
+
+- Bisect probe: ondevice with `maxiter=1500` but the inner Boozer BFGS cap
+  unset (`PROD_BOOZER_BFGS_MAXITER=` empty skips the flag, child default
+  applies) on a full CPU node, to isolate whether the 1500 inner cap drives
+  the compile blowup. The cap was added to the contract on 2026-06-12; the
+  May 2026 ondevice runs that completed predate it.
+- scipy-jax variants (host-driven outer loop, per-evaluation compiled
+  graphs, init-scale host RSS about 6 GB) as the currently feasible
+  production lanes, requiring SHA `43513bc52` or later.
