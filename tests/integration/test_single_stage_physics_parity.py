@@ -1144,3 +1144,37 @@ class TestDeferredSurfaceNativeDofLineage:
             rtol=0.0,
             atol=0.0,
         )
+
+
+def test_target_lane_optimizer_seed_contract_matches_target_minimize_guard():
+    """supports-seed contracts must resolve to the one seed-capable method.
+
+    target_minimize() only consumes initial_value_and_grad with
+    method='lbfgs-ondevice' (the ondevice private L-BFGS); every other
+    target route rejects it. Tier 5's outer-loop probe crashed because the
+    example's seed-support contract also claimed the scipy-jax route.
+    """
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    seed_supported_methods = set()
+    for optimizer_backend in (
+        "ondevice",
+        "scipy-jax",
+        "scipy-jax-fullgraph",
+        "optax-lbfgs",
+        "optimistix-lbfgs",
+    ):
+        contract = single_stage_example.resolve_single_stage_optimizer_contract(
+            "jax", optimizer_backend
+        )
+        if single_stage_example.target_lane_contract_supports_optimizer_seed(
+            contract
+        ):
+            seed_supported_methods.add(
+                single_stage_example.single_stage_optimizer_contract_method(
+                    contract
+                )
+            )
+    assert seed_supported_methods == {"lbfgs-ondevice"}

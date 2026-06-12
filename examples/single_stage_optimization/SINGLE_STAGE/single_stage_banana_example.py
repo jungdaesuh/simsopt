@@ -8960,12 +8960,12 @@ def _single_stage_target_optimizer_dofs(x):
 
 
 def target_lane_contract_supports_optimizer_seed(contract):
+    # Only the ondevice private L-BFGS consumes initial_value_and_grad;
+    # target_minimize() rejects the seed for every other method, and the
+    # SciPy-driven routes re-evaluate the objective at x0 themselves.
     return (
         contract.driver == Driver.SIMSOPT_LBFGSB
         and contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
-    ) or (
-        contract.driver == Driver.SCIPY_LBFGSB
-        and contract.objective_route == TargetObjectiveRoute.SCIPY_JAX
     )
 
 
@@ -9869,15 +9869,9 @@ def run_single_stage_optimizer(
                 "Single-stage target-lane optimization does not support "
                 "failure_callback with SciPy-compatible L-BFGS-B."
             )
-        if (
-            optimizer_initial_value_and_grad is not None
-            and not target_lane_supports_optimizer_seed
-        ):
-            raise ValueError(
-                "Single-stage target-lane optimization only supports "
-                "optimizer_initial_value_and_grad for explicit "
-                "value-and-gradient L-BFGS target methods."
-            )
+        # The initial (value, grad) pair is always computed for run records;
+        # it is a warm-start hint that only seed-capable contracts forward
+        # below, so lanes without seed plumbing simply re-evaluate at x0.
         optimizer_dofs = _single_stage_target_optimizer_dofs(dofs)
         optimizer_method = single_stage_optimizer_contract_method(contract)
         target_minimize_kwargs = {
