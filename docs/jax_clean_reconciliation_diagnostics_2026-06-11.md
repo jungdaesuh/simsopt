@@ -953,3 +953,42 @@ Follow-ups planned via the parameterized launchers:
 - scipy-jax variants (host-driven outer loop, per-evaluation compiled
   graphs, init-scale host RSS about 6 GB) as the currently feasible
   production lanes, requiring SHA `43513bc52` or later.
+
+## RunPod CPU32 Production scipy-jax Run And The Production Parity Contract
+
+A dedicated true 32-core RunPod CPU pod (`vqkce5tflteojf`, `cpu5c` flavor,
+32 vCPU / 64 GB, `nproc=32`, Python 3.13.14, `$1.12/hr`) ran the production
+single-stage scipy-jax variant at clean SHA
+`06b7f1a8fe0f23eef54ffcc14958a2334d7d71e5` with budgets
+`maxiter=1500`, `boozer_bfgs_maxiter=1500`, `boozer_newton_maxiter=50`,
+polish `run`. Local harvest:
+`.artifacts/clean_reconciliation_benchmarks/runpod_cpu32_prod_sjqn_06b7f1a8f_vqkce5tflteojf`
+(68 files). The pod was deleted after harvest.
+
+The run executed end-to-end (all gates green, `<class 'simsoptpp.Curve'>`
+smoke, JAX/JAXLIB `0.10.0` CPU contract) with wall `6:36.63` and MaxRSS
+`5384596K`, and exited `1` on final-metric parity thresholds, not on any
+crash:
+
+- cpp/python/cpu reference: 5 accepted iterations, final objective
+  `2.4337459921069065`, field error `1.745e-03`, iota `3.5496e-03`.
+- JAX scipy-jax target: 34 accepted iterations, final objective
+  `0.909271767201756` (lower is better), field error `2.366e-03`, iota
+  `1.660e-02`.
+- Recorded failures: iota difference `1.31e-02`, volume relative difference
+  `4.06e-04`, field-error relative difference `3.55e-01`.
+
+Interpretation: both outer optimizers terminated on convergence criteria far
+below the 1500 budget (5 versus 34 accepted steps) and walked different
+trajectories to different local minima; the JAX lane reached a lower final
+objective. Free-running lanes cannot satisfy init-scale final-state parity
+thresholds by construction. The harness's exact-candidate replay machinery
+(`_EXACT_SAME_CANDIDATE_REPLAY_BACKENDS`) covers `ondevice`,
+`scipy-jax-fullgraph`, and `optax-lbfgs` but not `scipy-jax`, so strict
+production-scale parity evidence must come from a replay-capable backend
+(currently blocked on the ondevice compile blowup; bisect job `54357279`
+pending). scipy-jax production rows are performance/feasibility and
+final-physics evidence, with the trajectory divergence recorded explicitly.
+
+The companion GPU scipy-jax production run continues on A100 pod
+`qm8jo42xd5368x` from the same SHA.
