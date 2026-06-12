@@ -8,6 +8,28 @@ artifacts are useful for debugging and run planning, but they are not final
 clean-branch signoff evidence unless the source state is explicitly marked as
 `pr/jax-port-clean` and source-identical to the final commit under test.
 
+## Clean Source Archive
+
+- Local archive root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_source/20de74d8b_20260612T001101Z`
+- Archive:
+  `simsopt-pr-jax-port-clean-20de74d8b.tgz`
+- Archive size:
+  `55592828` bytes.
+- Recorded repo head:
+  `20de74d8b5e0563f841bb8f36e242f5675597e63`
+- Recorded status:
+  `pr/jax-port-clean...upstream_hss/master [ahead 14]`
+- Manifest sidecars:
+  `repo-head.txt`, `git-status.txt`, `dirty.patch`,
+  `dirty-diff-stat.txt`, `source-manifest.txt`, and
+  `archive-size-bytes.txt`.
+- Dirty patch status:
+  `dirty.patch` and `dirty-diff-stat.txt` are empty.
+
+This archive is clean-source staging material for the remaining CPU/GPU reruns.
+It is not itself CPU/GPU benchmark evidence.
+
 ## Copied Diagnostic Bundle
 
 - Clean diagnostic root:
@@ -16,6 +38,27 @@ clean-branch signoff evidence unless the source state is explicitly marked as
   `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-pure/.artifacts/runpod_full_cpu_gpu_20260611`
 - Copy result: 480 files, 121 MB.
 - Final-clean-signoff eligible: false.
+
+### Perlmutter `sacct` Verification
+
+The copied Perlmutter diagnostic jobs were rechecked on 2026-06-12:
+
+`ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'`
+
+- `54304250|pure-cpu-cpp-jax-clean|COMPLETED|00:03:27||32|256|1|nid007045`
+- `54304250.batch|batch|COMPLETED|00:03:27|44888K|256|256|1|nid007045`
+- `54304250.0|time|COMPLETED|00:00:07|0|32|32|1|nid007045`
+- `54304250.1|time|COMPLETED|00:00:29|0|32|32|1|nid007045`
+- `54304250.2|time|COMPLETED|00:00:54|239320K|32|32|1|nid007045`
+- `54304250.3|time|COMPLETED|00:01:53|2157680K|32|32|1|nid007045`
+- `54314828|dbg-b012-vjp-cache|COMPLETED|00:01:22||32|32|1|nid003925`
+- `54314828.batch|batch|COMPLETED|00:01:22|25664K|32|32|1|nid003925`
+- `54314828.0|python|COMPLETED|00:00:43|1892208K|32|32|1|nid003925`
+- `54314828.1|python|COMPLETED|00:00:35|1606128K|32|32|1|nid003925`
+
+This confirms the diagnostic jobs reached Slurm `COMPLETED` state. It does not
+make them final clean-source evidence because their recorded source state is the
+dirty `pr/jax-port-pure` staging tree described below.
 
 ### Perlmutter CPU Baseline `54304250`
 

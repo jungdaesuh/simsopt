@@ -323,12 +323,21 @@ actually produced it.
         still open.
 
 6. Rebuild clean-source benchmark artifacts.
-   - [ ] Create a clean-source tarball or remote checkout from
+   - [x] Create a clean-source tarball or remote checkout from
          `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean`, not from
          `simsopt-pr-jax-port-pure`.
-   - [ ] Include a source manifest beside the tarball or remote checkout with
+        2026-06-12 evidence: created local clean-source archive
+        `.artifacts/clean_reconciliation_source/20de74d8b_20260612T001101Z/simsopt-pr-jax-port-clean-20de74d8b.tgz`
+        from
+        `20de74d8b5e0563f841bb8f36e242f5675597e63`.
+   - [x] Include a source manifest beside the tarball or remote checkout with
          `git rev-parse HEAD`, `git status --short --branch`, and a hash or
          saved copy of any intentionally included dirty patch.
+        2026-06-12 evidence: the same archive root contains
+        `repo-head.txt`, `git-status.txt`, `dirty.patch`,
+        `dirty-diff-stat.txt`, `source-manifest.txt`, and
+        `archive-size-bytes.txt`; `dirty.patch` and `dirty-diff-stat.txt` are
+        empty.
    - [ ] Before running Stage 2 or single-stage benchmarks, verify the execution
          environment can import the native extension with
          `python -c "from simsoptpp import Curve; print(Curve)"`.
@@ -396,7 +405,10 @@ actually produced it.
       Local Miniforge CPU evidence passed, but final CPU/GPU benchmark
       environments still need this gate recorded beside their run artifacts.
 - [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --repo /path/to/clean/remote/checkout --python-bin /path/to/python --results-dir /path/to/results` on a CUDA host after clean-source staging is complete.
-- [ ] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
+- [x] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
+      2026-06-12 evidence: `54304250` and `54314828` both returned
+      `COMPLETED`; node identities were `nid007045` for the CPU baseline and
+      `nid003925` for the GPU abort-debug job.
 - [ ] RunPod diagnostic artifact copy includes rc files and metrics JSON from
       `/workspace/runpod-a100-full-gpu/benchmarks/`,
       `/workspace/runpod-a100-full-gpu/stale_signoff_cuda129/`, and
