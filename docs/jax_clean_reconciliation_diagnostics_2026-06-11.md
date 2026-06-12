@@ -66,6 +66,59 @@ Both jobs were `PENDING` on `shared_gpu_ss11` for priority when recorded here.
 They are not final clean-source evidence until Slurm reports completion and the
 JSON/log/result artifacts are copied or indexed.
 
+## Copied RunPod Diagnostic Bundle
+
+- Pod:
+  `0d2guz9ioc95bb` (`simsopt-a100-full-gpu`)
+- Image:
+  `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`
+- Local copied root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_diagnostics/runpod/0d2guz9ioc95bb`
+- Copy result:
+  249 files, 13 MB.
+- Remote GPU artifact root:
+  `/workspace/runpod-a100-full-gpu`
+- Remote CPU diagnostic artifact root:
+  `/workspace/runpod-a100-cpu32-immediate`
+- Recorded RunPod source checkout:
+  `/workspace/simsopt-runpod-clean-gpu`, branch `master`, HEAD
+  `76c2655a7bb4197897a51e837ed6d325777a016c`.
+- Final-clean-signoff eligible:
+  false, because the source state does not match current clean branch
+  `2f273bf26e2574eada705f49547881ff3ab66265`.
+
+Copied GPU benchmark rc files:
+
+- `stage2_cuda.rc`: `0`
+- `single_stage_cuda.rc`: `1`
+- `single_stage_cuda_xla_serial.rc`: `1`
+- `single_stage_cuda_cuda129.rc`: `0`
+
+Copied CPU diagnostic rc files:
+
+- `stage2_cpu32.rc`: `0`
+- `single_stage_cpu32.rc`: `0`
+
+Copied RunPod stale CUDA signoff:
+
+- Run root:
+  `runpod-a100-full-gpu/stale_signoff_cuda129`
+- Result:
+  rc `1`; final-clean-signoff eligible: false.
+- Summary:
+  `results/summary.json` records 165 requested integration paths, 130 present
+  paths, 35 missing paths, 11 current failed/error selectors, 11 new selectors,
+  and 0 stale-failure-pattern hits.
+- Primary failures:
+  one focused abort repro selector missing, 35 integration inventory paths
+  missing, `pure-tests-jax` returned `1`, integration batches `003`, `005`,
+  `012`, `013`, `018`, `019`, and `020` failed or hard-aborted, and 11
+  failed/error selectors remained.
+
+The RunPod pod was stopped after these artifacts were copied:
+`runpodctl pod stop 0d2guz9ioc95bb` returned desired status `EXITED`, and a
+subsequent `runpodctl pod list` returned an empty list.
+
 ## Copied Diagnostic Bundle
 
 - Clean diagnostic root:

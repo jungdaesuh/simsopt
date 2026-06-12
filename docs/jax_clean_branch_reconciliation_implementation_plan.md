@@ -280,20 +280,29 @@ actually produced it.
         2026-06-11 evidence: copied 480 files / 121 MB from the donor
         `runpod_full_cpu_gpu_20260611` mirror into
         `.artifacts/clean_reconciliation_diagnostics/runpod_full_cpu_gpu_20260611`.
-   - [ ] Copy or index RunPod artifacts from
+   - [x] Copy or index RunPod artifacts from
          `/workspace/runpod-a100-full-gpu` and
          `/workspace/runpod-a100-cpu32-immediate` into
          `.artifacts/clean_reconciliation_diagnostics/runpod/` after the active
          stale signoff finishes or is intentionally stopped.
+        2026-06-12 evidence: copied 249 files / 13 MB from RunPod pod
+        `0d2guz9ioc95bb` into
+        `.artifacts/clean_reconciliation_diagnostics/runpod/0d2guz9ioc95bb`.
+        The stale CUDA signoff completed red with rc `1`; copied
+        `summary.json`, rc files, metrics JSON, logs, JUnit, and selector
+        inventories.
    - [x] Store each diagnostic bundle with a source-state manifest that records
          remote path, branch, HEAD, dirty status, job or pod id, and whether it
          is final-clean-signoff eligible.
         2026-06-11 evidence: `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md`
         records source state and final-clean eligibility for the copied
         Perlmutter CPU baseline and GPU abort-debug bundles. RunPod workspace
-        artifact indexing remains open.
-   - [ ] Mark the RunPod A100 pod for shutdown once all requested artifacts are
+        artifact indexing is now recorded in
+        `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md`.
+   - [x] Mark the RunPod A100 pod for shutdown once all requested artifacts are
          copied and no further diagnostic work is needed.
+        2026-06-12 evidence: `runpodctl pod stop 0d2guz9ioc95bb` returned
+        desired status `EXITED`; subsequent `runpodctl pod list` returned `[]`.
 
 5. Port clean-required code and tests in small slices.
    - [x] Start from current clean dirty files and classify whether each belongs
@@ -432,10 +441,14 @@ actually produced it.
       2026-06-12 evidence: `54304250` and `54314828` both returned
       `COMPLETED`; node identities were `nid007045` for the CPU baseline and
       `nid003925` for the GPU abort-debug job.
-- [ ] RunPod diagnostic artifact copy includes rc files and metrics JSON from
+- [x] RunPod diagnostic artifact copy includes rc files and metrics JSON from
       `/workspace/runpod-a100-full-gpu/benchmarks/`,
       `/workspace/runpod-a100-full-gpu/stale_signoff_cuda129/`, and
       `/workspace/runpod-a100-cpu32-immediate/benchmarks/`.
+      2026-06-12 evidence: local copy under
+      `.artifacts/clean_reconciliation_diagnostics/runpod/0d2guz9ioc95bb`
+      includes benchmark rc files, benchmark metrics JSON, stale signoff rc,
+      stale signoff metrics JSON, and stale signoff `results/summary.json`.
 - [ ] `python benchmarks/stage2_e2e_comparison.py --platform cpu --output-json <cpu-stage2.json>` from a clean CPU source state.
       Local evidence passed with `JAX_ENABLE_X64=1` and
       `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z/stage2_cpu.json`.
@@ -498,7 +511,7 @@ actually produced it.
       `pr/jax-port-clean` or explicitly rejected with a boundary reason.
 - [x] All currently ported code/test slices have focused validation results
       recorded.
-- [ ] Diagnostic Perlmutter and RunPod artifacts are copied or indexed under a
+- [x] Diagnostic Perlmutter and RunPod artifacts are copied or indexed under a
       clean reconciliation artifact root with source-state labels and
       final-signoff eligibility marked false unless proven otherwise.
 - [ ] Final CPU Stage 2 and single-stage benchmark artifacts are generated from
