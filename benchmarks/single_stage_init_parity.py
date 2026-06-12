@@ -433,6 +433,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target-lane-boozer-bfgs-maxiter",
+        type=int,
+        default=None,
+        help=(
+            "Optional target-lane Boozer BFGS iteration cap override passed "
+            "through to the single-stage runner."
+        ),
+    )
+    parser.add_argument(
         "--target-lane-boozer-newton-polish-policy",
         choices=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES,
         default=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
