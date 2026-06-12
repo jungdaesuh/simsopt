@@ -92,10 +92,34 @@ temporary walltime reduction test. Scheduler recheck on 2026-06-12T01:07:34Z:
 `scontrol show job` reported both jobs as `PENDING`, `Reason=None`,
 `TimeLimit=06:00:00`, QOS `gpu_shared`, and no assigned node.
 
-Alternate batch-QOS dry-run checks did not produce a supported replacement
-route: `sbatch --test-only` with `gpu_debug`, `gpu_regular`, and command-line
-`gpu_shared` each returned `Job request does not match any supported policy`.
-No duplicate replacement job was submitted.
+Alternate batch-QOS checks on 2026-06-12 corrected the scheduler picture:
+
+- `sbatch --test-only -A m4680_g -q debug -t 00:30:00` was accepted, with a
+  forecast start on `2026-06-13T08:35`.
+- `sbatch --test-only -A m4680_g -q shared -t 04:00:00` was accepted, with a
+  forecast start on `2026-06-13T01:31`.
+- Batch `-q interactive` was rejected with
+  `Cannot submit batch jobs to gpu_interactive_ss11`.
+- Batch `-q premium` was rejected with `Invalid qos specification`.
+- The earlier `gpu_debug`, `gpu_regular`, and `gpu_shared` QOS-name attempts
+  remained rejected by policy.
+
+Two 4-hour shared duplicate jobs were submitted as a possible acceleration path:
+
+- Benchmark duplicate `54327327`, results root
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-shared4h-20260612T011243Z/results`.
+- Stale-signoff duplicate `54327328`, run root
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-shared4h-20260612T011243Z`.
+
+After submission, both duplicates were normalized to QOS `gpu_shared`, had
+`START_TIME=N/A`, and remained pending for priority. They were canceled before
+allocation to avoid duplicate GPU consumption. `sacct` reported:
+
+- `54327327|banana-e2e-cpu-gpu|CANCELLED by 114058|00:00:00|0:0|32|0|1|None assigned`
+- `54327328|clean-stale-cuda|CANCELLED by 114058|00:00:00|0:0|32|0|1|None assigned`
+
+The original 6-hour jobs `54325846` and `54325885` remain the active queued
+routes.
 
 The pending jobs are not final clean-source evidence until Slurm reports
 completion and the JSON/log/result artifacts are copied or indexed.

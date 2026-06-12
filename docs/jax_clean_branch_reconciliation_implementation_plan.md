@@ -405,10 +405,16 @@ actually produced it.
         output directory from the remote checkout, `54325846` was restored to
         the intended 6 hour limit and remained `PENDING` with `Reason=None`,
         QOS `gpu_shared`, partition `shared_gpu_ss11`, and no node assigned.
-        `sbatch --test-only` checks for alternate `gpu_debug`, `gpu_regular`,
-        and command-line `gpu_shared` submissions all returned
-        `Job request does not match any supported policy`, so no duplicate
-        replacement benchmark job was submitted.
+        2026-06-12T01:13:39Z update: a corrected `sbatch --test-only`
+        check showed `-q debug -t 00:30:00` and `-q shared -t 04:00:00` are
+        supported policy routes, while batch `-q interactive` and `-q premium`
+        are rejected. A 4-hour shared duplicate benchmark job `54327327` was
+        submitted with results root
+        `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-shared4h-20260612T011243Z/results`,
+        but Slurm normalized it to QOS `gpu_shared`, gave `START_TIME=N/A`,
+        and left it pending for priority. It was canceled before allocation;
+        `sacct` reported `54327327|banana-e2e-cpu-gpu|CANCELLED by 114058`.
+        The original 6-hour job `54325846` remains the active benchmark route.
    - [ ] Compare CPU and GPU JSON outputs only after both runs are from the
          clean source state.
    - [ ] Keep old pure-based artifacts in a diagnostic directory, clearly
@@ -474,6 +480,13 @@ actually produced it.
       `PENDING` with `Reason=None`, QOS `gpu_shared`, partition
       `shared_gpu_ss11`, and no node assigned. No interactive-QOS replacement
       was submitted because the batch policy rejected that route.
+      2026-06-12T01:13:39Z update: a 4-hour shared duplicate stale-signoff job
+      `54327328` was submitted with run root
+      `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-shared4h-20260612T011243Z`,
+      but it was also normalized to QOS `gpu_shared`, given `START_TIME=N/A`,
+      and left pending for priority. It was canceled before allocation; `sacct`
+      reported `54327328|clean-stale-cuda|CANCELLED by 114058`. The original
+      6-hour job `54325885` remains the active clean CUDA stale-signoff route.
 - [x] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
       2026-06-12 evidence: `54304250` and `54314828` both returned
       `COMPLETED`; node identities were `nid007045` for the CPU baseline and
