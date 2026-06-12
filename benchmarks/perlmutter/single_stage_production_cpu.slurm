@@ -19,8 +19,13 @@ LOG_DIR="${JOB_ROOT}/logs"
 ARTIFACT_DIR="${JOB_ROOT}/artifacts"
 FIXTURE_STAGE2_BS="benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json"
 PROD_MAXITER="${PROD_MAXITER:-1500}"
-PROD_BOOZER_BFGS_MAXITER="${PROD_BOOZER_BFGS_MAXITER:-1500}"
+# Use ${VAR-default} (not :-) so an explicitly exported empty value skips
+# the inner Boozer BFGS cap flag and the child falls back to its default.
+PROD_BOOZER_BFGS_MAXITER="${PROD_BOOZER_BFGS_MAXITER-1500}"
 PROD_NEWTON_MAXITER="${PROD_NEWTON_MAXITER:-50}"
+PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-ondevice}"
+PROD_BOOZER_LS_ALGORITHM="${PROD_BOOZER_LS_ALGORITHM:-}"
+PROD_VARIANT="${PROD_OPTIMIZER_BACKEND}${PROD_BOOZER_LS_ALGORITHM:+-${PROD_BOOZER_LS_ALGORITHM}}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-36000}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-36000}"
 
@@ -124,23 +129,34 @@ if not payload["x64"]:
 print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 
-STEP_DIR="${ARTIFACT_DIR}/single_stage_cpu_production"
+echo "${PROD_VARIANT}" > "${JOB_ROOT}/production_variant.txt"
+boozer_bfgs_args=()
+if [[ -n "${PROD_BOOZER_BFGS_MAXITER}" ]]; then
+  boozer_bfgs_args=(--target-lane-boozer-bfgs-maxiter "${PROD_BOOZER_BFGS_MAXITER}")
+fi
+if [[ -n "${PROD_BOOZER_LS_ALGORITHM}" ]]; then
+  # The example child reads this env var as its --boozer-least-squares-algorithm
+  # default; the parity wrapper's subprocess env inherits os.environ.
+  export BOOZER_LEAST_SQUARES_ALGORITHM="${PROD_BOOZER_LS_ALGORITHM}"
+fi
+
+STEP_DIR="${ARTIFACT_DIR}/single_stage_cpu_production_${PROD_VARIANT}"
 mkdir -p "${STEP_DIR}"
 set +e
 /usr/bin/time -v \
   srun -n 1 -c 32 python benchmarks/single_stage_init_parity.py \
     --platform cpu \
-    --optimizer-backend ondevice \
+    --optimizer-backend "${PROD_OPTIMIZER_BACKEND}" \
     --reference-optimizer-method lbfgs \
     --maxiter "${PROD_MAXITER}" \
-    --target-lane-boozer-bfgs-maxiter "${PROD_BOOZER_BFGS_MAXITER}" \
+    "${boozer_bfgs_args[@]}" \
     --target-lane-boozer-newton-polish-policy run \
     --target-lane-boozer-newton-maxiter "${PROD_NEWTON_MAXITER}" \
     --stage2-bs-path "${FIXTURE_STAGE2_BS}" \
-    --case-artifacts-dir "${ARTIFACT_DIR}/single_stage_cpu_production_cases" \
+    --case-artifacts-dir "${ARTIFACT_DIR}/single_stage_cpu_production_${PROD_VARIANT}_cases" \
     --single-stage-case-timeout-seconds "${CASE_TIMEOUT_SECONDS}" \
     --single-stage-target-case-timeout-seconds "${TARGET_CASE_TIMEOUT_SECONDS}" \
-    --output-json "${ARTIFACT_DIR}/single_stage_cpu_production.json" \
+    --output-json "${ARTIFACT_DIR}/single_stage_cpu_production_${PROD_VARIANT}.json" \
   > "${STEP_DIR}/stdout.log" \
   2> "${STEP_DIR}/stderr_time.log"
 status="$?"
