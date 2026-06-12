@@ -42,6 +42,20 @@ python -m pip freeze > "${JOB_RESULTS}/pip_freeze.txt"
 
 git rev-parse HEAD > "${JOB_RESULTS}/repo_sha.txt"
 git status --short > "${JOB_RESULTS}/git_status_short.txt"
+git status --short --branch > "${JOB_RESULTS}/git_status_short_branch.txt"
+git diff --no-ext-diff HEAD > "${JOB_RESULTS}/dirty.patch"
+git diff --stat HEAD > "${JOB_RESULTS}/dirty-diff-stat.txt"
+if [[ -s "${JOB_RESULTS}/dirty.patch" ]]; then
+  echo "tracked worktree must be clean for benchmark signoff" >&2
+  cat "${JOB_RESULTS}/dirty-diff-stat.txt" >&2
+  exit 1
+fi
+SOURCE_STATUS="$(git status --porcelain=v1 --untracked-files=all)"
+if [[ -n "${SOURCE_STATUS}" ]]; then
+  echo "non-clean source state would invalidate benchmark signoff" >&2
+  printf '%s\n' "${SOURCE_STATUS}" >&2
+  exit 1
+fi
 
 export SLURM_CPU_BIND="cores"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
@@ -55,6 +69,12 @@ export JAX_PLATFORMS=cuda,cpu
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 unset LD_LIBRARY_PATH
+
+python - <<'PY' > "${JOB_RESULTS}/simsoptpp_curve_smoke.txt"
+from simsoptpp import Curve
+
+print(Curve)
+PY
 
 nvidia-smi > "${JOB_RESULTS}/nvidia_smi_start.txt"
 
