@@ -451,6 +451,10 @@ def _run_stage2_probe(
         export_json = Path(temp_dir) / f"{backend}_probe.json"
         dofs_json = Path(temp_dir) / "override_dofs.json"
         write_json(dofs_json, list(dofs))
+        # Without an explicit --output-root the Stage 2 child defaults to its
+        # repo-relative STAGE_2 script directory and contaminates clean-source
+        # checkouts with outputs-<plasma>/ init artifacts.
+        output_root = str(Path(temp_dir) / "outputs")
         command = [
             "--backend",
             backend,
@@ -460,6 +464,8 @@ def _run_stage2_probe(
             str(export_json),
             "--override-dofs-json",
             str(dofs_json),
+            "--output-root",
+            output_root,
             "--nphi",
             str(args.nphi),
             "--ntheta",

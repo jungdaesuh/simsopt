@@ -503,6 +503,67 @@ def _run_stage2_probe_and_load_payload(*args):
     return result, payload
 
 
+def test_stage2_e2e_probe_threads_external_output_root(tmp_path):
+    """The e2e matched-state probe must never write into the repo checkout.
+
+    Without an explicit --output-root the Stage 2 child defaults to its
+    repo-relative STAGE_2 script directory, which contaminates clean-source
+    benchmark checkouts with outputs-<plasma>/ init artifacts.
+    """
+    driver = tmp_path / "probe_argv_capture.py"
+    driver.write_text(
+        '''
+import json
+import types
+from pathlib import Path
+
+import benchmarks.stage2_e2e_comparison as stage2_e2e
+
+captured = {}
+
+
+def fake_run_python_script(script_path, command, **kwargs):
+    captured["command"] = [str(item) for item in command]
+    export_json = Path(command[command.index("--export-objective-json") + 1])
+    export_json.write_text(json.dumps({"probe": True}), encoding="utf-8")
+
+
+stage2_e2e.run_python_script = fake_run_python_script
+args = types.SimpleNamespace(
+    nphi=4,
+    ntheta=4,
+    optimizer_backend="scipy-jax",
+    equilibrium_path=None,
+    plasma_surf_filename="wout_test.nc",
+    equilibria_dir="equilibria",
+)
+payload = stage2_e2e._run_stage2_probe(args, "jax", platform="cpu", dofs=[0.0, 1.0])
+print(json.dumps({"command": captured["command"], "payload": payload}))
+''',
+        encoding="utf-8",
+    )
+    driver_env = dict(os.environ)
+    driver_env["PYTHONPATH"] = os.pathsep.join(
+        path
+        for path in (str(REPO_ROOT), driver_env.get("PYTHONPATH"))
+        if path
+    )
+    result = subprocess.run(
+        [sys.executable, str(driver)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=driver_env,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    probe_record = json.loads(result.stdout.splitlines()[-1])
+    assert probe_record["payload"] == {"probe": True}
+    command = probe_record["command"]
+    assert "--output-root" in command
+    output_root = Path(command[command.index("--output-root") + 1]).resolve()
+    assert not output_root.is_relative_to(REPO_ROOT)
+
+
 @contextmanager
 def _isolated_backend_runtime(mode: str):
     previous_env = {name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS}
