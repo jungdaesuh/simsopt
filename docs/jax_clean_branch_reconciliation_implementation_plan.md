@@ -330,6 +330,11 @@ actually produced it.
         `.artifacts/clean_reconciliation_source/20de74d8b_20260612T001101Z/simsopt-pr-jax-port-clean-20de74d8b.tgz`
         from
         `20de74d8b5e0563f841bb8f36e242f5675597e63`.
+        2026-06-12 update: created refreshed local archive and git bundle at
+        `.artifacts/clean_reconciliation_source/2f273bf26_20260612T001956Z/`
+        from `2f273bf26e2574eada705f49547881ff3ab66265`, then cloned the
+        bundle on Perlmutter at
+        `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-20260612T001956Z`.
    - [x] Include a source manifest beside the tarball or remote checkout with
          `git rev-parse HEAD`, `git status --short --branch`, and a hash or
          saved copy of any intentionally included dirty patch.
@@ -338,6 +343,12 @@ actually produced it.
         `dirty-diff-stat.txt`, `source-manifest.txt`, and
         `archive-size-bytes.txt`; `dirty.patch` and `dirty-diff-stat.txt` are
         empty.
+        2026-06-12 update: the refreshed `2f273bf26` source root adds
+        `bundle-size-bytes.txt` and `bundle-verify.txt`; the remote checkout
+        verified `git rev-parse HEAD` as
+        `2f273bf26e2574eada705f49547881ff3ab66265` and
+        `git status --short --branch` as
+        `pr/jax-port-clean...origin/pr/jax-port-clean`.
    - [ ] Before running Stage 2 or single-stage benchmarks, verify the execution
          environment can import the native extension with
          `python -c "from simsoptpp import Curve; print(Curve)"`.
@@ -349,9 +360,17 @@ actually produced it.
         `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z`.
         Default single-stage CPU remains open locally because JAX/JAXLIB
         `0.9.2` cannot run the required private on-device Boozer optimizer.
+        Submitted pending remote evidence: Perlmutter job `54325846` was
+        accepted from the clean `2f273bf26` checkout with results root
+        `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-20260612T001956Z/results`;
+        as of submission it was `PENDING` on `shared_gpu_ss11` for priority.
    - [ ] Submit or run the clean GPU benchmark lane and preserve JSON,
          `/usr/bin/time -v` output, host RSS, GPU memory samples, GPU model,
          driver/toolchain details, and exact git source state.
+        Submitted pending remote evidence: the same Perlmutter job `54325846`
+        will run Stage 2 CUDA and single-stage CUDA after the CPU lanes; no
+        final JSON exists until the job reaches `COMPLETED` and artifacts are
+        copied or indexed.
    - [ ] Compare CPU and GPU JSON outputs only after both runs are from the
          clean source state.
    - [ ] Keep old pure-based artifacts in a diagnostic directory, clearly
@@ -405,6 +424,10 @@ actually produced it.
       Local Miniforge CPU evidence passed, but final CPU/GPU benchmark
       environments still need this gate recorded beside their run artifacts.
 - [ ] `python scripts/jax_gpu_failed_stale_tests_signoff.py --repo /path/to/clean/remote/checkout --python-bin /path/to/python --results-dir /path/to/results` on a CUDA host after clean-source staging is complete.
+      Submitted pending evidence: Perlmutter job `54325885` was accepted from
+      the clean `2f273bf26` checkout using run root
+      `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`;
+      as of submission it was `PENDING` on `shared_gpu_ss11` for priority.
 - [x] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
       2026-06-12 evidence: `54304250` and `54314828` both returned
       `COMPLETED`; node identities were `nid007045` for the CPU baseline and
@@ -417,11 +440,15 @@ actually produced it.
       Local evidence passed with `JAX_ENABLE_X64=1` and
       `.artifacts/clean_reconciliation_benchmarks/cpu_330925564_x64_20260611T230856Z/stage2_cpu.json`.
 - [ ] `python benchmarks/stage2_e2e_comparison.py --platform cuda --output-json <gpu-stage2.json>` from a clean GPU source state.
+      Submitted pending under Perlmutter job `54325846`; not final until the
+      job completes and the JSON is copied or indexed.
 - [ ] `python benchmarks/single_stage_init_parity.py --platform cpu --output-json <cpu-single-stage.json>` from a clean CPU source state.
       Local default-lane attempts are blocked after the surface-vessel adapter
       shape fix by JAX/JAXLIB `0.9.2` lacking the required private optimizer
       runtime. Rerun on the pinned JAX/JAXLIB `0.10.0` benchmark environment.
 - [ ] `python benchmarks/single_stage_init_parity.py --platform cuda --output-json <gpu-single-stage.json>` from a clean GPU source state.
+      Submitted pending under Perlmutter job `54325846`; not final until the
+      job completes and the JSON is copied or indexed.
 - [ ] CPU/GPU comparison report records exact source commit, dirty status,
       platform, walltime, host RSS, GPU memory when applicable, precision
       deltas, and pass/fail status.

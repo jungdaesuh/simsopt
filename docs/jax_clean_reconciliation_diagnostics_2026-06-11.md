@@ -30,6 +30,42 @@ clean-branch signoff evidence unless the source state is explicitly marked as
 This archive is clean-source staging material for the remaining CPU/GPU reruns.
 It is not itself CPU/GPU benchmark evidence.
 
+### Refreshed Source Bundle And Remote Checkout
+
+- Local source root:
+  `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean/.artifacts/clean_reconciliation_source/2f273bf26_20260612T001956Z`
+- Archive:
+  `simsopt-pr-jax-port-clean-2f273bf26.tgz`
+- Archive size:
+  `55592844` bytes.
+- Git bundle:
+  `simsopt-pr-jax-port-clean-2f273bf26.bundle`
+- Bundle size:
+  `118757095` bytes.
+- Recorded repo head:
+  `2f273bf26e2574eada705f49547881ff3ab66265`
+- Local recorded status:
+  `pr/jax-port-clean...upstream_hss/master [ahead 16]`
+- Remote checkout:
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-20260612T001956Z`
+- Remote checkout status:
+  `pr/jax-port-clean...origin/pr/jax-port-clean`
+- Remote stale-CUDA signoff run root:
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`
+
+Perlmutter accepted two clean-source jobs from this source state:
+
+- Benchmark job `54325846`, job name `banana-e2e-cpu-gpu`, submitted from the
+  remote checkout with results root
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-e2e-20260612T001956Z/results`.
+- CUDA stale-test signoff job `54325885`, job name `clean-stale-cuda`, submitted
+  with run root
+  `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`.
+
+Both jobs were `PENDING` on `shared_gpu_ss11` for priority when recorded here.
+They are not final clean-source evidence until Slurm reports completion and the
+JSON/log/result artifacts are copied or indexed.
+
 ## Copied Diagnostic Bundle
 
 - Clean diagnostic root:
