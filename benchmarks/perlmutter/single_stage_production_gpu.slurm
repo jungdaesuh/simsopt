@@ -28,6 +28,12 @@ PROD_NEWTON_MAXITER="${PROD_NEWTON_MAXITER:-50}"
 PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-ondevice}"
 PROD_BOOZER_LS_ALGORITHM="${PROD_BOOZER_LS_ALGORITHM:-}"
 PROD_VARIANT="${PROD_OPTIMIZER_BACKEND}${PROD_BOOZER_LS_ALGORITHM:+-${PROD_BOOZER_LS_ALGORITHM}}"
+PROD_MPOL="${PROD_MPOL:-}"
+PROD_NTOR="${PROD_NTOR:-}"
+PROD_NPHI="${PROD_NPHI:-}"
+PROD_NTHETA="${PROD_NTHETA:-}"
+PROD_WARM_START_RUN_DIR="${PROD_WARM_START_RUN_DIR:-}"
+PROD_NEWTON_POLISH_POLICY="${PROD_NEWTON_POLISH_POLICY:-run}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-36000}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-36000}"
 
@@ -146,6 +152,14 @@ boozer_bfgs_args=()
 if [[ -n "${PROD_BOOZER_BFGS_MAXITER}" ]]; then
   boozer_bfgs_args=(--target-lane-boozer-bfgs-maxiter "${PROD_BOOZER_BFGS_MAXITER}")
 fi
+resolution_args=()
+[[ -n "${PROD_MPOL}" ]] && resolution_args+=(--mpol "${PROD_MPOL}")
+[[ -n "${PROD_NTOR}" ]] && resolution_args+=(--ntor "${PROD_NTOR}")
+[[ -n "${PROD_NPHI}" ]] && resolution_args+=(--nphi "${PROD_NPHI}")
+[[ -n "${PROD_NTHETA}" ]] && resolution_args+=(--ntheta "${PROD_NTHETA}")
+if [[ -n "${PROD_WARM_START_RUN_DIR}" ]]; then
+  resolution_args+=(--warm-start-run-dir "${PROD_WARM_START_RUN_DIR}")
+fi
 if [[ -n "${PROD_BOOZER_LS_ALGORITHM}" ]]; then
   # The example child reads this env var as its --boozer-least-squares-algorithm
   # default; the parity wrapper's subprocess env inherits os.environ.
@@ -169,7 +183,8 @@ set +e
     --reference-optimizer-method lbfgs \
     --maxiter "${PROD_MAXITER}" \
     "${boozer_bfgs_args[@]}" \
-    --target-lane-boozer-newton-polish-policy run \
+    "${resolution_args[@]}" \
+    --target-lane-boozer-newton-polish-policy "${PROD_NEWTON_POLISH_POLICY}" \
     --target-lane-boozer-newton-maxiter "${PROD_NEWTON_MAXITER}" \
     --stage2-bs-path "${FIXTURE_STAGE2_BS}" \
     --case-artifacts-dir "${ARTIFACT_DIR}/single_stage_cuda_production_${PROD_VARIANT}_cases" \
