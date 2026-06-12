@@ -68,8 +68,37 @@ Scheduler recheck on 2026-06-12T00:56:36Z still showed both GPU/shared jobs as
 - `54325846|banana-e2e-cpu-gpu|PENDING|00:00:00|0:0||32|0|1|None assigned`
 - `54325885|clean-stale-cuda|PENDING|00:00:00|0:0||32|0|1|None assigned`
 
-They are not final clean-source evidence until Slurm reports completion and the
-JSON/log/result artifacts are copied or indexed.
+Before either job started, the remote checkout was rechecked and had generated
+untracked Stage 2 output files:
+
+- `examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/curves_init.vtu`
+- `examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/surf_init.vts`
+
+Those files would have failed the signoff scripts' clean-source gate. They were
+moved out of the checkout to preserve them under:
+
+`/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-prelaunch-untracked-20260612T010613Z`
+
+After the move, `git status --porcelain=v1 --untracked-files=all` in the remote
+checkout was empty and `git status --short --branch` returned
+`pr/jax-port-clean...origin/pr/jax-port-clean`.
+
+The original pending jobs were restored to their intended 6 hour limit after a
+temporary walltime reduction test. Scheduler recheck on 2026-06-12T01:07:34Z:
+
+- `54325846|banana-e2e-cpu-gpu|PENDING|0:00|(None)|gpu_shared|shared_gpu_ss11`
+- `54325885|clean-stale-cuda|PENDING|0:00|(None)|gpu_shared|shared_gpu_ss11`
+
+`scontrol show job` reported both jobs as `PENDING`, `Reason=None`,
+`TimeLimit=06:00:00`, QOS `gpu_shared`, and no assigned node.
+
+Alternate batch-QOS dry-run checks did not produce a supported replacement
+route: `sbatch --test-only` with `gpu_debug`, `gpu_regular`, and command-line
+`gpu_shared` each returned `Job request does not match any supported policy`.
+No duplicate replacement job was submitted.
+
+The pending jobs are not final clean-source evidence until Slurm reports
+completion and the JSON/log/result artifacts are copied or indexed.
 
 ## Final Clean-Source CPU Benchmark Bundle
 

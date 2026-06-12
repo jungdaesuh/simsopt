@@ -358,6 +358,15 @@ actually produced it.
         `2f273bf26e2574eada705f49547881ff3ab66265` and
         `git status --short --branch` as
         `pr/jax-port-clean...origin/pr/jax-port-clean`.
+        2026-06-12 update: a generated untracked Stage 2 output directory was
+        found in the remote checkout before the GPU/stale jobs started:
+        `examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc`.
+        It was moved out of the checkout to
+        `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-prelaunch-untracked-20260612T010613Z`,
+        preserving `curves_init.vtu` and `surf_init.vts`. A follow-up
+        `git status --porcelain=v1 --untracked-files=all` in the remote
+        checkout was empty and `git status --short --branch` returned
+        `pr/jax-port-clean...origin/pr/jax-port-clean`.
    - [ ] Before running Stage 2 or single-stage benchmarks, verify the execution
          environment can import the native extension with
          `python -c "from simsoptpp import Curve; print(Curve)"`.
@@ -392,6 +401,14 @@ actually produced it.
         final JSON exists until the job reaches `COMPLETED` and artifacts are
         copied or indexed. 2026-06-12T00:56:36Z scheduler check: `54325846`
         remained `PENDING` for priority on `shared_gpu_ss11`.
+        2026-06-12T01:07:34Z update: after cleaning an untracked generated
+        output directory from the remote checkout, `54325846` was restored to
+        the intended 6 hour limit and remained `PENDING` with `Reason=None`,
+        QOS `gpu_shared`, partition `shared_gpu_ss11`, and no node assigned.
+        `sbatch --test-only` checks for alternate `gpu_debug`, `gpu_regular`,
+        and command-line `gpu_shared` submissions all returned
+        `Job request does not match any supported policy`, so no duplicate
+        replacement benchmark job was submitted.
    - [ ] Compare CPU and GPU JSON outputs only after both runs are from the
          clean source state.
    - [ ] Keep old pure-based artifacts in a diagnostic directory, clearly
@@ -452,6 +469,11 @@ actually produced it.
       `/pscratch/sd/j/jungdae/simsopt-pr-jax-port-clean-2f273bf26-stale-signoff-20260612T002410Z`;
       2026-06-12T00:56:36Z scheduler check: `54325885` remained `PENDING` for
       priority on `shared_gpu_ss11`.
+      2026-06-12T01:07:34Z update: after the remote checkout cleanup,
+      `54325885` was restored to the intended 6 hour limit and remained
+      `PENDING` with `Reason=None`, QOS `gpu_shared`, partition
+      `shared_gpu_ss11`, and no node assigned. No interactive-QOS replacement
+      was submitted because the batch policy rejected that route.
 - [x] `ssh perlmutter 'sacct -j 54304250,54314828 --format=JobID,JobName,State,Elapsed,MaxRSS,ReqCPUS,AllocCPUS,NNodes,NodeList -P'` still shows the cited Perlmutter jobs as completed when their diagnostic artifacts are copied or referenced.
       2026-06-12 evidence: `54304250` and `54314828` both returned
       `COMPLETED`; node identities were `nid007045` for the CPU baseline and
