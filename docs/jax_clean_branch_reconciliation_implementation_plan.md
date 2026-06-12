@@ -921,3 +921,35 @@ actually produced it.
   was rescued from job `54331917` contamination.
 - Resolved: all RunPod pods used by this reconciliation were deleted after
   artifacts were copied; final RunPod account spend rate was `0`.
+
+## Production Resolution Stage (mpol=12, ntor=12)
+
+User-selected production resolution for the single-stage matrix:
+`mpol=12, ntor=12` (2026-06-12). The parity wrapper's high-resolution
+contract requires a validated continuation donor for any outer run above
+resolution 4 (`--warm-start-run-dir`; cold high-res runs are rejected), and
+the smoke-resolution tolerance floor (`gtol 1e-2`, `ftol 1e-5` below mpol 8)
+no longer applies: at mpol >= 8 the outer tolerances tighten to `gtol 1e-7`,
+`ftol 1e-10`, so the 1500/1500/50 budgets become meaningful.
+
+- [ ] Build the mpol=12/ntor=12 continuation donor from the fixed iota15
+      Stage 2 seed via
+      `benchmarks/perlmutter/single_stage_continuation_donor.slurm`
+      (ladder 2/4/6/12, nphi=64, ntheta=32 matching the autoresearch
+      production shape; the five existing autoresearch mpol=12 endpoints
+      fail the donor contract on missing `FINAL_G` and
+      `HARDWARE_CONSTRAINTS_OK=false`).
+      2026-06-12 submission: Perlmutter job `54363243` (`ss-cont-donor`,
+      full CPU node, 24 hour limit) from clean checkout at `1302741c8`.
+- [ ] Run the mpol=12 production matrix via the parameterized launchers
+      (`PROD_MPOL=12 PROD_NTOR=12 PROD_NPHI=64 PROD_NTHETA=32
+      PROD_WARM_START_RUN_DIR=<donor>`) across the optimizer variants.
+      Open contract question: `PROD_NEWTON_POLISH_POLICY` at mpol >= 6 -
+      forcing `run` materializes the large dense Newton graph (the
+      compile/memory blowup regime); decide `run` versus skip-policy rows
+      once the donor exists and the ondevice bisect probe (`54357279`)
+      reports.
+- [ ] Re-key the smoke-resolution (mpol=2) rows already collected as the
+      cheap tier of the report; they measure converged-optimization behavior
+      at loose tolerances (reference stops in ~5 steps, scipy-jax in ~34)
+      and are not production-resolution evidence.
