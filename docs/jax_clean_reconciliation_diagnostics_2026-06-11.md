@@ -992,3 +992,39 @@ final-physics evidence, with the trajectory divergence recorded explicitly.
 
 The companion GPU scipy-jax production run continues on A100 pod
 `qm8jo42xd5368x` from the same SHA.
+
+## RunPod A100 Production scipy-jax GPU Run
+
+A100 pod `qm8jo42xd5368x` (A100-SXM4-80GB, driver `570.133.20`, 16 guaranteed
+vCPU with a 13.6-core cgroup quota) completed the production scipy-jax GPU
+run at clean SHA `06b7f1a8fe0f23eef54ffcc14958a2334d7d71e5`
+(`maxiter=1500`, `boozer_bfgs_maxiter=1500`, `boozer_newton_maxiter=50`,
+polish `run`, smoke resolution mpol=2). Local harvest:
+`.artifacts/clean_reconciliation_benchmarks/runpod_gpu_prod_sjqn_06b7f1a8f_qm8jo42xd5368x`.
+The pod was deleted after harvest; only the user-decision stopped pod
+`vd4ob48umodxpr` remains on the account.
+
+Lane results (`single_stage_cuda_prod1500_50.json`, backend `gpu`):
+
+- cpp/python/cpu reference control: 5 accepted iterations, final objective
+  `2.4337`, field error `1.745e-03`, iota `3.5496e-03`.
+- JAX scipy-jax GPU target: 219 accepted iterations, final objective
+  `0.078904`, field error `5.078e-03`, iota `0.142689` against target
+  `0.15` - the deepest optimization of any production row so far, reaching
+  95 percent of the iota target while every CPU reference lane stalls at 5
+  steps near the seed iota.
+- Wall `1:53:05` for the lane step (dominated by the quota-throttled host
+  reference and XLA:GPU compile), host MaxRSS `6676132K`, max GPU memory
+  `1302 MiB`.
+- Recorded threshold failures (iota diff `1.39e-01`, volume rel diff
+  `6.80e-03`, field-error rel diff `1.91`) are the expected free-running
+  trajectory divergence documented for non-replay backends; they compare a
+  5-step reference against a 219-step target.
+
+Cross-row production summary at smoke resolution (all scipy-jax, SHA
+`06b7f1a8f`): reference lanes converge at 5 iterations (objective 2.434);
+JAX CPU reaches 34 iterations (objective 0.909); JAX GPU reaches 219
+iterations (objective 0.0789). The outer-tolerance floor (`gtol 1e-2`,
+`ftol 1e-5` below mpol 8) stops each lane at trajectory-dependent points,
+which is the motivation for the mpol=12 production-resolution stage and its
+continuation donor build (job `54363243`).
