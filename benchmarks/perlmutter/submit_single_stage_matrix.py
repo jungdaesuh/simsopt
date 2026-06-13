@@ -81,9 +81,10 @@ def main() -> None:
     parser.add_argument("--run-root-base", required=True,
                         help="Scratch run-root base OUTSIDE the checkout.")
     parser.add_argument("--warm-start-run-dir", default=None,
-                        help="Continuation donor dir, required for mpol12 cells.")
+                        help="Continuation donor dir, required for production-tier "
+                             "cells (any tier whose manifest warm_start is set).")
     parser.add_argument("--status", choices=["core", "extended"], default=None)
-    parser.add_argument("--tier", choices=["mpol2", "mpol12"], default=None)
+    parser.add_argument("--tier", choices=["mpol2", "mpol10"], default=None)
     parser.add_argument("--dim", type=int, choices=[11, 51], default=None)
     parser.add_argument("--platform", choices=["cpu", "gpu"], default=None)
     parser.add_argument("--ids", nargs="*", default=None,

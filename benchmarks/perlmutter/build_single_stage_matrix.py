@@ -79,14 +79,15 @@ TIERS = {
         "note": "smoke resolution: loose tolerances (gtol 1e-2), budgets do not "
                 "bind, optimizers stop in ~5-219 steps; cheap diagnostics tier",
     },
-    "mpol12": {
-        "mpol": 12, "ntor": 12, "nphi": 64, "ntheta": 32,
+    "mpol10": {
+        "mpol": 10, "ntor": 10, "nphi": 64, "ntheta": 32,
         "warm_start": "<continuation-donor>", "binds_budget": True,
         "runnable_now": False,
         "note": "production resolution: tolerances tighten (gtol 1e-7), 1500/50 "
                 "budgets bind; requires --warm-start-run-dir from the donor "
-                "build (job 54363243); ondevice-51 here risks the dense-Newton "
-                "compile blowup (may need polish-policy skip)",
+                "build (2->4->6->8->10 ladder); smaller than mpol12 so the "
+                "ondevice-51 dense-Newton graph is more likely to fit, though it "
+                "may still need polish-policy skip",
     },
 }
 

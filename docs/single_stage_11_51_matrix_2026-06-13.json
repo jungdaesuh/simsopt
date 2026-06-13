@@ -1,6 +1,6 @@
 {
   "matrix_id": "single_stage_11_51_2026-06-13",
-  "source_sha": "bc5b9e74b1132bae14737c730f5450f38e98494c",
+  "source_sha": "42cbc2e964fd378251f383d4c6616e15c827de89",
   "seed": "benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json",
   "budgets": {
     "outer_lbfgs_maxiter": 1500,
@@ -34,15 +34,15 @@
       "runnable_now": true,
       "note": "smoke resolution: loose tolerances (gtol 1e-2), budgets do not bind, optimizers stop in ~5-219 steps; cheap diagnostics tier"
     },
-    "mpol12": {
-      "mpol": 12,
-      "ntor": 12,
+    "mpol10": {
+      "mpol": 10,
+      "ntor": 10,
       "nphi": 64,
       "ntheta": 32,
       "warm_start": "<continuation-donor>",
       "binds_budget": true,
       "runnable_now": false,
-      "note": "production resolution: tolerances tighten (gtol 1e-7), 1500/50 budgets bind; requires --warm-start-run-dir from the donor build (job 54363243); ondevice-51 here risks the dense-Newton compile blowup (may need polish-policy skip)"
+      "note": "production resolution: tolerances tighten (gtol 1e-7), 1500/50 budgets bind; requires --warm-start-run-dir from the donor build (2->4->6->8->10 ladder); smaller than mpol12 so the ondevice-51 dense-Newton graph is more likely to fit, though it may still need polish-policy skip"
     }
   },
   "cells": [
@@ -80,7 +80,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_11_scipyjax_cpu_quasinewton_mpol12",
+      "id": "ss_11_scipyjax_cpu_quasinewton_mpol10",
       "formulation_dim": 11,
       "formulation": "reduced coil-only, Boozer surface solved each iteration",
       "optimizer_backend": "scipy-jax",
@@ -89,7 +89,7 @@
       "lane": "jax-cpu",
       "inner_ls_name": "quasinewton",
       "inner_ls_value": "quasi-newton",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": false,
@@ -105,8 +105,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -146,7 +146,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_11_scipyjax_gpu_quasinewton_mpol12",
+      "id": "ss_11_scipyjax_gpu_quasinewton_mpol10",
       "formulation_dim": 11,
       "formulation": "reduced coil-only, Boozer surface solved each iteration",
       "optimizer_backend": "scipy-jax",
@@ -155,7 +155,7 @@
       "lane": "jax-gpu",
       "inner_ls_name": "quasinewton",
       "inner_ls_value": "quasi-newton",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": false,
@@ -171,8 +171,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -212,7 +212,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_11_scipyjax_cpu_LM_mpol12",
+      "id": "ss_11_scipyjax_cpu_LM_mpol10",
       "formulation_dim": 11,
       "formulation": "reduced coil-only, Boozer surface solved each iteration",
       "optimizer_backend": "scipy-jax",
@@ -221,7 +221,7 @@
       "lane": "jax-cpu",
       "inner_ls_name": "LM",
       "inner_ls_value": "lm",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": false,
@@ -237,8 +237,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -278,7 +278,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_11_scipyjax_gpu_LM_mpol12",
+      "id": "ss_11_scipyjax_gpu_LM_mpol10",
       "formulation_dim": 11,
       "formulation": "reduced coil-only, Boozer surface solved each iteration",
       "optimizer_backend": "scipy-jax",
@@ -287,7 +287,7 @@
       "lane": "jax-gpu",
       "inner_ls_name": "LM",
       "inner_ls_value": "lm",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": false,
@@ -303,8 +303,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -344,7 +344,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_11_scipyjax_cpu_LS_mpol12",
+      "id": "ss_11_scipyjax_cpu_LS_mpol10",
       "formulation_dim": 11,
       "formulation": "reduced coil-only, Boozer surface solved each iteration",
       "optimizer_backend": "scipy-jax",
@@ -353,7 +353,7 @@
       "lane": "jax-cpu",
       "inner_ls_name": "LS",
       "inner_ls_value": "lm-minpack",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": false,
@@ -369,8 +369,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -410,7 +410,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_11_scipyjax_gpu_LS_mpol12",
+      "id": "ss_11_scipyjax_gpu_LS_mpol10",
       "formulation_dim": 11,
       "formulation": "reduced coil-only, Boozer surface solved each iteration",
       "optimizer_backend": "scipy-jax",
@@ -419,7 +419,7 @@
       "lane": "jax-gpu",
       "inner_ls_name": "LS",
       "inner_ls_value": "lm-minpack",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": false,
@@ -435,8 +435,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -476,7 +476,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_51_ondevice_cpu_quasinewton_mpol12",
+      "id": "ss_51_ondevice_cpu_quasinewton_mpol10",
       "formulation_dim": 51,
       "formulation": "full-space coils+surface, Boozer residual as penalty",
       "optimizer_backend": "ondevice",
@@ -485,7 +485,7 @@
       "lane": "jax-cpu",
       "inner_ls_name": "quasinewton",
       "inner_ls_value": "quasi-newton",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": true,
@@ -501,8 +501,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -542,7 +542,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_51_ondevice_gpu_quasinewton_mpol12",
+      "id": "ss_51_ondevice_gpu_quasinewton_mpol10",
       "formulation_dim": 51,
       "formulation": "full-space coils+surface, Boozer residual as penalty",
       "optimizer_backend": "ondevice",
@@ -551,7 +551,7 @@
       "lane": "jax-gpu",
       "inner_ls_name": "quasinewton",
       "inner_ls_value": "quasi-newton",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": true,
@@ -567,8 +567,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -608,7 +608,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_51_ondevice_cpu_LM_mpol12",
+      "id": "ss_51_ondevice_cpu_LM_mpol10",
       "formulation_dim": 51,
       "formulation": "full-space coils+surface, Boozer residual as penalty",
       "optimizer_backend": "ondevice",
@@ -617,7 +617,7 @@
       "lane": "jax-cpu",
       "inner_ls_name": "LM",
       "inner_ls_value": "lm",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": true,
@@ -633,8 +633,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -674,7 +674,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_51_ondevice_gpu_LM_mpol12",
+      "id": "ss_51_ondevice_gpu_LM_mpol10",
       "formulation_dim": 51,
       "formulation": "full-space coils+surface, Boozer residual as penalty",
       "optimizer_backend": "ondevice",
@@ -683,7 +683,7 @@
       "lane": "jax-gpu",
       "inner_ls_name": "LM",
       "inner_ls_value": "lm",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": true,
@@ -699,8 +699,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -740,7 +740,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_51_ondevice_cpu_LS_mpol12",
+      "id": "ss_51_ondevice_cpu_LS_mpol10",
       "formulation_dim": 51,
       "formulation": "full-space coils+surface, Boozer residual as penalty",
       "optimizer_backend": "ondevice",
@@ -749,7 +749,7 @@
       "lane": "jax-cpu",
       "inner_ls_name": "LS",
       "inner_ls_value": "lm-minpack",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": true,
@@ -765,8 +765,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },
@@ -806,7 +806,7 @@
       "depends_on": null
     },
     {
-      "id": "ss_51_ondevice_gpu_LS_mpol12",
+      "id": "ss_51_ondevice_gpu_LS_mpol10",
       "formulation_dim": 51,
       "formulation": "full-space coils+surface, Boozer residual as penalty",
       "optimizer_backend": "ondevice",
@@ -815,7 +815,7 @@
       "lane": "jax-gpu",
       "inner_ls_name": "LS",
       "inner_ls_value": "lm-minpack",
-      "tier": "mpol12",
+      "tier": "mpol10",
       "reference_dim": 51,
       "reference_lane": "cpp-cpu",
       "dim_matched_reference": true,
@@ -831,8 +831,8 @@
         "PROD_BOOZER_BFGS_MAXITER": "1500",
         "PROD_NEWTON_MAXITER": "50",
         "PROD_NEWTON_POLISH_POLICY": "run",
-        "PROD_MPOL": "12",
-        "PROD_NTOR": "12",
+        "PROD_MPOL": "10",
+        "PROD_NTOR": "10",
         "PROD_NPHI": "64",
         "PROD_NTHETA": "32"
       },

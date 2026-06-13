@@ -1,7 +1,7 @@
 # Single-stage 11-vs-51 production test matrix
 
 - Matrix id: `single_stage_11_51_2026-06-13`
-- Source SHA: `bc5b9e74b1132bae14737c730f5450f38e98494c`
+- Source SHA: `42cbc2e964fd378251f383d4c6616e15c827de89`
 - Seed: `benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json`
 - Budgets: outer L-BFGS 1500, Boozer BFGS 1500, Boozer Newton 50, polish `run`
 - Inner-LS naming: quasinewton=`quasi-newton`, LM=`lm`, LS=`lm-minpack`
@@ -17,29 +17,29 @@
 | id | dim | backend | platform | inner-LS | tier | status | ref dim match | runnable now |
 |---|---|---|---|---|---|---|---|---|
 | `ss_11_scipyjax_cpu_quasinewton_mpol2` | 11 | scipy-jax | cpu | quasinewton=`quasi-newton` | mpol2 | core | NO (51 vs 11) | yes |
-| `ss_11_scipyjax_cpu_quasinewton_mpol12` | 11 | scipy-jax | cpu | quasinewton=`quasi-newton` | mpol12 | core | NO (51 vs 11) | no (donor) |
+| `ss_11_scipyjax_cpu_quasinewton_mpol10` | 11 | scipy-jax | cpu | quasinewton=`quasi-newton` | mpol10 | core | NO (51 vs 11) | no (donor) |
 | `ss_11_scipyjax_gpu_quasinewton_mpol2` | 11 | scipy-jax | gpu | quasinewton=`quasi-newton` | mpol2 | core | NO (51 vs 11) | yes |
-| `ss_11_scipyjax_gpu_quasinewton_mpol12` | 11 | scipy-jax | gpu | quasinewton=`quasi-newton` | mpol12 | core | NO (51 vs 11) | no (donor) |
+| `ss_11_scipyjax_gpu_quasinewton_mpol10` | 11 | scipy-jax | gpu | quasinewton=`quasi-newton` | mpol10 | core | NO (51 vs 11) | no (donor) |
 | `ss_11_scipyjax_cpu_LM_mpol2` | 11 | scipy-jax | cpu | LM=`lm` | mpol2 | extended | NO (51 vs 11) | yes |
-| `ss_11_scipyjax_cpu_LM_mpol12` | 11 | scipy-jax | cpu | LM=`lm` | mpol12 | extended | NO (51 vs 11) | no (donor) |
+| `ss_11_scipyjax_cpu_LM_mpol10` | 11 | scipy-jax | cpu | LM=`lm` | mpol10 | extended | NO (51 vs 11) | no (donor) |
 | `ss_11_scipyjax_gpu_LM_mpol2` | 11 | scipy-jax | gpu | LM=`lm` | mpol2 | extended | NO (51 vs 11) | yes |
-| `ss_11_scipyjax_gpu_LM_mpol12` | 11 | scipy-jax | gpu | LM=`lm` | mpol12 | extended | NO (51 vs 11) | no (donor) |
+| `ss_11_scipyjax_gpu_LM_mpol10` | 11 | scipy-jax | gpu | LM=`lm` | mpol10 | extended | NO (51 vs 11) | no (donor) |
 | `ss_11_scipyjax_cpu_LS_mpol2` | 11 | scipy-jax | cpu | LS=`lm-minpack` | mpol2 | extended | NO (51 vs 11) | yes |
-| `ss_11_scipyjax_cpu_LS_mpol12` | 11 | scipy-jax | cpu | LS=`lm-minpack` | mpol12 | extended | NO (51 vs 11) | no (donor) |
+| `ss_11_scipyjax_cpu_LS_mpol10` | 11 | scipy-jax | cpu | LS=`lm-minpack` | mpol10 | extended | NO (51 vs 11) | no (donor) |
 | `ss_11_scipyjax_gpu_LS_mpol2` | 11 | scipy-jax | gpu | LS=`lm-minpack` | mpol2 | extended | NO (51 vs 11) | yes |
-| `ss_11_scipyjax_gpu_LS_mpol12` | 11 | scipy-jax | gpu | LS=`lm-minpack` | mpol12 | extended | NO (51 vs 11) | no (donor) |
+| `ss_11_scipyjax_gpu_LS_mpol10` | 11 | scipy-jax | gpu | LS=`lm-minpack` | mpol10 | extended | NO (51 vs 11) | no (donor) |
 | `ss_51_ondevice_cpu_quasinewton_mpol2` | 51 | ondevice | cpu | quasinewton=`quasi-newton` | mpol2 | core | yes | yes |
-| `ss_51_ondevice_cpu_quasinewton_mpol12` | 51 | ondevice | cpu | quasinewton=`quasi-newton` | mpol12 | core | yes | no (donor) |
+| `ss_51_ondevice_cpu_quasinewton_mpol10` | 51 | ondevice | cpu | quasinewton=`quasi-newton` | mpol10 | core | yes | no (donor) |
 | `ss_51_ondevice_gpu_quasinewton_mpol2` | 51 | ondevice | gpu | quasinewton=`quasi-newton` | mpol2 | core | yes | yes |
-| `ss_51_ondevice_gpu_quasinewton_mpol12` | 51 | ondevice | gpu | quasinewton=`quasi-newton` | mpol12 | core | yes | no (donor) |
+| `ss_51_ondevice_gpu_quasinewton_mpol10` | 51 | ondevice | gpu | quasinewton=`quasi-newton` | mpol10 | core | yes | no (donor) |
 | `ss_51_ondevice_cpu_LM_mpol2` | 51 | ondevice | cpu | LM=`lm` | mpol2 | core | yes | yes |
-| `ss_51_ondevice_cpu_LM_mpol12` | 51 | ondevice | cpu | LM=`lm` | mpol12 | core | yes | no (donor) |
+| `ss_51_ondevice_cpu_LM_mpol10` | 51 | ondevice | cpu | LM=`lm` | mpol10 | core | yes | no (donor) |
 | `ss_51_ondevice_gpu_LM_mpol2` | 51 | ondevice | gpu | LM=`lm` | mpol2 | core | yes | yes |
-| `ss_51_ondevice_gpu_LM_mpol12` | 51 | ondevice | gpu | LM=`lm` | mpol12 | core | yes | no (donor) |
+| `ss_51_ondevice_gpu_LM_mpol10` | 51 | ondevice | gpu | LM=`lm` | mpol10 | core | yes | no (donor) |
 | `ss_51_ondevice_cpu_LS_mpol2` | 51 | ondevice | cpu | LS=`lm-minpack` | mpol2 | core | yes | yes |
-| `ss_51_ondevice_cpu_LS_mpol12` | 51 | ondevice | cpu | LS=`lm-minpack` | mpol12 | core | yes | no (donor) |
+| `ss_51_ondevice_cpu_LS_mpol10` | 51 | ondevice | cpu | LS=`lm-minpack` | mpol10 | core | yes | no (donor) |
 | `ss_51_ondevice_gpu_LS_mpol2` | 51 | ondevice | gpu | LS=`lm-minpack` | mpol2 | core | yes | yes |
-| `ss_51_ondevice_gpu_LS_mpol12` | 51 | ondevice | gpu | LS=`lm-minpack` | mpol12 | core | yes | no (donor) |
+| `ss_51_ondevice_gpu_LS_mpol10` | 51 | ondevice | gpu | LS=`lm-minpack` | mpol10 | core | yes | no (donor) |
 
 Total cells: 24 (16 core, 8 extended).
 
@@ -53,4 +53,4 @@ Total cells: 24 (16 core, 8 extended).
 ## Tier detail
 
 - `mpol2`: mpol=2 ntor=2 nphi=31 ntheta=16, binds_budget=False, runnable_now=True. smoke resolution: loose tolerances (gtol 1e-2), budgets do not bind, optimizers stop in ~5-219 steps; cheap diagnostics tier
-- `mpol12`: mpol=12 ntor=12 nphi=64 ntheta=32, binds_budget=True, runnable_now=False. production resolution: tolerances tighten (gtol 1e-7), 1500/50 budgets bind; requires --warm-start-run-dir from the donor build (job 54363243); ondevice-51 here risks the dense-Newton compile blowup (may need polish-policy skip)
+- `mpol10`: mpol=10 ntor=10 nphi=64 ntheta=32, binds_budget=True, runnable_now=False. production resolution: tolerances tighten (gtol 1e-7), 1500/50 budgets bind; requires --warm-start-run-dir from the donor build (2->4->6->8->10 ladder); smaller than mpol12 so the ondevice-51 dense-Newton graph is more likely to fit, though it may still need polish-policy skip

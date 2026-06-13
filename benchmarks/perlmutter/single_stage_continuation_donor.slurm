@@ -20,11 +20,13 @@ ENV_ROOT="${JOB_ROOT}/venv"
 LOG_DIR="${JOB_ROOT}/logs"
 DONOR_ROOT="${JOB_ROOT}/continuation_outputs"
 FIXTURE_STAGE2_BS="benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json"
-DONOR_MPOL="${DONOR_MPOL:-12}"
-DONOR_NTOR="${DONOR_NTOR:-12}"
+DONOR_MPOL="${DONOR_MPOL:-10}"
+DONOR_NTOR="${DONOR_NTOR:-10}"
 DONOR_NPHI="${DONOR_NPHI:-64}"
 DONOR_NTHETA="${DONOR_NTHETA:-32}"
 DONOR_MAXITER="${DONOR_MAXITER:-300}"
+# Extra continuation rungs for a gentler ladder (2,4,6,8,10 by default).
+DONOR_INTERMEDIATE_RUNGS="${DONOR_INTERMEDIATE_RUNGS:-8}"
 DONOR_STAGE_TIMEOUT_SECONDS="${DONOR_STAGE_TIMEOUT_SECONDS:-21600}"
 
 repo_root_real="$(realpath "${REPO_ROOT}")"
@@ -94,6 +96,7 @@ set +e
     --nphi "${DONOR_NPHI}" \
     --ntheta "${DONOR_NTHETA}" \
     --maxiter "${DONOR_MAXITER}" \
+    --intermediate-rungs "${DONOR_INTERMEDIATE_RUNGS}" \
     --initial-stage2-bs-path "${FIXTURE_STAGE2_BS}" \
     --stage-timeout-seconds "${DONOR_STAGE_TIMEOUT_SECONDS}" \
     --output-root "${DONOR_ROOT}" \
