@@ -250,7 +250,28 @@ def build_default_continuation_stages(
     medium_maxiter: int,
     prefinal_maxiter: int,
     trial_policy: str = CONTINUATION_TRIAL_POLICY_VALIDATED_FAST,
+    intermediate_rungs: tuple[int, ...] = (),
 ) -> list[ContinuationStage]:
+    prefinal_mpol = min(final_mpol, 6)
+    # Optional extra rungs inserted strictly between the prefinal (mpol 6) and
+    # final resolutions, so the ladder steps up in smaller increments
+    # (e.g. intermediate_rungs=(8,) with final 10 gives 2->4->6->8->10). Rungs
+    # outside the (prefinal, final) band are ignored to keep the ladder
+    # monotonically increasing; the surface quadrature is held at the final
+    # resolution (over-resolved for the lower mode count is safe). Default
+    # empty preserves the historical 2->4->6->final ladder exactly.
+    intermediate_specs = [
+        ContinuationStage(
+            f"intermediate-mpol{rung}",
+            rung,
+            min(final_ntor, rung),
+            final_nphi,
+            final_ntheta,
+            prefinal_maxiter,
+        )
+        for rung in sorted(set(intermediate_rungs))
+        if prefinal_mpol < rung < final_mpol
+    ]
     candidate_specs = [
         ContinuationStage(
             "coarse",
@@ -270,12 +291,13 @@ def build_default_continuation_stages(
         ),
         ContinuationStage(
             "prefinal",
-            min(final_mpol, 6),
+            prefinal_mpol,
             min(final_ntor, 6),
             min(final_nphi, 127),
             min(final_ntheta, 48),
             prefinal_maxiter,
         ),
+        *intermediate_specs,
         ContinuationStage(
             "final",
             final_mpol,
@@ -286,9 +308,13 @@ def build_default_continuation_stages(
         ),
     ]
     if trial_policy == CONTINUATION_TRIAL_POLICY_VALIDATED_FAST:
+        # Custom intermediate rungs reuse the prefinal fast-trial overrides
+        # (they are prefinal-like refinement stages).
         candidate_specs = [
             ContinuationStage(
-                **(stage.__dict__ | _VALIDATED_FAST_TRIAL_STAGE_OVERRIDES[stage.name])
+                **(stage.__dict__ | _VALIDATED_FAST_TRIAL_STAGE_OVERRIDES.get(
+                    stage.name, _VALIDATED_FAST_TRIAL_STAGE_OVERRIDES["prefinal"]
+                ))
             )
             for stage in candidate_specs
         ]
@@ -2010,6 +2036,17 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--medium-maxiter", type=int, default=1)
     parser.add_argument("--prefinal-maxiter", type=int, default=2)
     parser.add_argument(
+        "--intermediate-rungs",
+        default="",
+        help=(
+            "Optional comma-separated mpol values for extra continuation rungs "
+            "inserted between the prefinal (mpol 6) and final resolutions, for a "
+            "gentler ladder (e.g. '8' with --mpol 10 gives 2,4,6,8,10). Rungs "
+            "outside the (6, final) band are ignored. Default empty keeps the "
+            "historical 2,4,6,final ladder."
+        ),
+    )
+    parser.add_argument(
         "--trial-policy",
         choices=CONTINUATION_TRIAL_POLICY_CHOICES,
         default=CONTINUATION_TRIAL_POLICY_VALIDATED_FAST,
@@ -2729,6 +2766,9 @@ def run_single_continuation_with_args(
             else initial_jax_runtime_seed_source_resolution
         )
     )
+    intermediate_rungs = tuple(
+        int(token) for token in args.intermediate_rungs.split(",") if token.strip()
+    )
     stages = select_continuation_stages_for_initial_resolution(
         build_default_continuation_stages(
             final_mpol=args.mpol,
@@ -2740,6 +2780,7 @@ def run_single_continuation_with_args(
             medium_maxiter=args.medium_maxiter,
             prefinal_maxiter=args.prefinal_maxiter,
             trial_policy=args.trial_policy,
+            intermediate_rungs=intermediate_rungs,
         ),
         initial_resolution=initial_stage_selection_resolution,
     )
