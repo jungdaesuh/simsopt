@@ -1,6 +1,6 @@
 {
   "matrix_id": "single_stage_11_51_2026-06-13",
-  "source_sha": "b5f97fdf937ce05fa75e3b90137b77d003ccb904",
+  "source_sha": "0752b18f12255b185a9f6c48cb22fd638149ebec",
   "seed": "benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json",
   "budgets": {
     "outer_lbfgs_maxiter": 1500,

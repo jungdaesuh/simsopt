@@ -1,7 +1,7 @@
 # Single-stage 11-vs-51 production test matrix
 
 - Matrix id: `single_stage_11_51_2026-06-13`
-- Source SHA: `b5f97fdf937ce05fa75e3b90137b77d003ccb904`
+- Source SHA: `0752b18f12255b185a9f6c48cb22fd638149ebec`
 - Seed: `benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json`
 - Budgets: outer L-BFGS 1500, Boozer BFGS 1500, Boozer Newton 50, polish `run`
 - Inner Boozer least-squares: `quasi-newton` (both lanes; LM/lm-minpack dropped)
