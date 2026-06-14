@@ -9,7 +9,7 @@
 ## Formulation/backend coupling
 
 - `11` reduced (coils only, surface solved) ⇒ `scipy-jax` (host SciPy).
-- `51` full-space (coils+surface free, residual penalty) ⇒ `ondevice` (on-device JAX).
+- `51` 51-dim coils+surface vector (full-graph DOF map) ⇒ `ondevice` (on-device JAX; outer gradient on the coil block only, surface re-solved by the same inner Boozer solve as the 11 lane, not a residual penalty).
 - The cpp/CPU reference is always 51; the 11-dim JAX lane is compared against a dim-mismatched 51 reference.
 
 ## Cells

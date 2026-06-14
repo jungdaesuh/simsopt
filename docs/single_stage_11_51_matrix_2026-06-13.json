@@ -445,7 +445,7 @@
     {
       "id": "ss_51_ondevice_cpu_quasinewton_mpol2",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "cpu",
@@ -478,7 +478,7 @@
     {
       "id": "ss_51_ondevice_cpu_quasinewton_mpol10",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "cpu",
@@ -511,7 +511,7 @@
     {
       "id": "ss_51_ondevice_gpu_quasinewton_mpol2",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "gpu",
@@ -544,7 +544,7 @@
     {
       "id": "ss_51_ondevice_gpu_quasinewton_mpol10",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "gpu",
@@ -577,7 +577,7 @@
     {
       "id": "ss_51_ondevice_cpu_LM_mpol2",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "cpu",
@@ -610,7 +610,7 @@
     {
       "id": "ss_51_ondevice_cpu_LM_mpol10",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "cpu",
@@ -643,7 +643,7 @@
     {
       "id": "ss_51_ondevice_gpu_LM_mpol2",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "gpu",
@@ -676,7 +676,7 @@
     {
       "id": "ss_51_ondevice_gpu_LM_mpol10",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "gpu",
@@ -709,7 +709,7 @@
     {
       "id": "ss_51_ondevice_cpu_LS_mpol2",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "cpu",
@@ -742,7 +742,7 @@
     {
       "id": "ss_51_ondevice_cpu_LS_mpol10",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "cpu",
@@ -775,7 +775,7 @@
     {
       "id": "ss_51_ondevice_gpu_LS_mpol2",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "gpu",
@@ -808,7 +808,7 @@
     {
       "id": "ss_51_ondevice_gpu_LS_mpol10",
       "formulation_dim": 51,
-      "formulation": "full-space coils+surface, Boozer residual as penalty",
+      "formulation": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
       "optimizer_backend": "ondevice",
       "outer_optimizer": "ondevice-jax",
       "platform": "gpu",

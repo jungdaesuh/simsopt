@@ -6,8 +6,10 @@ backend (no flag decouples them), so the achievable cells are:
 
 - 11 reduced (coils only, surface solved each iteration): ``scipy-jax``
   (host SciPy L-BFGS-B over the differentiable inner Boozer solve).
-- 51 full-space (coils + Boozer-surface DOFs free, residual as penalty):
-  ``ondevice`` (on-device JAX L-BFGS over the full-graph DOF map).
+- 51 full-space (51-dim coils+surface vector via the full-graph DOF map):
+  ``ondevice`` (on-device JAX L-BFGS). Only the coil block carries outer
+  gradient; the surface is re-solved each iteration by the same inner Boozer
+  solve as the 11 reduced lane (``run_code_traceable``), not a residual penalty.
 
 Every parity run also produces the native cpp/CPU reference child, which the
 harness always drives at 51 full-space DOFs (there is no coil-only native
@@ -60,7 +62,7 @@ FORMULATIONS = {
     51: {
         "optimizer_backend": "ondevice",
         "outer_optimizer": "ondevice-jax",
-        "description": "full-space coils+surface, Boozer residual as penalty",
+        "description": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
         "inner_ls_applies": True,
     },
 }
@@ -191,7 +193,7 @@ def render_markdown(manifest: dict) -> str:
         "## Formulation/backend coupling",
         "",
         "- `11` reduced (coils only, surface solved) ⇒ `scipy-jax` (host SciPy).",
-        "- `51` full-space (coils+surface free, residual penalty) ⇒ `ondevice` (on-device JAX).",
+        "- `51` 51-dim coils+surface vector (full-graph DOF map) ⇒ `ondevice` (on-device JAX; outer gradient on the coil block only, surface re-solved by the same inner Boozer solve as the 11 lane, not a residual penalty).",
         "- The cpp/CPU reference is always 51; the 11-dim JAX lane is compared "
         "against a dim-mismatched 51 reference.",
         "",

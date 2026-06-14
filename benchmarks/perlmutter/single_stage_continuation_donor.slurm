@@ -71,7 +71,16 @@ fi
 
 export SLURM_CPU_BIND="cores"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-export SIMSOPT_BACKEND_MODE=jax_cpu_parity
+# This is a warm-start BUILD job, not a parity benchmark. The continuation
+# driver runs its outer optimization through the host-SciPy reference lane
+# (optimizer_jax_reference.reference_minimize, method='lbfgs'), which requires
+# the native_cpu backend (_require_native_cpu_reference_backend_for_scipy_adapter).
+# Forcing jax_cpu_parity here (copy-pasted from the production parity launchers)
+# made that lane raise RuntimeError at optimizer.py:_raise_if_target_lane_required
+# the instant the first rung's outer phase started (job 54390541, 2026-06-13).
+# The resulting warm-start surface is backend-independent geometry, so the
+# strict-jax mpol=10 cells consume it unchanged.
+export SIMSOPT_BACKEND_MODE=native_cpu
 export SIMSOPT_BACKEND_STRICT=1
 export SIMSOPT_JAX_TRANSFER_GUARD=disallow
 export SIMSOPT_JAX_PLATFORM=cpu
