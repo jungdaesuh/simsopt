@@ -4,6 +4,18 @@
 > "feasibility proven" claim). Supersedes the ondevice rows of
 > `docs/single_stage_11_51_matrix_2026-06-13.{json,md}`.
 
+> **Execution status (2026-06-14):** Phases 1–3 IMPLEMENTED + locally validated — generator emits the
+> 8 host-driven cells; launchers default `scipy-jax` and pass `--boozer-optimizer-backend`; manifest
+> regenerated; new `tests/integration/test_single_stage_matrix_manifest.py` (8 tests, green). The
+> Phase 0 GATE smoke RAN on RunPod A100 at `b5f97fdf9`: the `free_x` blocker is **RETIRED**
+> (fullgraph-51 runs past DOF extraction; GPU lane did 5 outer iterations, 887 MiB peak). Two findings:
+> (1) the fullgraph **CPU** lane crashed at `boozer_surface.py:5659` because its inner Boozer defaulted
+> to `scipy` under `jax_cpu_parity` — **FIXED** by forcing `--boozer-optimizer-backend ondevice` on the
+> fullgraph cells (the GPU lane already got it via the cuda auto-default); a confirmatory CPU smoke with
+> the fix is in progress. (2) the **GPU** lane is blocked by the pre-existing scipy-jax GPU compile
+> pathology (`docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`) — separate from this migration. Still
+> pending: confirmatory CPU pass, donor resubmit + mpol10, GPU-pathology decision.
+
 ## Purpose
 
 Rebuild the single-stage production parity/performance matrix so **both** the 11-dim
@@ -123,19 +135,24 @@ lanes use different inner backends).
 ## Implementation Plan
 
 0. **GATE — confirm fullgraph-51 actually runs (do this first; blocks Phases 4/production)**
-   - [ ] Run a `scipy-jax-fullgraph` mpol=2 init/smoke at the current SHA (CPU is enough first);
-         require `rc=0` and `passed=true` in the result JSON. The only prior fullgraph artifact failed
-         before optimization (`free_x`, pre-`521fa05f1`). If it still fails, fullgraph-51 is a debug
-         item and the 51-dim lane is blocked; the 11-dim `scipy-jax` lane proceeds regardless.
-   - [ ] If it fails, root-cause at the `JF.x` DOF-extraction path (`single_stage_banana_example.py:9728`)
-         — the surface/DOF handling (see Open Questions) is implicated.
+   - [x] DONE (b5f97fdf9 gate smoke, RunPod A100, 2026-06-14): `free_x` RETIRED — fullgraph-51 runs
+         past DOF extraction (GPU lane: 5 outer iterations, objective decreasing, 887 MiB peak). Neither
+         lane reached `passed=true` yet: GPU is compile-bound (separate pre-existing issue), CPU crashed
+         at `boozer_surface.py:5659`. A confirmatory CPU smoke with the fix below is in progress to reach
+         `rc=0`/`passed=true`.
+   - [x] Root cause (NOT the `free_x`/`JF.x` path, which is fixed): the fullgraph inner Boozer defaults to
+         `scipy` and the harness only auto-supplies `--boozer-optimizer-backend ondevice` on cuda, not cpu
+         (`single_stage_init_parity.py` `_resolve_target_boozer_optimizer_backend`). FIX: fullgraph cells
+         force `--boozer-optimizer-backend ondevice` (generator `inner_boozer_optimizer_backend` →
+         `PROD_BOOZER_OPTIMIZER_BACKEND`; launchers pass it). The GPU compile pathology is tracked
+         separately (`docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`).
 1. **Rewrite the matrix generator** (`benchmarks/perlmutter/build_single_stage_matrix.py`)
    - [ ] `FORMULATIONS`: keep `11 → optimizer_backend="scipy-jax"`; change `51` from `ondevice`
          to `optimizer_backend="scipy-jax-fullgraph"`, `outer_optimizer="host-scipy"`, and a correct
          description (host SciPy over full `JF.x`; native inner Boozer solve). Remove the ondevice entry.
    - [ ] Collapse the inner-LS axis to quasi-newton only: reduce `INNER_LS` to `{"quasinewton": "quasi-newton"}`
          (or drop the `INNER_LS` loop in `build_cells`) so each `(dim, platform, tier)` yields exactly one cell.
-   - [ ] Set `inner_ls_applies` accurately for both lanes (quasi-newton default; no LM/LS axis).
+   - [x] DONE — dropped the inner-LS axis entirely (no `inner_ls_applies`/`inner_ls_name`/`inner_ls_value` fields); the inner solve is recorded once as manifest-level `inner_boozer_least_squares: "quasi-newton"` (the child default, so `PROD_BOOZER_LS_ALGORITHM` stays empty and the launcher omits the override).
    - [ ] Update `formulation_backend_coupling` and the manifest `notes[]` (remove ondevice/penalty
          language; state both lanes are host-driven SciPy; 51=fullgraph full `JF.x`).
    - [ ] Confirm `build_cells` yields exactly 8 cells: `{scipy-jax, scipy-jax-fullgraph} × {cpu, gpu} × {mpol2, mpol10}`.

@@ -25,8 +25,9 @@ PROD_MAXITER="${PROD_MAXITER:-1500}"
 # the inner Boozer BFGS cap flag and the child falls back to its default.
 PROD_BOOZER_BFGS_MAXITER="${PROD_BOOZER_BFGS_MAXITER-1500}"
 PROD_NEWTON_MAXITER="${PROD_NEWTON_MAXITER:-50}"
-PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-ondevice}"
+PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-scipy-jax}"
 PROD_BOOZER_LS_ALGORITHM="${PROD_BOOZER_LS_ALGORITHM:-}"
+PROD_BOOZER_OPTIMIZER_BACKEND="${PROD_BOOZER_OPTIMIZER_BACKEND:-}"
 PROD_VARIANT="${PROD_OPTIMIZER_BACKEND}${PROD_BOOZER_LS_ALGORITHM:+-${PROD_BOOZER_LS_ALGORITHM}}"
 PROD_MPOL="${PROD_MPOL:-}"
 PROD_NTOR="${PROD_NTOR:-}"
@@ -152,6 +153,12 @@ boozer_bfgs_args=()
 if [[ -n "${PROD_BOOZER_BFGS_MAXITER}" ]]; then
   boozer_bfgs_args=(--target-lane-boozer-bfgs-maxiter "${PROD_BOOZER_BFGS_MAXITER}")
 fi
+boozer_backend_args=()
+if [[ -n "${PROD_BOOZER_OPTIMIZER_BACKEND}" ]]; then
+  # Force the inner Boozer LS solver backend (ondevice for the
+  # scipy-jax-fullgraph lane under jax_*_parity; see build_single_stage_matrix.py).
+  boozer_backend_args=(--boozer-optimizer-backend "${PROD_BOOZER_OPTIMIZER_BACKEND}")
+fi
 resolution_args=()
 [[ -n "${PROD_MPOL}" ]] && resolution_args+=(--mpol "${PROD_MPOL}")
 [[ -n "${PROD_NTOR}" ]] && resolution_args+=(--ntor "${PROD_NTOR}")
@@ -180,6 +187,7 @@ set +e
   srun -n 1 -c 32 --gpus-per-task=1 python benchmarks/single_stage_init_parity.py \
     --platform cuda \
     --optimizer-backend "${PROD_OPTIMIZER_BACKEND}" \
+    "${boozer_backend_args[@]}" \
     --reference-optimizer-method lbfgs \
     --maxiter "${PROD_MAXITER}" \
     "${boozer_bfgs_args[@]}" \

@@ -2,26 +2,41 @@
 """Generate the single-stage 11-vs-51 production test matrix manifest.
 
 The single-stage formulation dimension is hard-coupled to the outer optimizer
-backend (no flag decouples them), so the achievable cells are:
+backend (no flag decouples them). Both achievable cells drive the outer loop on
+the host (SciPy L-BFGS-B), so neither compiles the whole optimization into one
+XLA graph -- the monolithic ``ondevice`` lane that did so OOMs at production
+resolution (422 GiB compile-time section memory) and is intentionally excluded:
 
-- 11 reduced (coils only, surface solved each iteration): ``scipy-jax``
-  (host SciPy L-BFGS-B over the differentiable inner Boozer solve).
-- 51 full-space (51-dim coils+surface vector via the full-graph DOF map):
-  ``ondevice`` (on-device JAX L-BFGS). Only the coil block carries outer
-  gradient; the surface is re-solved each iteration by the same inner Boozer
-  solve as the 11 reduced lane (``run_code_traceable``), not a residual penalty.
+- 11 reduced (coils only, surface solved each iteration by the inner Boozer
+  solve): ``scipy-jax`` (host SciPy L-BFGS-B over the differentiable inner
+  Boozer solve).
+- 51 full-space (51-dim coils+surface vector via the full-graph ``JF.x`` DOF
+  map): ``scipy-jax-fullgraph`` (host SciPy L-BFGS-B over the full DOF vector;
+  outer gradient on the coil block only, the surface re-solved each iteration by
+  the inner Boozer solve, not a residual penalty).
 
 Every parity run also produces the native cpp/CPU reference child, which the
 harness always drives at 51 full-space DOFs (there is no coil-only native
-reference in this benchmark). So an 11-dim JAX lane is compared against a
-51-dim cpp reference unless an external 11-dim native reference is supplied.
+reference in this benchmark). So an 11-dim ``scipy-jax`` lane is compared against
+a 51-dim cpp reference (performance/feasibility), while the 51-dim
+``scipy-jax-fullgraph`` lane is dim-matched and replay-capable (exact
+same-candidate bit-parity).
 
-The inner Boozer least-squares algorithm (``quasi-newton`` / ``lm`` /
-``lm-minpack``) reaches the child via the ``BOOZER_LEAST_SQUARES_ALGORITHM``
-env var; the launchers export it from ``PROD_BOOZER_LS_ALGORITHM``. It is
-documented to apply to the on-device (ondevice) lane; its effect on the
-host-SciPy scipy-jax reduced lane is unvalidated (may fall back to
-quasi-newton), so those cells are marked extended.
+The inner Boozer least-squares solve is quasi-newton for both lanes; the LM /
+lm-minpack variants are dropped (unvalidated on the host-SciPy lanes, and the
+two lanes use different inner backends). quasi-newton is the child default, so
+no ``BOOZER_LEAST_SQUARES_ALGORITHM`` override is exported.
+
+Inner Boozer *optimizer* backend: under the jax_*_parity backend modes the inner
+Boozer solve must run on-device (JAX). The reduced ``scipy-jax`` lane already
+selects ``ondevice`` by the child default, but ``scipy-jax-fullgraph`` defaults
+its inner Boozer to ``scipy`` when ``--boozer-optimizer-backend`` is omitted, and
+the harness only auto-supplies ``ondevice`` on cuda -- not cpu
+(``single_stage_init_parity.py`` ``_resolve_target_boozer_optimizer_backend``).
+So the fullgraph cells set ``PROD_BOOZER_OPTIMIZER_BACKEND=ondevice`` explicitly;
+without it the fullgraph CPU lane raises at ``boozer_surface.py:5659`` under
+``jax_cpu_parity`` (confirmed by the b5f97fdf9 gate smoke, where the GPU lane --
+which got ``ondevice`` via the cuda auto-default -- ran past the same point).
 
 This script emits the manifest as JSON and a readable Markdown table. It does
 not submit anything; ``submit_single_stage_matrix.py`` consumes the JSON.
@@ -36,6 +51,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SEED = "benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json"
 
+# Inner Boozer least-squares solve: quasi-newton for both lanes (no LM axis).
+# quasi-newton is the child default, so PROD_BOOZER_LS_ALGORITHM stays empty and
+# the launcher does not export BOOZER_LEAST_SQUARES_ALGORITHM.
+INNER_BOOZER_LEAST_SQUARES = "quasi-newton"
+
 BUDGETS = {
     "outer_lbfgs_maxiter": 1500,
     "target_lane_boozer_bfgs_maxiter": 1500,
@@ -43,27 +63,33 @@ BUDGETS = {
     "target_lane_boozer_newton_polish_policy": "run",
 }
 
-# User naming -> child --boozer-least-squares-algorithm value.
-INNER_LS = {
-    "quasinewton": "quasi-newton",
-    "LM": "lm",
-    "LS": "lm-minpack",
-}
-
 # Formulation dim is fixed by the optimizer backend (verified against the
-# contract predicates in single_stage_banana_example.py).
+# contract predicates in single_stage_banana_example.py and the valid-backend
+# set TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS in
+# src/simsopt_jax/geo/_optimizer_backend_choices.py). Both lanes are host-driven
+# SciPy control over a JAX-evaluated value/grad.
+#
+# inner_boozer_optimizer_backend: forces --boozer-optimizer-backend for the lane.
+# Empty = rely on the child/harness default (the reduced scipy-jax lane already
+# resolves to ondevice). "ondevice" = set it explicitly, required for the
+# fullgraph lane on CPU (its inner Boozer otherwise defaults to scipy, which
+# jax_cpu_parity rejects at boozer_surface.py:5659).
 FORMULATIONS = {
     11: {
         "optimizer_backend": "scipy-jax",
         "outer_optimizer": "host-scipy",
-        "description": "reduced coil-only, Boozer surface solved each iteration",
-        "inner_ls_applies": False,  # scipy-jax reduced lane: inner-LS unvalidated
+        "inner_boozer_optimizer_backend": "",
+        "description": "reduced coil-only; Boozer surface solved each iteration "
+                       "by the inner solve; host SciPy L-BFGS-B outer loop",
     },
     51: {
-        "optimizer_backend": "ondevice",
-        "outer_optimizer": "ondevice-jax",
-        "description": "51-dim coils+surface vector (full-graph DOF map); outer gradient on the coil block only, surface re-solved each iteration by the same inner Boozer solve as the reduced lane (not a residual penalty)",
-        "inner_ls_applies": True,
+        "optimizer_backend": "scipy-jax-fullgraph",
+        "outer_optimizer": "host-scipy",
+        "inner_boozer_optimizer_backend": "ondevice",
+        "description": "51-dim coils+surface vector over the full-graph JF.x DOF "
+                       "map; host SciPy L-BFGS-B outer loop; outer gradient on "
+                       "the coil block only, surface re-solved each iteration by "
+                       "the inner Boozer solve (not a residual penalty)",
     },
 }
 
@@ -79,17 +105,20 @@ TIERS = {
         "mpol": 2, "ntor": 2, "nphi": 31, "ntheta": 16,
         "warm_start": None, "binds_budget": False, "runnable_now": True,
         "note": "smoke resolution: loose tolerances (gtol 1e-2), budgets do not "
-                "bind, optimizers stop in ~5-219 steps; cheap diagnostics tier",
+                "bind, optimizers stop in ~5-219 steps; cheap diagnostics tier. "
+                "The scipy-jax-fullgraph mpol2 cells double as the Phase 0 GATE "
+                "smoke (inspect their result JSON for passed=true).",
     },
     "mpol10": {
         "mpol": 10, "ntor": 10, "nphi": 64, "ntheta": 32,
         "warm_start": "<continuation-donor>", "binds_budget": True,
         "runnable_now": False,
         "note": "production resolution: tolerances tighten (gtol 1e-7), 1500/50 "
-                "budgets bind; requires --warm-start-run-dir from the donor "
-                "build (2->4->6->8->10 ladder); smaller than mpol12 so the "
-                "ondevice-51 dense-Newton graph is more likely to fit, though it "
-                "may still need polish-policy skip",
+                "budgets bind; requires --warm-start-run-dir from the "
+                "continuation donor build (2->4->6->8->10 ladder via "
+                "--intermediate-rungs). Both host-SciPy lanes compile only one "
+                "value/grad eval per step, so node memory is bounded by a single "
+                "eval rather than the whole optimization (no monolithic jit).",
     },
 }
 
@@ -97,55 +126,49 @@ TIERS = {
 def build_cells() -> list[dict]:
     cells: list[dict] = []
     for dim, fdef in FORMULATIONS.items():
-        for ls_name, ls_value in INNER_LS.items():
-            for platform in PLATFORMS:
-                for tier in TIERS:
-                    # quasi-newton is the child default; only set the env for
-                    # the explicit lm / lm-minpack opt-ins.
-                    prod_ls = "" if ls_value == "quasi-newton" else ls_value
-                    if dim == 51:
-                        status = "core"
-                    else:
-                        status = "core" if ls_value == "quasi-newton" else "extended"
-                    reason = None
-                    if status == "extended":
-                        reason = ("inner-LS effect on the scipy-jax reduced lane "
-                                  "is unvalidated; may fall back to quasi-newton")
-                    cell_id = f"ss_{dim}_{fdef['optimizer_backend'].replace('-', '')}_{platform}_{ls_name}_{tier}"
-                    cells.append({
-                        "id": cell_id,
-                        "formulation_dim": dim,
-                        "formulation": fdef["description"],
-                        "optimizer_backend": fdef["optimizer_backend"],
-                        "outer_optimizer": fdef["outer_optimizer"],
-                        "platform": platform,
-                        "lane": f"jax-{platform}",
-                        "inner_ls_name": ls_name,
-                        "inner_ls_value": ls_value,
-                        "tier": tier,
-                        "reference_dim": 51,
-                        "reference_lane": "cpp-cpu",
-                        "dim_matched_reference": dim == 51,
-                        "status": status,
-                        "status_reason": reason,
-                        "launcher": PLATFORMS[platform]["launcher"],
-                        "account": PLATFORMS[platform]["account"],
-                        "sbatch_extra": PLATFORMS[platform]["sbatch_extra"],
-                        "env": {
-                            "PROD_OPTIMIZER_BACKEND": fdef["optimizer_backend"],
-                            "PROD_BOOZER_LS_ALGORITHM": prod_ls,
-                            "PROD_MAXITER": str(BUDGETS["outer_lbfgs_maxiter"]),
-                            "PROD_BOOZER_BFGS_MAXITER": str(BUDGETS["target_lane_boozer_bfgs_maxiter"]),
-                            "PROD_NEWTON_MAXITER": str(BUDGETS["target_lane_boozer_newton_maxiter"]),
-                            "PROD_NEWTON_POLISH_POLICY": BUDGETS["target_lane_boozer_newton_polish_policy"],
-                            "PROD_MPOL": str(TIERS[tier]["mpol"]),
-                            "PROD_NTOR": str(TIERS[tier]["ntor"]),
-                            "PROD_NPHI": str(TIERS[tier]["nphi"]),
-                            "PROD_NTHETA": str(TIERS[tier]["ntheta"]),
-                        },
-                        "depends_on": None if TIERS[tier]["runnable_now"]
-                        else "continuation donor build (job 54363243)",
-                    })
+        for platform in PLATFORMS:
+            for tier in TIERS:
+                backend_slug = fdef["optimizer_backend"].replace("-", "")
+                cell_id = f"ss_{dim}_{backend_slug}_{platform}_{tier}"
+                cells.append({
+                    "id": cell_id,
+                    "formulation_dim": dim,
+                    "formulation": fdef["description"],
+                    "optimizer_backend": fdef["optimizer_backend"],
+                    "outer_optimizer": fdef["outer_optimizer"],
+                    "inner_boozer_optimizer_backend": fdef["inner_boozer_optimizer_backend"],
+                    "platform": platform,
+                    "lane": f"jax-{platform}",
+                    "inner_boozer_least_squares": INNER_BOOZER_LEAST_SQUARES,
+                    "tier": tier,
+                    "reference_dim": 51,
+                    "reference_lane": "cpp-cpu",
+                    "dim_matched_reference": dim == 51,
+                    "status": "core",
+                    "launcher": PLATFORMS[platform]["launcher"],
+                    "account": PLATFORMS[platform]["account"],
+                    "sbatch_extra": PLATFORMS[platform]["sbatch_extra"],
+                    "env": {
+                        "PROD_OPTIMIZER_BACKEND": fdef["optimizer_backend"],
+                        # Inner Boozer optimizer backend: empty for the reduced
+                        # lane (child default ondevice), "ondevice" forced for
+                        # the fullgraph lane (see module docstring).
+                        "PROD_BOOZER_OPTIMIZER_BACKEND": fdef["inner_boozer_optimizer_backend"],
+                        # quasi-newton inner: leave empty so the launcher does not
+                        # export BOOZER_LEAST_SQUARES_ALGORITHM (child default).
+                        "PROD_BOOZER_LS_ALGORITHM": "",
+                        "PROD_MAXITER": str(BUDGETS["outer_lbfgs_maxiter"]),
+                        "PROD_BOOZER_BFGS_MAXITER": str(BUDGETS["target_lane_boozer_bfgs_maxiter"]),
+                        "PROD_NEWTON_MAXITER": str(BUDGETS["target_lane_boozer_newton_maxiter"]),
+                        "PROD_NEWTON_POLISH_POLICY": BUDGETS["target_lane_boozer_newton_polish_policy"],
+                        "PROD_MPOL": str(TIERS[tier]["mpol"]),
+                        "PROD_NTOR": str(TIERS[tier]["ntor"]),
+                        "PROD_NPHI": str(TIERS[tier]["nphi"]),
+                        "PROD_NTHETA": str(TIERS[tier]["ntheta"]),
+                    },
+                    "depends_on": None if TIERS[tier]["runnable_now"]
+                    else "continuation donor warm-start build (native_cpu donor)",
+                })
     return cells
 
 
@@ -155,21 +178,37 @@ def build_manifest(source_sha: str) -> dict:
         "source_sha": source_sha,
         "seed": SEED,
         "budgets": BUDGETS,
-        "inner_ls_naming": INNER_LS,
+        "inner_boozer_least_squares": INNER_BOOZER_LEAST_SQUARES,
         "formulation_backend_coupling": {
             str(dim): FORMULATIONS[dim]["optimizer_backend"] for dim in FORMULATIONS
         },
         "notes": [
-            "11=scipy-jax (reduced), 51=ondevice (full); coupling is not "
-            "overridable by any flag.",
-            "Every run also yields the cpp/CPU reference at 51 full-space; "
-            "there is no coil-only native reference in this harness, so the "
-            "11-dim JAX lane has a dim-mismatched cpp reference.",
-            "optax-lbfgs and optimistix-lbfgs are intentionally excluded.",
-            "lm/lm-minpack export BOOZER_LEAST_SQUARES_ALGORITHM to BOTH the "
-            "target and reference children; the cpp reference uses the native "
-            "C++ Boozer solver and is expected to ignore it, but the first "
-            "lm/lm-minpack run must confirm the reference child tolerates it.",
+            "Both lanes run the outer loop on the host (SciPy L-BFGS-B); only "
+            "one value/grad eval is compiled per step, so neither builds the "
+            "monolithic on-device graph that OOMs. 11=scipy-jax (reduced), "
+            "51=scipy-jax-fullgraph (full JF.x). The ondevice lane is removed.",
+            "Formulation dim is hard-coupled to the optimizer backend; no flag "
+            "decouples them.",
+            "Every run also yields the cpp/CPU reference at 51 full-space; there "
+            "is no coil-only native reference in this harness, so the 11-dim "
+            "scipy-jax lane has a dim-mismatched 51 reference "
+            "(performance/feasibility), while the 51-dim scipy-jax-fullgraph "
+            "lane is dim-matched and replay-capable (exact same-candidate "
+            "bit-parity).",
+            "Inner Boozer least-squares is quasi-newton for both lanes; "
+            "LM/lm-minpack and optax-lbfgs/optimistix-lbfgs are intentionally "
+            "excluded.",
+            "scipy-jax-fullgraph cells force --boozer-optimizer-backend ondevice "
+            "(via PROD_BOOZER_OPTIMIZER_BACKEND): the fullgraph inner Boozer "
+            "otherwise defaults to scipy on CPU, which jax_cpu_parity rejects at "
+            "boozer_surface.py:5659. The GPU auto-default already supplies "
+            "ondevice. Confirmed by the b5f97fdf9 gate smoke.",
+            "GATE: scipy-jax-fullgraph (51) has no passing artifact yet (its "
+            "only completed run pre-fix failed; the b5f97fdf9 smoke cleared the "
+            "free_x bug and ran 5 outer iterations on GPU but did not reach "
+            "passed=true -- CPU needed the boozer-backend fix above; GPU is "
+            "compile-bound). A mpol=2 smoke must show rc=0/passed=true at the "
+            "source SHA before any mpol=10 fullgraph cell is submitted.",
         ],
         "tiers": TIERS,
         "cells": build_cells(),
@@ -187,27 +226,38 @@ def render_markdown(manifest: dict) -> str:
         f"Boozer BFGS {manifest['budgets']['target_lane_boozer_bfgs_maxiter']}, "
         f"Boozer Newton {manifest['budgets']['target_lane_boozer_newton_maxiter']}, "
         f"polish `{manifest['budgets']['target_lane_boozer_newton_polish_policy']}`",
-        "- Inner-LS naming: "
-        + ", ".join(f"{k}=`{v}`" for k, v in manifest["inner_ls_naming"].items()),
+        f"- Inner Boozer least-squares: `{manifest['inner_boozer_least_squares']}` "
+        "(both lanes; LM/lm-minpack dropped)",
         "",
         "## Formulation/backend coupling",
         "",
-        "- `11` reduced (coils only, surface solved) ⇒ `scipy-jax` (host SciPy).",
-        "- `51` 51-dim coils+surface vector (full-graph DOF map) ⇒ `ondevice` (on-device JAX; outer gradient on the coil block only, surface re-solved by the same inner Boozer solve as the 11 lane, not a residual penalty).",
-        "- The cpp/CPU reference is always 51; the 11-dim JAX lane is compared "
-        "against a dim-mismatched 51 reference.",
+        "- `11` reduced (coils only, surface solved each iteration by the inner "
+        "Boozer solve) ⇒ `scipy-jax` (host SciPy L-BFGS-B).",
+        "- `51` 51-dim coils+surface vector (full-graph `JF.x` DOF map) ⇒ "
+        "`scipy-jax-fullgraph` (host SciPy L-BFGS-B over the full DOF vector; "
+        "outer gradient on the coil block only, surface re-solved each iteration "
+        "by the inner Boozer solve, not a residual penalty).",
+        "- Both lanes are host-driven (one value/grad eval compiled per step); "
+        "the monolithic `ondevice` lane is removed (it OOMs at production "
+        "resolution).",
+        "- The inner Boozer solve runs on-device (JAX) on both lanes; the "
+        "`scipy-jax-fullgraph` cells force `--boozer-optimizer-backend ondevice` "
+        "(its CPU default is otherwise `scipy`, rejected under `jax_cpu_parity`).",
+        "- The cpp/CPU reference is always 51; the 11-dim `scipy-jax` lane is "
+        "compared against a dim-mismatched 51 reference, while the 51-dim "
+        "`scipy-jax-fullgraph` lane is dim-matched.",
         "",
         "## Cells",
         "",
-        "| id | dim | backend | platform | inner-LS | tier | status | ref dim match | runnable now |",
+        "| id | dim | backend | inner-boozer | platform | tier | status | ref dim match | runnable now |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for c in manifest["cells"]:
         runnable = "yes" if manifest["tiers"][c["tier"]]["runnable_now"] else "no (donor)"
+        inner = c["inner_boozer_optimizer_backend"] or "default"
         lines.append(
             f"| `{c['id']}` | {c['formulation_dim']} | {c['optimizer_backend']} | "
-            f"{c['platform']} | {c['inner_ls_name']}=`{c['inner_ls_value']}` | "
-            f"{c['tier']} | {c['status']} | "
+            f"{inner} | {c['platform']} | {c['tier']} | {c['status']} | "
             f"{'yes' if c['dim_matched_reference'] else 'NO (51 vs 11)'} | {runnable} |"
         )
     core = sum(1 for c in manifest["cells"] if c["status"] == "core")
