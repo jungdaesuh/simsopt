@@ -188,19 +188,24 @@ guard), then resolve the GPU compile-time residual.
      (after `_apply_jax_gpu_memory_env`), so `XLA_FLAGS` is set before XLA inits.
 
 3. **Diagnose and close the `scipy-jax` GPU compile-time residual.**
-   - [ ] Run the existing compile-count probe on the surviving host-driven
-     `scipy-jax` GPU lane with `--record-jax-compile-diagnostics`
-     (flag `single_stage_banana_example.py:4967`; recorder `:9536`) at maxiter
-     3 vs 6; compare `compile_event_count`, `cache_miss_count`, and recompile
-     sites in `jax_compile_diagnostics.json` / `results.json` via
-     `benchmarks/single_stage_outer_loop_probe.py`.
-   - [ ] Classify: compile-once-slow (image/box issue) vs recompile-per-eval
-     (cache-token bug). If recompile-per-eval, find the non-static arg / shifting
-     shape and pin it (static-vs-dynamic discipline, cf. TORAX
-     `runtime_params.py:17`; closure at `boozer_surface.py:4761-4770`).
-   - [ ] Write the missing decision-tree doc
-     `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md` referenced by
-     `docs/scipy_jax_11_51_matrix_implementation_plan.md:16,195`.
+   *Resolved on CPU (2026-06-15): classification = **once-slow**;
+   recompile-per-eval **refuted**.*
+   - [x] Ran the compile-count probe via `benchmarks/single_stage_init_parity.py`
+     (self-compiles the seed) on CPU at maxiter 3 vs 6 with
+     `--record-jax-compile-diagnostics`. Both runs: `cache_miss_count=127`,
+     `compile_event_count=178`, byte-identical `cache_miss_sites` — despite
+     executing **different** outer-step counts (3 vs 5). Compile count does not
+     grow with the iteration budget.
+   - [x] Classified: **compile-once-slow**, not recompile-per-eval. No
+     cache-token/shape bug; the static-vs-dynamic closure
+     (`boozer_surface.py:4761-4770`) is not triggering recompiles. The
+     ~73-min RunPod figure is the single cold GPU compile being slow on that
+     image (XLA:GPU autotune / cubin / container toolkit), not a lane defect.
+   - [x] Wrote the decision-tree doc
+     `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`.
+   - [ ] (GPU-only, magnitude — not a code fix) Enable persistent compilation +
+     XLA:GPU autotune cache on the GPU image; measure cold-compile wall at
+     production resolution. Needs a GPU; the once-vs-recompile question is closed.
 
 4. **Add a TORAX-style compile-once guard on the host-driven eval bundle.**
    *Locally verified (CPU): `1 passed in 4.46s` via real pytest in the
@@ -245,8 +250,10 @@ guard), then resolve the GPU compile-time residual.
 - [x] **Compile-once guard:** new test passes on CPU — bundle `_cache_size() == 1`
   after warmup and no growth on an `x`-change (`1 passed in 4.46s`,
   `jax-0.10.0` env). Confirms the host-driven bundle is compile-once.
-- [ ] **GPU residual classified:** `jax_compile_diagnostics.json` shows either a
-  single cold compile or a named recompile cause; decision-tree doc committed.
+- [x] **GPU residual classified:** CPU probe shows compile count constant across
+  outer budgets (127/178 at maxiter 3 vs 5 steps) → **once-slow**, recompile
+  refuted; decision-tree doc `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`
+  committed.
 - [x] **Default-lane check:** production single-stage launchers select
   `scipy-jax` without an explicit flag; `ondevice` requires opt-in.
 - [ ] **No-regression:** existing `tests/integration/test_single_stage_init_parity_compile_diagnostics.py`
@@ -281,17 +288,20 @@ guard), then resolve the GPU compile-time residual.
   with merge-not-overwrite semantics and a unit test. *(Code + unit test landed,
   local logic validated; CPU parity/effect checks pending cluster.)*
 - [x] Lane-level compile-once guard + no-recompile-on-`x`-change regression test
-  *authored* (`test_penalty_value_and_grad_bundle_reuses_compiled_executable`);
-  pending a cluster/CI run to confirm green.
-- [ ] GPU compile-time residual classified (once-slow vs recompile) with
+  (`test_penalty_value_and_grad_bundle_reuses_compiled_executable`) — **passes on
+  CPU** (`jax-0.10.0` env).
+- [x] GPU compile-time residual classified: **once-slow** (recompile refuted via
+  the CPU compile-count probe), decision-tree doc
   `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md` committed.
 - [ ] Parity validation green; no regression in existing compile-diagnostic tests.
 
 ## Open Questions
 
-- Is the `scipy-jax` GPU compile-time residual one cold compile or
-  recompile-per-eval?
-  (Owner: Phase 3 probe — decides whether any code change is needed at all.)
+- ~~Is the `scipy-jax` GPU compile-time residual one cold compile or
+  recompile-per-eval?~~ **ANSWERED (2026-06-15): one cold compile (once-slow).**
+  CPU compile-count probe is constant across outer budgets → no recompile bug →
+  no lane code change needed. See
+  `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`.
 - Should `FAST_COMPILE` be CPU-only or also applied on GPU host-compile? (Decide
   from Phase 2 measurement; default CPU-only.)
 - Does the `boozer_bfgs_maxiter=1500` inner cap dominate ondevice breadth? (Phase
