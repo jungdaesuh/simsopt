@@ -172,6 +172,7 @@ class HardwareSdfData:
     data_sha256: str
     groups: tuple[HardwareSdfGroup, ...]
     documented_gate_only: dict[str, object]
+    covered_by_other_in_loop: dict[str, object]
     provenance: dict[str, object]
 
     @property
@@ -813,11 +814,15 @@ def hardware_keepout_metadata(path, glb_path=None):
     live_sha = _validated_live_glb_sha(data, path, glb_path)
     provenance = data["provenance"]
     return {
+        "HARDWARE_KEEPOUT_BACKEND": "point_cloud",
         "HARDWARE_KEEPOUT_JSON": os.fspath(path),
         "HARDWARE_KEEPOUT_JSON_SHA256": _sha256_file(path),
         "HARDWARE_KEEPOUT_GROUPS": [
             str(group["label"]) for group in data["groups"]
         ],
+        "DOCUMENTED_GATE_ONLY_GROUPS": sorted(
+            str(key) for key in data.get("excluded", {}) if str(key) != "vessel"
+        ),
         "HARDWARE_KEEPOUT_PROVENANCE_GLB": provenance.get("glb"),
         "HARDWARE_KEEPOUT_PROVENANCE_GLB_SHA256": provenance.get("glb_sha256"),
         "HARDWARE_KEEPOUT_LIVE_GLB": (
@@ -917,13 +922,18 @@ def _coverage_keys(payload):
 
 
 def validate_hardware_sdf_static_coverage(
-    *, represented_groups, documented_gate_only, static_hardware_keys
+    *,
+    represented_groups,
+    documented_gate_only,
+    static_hardware_keys,
+    covered_by_other_in_loop=(),
 ):
     """Fail closed unless every oracle static key is covered or documented."""
     represented = _coverage_keys(represented_groups)
     gate_only = _coverage_keys(documented_gate_only)
+    other_in_loop = _coverage_keys(covered_by_other_in_loop)
     static = _coverage_keys(static_hardware_keys)
-    missing = sorted(static - represented - gate_only)
+    missing = sorted(static - represented - gate_only - other_in_loop)
     if missing:
         raise ValueError(
             "hardware SDF manifest does not cover static hardware groups "
@@ -968,6 +978,7 @@ def load_hardware_sdf(path, glb_path=None):
             f"data_sha256 {recorded_data_sha!r}, live file is {data_sha!r}")
 
     documented_gate_only = dict(manifest.get("documented_gate_only", {}))
+    covered_by_other_in_loop = dict(manifest.get("covered_by_other_in_loop", {}))
     group_specs = tuple(manifest.get("groups", ()))
     represented = [str(group["label"]) for group in group_specs]
     static_keys = manifest.get("static_hardware_keys")
@@ -975,6 +986,7 @@ def load_hardware_sdf(path, glb_path=None):
         validate_hardware_sdf_static_coverage(
             represented_groups=represented,
             documented_gate_only=documented_gate_only,
+            covered_by_other_in_loop=covered_by_other_in_loop,
             static_hardware_keys=static_keys,
         )
 
@@ -1032,13 +1044,13 @@ def load_hardware_sdf(path, glb_path=None):
         data_sha256=data_sha,
         groups=tuple(groups),
         documented_gate_only=documented_gate_only,
+        covered_by_other_in_loop=covered_by_other_in_loop,
         provenance=provenance,
     )
 
 
-def hardware_sdf_metadata(path, glb_path=None):
-    """Return run-stamp metadata for an SDF hardware keepout payload."""
-    sdf_data = load_hardware_sdf(path, glb_path=glb_path)
+def hardware_sdf_metadata_from_data(sdf_data):
+    """Return run-stamp metadata for a loaded SDF hardware keepout payload."""
     provenance = sdf_data.provenance
     return {
         "HARDWARE_KEEPOUT_BACKEND": "sdf",
@@ -1052,8 +1064,18 @@ def hardware_sdf_metadata(path, glb_path=None):
         "DOCUMENTED_GATE_ONLY_GROUPS": sorted(
             str(key) for key in sdf_data.documented_gate_only
         ),
+        "HARDWARE_SDF_OTHER_IN_LOOP_GROUPS": sorted(
+            str(key) for key in sdf_data.covered_by_other_in_loop
+        ),
         "HARDWARE_SDF_PROVENANCE_GLB": provenance.get("glb"),
         "HARDWARE_SDF_PROVENANCE_GLB_SHA256": provenance.get("glb_sha256"),
         "HARDWARE_SDF_LIVE_GLB": provenance.get("live_glb"),
         "HARDWARE_SDF_LIVE_GLB_SHA256": provenance.get("live_glb_sha256"),
     }
+
+
+def hardware_sdf_metadata(path, glb_path=None):
+    """Return run-stamp metadata for an SDF hardware keepout payload."""
+    return hardware_sdf_metadata_from_data(
+        load_hardware_sdf(path, glb_path=glb_path)
+    )

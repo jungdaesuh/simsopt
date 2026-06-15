@@ -298,10 +298,13 @@ from banana_opt.poloidal_extent import (
 )
 from banana_opt.hardware_keepout import (
     CurveHardwareKeepout,
+    CurveHardwareSdfKeepout,
     CurveVesselEnvelopeKeepout,
     hardware_keepout_metadata,
     hardware_keepout_results_fields,
+    hardware_sdf_metadata_from_data,
     load_hardware_keepout,
+    load_hardware_sdf,
 )
 from banana_opt.self_intersect import CurveSelfIntersect
 from banana_opt.wout_convention import wout_convention_artifact_fields
@@ -2546,6 +2549,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--hardware-keepout-backend",
+        choices=("point_cloud", "sdf"),
+        default=os.environ.get("HARDWARE_KEEPOUT_BACKEND", "point_cloud"),
+        help=(
+            "Backend for the in-loop hardware keep-out term. point_cloud keeps "
+            "the historical hardware_keepout.json objective; sdf samples the "
+            "Type KK swept U-channel surface against a CAD-derived SDF proxy. "
+            "The posthoc hardware_contact_report CAD oracle remains required."
+        ),
+    )
+    parser.add_argument(
         "--hardware-keepout-json",
         type=str,
         default=os.environ.get(
@@ -2556,6 +2570,16 @@ def parse_args():
             "Path to the hardware_keepout.json point cloud "
             "(hbt_clearance_viewer/tools/export_hardware_keepout.py). "
             "Required when the keep-out weight is > 0."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-keepout-sdf-manifest",
+        type=str,
+        default=os.environ.get("HARDWARE_KEEPOUT_SDF_MANIFEST"),
+        help=(
+            "Path to hardware_sdf.json when --hardware-keepout-backend=sdf. "
+            "The manifest references the SDF data payload and sha-binds it to "
+            "the CAD GLB; it is proxy evidence only, not a CAD-clean certificate."
         ),
     )
     parser.add_argument(
@@ -7403,42 +7427,68 @@ def build_single_stage_objective_bundle(
     HARDWARE_KEEPOUT_METADATA = {}
     keepout_winding_r0 = resolve_keepout_winding_r0(banana_coils)
     if SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT > 0.0:
-        if not HARDWARE_KEEPOUT_JSON_PATH:
-            raise ValueError(
-                "--single-stage-hardware-keepout-weight > 0 requires "
-                "--hardware-keepout-json (the exported sensor/mount point cloud)"
+        if HARDWARE_KEEPOUT_BACKEND == "point_cloud":
+            if not HARDWARE_KEEPOUT_JSON_PATH:
+                raise ValueError(
+                    "--single-stage-hardware-keepout-weight > 0 with "
+                    "--hardware-keepout-backend=point_cloud requires "
+                    "--hardware-keepout-json (the exported sensor/mount point cloud)"
+                )
+            keepout_points, keepout_point_weight, keepout_min_distance, _keepout_prov = (
+                load_hardware_keepout(
+                    HARDWARE_KEEPOUT_JSON_PATH,
+                    glb_path=HARDWARE_KEEPOUT_GLB_PATH,
+                )
             )
-        keepout_points, keepout_point_weight, keepout_min_distance, _keepout_prov = (
-            load_hardware_keepout(
+            HARDWARE_KEEPOUT_METADATA = hardware_keepout_metadata(
                 HARDWARE_KEEPOUT_JSON_PATH,
                 glb_path=HARDWARE_KEEPOUT_GLB_PATH,
             )
-        )
-        HARDWARE_KEEPOUT_METADATA = hardware_keepout_metadata(
-            HARDWARE_KEEPOUT_JSON_PATH,
-            glb_path=HARDWARE_KEEPOUT_GLB_PATH,
-        )
-        HARDWARE_KEEPOUT_GROUP_LABELS = HARDWARE_KEEPOUT_METADATA[
-            "HARDWARE_KEEPOUT_GROUPS"
-        ]
-        if not math.isclose(
-            keepout_min_distance,
-            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
-            rel_tol=0.0,
-            abs_tol=1e-15,
-        ):
-            raise ValueError(
-                f"keep-out JSON recommends min distance {keepout_min_distance} m "
-                f"but the hardware contract pins {HARDWARE_KEEPOUT_MIN_DISTANCE_M} m; "
-                "update banana_opt/hardware_contracts.py and the cloud together"
+            HARDWARE_KEEPOUT_GROUP_LABELS = HARDWARE_KEEPOUT_METADATA[
+                "HARDWARE_KEEPOUT_GROUPS"
+            ]
+            if not math.isclose(
+                keepout_min_distance,
+                HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            ):
+                raise ValueError(
+                    f"keep-out JSON recommends min distance {keepout_min_distance} m "
+                    f"but the hardware contract pins {HARDWARE_KEEPOUT_MIN_DISTANCE_M} m; "
+                    "update banana_opt/hardware_contracts.py and the cloud together"
+                )
+            JCurveHardwareKeepout = CurveHardwareKeepout(
+                banana_curves,
+                keepout_points,
+                HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                keepout_point_weight,
+                winding_r0=keepout_winding_r0,
             )
-        JCurveHardwareKeepout = CurveHardwareKeepout(
-            banana_curves,
-            keepout_points,
-            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
-            keepout_point_weight,
-            winding_r0=keepout_winding_r0,
-        )
+        elif HARDWARE_KEEPOUT_BACKEND == "sdf":
+            if not HARDWARE_KEEPOUT_SDF_MANIFEST_PATH:
+                raise ValueError(
+                    "--single-stage-hardware-keepout-weight > 0 with "
+                    "--hardware-keepout-backend=sdf requires "
+                    "--hardware-keepout-sdf-manifest"
+                )
+            hardware_sdf_data = load_hardware_sdf(
+                HARDWARE_KEEPOUT_SDF_MANIFEST_PATH,
+                glb_path=HARDWARE_KEEPOUT_GLB_PATH,
+            )
+            HARDWARE_KEEPOUT_METADATA = hardware_sdf_metadata_from_data(
+                hardware_sdf_data
+            )
+            HARDWARE_KEEPOUT_GROUP_LABELS = list(hardware_sdf_data.group_labels)
+            JCurveHardwareKeepout = CurveHardwareSdfKeepout(
+                banana_curves,
+                hardware_sdf_data,
+                winding_r0=keepout_winding_r0,
+            )
+        else:
+            raise ValueError(
+                f"unsupported hardware keep-out backend {HARDWARE_KEEPOUT_BACKEND!r}"
+            )
     if SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT > 0.0:
         if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
             raise ValueError("--single-stage-vessel-keepout-clearance must be positive")
@@ -13087,7 +13137,9 @@ SINGLE_STAGE_SELFINT_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+HARDWARE_KEEPOUT_BACKEND = "point_cloud"
 HARDWARE_KEEPOUT_JSON_PATH = DEFAULT_HARDWARE_KEEPOUT_JSON_PATH
+HARDWARE_KEEPOUT_SDF_MANIFEST_PATH = None
 HARDWARE_KEEPOUT_GLB_PATH = DEFAULT_HARDWARE_KEEPOUT_GLB_PATH
 HARDWARE_KEEPOUT_GROUP_LABELS = []
 HARDWARE_KEEPOUT_METADATA = {}
@@ -13820,7 +13872,9 @@ if __name__ == "__main__":
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
         args.single_stage_vessel_keepout_clearance
     )
+    HARDWARE_KEEPOUT_BACKEND = args.hardware_keepout_backend
     HARDWARE_KEEPOUT_JSON_PATH = args.hardware_keepout_json
+    HARDWARE_KEEPOUT_SDF_MANIFEST_PATH = args.hardware_keepout_sdf_manifest
     HARDWARE_KEEPOUT_GLB_PATH = args.hardware_keepout_glb
     SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = float(
         args.single_stage_poloidal_threshold_rad
@@ -15509,7 +15563,9 @@ if __name__ == "__main__":
         "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
             SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
         ),
+        "HARDWARE_KEEPOUT_BACKEND": HARDWARE_KEEPOUT_BACKEND,
         "HARDWARE_KEEPOUT_JSON": HARDWARE_KEEPOUT_JSON_PATH,
+        "HARDWARE_KEEPOUT_SDF_MANIFEST": HARDWARE_KEEPOUT_SDF_MANIFEST_PATH,
         "HARDWARE_KEEPOUT_GLB": HARDWARE_KEEPOUT_GLB_PATH,
         "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD": SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
         "SINGLE_STAGE_WIDTH_MIN_THRESHOLD": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
@@ -16082,6 +16138,14 @@ if __name__ == "__main__":
             ),
         )
     )
+    if JCurveHardwareKeepout is not None and HARDWARE_KEEPOUT_BACKEND == "sdf":
+        results.update(
+            {
+                "HARDWARE_SDF_MIN_CLEARANCE_M": float(
+                    JCurveHardwareKeepout.shortest_clearance()
+                )
+            }
+        )
     # Producer-side WOUT convention stamp. Mirrors the Stage 2 producer pattern in
     # ``banana_coil_solver`` so single-stage artifacts carry the same SSOT lane
     # metadata at write time, without depending on the consumer-side legacy upgrader.
