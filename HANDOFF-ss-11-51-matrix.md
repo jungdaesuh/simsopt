@@ -1,6 +1,6 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 06:56 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> Last updated: 2026-06-15 07:18 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
 > compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing commit `5f14a1463`; this
 > handoff is the operational launch-state source of truth).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
@@ -26,13 +26,16 @@
 > `DONOR_MAXITER=60` job `54483605`, and backup full-node 12 h / `DONOR_MAXITER=300` job `54482812`.
 > Added CPU-JAX fallback. First full CPU-JAX job `54484362` failed before physics because Slurm stdout landed
 > inside the checkout and tripped the clean-source guard (`?? slurm-54484362.out`); stdout/stderr paths were
-> moved out of the checkout and corrected CPU-JAX full job `54485382` is now RUNNING. Debug smoke `54484779`
+> moved out of the checkout and corrected CPU-JAX full job `54485382` ran to Newton completion but FAILED with
+> an OOM under the 180G cgroup during XLA constant folding / initial objective work. Debug smoke `54484779`
 > proved the CPU-JAX runtime path reaches Boozer Newton setup before its 30 min timeout. Live at 06:29 EDT:
-> `54483185` (GPU full-node) and `54485382` (CPU-JAX 180G) are RUNNING; both preserved the iota15 branch through
+> `54483185` (GPU full-node) and `54485382` (CPU-JAX 180G) both preserved the iota15 branch through
 > BFGS to `iota=0.1500517720536309`, `objective=6.075541041282424e-06`, `grad_inf=3.56e-09`, and are waiting at
 > `before_boozer_newton` with `newton_polish_policy=run`. `54483605` also reached the same boundary after it
 > started, then was cancelled intentionally as duplicate GPU burn (`CANCELLED+`, elapsed 13:41). `54482812`
-> remains the pending 12 h backup.
+> remains the pending 12 h GPU backup. New full-memory CPU-JAX fallback `54488062` was submitted at 07:18 EDT
+> (`ReqTRES=cpu=32,mem=487802M,node=1`, `DONOR_MAXITER=60`) to test whether the CPU-JAX failure is purely
+> memory-bounded.
 > Previous job `54477744` was cancelled before start because its submitted
 > script still used the bad `--nphi 64 --ntheta 32` runtime-spec mismatch. **RunPod H100 probe harvested, no
 > donor:** pod `ecxt9xwaudcejo`; first command
@@ -61,10 +64,12 @@ step is still **donor-gated**. The iota15 fixture is a useful mpol10 Stage 2 see
 not a continuation donor accepted by the high-resolution harness contract. Native continuation from this seed
 falls to the near-zero-iota branch; JAX preserves the branch but needs more host/container memory than the
 current A100 PCIe pod exposed. Current attempts are **Perlmutter job `54483185`** (GPU full-node 4 h,
-`DONOR_MAXITER=60`, RUNNING), **corrected Perlmutter job `54485382`** (CPU-JAX shared `mem=180G`, 4 h,
-`DONOR_MAXITER=60`, RUNNING), and backup job `54482812` (GPU full-node 12 h / `DONOR_MAXITER=300`,
-pending backup). Midmem GPU job `54483605` reached the same BFGS/Newton boundary and was cancelled as a
-duplicate. First CPU-JAX full job `54484362` failed only because Slurm stdout dirtied the checkout; it did
+`DONOR_MAXITER=60`, RUNNING), **full-memory CPU-JAX fallback `54488062`** (`ReqTRES=cpu=32,mem=487802M,node=1`,
+12 h, pending), and backup job `54482812` (GPU full-node 12 h / `DONOR_MAXITER=300`, pending backup).
+Corrected CPU-JAX 180G job `54485382` completed Newton but failed with an OOM during XLA constant folding /
+initial objective work, so the full-memory CPU-JAX fallback is the next CPU path. Midmem GPU job `54483605`
+reached the same BFGS/Newton boundary and was cancelled as a duplicate. First CPU-JAX full job `54484362`
+failed only because Slurm stdout dirtied the checkout; it did
 not reach physics. Debug smoke `54484779` reached `before_boozer_newton` and timed out without OOM. These jobs supersede
 cancelled job `54477744`, which had the wrong quadrature flags. The harvested RunPod H100 probe confirms
 the RunPod command must match the fixture runtime spec:
@@ -76,24 +81,27 @@ donor completes, run CPU/CUDA fair compare from that donor. If the Perlmutter jo
 RunPod class only after confirming container RAM >120 GB, or make a code-level seed-preservation fix.
 
 ## 3. NEXT ACTIONS (start here on resume)
-0. [ ] **Monitor high-memory JAX donor jobs `54483185`, `54485382`, and `54482812`, then CPU/CUDA compare.** Native donor
+0. [ ] **Monitor high-memory JAX donor jobs `54483185`, `54488062`, and `54482812`, then CPU/CUDA compare.** Native donor
        continuation is now a
        dead end for this seed (falls to iota ~0.0035 and writes `REJECTED.json`). Build the donor with the JAX
        path that preserves the iota15 branch, but run it on a node/container with enough host RAM for the dense
        Newton/target-lane graph. Current Perlmutter launch:
-       `ssh perlmutter 'squeue -j 54483185,54485382,54482812 -o "%i %j %T %M %L %R"; sacct -j 54483185,54485382,54484362,54484779,54483605,54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start,End -n'`.
+       `ssh perlmutter 'squeue -j 54483185,54488062,54482812 -o "%i %j %T %M %L %R"; sacct -j 54483185,54488062,54485382,54484362,54484779,54483605,54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start,End -n'`.
        Primary full-node: `54483185` (`DONOR_MAXITER=60`, 4 h; RUNNING since 2026-06-15 03:04 PDT).
-       Corrected CPU-JAX fallback: `54485382` (`DONOR_MAXITER=60`, 4 h, script
-       `jax_mpol10_donor_cpujax_180g.slurm`, `-C cpu`, shared QOS, `--mem=180G`, `jax_cpu_parity`,
-       `JAX_PLATFORMS=cpu`; RUNNING since 2026-06-15 03:08 PDT). Backup full-node:
+       Full-memory CPU-JAX fallback: `54488062` (`DONOR_MAXITER=60`, 12 h, script
+       `jax_mpol10_donor_cpujax_180g.slurm` with sbatch overrides `--exclusive --mem=0 -t 12:00:00`,
+       `ReqTRES=cpu=32,mem=487802M,node=1`; pending `Resources` at submit). Backup full-node:
        `54482812` (`DONOR_MAXITER=300`, 12 h; pending). Cancelled duplicate midmem GPU job:
        `54483605` (`DONOR_MAXITER=60`, 4 h, script `jax_mpol10_donor_midmem_180g.slurm`, `--mem=180G`,
        non-exclusive; reached the same BFGS/Newton boundary, then `CANCELLED+` at 13:41 elapsed).
+       Failed CPU-JAX 180G job: `54485382` reached Newton completion (`solve_success=true`, Newton iterations 6,
+       `grad_inf=8.34e-12`), then OOM-killed during XLA constant folding / initial objective work
+       (`slow_operation_alarm` on `f64[1323,663]` dot; Slurm OOM event; validation `valid_count=0`).
        First CPU-JAX full job `54484362` failed before physics because `slurm-54484362.out` was written inside
        the checkout and tripped the clean-source guard; fixed by moving Slurm stdout/stderr out of the checkout
        and resubmitting as `54485382`. CPU-JAX debug smoke `54484779` timed out at the Newton boundary but
        proved setup + branch preservation path through BFGS.
-       Live useful signal from `54483185` and `54485382`: both reached
+       Live useful signal from `54483185`, `54485382`, and `54483605`: all reached
        `before_boozer_newton` after BFGS with `iota=0.1500517720536309`, `objective=6.075541041282424e-06`,
        and `grad_inf=3.5611373073486663e-09`. This is not a donor yet; wait for artifacts/exit status.
        If one starts and reaches a useful donor/result first, cancel the others to avoid duplicate GPU burn.
@@ -195,10 +203,12 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
   `.../ss-prod-94f6ea838-20260615T003257Z/runs`. Donor job **54462557** (`-A m4680`, native_cpu) FAILED.
   Background poll IDs are not authoritative; verify live state with direct `sacct` for any new Perlmutter job.
 - **Perlmutter active JAX donors**: primary full-node job `54483185` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`,
-  RUNNING), corrected CPU-JAX fallback `54485382` (`-A m4680`, `-C cpu`, shared QOS, `--mem=180G`, 4 h,
-  `DONOR_MAXITER=60`, RUNNING), and backup full-node job `54482812` (`-A m4680_g`, 12 h,
-  `DONOR_MAXITER=300`, pending). Midmem job `54483605` (`-A m4680_g`, `--mem=180G`, non-exclusive) reached the
-  same BFGS/Newton boundary and was cancelled as duplicate GPU burn. First CPU-JAX full job `54484362` failed before physics on the clean-source guard because Slurm
+  RUNNING), full-memory CPU-JAX fallback `54488062` (`-A m4680`, `-C cpu`, `--exclusive --mem=0`, 12 h,
+  `DONOR_MAXITER=60`, pending; `ReqTRES=cpu=32,mem=487802M,node=1`), and backup full-node job `54482812`
+  (`-A m4680_g`, 12 h, `DONOR_MAXITER=300`, pending). Corrected CPU-JAX 180G job `54485382` reached Newton
+  completion but OOM-killed during XLA constant folding / initial objective work (`valid_count=0`). Midmem job
+  `54483605` (`-A m4680_g`, `--mem=180G`, non-exclusive) reached the same BFGS/Newton boundary and was
+  cancelled as duplicate GPU burn. First CPU-JAX full job `54484362` failed before physics on the clean-source guard because Slurm
   stdout landed in the checkout; debug smoke `54484779` reached the Newton boundary and timed out. All use checkout
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`, runs
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). They supersede cancelled job
