@@ -88,9 +88,10 @@ SHA before any production cell depends on it (see Current Context + the GATE bel
   (`FORMULATIONS`, `INNER_LS`, `PLATFORMS`, `TIERS`, `build_cells`) →
   `docs/single_stage_11_51_matrix_2026-06-13.{json,md}`; consumed by
   `benchmarks/perlmutter/submit_single_stage_matrix.py`.
-- **Production launchers default to ondevice:** `single_stage_production_{cpu,gpu}.slurm`
-  set `PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-ondevice}"` (`cpu:26`, `gpu:28`). Cells pass
-  it per-cell, but the default must change.
+- **Production launchers default to the host-driven reduced lane:** `single_stage_production_{cpu,gpu}.slurm`
+  now set `PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-scipy-jax}"` (`cpu:26`, `gpu:28`).
+  Matrix cells still pass the backend per-cell, so `scipy-jax-fullgraph` flows through explicitly for
+  the 51-dim cells.
 - **mpol=10 needs a warm-start donor** (cold high-res contract block
   `_require_supported_single_stage_seed_contract`, `single_stage_init_parity.py:1465`,
   resolution-based). The donor launcher `single_stage_continuation_donor.slurm` was fixed this session
@@ -205,7 +206,7 @@ fix — the compile diagnostics quantify it.
    - [ ] Confirm `build_cells` yields exactly 8 cells: `{scipy-jax, scipy-jax-fullgraph} × {cpu, gpu} × {mpol2, mpol10}`.
    - [ ] Keep `dim_matched_reference`: `False` for 11, `True` for 51 (cpp reference is 51).
 2. **Update the production launchers** (`single_stage_production_{cpu,gpu}.slurm`)
-   - [ ] Change `PROD_OPTIMIZER_BACKEND` default `ondevice → scipy-jax`.
+   - [x] Change `PROD_OPTIMIZER_BACKEND` default `ondevice → scipy-jax`.
    - [ ] Verify the launcher passes `--optimizer-backend "${PROD_OPTIMIZER_BACKEND}"` and that
          `scipy-jax-fullgraph` flows through unchanged (it is a valid `--optimizer-backend` choice).
    - [ ] Audit the target-lane flag set (`--target-lane-boozer-bfgs-maxiter`,
