@@ -1,6 +1,6 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 05:02 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> Last updated: 2026-06-15 05:06 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
 > compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing commit `5f14a1463`; this
 > handoff is the operational launch-state source of truth).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
@@ -20,9 +20,11 @@
 > --prefinal-maxiter 50`) also failed with native L-BFGS-B `ABNORMAL` / optimizer status `2`, final iota
 > only ~0.0035, and no accepted `results.json`. JAX preserves the iota15 branch, but the current A100 PCIe
 > pod has only 117 GB container RAM and the `run` Newton policy hit cgroup OOM after Boozer init. Next viable
-> donor launch is high-memory **JAX** donor, not native donor. **Submitted:** Perlmutter high-memory JAX donor
-> job `54477744` from checkout `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`,
-> pending `Priority` at last check. **RunPod H100 probe harvested, no donor:** pod `ecxt9xwaudcejo`; first command
+> donor launch is high-memory **JAX** donor, not native donor. **Submitted:** corrected Perlmutter high-memory JAX
+> donor job `54482812` from checkout `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`,
+> pending `Priority` at last check. Previous job `54477744` was cancelled before start because its submitted
+> script still used the bad `--nphi 64 --ntheta 32` runtime-spec mismatch. **RunPod H100 probe harvested, no
+> donor:** pod `ecxt9xwaudcejo`; first command
 > failed before optimization because the fixture runtime spec expects `quadrature.nphi=255`, not `--nphi 64`;
 > corrected relaunch `/workspace/runpod_himem_jax_mpol10_donor_306d53bdc_20260615T083623Z_nphi255b` advanced to
 > `optimizer_output_dir_ready` / `before_boozer_newton`, then the pod exited before a clean
@@ -47,8 +49,9 @@ the **Perlmutter donor `54462557`** (**FAILED**; see NEXT ACTION #1), the **RunP
 step is still **donor-gated**. The iota15 fixture is a useful mpol10 Stage 2 seed/runtime-spec fixture, but
 not a continuation donor accepted by the high-resolution harness contract. Native continuation from this seed
 falls to the near-zero-iota branch; JAX preserves the branch but needs more host/container memory than the
-current A100 PCIe pod exposed. Current active attempt is **Perlmutter job `54477744`** (high-memory JAX donor,
-requested `mem=229902M`, `gres/gpu=1`, pending `Priority` at submit). The harvested RunPod H100 probe confirms
+current A100 PCIe pod exposed. Current active attempt is **Perlmutter job `54482812`** (high-memory JAX donor,
+requested `mem=229902M`, `gres/gpu=1`, pending `Priority` at submit). It supersedes cancelled job `54477744`,
+which had the wrong quadrature flags. The harvested RunPod H100 probe confirms
 the RunPod command must match the fixture runtime spec:
 `--nphi 255 --ntheta 64` (`single_stage_jax_runtime_spec.json`: `quadrature.nphi=255`,
 `quadrature.ntheta=64`); `--nphi 64 --ntheta 32` fails before optimization. The corrected H100 probe was
@@ -58,11 +61,11 @@ donor completes, run CPU/CUDA fair compare from that donor. If the Perlmutter jo
 RunPod class only after confirming container RAM >120 GB, or make a code-level seed-preservation fix.
 
 ## 3. NEXT ACTIONS (start here on resume)
-0. [ ] **Monitor high-memory JAX donor `54477744`, then CPU/CUDA compare.** Native donor continuation is now a
+0. [ ] **Monitor high-memory JAX donor `54482812`, then CPU/CUDA compare.** Native donor continuation is now a
        dead end for this seed (falls to iota ~0.0035 and writes `REJECTED.json`). Build the donor with the JAX
        path that preserves the iota15 branch, but run it on a node/container with enough host RAM for the dense
        Newton/target-lane graph. Current Perlmutter launch:
-       `ssh perlmutter 'squeue -j 54477744 -o "%i %j %T %M %L %R"; sacct -j 54477744 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start -n'`.
+       `ssh perlmutter 'squeue -j 54482812 -o "%i %j %T %M %L %R"; sacct -j 54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start -n'`.
        Script:
        `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/slurm/jax_mpol10_donor.slurm`.
        RunPod H100 probe artifacts:
@@ -157,9 +160,10 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
   `/pscratch/sd/j/jungdae/ss-prod-94f6ea838-20260615T003257Z/checkout` (@94f6ea838); RUN_ROOT
   `.../ss-prod-94f6ea838-20260615T003257Z/runs`. Donor job **54462557** (`-A m4680`, native_cpu) FAILED.
   Background poll IDs are not authoritative; verify live state with direct `sacct` for any new Perlmutter job.
-- **Perlmutter active JAX donor**: job `54477744` (`-A m4680_g`, checkout
+- **Perlmutter active JAX donor**: job `54482812` (`-A m4680_g`, checkout
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`, runs
-  `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). `scontrol` reported
+  `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). It supersedes cancelled job `54477744`
+  (`--nphi 64 --ntheta 32` mismatch). `scontrol` reported
   `ReqTRES=cpu=32,mem=229902M,node=1,billing=32,gres/gpu=1`.
 - **Local validation**: `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 -m pytest tests/integration/test_single_stage_matrix_manifest.py tests/integration/test_fair_compare_launcher_contract.py tests/integration/test_single_stage_init_parity_compile_diagnostics.py tests/integration/test_continuation_donor_backend_contract.py -q` (8+5+6+2 = 21 pass). ruff at `../simsopt-jax/.miniforge/bin/ruff` (note: `ruff format` is NOT enforced repo-wide — only my edited regions are format-clean). Manifest regen: `python benchmarks/perlmutter/build_single_stage_matrix.py --source-sha <sha>`.
 - **RunPod**: `runpodctl`. H100 donor pod `ecxt9xwaudcejo` was restarted only to harvest artifacts and is now
