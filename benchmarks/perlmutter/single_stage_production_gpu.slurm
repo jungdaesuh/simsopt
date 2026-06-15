@@ -35,6 +35,12 @@ PROD_NPHI="${PROD_NPHI:-}"
 PROD_NTHETA="${PROD_NTHETA:-}"
 PROD_WARM_START_RUN_DIR="${PROD_WARM_START_RUN_DIR:-}"
 PROD_NEWTON_POLISH_POLICY="${PROD_NEWTON_POLISH_POLICY:-run}"
+# Persistent JAX/XLA compilation cache. Keep this OUTSIDE ${JOB_ROOT} so the one
+# slow cold XLA:GPU compile (~73 min on the RunPod cu1290 image; diagnosed
+# "once-slow" in docs/jax_scipy_jax_gpu_compile_diagnostic_next.md) is paid once
+# and reused across runs (different ${SLURM_JOB_ID}). ${RUN_ROOT} is already a
+# writable scratch dir outside the repo, so it persists between jobs.
+PROD_JAX_CACHE_DIR="${PROD_JAX_CACHE_DIR:-${RUN_ROOT}/jax_compilation_cache}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-36000}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-36000}"
 
@@ -98,6 +104,17 @@ export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export SIMSOPT_JAX_PLATFORM=cuda
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cuda,cpu
+# Point the JAX persistent compilation cache at scratch. runtime.py defaults it to
+# ~/.cache/simsopt-jax-xla (runtime.py:864), which has tight quota on Perlmutter;
+# apply_jax_runtime_config reads JAX_COMPILATION_CACHE_DIR (runtime.py:1437) and,
+# when set, uses the persistent cache plus the SAFE narrow GPU autotune cache
+# (jax_persistent_cache_enable_xla_caches="xla_gpu_per_fusion_autotune_cache_dir",
+# runtime.py:2394-2397). We deliberately set ONLY the cache dir and do NOT set
+# JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES: a broader mode (e.g. "all") can force
+# nvlink through the container CUDA toolkit vs the wheel-bundled NVIDIA libs
+# (runtime.py:2391-2393; cf. the RunPod cu1290 nvlink block).
+mkdir -p "${PROD_JAX_CACHE_DIR}"
+export JAX_COMPILATION_CACHE_DIR="${PROD_JAX_CACHE_DIR}"
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_exclude_nondeterministic_ops=true"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 unset LD_LIBRARY_PATH

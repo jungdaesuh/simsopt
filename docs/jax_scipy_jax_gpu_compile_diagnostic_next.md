@@ -82,13 +82,21 @@ Consequences:
 
 ## Remaining (GPU-only, magnitude — not a code defect)
 
-- Enable the JAX **persistent compilation cache** on the GPU image so the single
-  cold compile is paid once and reused across runs (JAX persistent cache helps
-  *repeat* compiles; it does not speed the first). Pair with the XLA:GPU
-  autotune cache.
+- **DONE** — persistent compilation cache wired into
+  `benchmarks/perlmutter/single_stage_production_gpu.slurm`:
+  `JAX_COMPILATION_CACHE_DIR=${RUN_ROOT}/jax_compilation_cache` (outside
+  `${JOB_ROOT}`, persists across jobs; relocated off the `$HOME` default which
+  has tight Perlmutter quota). Uses runtime.py's SAFE narrow autotune mode
+  (`xla_gpu_per_fusion_autotune_cache_dir`); no broader, nvlink-triggering cache
+  modes. The persistent cache helps *repeat* compiles, not the first.
+  **Caveat:** RunPod's ephemeral pods (where the ~73-min figure was observed)
+  need the cache dir on a persistent *mounted volume* — an operational step, not
+  in this launcher.
 - If the first cold GPU compile itself must be cut, evaluate an XLA:GPU
   compile-time preset / reduced autotuning on that image — analogous to the CPU
-  `--xla_cpu_opt_preset=FAST_COMPILE` already landed for non-parity CPU lanes.
-- Measuring the absolute cold-compile wall at **production resolution** on the
-  GPU image is the only step that still needs a GPU; the recompile-vs-once
-  question is now closed on CPU.
+  `--xla_cpu_opt_preset=FAST_COMPILE`. (CPU A/B at mpol2: ~18–19% less compile
+  *work* (`user` CPU time), but no wall/RSS win at toy resolution; production
+  effect unmeasured.)
+- Measuring the absolute cold-compile wall and the cache-hit speedup at
+  **production resolution** on the GPU image is the only step that still needs a
+  GPU; the recompile-vs-once question is closed on CPU.

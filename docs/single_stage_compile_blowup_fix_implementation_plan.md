@@ -203,9 +203,17 @@ guard), then resolve the GPU compile-time residual.
      image (XLA:GPU autotune / cubin / container toolkit), not a lane defect.
    - [x] Wrote the decision-tree doc
      `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`.
-   - [ ] (GPU-only, magnitude — not a code fix) Enable persistent compilation +
-     XLA:GPU autotune cache on the GPU image; measure cold-compile wall at
-     production resolution. Needs a GPU; the once-vs-recompile question is closed.
+   - [x] Wired the persistent compilation cache into the GPU launcher
+     (`benchmarks/perlmutter/single_stage_production_gpu.slurm`): sets
+     `JAX_COMPILATION_CACHE_DIR` to `${RUN_ROOT}/jax_compilation_cache` (outside
+     `${JOB_ROOT}`, so it persists across jobs), relocating off the `$HOME`
+     default; reuses runtime.py's SAFE narrow autotune mode (no broader,
+     nvlink-triggering XLA cache modes). On Perlmutter this lets repeat jobs
+     reuse the cold compile. NOTE: RunPod's ephemeral pods (where the ~73-min
+     pain was) need the cache dir on a persistent *mounted volume* — operational,
+     not in this launcher.
+   - [ ] (GPU-only, magnitude) Measure the cold-compile wall at production
+     resolution and the cache-hit speedup on the GPU image. Needs a GPU.
 
 4. **Add a TORAX-style compile-once guard on the host-driven eval bundle.**
    *Locally verified (CPU): `1 passed in 4.46s` via real pytest in the
@@ -241,9 +249,14 @@ guard), then resolve the GPU compile-time residual.
   `test_apply_is_noop_on_cpu_parity`). The bit-exact init parity rows
   (`docs/jax_clean_reconciliation_diagnostics_2026-06-11.md:894-899`) must stay
   `0.0`.
-- [ ] **Non-parity CPU effect:** on a production/`jax_cpu_fast` `scipy-jax` run,
-  confirm final results stay within acceptance tolerances and that compile wall
-  + peak host RSS drop (or are unchanged) with the preset active.
+- [~] **Non-parity CPU effect (measured at mpol2, 2026-06-15):** A/B probe
+  (`XLA_FLAGS=--xla_cpu_opt_preset=DEFAULT` vs `=FAST_COMPILE`, n=2 each) shows
+  **user CPU time −18% to −19%** (353→289 s) with byte-identical compile counts
+  (178/127) — the preset cuts compile *work*. But **wall (+1%) and peak RSS show
+  no win at mpol2** (toy compile is too small; RSS noisy). Production-scale wall/
+  RSS benefit is expected but **NOT demonstrated locally** (needs high-res seed /
+  bigger box). Honest status: a real-but-modest CPU-work reduction, headline
+  wall/RSS unproven.
 - [ ] **FAST_COMPILE effect:** record CPU compile wall + peak host RSS before/after
   on an mpol2 `scipy-jax` run; accept only if lower/equal or if any tradeoff is
   explicitly justified by parity and wall/RSS measurements.
