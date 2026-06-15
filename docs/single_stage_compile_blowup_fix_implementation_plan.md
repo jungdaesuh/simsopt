@@ -203,17 +203,34 @@ guard), then resolve the GPU compile-time residual.
      image (XLA:GPU autotune / cubin / container toolkit), not a lane defect.
    - [x] Wrote the decision-tree doc
      `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`.
-   - [x] Wired the persistent compilation cache into the GPU launcher
-     (`benchmarks/perlmutter/single_stage_production_gpu.slurm`): sets
+   - [x] Wired the persistent compilation cache into the **Perlmutter** GPU
+     launcher (`benchmarks/perlmutter/single_stage_production_gpu.slurm`): sets
      `JAX_COMPILATION_CACHE_DIR` to `${RUN_ROOT}/jax_compilation_cache` (outside
      `${JOB_ROOT}`, so it persists across jobs), relocating off the `$HOME`
      default; reuses runtime.py's SAFE narrow autotune mode (no broader,
-     nvlink-triggering XLA cache modes). On Perlmutter this lets repeat jobs
-     reuse the cold compile. NOTE: RunPod's ephemeral pods (where the ~73-min
-     pain was) need the cache dir on a persistent *mounted volume* — operational,
-     not in this launcher.
-   - [ ] (GPU-only, magnitude) Measure the cold-compile wall at production
-     resolution and the cache-hit speedup on the GPU image. Needs a GPU.
+     nvlink-triggering XLA cache modes). Lets repeat jobs reuse the cold compile.
+     (The fair-compare launcher is deliberately left cache-cold — it *measures*
+     compile time, which a warm cache would contaminate.)
+   - [x] Fixed the **RunPod/CUDA** launcher `prepare_cuda_gpu_lowres_tests.py`
+     `_cuda_env`: it set `JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES="all"` (the broad
+     mode that forces nvlink through the container toolkit — the cu1290 block);
+     aligned to the SAFE narrow `xla_gpu_per_fusion_autotune_cache_dir`
+     (commit `0ef2f8f76`).
+   - [x] Wrote the RunPod cold→warm validation runbook
+     `docs/runpod_gpu_compile_cache_validation_protocol.md` (network volume on
+     `/workspace`, tmux, cold→warm wall comparison, nvlink-clean check).
+   - [x] Curated + verified a 6-seed parity/walltime/memory benchmark set from
+     `autoresearch/runs` (2× mpol8 + 4× mpol10, hw-valid, complete trios) →
+     `docs/runpod_parity_benchmark_seeds.md`. NB: no mpol2 seeds exist there
+     (lowest is mpol8); the mpol2 *mechanism* check still uses the clean-repo
+     fixture via `init-parity --mpol 2`.
+   - [ ] **(GPU-only, pending execution)** Provision A100 80GB, stage the 6 seeds
+     on a `/workspace` network volume, and sweep
+     `init-parity --platform cuda --warm-start-run-dir <seed>
+     --record-jax-compile-diagnostics` → per-seed CPU-vs-GPU **precision parity**
+     + **walltime** + **MaxRSS/GPU-mem**, plus the cold→warm cache-hit and
+     nvlink-clean confirmation. This box can drive RunPod (`runpodctl` + API key)
+     but the run is billable and not yet executed.
 
 4. **Add a TORAX-style compile-once guard on the host-driven eval bundle.**
    *Locally verified (CPU): `1 passed in 4.46s` via real pytest in the
@@ -257,12 +274,19 @@ guard), then resolve the GPU compile-time residual.
   RSS benefit is expected but **NOT demonstrated locally** (needs high-res seed /
   bigger box). Honest status: a real-but-modest CPU-work reduction, headline
   wall/RSS unproven.
-- [ ] **FAST_COMPILE effect:** record CPU compile wall + peak host RSS before/after
-  on an mpol2 `scipy-jax` run; accept only if lower/equal or if any tradeoff is
-  explicitly justified by parity and wall/RSS measurements.
+- [ ] **FAST_COMPILE production-scale effect:** the mpol2 measurement above shows
+  no wall/RSS win at toy size; the production-scale wall/RSS effect is deferred to
+  the RunPod/big-box sweep (mpol8/mpol10 seeds in
+  `docs/runpod_parity_benchmark_seeds.md`). Accept only if lower/equal or the
+  tradeoff is justified by the parity + wall/RSS measurements there.
 - [x] **Compile-once guard:** new test passes on CPU — bundle `_cache_size() == 1`
   after warmup and no growth on an `x`-change (`1 passed in 4.46s`,
   `jax-0.10.0` env). Confirms the host-driven bundle is compile-once.
+- [ ] **RunPod GPU sweep (set up, pending execution):** runbook
+  (`docs/runpod_gpu_compile_cache_validation_protocol.md`) + 6-seed benchmark set
+  (`docs/runpod_parity_benchmark_seeds.md`) ready; the RunPod/CUDA launcher is
+  nvlink-safe. Execute on A100 80GB for per-seed CPU-vs-GPU precision parity,
+  walltime, MaxRSS/GPU-mem, and the cold→warm cache-hit. Billable; not yet run.
 - [x] **GPU residual classified:** CPU probe shows compile count constant across
   outer budgets (127/178 at maxiter 3 vs 5 steps) → **once-slow**, recompile
   refuted; decision-tree doc `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`
@@ -306,6 +330,10 @@ guard), then resolve the GPU compile-time residual.
 - [x] GPU compile-time residual classified: **once-slow** (recompile refuted via
   the CPU compile-count probe), decision-tree doc
   `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md` committed.
+- [x] GPU compile caches made persistent + nvlink-safe (Perlmutter launcher +
+  RunPod/CUDA launcher); cold→warm runbook and 6-seed benchmark set committed.
+- [ ] RunPod/A100 sweep executed: per-seed CPU-vs-GPU parity green, walltime +
+  MaxRSS/GPU-mem recorded, cold→warm cache-hit and nvlink-clean confirmed.
 - [ ] Parity validation green; no regression in existing compile-diagnostic tests.
 
 ## Open Questions
@@ -315,7 +343,10 @@ guard), then resolve the GPU compile-time residual.
   CPU compile-count probe is constant across outer budgets → no recompile bug →
   no lane code change needed. See
   `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md`.
-- Should `FAST_COMPILE` be CPU-only or also applied on GPU host-compile? (Decide
-  from Phase 2 measurement; default CPU-only.)
+- ~~Should `FAST_COMPILE` be CPU-only or also applied on GPU host-compile?~~
+  **RESOLVED: non-parity CPU only.** GPU relief comes from the persistent compile
+  cache (the narrow nvlink-safe autotune mode), not FAST_COMPILE; CUDA and parity
+  lanes are gated out. The remaining open GPU question is the *magnitude* of the
+  cold→warm cache-hit, which the RunPod/A100 sweep will measure.
 - Does the `boozer_bfgs_maxiter=1500` inner cap dominate ondevice breadth? (Phase
   5 bisect; record-only, does not change the production decision.)
