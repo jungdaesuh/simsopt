@@ -146,23 +146,28 @@ optimizer-path divergence via **replay**; (5) separate compile from steady-state
 **Run 1 — Parity (port correctness, host-independent).** fullgraph mpol10, warm-started. The harness
 auto-runs the same-candidate replay (`scipy-jax-fullgraph ∈ _EXACT_SAME_CANDIDATE_REPLAY_BACKENDS`;
 `single_stage_init_parity.py:1517` → `:1657`, `_compare_same_candidate_*` `:1966-2222`) → per-candidate
-value/grad/hardware **bit-parity vs cpp, convergence-independent**. Add `--record-jax-compile-diagnostics`.
+value/grad/hardware **bit-parity vs cpp, convergence-independent**.
 This is THE correctness number and does not depend on the convergence stall.
 
 **Run 2 — Perf (cpu vs gpu, same node).** New `single_stage_fair_compare_gpu.slurm` on a GPU node runs
-fullgraph mpol10 warm-started under `--platform cpu` then `--platform cuda`, thread-capped,
-compile-diagnostics on. Each invocation co-produces the cpp reference (parity anchor) on the identical
-host. Report **per-iteration steady-state throughput (compile excluded)**, MaxRSS, GPU mem, compile count
-— NOT raw total wall (iteration counts diverge across lanes).
+fullgraph mpol10 warm-started under `--platform cpu` then `--platform cuda`, thread-capped (cpu lane hides
+the GPU; cuda lane samples GPU mem). Each invocation co-produces the cpp reference (parity anchor) on the
+identical host. Report **per-iteration throughput**, MaxRSS, GPU mem — NOT raw total wall (iteration counts
+diverge across lanes). Compile-vs-steady-state separation is amortized for now (see task below).
 
 **Reuse, do not re-run:** scipy-jax 11-dim perf comes from the existing `06b7f1a8f` runs (perf-only /
 dim-mismatched vs the 51 reference). The genuinely-new work is the fullgraph-51 lane.
 
 **Implementation tasks:**
 - [x] Thread caps (OMP/OPENBLAS/MKL/NUMEXPR = `SLURM_CPUS_PER_TASK`) in both production launchers.
-- [ ] `--record-jax-compile-diagnostics` opt-in plumbing (e.g. `PROD_COMPILE_DIAGNOSTICS`).
-- [ ] `single_stage_fair_compare_gpu.slurm` — same-node cpu+cuda fullgraph mpol10 (base on
-      `single_stage_production_gpu.slurm`: one venv/build/clean-check, then run the harness twice).
+- [x] `single_stage_fair_compare_gpu.slurm` — same-node cpu+cuda fullgraph mpol10 (one venv/build/clean-check,
+      then a `run_lane` function runs the harness twice; cpu lane sets `CUDA_VISIBLE_DEVICES=""`, cuda lane
+      samples GPU mem; job fails red if either lane fails).
+- [ ] Compile-vs-steady-state separation is NOT yet available: the harness does not expose
+      `enable_compile_diagnostics` as a CLI flag (default-False, unwired in `single_stage_init_parity.py`),
+      so the launchers cannot pass `--record-jax-compile-diagnostics` (it would argparse-error). Until that
+      small harness arg is wired, per-iteration throughput comes from the harness timing fields with compile
+      amortized.
 
 **Achievable now:** parity (replay) + CPU perf, once the donor lands. **GPU perf gated** on the recompile
 fix — the compile diagnostics quantify it.
