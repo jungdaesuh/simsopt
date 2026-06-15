@@ -88,6 +88,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from jax import grad
@@ -108,6 +110,81 @@ from simsopt.geo.jit import jit
 #: Sentinel coordinate for chunk padding — far from any machine geometry
 #: (HBT-EP fits in ~1.3 m), so padded points never activate the hinge.
 _PAD_COORDINATE = 1.0e3
+
+# Surface quadrature over the swept rectangular Type KK U-channel sample box.
+# The triplets are coefficients of (half segment, half width, half depth):
+# 8 corners, 6 face centers, and 12 edge midpoints.  These points are a
+# deterministic low-order surface proxy for the exact swept solid; the parry3d
+# audit remains the final oracle.
+_SWEPT_SURFACE_QUADRATURE = np.array(
+    [
+        *(
+            (sweep, width, depth)
+            for sweep in (-1.0, 1.0)
+            for width in (-1.0, 1.0)
+            for depth in (-1.0, 1.0)
+        ),
+        (-1.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, -1.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, -1.0),
+        (0.0, 0.0, 1.0),
+        *(
+            (sweep, width, 0.0)
+            for sweep in (-1.0, 1.0)
+            for width in (-1.0, 1.0)
+        ),
+        *(
+            (sweep, 0.0, depth)
+            for sweep in (-1.0, 1.0)
+            for depth in (-1.0, 1.0)
+        ),
+        *(
+            (0.0, width, depth)
+            for width in (-1.0, 1.0)
+            for depth in (-1.0, 1.0)
+        ),
+    ],
+    dtype=np.float64,
+)
+
+
+@dataclass(frozen=True)
+class HardwareSdfGroup:
+    """One CAD-derived distance grid in the machine metre frame."""
+
+    label: str
+    grid: np.ndarray
+    origin_m: np.ndarray
+    spacing_m: float
+    effective_margin_m: float
+    sign_method: str
+
+
+@dataclass(frozen=True)
+class HardwareSdfData:
+    """Manifest-bound hardware SDF payload consumed by CurveHardwareSdfKeepout."""
+
+    manifest_path: str
+    data_path: str
+    manifest_sha256: str
+    data_sha256: str
+    groups: tuple[HardwareSdfGroup, ...]
+    documented_gate_only: dict[str, object]
+    provenance: dict[str, object]
+
+    @property
+    def group_labels(self) -> tuple[str, ...]:
+        return tuple(group.label for group in self.groups)
+
+    @property
+    def sign_methods(self) -> dict[str, str]:
+        return {group.label: group.sign_method for group in self.groups}
+
+    @property
+    def effective_margin_m(self) -> float:
+        return max(group.effective_margin_m for group in self.groups)
 
 
 def _normalize(v):
@@ -156,6 +233,28 @@ def _bracket_corners(gammac, half_w, half_d, winding_r0):
                     + depth_sign * half_d * radial
                 )
     return jnp.concatenate(corners, axis=0)
+
+
+def swept_channel_surface_points(gammac, half_w, half_d, winding_r0):
+    """Sample the swept Type KK U-channel surface in the viewer-matched frame.
+
+    Returns ``N * 26`` points: corners, face centers, and edge midpoints for the
+    local swept box at each curve station.  The exact CAD/parry swept-solid
+    checker remains the oracle; this deterministic sample set is the optimizer
+    proxy used by the SDF backend.
+    """
+    tangent, tangential, radial, half_seg = _bracket_frame(gammac, winding_r0)
+    coeffs = jnp.asarray(_SWEPT_SURFACE_QUADRATURE)
+    sweep = coeffs[:, 0]
+    width = coeffs[:, 1]
+    depth = coeffs[:, 2]
+    samples = (
+        gammac[:, None, :]
+        + sweep[None, :, None] * half_seg[:, None, None] * tangent[:, None, :]
+        + width[None, :, None] * half_w * tangential[:, None, :]
+        + depth[None, :, None] * half_d * radial[:, None, :]
+    )
+    return samples.reshape((-1, 3))
 
 
 def vessel_envelope_clearance_pure(gammac, half_w, half_d, winding_r0,
@@ -231,6 +330,63 @@ def hardware_keepout_pure(gammac, points, point_weight, half_w, half_d,
     solid = jnp.where(solid_sq > 0.0, jnp.sqrt(safe), 0.0)
     viol_rel = jnp.maximum(margin - solid, 0.0) / margin
     return jnp.sum(point_weight * viol_rel ** 2) / margin ** 2
+
+
+def _sdf_trilinear(grid, origin_m, spacing_m, points, outside_value):
+    """Trilinear interpolation for a single regular SDF grid.
+
+    Points outside the grid are assigned ``outside_value``.  The caller chooses
+    that value conservatively; the keepout objective uses a violating clearance
+    so an optimizer cannot silently leave the trusted CAD-derived field domain.
+    """
+    grid_shape = jnp.asarray(grid.shape)
+    local = (points - origin_m) / spacing_m
+    lower_f = jnp.floor(local)
+    lower = lower_f.astype(jnp.int32)
+    valid = jnp.all((local >= 0.0) & (local <= (grid_shape - 1)), axis=1)
+    lower = jnp.clip(lower, 0, grid_shape - 2)
+    frac = jnp.clip(local - lower_f, 0.0, 1.0)
+
+    i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
+    i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
+    tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
+
+    c000 = grid[i0, j0, k0]
+    c100 = grid[i1, j0, k0]
+    c010 = grid[i0, j1, k0]
+    c110 = grid[i1, j1, k0]
+    c001 = grid[i0, j0, k1]
+    c101 = grid[i1, j0, k1]
+    c011 = grid[i0, j1, k1]
+    c111 = grid[i1, j1, k1]
+
+    c00 = c000 * (1.0 - tx) + c100 * tx
+    c10 = c010 * (1.0 - tx) + c110 * tx
+    c01 = c001 * (1.0 - tx) + c101 * tx
+    c11 = c011 * (1.0 - tx) + c111 * tx
+    c0 = c00 * (1.0 - ty) + c10 * ty
+    c1 = c01 * (1.0 - ty) + c11 * ty
+    value = c0 * (1.0 - tz) + c1 * tz
+    return jnp.where(valid, value, outside_value)
+
+
+def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
+                              effective_margin_m, half_w, half_d,
+                              winding_r0):
+    """SDF-backed keepout on sampled swept Type KK surface points."""
+    surface_points = swept_channel_surface_points(
+        gammac, half_w, half_d, winding_r0
+    )
+    scale = jnp.maximum(effective_margin_m, 1.0e-6)
+    phi = _sdf_trilinear(
+        grid,
+        origin_m,
+        spacing_m,
+        surface_points,
+        outside_value=-scale,
+    )
+    violation = jnp.maximum(effective_margin_m - phi, 0.0) / scale
+    return jnp.mean(violation ** 2)
 
 
 class CurveHardwareKeepout(Optimizable):
@@ -369,6 +525,174 @@ class CurveHardwareKeepout(Optimizable):
             for i in range(len(self.curves))
         ]
         return sum(res)
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class CurveHardwareSdfKeepout(Optimizable):
+    r"""
+    Optimizer-visible CAD distance-field proxy for static hardware keepout.
+
+    The objective samples the viewer-matched Type KK swept U-channel surface and
+    queries one or more manifest-bound hardware distance grids.  It is a
+    steering proxy only: ``hardware_contact_report`` remains the direct CAD
+    oracle for promotion and handoff.
+    """
+
+    def __init__(self, curves, sdf_data,
+                 half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+                 half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M):
+        if not isinstance(sdf_data, HardwareSdfData):
+            raise TypeError("sdf_data must come from load_hardware_sdf(...)")
+        if not sdf_data.groups:
+            raise ValueError("hardware SDF payload must contain at least one group")
+        self.curves = curves
+        self.sdf_data = sdf_data
+        self.half_w = float(half_w)
+        self.half_d = float(half_d)
+        self.winding_r0 = float(winding_r0)
+        self._groups = [
+            {
+                "label": group.label,
+                "grid_np": np.ascontiguousarray(group.grid, dtype=np.float64),
+                "grid": jnp.asarray(group.grid),
+                "origin_np": np.asarray(group.origin_m, dtype=np.float64),
+                "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
+                "spacing": float(group.spacing_m),
+                "effective_margin": float(group.effective_margin_m),
+            }
+            for group in sdf_data.groups
+        ]
+        self.J_jax = jit(
+            lambda gammac, grid, origin, spacing, effective_margin:
+            hardware_sdf_keepout_pure(
+                gammac,
+                grid,
+                origin,
+                spacing,
+                effective_margin,
+                self.half_w,
+                self.half_d,
+                self.winding_r0,
+            )
+        )
+        self.dJ_dgamma = jit(
+            lambda gammac, grid, origin, spacing, effective_margin:
+            grad(self.J_jax, argnums=0)(
+                gammac, grid, origin, spacing, effective_margin
+            )
+        )
+        super().__init__(depends_on=curves)
+
+    @property
+    def group_labels(self):
+        return self.sdf_data.group_labels
+
+    def _group_value(self, gammac, group):
+        return float(
+            self.J_jax(
+                gammac,
+                group["grid"],
+                group["origin"],
+                group["spacing"],
+                group["effective_margin"],
+            )
+        )
+
+    def J(self):
+        total = 0.0
+        for curve in self.curves:
+            gammac = curve.gamma()
+            for group in self._groups:
+                total += self._group_value(gammac, group)
+        return total
+
+    @derivative_dec
+    def dJ(self):
+        dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        for curve_index, curve in enumerate(self.curves):
+            gammac = curve.gamma()
+            for group in self._groups:
+                dgamma_vecs[curve_index] += np.asarray(
+                    self.dJ_dgamma(
+                        gammac,
+                        group["grid"],
+                        group["origin"],
+                        group["spacing"],
+                        group["effective_margin"],
+                    )
+                )
+        return sum(
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
+            for i in range(len(self.curves))
+        )
+
+    def _interp_numpy(self, grid, origin, spacing, points, outside_value):
+        local = (points - origin) / spacing
+        shape = np.asarray(grid.shape, dtype=int)
+        valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
+        lower_f = np.floor(local)
+        lower = np.clip(lower_f.astype(int), 0, shape - 2)
+        frac = np.clip(local - lower_f, 0.0, 1.0)
+        i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
+        i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
+        tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
+        c000 = grid[i0, j0, k0]
+        c100 = grid[i1, j0, k0]
+        c010 = grid[i0, j1, k0]
+        c110 = grid[i1, j1, k0]
+        c001 = grid[i0, j0, k1]
+        c101 = grid[i1, j0, k1]
+        c011 = grid[i0, j1, k1]
+        c111 = grid[i1, j1, k1]
+        c00 = c000 * (1.0 - tx) + c100 * tx
+        c10 = c010 * (1.0 - tx) + c110 * tx
+        c01 = c001 * (1.0 - tx) + c101 * tx
+        c11 = c011 * (1.0 - tx) + c111 * tx
+        c0 = c00 * (1.0 - ty) + c10 * ty
+        c1 = c01 * (1.0 - ty) + c11 * ty
+        value = c0 * (1.0 - tz) + c1 * tz
+        return np.where(valid, value, outside_value)
+
+    def per_group_min_clearance(self):
+        """Minimum sampled swept-surface SDF value per represented group, m."""
+        best = {group["label"]: np.inf for group in self._groups}
+        for curve in self.curves:
+            surface_points = np.asarray(
+                swept_channel_surface_points(
+                    jnp.asarray(curve.gamma()),
+                    self.half_w,
+                    self.half_d,
+                    self.winding_r0,
+                ),
+                dtype=np.float64,
+            )
+            for group in self._groups:
+                values = self._interp_numpy(
+                    group["grid_np"],
+                    group["origin_np"],
+                    group["spacing"],
+                    surface_points,
+                    outside_value=-group["effective_margin"],
+                )
+                best[group["label"]] = min(
+                    best[group["label"]], float(values.min())
+                )
+        return best
+
+    def shortest_distance(self):
+        """Minimum sampled swept-surface SDF value, m.
+
+        Negative values indicate the sampled swept surface is inside a signed
+        field or outside the trusted field domain.  The name is retained for the
+        existing results-writer contract; ``shortest_clearance`` is an alias for
+        callers that want signed wording.
+        """
+        return min(self.per_group_min_clearance().values())
+
+    def shortest_clearance(self):
+        return self.shortest_distance()
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -562,3 +886,174 @@ def load_hardware_keepout(path, glb_path=None):
         float(data["recommended_min_distance_m"]),
         provenance,
     )
+
+
+def _read_hardware_sdf_manifest(path):
+    with open(path) as f:
+        data = json.load(f)
+    if data.get("schema_version") != 1:
+        raise ValueError(
+            f"unsupported SDF schema_version {data.get('schema_version')!r}")
+    if data.get("kind") not in {None, "hardware_sdf"}:
+        raise ValueError(f"unsupported SDF kind {data.get('kind')!r}")
+    if data.get("frame") != "machine_metres_zup" or data.get("units") != "m":
+        raise ValueError(
+            f"SDF frame/units mismatch: {data.get('frame')!r}/"
+            f"{data.get('units')!r}; expected machine_metres_zup metres")
+    return data
+
+
+def _resolve_manifest_relative(manifest_path, payload_path):
+    payload = Path(os.fspath(payload_path))
+    if payload.is_absolute():
+        return payload
+    return Path(os.fspath(manifest_path)).resolve().parent / payload
+
+
+def _coverage_keys(payload):
+    if isinstance(payload, dict):
+        return set(str(key) for key in payload)
+    return set(str(key) for key in payload)
+
+
+def validate_hardware_sdf_static_coverage(
+    *, represented_groups, documented_gate_only, static_hardware_keys
+):
+    """Fail closed unless every oracle static key is covered or documented."""
+    represented = _coverage_keys(represented_groups)
+    gate_only = _coverage_keys(documented_gate_only)
+    static = _coverage_keys(static_hardware_keys)
+    missing = sorted(static - represented - gate_only)
+    if missing:
+        raise ValueError(
+            "hardware SDF manifest does not cover static hardware groups "
+            f"{missing}; add represented fields or document them as gate-only")
+
+
+def _validated_hardware_sdf_glb_sha(manifest, path, glb_path):
+    if glb_path is None:
+        return None
+    provenance = manifest.get("provenance", {})
+    recorded_sha = provenance.get("glb_sha256")
+    live_sha = _sha256_file(glb_path)
+    if recorded_sha != live_sha:
+        raise ValueError(
+            f"stale hardware SDF manifest {os.fspath(path)!r}: its "
+            f"provenance.glb_sha256 {recorded_sha!r} does not match live GLB "
+            f"{os.fspath(glb_path)!r} sha256 {live_sha!r}; regenerate the SDF "
+            "from the live GLB before steering against it (fail-closed)")
+    return live_sha
+
+
+def load_hardware_sdf(path, glb_path=None):
+    """Load a manifest-bound ``hardware_sdf.json``/``.npz`` payload.
+
+    The manifest must use the machine metre frame, sha-bind its data payload,
+    and either represent every static hardware key it lists or declare the key
+    under ``documented_gate_only``.  The returned object is accepted directly by
+    :class:`CurveHardwareSdfKeepout`.
+    """
+    manifest_path = Path(os.fspath(path))
+    manifest = _read_hardware_sdf_manifest(manifest_path)
+    live_glb_sha = _validated_hardware_sdf_glb_sha(manifest, manifest_path, glb_path)
+    data_path = _resolve_manifest_relative(
+        manifest_path, manifest.get("data_file", "hardware_sdf.npz")
+    )
+    manifest_sha = _sha256_file(manifest_path)
+    data_sha = _sha256_file(data_path)
+    recorded_data_sha = manifest.get("data_sha256")
+    if recorded_data_sha is not None and recorded_data_sha != data_sha:
+        raise ValueError(
+            f"stale hardware SDF data {os.fspath(data_path)!r}: manifest records "
+            f"data_sha256 {recorded_data_sha!r}, live file is {data_sha!r}")
+
+    documented_gate_only = dict(manifest.get("documented_gate_only", {}))
+    group_specs = tuple(manifest.get("groups", ()))
+    represented = [str(group["label"]) for group in group_specs]
+    static_keys = manifest.get("static_hardware_keys")
+    if static_keys is not None:
+        validate_hardware_sdf_static_coverage(
+            represented_groups=represented,
+            documented_gate_only=documented_gate_only,
+            static_hardware_keys=static_keys,
+        )
+
+    top_margin = manifest.get("effective_margin_m")
+    groups = []
+    with np.load(data_path) as payload:
+        for group in group_specs:
+            label = str(group["label"])
+            field_key = str(group.get("field_key", label))
+            if field_key not in payload:
+                raise ValueError(
+                    f"SDF data payload {os.fspath(data_path)!r} is missing "
+                    f"field {field_key!r} for group {label!r}")
+            grid = np.ascontiguousarray(np.asarray(payload[field_key], dtype=np.float64))
+            if grid.ndim != 3 or min(grid.shape) < 2:
+                raise ValueError(
+                    f"SDF group {label!r} must be a 3-D grid with every "
+                    f"dimension >= 2, got {grid.shape}")
+            expected_shape = group.get("shape")
+            if expected_shape is not None and tuple(expected_shape) != grid.shape:
+                raise ValueError(
+                    f"SDF group {label!r} shape mismatch: manifest "
+                    f"{tuple(expected_shape)} vs payload {grid.shape}")
+            origin = np.asarray(group["origin_m"], dtype=np.float64)
+            if origin.shape != (3,):
+                raise ValueError(
+                    f"SDF group {label!r} origin_m must be length 3, got "
+                    f"{origin.shape}")
+            spacing = float(group["spacing_m"])
+            if spacing <= 0.0:
+                raise ValueError(f"SDF group {label!r} spacing_m must be > 0")
+            effective_margin = float(group.get("effective_margin_m", top_margin))
+            if effective_margin <= 0.0:
+                raise ValueError(
+                    f"SDF group {label!r} effective_margin_m must be > 0")
+            groups.append(
+                HardwareSdfGroup(
+                    label=label,
+                    grid=grid,
+                    origin_m=origin,
+                    spacing_m=spacing,
+                    effective_margin_m=effective_margin,
+                    sign_method=str(group.get("sign_method", "unknown")),
+                )
+            )
+
+    provenance = dict(manifest.get("provenance", {}))
+    if live_glb_sha is not None:
+        provenance["live_glb_sha256"] = live_glb_sha
+        provenance["live_glb"] = os.fspath(glb_path)
+    return HardwareSdfData(
+        manifest_path=os.fspath(manifest_path),
+        data_path=os.fspath(data_path),
+        manifest_sha256=manifest_sha,
+        data_sha256=data_sha,
+        groups=tuple(groups),
+        documented_gate_only=documented_gate_only,
+        provenance=provenance,
+    )
+
+
+def hardware_sdf_metadata(path, glb_path=None):
+    """Return run-stamp metadata for an SDF hardware keepout payload."""
+    sdf_data = load_hardware_sdf(path, glb_path=glb_path)
+    provenance = sdf_data.provenance
+    return {
+        "HARDWARE_KEEPOUT_BACKEND": "sdf",
+        "HARDWARE_SDF_MANIFEST": sdf_data.manifest_path,
+        "HARDWARE_SDF_MANIFEST_SHA256": sdf_data.manifest_sha256,
+        "HARDWARE_SDF_DATA": sdf_data.data_path,
+        "HARDWARE_SDF_SHA256": sdf_data.data_sha256,
+        "HARDWARE_SDF_GROUPS": list(sdf_data.group_labels),
+        "HARDWARE_SDF_SIGN_METHODS": sdf_data.sign_methods,
+        "HARDWARE_SDF_EFFECTIVE_MARGIN_M": sdf_data.effective_margin_m,
+        "DOCUMENTED_GATE_ONLY_GROUPS": sorted(
+            str(key) for key in sdf_data.documented_gate_only
+        ),
+        "HARDWARE_SDF_PROVENANCE_GLB": provenance.get("glb"),
+        "HARDWARE_SDF_PROVENANCE_GLB_SHA256": provenance.get("glb_sha256"),
+        "HARDWARE_SDF_LIVE_GLB": provenance.get("live_glb"),
+        "HARDWARE_SDF_LIVE_GLB_SHA256": provenance.get("live_glb_sha256"),
+    }
