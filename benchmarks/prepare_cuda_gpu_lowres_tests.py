@@ -454,7 +454,11 @@ def _cuda_env(output_dir: Path, *, cache_label: str) -> dict[str, str]:
         "JAX_COMPILATION_CACHE_DIR": str(cache_dir),
         "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
         "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES": "-1",
-        "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "all",
+        # SAFE narrow autotune cache only. The broad "all" mode forces nvlink
+        # through the container CUDA toolkit vs the wheel-bundled NVIDIA libs,
+        # which blocked the RunPod cu1290 image (runtime.py:2391-2397 uses this
+        # narrow mode for the same reason). Keep aligned with apply_jax_runtime_config.
+        "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "xla_gpu_per_fusion_autotune_cache_dir",
         "XLA_FLAGS": CUDA_DETERMINISM_XLA_FLAG,
         "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
     }

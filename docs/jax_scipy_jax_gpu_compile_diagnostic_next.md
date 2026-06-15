@@ -89,9 +89,18 @@ Consequences:
   has tight Perlmutter quota). Uses runtime.py's SAFE narrow autotune mode
   (`xla_gpu_per_fusion_autotune_cache_dir`); no broader, nvlink-triggering cache
   modes. The persistent cache helps *repeat* compiles, not the first.
-  **Caveat:** RunPod's ephemeral pods (where the ~73-min figure was observed)
-  need the cache dir on a persistent *mounted volume* — an operational step, not
-  in this launcher.
+  **RunPod path (the tracked CUDA launcher):**
+  `benchmarks/prepare_cuda_gpu_lowres_tests.py` `_cuda_env()` writes the CUDA
+  shell-runner env. It was setting `JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES="all"`
+  — the broad mode `runtime.py:2391-2397` warns forces nvlink through the
+  container CUDA toolkit (the cu1290 block). **Fixed to the narrow
+  `xla_gpu_per_fusion_autotune_cache_dir`** to match runtime.py and stay
+  nvlink-safe. Tradeoff: the narrow mode caches only per-fusion autotune
+  results (not the full XLA compile), so the cold-compile speedup is partial but
+  safe. For cross-pod reuse, point the generator's `output_dir` at the persistent
+  RunPod **network volume** (`/workspace/...`) so
+  `output_dir/jax_compilation_cache/<label>` survives pod restarts; otherwise
+  each ephemeral pod recompiles cold.
 - If the first cold GPU compile itself must be cut, evaluate an XLA:GPU
   compile-time preset / reduced autotuning on that image — analogous to the CPU
   `--xla_cpu_opt_preset=FAST_COMPILE`. (CPU A/B at mpol2: ~18–19% less compile
