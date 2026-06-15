@@ -28,6 +28,11 @@ DONOR_MAXITER="${DONOR_MAXITER:-300}"
 # Extra continuation rungs for a gentler ladder (2,4,6,8,10 by default).
 DONOR_INTERMEDIATE_RUNGS="${DONOR_INTERMEDIATE_RUNGS:-8}"
 DONOR_STAGE_TIMEOUT_SECONDS="${DONOR_STAGE_TIMEOUT_SECONDS:-21600}"
+# Build donors must materialize full restart artifacts on every promoted rung.
+# The continuation driver's default validated-fast policy is for cheap probes; it
+# uses minimal artifacts on non-final rungs and cannot satisfy this donor's
+# warm-start contract.
+DONOR_TRIAL_POLICY="${DONOR_TRIAL_POLICY:-none}"
 
 repo_root_real="$(realpath "${REPO_ROOT}")"
 run_root_real="$(realpath -m "${RUN_ROOT}")"
@@ -106,6 +111,7 @@ set +e
     --ntheta "${DONOR_NTHETA}" \
     --maxiter "${DONOR_MAXITER}" \
     --intermediate-rungs "${DONOR_INTERMEDIATE_RUNGS}" \
+    --trial-policy "${DONOR_TRIAL_POLICY}" \
     --initial-stage2-bs-path "${FIXTURE_STAGE2_BS}" \
     --stage-timeout-seconds "${DONOR_STAGE_TIMEOUT_SECONDS}" \
     --output-root "${DONOR_ROOT}" \

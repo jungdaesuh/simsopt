@@ -1,4 +1,4 @@
-"""Backend-mode contract for the single-stage continuation warm-start donor.
+"""Backend/trial-policy contract for the single-stage continuation warm-start donor.
 
 The donor build (``benchmarks/perlmutter/single_stage_continuation_donor.slurm``)
 produces a warm-start surface by running ``run_single_stage_continuation.py``,
@@ -15,6 +15,11 @@ launcher had copy-pasted the production parity env
 to a backend mode that resolves to a non-jax backend so that regression cannot
 recur, and resolves the mode through the production SSOT map rather than a literal
 string so it survives a future rename of the cpu mode.
+
+Perlmutter job 54462557 (2026-06-14) then exposed the second donor-specific
+contract: this launcher must not inherit the continuation driver's default
+``validated-fast`` trial policy. That policy is for probes and uses minimal
+artifacts on non-final rungs; a donor build must materialize restart artifacts.
 """
 from __future__ import annotations
 
@@ -38,6 +43,19 @@ def _single_exported_value(script: str, name: str) -> str:
         f"{name} is exported {len(matches)} times; expected exactly one source of truth"
     )
     return matches[0].strip().strip('"')
+
+
+def _single_shell_default(script: str, name: str) -> str:
+    matches = re.findall(
+        rf'^\s*{re.escape(name)}="\$\{{{re.escape(name)}:-([^}}]+)\}}"\s*(?:#.*)?$',
+        script,
+        re.MULTILINE,
+    )
+    assert matches, f"{name} default assignment is missing from the donor launcher"
+    assert len(matches) == 1, (
+        f"{name} is assigned {len(matches)} times; expected exactly one source of truth"
+    )
+    return matches[0].strip()
 
 
 def test_donor_launcher_backend_mode_permits_host_scipy_reference_lane():
@@ -72,4 +90,24 @@ def test_donor_launcher_backend_mode_permits_host_scipy_reference_lane():
         "continuation host-SciPy reference lane requires a native backend "
         "(_require_native_cpu_reference_backend_for_scipy_adapter raises under jax). "
         "See Perlmutter job 54390541."
+    )
+
+
+def test_donor_launcher_uses_full_artifact_trial_policy_for_warm_start_build():
+    script = DONOR_LAUNCHER.read_text(encoding="utf-8")
+
+    trial_policy_default = _single_shell_default(script, "DONOR_TRIAL_POLICY")
+    assert trial_policy_default == "none", (
+        "donor builds must default to --trial-policy none so every promoted rung "
+        "materializes the restart artifacts required by the high-resolution "
+        "warm-start contract. The continuation default validated-fast policy uses "
+        "minimal artifacts on non-final rungs and failed donor job 54462557."
+    )
+
+    command_lines = "\n".join(
+        line for line in script.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert '--trial-policy "${DONOR_TRIAL_POLICY}"' in command_lines, (
+        "donor launcher defines DONOR_TRIAL_POLICY but does not pass it to "
+        "run_single_stage_continuation.py"
     )
