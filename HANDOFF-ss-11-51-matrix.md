@@ -1,7 +1,8 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 07:18 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
-> compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing commit `5f14a1463`; this
+> Last updated: 2026-06-15 08:16 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> compile-diagnostics wiring + donor trial-policy fix + progress hardware-violation diagnostics all COMMITTED
+> (code-bearing commit `a7884c3e6`; this
 > handoff is the operational launch-state source of truth).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
 > mpol10/ntor10, nfp5, hardware-clean (vol 0.0937), but it is NOT a usable mpol10 `--warm-start-run-dir`
@@ -36,7 +37,10 @@
 > not branch-loss failures. `54482812` remains the pending 12 h GPU backup. New full-memory CPU-JAX fallback
 > `54488062` was submitted at 07:18 EDT
 > (`ReqTRES=cpu=32,mem=487802M,node=1`, `DONOR_MAXITER=60`) to test whether the CPU-JAX failure is purely
-> memory-bounded.
+> memory-bounded. At 08:16 EDT, both `54482812` and `54488062` are still pending, and their shared checkout was
+> updated cleanly from `306d53bdc` to `a7884c3e6`, so any next JAX donor run will log hardware
+> `violation_keys`, `violations`, `threshold_margins`, and realized hardware metric values in
+> `target_lane_reporting_hardware_status_returned` before the initial-objective OOM point.
 > Previous job `54477744` was cancelled before start because its submitted
 > script still used the bad `--nphi 64 --ntheta 32` runtime-spec mismatch. **RunPod H100 probe harvested, no
 > donor:** pod `ecxt9xwaudcejo`; first command
@@ -55,9 +59,10 @@ mpol2 (smoke) + mpol10 (production). `ondevice` removed (OOM monolith). User wan
 with cpu-vs-gpu measured fairly (same node, capped threads, replay parity); docs/memory updated.
 
 ## 2. Where we are right now
-All code needed before the next donor submission is committed (minimum code-bearing commit `5f14a1463`): the 8-cell host-driven
+All code needed before the next donor submission is committed (minimum code-bearing commit `a7884c3e6`): the 8-cell host-driven
 matrix, the fullgraph inner-Boozer fix, the thread-cap fairness fix, the same-node fair-compare launcher +
-tests, the compile-diagnostics wiring (`--record-jax-compile-diagnostics`), and the donor trial-policy fix.
+tests, the compile-diagnostics wiring (`--record-jax-compile-diagnostics`), the donor trial-policy fix, and
+progress logging of hardware violation details for target-lane reporting snapshots.
 Two background efforts:
 the **Perlmutter donor `54462557`** (**FAILED**; see NEXT ACTION #1), the **RunPod mpol2 smokes** (DONE
 — see §5), and the **RunPod mpol10 donor probes** (FAILED — see §5). The immediate mpol10 fair-compare/speed
@@ -167,14 +172,15 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
        contract (which deliberately rejects fixture-only seeds — they don't prove continuation-branch
        preservation). And even WITH a donor, `_require_supported_single_stage_seed_contract` (:1616→:1483)
        rejects it unless HARDWARE_CONSTRAINTS_OK, not SELF_INTERSECTING, and iota-quality pass.
-2. [ ] **Use a checkout that includes at least code-bearing commit `5f14a1463` for fair-compare.** The active
+2. [ ] **Use a checkout that includes at least code-bearing commit `a7884c3e6` for fair-compare.** The active
        JAX-donor checkout
-       `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout` is at `306d53bd` and already
-       contains `benchmarks/perlmutter/single_stage_fair_compare_gpu.slurm`,
-       `FAIR_WARM_START_RUN_DIR`, and `--record-jax-compile-diagnostics`. It is acceptable for fair-compare
-       once a valid donor exists. If staging a fresh checkout instead, use the current branch HEAD (doc-only
-       commits are fine) and always run `git submodule update --init --recursive` (MANDATORY — bundle lacks the
-       C++ submodules).
+       `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout` is detached at
+       `a7884c3e6` (verified clean at 08:16 EDT) and already contains
+       `benchmarks/perlmutter/single_stage_fair_compare_gpu.slurm`, `FAIR_WARM_START_RUN_DIR`,
+       `--record-jax-compile-diagnostics`, and target-lane hardware violation progress diagnostics. It is
+       acceptable for fair-compare once a valid donor exists. If staging a fresh checkout instead, use the
+       current branch HEAD (doc-only commits are fine) and always run `git submodule update --init --recursive`
+       (MANDATORY — bundle lacks the C++ submodules).
 3. [ ] **Submit the same-node fair-compare** (the defensible cpu-vs-gpu + replay-parity run):
        `sbatch -A m4680_g --export=ALL,REPO_ROOT=<new-checkout>,RUN_ROOT=<runs-OUTSIDE-checkout>,FAIR_WARM_START_RUN_DIR=<donor-warmstart> <new-checkout>/benchmarks/perlmutter/single_stage_fair_compare_gpu.slurm`
        It runs fullgraph mpol10 under `--platform cpu` then `--platform cuda` on one GPU node.
@@ -194,7 +200,8 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
 
 ## 4. Environment & how to run
 - cwd/repo/branch: `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean` / `pr/jax-port-clean`
-- **Code-bearing commit `5f14a1463`** (donor trial-policy fix on top of compile-diagnostics wiring). Current
+- **Code-bearing commit `a7884c3e6`** (target-lane hardware-violation progress diagnostics on top of donor
+  trial-policy fix and compile-diagnostics wiring). Current
   branch HEAD may include doc-only launch-state commits; preserve unrelated untracked `HANDOFF.md` from the
   parallel session.
 - **Perlmutter cert**: `sshproxy -u jungdae` (user-run, interactive password+OTP). Valid until
@@ -211,13 +218,14 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
   completion but OOM-killed during XLA constant folding / initial objective work (`valid_count=0`/no donor). Midmem job
   `54483605` (`-A m4680_g`, `--mem=180G`, non-exclusive) reached the same BFGS/Newton boundary and was
   cancelled as duplicate GPU burn. First CPU-JAX full job `54484362` failed before physics on the clean-source guard because Slurm
-  stdout landed in the checkout; debug smoke `54484779` reached the Newton boundary and timed out. All use checkout
-  `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`, runs
+  stdout landed in the checkout; debug smoke `54484779` reached the Newton boundary and timed out. Both pending
+  jobs now use checkout
+  `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout` detached cleanly at `a7884c3e6`, runs
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). They supersede cancelled job
   `54477744` (`--nphi 64 --ntheta 32` mismatch). For the GPU full-node scripts, `scontrol` reported
   `ReqTRES=cpu=32,mem=229902M,node=1,billing=32,gres/gpu=1`; the CPU-JAX fallback requests
-  `cpu=32,mem=180G,node=1` and no GPU.
-- **Local validation**: `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 -m pytest tests/integration/test_single_stage_matrix_manifest.py tests/integration/test_fair_compare_launcher_contract.py tests/integration/test_single_stage_init_parity_compile_diagnostics.py tests/integration/test_continuation_donor_backend_contract.py -q` (8+5+6+2 = 21 pass). ruff at `../simsopt-jax/.miniforge/bin/ruff` (note: `ruff format` is NOT enforced repo-wide — only my edited regions are format-clean). Manifest regen: `python benchmarks/perlmutter/build_single_stage_matrix.py --source-sha <sha>`.
+  `cpu=32,mem=487802M,node=1` and no GPU.
+- **Local validation**: `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 -m pytest tests/integration/test_single_stage_matrix_manifest.py tests/integration/test_fair_compare_launcher_contract.py tests/integration/test_single_stage_init_parity_compile_diagnostics.py tests/integration/test_continuation_donor_backend_contract.py tests/integration/test_single_stage_progress_diagnostics.py -q` (8+5+6+2+1 = 22 pass). ruff at `../simsopt-jax/.miniforge/bin/ruff` (note: `ruff format` is NOT enforced repo-wide — only my edited regions are format-clean). Manifest regen: `python benchmarks/perlmutter/build_single_stage_matrix.py --source-sha <sha>`.
 - **RunPod**: `runpodctl`. H100 donor pod `ecxt9xwaudcejo` was restarted only to harvest artifacts and is now
   stopped. The corrected `nphi=255`, `ntheta=64` JAX donor advanced to `before_boozer_newton` but was interrupted
   without a clean exit status or donor artifact. Current A100 PCIe donor pod `ibjsq44mxt72lg` was stopped after
@@ -333,7 +341,8 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
 
 ## 10. Pointers
 - Commits: `0752b18f1` `94f6ea838` `329c92750` `9ae9a1f4f` `77655d960` (compile-diagnostics wiring),
-  `5f14a1463` (donor `--trial-policy none` fix). Launch-state SSOT:
+  `5f14a1463` (donor `--trial-policy none` fix), `a7884c3e6` (hardware-violation progress diagnostics).
+  Launch-state SSOT:
   `HANDOFF-ss-11-51-matrix.md`. Plan/rationale:
   `docs/scipy_jax_11_51_matrix_implementation_plan.md`. Manifest:
   `docs/single_stage_11_51_matrix_2026-06-13.{json,md}`.
