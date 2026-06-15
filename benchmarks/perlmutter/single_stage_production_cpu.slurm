@@ -80,6 +80,14 @@ if [[ -n "${SOURCE_STATUS}" ]]; then
 fi
 
 export SLURM_CPU_BIND="cores"
+# Pin host BLAS/OpenMP threads to the allocated cores so the cpp reference and
+# the JAX-CPU host work use the same thread count (fair comparison), and to avoid
+# the uncapped-thread oversubscription that inflated host-side wall ~50x on
+# RunPod GPU pods (cpp reference 44s -> 2299s across otherwise-identical runs).
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
+export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
+export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
+export NUMEXPR_NUM_THREADS="${OMP_NUM_THREADS}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export SIMSOPT_BACKEND_MODE=jax_cpu_parity
 export SIMSOPT_BACKEND_STRICT=1
