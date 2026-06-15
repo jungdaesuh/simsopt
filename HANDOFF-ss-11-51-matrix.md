@@ -1,18 +1,26 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 00:55 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
-> compile-diagnostics wiring + donor trial-policy fix all COMMITTED (HEAD `5f14a1463`).
+> Last updated: 2026-06-15 03:43 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing HEAD `5f14a1463`; docs
+> launch-state HEAD `961df64c3`).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
 > mpol10/ntor10, nfp5, hardware-clean (vol 0.0937), but it is NOT a usable mpol10 `--warm-start-run-dir`
 > donor for `single_stage_init_parity.py`.** It has `biot_savart_opt.json`, `results.json`, and
 > `single_stage_jax_runtime_spec.json`, but no `surf_opt.json`; more importantly, the harness rejects
 > high-resolution outer runs (`maxiter > 0`, max(mpol, ntor) > 4) unless `--warm-start-run-dir` is supplied
 > from a validated continuation donor. A contract-valid donor still gates the mpol10 fair-compare/speed run,
-> but it can be built on RunPod or Perlmutter.
+> but it must still be built before the mpol10 fair compare.
 > fullgraph-51 advances past iter-4 (slow, not wedged). GPU recompile pathology is measurable via the
 > compile diagnostics. Donor `54462557` FAILED after 4m27s because the launcher inherited
 > `run_single_stage_continuation.py`'s default `validated-fast` trial policy; committed fix `5f14a1463`
 > defaults donor builds to `DONOR_TRIAL_POLICY=none` and passes `--trial-policy "${DONOR_TRIAL_POLICY}"`.
+> **NEW 06-15 RUNPOD RESULT:** the native continuation route is now disproven as a fast path: exact documented
+> RunPod ladder (`--trial-policy none`) failed at the first coarse rung because wrapper defaults left
+> `--coarse-maxiter=1`; the corrected budget probe (`--coarse-maxiter 50 --medium-maxiter 50
+> --prefinal-maxiter 50`) also failed with native L-BFGS-B `ABNORMAL` / optimizer status `2`, final iota
+> only ~0.0035, and no accepted `results.json`. JAX preserves the iota15 branch, but the current A100 PCIe
+> pod has only 117 GB container RAM and the `run` Newton policy hit cgroup OOM after Boozer init. Next viable
+> donor launch is high-memory **JAX** donor, not native donor.
 
 ## 1. Goal
 Single-stage parity/performance matrix on the clean JAX-port branch: native cpp/CPU reference vs JAX across
@@ -27,37 +35,41 @@ All code needed before the next donor submission is committed (HEAD `5f14a1463`)
 matrix, the fullgraph inner-Boozer fix, the thread-cap fairness fix, the same-node fair-compare launcher +
 tests, the compile-diagnostics wiring (`--record-jax-compile-diagnostics`), and the donor trial-policy fix.
 Two background efforts:
-the **Perlmutter donor `54462557`** (**FAILED**; see NEXT ACTION #1) and the **RunPod mpol2 smokes** (DONE
-— see §5). The immediate mpol10 fair-compare/speed step is still **donor-gated**, but the donor does not
-have to come from Perlmutter:
-the iota15 fixture is a useful mpol10 Stage 2 seed/runtime-spec fixture, but not a continuation donor
-accepted by the high-resolution harness contract. Fastest path is a RunPod GPU pod: build the donor directly,
-then run CPU and CUDA fair-compare lanes sequentially on that same pod. Perlmutter remains the cleaner
-institutional fallback.
+the **Perlmutter donor `54462557`** (**FAILED**; see NEXT ACTION #1), the **RunPod mpol2 smokes** (DONE
+— see §5), and the **RunPod mpol10 donor probes** (FAILED — see §5). The immediate mpol10 fair-compare/speed
+step is still **donor-gated**. The iota15 fixture is a useful mpol10 Stage 2 seed/runtime-spec fixture, but
+not a continuation donor accepted by the high-resolution harness contract. Native continuation from this seed
+falls to the near-zero-iota branch; JAX preserves the branch but needs more host/container memory than the
+current A100 PCIe pod exposed. Fastest remaining path is a high-memory JAX donor attempt on Perlmutter GPU
+or a larger RunPod class whose container RAM is actually >120 GB, then CPU/CUDA fair compare from that donor.
 
 ## 3. NEXT ACTIONS (start here on resume)
-0. [ ] **RunPod acceleration path — build donor, then same-pod CPU/CUDA compare.** Use one GPU pod if possible
-       so CPU and CUDA lanes share filesystem, host, source SHA, seed, and environment. Build the donor directly
-       from the repo root (do not use the Slurm wrapper), but keep the same native-backend contract as the
-       donor launcher:
+0. [ ] **High-memory JAX donor path — build donor, then CPU/CUDA compare.** Native donor continuation is now a
+       dead end for this seed (falls to iota ~0.0035 and writes `REJECTED.json`). Build the donor with the JAX
+       path that preserves the iota15 branch, but run it on a node/container with enough host RAM for the dense
+       Newton/target-lane graph. Preferred next launch: Perlmutter GPU one-off donor (or a larger RunPod class
+       only after confirming container RAM >120 GB). The donor command shape is:
        ```bash
-       export SIMSOPT_BACKEND_MODE=native_cpu
+       export SIMSOPT_BACKEND_MODE=jax_gpu_parity
        export SIMSOPT_BACKEND_STRICT=1
        export SIMSOPT_JAX_TRANSFER_GUARD=disallow
-       export SIMSOPT_JAX_PLATFORM=cpu
+       export SIMSOPT_JAX_PLATFORM=cuda
        export JAX_ENABLE_X64=1
-       export JAX_PLATFORMS=cpu
+       export JAX_PLATFORMS=cuda,cpu
        export XLA_PYTHON_CLIENT_PREALLOCATE=false
        unset LD_LIBRARY_PATH
 
-       python examples/single_stage_optimization/SINGLE_STAGE/run_single_stage_continuation.py \
+       python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+         --backend jax --optimizer-backend scipy-jax \
+         --record-jax-compile-diagnostics \
          --mpol 10 --ntor 10 --nphi 64 --ntheta 32 \
-         --maxiter 300 \
-         --intermediate-rungs 8 \
-         --trial-policy none \
-         --initial-stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
-         --stage-timeout-seconds 21600 \
-         --output-root /workspace/continuation_outputs
+         --maxiter <bounded donor budget, e.g. 60 first> \
+         --target-lane-boozer-bfgs-maxiter 1500 \
+         --target-lane-boozer-newton-polish-policy run \
+         --target-lane-boozer-newton-maxiter 50 \
+         --stage2-bs-path benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json \
+         --jax-runtime-seed-spec <compiled iota15 mpol10 runtime spec> \
+         --output-root <donor-output-root>
        ```
        Expected donor output: highest-mpol run dir contains `surf_opt.json`, `results.json`,
        `biot_savart_opt.json`; `results.json` has finite `FINAL_IOTA`/`FINAL_G`,
@@ -68,14 +80,16 @@ institutional fallback.
        `--record-jax-compile-diagnostics`). Expected compare output: replay/same-candidate parity,
        per-iter CPU vs GPU timing, compile-count diagnostics, and GPU memory. Full convergence is useful but
        not required for the parity/per-iteration speed answer.
-1. [ ] **Perlmutter fallback — resubmit the donor with the trial-policy fix (mpol10 still donor-gated).** Donor `54462557` failed:
+1. [ ] **Do not resubmit the native Perlmutter donor unchanged.** Donor `54462557` failed:
        `sacct` = `FAILED`, `ExitCode=1:0`, elapsed `00:04:27`. It ran only `trial_policy=validated-fast`,
        mpol2 coarse, `maxiter=1`, `--minimal-artifacts`; validation then failed because no `results.json`
        snapshot / finite donor metrics were present. Local fix: `single_stage_continuation_donor.slurm`
        defaults `DONOR_TRIAL_POLICY=none` and passes `--trial-policy "${DONOR_TRIAL_POLICY}"`; regression
        test added in `tests/integration/test_continuation_donor_backend_contract.py` (21-test slice passes).
-       Commit/bundle the fixed checkout, stage it on Perlmutter, then submit a new donor. When it completes,
-       find the mpol10 warm-start:
+       A later RunPod replay showed that even with `--trial-policy none` and longer non-final rung budgets,
+       native continuation stays on the low-iota branch and writes `REJECTED.json`. So the Slurm donor launcher
+       is still useful as setup/reference, but not sufficient as a launch recipe for this iota15 donor unless
+       the backend/seed-handling route changes. When a JAX donor completes, find the mpol10 warm-start:
        `ssh perlmutter 'ls -dt /pscratch/sd/j/jungdae/<fixed-run-root>/runs/<new-jobid>/continuation_outputs/*'`
        (the highest-mpol rung dir).
        **Do not use the iota15 fixture as a donor-free mpol10 `--stage2-bs-path` speed probe.** Verified
@@ -124,7 +138,12 @@ institutional fallback.
   `.../ss-prod-94f6ea838-20260615T003257Z/runs`. Donor job **54462557** (`-A m4680`, native_cpu) FAILED.
   Background poll IDs are not authoritative; verify live state with direct `sacct` for any new Perlmutter job.
 - **Local validation**: `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 -m pytest tests/integration/test_single_stage_matrix_manifest.py tests/integration/test_fair_compare_launcher_contract.py tests/integration/test_single_stage_init_parity_compile_diagnostics.py tests/integration/test_continuation_donor_backend_contract.py -q` (8+5+6+2 = 21 pass). ruff at `../simsopt-jax/.miniforge/bin/ruff` (note: `ruff format` is NOT enforced repo-wide — only my edited regions are format-clean). Manifest regen: `python benchmarks/perlmutter/build_single_stage_matrix.py --source-sha <sha>`.
-- **RunPod**: `runpodctl`. 3 pods EXITED (x6qnpac3hs35mc, h9lk6uvuqcutag, vd4ob48umodxpr — gate/confirm/mpol2 + parallel session); balance previously **$7.84**. New policy: RunPod is acceptable for the bounded donor+same-pod CPU/CUDA probe in NEXT ACTION #0, with cost monitored and artifacts harvested. GOTCHAS: a restarted pod loses `/usr/bin/time` + apt packages (only `/workspace` persists → `apt-get install -y time`); transient MooseFS `OSError: Errno 5` write flakes are retryable.
+- **RunPod**: `runpodctl`. Current A100 PCIe donor pod `ibjsq44mxt72lg` was stopped after harvesting artifacts.
+  It exposed only **117 GB container RAM** (`memoryInGb=117`, cgroup `memory.max=116999999488`), and the JAX
+  Newton `run` donor hit cgroup OOM at peak RSS ~113.8 GB after Boozer init. Do not retry the same pod class
+  for the JAX donor unless the memory limit changes. GOTCHAS: a restarted pod loses `/usr/bin/time` + apt
+  packages (only `/workspace` persists → `apt-get install -y time`); transient MooseFS `OSError: Errno 5`
+  write flakes are retryable.
 
 ## 5. Done so far (with evidence)
 - [x] **Migration + inner-Boozer fix COMMITTED** `0752b18f1` (+ `94f6ea838` source_sha pin): 8 cells
@@ -164,10 +183,20 @@ institutional fallback.
       stale monitor bq28fl125 stopped.
 - [x] **Donor 54462557 failed fast** (native_cpu) — root cause identified: inherited `validated-fast`
       trial policy suppressed non-final artifacts; launcher/test fix committed at `5f14a1463`.
+- [x] **RunPod mpol10 donor probes FAILED/HARVESTED** (`.artifacts/clean_reconciliation_benchmarks/runpod_mpol10_donor_fail_961df64c3_20260615T0738Z/mpol10_donor_fail_artifacts_20260615T0738Z.tar.gz`):
+      - Exact documented native continuation (`--trial-policy none`, default `coarse/medium/prefinal` budgets
+        `1/1/2`) failed at stage-01 coarse: no accepted `results.json`, iota ~0.0012.
+      - Corrected native budget probe (`--coarse-maxiter 50 --medium-maxiter 50 --prefinal-maxiter 50`) also
+        failed at stage-01 coarse: L-BFGS-B `ABNORMAL`, optimizer status `2`, final iota ~0.0035,
+        `REJECTED.json`, no accepted progress.
+      - JAX runtime-seed donor with Newton `run` preserved iota15 through Boozer init, but was SIGKILLed by the
+        pod's 117 GB cgroup limit after target-lane initial value/grad; GPU memory stayed tiny, so host RAM was
+        the limiter. JAX `skip` avoided dense Newton but failed initialization (`solve_success=false`).
 
 ## 6. Key decisions & rationale (do NOT relitigate)
-- **RunPod is allowed for the bounded acceleration path** — one GPU pod can build the donor and then run CPU
-  and CUDA lanes sequentially on the same host. Perlmutter remains the cleaner/free institutional fallback.
+- **RunPod is allowed only with the right memory envelope** — one GPU pod can build the donor and then run CPU
+  and CUDA lanes sequentially on the same host, but the tested A100 PCIe 117 GB container is too small for the
+  JAX `run` donor path.
 - **Fair comparison = same node + capped threads + replay parity + per-iter throughput** — the only way to
   isolate the device (the old cross-pod numbers were confounded 5 ways).
 - **Parity rides on the fullgraph same-candidate replay** (auto for `scipy-jax-fullgraph`,
@@ -187,13 +216,17 @@ institutional fallback.
   flag (was previously unwired/argparse-error). Do NOT re-add the "un-enableable" caveat anywhere.
 - **SIGKILLing fullgraph at "iter-4"** — NOT a wedge; it's a slow line search that breaks through. Let it run.
 - **Staging without `git submodule update --init --recursive`** / sharing one checkout across jobs — build fails.
+- **Native continuation donor from iota15 Stage 2 seed** — tested on RunPod with exact documented command and
+  longer non-final budgets; both fail the stage contract and stay on the near-zero-iota branch.
+- **Same A100 PCIe RunPod class for JAX donor** — cgroup RAM is 117 GB and already OOM-killed the dense Newton
+  path; use Perlmutter/high-memory or confirm a larger RunPod container RAM limit first.
 
 ## 8. Open questions / blockers
 - **Will fullgraph-51 mpol10 reach a usable converged state in walltime?** It converges slowly cold at mpol2;
   the donor WARM-START may speed it (better start) — UNVERIFIED. The replay parity is robust regardless;
   end-to-end convergence may need looser inner budgets.
-- **Replacement donor success is still UNVERIFIED** — `54462557` itself failed. The next donor must be built
-  with the `5f14a1463` trial-policy fix (`--trial-policy none`) on RunPod or Perlmutter.
+- **Replacement donor success is still UNVERIFIED** — `54462557` itself failed, and native continuation failed
+  again on RunPod. The next donor must be JAX/high-memory or a code-level seed-preservation fix.
 - **GPU recompile pathology** (scipy-jax GPU) — separate, blocks the GPU column.
 - **11-dim parity scoring** — the 11-dim lane converges but can't pass the 51-dim parity gate; needs an
   11-dim reference or non-parity scoring to be a meaningful matrix cell.
