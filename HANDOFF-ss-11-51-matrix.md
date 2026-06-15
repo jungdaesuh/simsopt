@@ -1,6 +1,6 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 05:13 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> Last updated: 2026-06-15 05:21 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
 > compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing commit `5f14a1463`; this
 > handoff is the operational launch-state source of truth).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
@@ -21,10 +21,10 @@
 > only ~0.0035, and no accepted `results.json`. JAX preserves the iota15 branch, but the current A100 PCIe
 > pod has only 117 GB container RAM and the `run` Newton policy hit cgroup OOM after Boozer init. Next viable
 > donor launch is high-memory **JAX** donor, not native donor. **Submitted:** corrected Perlmutter high-memory JAX
-> donor probe job `54483185` (`DONOR_MAXITER=60`, 4 h) from checkout
-> `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`, pending `Priority` at last check.
-> Backup 12 h / `DONOR_MAXITER=300` job `54482812` is also pending. Previous job `54477744` was cancelled before
-> start because its submitted
+> donor probe jobs from checkout `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`:
+> primary full-node 4 h / `DONOR_MAXITER=60` job `54483185`, backfill-friendly non-exclusive `mem=180G` 4 h /
+> `DONOR_MAXITER=60` job `54483605`, and backup full-node 12 h / `DONOR_MAXITER=300` job `54482812`.
+> All are pending `Priority` at last check. Previous job `54477744` was cancelled before start because its submitted
 > script still used the bad `--nphi 64 --ntheta 32` runtime-spec mismatch. **RunPod H100 probe harvested, no
 > donor:** pod `ecxt9xwaudcejo`; first command
 > failed before optimization because the fixture runtime spec expects `quadrature.nphi=255`, not `--nphi 64`;
@@ -51,10 +51,10 @@ the **Perlmutter donor `54462557`** (**FAILED**; see NEXT ACTION #1), the **RunP
 step is still **donor-gated**. The iota15 fixture is a useful mpol10 Stage 2 seed/runtime-spec fixture, but
 not a continuation donor accepted by the high-resolution harness contract. Native continuation from this seed
 falls to the near-zero-iota branch; JAX preserves the branch but needs more host/container memory than the
-current A100 PCIe pod exposed. Current primary attempt is **Perlmutter job `54483185`** (high-memory JAX donor,
-4 h, `DONOR_MAXITER=60`, requested `mem=229902M`, `gres/gpu=1`, pending `Priority` at submit). Backup
-job `54482812` is the same corrected script with 12 h / `DONOR_MAXITER=300`. Both supersede cancelled job
-`54477744`, which had the wrong quadrature flags. The harvested RunPod H100 probe confirms
+current A100 PCIe pod exposed. Current primary attempts are **Perlmutter job `54483185`** (full-node 4 h,
+`DONOR_MAXITER=60`) and **Perlmutter job `54483605`** (non-exclusive `mem=180G`, 4 h, `DONOR_MAXITER=60`).
+Backup job `54482812` is the same corrected full-node script with 12 h / `DONOR_MAXITER=300`. All supersede
+cancelled job `54477744`, which had the wrong quadrature flags. The harvested RunPod H100 probe confirms
 the RunPod command must match the fixture runtime spec:
 `--nphi 255 --ntheta 64` (`single_stage_jax_runtime_spec.json`: `quadrature.nphi=255`,
 `quadrature.ntheta=64`); `--nphi 64 --ntheta 32` fails before optimization. The corrected H100 probe was
@@ -64,14 +64,16 @@ donor completes, run CPU/CUDA fair compare from that donor. If the Perlmutter jo
 RunPod class only after confirming container RAM >120 GB, or make a code-level seed-preservation fix.
 
 ## 3. NEXT ACTIONS (start here on resume)
-0. [ ] **Monitor high-memory JAX donor jobs `54483185` and `54482812`, then CPU/CUDA compare.** Native donor
+0. [ ] **Monitor high-memory JAX donor jobs `54483185`, `54483605`, and `54482812`, then CPU/CUDA compare.** Native donor
        continuation is now a
        dead end for this seed (falls to iota ~0.0035 and writes `REJECTED.json`). Build the donor with the JAX
        path that preserves the iota15 branch, but run it on a node/container with enough host RAM for the dense
        Newton/target-lane graph. Current Perlmutter launch:
-       `ssh perlmutter 'squeue -j 54483185,54482812 -o "%i %j %T %M %L %R"; sacct -j 54483185,54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start -n'`.
-       Primary: `54483185` (`DONOR_MAXITER=60`, 4 h). Backup: `54482812` (`DONOR_MAXITER=300`, 12 h).
-       If one starts and reaches a useful donor/result first, cancel the other to avoid duplicate GPU burn.
+       `ssh perlmutter 'squeue -j 54483185,54483605,54482812 -o "%i %j %T %M %L %R"; sacct -j 54483185,54483605,54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start -n'`.
+       Primary full-node: `54483185` (`DONOR_MAXITER=60`, 4 h). Backfill-friendly midmem:
+       `54483605` (`DONOR_MAXITER=60`, 4 h, script `jax_mpol10_donor_midmem_180g.slurm`, `--mem=180G`,
+       non-exclusive). Backup full-node: `54482812` (`DONOR_MAXITER=300`, 12 h).
+       If one starts and reaches a useful donor/result first, cancel the others to avoid duplicate GPU burn.
        Script:
        `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/slurm/jax_mpol10_donor.slurm`.
        RunPod H100 probe artifacts:
@@ -166,8 +168,9 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
   `/pscratch/sd/j/jungdae/ss-prod-94f6ea838-20260615T003257Z/checkout` (@94f6ea838); RUN_ROOT
   `.../ss-prod-94f6ea838-20260615T003257Z/runs`. Donor job **54462557** (`-A m4680`, native_cpu) FAILED.
   Background poll IDs are not authoritative; verify live state with direct `sacct` for any new Perlmutter job.
-- **Perlmutter active JAX donors**: primary job `54483185` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`) and backup
-  job `54482812` (`-A m4680_g`, 12 h, `DONOR_MAXITER=300`), checkout
+- **Perlmutter active JAX donors**: primary full-node job `54483185` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`),
+  midmem job `54483605` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`, `--mem=180G`, non-exclusive), and backup
+  full-node job `54482812` (`-A m4680_g`, 12 h, `DONOR_MAXITER=300`), checkout
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`, runs
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). They supersede cancelled job
   `54477744` (`--nphi 64 --ntheta 32` mismatch). `scontrol` reported
