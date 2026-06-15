@@ -1,8 +1,8 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 03:43 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
-> compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing HEAD `5f14a1463`; docs
-> launch-state HEAD `306d53bdc`).
+> Last updated: 2026-06-15 04:40 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing commit `5f14a1463`; this
+> handoff is the operational launch-state source of truth).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
 > mpol10/ntor10, nfp5, hardware-clean (vol 0.0937), but it is NOT a usable mpol10 `--warm-start-run-dir`
 > donor for `single_stage_init_parity.py`.** It has `biot_savart_opt.json`, `results.json`, and
@@ -22,7 +22,10 @@
 > pod has only 117 GB container RAM and the `run` Newton policy hit cgroup OOM after Boozer init. Next viable
 > donor launch is high-memory **JAX** donor, not native donor. **Submitted:** Perlmutter high-memory JAX donor
 > job `54477744` from checkout `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`,
-> pending `Priority` at last check.
+> pending `Priority` at last check. **RunPod H100 active probe:** pod `ecxt9xwaudcejo`; first command failed before
+> optimization because the fixture runtime spec expects `quadrature.nphi=255`, not `--nphi 64`; corrected relaunch
+> `/workspace/runpod_himem_jax_mpol10_donor_306d53bdc_20260615T083623Z_nphi255b` is running and has reached
+> `optimizer_output_dir_ready`.
 
 ## 1. Goal
 Single-stage parity/performance matrix on the clean JAX-port branch: native cpp/CPU reference vs JAX across
@@ -42,19 +45,25 @@ the **Perlmutter donor `54462557`** (**FAILED**; see NEXT ACTION #1), the **RunP
 step is still **donor-gated**. The iota15 fixture is a useful mpol10 Stage 2 seed/runtime-spec fixture, but
 not a continuation donor accepted by the high-resolution harness contract. Native continuation from this seed
 falls to the near-zero-iota branch; JAX preserves the branch but needs more host/container memory than the
-current A100 PCIe pod exposed. Current active attempt is **Perlmutter job `54477744`** (high-memory JAX donor,
-requested `mem=229902M`, `gres/gpu=1`, pending `Priority` at submit). If it completes with a contract-valid
-donor, run CPU/CUDA fair compare from that donor. If it fails by memory, use a larger RunPod class only after
-confirming container RAM >120 GB, or make a code-level seed-preservation fix.
+current A100 PCIe pod exposed. Current active attempts are **Perlmutter job `54477744`** (high-memory JAX donor,
+requested `mem=229902M`, `gres/gpu=1`, pending `Priority` at submit) and **RunPod H100 pod `ecxt9xwaudcejo`**
+using the already-built environment. The RunPod command must match the fixture runtime spec:
+`--nphi 255 --ntheta 64` (`single_stage_jax_runtime_spec.json`: `quadrature.nphi=255`,
+`quadrature.ntheta=64`); `--nphi 64 --ntheta 32` fails before optimization. If either attempt completes with a
+contract-valid donor, run CPU/CUDA fair compare from that donor. If both fail by memory, use a larger RunPod
+class only after confirming container RAM >120 GB, or make a code-level seed-preservation fix.
 
 ## 3. NEXT ACTIONS (start here on resume)
-0. [ ] **Monitor high-memory JAX donor job `54477744`, then CPU/CUDA compare.** Native donor continuation is now a
+0. [ ] **Monitor high-memory JAX donors, then CPU/CUDA compare.** Native donor continuation is now a
        dead end for this seed (falls to iota ~0.0035 and writes `REJECTED.json`). Build the donor with the JAX
        path that preserves the iota15 branch, but run it on a node/container with enough host RAM for the dense
-       Newton/target-lane graph. Current launch:
+       Newton/target-lane graph. Current Perlmutter launch:
        `ssh perlmutter 'squeue -j 54477744 -o "%i %j %T %M %L %R"; sacct -j 54477744 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start -n'`.
        Script:
        `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/slurm/jax_mpol10_donor.slurm`.
+       Current RunPod launch: H100 pod `ecxt9xwaudcejo`, active corrected run
+       `/workspace/runpod_himem_jax_mpol10_donor_306d53bdc_20260615T083623Z_nphi255b`. Poll with
+       `ssh -i ~/.runpod/ssh/RunPod-Key-Go -p 15069 root@64.247.201.34 'RUN=$(cat /workspace/runpod_himem_donor_active_run.txt); ps -fp $(cat /workspace/runpod_himem_donor.pid); tail -n 120 "$RUN/single_stage_stderr_time.log"; cat "$RUN/single_stage_outputs/startup_progress.json"'`.
        Command shape:
        ```bash
        export SIMSOPT_BACKEND_MODE=jax_gpu_parity
@@ -69,7 +78,7 @@ confirming container RAM >120 GB, or make a code-level seed-preservation fix.
        python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
          --backend jax --optimizer-backend scipy-jax \
          --record-jax-compile-diagnostics \
-         --mpol 10 --ntor 10 --nphi 64 --ntheta 32 \
+         --mpol 10 --ntor 10 --nphi 255 --ntheta 64 \
          --maxiter <bounded donor budget, e.g. 60 first> \
          --target-lane-boozer-bfgs-maxiter 1500 \
          --target-lane-boozer-newton-polish-policy run \
@@ -136,8 +145,9 @@ confirming container RAM >120 GB, or make a code-level seed-preservation fix.
 
 ## 4. Environment & how to run
 - cwd/repo/branch: `/Users/suhjungdae/code/columbia/simsopt-pr-jax-port-clean` / `pr/jax-port-clean`
-- **HEAD `5f14a1463`** (donor trial-policy fix on top of compile-diagnostics wiring). Working tree:
-  untracked `HANDOFF.md` (parallel session) + this file.
+- **Code-bearing commit `5f14a1463`** (donor trial-policy fix on top of compile-diagnostics wiring). Current
+  branch HEAD may include doc-only launch-state commits; preserve unrelated untracked `HANDOFF.md` from the
+  parallel session.
 - **Perlmutter cert**: `sshproxy -u jungdae` (user-run, interactive password+OTP). Valid until
   **2026-06-15 20:26 EDT**; re-run if `ssh perlmutter` gives "Permission denied (publickey)".
 - **Perlmutter staging (donor)**: bundle `/pscratch/sd/j/jungdae/ss-prod-94f6ea838.bundle`; checkout
@@ -149,7 +159,9 @@ confirming container RAM >120 GB, or make a code-level seed-preservation fix.
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). `scontrol` reported
   `ReqTRES=cpu=32,mem=229902M,node=1,billing=32,gres/gpu=1`.
 - **Local validation**: `JAX_ENABLE_X64=1 ../simsopt-jax/.miniforge/bin/python3.13 -m pytest tests/integration/test_single_stage_matrix_manifest.py tests/integration/test_fair_compare_launcher_contract.py tests/integration/test_single_stage_init_parity_compile_diagnostics.py tests/integration/test_continuation_donor_backend_contract.py -q` (8+5+6+2 = 21 pass). ruff at `../simsopt-jax/.miniforge/bin/ruff` (note: `ruff format` is NOT enforced repo-wide — only my edited regions are format-clean). Manifest regen: `python benchmarks/perlmutter/build_single_stage_matrix.py --source-sha <sha>`.
-- **RunPod**: `runpodctl`. Current A100 PCIe donor pod `ibjsq44mxt72lg` was stopped after harvesting artifacts.
+- **RunPod**: `runpodctl`. Current H100 donor pod `ecxt9xwaudcejo` is running the corrected `nphi=255`,
+  `ntheta=64` JAX donor from the installed RunPod environment. Current A100 PCIe donor pod `ibjsq44mxt72lg` was
+  stopped after harvesting artifacts.
   It exposed only **117 GB container RAM** (`memoryInGb=117`, cgroup `memory.max=116999999488`), and the JAX
   Newton `run` donor hit cgroup OOM at peak RSS ~113.8 GB after Boozer init. Do not retry the same pod class
   for the JAX donor unless the memory limit changes. GOTCHAS: a restarted pod loses `/usr/bin/time` + apt
