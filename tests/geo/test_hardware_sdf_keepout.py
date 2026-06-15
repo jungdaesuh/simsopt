@@ -56,6 +56,7 @@ def _write_sdf_payload(
     units="m",
     static_keys=("sensors", "frame", "sample"),
     documented_gate_only=None,
+    covered_by_other_in_loop=None,
     glb_path=None,
 ):
     data_path = root / "hardware_sdf.npz"
@@ -102,6 +103,8 @@ def _write_sdf_payload(
         "documented_gate_only": documented_gate_only,
         "provenance": provenance,
     }
+    if covered_by_other_in_loop is not None:
+        manifest["covered_by_other_in_loop"] = covered_by_other_in_loop
     manifest_path = root / "hardware_sdf.json"
     manifest_path.write_text(json.dumps(manifest))
     return manifest_path
@@ -170,6 +173,32 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             glb.write_bytes(b"changed-cad")
             with self.assertRaisesRegex(ValueError, "stale hardware SDF manifest"):
                 load_hardware_sdf(manifest, glb_path=glb)
+
+    def test_loader_records_vessel_covered_by_other_in_loop(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                static_keys=("sensors", "vessel", "frame", "sample"),
+                covered_by_other_in_loop={
+                    "vessel": {
+                        "reason": "analytic vessel term in-loop",
+                        "covered_by": "CurveVesselEnvelopeKeepout",
+                    }
+                },
+            )
+
+            metadata = hardware_sdf_metadata(manifest)
+
+            self.assertEqual(
+                metadata["HARDWARE_SDF_OTHER_IN_LOOP_GROUPS"],
+                ["vessel"],
+            )
 
     def test_plane_sdf_objective_inactive_active_and_outside_grid(self):
         with tempfile.TemporaryDirectory() as td:
