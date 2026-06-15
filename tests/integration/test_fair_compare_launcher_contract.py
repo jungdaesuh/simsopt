@@ -12,8 +12,10 @@ break):
   CPU lane crashes at boozer_surface.py:5659 under jax_cpu_parity);
 - host threads are capped (the ~50x oversubscription artifact);
 - the mpol10 warm-start is required (cold high-res is contract-blocked);
-- the un-enableable ``--record-jax-compile-diagnostics`` flag is NOT passed (the
-  harness has no such CLI arg, so passing it would argparse-error the run).
+- compile/cache-miss diagnostics are recorded by default
+  (``--record-jax-compile-diagnostics``, now wired into the harness), gated by
+  ``FAIR_RECORD_COMPILE_DIAGNOSTICS`` and applied identically on both lanes so the
+  compile-vs-steady-state split and recompile counts stay a fair comparison.
 """
 from __future__ import annotations
 
@@ -64,8 +66,16 @@ def test_mpol10_warm_start_is_required():
     assert "--warm-start-run-dir" in script
 
 
-def test_does_not_pass_unenableable_compile_diagnostics_flag():
-    # single_stage_init_parity.py has no --record-jax-compile-diagnostics CLI arg
-    # (enable_compile_diagnostics is default-False, unwired); passing it would
-    # argparse-error the whole run.
-    assert "--record-jax-compile-diagnostics" not in _script()
+def test_records_compile_diagnostics_by_default_identically_on_both_lanes():
+    # single_stage_init_parity.py now exposes --record-jax-compile-diagnostics and
+    # threads it to the JAX target-lane child, so the fair launcher records
+    # compile/cache-miss diagnostics by default to separate one-time compile cost
+    # from steady-state throughput and to surface GPU XLA recompile counts.
+    script = _script()
+    assert "--record-jax-compile-diagnostics" in script
+    # Default-on, but escapable for a pristine throughput run.
+    assert "FAIR_RECORD_COMPILE_DIAGNOSTICS:-1" in script
+    # Built once in the shared run_lane invocation -> identical on cpu and cuda
+    # (a per-lane divergence here would make the comparison unfair).
+    assert "compile_diag_args=(--record-jax-compile-diagnostics)" in script
+    assert '"${compile_diag_args[@]}"' in script

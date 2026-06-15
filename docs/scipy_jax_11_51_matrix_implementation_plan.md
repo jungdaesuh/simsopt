@@ -153,7 +153,9 @@ This is THE correctness number and does not depend on the convergence stall.
 fullgraph mpol10 warm-started under `--platform cpu` then `--platform cuda`, thread-capped (cpu lane hides
 the GPU; cuda lane samples GPU mem). Each invocation co-produces the cpp reference (parity anchor) on the
 identical host. Report **per-iteration throughput**, MaxRSS, GPU mem — NOT raw total wall (iteration counts
-diverge across lanes). Compile-vs-steady-state separation is amortized for now (see task below).
+diverge across lanes). Compile-vs-steady-state separation is recorded directly via
+`--record-jax-compile-diagnostics` (now wired; default-on in the launcher, `FAIR_RECORD_COMPILE_DIAGNOSTICS=0`
+to disable), which also counts GPU XLA recompiles — the key signal for the "GPU slower" question.
 
 **Reuse, do not re-run:** scipy-jax 11-dim perf comes from the existing `06b7f1a8f` runs (perf-only /
 dim-mismatched vs the 51 reference). The genuinely-new work is the fullgraph-51 lane.
@@ -163,11 +165,16 @@ dim-mismatched vs the 51 reference). The genuinely-new work is the fullgraph-51 
 - [x] `single_stage_fair_compare_gpu.slurm` — same-node cpu+cuda fullgraph mpol10 (one venv/build/clean-check,
       then a `run_lane` function runs the harness twice; cpu lane sets `CUDA_VISIBLE_DEVICES=""`, cuda lane
       samples GPU mem; job fails red if either lane fails).
-- [ ] Compile-vs-steady-state separation is NOT yet available: the harness does not expose
-      `enable_compile_diagnostics` as a CLI flag (default-False, unwired in `single_stage_init_parity.py`),
-      so the launchers cannot pass `--record-jax-compile-diagnostics` (it would argparse-error). Until that
-      small harness arg is wired, per-iteration throughput comes from the harness timing fields with compile
-      amortized.
+- [x] Compile-vs-steady-state separation WIRED: `single_stage_init_parity.py` now exposes
+      `--record-jax-compile-diagnostics` (default-off), threaded to the JAX target-lane child gated to
+      `backend == "jax"` (the relay/resolver `_append_optional_single_stage_flags` /
+      `resolve_target_lane_compile_diagnostics` already existed — only the CLI flag + one arg-sourced wire
+      were missing). `single_stage_fair_compare_gpu.slurm` passes it on both lanes by default
+      (`FAIR_RECORD_COMPILE_DIAGNOSTICS=1`; `=0` for a pristine throughput run). It is observational (toggles
+      JAX compile logging only — compiled code/numerics unchanged), so the comparison stays fair, and the
+      child writes a compile/cache-miss summary (incl. recompile counts) into `results.json`. Tests:
+      `tests/integration/test_single_stage_init_parity_compile_diagnostics.py` (full chain, incl. the
+      backend gate) + `test_fair_compare_launcher_contract.py`.
 
 **Achievable now:** parity (replay) + CPU perf, once the donor lands. **GPU perf gated** on the recompile
 fix — the compile diagnostics quantify it.

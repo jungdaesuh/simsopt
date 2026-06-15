@@ -22,10 +22,14 @@
 # is no separate reference run. See the Fair-comparison protocol in
 # docs/scipy_jax_11_51_matrix_implementation_plan.md.
 #
-# NOTE: JAX compile diagnostics are not enabled here -- the harness does not expose
-# enable_compile_diagnostics as a CLI flag (single_stage_init_parity.py keeps it
-# default-False), so compile-vs-steady-state separation currently comes from the
-# harness timing fields. Wiring a real compile-diagnostics flag is a follow-up.
+# JAX compile diagnostics: enabled by default via --record-jax-compile-diagnostics
+# (FAIR_RECORD_COMPILE_DIAGNOSTICS=1). This records named compile/cache-miss
+# diagnostics for the JAX target-lane child into its results.json, so the
+# compile-vs-steady-state split and recompile counts (e.g. GPU XLA cache thrash)
+# are measured directly rather than inferred from coarse timing fields. It is
+# observational (toggles JAX compile logging only; compiled code and numerics are
+# unchanged), and identical on both lanes so the comparison stays fair. Set
+# FAIR_RECORD_COMPILE_DIAGNOSTICS=0 for a pristine no-diagnostics throughput run.
 
 set -euo pipefail
 
@@ -49,6 +53,9 @@ FAIR_MAXITER="${FAIR_MAXITER:-1500}"
 FAIR_BOOZER_BFGS_MAXITER="${FAIR_BOOZER_BFGS_MAXITER:-1500}"
 FAIR_NEWTON_MAXITER="${FAIR_NEWTON_MAXITER:-50}"
 FAIR_NEWTON_POLISH_POLICY="${FAIR_NEWTON_POLISH_POLICY:-run}"
+# Record JAX compile/cache-miss diagnostics on both lanes by default (set =0 to
+# disable for a pristine throughput run). See the NOTE above.
+FAIR_RECORD_COMPILE_DIAGNOSTICS="${FAIR_RECORD_COMPILE_DIAGNOSTICS:-1}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-36000}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-36000}"
 
@@ -118,6 +125,11 @@ run_lane() {
   mkdir -p "${step_dir}"
   local gpu_monitor_pid=""
   local srun_gpu=()
+  # Identical on both lanes so the comparison stays fair.
+  local compile_diag_args=()
+  if [[ "${FAIR_RECORD_COMPILE_DIAGNOSTICS}" == "1" ]]; then
+    compile_diag_args=(--record-jax-compile-diagnostics)
+  fi
 
   if [[ "${platform}" == "cuda" ]]; then
     export SIMSOPT_BACKEND_MODE=jax_gpu_parity
@@ -147,6 +159,7 @@ run_lane() {
         --platform "${platform}" \
         --optimizer-backend scipy-jax-fullgraph \
         --boozer-optimizer-backend ondevice \
+        "${compile_diag_args[@]}" \
         --reference-optimizer-method lbfgs \
         --maxiter "${FAIR_MAXITER}" \
         --target-lane-boozer-bfgs-maxiter "${FAIR_BOOZER_BFGS_MAXITER}" \

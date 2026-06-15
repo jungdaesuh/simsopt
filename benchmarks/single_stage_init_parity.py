@@ -536,6 +536,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--record-jax-compile-diagnostics",
+        action="store_true",
+        help=(
+            "Record named JAX compile/cache-miss diagnostics for the JAX "
+            "target-lane child and write the summary into its results.json. "
+            "Separates one-time compile cost from steady-state throughput and "
+            "surfaces recompile counts (e.g. GPU XLA cache thrash) for the "
+            "fair CPU-vs-GPU comparison. Observational only: it toggles JAX "
+            "compile logging and does not change compiled code or numerics."
+        ),
+    )
+    parser.add_argument(
         "--jax-profile-dir",
         default=None,
         help=(
@@ -1077,7 +1089,13 @@ def _run_single_stage_case(
             profile_target_lane_batch_size=getattr(
                 args, "profile_target_lane_batch_size", None
             ),
-            enable_compile_diagnostics=enable_compile_diagnostics,
+            enable_compile_diagnostics=(
+                enable_compile_diagnostics
+                or (
+                    backend == "jax"
+                    and bool(getattr(args, "record_jax_compile_diagnostics", False))
+                )
+            ),
             jax_profile_dir=getattr(args, "jax_profile_dir", None),
             experimental_target_lane_value_and_grad=(
                 experimental_target_lane_value_and_grad
