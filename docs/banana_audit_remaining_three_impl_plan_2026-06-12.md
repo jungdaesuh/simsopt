@@ -103,20 +103,21 @@ The three items:
   template: `run_residue_probe.py`.
   **NOTE: `banana_coil_solver.py` is under active edit by another session — its line
   numbers drift; navigate by the symbol names above, not the line numbers.**
-- **Winding-surface numbers — the code contract is NOT the ruled target; the two
-  coordinates have different statuses:**
-  - **Minor radius:** the executable code still carries `a = 0.142`
-    (`hardware_contracts.py:71-72`), but the 2026-06-11 user ruling SUPERSEDES it —
-    **`a_WS = 0.143` "is a must"; exact 0.142 is the measured 47→12/50 ι-resonance
-    cliff** (`autoresearch/program_cw_poloidal_legacy_fix_signs.md:428`). 0.142 is
-    retained in code only pending the hardware Q1/Q3 email answers.
+- **Winding-surface numbers:**
+  - **Minor radius `a = 0.142` is the operative hardware-pinned spec** — sensor-array
+    derived (shield-front 0.152−0.010; plasma 0.132+0.010; both = 0.142), *"not a
+    free knob"* (`autoresearch/program_cw_poloidal_legacy_fix_signs.md:141`). It is the
+    code default (`--banana-surf-radius 0.142`, `hardware_contracts.py:72`) and the
+    2026-06-10 ruling preference (`:426` item 2). The 06-11 note bumping to
+    `a = 0.143` (`:428`, `:991`) was a campaign NUMERICAL retarget to step off the
+    exact-0.142 47→12/50 ι-resonance ("a=0.143 is a must. it seems like"), not a
+    change to the hardware spec — the physical winding minor radius is **0.142**.
   - **Major radius:** `R0 = 0.903` is the nominal sensor-array center; `R0 = 0.92`
-    is "technically allowed" but UNRESOLVED (possible plasma-volume loss — this is
-    open Q1) (`program_cw_poloidal_legacy_fix_signs.md:426` item 1).
-  - The candidate `m9k_derate_v052` was frame-honest-audited at
-    `(winding_R0_m, winding_a_m) = (0.92, 0.143)`.
-  - Therefore the REGCOIL diagnostic must take R0/a as explicit args and DEFAULT the
-    minor to the ruled **0.143**, not the legacy/resonance-cliff 0.142.
+    is "technically allowed" but UNRESOLVED (possible plasma-volume loss — open Q1)
+    (`:426` item 1).
+  - The REGCOIL diagnostic takes R0/a as explicit args and DEFAULTS minor = **0.142**
+    (the spec); it may also evaluate 0.143 to quantify how far off-resonance the
+    1 mm retarget sits. Sweep major over {0.903 nominal, 0.92 allowed}.
 
 ## Rationale
 
@@ -124,7 +125,7 @@ The three items:
   independent and parallelizable; none shares a file with another's primary edit.
 - Item 1 attacks the dominant physics failure mode (resonance-cliff island growth
   in a shearless field) DURING optimization rather than discovering it post-hoc in
-  Poincaré — highest leverage for the stated goal of rebuilding ι≥0.08 at 0.143.
+  Poincaré — highest leverage for the stated goal of rebuilding ι≥0.08 at a=0.142.
   Reusing `IotaShearShortfall`'s three-layer wiring and the existing `Iotas` adjoint
   keeps it to ~30 lines of genuinely new code (the multi-well J/dJ) with no new
   linear algebra.
@@ -245,11 +246,10 @@ The three items:
          `nphi`, `ntheta`, wout path read from the run's `results.json`; build the
          winding torus via `build_banana_reference_surfaces(...).coil_winding_surface`
          OR a direct `SurfaceRZFourier` at explicit `--winding-major-radius`/
-         `--winding-minor-radius`. DEFAULT minor = **0.143** (the ruled "must"); expose
-         0.142 only as an explicit legacy/resonance-cliff comparison point. DEFAULT
-         major = 0.903 (nominal sensor center); sweep {0.903, 0.92} since R0=0.92 is
-         the live, unresolved Q1 lever. Do NOT default the minor to 0.142 — that
-         evaluates the floor at the radius the campaign has ruled against.
+         `--winding-minor-radius`. DEFAULT minor = **0.142** (the hardware-pinned spec
+         = code default); optionally also evaluate 0.143 to quantify the off-resonance
+         margin of the 1 mm retarget. DEFAULT major = 0.903 (nominal sensor center);
+         sweep {0.903, 0.92} since R0=0.92 is the live, unresolved Q1 lever.
    - [ ] Net currents: `G = μ₀·(20·tf_current_A)/(2π)` with the signed-TF convention
          (`current_contracts.py:37`); `I` via `physical_current_to_boozer_I(...)`
          (`current_contracts.py:210`) — 0 for the vacuum floor, matched proxy I for a
@@ -356,9 +356,13 @@ The three items:
   optional report. — confirm with user.
 - Item 2: should `reference_domain_exit` ever count toward promotion failure, or
   remain report-only initially? Recommend report-only first.
-- Item 3: minor radius is settled (ruled `a = 0.143`; 0.142 is the resonance cliff,
-  legacy-only). Open lever is the major radius — evaluate the floor at R0 = 0.903
-  (nominal) vs R0 = 0.92 (allowed, unresolved Q1)? Recommend sweeping {0.903, 0.92}
-  at a = 0.143, since the R0 standoff is exactly the decision the diagnostic informs.
+- Item 3: minor radius = `a = 0.142` (hardware-pinned spec, code default). Open lever
+  is the major radius — evaluate the floor at R0 = 0.903 (nominal) vs R0 = 0.92
+  (allowed, unresolved Q1)? Recommend sweeping {0.903, 0.92} at a = 0.142, since the
+  R0 standoff is exactly the decision the diagnostic informs.
+- SSOT reconciliation (not mine to settle): `program_cw_poloidal_legacy_fix_signs.md`
+  carries BOTH `a = 0.142` (spec body `:141`, ruling `:426`) and a 06-11
+  "a = 0.143 is a must" note (`:428`, `:991`). With the operative value confirmed as
+  0.142, those 0.143 notes are stale and should be reconciled in that SSOT doc.
 - Item 3: factor the LSQ kernel into `banana_opt/regcoil_floor.py` (unit-testable)
   vs inline in the script? Recommend the module for SRP/testability.
