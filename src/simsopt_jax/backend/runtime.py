@@ -189,6 +189,8 @@ _SYNCED_RUNTIME_ENV_VALUES = (
 )
 _GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_exclude_nondeterministic_ops",)
 _STALE_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_deterministic_ops",)
+_CPU_OPT_PRESET_FLAG_NAME = "--xla_cpu_opt_preset"
+_CPU_OPT_PRESET_FAST_COMPILE = f"{_CPU_OPT_PRESET_FLAG_NAME}=FAST_COMPILE"
 
 VALID_BACKEND_MODES = (
     "native_cpu",
@@ -574,6 +576,25 @@ def _stale_cuda_determinism_message() -> str:
 
 def _enabled_gpu_determinism_flags_text() -> str:
     return " or ".join(f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS)
+
+
+def _xla_flags_with_cpu_compile_preset(xla_flags: str | None) -> str:
+    """Return ``xla_flags`` with the CPU FAST_COMPILE preset appended.
+
+    Idempotent and non-destructive: existing tokens are preserved verbatim, and
+    a caller-provided ``--xla_cpu_opt_preset`` (any value) is respected rather
+    than overridden. ``None``/empty input yields just the preset token.
+    """
+    tokens = _split_xla_flag_tokens(xla_flags)
+    if any(
+        token == _CPU_OPT_PRESET_FLAG_NAME
+        or token.startswith(f"{_CPU_OPT_PRESET_FLAG_NAME}=")
+        for token in tokens
+    ):
+        return xla_flags or ""
+    if not tokens:
+        return _CPU_OPT_PRESET_FAST_COMPILE
+    return f"{xla_flags.strip()} {_CPU_OPT_PRESET_FAST_COMPILE}"
 
 
 @dataclass(frozen=True)
@@ -2322,6 +2343,24 @@ def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
         _set_runtime_env(name, value)
 
 
+def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) -> None:
+    """Pull the FAST_COMPILE CPU preset into ``XLA_FLAGS`` before JAX inits.
+
+    XLA reads ``XLA_FLAGS`` only at backend initialization, so this runs in the
+    pre-``import jax`` region of :func:`apply_jax_runtime_config`. Applied to
+    non-parity CPU lanes only: ``xla_cpu_opt_preset`` is inert on the CUDA
+    backend (whose XLA flags carry the determinism contract), and the preset
+    reduces XLA optimization passes -- which can shift CPU reduction order, so
+    it is withheld from the bit-exact ``*_parity`` lanes.
+    """
+    if config.jax_platform == "cuda" or policy.parity_mode:
+        return
+    _set_runtime_env(
+        _XLA_FLAGS_ENV,
+        _xla_flags_with_cpu_compile_preset(os.environ.get(_XLA_FLAGS_ENV)),
+    )
+
+
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process."""
     config = get_backend_config()
@@ -2330,6 +2369,7 @@ def apply_jax_runtime_config() -> None:
     policy = get_backend_policy(config.mode)
     _validate_cuda_parity_determinism_env(config, policy)
     _apply_jax_gpu_memory_env(config)
+    _apply_cpu_compile_preset_env(config, policy)
 
     import jax
 

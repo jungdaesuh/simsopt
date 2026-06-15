@@ -141,11 +141,13 @@ guard), then resolve the GPU compile-time residual.
   Phase 3**, not yet measured.
 - Setting `--xla_cpu_opt_preset=FAST_COMPILE` may reduce CPU compile time/memory
   without changing optimization results (TORAX relies on it in production).
-  Assumption: it is accepted by our jaxlib pin and does not perturb numerical
-  parity on our lanes — gated by the parity validation in the Validation Plan.
+  Assumption: it is accepted by our jaxlib pin. The bit-exact `*_parity` lanes
+  are excluded outright (the preset reduces XLA passes and could shift CPU
+  reduction order), so the residual risk is confined to production/non-parity
+  CPU lanes whose acceptance tolerances are looser.
 - `FAST_COMPILE` is a CPU-backend preset; GPU host-compile relief comes primarily
-  from the host-driven boundary, not this flag. Treat the flag as CPU-lane scoped
-  unless measurement shows otherwise.
+  from the host-driven boundary, not this flag. Implemented as non-parity-CPU
+  scoped.
 
 ## Implementation Plan
 
@@ -172,15 +174,18 @@ guard), then resolve the GPU compile-time residual.
      there.
 
 2. **Apply `--xla_cpu_opt_preset=FAST_COMPILE` in config-before-init.**
-   - [ ] In `apply_jax_runtime_config()` (`src/simsopt_jax/backend/runtime.py:2325`),
-     compose `--xla_cpu_opt_preset=FAST_COMPILE` into `XLA_FLAGS` using the
-     existing flag-merge pattern (lines 533–576) — **merge, do not overwrite**
-     any user-provided `XLA_FLAGS`; idempotent (skip if already present).
-   - [ ] Scope to CPU backend (or unconditionally if measurement shows it is
-     inert/safe on GPU). Follow the existing determinism-flag precedent.
-   - [ ] Ensure it is applied before JAX is imported or devices are touched in
-     the active process. `apply_jax_runtime_config()` imports JAX lazily today,
-     so this belongs before the local `import jax` line.
+   *Implemented (local logic validated; CPU parity/effect pending cluster).*
+   - [x] Pure merge helper `_xla_flags_with_cpu_compile_preset(xla_flags)`
+     (`src/simsopt_jax/backend/runtime.py`): **merge, do not overwrite** — keeps
+     existing tokens verbatim, respects a caller-supplied `--xla_cpu_opt_preset`,
+     idempotent. Unit-tested in `tests/test_backend_xla_compile_preset.py`.
+   - [x] Applier `_apply_cpu_compile_preset_env(config, policy)` scoped to
+     **non-parity CPU lanes** — no-op on `jax_platform == "cuda"` *and* on
+     `policy.parity_mode` (the preset reduces XLA passes and can shift CPU
+     reduction order, so it is withheld from the bit-exact `*_parity` lanes).
+     Mirrors the `_apply_jax_gpu_memory_env` precedent.
+   - [x] Wired into `apply_jax_runtime_config()` in the pre-`import jax` region
+     (after `_apply_jax_gpu_memory_env`), so `XLA_FLAGS` is set before XLA inits.
 
 3. **Diagnose and close the `scipy-jax` GPU compile-time residual.**
    - [ ] Run the existing compile-count probe on the surviving host-driven
@@ -198,13 +203,22 @@ guard), then resolve the GPU compile-time residual.
      `docs/scipy_jax_11_51_matrix_implementation_plan.md:16,195`.
 
 4. **Add a TORAX-style compile-once guard on the host-driven eval bundle.**
-   - [ ] After warmup, assert the per-evaluation jitted bundle compiles exactly
-     once across N outer steps (mirror `get_number_of_compiles(...) == 1`,
-     `torax/_src/jax_utils.py:147`). Place as a lane-level invariant/test, not
-     only a benchmark probe.
-   - [ ] Add a regression test asserting no recompile when only `x` changes
-     (stable shape), modeled on TORAX's `jit_updates_value_without_recompile`
-     subtests.
+   *Authored; runs on the cluster/CI. The local pytest harness cannot collect it
+   in this checkout: `tests/conftest.py:17` → `bootstrap_local_simsopt` →
+   `src/simsopt/_core/util.py:19` raises `ImportError: cannot import name 'Curve'
+   from 'simsoptpp' (unknown location)` — `simsoptpp` resolves to a build lacking
+   `Curve` here (an environment/build artifact, not a test defect). Verified
+   reproducing with and without `PYTHONPATH=src`.*
+   - [x] `test_penalty_value_and_grad_bundle_reuses_compiled_executable`
+     (`tests/geo/test_boozersurface_jax.py`) builds the production `scipy-jax`
+     value/grad bundle via `_make_penalty_value_and_grad_cpu_ordered_with`,
+     calls it at `x0` then a same-shape `x1`, and asserts (a) `_cache_size()`
+     does not grow on the `x`-change (no recompile-per-step) and (b)
+     `_cache_size() == 1` after warmup (compiles exactly once). Mirrors
+     `get_number_of_compiles(...) == 1` (`torax/_src/jax_utils.py:147`) and the
+     existing `_cache_size()` pattern (`test_boozersurface_jax.py:8884`).
+   - [ ] Run on the cluster/CI to confirm green; if `_cache_size()` exceeds 1 at
+     warmup, capture the sub-graph variants before tightening the assertion.
 
 5. **(Optional, after Phase 3) Inner-cap bisect for ondevice feasibility record.**
    - [ ] Run ondevice with `maxiter=1500` and the inner Boozer BFGS cap unset
@@ -217,10 +231,14 @@ guard), then resolve the GPU compile-time residual.
 
 ## Validation Plan
 
-- [ ] **FAST_COMPILE parity:** run the CPU single-stage parity lane with and
-  without the preset; final objective / field-error / iota / volume relative
-  diffs unchanged at the established tolerances (cf. init parity rows in
-  `docs/jax_clean_reconciliation_diagnostics_2026-06-11.md:894-899`).
+- [ ] **Parity lane unaffected:** confirm the `*_parity` lanes never receive the
+  preset (code-gated on `policy.parity_mode`; unit-tested by
+  `test_apply_is_noop_on_cpu_parity`). The bit-exact init parity rows
+  (`docs/jax_clean_reconciliation_diagnostics_2026-06-11.md:894-899`) must stay
+  `0.0`.
+- [ ] **Non-parity CPU effect:** on a production/`jax_cpu_fast` `scipy-jax` run,
+  confirm final results stay within acceptance tolerances and that compile wall
+  + peak host RSS drop (or are unchanged) with the preset active.
 - [ ] **FAST_COMPILE effect:** record CPU compile wall + peak host RSS before/after
   on an mpol2 `scipy-jax` run; accept only if lower/equal or if any tradeoff is
   explicitly justified by parity and wall/RSS measurements.
@@ -237,8 +255,9 @@ guard), then resolve the GPU compile-time residual.
 
 - Risk: `--xla_cpu_opt_preset=FAST_COMPILE` perturbs numerics or is silently
   ignored on the installed XLA version.
-  Mitigation: gate behind the FAST_COMPILE parity check; assert the flag is
-  accepted (no XLA warning) on the target jaxlib pin before landing.
+  Mitigation: the bit-exact `*_parity` lanes are excluded at the source
+  (`policy.parity_mode` gate); for non-parity CPU lanes, confirm acceptance
+  tolerances hold and the flag is accepted (no XLA warning) on the jaxlib pin.
 - Risk: overwriting a user/launcher-provided `XLA_FLAGS` (e.g. GPU determinism
   flags) when injecting the preset.
   Mitigation: reuse the existing merge/idempotent pattern at
@@ -257,10 +276,12 @@ guard), then resolve the GPU compile-time residual.
   remains opt-in. A host-RAM warning exists in the example parser for explicit
   CPU-ondevice selection; cross-link it to the 422 GiB evidence if it remains
   user-facing.
-- [ ] `--xla_cpu_opt_preset=FAST_COMPILE` applied via `apply_jax_runtime_config()`
-  with merge-not-overwrite semantics and a unit test.
-- [ ] Lane-level compile-once guard + no-recompile-on-`x`-change regression test
-  passing.
+- [x] `--xla_cpu_opt_preset=FAST_COMPILE` applied via `apply_jax_runtime_config()`
+  with merge-not-overwrite semantics and a unit test. *(Code + unit test landed,
+  local logic validated; CPU parity/effect checks pending cluster.)*
+- [x] Lane-level compile-once guard + no-recompile-on-`x`-change regression test
+  *authored* (`test_penalty_value_and_grad_bundle_reuses_compiled_executable`);
+  pending a cluster/CI run to confirm green.
 - [ ] GPU compile-time residual classified (once-slow vs recompile) with
   `docs/jax_scipy_jax_gpu_compile_diagnostic_next.md` committed.
 - [ ] Parity validation green; no regression in existing compile-diagnostic tests.

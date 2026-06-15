@@ -9687,6 +9687,43 @@ class TestUpstreamFactoryBoozerMatrix:
             err_msg="CPU-ordered gradient closure mismatch before SciPy BFGS",
         )
 
+    def test_penalty_value_and_grad_bundle_reuses_compiled_executable(self):
+        """Host-SciPy outer reuse: a fresh x at fixed shape must not recompile.
+
+        The ``scipy-jax`` lane evaluates this jitted value/grad bundle once per
+        outer L-BFGS-B step with a new ``x`` of identical shape. Reusing one
+        compiled executable across those steps is the property that keeps the
+        host-driven lane out of the monolithic compile pressure it exists to
+        avoid; a recompile-per-step regression would silently restore it.
+        """
+        case = _build_upstream_boozer_penalty_case(
+            UPSTREAM_BOOZER_SURFACE_TYPES[0],
+            UPSTREAM_BOOZER_STELLSYM[0],
+            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        )
+        value_and_grad = case.jax_boozer._make_penalty_value_and_grad_cpu_ordered_with(
+            case.optimize_G,
+            case.jax_boozer.options["weight_inv_modB"],
+            case.constraint_weight,
+        )
+        x0 = jnp.asarray(case.x, dtype=jnp.float64)
+        # Distinct DOF values, identical shape/dtype — exactly what successive
+        # outer optimizer steps feed in.
+        x1 = x0 + jnp.asarray(1e-3, dtype=jnp.float64)
+
+        value_and_grad(x0)
+        cache_after_warmup = value_and_grad._cache_size()
+        value_and_grad(x1)
+
+        assert value_and_grad._cache_size() == cache_after_warmup, (
+            "scipy-jax value/grad bundle recompiled when only x changed at "
+            "fixed shape (recompile-per-step regression)"
+        )
+        assert cache_after_warmup == 1, (
+            "scipy-jax value/grad bundle compiled more than one executable at "
+            f"warmup (cache size {cache_after_warmup})"
+        )
+
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
     @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
