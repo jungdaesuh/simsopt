@@ -20,6 +20,14 @@ The three items:
    the winding surface to decompose the flux residual into winding-surface-physics
    vs coil-order-parameterization deficit (decides order-3→4 vs move-the-surface).
 
+**Phase 0** (added 2026-06-12) front-loads the decision-gating `a = 0.142` candidate
+reconciliation: the winding minor radius is now locked at the hardware spec 0.142, so
+the campaign's headline candidate (solved at the rescinded 0.143 retarget) is off-spec
+and must be re-validated before the three items are prioritized. A closing
+**Deferred / partial items** section indexes audit work outside this plan's scope
+(already-done, partial-but-unwired, and correctly-deferred items) so this doc reads as
+a forward map without claiming to own them.
+
 ## Goals
 
 - A default-OFF, opt-in `IotaRationalRepulsion` objective term that repels the
@@ -153,6 +161,32 @@ The three items:
   `working_surface` grid are used on both sides of the comparison.
 
 ## Implementation Plan
+
+0. **Phase 0 — a=0.142 candidate reconciliation (decision-gating; do FIRST)**
+   - Context: `a_WS = 0.142` is the locked hardware spec, but the campaign's headline
+     candidate `m9k_derate_v052` was solved/audited at the 06-11 retarget (its artifact
+     records `winding_a_m = 0.143`). With the retarget rescinded, that candidate is
+     off-spec, and exact a=0.142 is exactly the radius that was measured on the
+     47→12/50 ι-resonance — so feasibility at the real spec is NOT established.
+   - [ ] Re-solve / re-audit the `m9k_derate_v052` derate at **a = 0.142** (same
+         R0, currents, recipe; only the winding minor radius changes) and run the
+         canonical 3-mode Poincaré + exact-Newton ι + spec-frame swept audit.
+   - [ ] Record the outcome explicitly: does the 0.142 version still clear default
+         Poincaré ≥30/50 and exact-ι ≥0.08, or does it fall into the resonance?
+         (a) holds → you have a real 0.142 candidate; audit-2 becomes insurance.
+         (b) collapses → 0.142 is not viable as-is; **audit-2 (Phase 1) is REQUIRED**,
+         since the winding surface can no longer be moved to dodge the resonance —
+         iota must be steered off it instead.
+   - [ ] Reconcile `autoresearch/docs/banana_spec143_campaign_and_solver_plan_2026-06-11.md`:
+         its INTERIM-GATE, candidate block, and frame-honest re-audit still describe
+         the 0.143 artifact. Rewrite the target/gate to a=0.142 and either point at
+         the new 0.142 re-audit (Phase 0 step above) or mark the 0.143 artifact as a
+         superseded historical reference. Do NOT find-replace 0.143→0.142 blindly —
+         the on-disk artifact JSON genuinely holds 0.143; the text must describe what
+         exists, not pretend the artifact was re-spec'd.
+   - [ ] Confirm `examples/.../run_single_stage_*`/lane launchers and any 0.143 CLI
+         defaults are at `--banana-surf-radius 0.142` (code default is already 0.142;
+         verify no lane script overrides to 0.143).
 
 1. **Phase 1 — Audit-2: `IotaRationalRepulsion` objective term**
    - [ ] Add `IotaRationalRepulsion(Optimizable, depends_on=[iota_term])` to
@@ -357,3 +391,33 @@ The three items:
   since the R0 standoff is exactly the decision the diagnostic informs.
 - Item 3: factor the LSQ kernel into `banana_opt/regcoil_floor.py` (unit-testable)
   vs inline in the script? Recommend the module for SRP/testability.
+
+## Deferred / partial items (out of this plan's scope — tracked, not lost)
+
+These are real remaining audit work but are NOT covered by Phases 0–3 above. Listed
+so this doc can serve as a forward index without pretending to own them.
+
+- **Already DONE (no action) — verified in tree as of 2026-06-12:** island/WBA verdict
+  wired into the strict ladder (`run_topology_fidelity_ladder.py` passes
+  `require_island_gate=True`); resonant q-cap `MAX_RESONANT_DENOMINATOR = 13`
+  (`stage2_resonant_flux.py`); `banana_curves` NameError fixed (the
+  `HardwareConstraintTests` gate is green, 164 passed); Stage-2 5a/5b/5c
+  (frame-aware κ, exact segment cc/cs, vessel keep-out) and audit-8 active half
+  (`stage2_resonant_flux.py`) landed with tests.
+- **PARTIAL — built but not fully wired (candidate follow-ups):**
+  - *Twist-rate regularization:* the core `FramedCurveSurfaceTangent` exposes
+    `frame_torsion` with VJPs (`src/simsopt/geo/framedcurve.py`), but NO penalty term
+    consumes it — the optimizable α(φ) pack-rotation DOFs (default `rotation_order=1`)
+    are unregularized. A twist-rate penalty for `rotation_order ≥ 1` is unbuilt.
+  - *Transit-normalized horizons (audit-6):* the helper
+    (`trace_transit_normalization.py`) is consumed only by the strict Poincaré lane
+    (opt-in env vars), NOT by the in-loop topology gate / scorer / fidelity ladder.
+    Wiring it into the gate decision + recalibrating thresholds is unbuilt. (Phase 2
+    here reuses the transit framing for survival but does not finish audit-6.)
+- **DEFERRED — correctly out of scope for the configured penalty+target lanes**
+  (revisit only if an ALM/frontier lane is launched): audit-3 LSE smoothing
+  ε-coupling, audit-4 frontier phantom-DOF / `JF.dof_names` probe, audit-7
+  surface_surface_spacing adjoint + `MagneticWellVolumeShortfall` flux-vs-volume fix,
+  the projected-gradient ALM stationarity gate, the inner/outer norm mismatch, the
+  frontier epsilon/Chebyshev reachability items, and residue `BranchState`
+  continuation. (Full rationale in the 2026-06-11 first-principles review.)
