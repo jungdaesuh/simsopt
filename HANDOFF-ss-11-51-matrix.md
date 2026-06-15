@@ -42,7 +42,7 @@ mpol2 (smoke) + mpol10 (production). `ondevice` removed (OOM monolith). User wan
 with cpu-vs-gpu measured fairly (same node, capped threads, replay parity); docs/memory updated.
 
 ## 2. Where we are right now
-All code needed before the next donor submission is committed (HEAD `5f14a1463`): the 8-cell host-driven
+All code needed before the next donor submission is committed (minimum code-bearing commit `5f14a1463`): the 8-cell host-driven
 matrix, the fullgraph inner-Boozer fix, the thread-cap fairness fix, the same-node fair-compare launcher +
 tests, the compile-diagnostics wiring (`--record-jax-compile-diagnostics`), and the donor trial-policy fix.
 Two background efforts:
@@ -135,11 +135,14 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
        contract (which deliberately rejects fixture-only seeds — they don't prove continuation-branch
        preservation). And even WITH a donor, `_require_supported_single_stage_seed_contract` (:1616→:1483)
        rejects it unless HARDWARE_CONSTRAINTS_OK, not SELF_INTERSECTING, and iota-quality pass.
-2. [ ] **Stage a FRESH checkout at HEAD `5f14a1463`** (the existing Perlmutter checkout is `94f6ea838` and
-       LACKS the fair launchers + thread caps + compile-diagnostics wiring). On the LOGIN node:
-       `git -C /Users/.../simsopt-pr-jax-port-clean bundle create /tmp/ss-5f14a1463.bundle pr/jax-port-clean`
-       → `scp` to `/pscratch/sd/j/jungdae/` → clone to a new dir → `git checkout --detach 5f14a1463` →
-       `git submodule update --init --recursive` (MANDATORY — bundle lacks the C++ submodules).
+2. [ ] **Use a checkout that includes at least code-bearing commit `5f14a1463` for fair-compare.** The active
+       JAX-donor checkout
+       `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout` is at `306d53bd` and already
+       contains `benchmarks/perlmutter/single_stage_fair_compare_gpu.slurm`,
+       `FAIR_WARM_START_RUN_DIR`, and `--record-jax-compile-diagnostics`. It is acceptable for fair-compare
+       once a valid donor exists. If staging a fresh checkout instead, use the current branch HEAD (doc-only
+       commits are fine) and always run `git submodule update --init --recursive` (MANDATORY — bundle lacks the
+       C++ submodules).
 3. [ ] **Submit the same-node fair-compare** (the defensible cpu-vs-gpu + replay-parity run):
        `sbatch -A m4680_g --export=ALL,REPO_ROOT=<new-checkout>,RUN_ROOT=<runs-OUTSIDE-checkout>,FAIR_WARM_START_RUN_DIR=<donor-warmstart> <new-checkout>/benchmarks/perlmutter/single_stage_fair_compare_gpu.slurm`
        It runs fullgraph mpol10 under `--platform cpu` then `--platform cuda` on one GPU node.
@@ -282,15 +285,18 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
 - **The "convergence stall" is SLOWNESS, not a wedge:** fullgraph's outer L-BFGS-B does very long line
   searches near penalty regions (self-intersection / hardware constraints), ~4–11 min/outer-iter and slowing,
   but it DOES progress (iter-5 J matched cpp). Reduced 11-dim re-solves the surface each iter → fast.
-- **Donor = native_cpu** because the continuation's outer loop uses the host-SciPy *reference* lane (requires
-  backend≠jax). Warm-start surface is backend-independent geometry → consumable by strict-jax cells at any SHA.
+- **For this iota15 seed, the viable donor route is JAX/high-memory, not native_cpu.** Native continuation was
+  tested with the documented commands and longer non-final budgets and stayed on the near-zero-iota branch.
+  JAX runtime-seed preserves the iota15 branch, but the dense Newton/target-lane graph needs enough host RAM.
+  A successful donor is still backend-independent geometry → consumable by strict-jax fair-compare cells.
 - **GPU "slower" was an artifact**, not real (throttled CPU slice; per-eval GPU compute is fine). Fair perf
   needs the same-node run.
 
 ## 10. Pointers
 - Commits: `0752b18f1` `94f6ea838` `329c92750` `9ae9a1f4f` `77655d960` (compile-diagnostics wiring),
-  `5f14a1463` (donor `--trial-policy none` fix). Plan
-  (execution SSOT, has the Fair-comparison protocol): `docs/scipy_jax_11_51_matrix_implementation_plan.md`. Manifest:
+  `5f14a1463` (donor `--trial-policy none` fix). Launch-state SSOT:
+  `HANDOFF-ss-11-51-matrix.md`. Plan/rationale:
+  `docs/scipy_jax_11_51_matrix_implementation_plan.md`. Manifest:
   `docs/single_stage_11_51_matrix_2026-06-13.{json,md}`.
 - Launchers: `benchmarks/perlmutter/single_stage_production_{cpu,gpu}.slurm` (matrix cells),
   `single_stage_fair_compare_gpu.slurm` (same-node fair compare), `single_stage_continuation_donor.slurm` (donor),
