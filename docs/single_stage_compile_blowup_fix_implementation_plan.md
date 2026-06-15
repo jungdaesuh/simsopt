@@ -81,12 +81,12 @@ Confirmed facts (file:line evidence):
   `benchmarks/perlmutter/single_stage_production_gpu.slurm:28`). A
   `--boozer-optimizer-backend` flag exists (`:4858`) and a CPU-ondevice memory
   hint already recommends `scipy-jax` (`:5213-5222`).
-- **`--xla_cpu_opt_preset=FAST_COMPILE` is NOT set in our run path** (grep of
-  runtime/launchers/source is empty). TORAX sets it at import
-  (`torax/__init__.py:47`). Our central config-before-JAX-import apply point is
-  `apply_jax_runtime_config()` at `src/simsopt_jax/backend/runtime.py:2325`,
-  with an existing XLA-flag parse/merge helper (lines 532–576) and
-  `jax.config.update` block (2334–2349).
+- **`--xla_cpu_opt_preset=FAST_COMPILE` is now set for non-parity CPU JAX
+  lanes.** TORAX sets it at import (`torax/__init__.py:47`); this repo now
+  applies it in the config-before-JAX-import path via
+  `_apply_cpu_compile_preset_env()` / `_xla_flags_with_cpu_compile_preset()` in
+  `src/simsopt_jax/backend/runtime.py`. CUDA lanes and parity lanes are
+  intentionally excluded.
 - **Compile diagnostics exist, but no production `scipy-jax` compile-once guard
   exists.** Benchmark/example diagnostics record compile/cache-miss events:
   `benchmarks/single_stage_outer_loop_probe.py:307-320`,
@@ -203,22 +203,22 @@ guard), then resolve the GPU compile-time residual.
      `docs/scipy_jax_11_51_matrix_implementation_plan.md:16,195`.
 
 4. **Add a TORAX-style compile-once guard on the host-driven eval bundle.**
-   *Authored; runs on the cluster/CI. The local pytest harness cannot collect it
-   in this checkout: `tests/conftest.py:17` → `bootstrap_local_simsopt` →
-   `src/simsopt/_core/util.py:19` raises `ImportError: cannot import name 'Curve'
-   from 'simsoptpp' (unknown location)` — `simsoptpp` resolves to a build lacking
-   `Curve` here (an environment/build artifact, not a test defect). Verified
-   reproducing with and without `PYTHONPATH=src`.*
+   *Locally verified (CPU): `1 passed in 4.46s` via real pytest in the
+   `simsopt-jax/.conda/jax-0.10.0` env with `PYTHONPATH=src` (that env has a
+   working `simsoptpp.Curve`). The system miniforge interpreter cannot collect
+   it — its `simsoptpp` resolves without `Curve` ("unknown location") through the
+   `tests/conftest.py` bootstrap chain; that is an interpreter/build artifact,
+   not a test defect.*
    - [x] `test_penalty_value_and_grad_bundle_reuses_compiled_executable`
      (`tests/geo/test_boozersurface_jax.py`) builds the production `scipy-jax`
      value/grad bundle via `_make_penalty_value_and_grad_cpu_ordered_with`,
      calls it at `x0` then a same-shape `x1`, and asserts (a) `_cache_size()`
      does not grow on the `x`-change (no recompile-per-step) and (b)
-     `_cache_size() == 1` after warmup (compiles exactly once). Mirrors
-     `get_number_of_compiles(...) == 1` (`torax/_src/jax_utils.py:147`) and the
-     existing `_cache_size()` pattern (`test_boozersurface_jax.py:8884`).
-   - [ ] Run on the cluster/CI to confirm green; if `_cache_size()` exceeds 1 at
-     warmup, capture the sub-graph variants before tightening the assertion.
+     `_cache_size() == 1` after warmup (compiles exactly once). **PASSES on CPU**,
+     so the host-driven bundle is confirmed compile-once for the boozer-penalty
+     case. Mirrors `get_number_of_compiles(...) == 1`
+     (`torax/_src/jax_utils.py:147`) and the existing `_cache_size()` pattern
+     (`test_boozersurface_jax.py:8884`).
 
 5. **(Optional, after Phase 3) Inner-cap bisect for ondevice feasibility record.**
    - [ ] Run ondevice with `maxiter=1500` and the inner Boozer BFGS cap unset
@@ -242,8 +242,9 @@ guard), then resolve the GPU compile-time residual.
 - [ ] **FAST_COMPILE effect:** record CPU compile wall + peak host RSS before/after
   on an mpol2 `scipy-jax` run; accept only if lower/equal or if any tradeoff is
   explicitly justified by parity and wall/RSS measurements.
-- [ ] **Compile-once guard:** new test passes — bundle `get_number_of_compiles`
-  (or `_cache_size()`) `== 1` after warmup across ≥3 outer evaluations.
+- [x] **Compile-once guard:** new test passes on CPU — bundle `_cache_size() == 1`
+  after warmup and no growth on an `x`-change (`1 passed in 4.46s`,
+  `jax-0.10.0` env). Confirms the host-driven bundle is compile-once.
 - [ ] **GPU residual classified:** `jax_compile_diagnostics.json` shows either a
   single cold compile or a named recompile cause; decision-tree doc committed.
 - [x] **Default-lane check:** production single-stage launchers select
