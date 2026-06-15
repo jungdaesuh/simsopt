@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+from unittest import mock
+
+import pytest
+
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
     _single_stage_hardware_status_progress_fields,
+    parse_args,
+    should_evaluate_pending_target_lane_initial_objective,
 )
 
 
@@ -51,3 +58,46 @@ def test_hardware_status_progress_fields_preserve_violation_details():
         "max_curvature": 41.0,
         "curvature_threshold": 40.0,
     }
+
+
+def test_reporting_snapshot_diagnostic_skips_pending_initial_value_grad():
+    run_dict = {"initial_objective_pending": True}
+
+    assert not should_evaluate_pending_target_lane_initial_objective(
+        run_dict,
+        diagnose_target_lane_reporting_snapshot=True,
+    )
+    assert should_evaluate_pending_target_lane_initial_objective(
+        run_dict,
+        diagnose_target_lane_reporting_snapshot=False,
+    )
+    assert not should_evaluate_pending_target_lane_initial_objective(
+        {"initial_objective_pending": False},
+        diagnose_target_lane_reporting_snapshot=True,
+    )
+
+
+def _parse_child_args(*extra: str):
+    argv = ["single_stage_banana_example.py", *extra]
+    with mock.patch.object(sys, "argv", argv):
+        return parse_args()
+
+
+def test_cli_exposes_reporting_snapshot_diagnostic():
+    args = _parse_child_args("--diagnose-target-lane-reporting-snapshot")
+
+    assert args.diagnose_target_lane_reporting_snapshot is True
+
+
+def test_reporting_snapshot_diagnostic_rejects_other_skip_modes():
+    with mock.patch.object(
+        sys,
+        "argv",
+        [
+            "single_stage_banana_example.py",
+            "--diagnose-target-lane-reporting-snapshot",
+            "--profile-target-lane-only",
+        ],
+    ):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            parse_args()

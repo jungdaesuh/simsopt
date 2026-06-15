@@ -1091,6 +1091,9 @@ def build_single_stage_problem_contract(
             "diagnose_target_lane_scaled_phase1": bool(
                 getattr(args, "diagnose_target_lane_scaled_phase1", False)
             ),
+            "diagnose_target_lane_reporting_snapshot": bool(
+                getattr(args, "diagnose_target_lane_reporting_snapshot", False)
+            ),
             "diagnostic_callbacks": bool(getattr(args, "diagnostic_callbacks", False)),
             "record_target_lane_invalid_state_events": bool(
                 getattr(args, "record_target_lane_invalid_state_events", False)
@@ -1267,6 +1270,9 @@ def build_single_stage_results_envelope(
     if getattr(args, "diagnose_target_lane_scaled_phase1", False):
         required_files.append("target_lane_scaled_phase1_diagnosis.json")
         planned_files.append("target_lane_scaled_phase1_diagnosis.json")
+    if getattr(args, "diagnose_target_lane_reporting_snapshot", False):
+        required_files.append("REJECTED.json")
+        planned_files.append("REJECTED.json")
     if constraint_method == "alm":
         required_files.append("alm_state.partial.json")
         planned_files.append("alm_state.partial.json")
@@ -5012,6 +5018,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--diagnose-target-lane-reporting-snapshot",
+        action="store_true",
+        help=(
+            "Build the JAX/ondevice target-lane runtime bundle, record the "
+            "initial reporting snapshot, then skip the initial value/gradient "
+            "compile and optimizer. Writes a rejected diagnostic artifact, not "
+            "a warm-start donor."
+        ),
+    )
+    parser.add_argument(
         "--diagnostic-callbacks",
         action="store_true",
         help=(
@@ -5172,10 +5188,26 @@ def parse_args():
         or args.diagnose_target_lane_optimistix
         or args.diagnose_target_lane_optax
         or args.diagnose_target_lane_scaled_phase1
+        or args.diagnose_target_lane_reporting_snapshot
     ):
         raise ValueError(
             "target-lane profiling and diagnostic flags are only supported with "
             "--constraint-method=penalty"
+        )
+    reporting_snapshot_exclusive_flags = (
+        args.profile_target_lane_only,
+        args.diagnose_target_lane_gradient,
+        args.diagnose_target_lane_first_line_search,
+        args.diagnose_target_lane_optimistix,
+        args.diagnose_target_lane_optax,
+        args.diagnose_target_lane_scaled_phase1,
+    )
+    if args.diagnose_target_lane_reporting_snapshot and any(
+        reporting_snapshot_exclusive_flags
+    ):
+        raise ValueError(
+            "--diagnose-target-lane-reporting-snapshot cannot be combined with "
+            "other target-lane profiling or diagnostic skip modes."
         )
 
     # Warn when explicit CPU ondevice selects the memory-heavy compiled optimizer loop.
@@ -7057,6 +7089,7 @@ def cache_single_stage_target_lane_init_reporting_snapshot(
     length_weight,
     curvature_threshold,
     curvature_weight,
+    record_outer_optimizer_event=None,
 ):
     """Prime target-lane final reporting for init-only runs."""
     del disable_success_filter
@@ -7086,6 +7119,7 @@ def cache_single_stage_target_lane_init_reporting_snapshot(
         iota_target,
         outer_objective_config=target_lane_outer_objective_config,
         success_filter=target_lane_success_filter,
+        record_outer_optimizer_event=record_outer_optimizer_event,
     )
     return sync_target_lane_reporting(
         run_dict,
@@ -12600,6 +12634,17 @@ def seed_single_stage_initial_objective_from_values(
     run_dict["initial_objective_pending"] = False
 
 
+def should_evaluate_pending_target_lane_initial_objective(
+    run_dict,
+    *,
+    diagnose_target_lane_reporting_snapshot,
+):
+    """Return whether startup should compile/evaluate target-lane value/grad."""
+    return bool(run_dict.get("initial_objective_pending", False)) and not bool(
+        diagnose_target_lane_reporting_snapshot
+    )
+
+
 def seed_pending_single_stage_target_lane_initial_objective(
     run_dict,
     *,
@@ -13785,6 +13830,7 @@ if __name__ == "__main__":
         str(getattr(args, "diagnose_target_lane_first_line_search", False)),
         str(getattr(args, "diagnose_target_lane_optimistix", False)),
         str(getattr(args, "diagnose_target_lane_optax", False)),
+        str(getattr(args, "diagnose_target_lane_reporting_snapshot", False)),
         str(args.minimal_artifacts),
         str(args.backend),
         str(optimizer_backend_record),
@@ -14431,6 +14477,7 @@ if __name__ == "__main__":
                 or args.diagnose_target_lane_gradient
                 or args.diagnose_target_lane_first_line_search
                 or args.diagnose_target_lane_scaled_phase1
+                or args.diagnose_target_lane_reporting_snapshot
             )
         )
     )
@@ -14459,7 +14506,7 @@ if __name__ == "__main__":
             "for diagnostic run."
         )
 
-    if args.init_only and use_target_lane:
+    if (args.init_only or args.diagnose_target_lane_reporting_snapshot) and use_target_lane:
         print("Preparing target-lane init objective/runtime bundle...")
         target_lane_bundle_setup_start_s = _perf_counter_s()
         target_lane_trial_boozer_overrides = build_target_lane_trial_boozer_overrides(
@@ -14581,7 +14628,12 @@ if __name__ == "__main__":
             full_state_optimizer=bool(use_target_lane_full_state_optimizer),
             full_graph_host_callback=bool(use_target_lane_full_graph_host_callback),
         )
-        if bool(run_dict.get("initial_objective_pending", False)):
+        if should_evaluate_pending_target_lane_initial_objective(
+            run_dict,
+            diagnose_target_lane_reporting_snapshot=(
+                args.diagnose_target_lane_reporting_snapshot
+            ),
+        ):
             initial_target_eval_start_s = _perf_counter_s()
             record_outer_optimizer_event(
                 "target_lane_initial_objective_started",
@@ -14629,16 +14681,34 @@ if __name__ == "__main__":
                 phase="initial",
                 elapsed_s=timings.get("target_lane_initial_objective_s"),
             )
+        elif args.diagnose_target_lane_reporting_snapshot and bool(
+            run_dict.get("initial_objective_pending", False)
+        ):
+            record_outer_optimizer_event(
+                "target_lane_initial_objective_skipped",
+                phase="initial",
+                reason="diagnose_target_lane_reporting_snapshot",
+            )
 
-    if args.init_only:
+    if args.init_only or args.diagnose_target_lane_reporting_snapshot:
         res_nit = 0
-        optimizer_success = True
-        termination_message = "init_only"
+        optimizer_success = not bool(args.diagnose_target_lane_reporting_snapshot)
+        termination_message = (
+            "diagnose_target_lane_reporting_snapshot"
+            if args.diagnose_target_lane_reporting_snapshot
+            else "init_only"
+        )
         final_volume = initial_volume
         final_iota = initial_iota
         final_max_curvature = initial_max_curvature
         fieldError = initial_field_error
-        print("Skipping single-stage optimizer because --init-only was provided.")
+        if args.diagnose_target_lane_reporting_snapshot:
+            print(
+                "Skipping initial target-lane value/gradient and optimizer because "
+                "--diagnose-target-lane-reporting-snapshot was provided."
+            )
+        else:
+            print("Skipping single-stage optimizer because --init-only was provided.")
     else:
         outer_optimizer_start_s = _perf_counter_s()
         outer_optimizer_run_start_s = outer_optimizer_start_s
@@ -16301,6 +16371,7 @@ if __name__ == "__main__":
             length_weight=LENGTH_WEIGHT,
             curvature_threshold=CURVATURE_THRESHOLD,
             curvature_weight=CURVATURE_WEIGHT,
+            record_outer_optimizer_event=record_outer_optimizer_event,
         )
         target_lane_init_reporting_end_s = _perf_counter_s()
         target_lane_init_reporting_snapshot_s = _record_timing(
@@ -16728,6 +16799,9 @@ if __name__ == "__main__":
         ),
         "diagnose_target_lane_scaled_phase1": bool(
             args.diagnose_target_lane_scaled_phase1
+        ),
+        "diagnose_target_lane_reporting_snapshot": bool(
+            args.diagnose_target_lane_reporting_snapshot
         ),
         "diagnostic_callbacks": bool(diagnostic_target_lane_callbacks),
         "record_target_lane_invalid_state_events": bool(
