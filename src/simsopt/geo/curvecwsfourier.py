@@ -62,6 +62,52 @@ def vjp_contraction_2d(mat, v):
     return np.einsum('ijk,ij->k',mat,v)
 
 
+def surfrz_gamma_lin_jax(quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym):
+    """Evaluate ``SurfaceRZFourier.gamma_lin`` at paired normalized angles."""
+    npts = quadpoints_phi.size
+    theta = quadpoints_theta * 2.0 * jnp.pi
+    phi = quadpoints_phi * 2.0 * jnp.pi
+    num_cos_modes = ntor + 1 + mpol * (2 * ntor + 1)
+    num_sin_modes = num_cos_modes - 1
+    rs_offset = num_cos_modes
+    zc_offset = num_cos_modes + num_sin_modes
+    zs_offset = num_cos_modes if stellsym else zc_offset + num_cos_modes
+
+    r = jnp.zeros((npts,))
+    z = jnp.zeros((npts,))
+    cos_counter = 0
+    sin_counter = 0
+    for mm in range(mpol + 1):
+        for nn in range(-ntor, ntor + 1):
+            if mm == 0 and nn < 0:
+                continue
+            angle = mm * theta - nn * nfp * phi
+            sin_angle = jnp.sin(angle)
+            cos_angle = jnp.cos(angle)
+            r = r + surf_dofs[cos_counter] * cos_angle
+            if not stellsym:
+                z = z + surf_dofs[zc_offset + cos_counter] * cos_angle
+            if not (mm == 0 and nn <= 0):
+                if not stellsym:
+                    r = r + surf_dofs[rs_offset + sin_counter] * sin_angle
+                z = z + surf_dofs[zs_offset + sin_counter] * sin_angle
+                sin_counter += 1
+            cos_counter += 1
+
+    gamma = jnp.zeros((npts, 3))
+    gamma = gamma.at[:, 0].set(r * jnp.cos(phi))
+    gamma = gamma.at[:, 1].set(r * jnp.sin(phi))
+    gamma = gamma.at[:, 2].set(z)
+    return gamma
+
+
+def gamma_curve_on_surfrz_surface(curve_dofs, qpts, order, G, H, surf_dofs, mpol, ntor, nfp, stellsym):
+    gamma2d = gamma_2d(curve_dofs, qpts, order, G, H)
+    return surfrz_gamma_lin_jax(
+        gamma2d[:, 0], gamma2d[:, 1], mpol, ntor, surf_dofs, nfp, stellsym
+    )
+
+
 class CurveCWSFourierCPP( Curve, sopp.Curve ):
     def __init__(self, quadpoints, order, surf, G=0, H=0, **kwargs):
         # Curve order. Number of Fourier harmonics for phi and theta
@@ -75,11 +121,13 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         #self.quadpoints = quadpoints
         self.surf = surf
 
-        # Initialize C++ class and Curve class   
+        # Initialize C++ class and Curve class
         sopp.Curve.__init__(self, quadpoints)
-        Curve.__init__(self, x0=self.get_dofs(), depends_on=[], names=self._make_names(), external_dof_setter=CurveCWSFourierCPP.set_dofs_impl, **kwargs)      
+        Curve.__init__(self, x0=self.get_dofs(), depends_on=[surf], names=self._make_names(), external_dof_setter=CurveCWSFourierCPP.set_dofs_impl, **kwargs)
 
         self.numquadpoints = self.quadpoints.size
+
+        points = jnp.asarray(self.quadpoints)
 
         ## gamma
         self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H))
@@ -87,17 +135,87 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.dgamma_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gamma_2d_jax)(cdofs))
         self.dgamma_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gamma_2d_jax, cdofs)[1](v)[0])
 
+        self.gamma_pure = jit(
+            lambda cdofs, sdofs, qpts: gamma_curve_on_surfrz_surface(
+                cdofs,
+                qpts,
+                self.order,
+                self.G,
+                self.H,
+                sdofs,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.stellsym,
+            )
+        )
+        self.gamma_jax = jit(lambda cdofs, sdofs: self.gamma_pure(cdofs, sdofs, points))
+        self.gamma_impl_jax = jit(lambda cdofs, sdofs, qpts: self.gamma_pure(cdofs, sdofs, qpts))
+        self.dgamma_by_dcoeff_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.gamma_jax(dofs, sdofs))(cdofs)
+        )
+        self.dgamma_by_dsurf_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.gamma_jax(cdofs, dofs))(sdofs)
+        )
+        self.dgamma_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.gamma_jax(dofs, sdofs), cdofs)[1](v)[0]
+        )
+        self.dgamma_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.gamma_jax(cdofs, dofs), sdofs)[1](v)[0]
+        )
+
         ## gammadash
         self.gammadash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gamma_2d_pure(cdofs, qpts), (q,), (jnp.ones_like(q),))[1])
         self.gammadash_2d_jax = jit(lambda cdofs: self.gammadash_2d_pure(cdofs, self.quadpoints))
         self.dgammadash_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gammadash_2d_jax)(cdofs))
         self.dgammadash_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gammadash_2d_jax, cdofs)[1](v)[0])
 
+        self.gammadash_pure = jit(
+            lambda cdofs, sdofs, qpts: jvp(
+                lambda points: self.gamma_pure(cdofs, sdofs, points),
+                (qpts,),
+                (jnp.ones_like(qpts),),
+            )[1]
+        )
+        self.gammadash_jax = jit(lambda cdofs, sdofs: self.gammadash_pure(cdofs, sdofs, points))
+        self.dgammadash_by_dcoeff_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.gammadash_jax(dofs, sdofs))(cdofs)
+        )
+        self.dgammadash_by_dsurf_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.gammadash_jax(cdofs, dofs))(sdofs)
+        )
+        self.dgammadash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.gammadash_jax(dofs, sdofs), cdofs)[1](v)[0]
+        )
+        self.dgammadash_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.gammadash_jax(cdofs, dofs), sdofs)[1](v)[0]
+        )
+
         ## gammadashdash
         self.gammadashdash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gammadash_2d_pure(cdofs, qpts), (q,), (jnp.ones_like(q),))[1])
         self.gammadashdash_2d_jax = jit(lambda cdofs: self.gammadashdash_2d_pure(cdofs, self.quadpoints))
         self.dgammadashdash_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gammadashdash_2d_jax)(cdofs))
         self.dgammadashdash_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gammadashdash_2d_jax, cdofs)[1](v)[0])
+        self.gammadashdash_pure = jit(
+            lambda cdofs, sdofs, qpts: jvp(
+                lambda points: self.gammadash_pure(cdofs, sdofs, points),
+                (qpts,),
+                (jnp.ones_like(qpts),),
+            )[1]
+        )
+        self.gammadashdash_jax = jit(lambda cdofs, sdofs: self.gammadashdash_pure(cdofs, sdofs, points))
+        self.dgammadashdash_by_dcoeff_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.gammadashdash_jax(dofs, sdofs))(cdofs)
+        )
+        self.dgammadashdash_by_dsurf_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.gammadashdash_jax(cdofs, dofs))(sdofs)
+        )
+        self.dgammadashdash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.gammadashdash_jax(dofs, sdofs), cdofs)[1](v)[0]
+        )
+        self.dgammadashdash_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.gammadashdash_jax(cdofs, dofs), sdofs)[1](v)[0]
+        )
 
 
         # determine sign for normal
@@ -162,42 +280,41 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         g2[:,:] =  self.gamma_2d_pure(cdofs, quadpoints)
     
     def gamma(self):
-        g2 = self.gamma_2d()
-        out = np.zeros((self.numquadpoints,3))
-        self.surf.gamma_lin(out, g2[:,0], g2[:,1])
-        return out
+        return np.asarray(self.gamma_jax(self.get_dofs(), self.surf.get_dofs()))
     
     def gamma_impl(self, gamma, quadpoints):
-        g2 = np.zeros((quadpoints.size,2))
-        self.gamma_2d_impl(g2, quadpoints)
-        self.surf.gamma_lin(gamma, g2[:,0], g2[:,1])
+        gamma[:, :] = np.asarray(
+            self.gamma_impl_jax(self.get_dofs(), self.surf.get_dofs(), quadpoints)
+        )
 
     def dgamma_2d_by_dcoeff(self):
         cdofs = self.get_dofs()
         return self.dgamma_2d_by_dcoeff_jax(cdofs)
 
     def dgamma_by_dcoeff(self):
-        g2 = self.gamma_2d()
-        dsurf_dphi = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
-        dsurf_dtheta = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
+        return np.asarray(self.dgamma_by_dcoeff_jax(self.get_dofs(), self.surf.get_dofs()))
 
-        dg2_by_dcoeff = self.dgamma_2d_by_dcoeff() # shape nqpts x 2 x ndofs
-        dphi_by_dcoeff = dg2_by_dcoeff[:,0,:] # shape nqpts x ndofs
-        dtheta_by_dcoeff = dg2_by_dcoeff[:,1,:] # shape nqpts x ndofs
-
-        # Evaluate dgamma_by_dcoeff, size nqpts x 3 x ndofs
-        return np.einsum('ij,ik->ijk', dsurf_dphi, dphi_by_dcoeff) + np.einsum('ij,ik->ijk', dsurf_dtheta, dtheta_by_dcoeff)
+    def dgamma_by_dsurf(self):
+        return np.asarray(self.dgamma_by_dsurf_jax(self.get_dofs(), self.surf.get_dofs()))
 
     def dgamma_by_dcoeff_impl(self, v):
         v[:,:,:] = self.dgamma_by_dcoeff()
 
     def dgamma_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgamma_by_dcoeff_vjp_impl(v)})
+        return Derivative({
+            self: self.dgamma_by_dcoeff_vjp_impl(v),
+            self.surf: self.dgamma_by_dsurf_vjp_impl(v),
+        })
         
     def dgamma_by_dcoeff_vjp_impl(self, v):
-        return vjp_contraction_2d(self.dgamma_by_dcoeff(), v)
+        return np.asarray(
+            self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
+
+    def dgamma_by_dsurf_vjp_impl(self, v):
+        return np.asarray(
+            self.dgamma_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
 
     #=========================================================================
     # GAMMADASH
@@ -215,63 +332,35 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         return self.dgammadash_2d_by_dcoeff_jax(cdofs)
     
     def gammadash(self):
-        g2 = self.gamma_2d()
-        dsurf_dphi = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
-        dsurf_dtheta = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
-
-        g2dash = self.gammadash_2d()
-        phidash = g2dash[:,0] # shape nqpts
-        thetadash = g2dash[:,1] # shape nqpts
-
-        # Evaluate dgamma_by_dcoeff, size nqpts x 3
-        return np.einsum('ij,i->ij', dsurf_dphi, phidash) + np.einsum('ij,i->ij', dsurf_dtheta, thetadash)
+        return np.asarray(self.gammadash_jax(self.get_dofs(), self.surf.get_dofs()))
     
     def gammadash_impl(self, gammadash):
         gammadash[:,:] = self.gammadash()
 
     def dgammadash_by_dcoeff(self):# dgammadash by dcoeff
-        g2 = self.gamma_2d()
-        dsurf_dphi = np.zeros((self.numquadpoints,3)) 
-        dsurf_dtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dphidphi = np.zeros((self.numquadpoints,3))
-        dsurf_dphidtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dthetadtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash1_lin(dsurf_dphidphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, g2[:,0], g2[:,1]) 
+        return np.asarray(self.dgammadash_by_dcoeff_jax(self.get_dofs(), self.surf.get_dofs()))
 
-        g2dash = self.gammadash_2d()
-        phidash = g2dash[:,0]
-        thetadash = g2dash[:,1]
-
-        dg2_by_dcoef = self.dgamma_2d_by_dcoeff()
-        dphi_by_dcoef = dg2_by_dcoef[:,0,:]
-        dtheta_by_dcoef = dg2_by_dcoef[:,1,:]
-
-        dg2dash_by_dcoeff = self.dgammadash_2d_by_dcoeff()
-        dphidash_by_dcoeff = dg2dash_by_dcoeff[:,0,:] # shape nqpts x ndofs
-        dthetadash_by_dcoeff = dg2dash_by_dcoeff[:,1,:] # shape nqpts x ndofs
-
-        # Evaluate dgamma_by_dcoeff, size nqpts x 3 x ndofs
-        return np.einsum('ij,ik->ijk', dsurf_dphi, dphidash_by_dcoeff) \
-             + np.einsum('ij,ik->ijk', dsurf_dtheta, dthetadash_by_dcoeff) \
-             + np.einsum('ij,i,ik->ijk', dsurf_dphidphi, phidash, dphi_by_dcoef) \
-             + np.einsum('ij,i,ik->ijk', dsurf_dphidtheta, phidash, dtheta_by_dcoef) \
-             + np.einsum('ij,i,ik->ijk', dsurf_dphidtheta, thetadash, dphi_by_dcoef) \
-             + np.einsum('ij,i,ik->ijk', dsurf_dthetadtheta, thetadash, dtheta_by_dcoef)
+    def dgammadash_by_dsurf(self):
+        return np.asarray(self.dgammadash_by_dsurf_jax(self.get_dofs(), self.surf.get_dofs()))
 
     def dgammadash_by_dcoeff_impl(self, v):
         v[:,:,:] = self.dgammadash_by_dcoeff()
 
     def dgammadash_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgammadash_by_dcoeff_vjp_impl(v)})
+        return Derivative({
+            self: self.dgammadash_by_dcoeff_vjp_impl(v),
+            self.surf: self.dgammadash_by_dsurf_vjp_impl(v),
+        })
         
     def dgammadash_by_dcoeff_vjp_impl(self, v):
-        return vjp_contraction_2d(self.dgammadash_by_dcoeff(), v)
+        return np.asarray(
+            self.dgammadash_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
+
+    def dgammadash_by_dsurf_vjp_impl(self, v):
+        return np.asarray(
+            self.dgammadash_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
 
  
     #=========================================================================
@@ -286,124 +375,36 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         g2[:,:] =  self.gammadashdash_2d_pure(cdofs, quadpoints)
     
     def gammadashdash(self):
-        g2 = self.gamma_2d()
-        dsurf_dphi = np.zeros((self.numquadpoints,3)) 
-        dsurf_dtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dphidphi = np.zeros((self.numquadpoints,3))
-        dsurf_dphidtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dthetadtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash1_lin(dsurf_dphidphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, g2[:,0], g2[:,1]) 
-
-        g2dash = self.gammadash_2d()
-        phidash = g2dash[:,0] # self.numquadpoints
-        thetadash = g2dash[:,1] # self.numquadpoints
-
-        g2dashdash = self.gammadashdash_2d()
-        phidashdash = g2dashdash[:,0] # self.numquadpoints
-        thetadashdash = g2dashdash[:,1] # self.numquadpoints
-
-        return np.einsum('ij,i->ij', dsurf_dphidphi, phidash**2) \
-             + np.einsum('ij,i->ij', dsurf_dthetadtheta, thetadash**2) \
-             + 2 * np.einsum('ij,i,i->ij', dsurf_dphidtheta, phidash, thetadash) \
-             + np.einsum('ij,i->ij', dsurf_dphi, phidashdash) \
-             + np.einsum('ij,i->ij', dsurf_dtheta, thetadashdash)
+        return np.asarray(self.gammadashdash_jax(self.get_dofs(), self.surf.get_dofs()))
         
     
     def gammadashdash_impl(self, gammadashdash):
         gammadashdash[:,:] = self.gammadashdash()
 
     def dgammadashdash_by_dcoeff(self):
-        # This is ugly, but I don't know how to make it better!
-        g2 = self.gamma_2d()
+        return np.asarray(self.dgammadashdash_by_dcoeff_jax(self.get_dofs(), self.surf.get_dofs()))
 
-        ## First order derivative
-        dsurf_dphi = np.zeros((self.numquadpoints,3)) 
-        dsurf_dtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
-
-        ## Second order derivative
-        dsurf_dphidphi = np.zeros((self.numquadpoints,3))
-        dsurf_dphidtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dthetadtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dphidphidphi = np.zeros((self.numquadpoints,3))
-        self.surf.gammadash1dash1_lin(dsurf_dphidphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, g2[:,0], g2[:,1]) 
-
-        ## Third order derivative
-        dsurf_dphidphidtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dphidthetadtheta = np.zeros((self.numquadpoints,3)) 
-        dsurf_dthetadthetadtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1dash1dash1_lin(dsurf_dphidphidphi, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash1dash2_lin(dsurf_dphidphidtheta, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2dash2_lin(dsurf_dphidthetadtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2dash2_lin(dsurf_dthetadthetadtheta, g2[:,0], g2[:,1]) 
-
-        cdofs = self.get_dofs()
-        dg2_by_dcoef = self.dgamma_2d_by_dcoeff_jax(cdofs)
-        dphi_by_dcoef = dg2_by_dcoef[:,0,:]
-        dtheta_by_dcoef = dg2_by_dcoef[:,1,:]
-
-        g2dash = self.gammadash_2d_jax(cdofs)
-        phidash = g2dash[:,0] # self.numquadpoints
-        thetadash = g2dash[:,1] # self.numquadpoints
-
-        g2dashdash = self.gammadashdash_2d_jax(cdofs)
-        phidashdash = g2dashdash[:,0] # self.numquadpoints
-        thetadashdash = g2dashdash[:,1] # self.numquadpoints
-
-        dg2dash_by_dcoeff = self.dgammadash_2d_by_dcoeff_jax(cdofs)
-        dphidash_by_dcoeff = dg2dash_by_dcoeff[:,0] # self.numquadpoints
-        dthetadash_by_dcoeff = dg2dash_by_dcoeff[:,1] # self.numquadpoints
-
-        dg2dashdash_by_dcoeff = self.dgammadashdash_2d_by_dcoeff_jax(cdofs)
-        dphidashdash_by_dcoeff = dg2dashdash_by_dcoeff[:,0] # self.numquadpoints
-        dthetadashdash_by_dcoeff = dg2dashdash_by_dcoeff[:,1] # self.numquadpoints
-
-        # l1-l6 denotes lines in my hand-written notes...
-        l1 = np.einsum('ij,ik,i->ijk', dsurf_dthetadthetadtheta, dtheta_by_dcoef, thetadash**2) \
-           + np.einsum('ij,ik,i,i->ijk', dsurf_dphidthetadtheta, dtheta_by_dcoef, thetadash, phidash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dthetadtheta, dthetadash_by_dcoeff, thetadash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dthetadtheta, dtheta_by_dcoef, thetadashdash)
-        
-        l2 = np.einsum('ij,ik,i,i->ijk', dsurf_dphidthetadtheta, dtheta_by_dcoef, thetadash, phidash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidphidtheta, dtheta_by_dcoef, phidash**2) \
-           + np.einsum('ij,ik,i->ijk',dsurf_dphidtheta, dthetadash_by_dcoeff,phidash) \
-           + np.einsum('ij,ik,i->ijk',dsurf_dphidtheta,dtheta_by_dcoef,phidashdash)
-        
-        l3 = np.einsum('ij,ik,i->ijk',dsurf_dthetadtheta,dthetadash_by_dcoeff,thetadash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidtheta, dthetadash_by_dcoeff, phidash) \
-           + np.einsum('ij,ik->ijk', dsurf_dtheta, dthetadashdash_by_dcoeff)
-        
-        l4 = np.einsum('ij,ik,i,i->ijk', dsurf_dphidphidtheta, dphi_by_dcoef, thetadash, phidash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidphidphi, dphi_by_dcoef, phidash**2) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidphi, dphidash_by_dcoeff, phidash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidphi, dphi_by_dcoef, phidashdash)
-        
-        l5 = np.einsum('ij,ik,i->ijk', dsurf_dphidthetadtheta, dphi_by_dcoef, thetadash**2) \
-           + np.einsum('ij,ik,i,i->ijk', dsurf_dphidphidtheta, dphi_by_dcoef, phidash, thetadash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidtheta, dphidash_by_dcoeff, thetadash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidtheta, dphi_by_dcoef, thetadashdash)
-        
-        l6 = np.einsum('ij,ik,i->ijk', dsurf_dphidtheta, dphidash_by_dcoeff, thetadash) \
-           + np.einsum('ij,ik,i->ijk', dsurf_dphidphi, dphidash_by_dcoeff, phidash) \
-           + np.einsum('ij,ik->ijk', dsurf_dphi, dphidashdash_by_dcoeff)
-
-        return l1 + l2 + l3 + l4 + l5 + l6
+    def dgammadashdash_by_dsurf(self):
+        return np.asarray(self.dgammadashdash_by_dsurf_jax(self.get_dofs(), self.surf.get_dofs()))
 
     def dgammadashdash_by_dcoeff_impl(self, v):
         v[:,:,:] = self.dgammadashdash_by_dcoeff()
 
     def dgammadashdash_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgammadashdash_by_dcoeff_vjp_impl(v)})
+        return Derivative({
+            self: self.dgammadashdash_by_dcoeff_vjp_impl(v),
+            self.surf: self.dgammadashdash_by_dsurf_vjp_impl(v),
+        })
         
     def dgammadashdash_by_dcoeff_vjp_impl(self, v):
-        return vjp_contraction_2d(self.dgammadashdash_by_dcoeff(), v)
+        return np.asarray(
+            self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
+
+    def dgammadashdash_by_dsurf_vjp_impl(self, v):
+        return np.asarray(
+            self.dgammadashdash_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
     
     #=========================================================================
     # NORMAL
@@ -482,4 +483,3 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     def drfactor_by_dcoeff_vjp(self, v):
         return Derivative({self: vjp_contraction_1d(self.drfactor_by_dcoeff(), v)})
     
-
