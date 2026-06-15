@@ -1,6 +1,6 @@
 # HANDOFF — Single-stage 11-vs-51 matrix → host-driven SciPy + fair comparison
 
-> Last updated: 2026-06-15 05:33 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
+> Last updated: 2026-06-15 06:29 EDT · Status: Migration + inner-Boozer fix + fair-comparison protocol +
 > compile-diagnostics wiring + donor trial-policy fix all COMMITTED (code-bearing commit `5f14a1463`; this
 > handoff is the operational launch-state source of truth).
 > **CORRECTION (06-15 doc-review): the iota15 fixture `benchmarks/fixtures/single_stage_seed_iota15` is
@@ -24,8 +24,13 @@
 > donor probe jobs from checkout `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`:
 > primary full-node 4 h / `DONOR_MAXITER=60` job `54483185`, backfill-friendly non-exclusive `mem=180G` 4 h /
 > `DONOR_MAXITER=60` job `54483605`, and backup full-node 12 h / `DONOR_MAXITER=300` job `54482812`.
-> Added CPU-JAX fallback job `54484362` (`-C cpu`, shared QOS, `--mem=180G`, `DONOR_MAXITER=60`) to test the
-> same JAX runtime-seed donor path without waiting on the GPU queue. All are pending `Priority` at last check.
+> Added CPU-JAX fallback. First full CPU-JAX job `54484362` failed before physics because Slurm stdout landed
+> inside the checkout and tripped the clean-source guard (`?? slurm-54484362.out`); stdout/stderr paths were
+> moved out of the checkout and corrected CPU-JAX full job `54485382` is now RUNNING. Debug smoke `54484779`
+> proved the CPU-JAX runtime path reaches Boozer Newton setup before its 30 min timeout. Live at 06:29 EDT:
+> `54483185` (GPU full-node) and `54485382` (CPU-JAX 180G) are RUNNING; both preserved the iota15 branch through
+> BFGS to `iota=0.1500517720536309`, `objective=6.075541041282424e-06`, `grad_inf=3.56e-09`, and are waiting at
+> `before_boozer_newton` with `newton_polish_policy=run`. `54483605` and `54482812` remain pending backups.
 > Previous job `54477744` was cancelled before start because its submitted
 > script still used the bad `--nphi 64 --ntheta 32` runtime-spec mismatch. **RunPod H100 probe harvested, no
 > donor:** pod `ecxt9xwaudcejo`; first command
@@ -54,9 +59,11 @@ step is still **donor-gated**. The iota15 fixture is a useful mpol10 Stage 2 see
 not a continuation donor accepted by the high-resolution harness contract. Native continuation from this seed
 falls to the near-zero-iota branch; JAX preserves the branch but needs more host/container memory than the
 current A100 PCIe pod exposed. Current attempts are **Perlmutter job `54483185`** (GPU full-node 4 h,
-`DONOR_MAXITER=60`), **Perlmutter job `54483605`** (GPU non-exclusive `mem=180G`, 4 h,
-`DONOR_MAXITER=60`), **Perlmutter job `54484362`** (CPU-JAX shared `mem=180G`, 4 h,
-`DONOR_MAXITER=60`), and backup job `54482812` (GPU full-node 12 h / `DONOR_MAXITER=300`). All supersede
+`DONOR_MAXITER=60`, RUNNING), **corrected Perlmutter job `54485382`** (CPU-JAX shared `mem=180G`, 4 h,
+`DONOR_MAXITER=60`, RUNNING), **Perlmutter job `54483605`** (GPU non-exclusive `mem=180G`, 4 h,
+`DONOR_MAXITER=60`, pending backup), and backup job `54482812` (GPU full-node 12 h / `DONOR_MAXITER=300`,
+pending backup). First CPU-JAX full job `54484362` failed only because Slurm stdout dirtied the checkout; it did
+not reach physics. Debug smoke `54484779` reached `before_boozer_newton` and timed out without OOM. These jobs supersede
 cancelled job `54477744`, which had the wrong quadrature flags. The harvested RunPod H100 probe confirms
 the RunPod command must match the fixture runtime spec:
 `--nphi 255 --ntheta 64` (`single_stage_jax_runtime_spec.json`: `quadrature.nphi=255`,
@@ -67,17 +74,25 @@ donor completes, run CPU/CUDA fair compare from that donor. If the Perlmutter jo
 RunPod class only after confirming container RAM >120 GB, or make a code-level seed-preservation fix.
 
 ## 3. NEXT ACTIONS (start here on resume)
-0. [ ] **Monitor high-memory JAX donor jobs `54483185`, `54483605`, `54484362`, and `54482812`, then CPU/CUDA compare.** Native donor
+0. [ ] **Monitor high-memory JAX donor jobs `54483185`, `54485382`, `54483605`, and `54482812`, then CPU/CUDA compare.** Native donor
        continuation is now a
        dead end for this seed (falls to iota ~0.0035 and writes `REJECTED.json`). Build the donor with the JAX
        path that preserves the iota15 branch, but run it on a node/container with enough host RAM for the dense
        Newton/target-lane graph. Current Perlmutter launch:
-       `ssh perlmutter 'squeue -j 54483185,54483605,54484362,54482812 -o "%i %j %T %M %L %R"; sacct -j 54483185,54483605,54484362,54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start -n'`.
-       Primary full-node: `54483185` (`DONOR_MAXITER=60`, 4 h). Backfill-friendly midmem:
-       `54483605` (`DONOR_MAXITER=60`, 4 h, script `jax_mpol10_donor_midmem_180g.slurm`, `--mem=180G`,
-       non-exclusive). CPU-JAX fallback: `54484362` (`DONOR_MAXITER=60`, 4 h, script
+       `ssh perlmutter 'squeue -j 54483185,54485382,54483605,54482812 -o "%i %j %T %M %L %R"; sacct -j 54483185,54485382,54484362,54484779,54483605,54482812 -X -o JobID,JobName,State,Elapsed,ExitCode%20,Start,End -n'`.
+       Primary full-node: `54483185` (`DONOR_MAXITER=60`, 4 h; RUNNING since 2026-06-15 03:04 PDT).
+       Corrected CPU-JAX fallback: `54485382` (`DONOR_MAXITER=60`, 4 h, script
        `jax_mpol10_donor_cpujax_180g.slurm`, `-C cpu`, shared QOS, `--mem=180G`, `jax_cpu_parity`,
-       `JAX_PLATFORMS=cpu`). Backup full-node: `54482812` (`DONOR_MAXITER=300`, 12 h).
+       `JAX_PLATFORMS=cpu`; RUNNING since 2026-06-15 03:08 PDT). Backfill-friendly midmem:
+       `54483605` (`DONOR_MAXITER=60`, 4 h, script `jax_mpol10_donor_midmem_180g.slurm`, `--mem=180G`,
+       non-exclusive; pending). Backup full-node: `54482812` (`DONOR_MAXITER=300`, 12 h; pending).
+       First CPU-JAX full job `54484362` failed before physics because `slurm-54484362.out` was written inside
+       the checkout and tripped the clean-source guard; fixed by moving Slurm stdout/stderr out of the checkout
+       and resubmitting as `54485382`. CPU-JAX debug smoke `54484779` timed out at the Newton boundary but
+       proved setup + branch preservation path through BFGS.
+       Live useful signal from `54483185` and `54485382`: both reached
+       `before_boozer_newton` after BFGS with `iota=0.1500517720536309`, `objective=6.075541041282424e-06`,
+       and `grad_inf=3.5611373073486663e-09`. This is not a donor yet; wait for artifacts/exit status.
        If one starts and reaches a useful donor/result first, cancel the others to avoid duplicate GPU burn.
        Script:
        `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/slurm/jax_mpol10_donor.slurm`.
@@ -176,11 +191,12 @@ RunPod class only after confirming container RAM >120 GB, or make a code-level s
   `/pscratch/sd/j/jungdae/ss-prod-94f6ea838-20260615T003257Z/checkout` (@94f6ea838); RUN_ROOT
   `.../ss-prod-94f6ea838-20260615T003257Z/runs`. Donor job **54462557** (`-A m4680`, native_cpu) FAILED.
   Background poll IDs are not authoritative; verify live state with direct `sacct` for any new Perlmutter job.
-- **Perlmutter active JAX donors**: primary full-node job `54483185` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`),
-  midmem job `54483605` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`, `--mem=180G`, non-exclusive), and backup
-  full-node job `54482812` (`-A m4680_g`, 12 h, `DONOR_MAXITER=300`). CPU-JAX fallback job `54484362`
-  (`-A m4680`, `-C cpu`, shared QOS, `--mem=180G`, 4 h, `DONOR_MAXITER=60`) uses the same checkout and run
-  root. All use checkout
+- **Perlmutter active JAX donors**: primary full-node job `54483185` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`,
+  RUNNING), corrected CPU-JAX fallback `54485382` (`-A m4680`, `-C cpu`, shared QOS, `--mem=180G`, 4 h,
+  `DONOR_MAXITER=60`, RUNNING), midmem job `54483605` (`-A m4680_g`, 4 h, `DONOR_MAXITER=60`, `--mem=180G`,
+  non-exclusive, pending), and backup full-node job `54482812` (`-A m4680_g`, 12 h, `DONOR_MAXITER=300`,
+  pending). First CPU-JAX full job `54484362` failed before physics on the clean-source guard because Slurm
+  stdout landed in the checkout; debug smoke `54484779` reached the Newton boundary and timed out. All use checkout
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/checkout`, runs
   `/pscratch/sd/j/jungdae/ss-jax-donor-306d53bdc-20260615T074239Z/runs`). They supersede cancelled job
   `54477744` (`--nphi 64 --ntheta 32` mismatch). For the GPU full-node scripts, `scontrol` reported
