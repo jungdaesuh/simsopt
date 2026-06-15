@@ -18,7 +18,7 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from scipy.optimize import minimize
-from simsopt.field import Current, Coil, apply_symmetries_to_curves
+from simsopt.field import BiotSavart, Current, Coil, apply_symmetries_to_curves
 from simsopt.geo import (
     curves_to_vtk,
     create_equally_spaced_curves,
@@ -28,6 +28,10 @@ from simsopt.geo import (
     LpCurveCurvature,
 )
 from simsopt.geo.curveobjectives import CurveSurfaceDistance
+from simsopt.geo.framedcurve import (
+    FramedCurveSurfaceTangent,
+    surface_tangent_normal_direction,
+)
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 
 from alm_utils import (
@@ -64,6 +68,7 @@ from banana_opt.constraint_contract import (
     resolve_constraint_contract_from_wire_names,
 )
 from banana_opt.coil_order_upgrade import (
+    realized_cws_winding_radii,
     upgrade_loaded_seed_biot_savart_order,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
@@ -74,7 +79,11 @@ from banana_opt.basin_hopping import (
 from banana_opt.stage2_geometry import (
     FiniteBuildSettings,
     VFCoilBuildResult,
+    build_finite_build_banana_coils,
     coerce_vf_coil_build_result,
+    curve_curve_min_distance_segments_m,
+    curve_surface_min_distance_segments_m,
+    finite_build_frame_aware_curvature_limit_inv_m,
     initialize_coils as _initialize_coils,
     is_self_intersecting,
     load_plasma_geometry_for_working_major_radius,
@@ -86,7 +95,13 @@ from banana_opt.stage2_geometry import (
     surface_surface_min_distance as _surface_surface_min_distance,
 )
 from banana_opt.hardware_contracts import (
+    BANANA_CC_OBJECTIVE_MARGIN_M,
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
+    BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION,
+    BANANA_SELF_DISTANCE_WINDOW_M,
+    BANANA_SELF_ENVELOPE_GROC_RADIUS_FLOOR_M,
+    BANANA_SELF_ENVELOPE_MIN_DISTANCE_M,
     BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
     BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR,
     BANANA_WIDTH_MAX_M,
@@ -98,17 +113,26 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_MIN_FRACTION,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
+    HARDWARE_KEEPOUT_MIN_DISTANCE_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    STAGE2_HARDWARE_KEEPOUT_WEIGHT_DEFAULT,
     STAGE2_POLOIDAL_WEIGHT_DEFAULT,
     STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT,
+    STAGE2_VESSEL_KEEPOUT_WEIGHT_DEFAULT,
     STAGE2_WIDTH_WEIGHT_DEFAULT,
     TF_CURRENT_CW_DEFAULT_A,
     TARGET_LCFS_MAX_MAJOR_RADIUS_M,
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_HARD_LIMIT_A,
+    TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+    TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
+    TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    required_banana_cc_centerline_m,
     validate_banana_winding_surface_radius,
     validate_coil_length_target,
     validate_major_radius,
@@ -119,6 +143,18 @@ from banana_opt.hardware_contracts import (
 from banana_opt.hardware_constraint_schema import (
     build_bootability_recovery_payload_fields,
     hardware_constraint_alm_names,
+)
+from banana_opt.hardware_keepout import (
+    CurveHardwareKeepout,
+    CurveVesselEnvelopeKeepout,
+    hardware_keepout_metadata,
+    hardware_keepout_results_fields,
+    load_hardware_keepout,
+)
+from banana_opt.stage2_resonant_flux import (
+    MAX_RESONANT_DENOMINATOR,
+    build_stage2_resonant_flux_penalty,
+    enumerate_resonant_rationals,
 )
 from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR
 from banana_opt.current_contracts import (
@@ -167,6 +203,7 @@ from banana_opt.wout_convention import wout_convention_artifact_fields
 from topology_scorer import padded_bounds
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
+    build_stage2_iota_runtime,
     build_stage2_results as _build_stage2_results_impl,
     evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem,
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
@@ -179,12 +216,17 @@ from banana_opt.stage2_objectives import (
     validate_stage2_coil_partition_counts,
 )
 from banana_opt.ellipse_width import ProjectedEllipseWidth
+from banana_opt.fold_buildability import CurveSurfaceGeodesicCurvature
 from banana_opt.poloidal_extent import (
     PoloidalExtent,
     max_poloidal_extent_rad,
     smooth_max_poloidal_extent_signed_constraint,
 )
-from banana_opt.self_intersect import CurveSelfIntersect
+from banana_opt.self_intersect import (
+    CurveGlobalRadiusOfCurvature,
+    CurveSelfDistance,
+    CurveSelfIntersect,
+)
 
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -192,6 +234,22 @@ DEFAULT_EQUILIBRIA_DIR = (
     DATABASE_EQUILIBRIA_DIR
     if os.path.isdir(DATABASE_EQUILIBRIA_DIR)
     else os.path.join(EXAMPLE_ROOT, "equilibria")
+)
+# Same exported shells/sensors/solenoid/REMC/limiter/quartz point cloud the
+# single-stage path consumes (SINGLE_STAGE DEFAULT_HARDWARE_KEEPOUT_JSON_PATH).
+DEFAULT_HARDWARE_KEEPOUT_JSON_PATH = os.path.join(
+    REPO_ROOT,
+    "CAD",
+    "banana_coils",
+    "hbt_clearance_viewer",
+    "tools",
+    "hardware_keepout.json",
+)
+DEFAULT_HARDWARE_KEEPOUT_GLB_PATH = os.path.join(
+    REPO_ROOT,
+    "CAD",
+    "banana_coils",
+    "hbt_assembly.glb",
 )
 DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
 DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
@@ -222,6 +280,7 @@ def stage2_alm_constraint_names(
     *,
     include_coil_surface: bool,
     include_poloidal_extent: bool = False,
+    include_hardware_keepout: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
     available_names = {
@@ -238,6 +297,8 @@ def stage2_alm_constraint_names(
         available_names.add("coil_surface_spacing")
     if include_poloidal_extent:
         available_names.add("poloidal_extent")
+    if include_hardware_keepout:
+        available_names.add("hardware_keepout")
     constraint_names = list(hardware_constraint_alm_names(names=available_names))
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
@@ -293,11 +354,25 @@ def validate_banana_current_cli_args(args) -> None:
 
 def validate_finite_build_cli_args(args) -> None:
     if not getattr(args, "finite_build", False):
+        if getattr(args, "finitebuild_frame_aware_curvature_threshold", None) is True:
+            raise ValueError(
+                "--finitebuild-frame-aware-curvature-threshold is incompatible "
+                "with --filament-only (the frame-aware limit is derived from "
+                "finite-build winding-pack geometry)."
+            )
         return
-    if getattr(args, "stage2_bs_path", None):
+    # --finite-build + --stage2-bs-path is a warm start: the multi-filament pack
+    # is built from the seed's master banana curve and seed banana current
+    # (load_stage2_seed_configuration), not a fresh circle. The jhalpern30
+    # current path has no finite-build pack, so reject that combination only.
+    if (
+        getattr(args, "stage2_bs_path", None)
+        and getattr(args, "finite_current_mode", DEFAULT_FINITE_CURRENT_MODE)
+        == JHALPERN30_FINITE_CURRENT_MODE
+    ):
         raise ValueError(
-            "--finite-build is not supported with --stage2-bs-path in this "
-            "version; finite-build optimization starts from a fresh banana coil."
+            "--finite-build is not supported with a jhalpern30 --stage2-bs-path "
+            "seed; the jhalpern30 banana current path has no finite-build pack."
         )
     if int(args.finitebuild_numfilaments_n) <= 0:
         raise ValueError("--finitebuild-numfilaments-n must be positive.")
@@ -317,6 +392,208 @@ def validate_finite_build_cli_args(args) -> None:
             "--finitebuild-pin-current is supported only with "
             "--constraint-method penalty (the pinned current DOF has no box bound)."
         )
+
+
+def validate_stage2_vessel_keepout_cli_args(args) -> None:
+    if float(args.stage2_vessel_keepout_weight) < 0.0:
+        raise ValueError("--stage2-vessel-keepout-weight must be >= 0.")
+
+
+def resolve_stage2_resonant_iota_target(args):
+    """Explicit config resolution for the audit-8 resonant flux reweighting:
+    the dedicated --stage2-resonant-iota-target wins; otherwise the existing
+    Stage-2 iota-target plumbing (--stage2-iota-target / STAGE2_IOTA_TARGET)
+    is reused so iota-targeted lanes opt in with a single weight flag.
+    Returns None when neither is configured (the validator rejects that
+    combination whenever the weight is nonzero)."""
+    if args.stage2_resonant_iota_target is not None:
+        return float(args.stage2_resonant_iota_target)
+    if args.stage2_iota_target is not None:
+        return float(args.stage2_iota_target)
+    return None
+
+
+def resolve_stage2_resonant_qmax(args) -> int:
+    q_max = int(
+        getattr(
+            args,
+            "stage2_resonant_qmax",
+            MAX_RESONANT_DENOMINATOR,
+        )
+    )
+    if q_max < 1:
+        raise ValueError(f"--stage2-resonant-qmax must be >= 1; got {q_max}.")
+    if q_max > MAX_RESONANT_DENOMINATOR:
+        raise ValueError(
+            f"--stage2-resonant-qmax must be <= {MAX_RESONANT_DENOMINATOR}; "
+            f"got {q_max}."
+        )
+    return q_max
+
+
+def validate_stage2_resonant_flux_cli_args(args) -> None:
+    """Audit-8 CLI contract: weight >= 0; a nonzero weight requires an iota
+    target and a non-empty q<=MAX_RESONANT_DENOMINATOR rational window (checked here so a
+    misconfigured lane dies at argparse time, not mid-setup)."""
+    weight = float(args.stage2_resonant_flux_weight)
+    if weight < 0.0:
+        raise ValueError("--stage2-resonant-flux-weight must be >= 0.")
+    q_max = resolve_stage2_resonant_qmax(args)
+    if weight == 0.0:
+        return
+    iota_target = resolve_stage2_resonant_iota_target(args)
+    if iota_target is None:
+        raise ValueError(
+            "--stage2-resonant-flux-weight > 0 requires "
+            "--stage2-resonant-iota-target (or --stage2-iota-target)."
+        )
+    rationals = enumerate_resonant_rationals(
+        iota_target,
+        float(args.stage2_resonant_delta),
+        q_max,
+    )
+    if not rationals:
+        raise ValueError(
+            f"no rationals p/q with q <= {int(args.stage2_resonant_qmax)} lie "
+            f"within +/-{float(args.stage2_resonant_delta)} of iota target "
+            f"{iota_target}; a nonzero --stage2-resonant-flux-weight would be "
+            "a silent no-op."
+        )
+
+
+def stage2_self_envelope_default_floor(mode: str) -> float:
+    if mode == "groc":
+        return float(BANANA_SELF_ENVELOPE_GROC_RADIUS_FLOOR_M)
+    if mode in {"hinge", "off"}:
+        return float(BANANA_SELF_ENVELOPE_MIN_DISTANCE_M)
+    raise ValueError("--self-envelope-mode must be one of: hinge, groc, off.")
+
+
+def resolve_stage2_self_envelope_floor(args) -> float:
+    mode = str(getattr(args, "self_envelope_mode", "hinge"))
+    explicit_floor = getattr(args, "self_envelope_floor", None)
+    if explicit_floor is None:
+        return stage2_self_envelope_default_floor(mode)
+    return float(explicit_floor)
+
+
+def validate_stage2_buildability_objective_cli_args(args) -> None:
+    self_envelope_mode = str(getattr(args, "self_envelope_mode", "hinge"))
+    self_envelope_weight = float(getattr(args, "self_envelope_weight", 1.0))
+    self_envelope_floor = resolve_stage2_self_envelope_floor(args)
+    self_distance_window = float(
+        getattr(args, "self_distance_window", BANANA_SELF_DISTANCE_WINDOW_M)
+    )
+    self_envelope_sampling_margin = float(
+        getattr(args, "self_envelope_sampling_margin", 0.0)
+    )
+    cc_objective_margin = float(
+        getattr(args, "cc_objective_margin", BANANA_CC_OBJECTIVE_MARGIN_M)
+    )
+    fold_weight = float(getattr(args, "fold_weight", 1.0))
+    fold_limit = float(
+        getattr(
+            args,
+            "fold_geodesic_curvature_limit",
+            BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
+        )
+    )
+    fold_margin = float(
+        getattr(
+            args,
+            "fold_geodesic_curvature_margin_fraction",
+            BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION,
+        )
+    )
+    if self_envelope_mode not in {"hinge", "groc", "off"}:
+        raise ValueError("--self-envelope-mode must be one of: hinge, groc, off.")
+    if not np.isfinite(self_envelope_weight) or self_envelope_weight < 0.0:
+        raise ValueError("--self-envelope-weight must be finite and >= 0.")
+    if not np.isfinite(self_envelope_floor) or self_envelope_floor <= 0.0:
+        raise ValueError("--self-envelope-floor must be finite and > 0.")
+    if not np.isfinite(self_distance_window) or self_distance_window < 0.0:
+        raise ValueError("--self-distance-window must be finite and >= 0.")
+    if (
+        not np.isfinite(self_envelope_sampling_margin)
+        or self_envelope_sampling_margin < 0.0
+    ):
+        raise ValueError("--self-envelope-sampling-margin must be finite and >= 0.")
+    if self_envelope_mode != "hinge" and self_envelope_sampling_margin > 0.0:
+        raise ValueError(
+            "--self-envelope-sampling-margin is only supported with "
+            "--self-envelope-mode hinge."
+        )
+    if not np.isfinite(cc_objective_margin) or cc_objective_margin < 0.0:
+        raise ValueError("--cc-objective-margin must be finite and >= 0.")
+    if not np.isfinite(fold_weight) or fold_weight < 0.0:
+        raise ValueError("--fold-weight must be finite and >= 0.")
+    if not np.isfinite(fold_limit) or fold_limit <= 0.0:
+        raise ValueError("--fold-geodesic-curvature-limit must be finite and > 0.")
+    if not np.isfinite(fold_margin) or not (0.0 <= fold_margin < 1.0):
+        raise ValueError(
+            "--fold-geodesic-curvature-margin-fraction must be finite and in [0, 1)."
+        )
+
+
+def build_stage2_resonant_flux_term_if_requested(args, surface, field):
+    """Weight-gated audit-8 construction. Returns ``(term, weight, rationals)``;
+    the default weight 0.0 returns ``(None, 0.0, ())`` WITHOUT constructing
+    any new objects, keeping the legacy objective graph byte-identical."""
+    weight = float(args.stage2_resonant_flux_weight)
+    if weight < 0.0:
+        raise ValueError("--stage2-resonant-flux-weight must be >= 0.")
+    q_max = resolve_stage2_resonant_qmax(args)
+    if weight == 0.0:
+        return None, 0.0, ()
+    term, rationals = build_stage2_resonant_flux_penalty(
+        surface,
+        field,
+        iota_target=resolve_stage2_resonant_iota_target(args),
+        delta=float(args.stage2_resonant_delta),
+        q_max=q_max,
+    )
+    return term, weight, rationals
+
+
+def stage2_frame_aware_curvature_tightening(
+    curvature_threshold_inv_m,
+    finite_build_settings,
+    opt_in,
+):
+    """Audit 5a: tighten the in-run curvature threshold when enabled.
+
+    Returns ``(threshold_inv_m, pack_limit_inv_m, applied)``;
+    ``pack_limit_inv_m`` is ``None`` when tightening is off, and ``applied`` is
+    False whenever the caller threshold was already at least as strict as the
+    pack limit.
+    """
+    if not opt_in:
+        return float(curvature_threshold_inv_m), None, False
+    if finite_build_settings is None:
+        # Broken contract: the limit derives from the winding-pack
+        # geometry, so it cannot be honored without finite-build settings. The
+        # CLI gate (validate_finite_build_cli_args) already rejects this combo;
+        # raise loudly rather than silently skipping the requested tightening.
+        raise ValueError(
+            "frame-aware curvature tightening was requested but no finite-build "
+            "settings are present; the limit is derived from the winding-pack "
+            "geometry and cannot be applied without --finite-build."
+        )
+    pack_limit_inv_m = finite_build_frame_aware_curvature_limit_inv_m(
+        finite_build_settings,
+        TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+    )
+    if pack_limit_inv_m < float(curvature_threshold_inv_m):
+        return pack_limit_inv_m, pack_limit_inv_m, True
+    return float(curvature_threshold_inv_m), pack_limit_inv_m, False
+
+
+def stage2_frame_aware_curvature_threshold_enabled(args) -> bool:
+    """Default the Type-KK bend-radius objective on for finite-build runs."""
+    raw_value = getattr(args, "finitebuild_frame_aware_curvature_threshold", None)
+    if raw_value is None:
+        return bool(getattr(args, "finite_build", False))
+    return bool(raw_value)
 
 
 def resolve_finite_build_settings(args):
@@ -440,6 +717,23 @@ def validate_stage2_iota_cli_args(args) -> None:
         stage2_iota_mpol=args.stage2_iota_mpol,
         stage2_iota_ntor=args.stage2_iota_ntor,
     )
+    stage2_iota_objective_mode = getattr(
+        args,
+        "stage2_iota_objective_mode",
+        "report",
+    )
+    if stage2_iota_objective_mode == "report":
+        return
+    if args.stage2_iota_target is None:
+        raise ValueError(
+            "--stage2-iota-objective-mode=soft requires --stage2-iota-target."
+        )
+    if args.constraint_method == "alm":
+        raise ValueError(
+            "--stage2-iota-objective-mode=soft is only supported by the "
+            "penalty/L-BFGS and basin-hopping Stage 2 paths; the ALM hard-iota "
+            "constraint remains disabled."
+        )
 
 
 def validate_s_hel_objective_cli_args(args) -> None:
@@ -452,6 +746,58 @@ def validate_s_hel_objective_cli_args(args) -> None:
 
 def resolve_stage2_iota_constraint_weight(constraint_weight: float) -> float | None:
     return canonical_stage2_iota_constraint_weight(constraint_weight)
+
+
+def stage2_iota_runtime_is_active(stage2_iota_runtime) -> bool:
+    return str(getattr(stage2_iota_runtime, "mode", "")) in {
+        "soft",
+        "alm",
+        "alm-floor",
+    }
+
+
+def build_stage2_iota_runtime_if_requested(
+    *,
+    args,
+    equilibrium_file,
+    bs,
+    tf_coils,
+    major_radius,
+    toroidal_flux,
+    proxy_plasma_current_A,
+    boozer_current_convention,
+):
+    stage2_iota_objective_mode = getattr(
+        args,
+        "stage2_iota_objective_mode",
+        "report",
+    )
+    if stage2_iota_objective_mode == "report":
+        return None
+    return build_stage2_iota_runtime(
+        equilibrium_file=equilibrium_file,
+        bs=bs,
+        tf_coils=tf_coils,
+        major_radius=major_radius,
+        toroidal_flux=toroidal_flux,
+        nphi=args.stage2_iota_nphi,
+        ntheta=args.stage2_iota_ntheta,
+        mpol=args.stage2_iota_mpol,
+        ntor=args.stage2_iota_ntor,
+        vol_target=args.stage2_iota_vol_target,
+        iota_target=float(args.stage2_iota_target),
+        iota_tolerance=args.stage2_iota_tolerance,
+        constraint_weight=resolve_stage2_iota_constraint_weight(
+            args.stage2_iota_constraint_weight,
+        ),
+        num_tf_coils=args.stage2_iota_num_tf_coils,
+        mode=stage2_iota_objective_mode,
+        weight=1.0,
+        boozer_I=physical_current_to_boozer_I(
+            proxy_plasma_current_A,
+            convention=boozer_current_convention,
+        ),
+    )
 
 
 def resolve_s_hel_objective_weight(args) -> float:
@@ -920,6 +1266,17 @@ def parse_args():
         help="Target iota used by the optional Stage 2 reporting-only probe.",
     )
     parser.add_argument(
+        "--stage2-iota-objective-mode",
+        choices=("report", "soft"),
+        default=os.environ.get("STAGE2_IOTA_OBJECTIVE_MODE", "report"),
+        help=(
+            "How --stage2-iota-target is used. 'report' keeps the current "
+            "post-run bootability probe only. 'soft' enables the existing "
+            "Boozer/iota soft-penalty objective in penalty and basin-hopping "
+            "Stage 2 runs."
+        ),
+    )
+    parser.add_argument(
         "--stage2-iota-tolerance",
         type=float,
         default=float(
@@ -1111,7 +1468,21 @@ def parse_args():
         "--length-weight",
         type=float,
         default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
-        help="Curve-length penalty weight.",
+        help="Curve-length penalty weight (soft target at --length-target).",
+    )
+    parser.add_argument(
+        "--length-min-weight",
+        type=float,
+        default=float(os.environ.get("LENGTH_MIN_WEIGHT", "1.0")),
+        help="Weight on the one-sided below-floor curve-length penalty, separate "
+        "from --length-weight. The floor is 0.5 * --length-target; the penalty is "
+        "0.5 * w * min(L - floor, 0)^2 and is exactly zero for L >= floor (no "
+        "effect on runs that stay above it). The soft --length-weight (default "
+        "0.0005) cannot hold this floor on its own, so a degenerate small-coil "
+        "basin is reachable; default 1.0 keeps the optimizer above the floor. "
+        "Legacy-replay note: pre-split runs combined this term with --length-weight "
+        "(both at LENGTH_WEIGHT~=5e-4); to reproduce that exact below-floor "
+        "strength set LENGTH_MIN_WEIGHT=0.0005.",
     )
     parser.add_argument(
         "--stage2-poloidal-weight",
@@ -1147,6 +1518,56 @@ def parse_args():
         help="Stage 2 curve self-intersect penalty weight.",
     )
     parser.add_argument(
+        "--self-envelope-mode",
+        choices=("hinge", "groc", "off"),
+        default=os.environ.get("STAGE2_SELF_ENVELOPE_MODE", "hinge"),
+        help=(
+            "Stage 2 self-envelope objective mode: true-arc distance hinge, "
+            "global-radius-of-curvature hinge, or diagnostic-only off."
+        ),
+    )
+    parser.add_argument(
+        "--self-envelope-weight",
+        type=float,
+        default=float(os.environ.get("STAGE2_SELF_ENVELOPE_WEIGHT", "1.0")),
+        help="Stage 2 self-envelope penalty weight for hinge/groc modes.",
+    )
+    parser.add_argument(
+        "--self-envelope-floor",
+        type=float,
+        default=(
+            None
+            if os.environ.get("STAGE2_SELF_ENVELOPE_FLOOR") is None
+            else float(os.environ["STAGE2_SELF_ENVELOPE_FLOOR"])
+        ),
+        help=(
+            "Self-envelope activation floor. Defaults by mode: hinge/off use "
+            f"{BANANA_SELF_ENVELOPE_MIN_DISTANCE_M:.6f} m distance; groc uses "
+            f"{BANANA_SELF_ENVELOPE_GROC_RADIUS_FLOOR_M:.6f} m radius."
+        ),
+    )
+    parser.add_argument(
+        "--self-distance-window",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_SELF_DISTANCE_WINDOW",
+                str(BANANA_SELF_DISTANCE_WINDOW_M),
+            )
+        ),
+        help="Physical arc-length exclusion window for self-envelope checks.",
+    )
+    parser.add_argument(
+        "--self-envelope-sampling-margin",
+        type=float,
+        default=float(os.environ.get("STAGE2_SELF_ENVELOPE_SAMPLING_MARGIN", "0.0")),
+        help=(
+            "Conservative additive margin on the hinge-mode point-pair "
+            "self-envelope threshold, used to make point-sampled optimization "
+            "imply the segment-segment CAD screen at a chosen sampling density."
+        ),
+    )
+    parser.add_argument(
         "--length-target",
         type=float,
         default=float(os.environ.get("LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
@@ -1161,6 +1582,18 @@ def parse_args():
         type=float,
         default=float(os.environ.get("CC_THRESHOLD", str(COIL_COIL_MIN_DIST_M))),
         help="Coil-coil distance threshold in meters.",
+    )
+    parser.add_argument(
+        "--cc-objective-margin",
+        type=float,
+        default=float(
+            os.environ.get("CC_OBJECTIVE_MARGIN", str(BANANA_CC_OBJECTIVE_MARGIN_M))
+        ),
+        help=(
+            "Extra coil-coil objective buffer in meters. The hard gate remains "
+            "--cc-threshold; the optimizer is steered toward "
+            "--cc-threshold + this margin."
+        ),
     )
     parser.add_argument(
         "--cc-weight",
@@ -1211,6 +1644,38 @@ def parse_args():
         help="Lp norm exponent for curvature penalty (default 4).",
     )
     parser.add_argument(
+        "--fold-weight",
+        type=float,
+        default=float(os.environ.get("STAGE2_FOLD_WEIGHT", "1.0")),
+        help=(
+            "Weight on the surface-geodesic fold-curvature hinge. The hinge "
+            "activates at limit * (1 - margin-fraction); the reported FOLD_OK "
+            "gate stays at the hard limit."
+        ),
+    )
+    parser.add_argument(
+        "--fold-geodesic-curvature-limit",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_FOLD_GEODESIC_CURVATURE_LIMIT",
+                str(BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M),
+            )
+        ),
+        help="Hard fold limit on abs(surface geodesic curvature), in m^-1.",
+    )
+    parser.add_argument(
+        "--fold-geodesic-curvature-margin-fraction",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION",
+                str(BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION),
+            )
+        ),
+        help="Fractional safety margin used by the fold objective threshold.",
+    )
+    parser.add_argument(
         "--num-quadpoints",
         type=int,
         default=int(os.environ.get("NUM_QUADPOINTS", "128")),
@@ -1254,43 +1719,56 @@ def parse_args():
         default=int(os.environ.get("BASIN_SEED", "-1")),
         help="RNG seed for basin-hopping (-1 = random, default). Set for reproducibility.",
     )
-    parser.add_argument(
+    finite_build_group = parser.add_mutually_exclusive_group()
+    finite_build_group.add_argument(
         "--finite-build",
+        dest="finite_build",
         action="store_true",
+        default=True,
         help=(
             "Optimize each banana coil as a multi-filament winding pack (finite "
             "build) instead of a zero-thickness filament. The field (SquaredFlux) "
-            "sees the real pack and the pack-rotation profile is optimized. Default "
-            "off (thin filament). Not supported with --stage2-bs-path or the "
-            "jhalpern30 banana path in this version."
+            "sees the real Type KK 2x7 pack and the pack-rotation profile is "
+            "optimized. This is the Stage 2 default representation."
+        ),
+    )
+    finite_build_group.add_argument(
+        "--filament-only",
+        dest="finite_build",
+        action="store_false",
+        help=(
+            "Diagnostic-only opt-out that runs the legacy zero-thickness banana "
+            "centerline model. CAD-bound artifacts must use finite-build."
         ),
     )
     parser.add_argument(
         "--finitebuild-numfilaments-n",
         type=int,
-        default=2,
+        default=TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
         help="Filaments in the normal direction of the banana pack (default 2). "
-        "Used only with --finite-build. Defaults are not HBT-calibrated.",
+        "Used only with --finite-build. Type KK regular-grid approximation.",
     )
     parser.add_argument(
         "--finitebuild-numfilaments-b",
         type=int,
-        default=3,
-        help="Filaments in the binormal direction of the banana pack (default 3). "
-        "Used only with --finite-build.",
+        default=TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+        help="Filaments in the binormal direction of the banana pack (default 7). "
+        "Used only with --finite-build. Type KK regular-grid approximation.",
     )
     parser.add_argument(
         "--finitebuild-gapsize-n",
         type=float,
-        default=0.02,
-        help="Gap between filaments in the normal direction, meters (default 0.02). "
-        "Used only with --finite-build.",
+        default=TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+        help="Normal-direction filament center spacing, meters (default Type KK "
+        "conductor-pack depth for a 2-row spanning approximation). Used only with "
+        "--finite-build.",
     )
     parser.add_argument(
         "--finitebuild-gapsize-b",
         type=float,
-        default=0.04,
-        help="Gap between filaments in the binormal direction, meters (default 0.04). "
+        default=TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+        help="Binormal-direction filament center spacing, meters (default Type KK "
+        "conductor-pack width divided by 6 for a 7-column spanning approximation). "
         "Used only with --finite-build.",
     )
     parser.add_argument(
@@ -1303,10 +1781,11 @@ def parse_args():
     )
     parser.add_argument(
         "--finitebuild-frame",
-        choices=("centroid", "frenet"),
-        default="centroid",
+        choices=("centroid", "frenet", "surface_tangent"),
+        default="surface_tangent",
         help="Pre-rotation orthonormal frame for the filament pack (default "
-        "centroid). Used only with --finite-build.",
+        "surface_tangent, a local fork extension that lays the Type KK pack flat "
+        "against the winding surface). Used only with --finite-build.",
     )
     parser.add_argument(
         "--finitebuild-pin-current",
@@ -1316,6 +1795,134 @@ def parse_args():
         "leaves the current under-constrained and it drifts toward zero. Used only "
         "with --finite-build.",
     )
+    parser.add_argument(
+        "--finitebuild-frame-aware-curvature-threshold",
+        dest="finitebuild_frame_aware_curvature_threshold",
+        action="store_true",
+        default=None,
+        help="Tighten the in-run curvature threshold (penalty objective, ALM "
+        "max_curvature constraint, and the in-run hardware gate) to the "
+        "frame-aware winding-pack limit 1/(single-filament bend floor + pack "
+        "corner reach) when that is stricter than --curvature-threshold, so "
+        "finite-build runs stop converging into the post-hoc "
+        "FINITEBUILD_CURVATURE_OK reject region. Never loosens the threshold. "
+        "Enabled by default for finite-build runs. Incompatible with "
+        "--filament-only when explicitly requested.",
+    )
+    parser.add_argument(
+        "--no-finitebuild-frame-aware-curvature-threshold",
+        dest="finitebuild_frame_aware_curvature_threshold",
+        action="store_false",
+        help="Diagnostic opt-out: keep the centerline curvature threshold even "
+        "when --finite-build is active.",
+    )
+    parser.add_argument(
+        "--stage2-vessel-keepout-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_VESSEL_KEEPOUT_WEIGHT",
+                str(STAGE2_VESSEL_KEEPOUT_WEIGHT_DEFAULT),
+            )
+        ),
+        help="Weight on the analytic vessel-envelope keep-out term "
+        "(CurveVesselEnvelopeKeepout: Type KK swept-envelope corners vs the "
+        "fixed vessel torus from hardware_contracts), applied to the "
+        "symmetry-expanded banana centerlines. Defaults ON at single-stage "
+        "parity (STAGE2_VESSEL_KEEPOUT_WEIGHT_DEFAULT); pass 0 (or export "
+        "STAGE2_VESSEL_KEEPOUT_WEIGHT=0) to disable the term entirely for "
+        "legacy/byte-identical reproduction. In ALM mode the weighted term "
+        "rides the smooth objective rather than adding a constraint row.",
+    )
+    parser.add_argument(
+        "--stage2-hardware-keepout-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_HARDWARE_KEEPOUT_WEIGHT",
+                str(STAGE2_HARDWARE_KEEPOUT_WEIGHT_DEFAULT),
+            )
+        ),
+        help="Weight on the static in-vessel hardware keep-out term "
+        "(CurveHardwareKeepout: the swept Type KK U-channel envelope of every "
+        "symmetry-expanded banana centerline vs the exported "
+        "shells/sensors/solenoid/REMC/limiter/quartz point cloud), wired exactly as "
+        "the single-stage path does (same hardware_keepout.json, same "
+        "HARDWARE_KEEPOUT_MIN_DISTANCE_M contract threshold). Defaults ON at "
+        "single-stage parity (STAGE2_HARDWARE_KEEPOUT_WEIGHT_DEFAULT) so an "
+        "unconfigured Stage-2 run feels the fixed hardware cloud; pass 0 (or "
+        "export STAGE2_HARDWARE_KEEPOUT_WEIGHT=0) to disable the term entirely "
+        "for legacy/byte-identical reproduction. In ALM mode the weighted term "
+        "rides the smooth objective rather than adding a constraint row.",
+    )
+    parser.add_argument(
+        "--stage2-hardware-keepout-json",
+        type=str,
+        default=os.environ.get(
+            "STAGE2_HARDWARE_KEEPOUT_JSON",
+            DEFAULT_HARDWARE_KEEPOUT_JSON_PATH,
+        ),
+        help="Path to the hardware_keepout.json point cloud "
+        "(hbt_clearance_viewer/tools/export_hardware_keepout.py), the same "
+        "cloud the single-stage --hardware-keepout-json consumes. Required when "
+        "--stage2-hardware-keepout-weight is > 0.",
+    )
+    parser.add_argument(
+        "--stage2-hardware-keepout-glb",
+        type=str,
+        default=os.environ.get(
+            "STAGE2_HARDWARE_KEEPOUT_GLB",
+            DEFAULT_HARDWARE_KEEPOUT_GLB_PATH,
+        ),
+        help="Path to the live hbt_assembly.glb used to fail-closed validate "
+        "the hardware_keepout.json cloud when --stage2-hardware-keepout-weight "
+        "is > 0.",
+    )
+    parser.add_argument(
+        "--stage2-resonant-flux-weight",
+        type=float,
+        default=float(os.environ.get("STAGE2_RESONANT_FLUX_WEIGHT", "0.0")),
+        help="Audit-8 static resonant reweighting weight w_res: adds "
+        "w_res * J_res to the objective, where J_res is the FFT spectral "
+        "power of B.n restricted to the harmonics of the selected low-order "
+        "rationals within --stage2-resonant-delta of the resonant iota target "
+        "(island suppression at the source). The mode mask is computed ONCE "
+        "at setup (static; no in-loop Boozer dependence). 0 disables the "
+        "term entirely (default; legacy-identical objective). In ALM mode "
+        "the weighted term rides the smooth objective rather than adding a "
+        "constraint row.",
+    )
+    parser.add_argument(
+        "--stage2-resonant-iota-target",
+        type=float,
+        default=(
+            None
+            if os.environ.get("STAGE2_RESONANT_IOTA_TARGET") is None
+            else float(os.environ["STAGE2_RESONANT_IOTA_TARGET"])
+        ),
+        help="Iota target for the audit-8 resonant reweighting mode "
+        "selection. When omitted, --stage2-iota-target is reused; one of "
+        "the two is required whenever --stage2-resonant-flux-weight > 0.",
+    )
+    parser.add_argument(
+        "--stage2-resonant-delta",
+        type=float,
+        default=float(os.environ.get("STAGE2_RESONANT_DELTA", "0.02")),
+        help="Half-width of the rational window |p/q - iota_target| <= delta "
+        "for the audit-8 resonant reweighting (default 0.02, matching the "
+        "campaign's resonance-window evidence).",
+    )
+    parser.add_argument(
+        "--stage2-resonant-qmax",
+        type=int,
+        default=int(
+            os.environ.get("STAGE2_RESONANT_QMAX", str(MAX_RESONANT_DENOMINATOR))
+        ),
+        help="Maximum rational denominator q for the audit-8 resonant "
+        f"reweighting (hard cap {MAX_RESONANT_DENOMINATOR}; larger requests "
+        "raise). The default cap is calibrated for the current low-iota "
+        "campaign band, not the older iota~0.30 regime.",
+    )
     args = parser.parse_args()
     try:
         validate_banana_current_cli_args(args)
@@ -1323,6 +1930,9 @@ def parse_args():
         validate_stage2_iota_cli_args(args)
         validate_s_hel_objective_cli_args(args)
         validate_finite_build_cli_args(args)
+        validate_stage2_vessel_keepout_cli_args(args)
+        validate_stage2_resonant_flux_cli_args(args)
+        validate_stage2_buildability_objective_cli_args(args)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -1480,6 +2090,9 @@ def build_stage2_iota_hot_loop_payload(
     )
     payload = {
         "STAGE2_IOTA_EFFECTIVE_WEIGHT": None,
+        "STAGE2_IOTA_OBJECTIVE_MODE": str(
+            getattr(args, "stage2_iota_objective_mode", "report")
+        ),
         "STAGE2_IOTA_VOL_TARGET": float(
             getattr(args, "stage2_iota_vol_target", DEFAULT_STAGE2_IOTA_VOL_TARGET)
         ),
@@ -1545,9 +2158,12 @@ def build_stage2_iota_hot_loop_payload(
     if stage2_iota_runtime is None:
         return payload
 
+    runtime_active = stage2_iota_runtime_is_active(stage2_iota_runtime)
     final_state = stage2_iota_runtime.last_state
     payload.update(
         {
+            "STAGE2_IOTA_OBJECTIVE_COUPLED": runtime_active,
+            "STAGE2_IOTA_HOT_LOOP_ENABLED": runtime_active,
             "STAGE2_IOTA_BOOTSTRAP_SECONDS": stage2_iota_runtime.stats.bootstrap_seconds,
             "STAGE2_IOTA_RUNTIME_SECONDS": stage2_iota_runtime.stats.runtime_seconds,
             "STAGE2_IOTA_RUNTIME_CALLS": stage2_iota_runtime.stats.runtime_calls,
@@ -1912,6 +2528,10 @@ def evaluate_stage2_hardware_constraints(
     curvature_threshold,
     poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    self_envelope_min_dist=None,
+    self_envelope_min_distance=None,
+    fold_geodesic_curvature_max=None,
+    fold_geodesic_curvature_limit=None,
     final_plasma_major_radius_m=None,
     final_plasma_minor_radius_m=None,
 ):
@@ -1924,6 +2544,10 @@ def evaluate_stage2_hardware_constraints(
         curvature_threshold,
         poloidal_extent_rad=poloidal_extent_rad,
         poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        self_envelope_min_dist=self_envelope_min_dist,
+        self_envelope_min_distance=self_envelope_min_distance,
+        fold_geodesic_curvature_max=fold_geodesic_curvature_max,
+        fold_geodesic_curvature_limit=fold_geodesic_curvature_limit,
         final_plasma_major_radius_m=final_plasma_major_radius_m,
         final_plasma_minor_radius_m=final_plasma_minor_radius_m,
     )
@@ -1942,6 +2566,52 @@ def _evaluate_stage2_flux_objective_on_own_grid(Jf):
     return float(Jf.J())
 
 
+def _normalize_rows(values):
+    norms = np.linalg.norm(values, axis=1)
+    return np.divide(
+        values,
+        norms[:, None],
+        out=np.zeros_like(values, dtype=float),
+        where=norms[:, None] > 0.0,
+    )
+
+
+def _finite_build_projected_bend_half_extent_m(finite_build, banana_curve):
+    kappa = np.asarray(banana_curve.kappa(), dtype=float)
+    half_n_m = float(finite_build.pack_half_extent_n_m)
+    half_b_m = float(finite_build.pack_half_extent_b_m)
+    if finite_build.frame != "surface_tangent":
+        # centroid / frenet frames carry no winding-surface normal to project
+        # the pack onto, so the conservative (largest) half-extent is the
+        # correct buildability bound for those frames.
+        return np.full(kappa.shape, max(half_n_m, half_b_m), dtype=float)
+
+    gamma = np.asarray(banana_curve.gamma(), dtype=float)
+    gammadash = np.asarray(banana_curve.gammadash(), dtype=float)
+    gammadashdash = np.asarray(banana_curve.gammadashdash(), dtype=float)
+    tangent = _normalize_rows(gammadash)
+    curvature_vector = gammadashdash - np.sum(
+        gammadashdash * tangent, axis=1
+    )[:, None] * tangent
+    bend_direction = _normalize_rows(curvature_vector)
+    surface_normal = np.asarray(
+        surface_tangent_normal_direction(
+            gamma,
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+            0.0,
+        ),
+        dtype=float,
+    )
+    normal_axis = _normalize_rows(
+        surface_normal - np.sum(surface_normal * tangent, axis=1)[:, None] * tangent
+    )
+    binormal_axis = np.cross(tangent, normal_axis, axis=1)
+    return (
+        np.abs(np.sum(bend_direction * normal_axis, axis=1)) * half_n_m
+        + np.abs(np.sum(bend_direction * binormal_axis, axis=1)) * half_b_m
+    )
+
+
 def _finite_build_artifact_metadata(
     finite_build,
     banana_curve,
@@ -1951,31 +2621,61 @@ def _finite_build_artifact_metadata(
     cs_min_dist_m=None,
     cc_nominal_m=None,
     cs_nominal_m=None,
+    self_envelope_min_dist_m=None,
+    self_envelope_nominal_m=None,
+    self_envelope_nominal_contract_m=None,
+    self_envelope_sampling_margin_m=None,
+    self_distance_window_m=None,
+    self_envelope_mode=None,
+    self_envelope_groc_radius_m=None,
+    self_envelope_groc_radius_floor_m=None,
+    fold_geodesic_curvature_max_inv_m=None,
+    fold_geodesic_curvature_limit_inv_m=None,
+    fold_geodesic_curvature_threshold_inv_m=None,
+    fold_penalty=None,
     curvature_margin_m=0.0,
 ):
     """results.json fields describing the finite-build banana winding pack.
 
     Buildability diagnostics:
-    - Bend feasibility: the conductor bends in the centerline's principal-normal
-      plane, which is not aligned with either pack axis, so the conservative binding
-      extent is the LARGER half-build. ``FINITEBUILD_INNER_EDGE_RADIUS_M =
-      min_curv_radius - max(half_n, half_b)`` is the inner-fiber radius; the pack is
-      bend-feasible when it is >= ``curvature_margin_m`` (an optional cable-bend
-      floor; 0 = pure geometric limit). ``FINITEBUILD_CURVATURE_OK`` reports this.
-    - Envelope clearance: clearance is enforced on centerlines, so the real pack
-      envelope clears only if the centerline gap exceeds the nominal floor plus the
-      pack corner reach (2x between two packs, 1x to the plasma). Reported as
-      ``FINITEBUILD_CC_ENVELOPE_OK`` / ``FINITEBUILD_CS_ENVELOPE_OK`` when the
-      centerline min distances and nominal floors are supplied.
+    - Bend feasibility: the conductor pack is projected into each centerline bend
+      plane. The inner-wire bend radius is the local centerline radius minus that
+      projected half-extent and must stay above the Type KK single-filament floor.
+    - Envelope clearance: coil-to-coil clearance is already a Type KK frame
+      face-touch centerline floor. Coil-surface clearance still subtracts the
+      plasma-facing normal half-build.
     """
-    max_curvature = float(np.max(banana_curve.kappa()))
-    min_curv_radius_m = float("inf") if max_curvature == 0.0 else 1.0 / max_curvature
+    kappa = np.asarray(banana_curve.kappa(), dtype=float)
+    max_curvature = float(np.max(kappa))
+    curvature_radius_m = np.divide(
+        1.0,
+        kappa,
+        out=np.full(kappa.shape, float("inf"), dtype=float),
+        where=kappa > 0.0,
+    )
+    min_curv_radius_m = float(np.min(curvature_radius_m))
     half_n_m = float(finite_build.pack_half_extent_n_m)
     half_b_m = float(finite_build.pack_half_extent_b_m)
-    binding_half_build_m = max(half_n_m, half_b_m)
-    inner_edge_radius_m = min_curv_radius_m - binding_half_build_m
-    # Pack-to-pack uses the worst-case CORNER reach (two packs at arbitrary relative
-    # orientation). Pack-to-plasma uses the NORMAL (radial) half-build only: the
+    projected_half_extent_m = _finite_build_projected_bend_half_extent_m(
+        finite_build,
+        banana_curve,
+    )
+    binding_half_build_m = float(np.max(projected_half_extent_m))
+    inner_edge_radius_m = float(np.min(curvature_radius_m - projected_half_extent_m))
+    single_filament_floor_m = (
+        TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M + float(curvature_margin_m)
+    )
+    required_centerline_radius_m = projected_half_extent_m + single_filament_floor_m
+    min_radius_margin_m = float(
+        np.min(curvature_radius_m - required_centerline_radius_m)
+    )
+    strictest_required_radius_m = float(np.max(required_centerline_radius_m))
+    frame_aware_limit_inv_m = (
+        float("inf")
+        if strictest_required_radius_m <= 0.0
+        else 1.0 / strictest_required_radius_m
+    )
+    # Pack-to-plasma uses the NORMAL (radial) half-build only: the
     # channel rides tangent to the toroidal surface (BANANA_WINDING_CHANNEL_
     # ORIENTATION), so the plasma-facing extent is the channel depth/2, not the
     # corner. (Assumes the pack normal axis ~ the surface radial; documented.)
@@ -1999,19 +2699,118 @@ def _finite_build_artifact_metadata(
         "FINITEBUILD_CS_REACH_M": cs_reach_m,
         "FINITEBUILD_MIN_CURVATURE_RADIUS_M": min_curv_radius_m,
         "FINITEBUILD_INNER_EDGE_RADIUS_M": inner_edge_radius_m,
-        "FINITEBUILD_CURVATURE_OK": bool(
-            inner_edge_radius_m >= float(curvature_margin_m)
+        "FINITEBUILD_SINGLE_FILAMENT_MIN_BEND_RADIUS_M": float(
+            single_filament_floor_m
         ),
+        "FINITEBUILD_FRAME_AWARE_MAX_PROJECTED_HALF_EXTENT_M": binding_half_build_m,
+        "FINITEBUILD_FRAME_AWARE_MIN_REQUIRED_CENTERLINE_RADIUS_M": (
+            strictest_required_radius_m
+        ),
+        "FINITEBUILD_FRAME_AWARE_CURVATURE_LIMIT_INV_M": frame_aware_limit_inv_m,
+        "FINITEBUILD_FRAME_AWARE_MIN_RADIUS_MARGIN_M": min_radius_margin_m,
+        "FINITEBUILD_CURVATURE_OK": bool(min_radius_margin_m >= 0.0),
     }
     if cc_min_dist_m is not None and cc_nominal_m is not None:
-        cc_envelope_m = float(cc_min_dist_m) - 2.0 * cc_reach_m
-        metadata["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"] = cc_envelope_m
-        metadata["FINITEBUILD_CC_ENVELOPE_OK"] = bool(cc_envelope_m >= float(cc_nominal_m))
+        cc_edge_gap_m = float(cc_min_dist_m) - float(cc_nominal_m)
+        metadata["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"] = float(cc_min_dist_m)
+        metadata["FINITEBUILD_CC_EDGE_GAP_M"] = cc_edge_gap_m
+        metadata["FINITEBUILD_CC_ENVELOPE_OK"] = bool(
+            float(cc_min_dist_m) >= float(cc_nominal_m)
+        )
     if cs_min_dist_m is not None and cs_nominal_m is not None:
         cs_envelope_m = float(cs_min_dist_m) - cs_reach_m
         metadata["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"] = cs_envelope_m
-        metadata["FINITEBUILD_CS_ENVELOPE_OK"] = bool(cs_envelope_m >= float(cs_nominal_m))
+        metadata["FINITEBUILD_CS_ENVELOPE_OK"] = bool(
+            cs_envelope_m >= float(cs_nominal_m)
+        )
+    if self_envelope_min_dist_m is not None and self_envelope_nominal_m is not None:
+        metadata["FINITEBUILD_SELF_ENVELOPE_MIN_DIST_M"] = float(
+            self_envelope_min_dist_m
+        )
+        metadata["FINITEBUILD_SELF_ENVELOPE_MIN_DISTANCE_M"] = float(
+            self_envelope_nominal_m
+        )
+        if self_envelope_nominal_contract_m is not None:
+            metadata["FINITEBUILD_SELF_ENVELOPE_NOMINAL_MIN_DISTANCE_M"] = float(
+                self_envelope_nominal_contract_m
+            )
+        if self_envelope_sampling_margin_m is not None:
+            metadata["FINITEBUILD_SELF_ENVELOPE_SAMPLING_MARGIN_M"] = float(
+                self_envelope_sampling_margin_m
+            )
+        if self_distance_window_m is not None:
+            metadata["FINITEBUILD_SELF_DISTANCE_WINDOW_M"] = float(
+                self_distance_window_m
+            )
+        if self_envelope_mode is not None:
+            metadata["FINITEBUILD_SELF_ENVELOPE_MODE"] = str(self_envelope_mode)
+        if self_envelope_groc_radius_m is not None:
+            metadata["FINITEBUILD_SELF_ENVELOPE_GROC_RADIUS_M"] = float(
+                self_envelope_groc_radius_m
+            )
+        if self_envelope_groc_radius_floor_m is not None:
+            metadata["FINITEBUILD_SELF_ENVELOPE_GROC_RADIUS_FLOOR_M"] = float(
+                self_envelope_groc_radius_floor_m
+            )
+        metadata["FINITEBUILD_SELF_ENVELOPE_OK"] = bool(
+            float(self_envelope_min_dist_m) >= float(self_envelope_nominal_m)
+        )
+    if (
+        fold_geodesic_curvature_max_inv_m is not None
+        and fold_geodesic_curvature_limit_inv_m is not None
+    ):
+        metadata["FOLD_GEODESIC_CURVATURE_MAX_INV_M"] = float(
+            fold_geodesic_curvature_max_inv_m
+        )
+        metadata["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"] = float(
+            fold_geodesic_curvature_limit_inv_m
+        )
+        if fold_geodesic_curvature_threshold_inv_m is not None:
+            metadata["FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"] = float(
+                fold_geodesic_curvature_threshold_inv_m
+            )
+        if fold_penalty is not None:
+            metadata["FOLD_PENALTY"] = float(fold_penalty)
+        metadata["FOLD_OK"] = bool(
+            float(fold_geodesic_curvature_max_inv_m)
+            <= float(fold_geodesic_curvature_limit_inv_m)
+        )
     return metadata
+
+
+def _segment_exact_clearance_artifact_fields(objective_curves, lcfs_surf):
+    """results.json fields with exact segment-based cc/cs minima (audit 5b).
+
+    The recorded CURVE_CURVE_MIN_DIST / CURVE_SURFACE_MIN_DIST are point-cloud
+    minima over the quadrature samples and can overestimate clearance reached
+    BETWEEN samples. These additive capture-time keys record exact
+    piecewise-linear (closed chord polyline) minima of the same curves:
+
+    - CURVE_CURVE_MIN_DIST_SEGMENT_EXACT: exact segment-segment minimum;
+      always <= CURVE_CURVE_MIN_DIST (conservative for clearance gates).
+    - CURVE_SURFACE_MIN_DIST_SEGMENT_EXACT: segment-to-surface-point-cloud
+      minimum; always <= CURVE_SURFACE_MIN_DIST on the same samples. The
+      surface side stays the sampled point cloud, so its residual
+      discretization error direction (possible overestimate of the true
+      continuous-surface distance) is unchanged from the point-cloud metric.
+    """
+    return {
+        "CURVE_CURVE_MIN_DIST_SEGMENT_EXACT": float(
+            curve_curve_min_distance_segments_m(objective_curves)
+        ),
+        "CURVE_CURVE_MIN_DIST_SEGMENT_EXACT_METHOD": (
+            "closed_chord_polyline_segment_segment"
+        ),
+        "CURVE_SURFACE_MIN_DIST_SEGMENT_EXACT": float(
+            curve_surface_min_distance_segments_m(
+                objective_curves,
+                lcfs_surf.gamma().reshape((-1, 3)),
+            )
+        ),
+        "CURVE_SURFACE_MIN_DIST_SEGMENT_EXACT_METHOD": (
+            "closed_chord_polyline_segment_to_surface_point_cloud"
+        ),
+    }
 
 
 def _capture_stage2_artifact_state(
@@ -2041,10 +2840,21 @@ def _capture_stage2_artifact_state(
     stage2_iota_runtime=None,
     Jw=None,
     Jself=None,
+    Jself_envelope=None,
+    Jfold=None,
     length_min_target=None,
     width_min_threshold=None,
     width_max_threshold=None,
     self_intersect_min_distance=None,
+    self_envelope_mode=None,
+    self_envelope_min_distance=None,
+    self_envelope_nominal_min_distance=None,
+    self_envelope_sampling_margin=None,
+    self_distance_window=None,
+    self_envelope_groc_radius_floor=None,
+    fold_geodesic_curvature_limit=None,
+    fold_geodesic_curvature_threshold=None,
+    fold_geodesic_curvature_margin_fraction=None,
 ):
     candidate_x = np.asarray(dofs, dtype=float).copy()
     JF.x = candidate_x
@@ -2059,6 +2869,25 @@ def _capture_stage2_artifact_state(
     coil_width = float(Jw.J())
     self_intersect_penalty = float(Jself.J())
     shortest_self_distance = float(Jself.shortest_self_distance())
+    self_envelope_penalty = float(Jself_envelope.J())
+    self_envelope_min_dist = float(Jself_envelope.shortest_self_distance())
+    shortest_groc = getattr(Jself_envelope, "shortest_groc", None)
+    self_envelope_groc_radius = (
+        None if shortest_groc is None else float(shortest_groc())
+    )
+    fold_penalty = None if Jfold is None else float(Jfold.J())
+    fold_geodesic_curvature_max = (
+        None if Jfold is None else float(Jfold.max_abs_geodesic_curvature())
+    )
+    fold_ok = (
+        None
+        if fold_geodesic_curvature_max is None
+        or fold_geodesic_curvature_limit is None
+        else bool(
+            fold_geodesic_curvature_max
+            <= float(fold_geodesic_curvature_limit)
+        )
+    )
     hardware_status = _evaluate_stage2_hardware_constraints(
         coil_length,
         length_target,
@@ -2079,6 +2908,10 @@ def _capture_stage2_artifact_state(
         self_intersect_threshold=0.0,
         shortest_self_distance=shortest_self_distance,
         self_intersect_min_distance=self_intersect_min_distance,
+        self_envelope_min_dist=self_envelope_min_dist,
+        self_envelope_min_distance=self_envelope_min_distance,
+        fold_geodesic_curvature_max=fold_geodesic_curvature_max,
+        fold_geodesic_curvature_limit=fold_geodesic_curvature_limit,
         banana_current_A=banana_current_A,
         banana_current_threshold=banana_current_max_A,
         tf_current_A=tf_current_A,
@@ -2108,6 +2941,47 @@ def _capture_stage2_artifact_state(
         "self_intersect_threshold": 0.0,
         "shortest_self_distance": shortest_self_distance,
         "self_intersect_min_distance": float(self_intersect_min_distance),
+        "self_envelope_mode": None if self_envelope_mode is None else str(self_envelope_mode),
+        "self_envelope_penalty": self_envelope_penalty,
+        "self_envelope_min_dist": self_envelope_min_dist,
+        "self_envelope_min_distance": float(self_envelope_min_distance),
+        "self_envelope_nominal_min_distance": (
+            None
+            if self_envelope_nominal_min_distance is None
+            else float(self_envelope_nominal_min_distance)
+        ),
+        "self_envelope_sampling_margin": (
+            None
+            if self_envelope_sampling_margin is None
+            else float(self_envelope_sampling_margin)
+        ),
+        "self_distance_window": (
+            None if self_distance_window is None else float(self_distance_window)
+        ),
+        "self_envelope_groc_radius": self_envelope_groc_radius,
+        "self_envelope_groc_radius_floor": (
+            None
+            if self_envelope_groc_radius_floor is None
+            else float(self_envelope_groc_radius_floor)
+        ),
+        "fold_penalty": fold_penalty,
+        "fold_geodesic_curvature_max": fold_geodesic_curvature_max,
+        "fold_geodesic_curvature_limit": (
+            None
+            if fold_geodesic_curvature_limit is None
+            else float(fold_geodesic_curvature_limit)
+        ),
+        "fold_geodesic_curvature_threshold": (
+            None
+            if fold_geodesic_curvature_threshold is None
+            else float(fold_geodesic_curvature_threshold)
+        ),
+        "fold_geodesic_curvature_margin_fraction": (
+            None
+            if fold_geodesic_curvature_margin_fraction is None
+            else float(fold_geodesic_curvature_margin_fraction)
+        ),
+        "fold_ok": fold_ok,
         "length_min_target": float(length_min_target),
         "hardware_status": hardware_status,
         "stage2_iota_value": None if iota_state is None else iota_state.iota,
@@ -2128,6 +3002,7 @@ def load_stage2_seed_configuration(
     *,
     stage2_results,
     seed_order_upgrade=None,
+    finite_build=None,
 ):
     bs = load_boozer_finite_i(seed_bs_path)
     if seed_order_upgrade is not None:
@@ -2150,17 +3025,9 @@ def load_stage2_seed_configuration(
                 vf_coils=loaded_coil_partitions.vf_coils,
                 new_order=int(seed_order_upgrade),
             )
-    bs.set_points(surf.gamma().reshape((-1, 3)))
-
-    coils = bs.coils
-    curves = [c.curve for c in coils]
-    curves_to_vtk(curves, out_dir + "curves_init", close=True)
-    unitn = surf.unitnormal()
-    pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
-    surf.to_vtk(out_dir + "surf_init", extra_data=pointData)
 
     coil_partitions = partition_loaded_stage2_coils(
-        coils,
+        bs.coils,
         stage2_results=stage2_results,
         requested_num_tf_coils=num_tf_coils,
     )
@@ -2169,6 +3036,44 @@ def load_stage2_seed_configuration(
     proxy_coils = list(coil_partitions.proxy_coils)
     vf_coils = list(coil_partitions.vf_coils)
     banana_curve = banana_coils[0].curve
+
+    if finite_build is not None:
+        # Warm-start finite build: rebuild the multi-filament pack from the seed's
+        # MASTER banana curve (the identity-symmetry CurveCWSFourierCPP) and the
+        # seed's NET banana current, then re-expand by symmetry. The seed bs holds
+        # the already-symmetry-expanded thin banana pack, so only the master curve
+        # and its net current carry over; the seed TF/proxy/VF coils are reused
+        # verbatim. This mirrors the cold finite-build path in initialize_coils.
+        if coil_partitions.finite_current_mode == JHALPERN30_FINITE_CURRENT_MODE:
+            # Mirror the cold-path guard: the jhalpern30 banana current path has
+            # no finite-build pack. Caught here too because the seed mode can be
+            # resolved from the artifact rather than the CLI flag.
+            raise ValueError(
+                "Finite-build optimization is not supported with a jhalpern30 "
+                "Stage 2 seed."
+            )
+        if not isinstance(banana_curve, CurveCWSFourierCPP):
+            raise ValueError(
+                "Finite-build warm start requires a CurveCWSFourierCPP master "
+                "banana curve in the Stage 2 seed."
+            )
+        seed_net_banana_current_A = float(banana_coils[0].current.get_value())
+        banana_coils = build_finite_build_banana_coils(
+            banana_curve,
+            seed_net_banana_current_A,
+            finite_build,
+            banana_curve.surf,
+        )
+        bs = BiotSavart(tf_coils + banana_coils + proxy_coils + vf_coils)
+
+    bs.set_points(surf.gamma().reshape((-1, 3)))
+    coils = bs.coils
+    curves = [c.curve for c in coils]
+    curves_to_vtk(curves, out_dir + "curves_init", close=True)
+    unitn = surf.unitnormal()
+    pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
+    surf.to_vtk(out_dir + "surf_init", extra_data=pointData)
+
     return bs, curves, banana_curve, banana_coils, tf_coils, proxy_coils, vf_coils
 
 
@@ -2562,6 +3467,7 @@ def main(parsed_args=None):
     args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
     validate_stage2_iota_cli_args(args)
+    validate_stage2_buildability_objective_cli_args(args)
     if parsed_args is not None:
         validate_banana_current_cli_args(args)
         validate_stage2_tf_current_cli_args(args)
@@ -2709,6 +3615,8 @@ def main(parsed_args=None):
         raise ValueError("Stage 2 geometry preflight selected inconsistent NFP.")
     plasma_vessel_min_dist = _surface_surface_min_distance(lcfs_surf, VV)
 
+    finite_build_settings = resolve_finite_build_settings(args)
+    FINITE_BUILD = finite_build_settings is not None
     new_vf_build_result = VFCoilBuildResult(coils=[], current_control=None)
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
@@ -2727,6 +3635,7 @@ def main(parsed_args=None):
             OUT_DIR,
             stage2_results=seed_stage2_results,
             seed_order_upgrade=getattr(args, "seed_order_upgrade", None),
+            finite_build=finite_build_settings,
         )
         if args.stage2_seed_current_traversal:
             _retarget_stage2_seed_auxiliary_currents(
@@ -2798,8 +3707,6 @@ def main(parsed_args=None):
         new_tf_coils = tf_coils
     order = int(new_banana_curve.order)
     new_surf_coils = surf_coils
-    finite_build_settings = resolve_finite_build_settings(args)
-    FINITE_BUILD = finite_build_settings is not None
     # SquaredFlux geometry penalties act on the optimizable banana curves only;
     # TF / proxy / VF curves are fixed field sources and must not enter the
     # clearance or length objectives.
@@ -2837,6 +3744,11 @@ def main(parsed_args=None):
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than the hardware contract target.
     LENGTH_WEIGHT = args.length_weight
+    # Separate, stronger weight for the one-sided BELOW-floor length penalty. The
+    # soft LENGTH_WEIGHT (~5e-4) is tuned for the max-length target and is far too
+    # weak to hold the 0.95 m floor against the field-fit gradient, so a cold start
+    # can ride into the degenerate small-coil basin (observed L ~ 0.58-0.69 m).
+    LENGTH_MIN_WEIGHT = args.length_min_weight
     LENGTH_TARGET = validate_coil_length_target(
         args.length_target,
         accept_offspec_coil_length=stage2_length_contract_allows_offspec(args),
@@ -2844,28 +3756,50 @@ def main(parsed_args=None):
     )
 
     # Threshold and weight for the coil-to-coil distance penalty
-    if args.cc_threshold < COIL_COIL_MIN_DIST_M:
-        raise ValueError(f"--cc-threshold must be >= {COIL_COIL_MIN_DIST_M:.3f} m.")
+    required_cc_centerline_m = required_banana_cc_centerline_m()
+    if args.cc_threshold < required_cc_centerline_m:
+        raise ValueError(
+            f"--cc-threshold must be >= {required_cc_centerline_m:.3f} m."
+        )
     CC_THRESHOLD = float(args.cc_threshold)
     CC_WEIGHT = args.cc_weight
-    CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
-    # Finite-build clearance is enforced on the symmetry-expanded CENTERLINES, so
-    # inflate the distance-penalty thresholds by the pack corner reach: centerline
-    # clearance then implies the real pack ENVELOPE clears the nominal floor
-    # (2x reach between two packs, 1x reach to the plasma). Thin mode: reach 0
-    # (thresholds unchanged). The recorded CC_THRESHOLD/CS_THRESHOLD (metadata,
-    # contract, HW-eval) stay nominal; only the objective penalties are inflated.
-    # Pack-to-pack: worst-case corner reach (2x). Pack-to-plasma: the normal/radial
-    # half-build only (channel rides tangent to the surface, so the plasma-facing
-    # extent is the depth/2, not the corner).
-    finite_build_cc_reach_m = (
-        finite_build_settings.pack_reach_m if FINITE_BUILD else 0.0
+    SELF_ENVELOPE_MODE = str(getattr(args, "self_envelope_mode", "hinge"))
+    SELF_ENVELOPE_WEIGHT = (
+        0.0
+        if SELF_ENVELOPE_MODE == "off"
+        else float(getattr(args, "self_envelope_weight", 1.0))
     )
+    SELF_ENVELOPE_FLOOR = resolve_stage2_self_envelope_floor(args)
+    SELF_ENVELOPE_SAMPLING_MARGIN = float(
+        getattr(args, "self_envelope_sampling_margin", 0.0)
+    )
+    SELF_ENVELOPE_OBJECTIVE_FLOOR = (
+        SELF_ENVELOPE_FLOOR + SELF_ENVELOPE_SAMPLING_MARGIN
+        if SELF_ENVELOPE_MODE == "hinge"
+        else SELF_ENVELOPE_FLOOR
+    )
+    SELF_ENVELOPE_REPORT_FLOOR = (
+        2.0 * SELF_ENVELOPE_FLOOR
+        if SELF_ENVELOPE_MODE == "groc"
+        else SELF_ENVELOPE_OBJECTIVE_FLOOR
+    )
+    CC_OBJECTIVE_MARGIN = float(
+        getattr(args, "cc_objective_margin", BANANA_CC_OBJECTIVE_MARGIN_M)
+    )
+    CC_OBJECTIVE_THRESHOLD = CC_THRESHOLD + CC_OBJECTIVE_MARGIN
+    CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
+    # The Type KK coil-to-coil floor is already the ruled frame face-touch
+    # centerline clearance. Only coil-plasma needs finite-build normal inflation.
     finite_build_cs_reach_m = (
         finite_build_settings.pack_half_extent_n_m if FINITE_BUILD else 0.0
     )
-    cc_clearance_threshold = CC_THRESHOLD + 2.0 * finite_build_cc_reach_m
+    cc_clearance_threshold = CC_THRESHOLD
     cs_clearance_threshold = CS_THRESHOLD + finite_build_cs_reach_m
+    if CC_OBJECTIVE_MARGIN > 0.0:
+        print(
+            "Coil-coil objective buffer: "
+            f"hard={CC_THRESHOLD:.4f} m, objective={CC_OBJECTIVE_THRESHOLD:.4f} m"
+        )
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
@@ -2877,13 +3811,35 @@ def main(parsed_args=None):
         raise ValueError(
             f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )
+    # Audit 5a: drive finite-build solves with the frame-aware winding-pack
+    # curvature limit instead of the centerline cap, so finite-build runs cannot
+    # converge into the post-hoc FINITEBUILD_CURVATURE_OK reject region. Only
+    # ever tightens.
+    pre_tightening_curvature_threshold = CURVATURE_THRESHOLD
+    (
+        CURVATURE_THRESHOLD,
+        frame_aware_curvature_limit_inv_m,
+        frame_aware_curvature_limit_applied,
+    ) = stage2_frame_aware_curvature_tightening(
+        CURVATURE_THRESHOLD,
+        finite_build_settings,
+        stage2_frame_aware_curvature_threshold_enabled(args),
+    )
+    if frame_aware_curvature_limit_applied:
+        print(
+            "Frame-aware curvature threshold: "
+            f"{pre_tightening_curvature_threshold:.4f} -> "
+            f"{CURVATURE_THRESHOLD:.4f} m^-1 "
+            "(single-filament bend floor + pack corner reach)"
+        )
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs)  # penalty on B dot n
     Jls = CurveLength(new_banana_curve)  # penalty on curve length
     Jccdist = CurveCurveDistance(
         objective_curves, cc_clearance_threshold
-    )  # penalty on coil-to-coil distance (pack-envelope-inflated in finite build)
+    )  # penalty on ruled Type KK coil-to-coil centerline distance
+    Jccdist_objective = CurveCurveDistance(objective_curves, CC_OBJECTIVE_THRESHOLD)
     Jcsdist = CurveSurfaceDistance(objective_curves, lcfs_surf, cs_clearance_threshold)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
@@ -2896,7 +3852,7 @@ def main(parsed_args=None):
     Jw = ProjectedEllipseWidth(
         new_banana_curve,
         BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-        BANANA_WINDING_MINOR_RADIUS_M,
+        banana_surf_radius,
     )
     Jself = CurveSelfIntersect(
         new_banana_curve,
@@ -2905,6 +3861,152 @@ def main(parsed_args=None):
             BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * new_banana_curve.order
         ),
     )
+    if SELF_ENVELOPE_MODE == "groc":
+        Jself_envelope = CurveGlobalRadiusOfCurvature(
+            new_banana_curve,
+            SELF_ENVELOPE_FLOOR,
+        )
+    else:
+        Jself_envelope = CurveSelfDistance(
+            new_banana_curve,
+            SELF_ENVELOPE_FLOOR,
+            self_window_m=args.self_distance_window,
+            sampling_margin_m=SELF_ENVELOPE_SAMPLING_MARGIN,
+        )
+    FOLD_WEIGHT = float(getattr(args, "fold_weight", 1.0))
+    FOLD_GEODESIC_CURVATURE_LIMIT = float(
+        getattr(
+            args,
+            "fold_geodesic_curvature_limit",
+            BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
+        )
+    )
+    FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION = float(
+        getattr(
+            args,
+            "fold_geodesic_curvature_margin_fraction",
+            BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION,
+        )
+    )
+    FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD = (
+        FOLD_GEODESIC_CURVATURE_LIMIT
+        * (1.0 - FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION)
+    )
+    fold_winding_radii = realized_cws_winding_radii(new_banana_coils)
+    fold_winding_r0 = (
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        if fold_winding_radii is None
+        else fold_winding_radii[0]
+    )
+    Jfold = CurveSurfaceGeodesicCurvature(
+        FramedCurveSurfaceTangent(new_banana_curve, fold_winding_r0, 0.0),
+        p=2,
+        threshold=FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD,
+    )
+    # Default-on at single-stage parity (2026-06-15 keep-out parity decision;
+    # formulation audit 5c origin): analytic vessel-envelope keep-out, proven in
+    # single-stage. Steers the Type KK swept-envelope corners of every
+    # symmetry-expanded banana centerline inside the fixed vessel torus (R0/a
+    # from hardware_contracts). An explicit weight 0 never constructs the term,
+    # restoring the legacy objective graph for byte-identical reproduction.
+    # The U-channel frame is oriented about the REALIZED CWS winding torus
+    # (not the 0.903 spec constant) so re-centered lineages are measured in
+    # their true frame, mirroring the single-stage resolve_keepout_winding_r0
+    # wiring (2026-06-10 winding-frame fix). No silent 0.903 fallback.
+    VESSEL_KEEPOUT_WEIGHT = float(args.stage2_vessel_keepout_weight)
+    if VESSEL_KEEPOUT_WEIGHT > 0.0:
+        realized_winding_radii = realized_cws_winding_radii(new_banana_coils)
+        vessel_keepout_winding_r0 = (
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+            if realized_winding_radii is None
+            else realized_winding_radii[0]
+        )
+        Jvessel = CurveVesselEnvelopeKeepout(
+            objective_curves, winding_r0=vessel_keepout_winding_r0
+        )
+    else:
+        Jvessel = None
+    # Default-on at single-stage parity (2026-06-15 keep-out parity decision;
+    # Stage-2 path-parity, hardware keep-out coverage plan 2026-06-13): the
+    # static in-vessel hardware keep-out (shells / sensors / solenoid / REMC /
+    # limiter / quartz point cloud), wired exactly as the single-stage path does
+    # (load_hardware_keepout + CurveHardwareKeepout over the swept Type KK
+    # envelope of the symmetry-expanded banana centerlines). The cloud and the
+    # HARDWARE_KEEPOUT_MIN_DISTANCE_M contract threshold are shared with
+    # single-stage; the JSON's recommended min distance is reconciled
+    # fail-closed against the contract so a run never steers against a mismatched
+    # cloud. The U-channel frame is oriented about the REALIZED CWS winding torus
+    # (same r0 the vessel term uses, not the 0.903 spec constant). An explicit
+    # weight 0 never constructs the term, restoring the legacy objective graph
+    # for byte-identical reproduction.
+    HARDWARE_KEEPOUT_WEIGHT = float(args.stage2_hardware_keepout_weight)
+    hardware_keepout_group_labels = []
+    hardware_keepout_metadata_fields = {}
+    if HARDWARE_KEEPOUT_WEIGHT > 0.0:
+        if not args.stage2_hardware_keepout_json:
+            raise ValueError(
+                "--stage2-hardware-keepout-weight > 0 requires "
+                "--stage2-hardware-keepout-json (the exported "
+                "sensor/mount point cloud)"
+            )
+        (
+            keepout_points,
+            keepout_point_weight,
+            keepout_min_distance,
+            _keepout_provenance,
+        ) = load_hardware_keepout(
+            args.stage2_hardware_keepout_json,
+            glb_path=args.stage2_hardware_keepout_glb,
+        )
+        hardware_keepout_metadata_fields = hardware_keepout_metadata(
+            args.stage2_hardware_keepout_json,
+            glb_path=args.stage2_hardware_keepout_glb,
+        )
+        hardware_keepout_group_labels = hardware_keepout_metadata_fields[
+            "HARDWARE_KEEPOUT_GROUPS"
+        ]
+        if abs(keepout_min_distance - HARDWARE_KEEPOUT_MIN_DISTANCE_M) > 1e-15:
+            raise ValueError(
+                f"keep-out JSON recommends min distance {keepout_min_distance} m "
+                f"but the hardware contract pins {HARDWARE_KEEPOUT_MIN_DISTANCE_M} m; "
+                "update banana_opt/hardware_contracts.py and the cloud together"
+            )
+        hardware_keepout_winding_radii = realized_cws_winding_radii(
+            new_banana_coils
+        )
+        hardware_keepout_winding_r0 = (
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+            if hardware_keepout_winding_radii is None
+            else hardware_keepout_winding_radii[0]
+        )
+        Jhardware = CurveHardwareKeepout(
+            objective_curves,
+            keepout_points,
+            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+            keepout_point_weight,
+            winding_r0=hardware_keepout_winding_r0,
+        )
+    else:
+        Jhardware = None
+    # Opt-in (2026-06-11 formulation audit 8, active half): static resonant
+    # reweighting of the flux spectrum at the target-iota rationals (island
+    # suppression at the source). The FFT mode mask is computed ONCE here
+    # from the resonant iota target; weight 0 (the default) never constructs
+    # the term, keeping the legacy objective graph identical. Misconfiguration
+    # (no iota target, empty rational window, grid too coarse for the NFP
+    # harmonics) raises loudly at setup instead of silently penalising
+    # nothing. NOTE: the mask lives in VMEC quadrature angles, not Boozer
+    # angles (approximation documented in banana_opt/stage2_resonant_flux.py).
+    Jres, RESONANT_FLUX_WEIGHT, resonant_flux_rationals = (
+        build_stage2_resonant_flux_term_if_requested(args, new_surf, new_bs)
+    )
+    if Jres is not None:
+        print(
+            "Resonant flux reweighting (audit 8): w_res="
+            f"{RESONANT_FLUX_WEIGHT:g}, rationals="
+            f"{[str(r) for r in resonant_flux_rationals]}, "
+            f"resonant FFT bins={int(np.count_nonzero(Jres.mode_mask))}"
+        )
     LENGTH_MIN_TARGET = COIL_LENGTH_MIN_FRACTION * LENGTH_TARGET
     Jlsmin = QuadraticPenalty(Jls, LENGTH_MIN_TARGET, "min")
     Jwmin = QuadraticPenalty(Jw, BANANA_WIDTH_MIN_M, "min")
@@ -2918,7 +4020,39 @@ def main(parsed_args=None):
         f"Initial coil self-distance: {Jself.shortest_self_distance():.4f} [m] "
         f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
     )
-    stage2_iota_runtime = None
+    if SELF_ENVELOPE_MODE == "groc":
+        print(
+            "Initial coil self-envelope GROC: "
+            f"radius={Jself_envelope.shortest_groc():.4f} [m], "
+            f"equivalent_distance={Jself_envelope.shortest_self_distance():.4f} [m] "
+            f"(radius_min={SELF_ENVELOPE_FLOOR:.4f}, "
+            f"distance_min={SELF_ENVELOPE_REPORT_FLOOR:.4f})"
+        )
+    else:
+        print(
+            "Initial coil self-envelope distance: "
+            f"{Jself_envelope.shortest_self_distance():.4f} [m] "
+            f"(mode={SELF_ENVELOPE_MODE}, min={SELF_ENVELOPE_REPORT_FLOOR:.4f}, "
+            f"nominal={SELF_ENVELOPE_FLOOR:.4f}, "
+            f"sampling_margin={SELF_ENVELOPE_SAMPLING_MARGIN:.4f}, "
+            f"arc_window={args.self_distance_window:.4f})"
+        )
+    print(
+        "Initial fold geodesic curvature: "
+        f"{Jfold.max_abs_geodesic_curvature():.4f} [m^-1] "
+        f"(objective={FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD:.4f}, "
+        f"hard={FOLD_GEODESIC_CURVATURE_LIMIT:.4f})"
+    )
+    stage2_iota_runtime = build_stage2_iota_runtime_if_requested(
+        args=args,
+        equilibrium_file=file_loc,
+        bs=new_bs,
+        tf_coils=new_tf_coils,
+        major_radius=R0,
+        toroidal_flux=s,
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        boozer_current_convention=boozer_current_convention,
+    )
     deprecated_iota_alm_hot_loop = False
 
     # TOTAL OBJECTIVE FUNCTION -
@@ -2927,15 +4061,47 @@ def main(parsed_args=None):
     CONSTRAINT_METHOD = args.constraint_method
     JF = (
         SQUARED_FLUX_WEIGHT * Jf
-        + LENGTH_WEIGHT * (QuadraticPenalty(Jls, LENGTH_TARGET, "max") + Jlsmin)
-        + CC_WEIGHT * Jccdist
+        + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max")
+        + LENGTH_MIN_WEIGHT * Jlsmin
+        + CC_WEIGHT * Jccdist_objective
         + CC_WEIGHT * Jcsdist
         + CURVATURE_WEIGHT * Jc
         + args.stage2_poloidal_weight * Jpe
         + args.stage2_width_weight * (Jwmin + Jwmax)
         + args.stage2_selfint_weight * Jself
+        + SELF_ENVELOPE_WEIGHT * Jself_envelope
+        + FOLD_WEIGHT * Jfold
     )
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
+    if CC_OBJECTIVE_MARGIN > 0.0:
+        BASE_OBJECTIVE = BASE_OBJECTIVE + CC_WEIGHT * Jccdist_objective
+    if SELF_ENVELOPE_WEIGHT > 0.0:
+        BASE_OBJECTIVE = (
+            BASE_OBJECTIVE + SELF_ENVELOPE_WEIGHT * Jself_envelope
+        )
+    if FOLD_WEIGHT > 0.0:
+        BASE_OBJECTIVE = BASE_OBJECTIVE + FOLD_WEIGHT * Jfold
+    if Jvessel is not None:
+        JF = JF + VESSEL_KEEPOUT_WEIGHT * Jvessel
+        # ALM path: the keep-out rides the smooth base objective (no new
+        # constraint row), mirroring the single-stage weighted-penalty wiring.
+        BASE_OBJECTIVE = BASE_OBJECTIVE + VESSEL_KEEPOUT_WEIGHT * Jvessel
+    if Jhardware is not None:
+        JF = JF + HARDWARE_KEEPOUT_WEIGHT * Jhardware
+        # Penalty path: the static-hardware keep-out rides the weighted objective.
+        # ALM path (2026-06-15 parity): the keep-out is promoted to a zero-slack
+        # ALM constraint row instead (mirroring self_intersect and the single-
+        # stage `hardware_keepout` row), so it must NOT also ride the smooth base
+        # objective here — that would double-count the penalty. Vessel keep-out
+        # (above) has no constraint-row analog and stays in the base objective.
+        if CONSTRAINT_METHOD != "alm":
+            BASE_OBJECTIVE = BASE_OBJECTIVE + HARDWARE_KEEPOUT_WEIGHT * Jhardware
+    if Jres is not None:
+        JF = JF + RESONANT_FLUX_WEIGHT * Jres
+        # ALM path: the resonant reweighting is part of the (smooth, quadratic)
+        # flux objective itself, so it rides the base objective; no constraint
+        # row, mirroring the vessel keep-out wiring above.
+        BASE_OBJECTIVE = BASE_OBJECTIVE + RESONANT_FLUX_WEIGHT * Jres
     if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
         raise ValueError("--alm-taylor-test requires --constraint-method=alm")
 
@@ -3045,7 +4211,7 @@ def main(parsed_args=None):
             length_target=LENGTH_TARGET,
             cc_threshold=CC_THRESHOLD,
             curvature_threshold=CURVATURE_THRESHOLD,
-            coil_surface_threshold=CS_THRESHOLD,
+            coil_surface_threshold=cs_clearance_threshold,
             plasma_vessel_min_dist=plasma_vessel_min_dist,
             plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
             poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
@@ -3055,10 +4221,31 @@ def main(parsed_args=None):
             stage2_iota_runtime=stage2_iota_runtime,
             Jw=Jw,
             Jself=Jself,
+            Jself_envelope=Jself_envelope,
+            Jfold=Jfold,
             length_min_target=LENGTH_MIN_TARGET,
             width_min_threshold=BANANA_WIDTH_MIN_M,
             width_max_threshold=BANANA_WIDTH_MAX_M,
             self_intersect_min_distance=BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+            self_envelope_mode=SELF_ENVELOPE_MODE,
+            self_envelope_min_distance=SELF_ENVELOPE_REPORT_FLOOR,
+            self_envelope_nominal_min_distance=SELF_ENVELOPE_FLOOR,
+            self_envelope_sampling_margin=SELF_ENVELOPE_SAMPLING_MARGIN,
+            self_distance_window=(
+                args.self_distance_window
+                if SELF_ENVELOPE_MODE in {"hinge", "off"}
+                else None
+            ),
+            self_envelope_groc_radius_floor=(
+                SELF_ENVELOPE_FLOOR if SELF_ENVELOPE_MODE == "groc" else None
+            ),
+            fold_geodesic_curvature_limit=FOLD_GEODESIC_CURVATURE_LIMIT,
+            fold_geodesic_curvature_threshold=(
+                FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD
+            ),
+            fold_geodesic_curvature_margin_fraction=(
+                FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION
+            ),
         )
 
     selected_result_x = None
@@ -3105,6 +4292,7 @@ def main(parsed_args=None):
         alm_constraint_names = stage2_alm_constraint_names(
             include_coil_surface=Jcsdist is not None,
             include_poloidal_extent=True,
+            include_hardware_keepout=Jhardware is not None,
             include_iota_penalty=deprecated_iota_alm_hot_loop,
         )
         alm_smoothing_state, history_callback = (
@@ -3156,6 +4344,7 @@ def main(parsed_args=None):
                 width_max_threshold=BANANA_WIDTH_MAX_M,
                 Jself=Jself,
                 self_intersect_threshold=0.0,
+                Jhardware=Jhardware,
                 length_min_target=LENGTH_MIN_TARGET,
             )
 
@@ -3379,12 +4568,15 @@ def main(parsed_args=None):
         optimizer_success = bool(res.success)
         print(res.message)
 
-    # Ensure SIMSOPT state matches the best result (needed after basin-hopping)
-    final_artifact_state = None
-    if not args.init_only:
-        if selected_result_x is None:
-            selected_result_x = np.asarray(res.x, dtype=float).copy()
-        final_artifact_state = capture_artifact_state(selected_result_x)
+    # Ensure SIMSOPT state matches the measured result (needed after basin-hopping
+    # and for init-only baselines that still serialize final metrics). Penalty and
+    # basin-hopping paths reach here without an assignment, so the fallback must
+    # take the optimizer result, not the pre-optimization seed dofs.
+    if selected_result_x is None:
+        selected_result_x = np.asarray(
+            dofs if args.init_only else res.x, dtype=float
+        ).copy()
+    final_artifact_state = capture_artifact_state(selected_result_x)
 
     # POST-OPTIMIZATION PROCESSING AND OUTPUTS
     # ---------------------------------------------------------------------------------------
@@ -3402,6 +4594,13 @@ def main(parsed_args=None):
         final_coil_width = float(Jw.J())
         final_self_intersect_penalty = float(Jself.J())
         final_shortest_self_distance = float(Jself.shortest_self_distance())
+        final_self_envelope_penalty = float(Jself_envelope.J())
+        final_self_envelope_min_dist = float(Jself_envelope.shortest_self_distance())
+        final_fold_penalty = float(Jfold.J())
+        final_fold_geodesic_curvature_max = float(Jfold.max_abs_geodesic_curvature())
+        final_fold_ok = bool(
+            final_fold_geodesic_curvature_max <= FOLD_GEODESIC_CURVATURE_LIMIT
+        )
         hardware_status = _evaluate_stage2_hardware_constraints(
             final_coil_length,
             LENGTH_TARGET,
@@ -3410,7 +4609,7 @@ def main(parsed_args=None):
             final_max_curvature,
             CURVATURE_THRESHOLD,
             curve_surface_min_dist=final_curve_surface_min_dist,
-            coil_surface_threshold=CS_THRESHOLD,
+            coil_surface_threshold=cs_clearance_threshold,
             plasma_vessel_min_dist=plasma_vessel_min_dist,
             plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
             poloidal_extent_rad=final_poloidal_extent_rad,
@@ -3439,6 +4638,13 @@ def main(parsed_args=None):
         final_coil_width = final_artifact_state["coil_width"]
         final_self_intersect_penalty = final_artifact_state["self_intersect_penalty"]
         final_shortest_self_distance = final_artifact_state["shortest_self_distance"]
+        final_self_envelope_penalty = final_artifact_state["self_envelope_penalty"]
+        final_self_envelope_min_dist = final_artifact_state["self_envelope_min_dist"]
+        final_fold_penalty = final_artifact_state["fold_penalty"]
+        final_fold_geodesic_curvature_max = final_artifact_state[
+            "fold_geodesic_curvature_max"
+        ]
+        final_fold_ok = final_artifact_state["fold_ok"]
         hardware_status = final_artifact_state["hardware_status"]
     print(
         f"Final coil width: {final_coil_width:.4f} [m] "
@@ -3447,6 +4653,29 @@ def main(parsed_args=None):
     print(
         f"Final coil self-distance: {final_shortest_self_distance:.4f} [m] "
         f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
+    )
+    if SELF_ENVELOPE_MODE == "groc":
+        print(
+            "Final coil self-envelope GROC: "
+            f"radius={final_artifact_state['self_envelope_groc_radius']:.4f} [m], "
+            f"equivalent_distance={final_self_envelope_min_dist:.4f} [m] "
+            f"(radius_min={SELF_ENVELOPE_FLOOR:.4f}, "
+            f"distance_min={SELF_ENVELOPE_REPORT_FLOOR:.4f})"
+        )
+    else:
+        print(
+            "Final coil self-envelope distance: "
+            f"{final_self_envelope_min_dist:.4f} [m] "
+            f"(mode={SELF_ENVELOPE_MODE}, min={SELF_ENVELOPE_REPORT_FLOOR:.4f}, "
+            f"nominal={SELF_ENVELOPE_FLOOR:.4f}, "
+            f"sampling_margin={SELF_ENVELOPE_SAMPLING_MARGIN:.4f}, "
+            f"arc_window={args.self_distance_window:.4f})"
+        )
+    print(
+        "Final fold geodesic curvature: "
+        f"{final_fold_geodesic_curvature_max:.4f} [m^-1] "
+        f"(objective={FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD:.4f}, "
+        f"hard={FOLD_GEODESIC_CURVATURE_LIMIT:.4f}, ok={final_fold_ok})"
     )
     final_iota_feasible = (
         None
@@ -3575,6 +4804,8 @@ def main(parsed_args=None):
         ),
         cc_threshold=CC_THRESHOLD,
         cc_weight=CC_WEIGHT,
+        cc_objective_threshold=CC_OBJECTIVE_THRESHOLD,
+        cc_objective_margin=CC_OBJECTIVE_MARGIN,
         curvature_weight=CURVATURE_WEIGHT,
         curvature_threshold=CURVATURE_THRESHOLD,
         length_weight=LENGTH_WEIGHT,
@@ -3629,6 +4860,33 @@ def main(parsed_args=None):
         self_intersect_threshold=0.0,
         final_shortest_self_distance=final_shortest_self_distance,
         self_intersect_min_distance=BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        final_self_envelope_penalty=final_self_envelope_penalty,
+        final_self_envelope_min_dist=final_self_envelope_min_dist,
+        self_envelope_mode=SELF_ENVELOPE_MODE,
+        self_envelope_min_distance=SELF_ENVELOPE_REPORT_FLOOR,
+        self_envelope_nominal_min_distance=SELF_ENVELOPE_FLOOR,
+        self_envelope_sampling_margin=SELF_ENVELOPE_SAMPLING_MARGIN,
+        self_distance_window=(
+            args.self_distance_window
+            if SELF_ENVELOPE_MODE in {"hinge", "off"}
+            else None
+        ),
+        self_envelope_groc_radius=final_artifact_state[
+            "self_envelope_groc_radius"
+        ],
+        self_envelope_groc_radius_floor=(
+            SELF_ENVELOPE_FLOOR if SELF_ENVELOPE_MODE == "groc" else None
+        ),
+        final_fold_penalty=final_fold_penalty,
+        final_fold_geodesic_curvature_max=final_fold_geodesic_curvature_max,
+        fold_geodesic_curvature_limit=FOLD_GEODESIC_CURVATURE_LIMIT,
+        fold_geodesic_curvature_threshold=(
+            FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD
+        ),
+        fold_geodesic_curvature_margin_fraction=(
+            FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION
+        ),
+        fold_ok=final_fold_ok,
         length_min_target=LENGTH_MIN_TARGET,
         hardware_status=hardware_status,
     )
@@ -3671,6 +4929,12 @@ def main(parsed_args=None):
             new_surf=new_surf,
             constraint_metadata=constraint_metadata,
         )
+        # Audit 5b: the live geometry still holds the secondary state captured
+        # above, so the exact segment minima match the recorded point-cloud
+        # CURVE_*_MIN_DIST values of this secondary artifact.
+        secondary_results.update(
+            _segment_exact_clearance_artifact_fields(objective_curves, lcfs_surf)
+        )
         write_json(secondary_stage2_results_path, secondary_results)
         secondary_artifact_metadata = build_stage2_secondary_artifact_metadata(
             secondary_stage2_bs_path=secondary_stage2_bs_path,
@@ -3702,16 +4966,120 @@ def main(parsed_args=None):
                 banana_current_optimizable.get_value(),
                 cc_min_dist_m=results.get("CURVE_CURVE_MIN_DIST"),
                 cs_min_dist_m=results.get("CURVE_SURFACE_MIN_DIST"),
-                cc_nominal_m=COIL_COIL_MIN_DIST_M,
+                cc_nominal_m=required_banana_cc_centerline_m(),
                 cs_nominal_m=COIL_PLASMA_MIN_DIST_M,
+                self_envelope_min_dist_m=results.get("SELF_ENVELOPE_MIN_DIST_M"),
+                self_envelope_nominal_m=results.get("SELF_ENVELOPE_THRESHOLD_M"),
+                self_envelope_nominal_contract_m=results.get(
+                    "SELF_ENVELOPE_NOMINAL_MIN_DISTANCE_M"
+                ),
+                self_envelope_sampling_margin_m=results.get(
+                    "SELF_ENVELOPE_SAMPLING_MARGIN_M"
+                ),
+                self_distance_window_m=results.get("SELF_DISTANCE_WINDOW_M"),
+                self_envelope_mode=results.get("SELF_ENVELOPE_MODE"),
+                self_envelope_groc_radius_m=results.get(
+                    "SELF_ENVELOPE_GROC_RADIUS_M"
+                ),
+                self_envelope_groc_radius_floor_m=results.get(
+                    "SELF_ENVELOPE_GROC_RADIUS_FLOOR_M"
+                ),
+                fold_geodesic_curvature_max_inv_m=results.get(
+                    "FOLD_GEODESIC_CURVATURE_MAX_INV_M"
+                ),
+                fold_geodesic_curvature_limit_inv_m=results.get(
+                    "FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"
+                ),
+                fold_geodesic_curvature_threshold_inv_m=results.get(
+                    "FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"
+                ),
+                fold_penalty=results.get("FOLD_PENALTY"),
             )
         )
+    if FINITE_BUILD and stage2_frame_aware_curvature_threshold_enabled(args):
+        # Audit 5a provenance: distinguishes the constant pack limit driven into
+        # the optimizer from the realized per-point
+        # FINITEBUILD_FRAME_AWARE_CURVATURE_LIMIT_INV_M recorded above.
+        raw_frame_aware_threshold = getattr(
+            args, "finitebuild_frame_aware_curvature_threshold", None
+        )
+        results.update(
+            {
+                "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_ENABLED": True,
+                "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_MODE": (
+                    "default_on"
+                    if raw_frame_aware_threshold is None
+                    else "explicit_on"
+                ),
+                "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_OPT_IN": (
+                    raw_frame_aware_threshold is True
+                ),
+                "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_PACK_LIMIT_INV_M": (
+                    float(frame_aware_curvature_limit_inv_m)
+                ),
+                "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_APPLIED": bool(
+                    frame_aware_curvature_limit_applied
+                ),
+            }
+        )
+    if Jvessel is not None:
+        # Audit 5c opt-in provenance, evaluated on the final selected geometry.
+        results.update(
+            {
+                "STAGE2_VESSEL_KEEPOUT_WEIGHT": VESSEL_KEEPOUT_WEIGHT,
+                "STAGE2_VESSEL_KEEPOUT_PENALTY": float(Jvessel.J()),
+                "STAGE2_VESSEL_KEEPOUT_MIN_CLEARANCE_M": float(
+                    Jvessel.shortest_clearance()
+                ),
+            }
+        )
+    if Jhardware is not None:
+        # Phase 2 path-parity provenance, evaluated on the final selected
+        # geometry (mirrors the single-stage hardware keep-out provenance).
+        results.update(
+            {
+                "STAGE2_HARDWARE_KEEPOUT_WEIGHT": HARDWARE_KEEPOUT_WEIGHT,
+                "STAGE2_HARDWARE_KEEPOUT_PENALTY": float(Jhardware.J()),
+                "STAGE2_HARDWARE_KEEPOUT_MIN_DISTANCE_M": float(
+                    Jhardware.shortest_distance()
+                ),
+                "STAGE2_HARDWARE_KEEPOUT_JSON": str(
+                    args.stage2_hardware_keepout_json
+                ),
+                "STAGE2_HARDWARE_KEEPOUT_GLB": str(
+                    args.stage2_hardware_keepout_glb
+                ),
+            }
+        )
+    results.update(
+        hardware_keepout_results_fields(
+            hardware_group_labels=(
+                hardware_keepout_group_labels
+                if Jhardware is not None
+                else ()
+            ),
+            vessel_active=Jvessel is not None,
+            metadata=(
+                hardware_keepout_metadata_fields
+                if Jhardware is not None
+                else None
+            ),
+        )
+    )
     if new_proxy_coils:
         results.update(
             build_design_only_results_fields(
                 reason=f"finite_current_proxy_line_current: {finite_current_mode}",
             )
         )
+    # Audit 5b (always-on, additive keys only): exact segment-based minima of
+    # the same curves/surface whose point-cloud minima are recorded above. The
+    # live geometry here matches the recorded state in every path: the final
+    # capture (or the init/live state when no optimizer ran) set it before the
+    # final_* metrics were read.
+    results.update(
+        _segment_exact_clearance_artifact_fields(objective_curves, lcfs_surf)
+    )
     write_json(os.path.join(OUT_DIR_ITER, "results.json"), results)
 
 

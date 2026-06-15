@@ -131,9 +131,12 @@ def load_poincare_surfaces_module():
 
 
 def load_topology_fidelity_ladder_module():
+    # The ladder module uses package-relative imports (from .topology.kam_birkhoff
+    # import ...), so the fresh copy must be loaded under a dotted name inside the
+    # real banana_opt package for the relative import to resolve.
     return _load_module_from_path(
         TOPOLOGY_FIDELITY_LADDER_MODULE_PATH,
-        "topology_fidelity_ladder",
+        "examples.single_stage_optimization.banana_opt.topology_fidelity_ladder",
         register_in_sys_modules=True,
     )
 
@@ -229,6 +232,7 @@ def search_hardware_penalty_payload(values=(0.0, 0.0, 0.0)):
 
 def seed_near_miss_diagnostic_globals(module, *, coil_length=0.44):
     module.curvelength = SimpleNamespace(J=lambda: coil_length)
+    module.CurveLength = lambda curve: SimpleNamespace(J=lambda: coil_length)
     module.VV = None
     module.OUT_DIR_ITER = ""
 
@@ -2365,6 +2369,34 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(metrics["validation_status"], "broken")
         self.assertEqual(metrics["stop_reason_counts"]["iteration_limit"], 1)
 
+    def test_trace_metrics_refuses_clean_verdict_on_underresolved_high_iota_surface(self):
+        topology_module = load_topology_scorer_module()
+        # One field line that survives with no stop -> would be a clean "validated" 50/50.
+        survived_tys = [np.array([[0.0, 1.0, 0.0, 0.0]])]
+        survived_hits = [np.array([[1.0, 0.0, 1.0, 0.0, 0.0]])]
+        phis = [0.0]
+        labels = ["surface_exit"]
+
+        def status(**kw):
+            return topology_module.trace_metrics(
+                survived_tys, survived_hits, phis, labels, mode="validation", **kw
+            )["validation_status"]
+
+        # Backward-compatible: without iota/resolution the verdict is unchanged.
+        self.assertEqual(status(), "validated")
+        # High iota on a coarse 127/32 surface: refuse the clean verdict (the footgun).
+        self.assertEqual(
+            status(iota=0.30, surface_resolution=(127, 32)), "under_resolved"
+        )
+        # ntheta alone under the floor still trips the guard.
+        self.assertEqual(
+            status(iota=0.30, surface_resolution=(255, 32)), "under_resolved"
+        )
+        # High iota on the fine 255/64 surface: trusted -> validated.
+        self.assertEqual(status(iota=0.30, surface_resolution=(255, 64)), "validated")
+        # Low iota is unaffected by the guard even on a coarse surface.
+        self.assertEqual(status(iota=0.10, surface_resolution=(127, 32)), "validated")
+
     def test_legacy_bounded_seed_fraction_and_trace_metrics_share_first_stop_semantics(
         self,
     ):
@@ -2829,6 +2861,38 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported POINCARE_FIELD_POLICY"):
             module.resolve_poincare_field_policy({"POINCARE_FIELD_POLICY": "sometimes"})
 
+    def test_poincare_render_mode_env_validation(self):
+        module = load_poincare_surfaces_module()
+
+        self.assertEqual(
+            module.resolve_poincare_render_mode_names({}),
+            ("validation", "diagnostic", "default"),
+        )
+        self.assertEqual(
+            module.resolve_poincare_render_mode_names(
+                {"POINCARE_RENDER_MODES": "default"}
+            ),
+            ("default",),
+        )
+        self.assertEqual(
+            module.resolve_poincare_render_mode_names(
+                {"POINCARE_RENDER_MODES": "diagnostic,default"}
+            ),
+            ("diagnostic", "default"),
+        )
+        with self.assertRaisesRegex(ValueError, "Unsupported POINCARE_RENDER_MODES"):
+            module.resolve_poincare_render_mode_names(
+                {"POINCARE_RENDER_MODES": "strict"}
+            )
+        with self.assertRaisesRegex(ValueError, "must not repeat"):
+            module.resolve_poincare_render_mode_names(
+                {"POINCARE_RENDER_MODES": "default,default"}
+            )
+        with self.assertRaisesRegex(ValueError, "comma-separated"):
+            module.resolve_poincare_render_mode_names(
+                {"POINCARE_RENDER_MODES": "default,"}
+            )
+
     def test_poincare_render_modes_preserve_metric_contracts(self):
         module = load_poincare_surfaces_module()
 
@@ -2906,6 +2970,55 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertAlmostEqual(field_domain.stopping_rmin, 0.75 * 0.95)
         self.assertAlmostEqual(field_domain.stopping_rmax, 1.25 * 1.05)
         self.assertAlmostEqual(field_domain.stopping_zmax, 0.1 * 1.05)
+
+    def test_select_poincare_render_modes_keeps_requested_order(self):
+        module = load_poincare_surfaces_module()
+        render_modes = [
+            {"mode": "validation"},
+            {"mode": "diagnostic"},
+            {"mode": "default"},
+        ]
+
+        selected = module.select_poincare_render_modes(
+            render_modes,
+            ("default", "validation"),
+        )
+
+        self.assertEqual([mode["mode"] for mode in selected], ["default", "validation"])
+        with self.assertRaisesRegex(ValueError, "not built"):
+            module.select_poincare_render_modes(render_modes, ("strict",))
+
+    def test_partial_poincare_modes_reject_stale_unselected_metrics(self):
+        module = load_poincare_surfaces_module()
+        all_modes = [
+            {"mode": "validation", "metrics_suffix": "_validation"},
+            {"mode": "diagnostic", "metrics_suffix": "_diagnostic"},
+            {"mode": "default", "metrics_suffix": "_default"},
+        ]
+        selected_modes = [all_modes[2]]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(
+                os.path.join(tmpdir, "PoincareMetrics_opt_validation.json"),
+                "w",
+                encoding="utf-8",
+            ) as fh:
+                fh.write("{}")
+
+            with self.assertRaisesRegex(FileExistsError, "stale metrics"):
+                module.assert_no_stale_unselected_metrics(
+                    tmpdir,
+                    "opt",
+                    all_modes,
+                    selected_modes,
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.assert_no_stale_unselected_metrics(
+                tmpdir,
+                "opt",
+                all_modes,
+                selected_modes,
+            )
 
     def test_prepare_poincare_fields_keeps_default_native_wander(self):
         module = load_poincare_surfaces_module()
@@ -4901,6 +5014,35 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertEqual(status["length_target"], 1.9)
 
+    def test_stage2_hardware_constraints_enforce_self_envelope_and_fold(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=1.95,
+            length_target=1.9,
+            curve_curve_min_dist=0.05,
+            cc_threshold=0.05,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+            self_envelope_min_dist=0.0460,
+            self_envelope_min_distance=0.0462,
+            fold_geodesic_curvature_max=44.0,
+            fold_geodesic_curvature_limit=43.0,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(
+            status["violations"],
+            [
+                "self_envelope_min_dist 0.046000 below threshold 0.046200",
+                "fold_geodesic_curvature_max 44.000000 exceeds threshold 43.000000",
+            ],
+        )
+        self.assertFalse(status["constraints"]["self_envelope_min_dist"]["success"])
+        self.assertFalse(
+            status["constraints"]["fold_geodesic_curvature_max"]["success"]
+        )
+
     def test_single_stage_hardware_constraints_report_each_violation(self):
         module = load_single_stage_example_module()
 
@@ -5371,7 +5513,9 @@ class HardwareConstraintTests(unittest.TestCase):
         module.JCurveSurface = _DistanceObjective(0.77, 0.07)
         module.JCurvature = _ScalarObjective(0.99)
         module.banana_curve = _Curve()
+        module.banana_curves = [module.banana_curve]
         module.curvelength = _CurveLength()
+        module.CurveLength = lambda curve: _CurveLength()
         module.bs = _BiotSavart()
         module.VV = object()
         module.CHECKPOINT_EVERY = 0
@@ -7645,6 +7789,10 @@ class HardwareConstraintTests(unittest.TestCase):
             max_iterations=30,
             target_volume=0.10,
             target_iota=0.15,
+            toroidal_flux=0.24,
+            banana_surf_radius=0.142,
+            curvature_threshold=100.0,
+            order=2,
             stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
             single_stage_goal_mode="target",
         )
@@ -7715,6 +7863,10 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(payload["SEARCH_OBJECTIVE_J"], compact_eval["total"])
         self.assertAlmostEqual(payload["NONQS_RATIO"], rich_eval["J_QS"])
         self.assertAlmostEqual(payload["BOOZER_RESIDUAL"], rich_eval["J_Boozer"])
+        self.assertAlmostEqual(payload["TOROIDAL_FLUX"], 0.24)
+        self.assertAlmostEqual(payload["banana_surf_radius"], 0.142)
+        self.assertAlmostEqual(payload["CURVATURE_THRESHOLD"], 100.0)
+        self.assertEqual(payload["order"], 2)
         self.assertAlmostEqual(
             payload["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"],
             module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
@@ -10173,7 +10325,9 @@ class HardwareConstraintTests(unittest.TestCase):
         module.JCurveSurface = _DistanceObjective(0.77, 0.03)
         module.JCurvature = _ScalarObjective(0.99)
         module.banana_curve = _Curve()
+        module.banana_curves = [module.banana_curve]
         module.curvelength = _CurveLength()
+        module.CurveLength = lambda curve: _CurveLength()
         module.bs = _BS()
         module.VV = object()
         module.CHECKPOINT_EVERY = 0
@@ -12473,6 +12627,8 @@ class HardwareConstraintTests(unittest.TestCase):
         module.CURVATURE_WEIGHT = 6.0
         module.JShear = "shear"
         module.SHEAR_WEIGHT = 7.0
+        module.JMagneticWell = "magnetic_well"
+        module.MAGNETIC_WELL_WEIGHT = 8.0
 
         with patch.object(
             module,
@@ -12489,11 +12645,22 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(evaluate_mock.call_args.kwargs["include_diagnostics"])
         self.assertEqual(evaluate_mock.call_args.kwargs["JShear"], "shear")
         self.assertEqual(evaluate_mock.call_args.kwargs["SHEAR_WEIGHT"], 7.0)
+        self.assertEqual(
+            evaluate_mock.call_args.kwargs["JMagneticWell"],
+            "magnetic_well",
+        )
+        self.assertEqual(
+            evaluate_mock.call_args.kwargs["MAGNETIC_WELL_WEIGHT"],
+            8.0,
+        )
 
-    def test_evaluate_search_objective_penalty_includes_weighted_shear_gradient(self):
+    def test_evaluate_search_objective_penalty_includes_optional_physics_gradients(
+        self,
+    ):
         module = self.load_module()
         zero = FakeAlgebraicObjective(0.0, [0.0, 0.0])
         shear = FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        magnetic_well = FakeAlgebraicObjective(0.25, [0.5, 0.25])
 
         module.SINGLE_STAGE_GOAL_MODE = "target"
         module.FRONTIER_GOAL_CONFIG = None
@@ -12524,21 +12691,24 @@ class HardwareConstraintTests(unittest.TestCase):
 
         module.JShear = None
         module.SHEAR_WEIGHT = 10.0
+        module.JMagneticWell = None
+        module.MAGNETIC_WELL_WEIGHT = 4.0
         baseline = module.evaluate_search_objective(
             np.array([1.0]),
             include_diagnostics=False,
         )
 
         module.JShear = shear
-        with_shear = module.evaluate_search_objective(
+        module.JMagneticWell = magnetic_well
+        with_terms = module.evaluate_search_objective(
             np.array([1.0]),
             include_diagnostics=False,
         )
 
-        self.assertAlmostEqual(with_shear["total"] - baseline["total"], 5.0)
+        self.assertAlmostEqual(with_terms["total"] - baseline["total"], 6.0)
         np.testing.assert_allclose(
-            with_shear["grad"] - baseline["grad"],
-            [2.5, -7.5],
+            with_terms["grad"] - baseline["grad"],
+            [4.5, -6.5],
         )
         diagnostics = module.evaluate_search_objective(
             np.array([1.0]),
@@ -12548,6 +12718,50 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["shear_weight"], 10.0)
         self.assertAlmostEqual(diagnostics["J_shear"], 0.5)
         np.testing.assert_allclose(diagnostics["dJ_shear"], [0.25, -0.75])
+        self.assertTrue(diagnostics["magnetic_well_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["magnetic_well_weight"], 4.0)
+        self.assertAlmostEqual(diagnostics["J_magnetic_well"], 0.25)
+        np.testing.assert_allclose(
+            diagnostics["dJ_magnetic_well"],
+            [0.5, 0.25],
+        )
+
+    def test_magnetic_well_objective_results_payload_reports_proxy_contract(self):
+        module = self.load_module()
+        module.MAGNETIC_WELL_WEIGHT = 4.0
+        module.MAGNETIC_WELL_TARGET = -0.05
+        module.JMagneticWell = SimpleNamespace(
+            well_target=-0.05,
+            label_inner=0.6,
+            label_mid=0.8,
+            label_outer=1.0,
+            magnetic_well_proxy=lambda: -0.125,
+        )
+        search_eval = {
+            "magnetic_well_objective_enabled": True,
+            "magnetic_well_weight": 4.0,
+            "J_magnetic_well": 0.25,
+            "dJ_magnetic_well": np.array([3.0, 4.0]),
+        }
+
+        payload = module.magnetic_well_objective_results_payload(search_eval)
+
+        self.assertTrue(payload["MAGNETIC_WELL_OBJECTIVE_ENABLED"])
+        self.assertEqual(
+            payload["MAGNETIC_WELL_OBJECTIVE_KIND"],
+            module.MAGNETIC_WELL_OBJECTIVE_KIND,
+        )
+        self.assertFalse(payload["MAGNETIC_WELL_IS_FINITE_BETA_MERCIER"])
+        self.assertAlmostEqual(payload["MAGNETIC_WELL_OBJECTIVE_WEIGHT"], 4.0)
+        self.assertAlmostEqual(payload["MAGNETIC_WELL_OBJECTIVE_TARGET"], -0.05)
+        self.assertAlmostEqual(payload["MAGNETIC_WELL_OBJECTIVE_VALUE"], 0.25)
+        self.assertAlmostEqual(payload["MAGNETIC_WELL_OBJECTIVE_GRADIENT_NORM"], 5.0)
+        self.assertAlmostEqual(payload["MAGNETIC_WELL_PROXY"], -0.125)
+        self.assertEqual(payload["MAGNETIC_WELL_SURFACE_LABELS"], [0.6, 0.8, 1.0])
+        self.assertEqual(
+            payload["MAGNETIC_WELL_OBJECTIVE_PAYLOAD"]["kind"],
+            module.MAGNETIC_WELL_OBJECTIVE_KIND,
+        )
 
     def test_build_total_objective_skips_missing_volume_term(self):
         module = self.load_module()
@@ -12749,8 +12963,15 @@ class HardwareConstraintTests(unittest.TestCase):
         outer_surface = object()
         self_objective = object()
         hardware_keepout_objective = object()
+        vessel_keepout_objective = object()
+        coil_force_objective = object()
         recorded_self_intersect_call = {}
         recorded_hardware_keepout_call = {}
+        recorded_vessel_keepout_call = {}
+        recorded_coil_force_call = {}
+        recorded_poloidal_extent_call = {}
+        recorded_width_call = {}
+        recorded_loader_call = {}
 
         def fake_curve_self_intersect(curve, minimum_distance, *, neighbor_skip):
             recorded_self_intersect_call.update(
@@ -12767,6 +12988,7 @@ class HardwareConstraintTests(unittest.TestCase):
             points,
             minimum_distance,
             point_weight,
+            winding_r0,
         ):
             recorded_hardware_keepout_call.update(
                 {
@@ -12774,9 +12996,58 @@ class HardwareConstraintTests(unittest.TestCase):
                     "points": points,
                     "minimum_distance": minimum_distance,
                     "point_weight": point_weight,
+                    "winding_r0": winding_r0,
                 }
             )
             return hardware_keepout_objective
+
+        def fake_vessel_keepout(curves, *, minimum_clearance, winding_r0):
+            recorded_vessel_keepout_call.update(
+                {
+                    "curves": curves,
+                    "minimum_clearance": minimum_clearance,
+                    "winding_r0": winding_r0,
+                }
+            )
+            return vessel_keepout_objective
+
+        def fake_mean_squared_force(coil, coils, regularization):
+            recorded_coil_force_call.update(
+                {
+                    "coil": coil,
+                    "coils": coils,
+                    "regularization": regularization,
+                }
+            )
+            return coil_force_objective
+
+        def fake_poloidal_extent(curve, major_radius, threshold):
+            recorded_poloidal_extent_call.update(
+                {
+                    "curve": curve,
+                    "major_radius": major_radius,
+                    "threshold": threshold,
+                }
+            )
+            return object()
+
+        def fake_ellipse_width(curve, major_radius, minor_radius):
+            recorded_width_call.update(
+                {
+                    "curve": curve,
+                    "major_radius": major_radius,
+                    "minor_radius": minor_radius,
+                }
+            )
+            return object()
+
+        def fake_average_surface_objectives(terms):
+            terms = list(terms)
+            if terms == [self_objective]:
+                return self_objective
+            if terms == [hardware_keepout_objective]:
+                return hardware_keepout_objective
+            return object()
 
         with ExitStack() as stack:
             stack.enter_context(
@@ -12796,17 +13067,25 @@ class HardwareConstraintTests(unittest.TestCase):
                 "Volume",
                 "build_single_stage_iota_objective",
                 "build_single_stage_volume_objective",
-                "average_surface_objectives",
                 "QuadraticPenalty",
                 "CurveCurveDistance",
                 "CurveSurfaceDistance",
                 "LpCurveCurvature",
-                "PoloidalExtent",
-                "EllipseWidth",
                 "MajorRadius",
                 "MinorRadius",
             ):
                 stack.enter_context(patch.object(module, name, return_value=object()))
+            stack.enter_context(
+                patch.object(
+                    module,
+                    "average_surface_objectives",
+                    fake_average_surface_objectives,
+                )
+            )
+            stack.enter_context(
+                patch.object(module, "PoloidalExtent", fake_poloidal_extent)
+            )
+            stack.enter_context(patch.object(module, "EllipseWidth", fake_ellipse_width))
             stack.enter_context(
                 patch.object(
                     module,
@@ -12825,27 +13104,52 @@ class HardwareConstraintTests(unittest.TestCase):
             )
             keepout_points = np.array([[0.9, 0.0, 0.0], [0.91, 0.01, 0.0]])
             keepout_point_weight = 3.6e-5
+            keepout_metadata = {
+                "HARDWARE_KEEPOUT_GROUPS": ["shells", "limiter"],
+                "HARDWARE_KEEPOUT_JSON_SHA256": "json-sha",
+            }
+
+            def fake_load_hardware_keepout(path, *, glb_path=None):
+                recorded_loader_call.update({"path": path, "glb_path": glb_path})
+                return (
+                    keepout_points,
+                    keepout_point_weight,
+                    module.HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                    {},
+                )
+
             stack.enter_context(
                 patch.object(
                     module,
                     "load_hardware_keepout",
-                    return_value=(
-                        keepout_points,
-                        keepout_point_weight,
-                        module.HARDWARE_KEEPOUT_MIN_DISTANCE_M,
-                        {},
-                    ),
+                    fake_load_hardware_keepout,
+                )
+            )
+            metadata_mock = stack.enter_context(
+                patch.object(
+                    module,
+                    "hardware_keepout_metadata",
+                    return_value=keepout_metadata,
                 )
             )
             stack.enter_context(
                 patch.object(module, "CurveHardwareKeepout", fake_hardware_keepout)
+            )
+            stack.enter_context(
+                patch.object(module, "CurveVesselEnvelopeKeepout", fake_vessel_keepout)
+            )
+            stack.enter_context(
+                patch.object(module, "MeanSquaredForce", fake_mean_squared_force)
             )
             build_total_mock = stack.enter_context(
                 patch.object(module, "build_total_objective", return_value=object())
             )
 
             module.SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = 1.0
+            module.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = 2.0
+            module.SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = 0.006
             module.HARDWARE_KEEPOUT_JSON_PATH = "/tmp/hardware_keepout.json"
+            module.HARDWARE_KEEPOUT_GLB_PATH = "/tmp/hbt_assembly.glb"
             bundle = module.build_single_stage_objective_bundle(
                 stage="full",
                 surface_data=[
@@ -12864,9 +13168,18 @@ class HardwareConstraintTests(unittest.TestCase):
                 CS_DIST=0.015,
                 CURVATURE_WEIGHT=1.0,
                 CURVATURE_THRESHOLD=20.0,
+                banana_surf_radius=0.21,
+                banana_surf_major_radius=0.904,
+                FORCE_WEIGHT=3.0,
+                coil_force_regularization=0.123,
             )
 
         self.assertIs(recorded_self_intersect_call["curve"], banana_curve)
+        self.assertEqual(recorded_poloidal_extent_call["curve"], banana_curve)
+        self.assertAlmostEqual(recorded_poloidal_extent_call["major_radius"], 0.904)
+        self.assertEqual(recorded_width_call["curve"], banana_curve)
+        self.assertAlmostEqual(recorded_width_call["major_radius"], 0.904)
+        self.assertAlmostEqual(recorded_width_call["minor_radius"], 0.21)
         self.assertAlmostEqual(
             recorded_self_intersect_call["minimum_distance"],
             module.BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
@@ -12881,6 +13194,19 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertIs(bundle["JCurveSelfIntersect"], self_objective)
         self.assertIs(bundle["JCurveHardwareKeepout"], hardware_keepout_objective)
+        self.assertEqual(
+            recorded_loader_call,
+            {
+                "path": "/tmp/hardware_keepout.json",
+                "glb_path": "/tmp/hbt_assembly.glb",
+            },
+        )
+        metadata_mock.assert_called_once_with(
+            "/tmp/hardware_keepout.json",
+            glb_path="/tmp/hbt_assembly.glb",
+        )
+        self.assertEqual(bundle["HARDWARE_KEEPOUT_GROUP_LABELS"], ["shells", "limiter"])
+        self.assertEqual(bundle["HARDWARE_KEEPOUT_METADATA"], keepout_metadata)
         self.assertEqual(recorded_hardware_keepout_call["curves"], [banana_curve])
         np.testing.assert_allclose(
             recorded_hardware_keepout_call["points"],
@@ -12894,6 +13220,37 @@ class HardwareConstraintTests(unittest.TestCase):
             recorded_hardware_keepout_call["point_weight"],
             keepout_point_weight,
         )
+        self.assertIs(bundle["JCurveVesselEnvelopeKeepout"], vessel_keepout_objective)
+        self.assertEqual(recorded_vessel_keepout_call["curves"], [banana_curve])
+        self.assertAlmostEqual(
+            recorded_vessel_keepout_call["minimum_clearance"],
+            module.SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE,
+        )
+        self.assertIs(bundle["JCoilForce"], coil_force_objective)
+        self.assertEqual(recorded_coil_force_call["coil"], "coil")
+        self.assertEqual(recorded_coil_force_call["coils"], ["coil"])
+        self.assertAlmostEqual(recorded_coil_force_call["regularization"], 0.123)
+        self.assertIs(
+            build_total_mock.call_args.kwargs["JCurveVesselEnvelopeKeepout"],
+            vessel_keepout_objective,
+        )
+        self.assertEqual(
+            build_total_mock.call_args.kwargs["VESSEL_KEEPOUT_WEIGHT"],
+            module.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        )
+        self.assertIs(
+            build_total_mock.call_args.kwargs["JCoilForce"],
+            coil_force_objective,
+        )
+        self.assertEqual(build_total_mock.call_args.kwargs["FORCE_WEIGHT"], 3.0)
+
+    def test_banana_curve_order_unwraps_rotated_curve(self):
+        module = self.load_module()
+        banana_curve = SimpleNamespace(order=8)
+        wrapped_curve = SimpleNamespace(curve=banana_curve)
+
+        self.assertEqual(module.banana_curve_order(banana_curve), 8)
+        self.assertEqual(module.banana_curve_order(wrapped_curve), 8)
 
     def test_build_single_stage_iota_objective_target_mode_uses_quadratic_penalty(self):
         module = self.load_module()
@@ -12980,16 +13337,18 @@ class HardwareConstraintTests(unittest.TestCase):
         config = module.build_frontier_goal_config(
             initial_iota=0.15,
             initial_volume=0.10,
+            target_iota=0.18,
+            target_volume=0.12,
             initial_qs_objective=2.0e-4,
             initial_boozer_objective=6.0e-7,
             res_weight=1000.0,
             iotas_weight=100.0,
         )
 
-        self.assertAlmostEqual(config.iota_reference, 0.15)
+        self.assertAlmostEqual(config.iota_reference, 0.18)
         self.assertAlmostEqual(config.iota_scale, 0.05)
-        self.assertAlmostEqual(config.volume_reference, 0.10)
-        self.assertAlmostEqual(config.volume_scale, 0.01)
+        self.assertAlmostEqual(config.volume_reference, 0.12)
+        self.assertAlmostEqual(config.volume_scale, 0.012)
         self.assertAlmostEqual(config.qs_reference, 2.0e-4)
         # qs_scale defaults to ``max(|initial_qs_objective|, 1e-6) * 0.25``
         # (per the iota_scale heuristic). For initial_qs_objective=2.0e-4
@@ -13547,7 +13906,9 @@ class HardwareConstraintTests(unittest.TestCase):
             module.CURVATURE_WEIGHT = 0.1
             module.CURVATURE_THRESHOLD = 40.0
             module.banana_curve = _Curve()
+            module.banana_curves = [module.banana_curve]
             module.curvelength = _CurveLength()
+            module.CurveLength = lambda curve: _CurveLength()
             module.bs = _BS()
             module.OUT_DIR_ITER = tmpdir
             # Preserved-timeout writes during callback stamp WOUT_CONVENTION at
@@ -13758,7 +14119,9 @@ class HardwareConstraintTests(unittest.TestCase):
             module.CURVATURE_WEIGHT = 0.1
             module.CURVATURE_THRESHOLD = 40.0
             module.banana_curve = _Curve()
+            module.banana_curves = [module.banana_curve]
             module.curvelength = _CurveLength()
+            module.CurveLength = lambda curve: _CurveLength()
             module.bs = _BS()
             module.OUT_DIR_ITER = tmpdir
             module.run_dict = {
@@ -14524,6 +14887,10 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_poloidal_weight=1.0,
             single_stage_width_weight=1.0,
             single_stage_selfint_weight=1.0,
+            single_stage_hardware_keepout_weight=1000.0,
+            hardware_keepout_json="hardware_keepout.json",
+            single_stage_vessel_keepout_weight=1000.0,
+            single_stage_vessel_keepout_clearance=0.005,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             constraint_method="penalty",
@@ -14573,6 +14940,8 @@ class RunIdentityTests(unittest.TestCase):
             confinement_surrogate_mean_weight=0.2,
             confinement_surrogate_worst_weight=0.6,
             confinement_surrogate_early_weight=0.2,
+            magnetic_well_weight=0.0,
+            magnetic_well_target=0.0,
         )
 
     def _set_residue_objective_args(
@@ -14678,10 +15047,14 @@ class RunIdentityTests(unittest.TestCase):
             if field.name
             not in {
                 "single_stage_banana_current_coordinate_scaling",
+                "single_stage_banana_geometry_mode",
                 "residue_objective_weight",
                 "residue_objective_target_manifest_id",
                 "residue_objective_validation_id",
                 "residue_objective_replay_config",
+                "magnetic_well_weight",
+                "magnetic_well_target",
+                "lcfs_constraint_mode",
             }
         ]
 
@@ -14700,6 +15073,17 @@ class RunIdentityTests(unittest.TestCase):
         self.assertNotEqual(
             self._build_identity(module, base_args),
             self._build_identity(module, scaled_args),
+        )
+
+    def test_run_identity_changes_when_banana_geometry_mode_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        materialized_args = self._make_identity_args()
+        materialized_args.single_stage_banana_geometry_mode = "materialized_cws"
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, materialized_args),
         )
 
     def test_run_identity_distinguishes_explicit_preserve_first_from_auto(self):
@@ -14724,6 +15108,18 @@ class RunIdentityTests(unittest.TestCase):
         base_args = self._make_identity_args()
         weighted_args = self._make_identity_args()
         weighted_args.confinement_objective_weight = 5.0
+
+        base_config = self._build_identity(module, base_args)
+        weighted_config = self._build_identity(module, weighted_args)
+
+        self.assertNotEqual(base_config, weighted_config)
+
+    def test_run_identity_changes_when_magnetic_well_settings_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.magnetic_well_weight = 5.0
+        weighted_args.magnetic_well_target = -0.05
 
         base_config = self._build_identity(module, base_args)
         weighted_config = self._build_identity(module, weighted_args)
@@ -15607,6 +16003,60 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.single_stage_width_weight, 2.5)
         self.assertEqual(args.single_stage_selfint_weight, 3.5)
 
+    def test_single_stage_parse_args_defaults_engineering_contract_terms_on(self):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.object(sys, "argv", ["single_stage_banana_example.py"]),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.single_stage_hardware_keepout_weight,
+            module.SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT,
+        )
+        self.assertEqual(
+            args.single_stage_vessel_keepout_weight,
+            module.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT,
+        )
+        self.assertEqual(
+            args.coil_force_weight,
+            module.SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT,
+        )
+        self.assertEqual(
+            args.coil_force_conductor_radius,
+            module.SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M,
+        )
+        self.assertEqual(
+            args.hardware_keepout_json,
+            module.DEFAULT_HARDWARE_KEEPOUT_JSON_PATH,
+        )
+        self.assertEqual(
+            args.hardware_keepout_glb,
+            module.DEFAULT_HARDWARE_KEEPOUT_GLB_PATH,
+        )
+        self.assertGreater(args.single_stage_hardware_keepout_weight, 0.0)
+        self.assertGreater(args.single_stage_vessel_keepout_weight, 0.0)
+        self.assertGreater(args.coil_force_weight, 0.0)
+        self.assertGreater(args.coil_force_conductor_radius, 0.0)
+
+    def test_single_stage_parse_args_accepts_hardware_keepout_glb(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--hardware-keepout-glb",
+                "/tmp/hbt_assembly.glb",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.hardware_keepout_glb, "/tmp/hbt_assembly.glb")
+
     def test_single_stage_parse_args_accepts_residue_objective_flags(self):
         module = load_single_stage_example_module()
 
@@ -15638,6 +16088,25 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args.residue_objective_samples_per_full_torus,
             module.DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
         )
+
+    def test_single_stage_parse_args_accepts_magnetic_well_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--magnetic-well-weight",
+                "5.0",
+                "--magnetic-well-target",
+                "-0.05",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.magnetic_well_weight, 5.0)
+        self.assertEqual(args.magnetic_well_target, -0.05)
 
     def test_single_stage_parse_args_uses_measured_lbfgsb_maxcor_default(self):
         module = load_single_stage_example_module()
@@ -16082,6 +16551,58 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.single_stage_goal_mode, "frontier")
 
+    def test_single_stage_parse_args_defaults_target_mode_to_historical_iota(self):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(sys, "argv", ["single_stage_banana_example.py"]),
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_goal_mode, "target")
+        self.assertAlmostEqual(
+            args.iota_target,
+            module.DEFAULT_SINGLE_STAGE_IOTA_TARGET,
+        )
+
+    def test_single_stage_parse_args_defaults_frontier_mode_to_off_resonance_iota(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                sys,
+                "argv",
+                ["single_stage_banana_example.py", "--single-stage-goal-mode", "frontier"],
+            ),
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_goal_mode, "frontier")
+        self.assertAlmostEqual(
+            args.iota_target,
+            module.DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET,
+        )
+
+    def test_single_stage_parse_args_iota_env_overrides_frontier_default(self):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.dict(os.environ, {"IOTA_TARGET": "0.19"}, clear=True),
+            patch.object(
+                sys,
+                "argv",
+                ["single_stage_banana_example.py", "--single-stage-goal-mode", "frontier"],
+            ),
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_goal_mode, "frontier")
+        self.assertAlmostEqual(args.iota_target, 0.19)
+
     def test_frontier_goal_mode_warning_message_reports_scale_and_unsaturated_reward(
         self,
     ):
@@ -16155,6 +16676,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.zeros(2),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(2),
+            "J_hardware_keepout": 0.0,
+            "dJ_hardware_keepout": np.zeros(2),
+            "J_vessel_keepout": 0.0,
+            "dJ_vessel_keepout": np.zeros(2),
         }
 
         scalarized = module.apply_frontier_scalarization_override(objective_eval)
@@ -16223,6 +16748,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.zeros(2),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(2),
+            "J_hardware_keepout": 0.0,
+            "dJ_hardware_keepout": np.zeros(2),
+            "J_vessel_keepout": 0.0,
+            "dJ_vessel_keepout": np.zeros(2),
         }
 
         scalarized = module.apply_frontier_scalarization_override(objective_eval)
@@ -16308,6 +16837,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.zeros(4),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(4),
+            "J_hardware_keepout": 0.0,
+            "dJ_hardware_keepout": np.zeros(4),
+            "J_vessel_keepout": 0.0,
+            "dJ_vessel_keepout": np.zeros(4),
         }
 
         scalarized = module.apply_frontier_scalarization_override(objective_eval)
@@ -16347,8 +16880,18 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.CC_WEIGHT = 0.0
         module.CS_WEIGHT = 0.0
         module.CURVATURE_WEIGHT = 0.0
+        module.SINGLE_STAGE_POLOIDAL_WEIGHT = 0.0
+        module.SINGLE_STAGE_WIDTH_WEIGHT = 0.0
+        module.SINGLE_STAGE_SELFINT_WEIGHT = 0.0
+        module.SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = 0.0
+        module.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = 0.0
+        module.MSC_WEIGHT = 0.0
+        module.ARCLEN_WEIGHT = 0.0
+        module.LINKING_WEIGHT = 0.0
+        module.FORCE_WEIGHT = 0.0
         module.ALM_MULTIPLIERS = np.array([0.4])
         module.ALM_PENALTY = 10.0
+        module.MAGNETIC_WELL_WEIGHT = 3.0
 
         constraint_values = np.array([0.2])
         constraint_grads = [np.array([2.0, -1.0])]
@@ -16372,6 +16915,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_iota": np.array([0.3, 0.0]),
             "J_volume": 0.4,
             "dJ_volume": np.array([0.0, 0.5]),
+            "J_magnetic_well": 0.8,
+            "dJ_magnetic_well": np.array([0.2, 0.3]),
             "J_len": 2.0,
             "dJ_len": np.array([0.6, 0.7]),
             "J_cc": 1.1,
@@ -16392,6 +16937,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             + module.EFFECTIVE_RES_WEIGHT * objective_eval["J_Boozer_objective"]
             + module.EFFECTIVE_IOTAS_WEIGHT * objective_eval["J_iota"]
             + module.EFFECTIVE_VOLUME_WEIGHT * objective_eval["J_volume"]
+            + module.MAGNETIC_WELL_WEIGHT * objective_eval["J_magnetic_well"]
         )
         expected_base_grad = (
             module.LENGTH_WEIGHT * objective_eval["dJ_len"]
@@ -16399,6 +16945,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             + module.EFFECTIVE_RES_WEIGHT * objective_eval["dJ_Boozer_objective"]
             + module.EFFECTIVE_IOTAS_WEIGHT * objective_eval["dJ_iota"]
             + module.EFFECTIVE_VOLUME_WEIGHT * objective_eval["dJ_volume"]
+            + module.MAGNETIC_WELL_WEIGHT * objective_eval["dJ_magnetic_well"]
         )
         expected = module.augmented_inequality_objective(
             expected_base_total,
@@ -16427,6 +16974,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "boozer_surface": SimpleNamespace(surface="outer_surface")
         }
         module.banana_curve = "banana_curve"
+        module.banana_curves = banana_objective_curves
+        module.banana_curvelengths = [zero]
         module.surface_data = [module.outer_surface_data]
         module.CC_DIST = 0.05
         module.CS_DIST = 0.015
@@ -16437,6 +16986,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.JF = SimpleNamespace(x=np.array([0.0]))
         module.JShear = "shear"
         module.SHEAR_WEIGHT = 9.0
+        module.JMagneticWell = "magnetic_well"
+        module.MAGNETIC_WELL_WEIGHT = 6.0
         module.args = SimpleNamespace(
             alm_formulation="weighted_sum",
             alm_qs_threshold=1.0,
@@ -16451,6 +17002,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
             self.assertIsNot(kwargs["curves"], all_field_curves)
             self.assertEqual(kwargs["JShear"], "shear")
             self.assertEqual(kwargs["SHEAR_WEIGHT"], 9.0)
+            self.assertEqual(kwargs["JMagneticWell"], "magnetic_well")
+            self.assertEqual(kwargs["MAGNETIC_WELL_WEIGHT"], 6.0)
             return {
                 "total": 1.0,
                 "grad": np.array([0.0]),
@@ -16521,6 +17074,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         curve_curve = FakeAlgebraicObjective(0.25, [0.3, 0.4])
         curve_surface = FakeAlgebraicObjective(0.15, [0.2, -0.1])
         curvature = FakeAlgebraicObjective(0.35, [0.2, 0.3])
+        magnetic_well = FakeAlgebraicObjective(0.45, [0.6, -0.2])
         resolved_terms = {
             "effective_res_weight": 7.0,
             "effective_iotas_weight": 11.0,
@@ -16550,6 +17104,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 CS_WEIGHT=3.0,
                 JCurvature=curvature,
                 CURVATURE_WEIGHT=4.0,
+                JMagneticWell=magnetic_well,
+                MAGNETIC_WELL_WEIGHT=5.0,
             )
         raw = module._evaluate_total_objective_impl(
             surface_weights,
@@ -16570,6 +17126,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
             JBoozerObjective=resolved_terms["JBoozerObjective"],
             JVolume=resolved_terms["JVolume"],
             VOLUME_WEIGHT=resolved_terms["effective_volume_weight"],
+            JMagneticWell=magnetic_well,
+            MAGNETIC_WELL_WEIGHT=5.0,
         )
 
         self.assertEqual(set(wrapped.keys()), set(raw.keys()))
@@ -17057,6 +17615,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.cs_dist, module.COIL_PLASMA_MIN_DIST_M)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
+        self.assertEqual(args.single_stage_banana_geometry_mode, "shared_symmetry")
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.single_stage_banana_current_coordinate_scaling, "none")
         self.assertEqual(args.alm_qs_threshold, 3.0e-3)
@@ -17070,10 +17629,37 @@ class CurrentBaselineContractTests(unittest.TestCase):
         source = EXAMPLE_MODULE_PATH.read_text()
 
         self.assertEqual(module.CURVATURE_P_NORM, 4)
-        self.assertIn("LpCurveCurvature(\n        banana_curves[0],", source)
+        self.assertIn(
+            "LpCurveCurvature(curve, CURVATURE_P_NORM, CURVATURE_THRESHOLD)",
+            source,
+        )
+        self.assertIn("for curve in banana_curves", source)
         self.assertIn("CURVATURE_P_NORM", source)
         self.assertIn("COIL_LENGTH_MIN_FRACTION * length_target", source)
-        self.assertIn("JCurveLengthMin = QuadraticPenalty(", source)
+        self.assertIn("JCurveLengthMin = average_surface_objectives(", source)
+
+    def test_single_stage_scalar_hardware_helpers_use_worst_banana_curve(self):
+        module = load_single_stage_example_module()
+
+        class _FakeCurve:
+            def __init__(self, length, kappa):
+                self.length = length
+                self._kappa = np.asarray(kappa, dtype=float)
+
+            def kappa(self):
+                return self._kappa
+
+        class _FakeCurveLength:
+            def __init__(self, curve):
+                self.curve = curve
+
+            def J(self):
+                return self.curve.length
+
+        curves = (_FakeCurve(1.2, [12.0, 18.0]), _FakeCurve(1.5, [45.0, 72.0]))
+        with patch.object(module, "CurveLength", _FakeCurveLength):
+            self.assertEqual(module.max_single_stage_banana_curve_length(curves), 1.5)
+        self.assertEqual(module.max_single_stage_banana_curvature(curves), 72.0)
 
     def test_single_stage_parse_args_accepts_flip_banana(self):
         module = load_single_stage_example_module()
@@ -17195,6 +17781,22 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.single_stage_banana_current_mode, "independent")
 
+    def test_single_stage_parse_args_accepts_materialized_banana_geometry_mode(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-banana-geometry-mode",
+                "materialized_cws",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_banana_geometry_mode, "materialized_cws")
+
     def test_single_stage_parse_args_accepts_banana_current_coordinate_scaling(self):
         module = load_single_stage_example_module()
 
@@ -17263,6 +17865,23 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError,
             "--single-stage-banana-current-mode must be one of \\{shared, independent\\}",
+        ):
+            module.validate_single_stage_current_args(args)
+
+    def test_validate_single_stage_current_args_rejects_invalid_geometry_mode(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=16000.0,
+            single_stage_banana_current_mode="shared",
+            single_stage_banana_geometry_mode="bogus",
+            constraint_method="penalty",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-banana-geometry-mode must be one of "
+            "\\{shared_symmetry, materialized_cws\\}",
         ):
             module.validate_single_stage_current_args(args)
 
@@ -17831,7 +18450,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             for _ in range(count)
         ]
 
-    def _make_stage2_args(self, output_root, **overrides):
+    def _make_stage2_args(
+        self,
+        output_root,
+        *,
+        stage2_hardware_keepout_glb_default,
+        **overrides,
+    ):
         defaults = {
             "plasma_surf_filename": "demo.nc",
             "equilibria_dir": str(output_root),
@@ -17874,6 +18499,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "alm_taylor_test": False,
             "alm_taylor_test_seed": 123,
             "stage2_iota_target": None,
+            "stage2_iota_objective_mode": "report",
             "stage2_iota_tolerance": 5.0e-3,
             "stage2_iota_vol_target": 0.10,
             "stage2_iota_constraint_weight": 1.0,
@@ -17883,6 +18509,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_iota_mpol": 8,
             "stage2_iota_ntor": 6,
             "length_weight": 5e-4,
+            "length_min_weight": 1.0,
             "length_target": 1.9,
             "target_lcfs_max_major_radius_m": in_bounds_lcfs_major_radius_m(),
             "target_lcfs_max_minor_radius_m": in_bounds_lcfs_minor_radius_m(),
@@ -17901,6 +18528,22 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_poloidal_weight": 1.0,
             "stage2_width_weight": 1.0,
             "stage2_selfint_weight": 1.0,
+            "self_envelope_mode": "hinge",
+            "self_envelope_weight": 1.0,
+            "self_distance_window": 0.060,
+            "self_envelope_sampling_margin": 0.0,
+            "self_envelope_groc_radius_floor": 0.0231,
+            "fold_weight": 1.0,
+            "fold_geodesic_curvature_limit": 43.3114,
+            "fold_geodesic_curvature_margin_fraction": 0.10,
+            "stage2_vessel_keepout_weight": 0.0,
+            "stage2_hardware_keepout_weight": 0.0,
+            "stage2_hardware_keepout_json": None,
+            "stage2_hardware_keepout_glb": stage2_hardware_keepout_glb_default,
+            "stage2_resonant_flux_weight": 0.0,
+            "stage2_resonant_iota_target": None,
+            "stage2_resonant_delta": 0.02,
+            "stage2_resonant_qmax": 8,
             "basin_hops": 0,
             "basin_stepsize": 0.01,
             "basin_temperature": 2.5,
@@ -17926,6 +18569,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         seed_has_results_sidecar=True,
         basin_hops=0,
         banana_current_A=9500.0,
+        self_envelope_min_dist=0.08,
+        fold_geodesic_curvature_max=30.0,
         alm_accepted_candidate_x=None,
         artifact_state_by_x=None,
         seed_stage2_results=None,
@@ -17947,12 +18592,20 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "basin_options": None,
             "initialize_extra_kwargs": None,
             "curve_curve_curves": None,
+            "curve_curve_minimum_distances": [],
             "curve_surface_curves": None,
             "curve_surface_surface_label": None,
+            "projected_ellipse_width_args": None,
             "surface_surface_min_distance_labels": None,
             "plasma_geometry_args": None,
             "stage2_iota_probes": 0,
             "stage2_iota_probe_kwargs": None,
+            "stage2_iota_runtime_calls": 0,
+            "stage2_iota_runtime_kwargs": None,
+            "vessel_keepout_args": None,
+            "hardware_keepout_loader_args": None,
+            "hardware_keepout_metadata_args": None,
+            "hardware_keepout_objective_args": None,
             "results": None,
         }
 
@@ -18099,6 +18752,56 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             def shortest_self_distance(self):
                 return 0.5
 
+        class FakeCurveSelfDistance(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.0, [0.0, 0.0])
+
+            def shortest_self_distance(self):
+                return float(self_envelope_min_dist)
+
+            def shortest_groc(self):
+                return 0.04
+
+        class FakeCurveSurfaceGeodesicCurvature(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.0, [0.0, 0.0])
+
+            def max_abs_geodesic_curvature(self):
+                return float(fold_geodesic_curvature_max)
+
+        class FakeVesselEnvelopeKeepout(FakeStage2Objective):
+            def __init__(self, curves, *, winding_r0):
+                super().__init__(0.03, [0.0, 0.0])
+                runtime["vessel_keepout_args"] = {
+                    "curves": tuple(curves),
+                    "winding_r0": winding_r0,
+                }
+
+            def shortest_clearance(self):
+                return 0.041
+
+        class FakeHardwareKeepout(FakeStage2Objective):
+            def __init__(
+                self,
+                curves,
+                points,
+                minimum_distance,
+                point_weight,
+                *,
+                winding_r0,
+            ):
+                super().__init__(0.07, [0.0, 0.0])
+                runtime["hardware_keepout_objective_args"] = {
+                    "curves": tuple(curves),
+                    "points": np.asarray(points, dtype=float),
+                    "minimum_distance": minimum_distance,
+                    "point_weight": point_weight,
+                    "winding_r0": winding_r0,
+                }
+
+            def shortest_distance(self):
+                return 0.042
+
         fake_bs = FakeBiotSavart()
         fake_working_surface = FakeSurface(
             label="working",
@@ -18129,6 +18832,15 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         fake_banana_curve = SimpleNamespace(
             order=2,
             kappa=lambda: np.array([39.0, 41.0], dtype=float),
+            gamma=lambda: np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.1, 0.0, 0.0],
+                    [0.1, 0.1, 0.0],
+                    [0.0, 0.1, 0.0],
+                ],
+                dtype=float,
+            ),
         )
         fake_banana_coils = [
             SimpleNamespace(
@@ -18255,6 +18967,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         def fake_curve_curve_distance(curves, *_args, **_kwargs):
             runtime["curve_curve_curves"] = tuple(curves)
+            runtime["curve_curve_minimum_distances"].append(_args[0])
             return FakeCurveDistance()
 
         def fake_curve_surface_distance(
@@ -18272,6 +18985,31 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertIs(surface_a, fake_lcfs_surface)
             self.assertIs(surface_b, fake_vv)
             return 0.045
+
+        def fake_projected_ellipse_width(*args, **_kwargs):
+            runtime["projected_ellipse_width_args"] = args
+            return FakeProjectedEllipseWidth()
+
+        def fake_load_hardware_keepout(path, *, glb_path=None):
+            runtime["hardware_keepout_loader_args"] = (path, glb_path)
+            return (
+                np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]], dtype=float),
+                0.0025,
+                module.HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                {"glb_sha256": "provenance-sha"},
+            )
+
+        def fake_hardware_keepout_metadata(path, glb_path=None):
+            runtime["hardware_keepout_metadata_args"] = (path, glb_path)
+            return {
+                "HARDWARE_KEEPOUT_JSON": path,
+                "HARDWARE_KEEPOUT_JSON_SHA256": "json-sha",
+                "HARDWARE_KEEPOUT_GROUPS": ["shells", "limiter"],
+                "HARDWARE_KEEPOUT_PROVENANCE_GLB": "provenance.glb",
+                "HARDWARE_KEEPOUT_PROVENANCE_GLB_SHA256": "provenance-sha",
+                "HARDWARE_KEEPOUT_LIVE_GLB": glb_path,
+                "HARDWARE_KEEPOUT_LIVE_GLB_SHA256": "live-sha",
+            }
 
         def fake_minimize(*_args, **_kwargs):
             runtime["minimize_calls"] += 1
@@ -18383,10 +19121,49 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 "self_intersect_min_distance": float(
                     state.get("self_intersect_min_distance", 0.01)
                 ),
+                "self_envelope_mode": state.get("self_envelope_mode", "hinge"),
+                "self_envelope_penalty": float(
+                    state.get("self_envelope_penalty", 0.0)
+                ),
+                "self_envelope_min_dist": float(
+                    state.get("self_envelope_min_dist", 0.08)
+                ),
+                "self_envelope_min_distance": float(
+                    state.get("self_envelope_min_distance", 0.0462)
+                ),
+                "self_envelope_nominal_min_distance": state.get(
+                    "self_envelope_nominal_min_distance"
+                ),
+                "self_envelope_sampling_margin": state.get(
+                    "self_envelope_sampling_margin"
+                ),
+                "self_distance_window": float(
+                    state.get("self_distance_window", 0.06)
+                ),
+                "self_envelope_groc_radius": state.get("self_envelope_groc_radius"),
+                "self_envelope_groc_radius_floor": state.get(
+                    "self_envelope_groc_radius_floor"
+                ),
+                "fold_penalty": float(state.get("fold_penalty", 0.0)),
+                "fold_geodesic_curvature_max": float(
+                    state.get("fold_geodesic_curvature_max", 30.0)
+                ),
+                "fold_geodesic_curvature_limit": float(
+                    state.get("fold_geodesic_curvature_limit", 43.3114)
+                ),
+                "fold_geodesic_curvature_threshold": float(
+                    state.get("fold_geodesic_curvature_threshold", 38.9803)
+                ),
+                "fold_ok": bool(state.get("fold_ok", True)),
                 "hardware_status": {
                     "success": bool(state["hardware_status"]["success"]),
                     "violations": list(state["hardware_status"]["violations"]),
                 },
+                "stage2_iota_value": state.get("stage2_iota_value"),
+                "stage2_iota_penalty": state.get("stage2_iota_penalty"),
+                "stage2_iota_abs_error": state.get("stage2_iota_abs_error"),
+                "stage2_iota_feasible": state.get("stage2_iota_feasible"),
+                "stage2_iota_solve_failed": state.get("stage2_iota_solve_failed"),
             }
 
         def fake_run_basin_hopping(*_args, **_kwargs):
@@ -18429,12 +19206,38 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 "BOOTABILITY_SELF_INTERSECTING": False,
             }
 
+        def fake_build_stage2_iota_runtime(**kwargs):
+            runtime["stage2_iota_runtime_calls"] += 1
+            runtime["stage2_iota_runtime_kwargs"] = dict(kwargs)
+            return SimpleNamespace(
+                mode=kwargs["mode"],
+                boozer_surface=SimpleNamespace(),
+                stats=SimpleNamespace(
+                    bootstrap_seconds=0.25,
+                    runtime_seconds=0.5,
+                    runtime_calls=2,
+                ),
+                initial_state=SimpleNamespace(iota=0.18, penalty=0.0002),
+                last_state=SimpleNamespace(
+                    iota=0.201,
+                    penalty=0.0,
+                    abs_error=0.001,
+                    feasible=True,
+                    solve_failed=False,
+                ),
+                penalty_threshold=0.5 * 5.0e-3 * 5.0e-3,
+                effective_weight=1.25,
+            )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             equilibrium_path = Path(tmpdir) / "demo.nc"
             equilibrium_path.write_bytes(SIGNED_CW_WOUT_PATH.read_bytes())
             stage2_bs_path = str(Path(tmpdir) / "seed.json") if use_seed else None
             args = self._make_stage2_args(
                 tmpdir,
+                stage2_hardware_keepout_glb_default=(
+                    module.DEFAULT_HARDWARE_KEEPOUT_GLB_PATH
+                ),
                 init_only=init_only,
                 constraint_method=constraint_method,
                 stage2_bs_path=stage2_bs_path,
@@ -18508,6 +19311,26 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     ),
                     patch.object(
                         module,
+                        "CurveVesselEnvelopeKeepout",
+                        side_effect=FakeVesselEnvelopeKeepout,
+                    ),
+                    patch.object(
+                        module,
+                        "CurveHardwareKeepout",
+                        side_effect=FakeHardwareKeepout,
+                    ),
+                    patch.object(
+                        module,
+                        "load_hardware_keepout",
+                        side_effect=fake_load_hardware_keepout,
+                    ),
+                    patch.object(
+                        module,
+                        "hardware_keepout_metadata",
+                        side_effect=fake_hardware_keepout_metadata,
+                    ),
+                    patch.object(
+                        module,
                         "LpCurveCurvature",
                         lambda *_args, **_kwargs: FakeCurvatureObjective(),
                     ),
@@ -18524,12 +19347,32 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(
                         module,
                         "ProjectedEllipseWidth",
-                        lambda *_args, **_kwargs: FakeProjectedEllipseWidth(),
+                        side_effect=fake_projected_ellipse_width,
                     ),
                     patch.object(
                         module,
                         "CurveSelfIntersect",
                         lambda *_args, **_kwargs: FakeCurveSelfIntersect(),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveSelfDistance",
+                        lambda *_args, **_kwargs: FakeCurveSelfDistance(),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveGlobalRadiusOfCurvature",
+                        lambda *_args, **_kwargs: FakeCurveSelfDistance(),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveSurfaceGeodesicCurvature",
+                        lambda *_args, **_kwargs: FakeCurveSurfaceGeodesicCurvature(),
+                    ),
+                    patch.object(
+                        module,
+                        "FramedCurveSurfaceTangent",
+                        lambda *_args, **_kwargs: SimpleNamespace(),
                     ),
                     patch.object(
                         module,
@@ -18565,8 +19408,20 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     ),
                     patch.object(
                         module,
+                        "build_stage2_iota_runtime",
+                        side_effect=fake_build_stage2_iota_runtime,
+                    ),
+                    patch.object(
+                        module,
                         "compute_stage2_bs_sha256",
                         return_value="0" * 64,
+                    ),
+                    patch.object(
+                        module,
+                        "save_boozer_surface_with_state",
+                        side_effect=lambda _surface, path: path.with_suffix(
+                            ".state.json"
+                        ),
                     ),
                     patch.object(module, "minimize", side_effect=fake_minimize),
                     patch.object(module, "minimize_alm", side_effect=fake_minimize_alm),
@@ -18691,6 +19546,117 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
         self.assertTrue(runtime["results"]["STAGE2_BS_PATH"].endswith("seed.json"))
 
+    def test_stage2_main_hardware_keepout_passes_glb_and_stamps_results(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            arg_overrides={
+                "stage2_vessel_keepout_weight": 1000.0,
+                "stage2_hardware_keepout_weight": 1000.0,
+                "stage2_hardware_keepout_json": "/tmp/hardware_keepout.json",
+                "stage2_hardware_keepout_glb": "/tmp/hbt_assembly.glb",
+            },
+        )
+
+        self._assert_init_only_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+        )
+        self.assertEqual(
+            runtime["hardware_keepout_loader_args"],
+            ("/tmp/hardware_keepout.json", "/tmp/hbt_assembly.glb"),
+        )
+        self.assertEqual(
+            runtime["hardware_keepout_metadata_args"],
+            ("/tmp/hardware_keepout.json", "/tmp/hbt_assembly.glb"),
+        )
+        self.assertIsNotNone(runtime["vessel_keepout_args"])
+        hardware_args = runtime["hardware_keepout_objective_args"]
+        self.assertIsNotNone(hardware_args)
+        self.assertAlmostEqual(hardware_args["point_weight"], 0.0025)
+        np.testing.assert_allclose(
+            hardware_args["points"],
+            np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]], dtype=float),
+        )
+
+        results = runtime["results"]
+        self.assertEqual(
+            results["STAGE2_HARDWARE_KEEPOUT_GLB"],
+            "/tmp/hbt_assembly.glb",
+        )
+        self.assertEqual(
+            results["STAGE2_HARDWARE_KEEPOUT_JSON"],
+            "/tmp/hardware_keepout.json",
+        )
+        self.assertEqual(
+            results["EFFECTIVE_KEEPOUT_GROUPS"],
+            ["vessel", "shells", "limiter"],
+        )
+        self.assertEqual(results["HARDWARE_KEEPOUT_JSON_SHA256"], "json-sha")
+        self.assertEqual(
+            results["HARDWARE_KEEPOUT_PROVENANCE_GLB_SHA256"],
+            "provenance-sha",
+        )
+        self.assertEqual(results["HARDWARE_KEEPOUT_LIVE_GLB_SHA256"], "live-sha")
+        self.assertAlmostEqual(results["STAGE2_HARDWARE_KEEPOUT_PENALTY"], 0.07)
+        self.assertAlmostEqual(
+            results["STAGE2_HARDWARE_KEEPOUT_MIN_DISTANCE_M"],
+            0.042,
+        )
+
+    def test_stage2_main_rejects_self_envelope_hardware_status_violation(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            self_envelope_min_dist=0.0460,
+        )
+
+        self.assertFalse(runtime["results"]["OPTIMIZER_SUCCESS"])
+        self.assertFalse(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
+        self.assertIn(
+            "self_envelope_min_dist 0.046000 below threshold 0.046200",
+            runtime["results"]["HARDWARE_CONSTRAINT_VIOLATIONS"],
+        )
+        self.assertAlmostEqual(
+            runtime["results"]["SELF_ENVELOPE_MIN_DIST_M"],
+            0.0460,
+        )
+        self.assertAlmostEqual(
+            runtime["results"]["SELF_ENVELOPE_THRESHOLD_M"],
+            0.0462,
+        )
+
+    def test_stage2_main_sampling_margin_tightens_self_envelope_gate(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            self_envelope_min_dist=0.0480,
+            arg_overrides={"self_envelope_sampling_margin": 0.0030},
+        )
+
+        self.assertFalse(runtime["results"]["OPTIMIZER_SUCCESS"])
+        self.assertFalse(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
+        self.assertIn(
+            "self_envelope_min_dist 0.048000 below threshold 0.049200",
+            runtime["results"]["HARDWARE_CONSTRAINT_VIOLATIONS"],
+        )
+        self.assertAlmostEqual(
+            runtime["results"]["SELF_ENVELOPE_THRESHOLD_M"],
+            0.0492,
+        )
+        self.assertAlmostEqual(
+            runtime["results"]["SELF_ENVELOPE_NOMINAL_MIN_DISTANCE_M"],
+            0.0462,
+        )
+        self.assertAlmostEqual(
+            runtime["results"]["SELF_ENVELOPE_SAMPLING_MARGIN_M"],
+            0.0030,
+        )
+
     def test_stage2_main_report_runs_post_gate_without_hot_loop_runtime(self):
         runtime = self._run_stage2_main(
             init_only=True,
@@ -18708,6 +19674,44 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(runtime["results"]["BOOZER_BOOTABLE"])
         self.assertTrue(runtime["results"]["BOOZER_TRUSTED"])
         self.assertEqual(runtime["stage2_iota_probe_kwargs"]["iota_target"], 0.2)
+
+    def test_stage2_main_soft_iota_mode_builds_active_runtime(self):
+        runtime = self._run_stage2_main(
+            init_only=False,
+            constraint_method="penalty",
+            use_seed=True,
+            artifact_state_by_x={
+                (0.3, -0.2): {
+                    "field_objective": 0.2,
+                    "coil_length": 1.6,
+                    "curve_curve_min_dist": 0.08,
+                    "curve_surface_min_dist": 0.04,
+                    "max_curvature": 20.0,
+                    "poloidal_extent_rad": 0.1,
+                    "banana_current_A": 9500.0,
+                    "tf_current_A": -80000.0,
+                    "hardware_status": {"success": True, "violations": []},
+                    "stage2_iota_value": 0.201,
+                    "stage2_iota_penalty": 0.0,
+                    "stage2_iota_abs_error": 0.001,
+                    "stage2_iota_feasible": True,
+                    "stage2_iota_solve_failed": False,
+                }
+            },
+            arg_overrides={
+                "stage2_iota_target": 0.2,
+                "stage2_iota_objective_mode": "soft",
+            },
+        )
+
+        self.assertEqual(runtime["stage2_iota_runtime_calls"], 1)
+        self.assertEqual(runtime["stage2_iota_runtime_kwargs"]["mode"], "soft")
+        self.assertEqual(runtime["stage2_iota_runtime_kwargs"]["iota_target"], 0.2)
+        self.assertEqual(runtime["minimize_calls"], 1)
+        self.assertTrue(runtime["results"]["STAGE2_IOTA_OBJECTIVE_COUPLED"])
+        self.assertTrue(runtime["results"]["STAGE2_IOTA_HOT_LOOP_ENABLED"])
+        self.assertEqual(runtime["results"]["STAGE2_IOTA_OBJECTIVE_MODE"], "soft")
+        self.assertEqual(runtime["results"]["STAGE2_IOTA_VALUE"], 0.201)
 
     def test_stage2_main_reports_lcfs_metrics_and_boundary_clearance(self):
         module = load_stage2_module()
@@ -18754,6 +19758,18 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.88)
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.12)
         self.assertEqual(runtime["curve_surface_surface_label"], "lcfs")
+        # The hard coil-coil gate stays at --cc-threshold; the optimizer is
+        # additionally steered toward the buffered objective threshold
+        # (CC_THRESHOLD + BANANA_CC_OBJECTIVE_MARGIN_M).
+        self.assertEqual(
+            runtime["curve_curve_minimum_distances"],
+            [0.05, 0.05 + module.BANANA_CC_OBJECTIVE_MARGIN_M],
+        )
+        self.assertEqual(
+            runtime["projected_ellipse_width_args"][1],
+            module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
+        self.assertEqual(runtime["projected_ellipse_width_args"][2], 0.21)
 
     def test_stage2_main_rejects_wataru_seed_without_results_sidecar(self):
         workflow_runner_common = load_workflow_runner_common_module()

@@ -6,9 +6,11 @@ Motivation
 The HBT clearance viewer's swept-solid contact check showed that the M7
 champion's coils intersect in-vessel hardware no existing objective knows
 about: 4/10 coils clip the Mirnov sensor arrays and one clips a solenoid
-mount (vessel/shell are already covered by ``CurveSurfaceDistance``; the
-legacy banana frame channel is moot). A 360-degree rigid toroidal phase
-scan proved no rotation clears the hardware — the 5/10-contact minima
+mount. The point-cloud objective below covers the sampled shells, sensors,
+solenoid, REMC, limiter, and quartz-spool hardware. Vessel contact is steered
+by the analytic vessel-envelope term; frame/sample remain documented gate-only
+classes checked by the direct promotion oracle. A 360-degree rigid toroidal
+phase scan proved no rotation clears the hardware — the 5/10-contact minima
 repeat at the machine's 36-degree period with the current registration
 already optimal — so the coil shapes must be steered away during
 optimisation.
@@ -83,7 +85,9 @@ Design notes
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 
 import numpy as np
 from jax import grad
@@ -91,8 +95,11 @@ import jax.numpy as jnp
 
 from banana_opt.hardware_contracts import (
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
     TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
     TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
+    VACUUM_VESSEL_MINOR_RADIUS_M,
 )
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
@@ -133,6 +140,51 @@ def _bracket_frame(gammac, winding_r0):
     radial = _normalize(jnp.cross(tangential, tangent))
     half_seg = 0.25 * jnp.linalg.norm(nxt - prv, axis=1)
     return tangent, tangential, radial, half_seg
+
+
+def _bracket_corners(gammac, half_w, half_d, winding_r0):
+    """Eight Type KK envelope corners per quadpoint in the viewer frame."""
+    tangent, tangential, radial, half_seg = _bracket_frame(gammac, winding_r0)
+    corners = []
+    for sweep_sign in (-1.0, 1.0):
+        for width_sign in (-1.0, 1.0):
+            for depth_sign in (-1.0, 1.0):
+                corners.append(
+                    gammac
+                    + sweep_sign * half_seg[:, None] * tangent
+                    + width_sign * half_w * tangential
+                    + depth_sign * half_d * radial
+                )
+    return jnp.concatenate(corners, axis=0)
+
+
+def vessel_envelope_clearance_pure(gammac, half_w, half_d, winding_r0,
+                                   vessel_r0, vessel_minor_radius):
+    """Signed clearance from the Type KK swept envelope to the vessel torus.
+
+    Positive means all sampled envelope corners are inside the vessel tube;
+    negative means at least one corner pokes outside the vessel wall.
+    """
+    corners = _bracket_corners(gammac, half_w, half_d, winding_r0)
+    major_radius = jnp.sqrt(corners[:, 0] ** 2 + corners[:, 1] ** 2)
+    tube_radius = jnp.sqrt(
+        (major_radius - vessel_r0) ** 2 + corners[:, 2] ** 2
+    )
+    return jnp.min(vessel_minor_radius - tube_radius)
+
+
+def vessel_envelope_keepout_pure(gammac, half_w, half_d, minimum_clearance,
+                                 winding_r0, vessel_r0, vessel_minor_radius):
+    """Margin-normalized vessel-wall penalty for the Type KK swept envelope."""
+    corners = _bracket_corners(gammac, half_w, half_d, winding_r0)
+    major_radius = jnp.sqrt(corners[:, 0] ** 2 + corners[:, 1] ** 2)
+    tube_radius = jnp.sqrt(
+        (major_radius - vessel_r0) ** 2 + corners[:, 2] ** 2
+    )
+    clearance = vessel_minor_radius - tube_radius
+    scale = jnp.maximum(minimum_clearance, 1.0e-6)
+    violation = jnp.maximum(minimum_clearance - clearance, 0.0) / scale
+    return jnp.mean(violation ** 2)
 
 
 def hardware_keepout_pure(gammac, points, point_weight, half_w, half_d,
@@ -184,9 +236,10 @@ def hardware_keepout_pure(gammac, points, point_weight, half_w, half_d,
 class CurveHardwareKeepout(Optimizable):
     r"""
     Penalty steering the banana coils away from fixed in-vessel hardware
-    (sensor arrays, solenoid mounts, REMC mounts) — the keep-out analogue
-    of :class:`simsopt.geo.curveobjectives.CurveSurfaceDistance` with the
-    surface quadrature replaced by a static sampled point cloud.
+    sampled in ``hardware_keepout.json`` (shells, sensors, solenoid, REMC,
+    limiter, and quartz-spool rings) — the keep-out analogue of
+    :class:`simsopt.geo.curveobjectives.CurveSurfaceDistance` with the surface
+    quadrature replaced by a static sampled point cloud.
 
     Parameters
     ----------
@@ -320,16 +373,83 @@ class CurveHardwareKeepout(Optimizable):
     return_fn_map = {'J': J, 'dJ': dJ}
 
 
-def load_hardware_keepout(path):
-    """Load a ``hardware_keepout.json`` produced by
-    ``hbt_clearance_viewer/tools/export_hardware_keepout.py``.
-
-    Returns ``(points, point_weight, recommended_min_distance, provenance)``
-    where ``points`` is the concatenated (P, 3) float64 cloud over all
-    groups, ``point_weight`` the per-point surface patch area (spacing^2,
-    m^2), ``recommended_min_distance`` the centerline threshold recorded by
-    the exporter, and ``provenance`` the raw provenance block.
+class CurveVesselEnvelopeKeepout(Optimizable):
+    r"""
+    Penalty steering Type KK banana coil envelopes inside the analytic vessel
+    torus. It uses the same U-channel frame as :class:`CurveHardwareKeepout`,
+    but the obstacle is the fixed vessel ``(R0, a)`` from hardware_contracts.
     """
+
+    def __init__(self, curves,
+                 half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+                 half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                 minimum_clearance=HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+                 vessel_r0=VACUUM_VESSEL_MAJOR_RADIUS_M,
+                 vessel_minor_radius=VACUUM_VESSEL_MINOR_RADIUS_M):
+        self.curves = curves
+        self.half_w = float(half_w)
+        self.half_d = float(half_d)
+        self.minimum_clearance = float(minimum_clearance)
+        self.winding_r0 = float(winding_r0)
+        self.vessel_r0 = float(vessel_r0)
+        self.vessel_minor_radius = float(vessel_minor_radius)
+        self.J_jax = jit(lambda gammac: vessel_envelope_keepout_pure(
+            gammac,
+            self.half_w,
+            self.half_d,
+            self.minimum_clearance,
+            self.winding_r0,
+            self.vessel_r0,
+            self.vessel_minor_radius,
+        ))
+        self.dJ_dgamma = jit(lambda gammac: grad(self.J_jax)(gammac))
+        super().__init__(depends_on=curves)
+
+    def shortest_clearance(self):
+        """Minimum signed Type KK envelope clearance to the vessel, m."""
+        best = np.inf
+        for curve in self.curves:
+            clearance = vessel_envelope_clearance_pure(
+                jnp.asarray(curve.gamma()),
+                self.half_w,
+                self.half_d,
+                self.winding_r0,
+                self.vessel_r0,
+                self.vessel_minor_radius,
+            )
+            best = min(best, float(clearance))
+        return best
+
+    def J(self):
+        return sum(float(self.J_jax(curve.gamma())) for curve in self.curves)
+
+    @derivative_dec
+    def dJ(self):
+        return sum(
+            curve.dgamma_by_dcoeff_vjp(
+                np.asarray(self.dJ_dgamma(curve.gamma()))
+            )
+            for curve in self.curves
+        )
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+def _sha256_file(path):
+    """Stream ``path`` through SHA-256 (constant memory) and return the hex
+    digest, matching the exporter's ``hashlib.sha256(...).hexdigest()``."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+EFFECTIVE_KEEPOUT_GROUPS_KEY = "EFFECTIVE_KEEPOUT_GROUPS"
+
+
+def _read_hardware_keepout_data(path):
     with open(path) as f:
         data = json.load(f)
     if data.get("schema_version") != 1:
@@ -340,6 +460,97 @@ def load_hardware_keepout(path):
             f"keepout frame/units mismatch: {data.get('frame')!r}/"
             f"{data.get('units')!r}; expected machine_metres_zup metres "
             f"(the coils' frame)")
+    return data
+
+
+def _validated_live_glb_sha(data, path, glb_path):
+    if glb_path is None:
+        return None
+    provenance = data["provenance"]
+    recorded_sha = provenance.get("glb_sha256")
+    live_sha = _sha256_file(glb_path)
+    if recorded_sha != live_sha:
+        raise ValueError(
+            f"stale hardware keep-out cloud {os.fspath(path)!r}: its "
+            f"provenance.glb_sha256 {recorded_sha!r} (sampled from a prior "
+            f"GLB) does not match the live GLB {os.fspath(glb_path)!r} "
+            f"sha256 {live_sha!r}; regenerate the cloud from the live GLB "
+            f"before steering against it (fail-closed)")
+    return live_sha
+
+
+def hardware_keepout_metadata(path, glb_path=None):
+    """Return run-stamp metadata for the exported hardware keep-out cloud.
+
+    This shares the loader's schema/frame/freshness gates so producers cannot
+    stamp a cloud that they would not be allowed to steer against.
+    """
+    data = _read_hardware_keepout_data(path)
+    live_sha = _validated_live_glb_sha(data, path, glb_path)
+    provenance = data["provenance"]
+    return {
+        "HARDWARE_KEEPOUT_JSON": os.fspath(path),
+        "HARDWARE_KEEPOUT_JSON_SHA256": _sha256_file(path),
+        "HARDWARE_KEEPOUT_GROUPS": [
+            str(group["label"]) for group in data["groups"]
+        ],
+        "HARDWARE_KEEPOUT_PROVENANCE_GLB": provenance.get("glb"),
+        "HARDWARE_KEEPOUT_PROVENANCE_GLB_SHA256": provenance.get("glb_sha256"),
+        "HARDWARE_KEEPOUT_LIVE_GLB": (
+            None if glb_path is None else os.fspath(glb_path)
+        ),
+        "HARDWARE_KEEPOUT_LIVE_GLB_SHA256": live_sha,
+    }
+
+
+def effective_keepout_groups(hardware_group_labels, *, vessel_active):
+    """Canonical producer-side group list consumed by contact audits."""
+    groups = []
+    if vessel_active:
+        groups.append("vessel")
+    for label in hardware_group_labels:
+        label = str(label)
+        if label not in groups:
+            groups.append(label)
+    return groups
+
+
+def hardware_keepout_results_fields(
+    *, hardware_group_labels, vessel_active, metadata=None
+):
+    fields = {
+        EFFECTIVE_KEEPOUT_GROUPS_KEY: effective_keepout_groups(
+            hardware_group_labels,
+            vessel_active=vessel_active,
+        )
+    }
+    if metadata is not None:
+        fields.update(metadata)
+    return fields
+
+
+def load_hardware_keepout(path, glb_path=None):
+    """Load a ``hardware_keepout.json`` produced by
+    ``hbt_clearance_viewer/tools/export_hardware_keepout.py``.
+
+    Returns ``(points, point_weight, recommended_min_distance, provenance)``
+    where ``points`` is the concatenated (P, 3) float64 cloud over all
+    groups, ``point_weight`` the per-point surface patch area (spacing^2,
+    m^2), ``recommended_min_distance`` the centerline threshold recorded by
+    the exporter, and ``provenance`` the raw provenance block.
+
+    Parameters
+    ----------
+    glb_path : str | os.PathLike | None, optional
+        When provided, the cloud is freshness-checked against the live GLB:
+        ``sha256(glb_path)`` (streamed) must equal the cloud's recorded
+        ``provenance["glb_sha256"]``, else a :class:`ValueError` is raised
+        (fail-closed) so a run never steers against stale geometry. The
+        default ``None`` preserves the historical behaviour (no sha check).
+    """
+    data = _read_hardware_keepout_data(path)
+    provenance = data["provenance"]
+    _validated_live_glb_sha(data, path, glb_path)
     points = np.concatenate(
         [np.asarray(group["points"], dtype=np.float64) for group in data["groups"]],
         axis=0,
@@ -349,5 +560,5 @@ def load_hardware_keepout(path):
         points,
         spacing * spacing,
         float(data["recommended_min_distance_m"]),
-        data["provenance"],
+        provenance,
     )

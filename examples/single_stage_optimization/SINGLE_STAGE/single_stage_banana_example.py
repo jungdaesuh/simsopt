@@ -27,6 +27,17 @@ if EXAMPLE_ROOT not in sys.path:
 from import_provenance import configure_local_simsopt_imports
 
 EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
+DEFAULT_HARDWARE_KEEPOUT_JSON_PATH = str(
+    Path(SIMSOPT_ROOT).parent
+    / "CAD"
+    / "banana_coils"
+    / "hbt_clearance_viewer"
+    / "tools"
+    / "hardware_keepout.json"
+)
+DEFAULT_HARDWARE_KEEPOUT_GLB_PATH = str(
+    Path(SIMSOPT_ROOT).parent / "CAD" / "banana_coils" / "hbt_assembly.glb"
+)
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
@@ -96,6 +107,8 @@ from workflow_helpers import (
     format_local_stage2_seed_dir_without_tf,
 )
 from workflow_runner_common import (
+    DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET,
+    DEFAULT_SINGLE_STAGE_IOTA_TARGET,
     format_flip_banana_banner,
     load_stage2_artifact_results,
     json_dumps as _common_json_dumps,
@@ -105,6 +118,10 @@ from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
     upgrade_legacy_stage2_artifact_results,
     validate_vacuum_boozer_surface_json,
+)
+from banana_opt.checkpoint_seed_sidecar import (
+    bind_results_to_bs,
+    write_checkpoint_seed_sidecar,
 )
 from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.alm_adaptive_smoothing import (
@@ -121,7 +138,10 @@ from banana_opt.constraint_contract import (
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names as _resolve_constraint_contract_from_wire_names_impl,
 )
-from banana_opt.coil_order_upgrade import upgrade_loaded_seed_biot_savart_order
+from banana_opt.coil_order_upgrade import (
+    realized_cws_winding_radii,
+    upgrade_loaded_seed_biot_savart_order,
+)
 from banana_opt.basin_hopping import (
     run_basin_hopping,
     telemetry_values as basin_telemetry_values,
@@ -203,6 +223,7 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+    HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
     LCFS_CONSTRAINT_MODE_CENTERED,
     LCFS_CONSTRAINT_MODE_DEFAULT,
     LCFS_CONSTRAINT_MODE_EDGE_ENVELOPE,
@@ -213,9 +234,12 @@ from banana_opt.hardware_contracts import (
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     POLOIDAL_EXTENT_WEIGHT,
+    SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M,
+    SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT,
     SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT,
     SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT,
     SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT,
+    SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT,
     SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT,
     TARGET_LCFS_MAX_MAJOR_RADIUS_M,
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
@@ -261,7 +285,13 @@ from banana_opt.poloidal_extent import (
     smooth_max_poloidal_extent_signed_constraint as _smooth_max_poloidal_extent_signed_constraint,
     smooth_max_poloidal_extent_signed_constraint_with_hard_signal,
 )
-from banana_opt.hardware_keepout import CurveHardwareKeepout, load_hardware_keepout
+from banana_opt.hardware_keepout import (
+    CurveHardwareKeepout,
+    CurveVesselEnvelopeKeepout,
+    hardware_keepout_metadata,
+    hardware_keepout_results_fields,
+    load_hardware_keepout,
+)
 from banana_opt.self_intersect import CurveSelfIntersect
 from banana_opt.wout_convention import wout_convention_artifact_fields
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
@@ -280,6 +310,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
     _SEED_REGIME_BRIDGE_ONLY as _PHASE1_SEED_REGIME_BRIDGE_ONLY,
     _SEED_REGIME_PRESERVE_FIRST as _PHASE1_SEED_REGIME_PRESERVE_FIRST,
     _SEED_REGIME_REPAIR_FIRST as _PHASE1_SEED_REGIME_REPAIR_FIRST,
+    REPAIR_STATE_BLOCKED,
     build_penalty_phase2_bounds,
     build_phase1_config,
     resolve_initial_step_phase_maxiter,
@@ -354,12 +385,14 @@ from banana_opt.single_stage_search_policy import (
 from banana_opt.single_stage_objectives import (
     ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     average_surface_objectives as _average_surface_objectives_impl,
+    build_single_stage_magnetic_well_objective,
     build_single_stage_shear_objective,
     build_total_objective as _build_total_objective_impl,
     evaluate_base_objective as _evaluate_base_objective_impl,
     evaluate_total_objective as _evaluate_total_objective_impl,
     evaluate_alm_objective as _evaluate_alm_objective_impl,
     independent_banana_current_alm_constraint_name,
+    MinLGradBShortfall,
 )
 from banana_opt.single_stage_banana_current_mode import (
     BANANA_CURRENT_COORDINATE_SCALING_NONE,
@@ -372,6 +405,11 @@ from banana_opt.single_stage_banana_current_mode import (
     build_single_stage_banana_current_payload_fields,
     resolve_single_stage_banana_current_state as _resolve_single_stage_banana_current_state_impl,
     resolve_banana_current_coordinate_spec,
+)
+from banana_opt.single_stage_banana_geometry_mode import (
+    BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
+    BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+    resolve_single_stage_banana_geometry_state as _resolve_single_stage_banana_geometry_state_impl,
 )
 from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
@@ -1397,8 +1435,12 @@ def parse_args():
         ),
         help=(
             "Coil winding-surface MAJOR radius (m). Defaults to the on-spec sensor-array "
-            "center (BANANA_WINDING_SURFACE_MAJOR_RADIUS_M). Set to ramp the winding "
-            "surface for a continuation; only the coil-winding reference torus uses it."
+            "center (BANANA_WINDING_SURFACE_MAJOR_RADIUS_M). COLD-INIT/DIAGNOSTIC ONLY: "
+            "warm resumes keep the torus serialized inside the seed's CurveCWSFourierCPP "
+            "(banana coils are angle-dofs pinned to that embedded surface; 2026-06-10 "
+            "laneR0920). To re-center a warm seed, rebuild it with "
+            "autoresearch/scripts/remap_banana_cws_seed_radius.py "
+            "(--target-winding-major-radius) and resume from the remapped seed."
         ),
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
@@ -1419,8 +1461,8 @@ def parse_args():
         help=(
             "Single-stage physics-goal contract. 'target' preserves the existing target-based "
             "formulation. 'frontier' uses a normalized tradeoff score that rewards higher "
-            "iota and larger volume, penalizes QA error and Boozer residual relative to the "
-            "seed, and rejects candidates whose Boozer residual exceeds the frontier trust "
+            "iota and larger volume relative to the target references, penalizes QA error "
+            "and Boozer residual relative to the seed, and rejects candidates whose Boozer residual exceeds the frontier trust "
             "threshold. Defaults to the SINGLE_STAGE_GOAL_MODE environment variable when set, "
             "otherwise 'target'."
         ),
@@ -1982,11 +2024,15 @@ def parse_args():
         "--iota-target",
         type=float,
         # Set this explicitly from the equilibrium and working surface.
-        # The 0.15 value is only a historical fallback.
-        default=float(os.environ.get("IOTA_TARGET", "0.15")),
+        # Target mode keeps the historical fallback; frontier mode resolves to
+        # the off-resonance default after argparse if no explicit target is set.
+        default=(
+            float(os.environ["IOTA_TARGET"]) if "IOTA_TARGET" in os.environ else None
+        ),
         help=(
-            "Target-mode iota penalty center and Boozer initialization guess. In frontier mode "
-            "the outer objective no longer targets this value."
+            "Target-mode iota penalty center and Boozer initialization guess. "
+            "When omitted, target mode defaults to 0.15 and frontier mode "
+            "defaults to the off-resonance 0.18 lane."
         ),
     )
     parser.add_argument(
@@ -2150,17 +2196,60 @@ def parse_args():
         ),
         help=(
             "Penalty/ALM weight for the hardware keep-out distance term "
-            "(0 disables the term entirely)."
+            "(0 disables the term entirely; default is the Type KK production contract)."
         ),
     )
     parser.add_argument(
         "--hardware-keepout-json",
         type=str,
-        default=os.environ.get("HARDWARE_KEEPOUT_JSON"),
+        default=os.environ.get(
+            "HARDWARE_KEEPOUT_JSON",
+            DEFAULT_HARDWARE_KEEPOUT_JSON_PATH,
+        ),
         help=(
             "Path to the hardware_keepout.json point cloud "
             "(hbt_clearance_viewer/tools/export_hardware_keepout.py). "
             "Required when the keep-out weight is > 0."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-keepout-glb",
+        type=str,
+        default=os.environ.get(
+            "HARDWARE_KEEPOUT_GLB",
+            DEFAULT_HARDWARE_KEEPOUT_GLB_PATH,
+        ),
+        help=(
+            "Path to the live hbt_assembly.glb used to fail-closed validate "
+            "hardware_keepout.json freshness when the keep-out weight is > 0."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-vessel-keepout-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT",
+                str(SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT),
+            )
+        ),
+        help=(
+            "Penalty weight for the analytic Type KK vessel-envelope keep-out "
+            "term (0 disables the term; default is the production contract)."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-vessel-keepout-clearance",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE",
+                str(HARDWARE_KEEPOUT_SAFETY_MARGIN_M),
+            )
+        ),
+        help=(
+            "Required clearance from the swept Type KK envelope to the analytic "
+            "vessel torus, in meters."
         ),
     )
     parser.add_argument(
@@ -2193,16 +2282,26 @@ def parse_args():
     parser.add_argument(
         "--coil-force-weight",
         type=float,
-        default=float(os.environ.get("COIL_FORCE_WEIGHT", "0.0")),
+        default=float(
+            os.environ.get(
+                "COIL_FORCE_WEIGHT",
+                str(SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT),
+            )
+        ),
         help=(
-            "Opt-in weight for the summed SIMSOPT MeanSquaredForce coil-force term "
-            "(default 0 = off); requires --coil-force-conductor-radius > 0."
+            "Weight for the summed SIMSOPT MeanSquaredForce coil-force term "
+            "(0 disables the term; default is the production contract)."
         ),
     )
     parser.add_argument(
         "--coil-force-conductor-radius",
         type=float,
-        default=float(os.environ.get("COIL_FORCE_CONDUCTOR_RADIUS", "0.0")),
+        default=float(
+            os.environ.get(
+                "COIL_FORCE_CONDUCTOR_RADIUS",
+                str(SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M),
+            )
+        ),
         help=(
             "Circular conductor radius a (m) for the coil-force regularization "
             "regularization_circ(a). Required when --coil-force-weight > 0."
@@ -2226,6 +2325,68 @@ def parse_args():
             "Opt-in weight for the magnetic-shear shortfall term (default 0 = off); "
             "rewards a larger axis-to-edge iota spread to break out of the flat-iota "
             "rational soup. Only meaningful in multisurface (>=2 surface) mode."
+        ),
+    )
+    parser.add_argument(
+        "--magnetic-well-weight",
+        type=float,
+        default=float(os.environ.get("MAGNETIC_WELL_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the multisurface Boozer-volume magnetic-well "
+            "proxy shortfall (default 0 = off). Requires at least three Boozer "
+            "surfaces; negative proxy values are favorable, matching the VMEC "
+            "magnetic-well sign convention. This is not a finite-beta Mercier "
+            "criterion."
+        ),
+    )
+    parser.add_argument(
+        "--magnetic-well-target",
+        type=float,
+        default=float(os.environ.get("MAGNETIC_WELL_TARGET", "0.0")),
+        help=(
+            "Upper target for the normalized Boozer-volume magnetic-well proxy. "
+            "The objective is zero when proxy <= target. Default 0 penalizes "
+            "outward-increasing V'(s) while accepting neutral/favorable wells."
+        ),
+    )
+    parser.add_argument(
+        "--lgradb-weight",
+        type=float,
+        default=float(os.environ.get("LGRADB_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the min(L_grad_B) Kappel coil-realizability shortfall "
+            "term (default 0 = off, uncalibrated). Larger L_grad_B means a gentler "
+            "field gradient and more coil-realizable boundary. Calibration range: "
+            "good ~0.34 m / bad ~0.13 m at HBT-EP scale. Requires --lgradb-floor."
+        ),
+    )
+    parser.add_argument(
+        "--lgradb-floor",
+        type=float,
+        default=float(os.environ.get("LGRADB_FLOOR", "0.30")),
+        help=(
+            "One-sided shortfall floor for the min(L_grad_B) term (m). The objective "
+            "is zero when min(L_grad_B) >= floor. Default 0.30 m (near the good regime "
+            "at HBT-EP scale; uncalibrated). Only effective when --lgradb-weight > 0."
+        ),
+    )
+    parser.add_argument(
+        "--lgradb-ntheta",
+        type=int,
+        default=int(os.environ.get("LGRADB_NTHETA", "32")),
+        help=(
+            "Number of poloidal quadrature points for L_grad_B evaluation on the outer "
+            "Boozer surface (default 32). Only effective when --lgradb-weight > 0."
+        ),
+    )
+    parser.add_argument(
+        "--lgradb-nphi",
+        type=int,
+        default=int(os.environ.get("LGRADB_NPHI", "32")),
+        help=(
+            "Number of toroidal quadrature points per field period for L_grad_B "
+            "evaluation on the outer Boozer surface (default 32). Only effective when "
+            "--lgradb-weight > 0."
         ),
     )
     parser.add_argument(
@@ -2263,6 +2424,23 @@ def parse_args():
             "historical single shared banana-current DOF. 'independent' creates one "
             "current DOF per loaded banana coil while preserving the loaded Stage 2 "
             "current state at the handoff."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-banana-geometry-mode",
+        choices=[
+            BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+            BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
+        ],
+        default=os.environ.get(
+            "SINGLE_STAGE_BANANA_GEOMETRY_MODE",
+            BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+        ),
+        help=(
+            "Single-stage banana geometry contract. 'shared_symmetry' preserves "
+            "the loaded one-master plus symmetry-wrapper curve family. "
+            "'materialized_cws' folds each CWS symmetry wrapper into its own "
+            "independent CWS curve on the same winding surface."
         ),
     )
     parser.add_argument(
@@ -2354,8 +2532,9 @@ def parse_args():
         type=float,
         default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
         help=(
-            "Curve length quadratic penalty target in meters (applies to banana_curves[0] via "
-            f"QuadraticPenalty(..., 'max')). Defaults to the preferred hardware target of "
+            "Curve length quadratic penalty target in meters (applies to each "
+            "banana curve via QuadraticPenalty(..., 'max')). Defaults to the "
+            f"preferred hardware target of "
             f"{COIL_LENGTH_TARGET_M:.1f} m, with a hard ceiling at "
             f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m. Passing a larger value requires "
             "--accept-offspec-coil-length; passing a smaller value makes the run stricter."
@@ -2822,6 +3001,12 @@ def parse_args():
         help="RNG seed for basin-hopping (-1 = random). Set for reproducibility.",
     )
     args = parser.parse_args()
+    if args.iota_target is None:
+        args.iota_target = (
+            DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET
+            if args.single_stage_goal_mode == "frontier"
+            else DEFAULT_SINGLE_STAGE_IOTA_TARGET
+        )
     if args.free_tf_geometry:
         parser.error(_FREE_TF_GEOMETRY_DISABLED_MESSAGE)
     return args
@@ -2991,7 +3176,12 @@ def _load_required_warm_start_boozer_seeds(
             # Returning None here lets the caller construct this surface from the
             # stage2/outer seed via resolve_initial_boozer_surface_seed instead
             # of hard-failing -- this is what unblocks experimental_multisurface
-            # single-stage from single-surface donors.
+            # single-stage from single-surface donors. Without a stage2/outer
+            # donor there is nothing to fall back to (published named stacks
+            # warm-start with stage2_seed_surface=None), so a missing artifact
+            # stays a hard failure before any Boozer solve.
+            if stage2_seed_surface is None:
+                raise
             seeds_by_name[config["name"]] = None
             continue
         seeds_by_name[config["name"]] = load_warm_start_boozer_seed(
@@ -3492,6 +3682,24 @@ def single_stage_banana_poloidal_extent_rad(banana_curve):
     )
 
 
+def max_single_stage_banana_poloidal_extent_rad(banana_curve_entries):
+    return max(
+        single_stage_banana_poloidal_extent_rad(banana_curve_entry)
+        for banana_curve_entry in banana_curve_entries
+    )
+
+
+def max_single_stage_banana_curve_length(banana_curve_entries):
+    return max(float(CurveLength(curve).J()) for curve in banana_curve_entries)
+
+
+def max_single_stage_banana_curvature(banana_curve_entries):
+    return max(
+        float(np.max(np.asarray(curve.kappa(), dtype=float)))
+        for curve in banana_curve_entries
+    )
+
+
 def current_single_stage_common_hardware_snapshot_kwargs(
     *,
     coil_length=None,
@@ -3503,7 +3711,12 @@ def current_single_stage_common_hardware_snapshot_kwargs(
     resolved_coil_length = None
     if curvelength_obj is not None:
         resolved_coil_length = float(curvelength_obj.J())
-    if coil_length is not None:
+    banana_curve_entries = globals().get("banana_curves")
+    if banana_curve_entries:
+        resolved_coil_length = max_single_stage_banana_curve_length(
+            banana_curve_entries
+        )
+    if coil_length is not None and not banana_curve_entries:
         resolved_coil_length = float(coil_length)
     resolved_length_target = globals().get("length_target")
     resolved_tf_current_A = (
@@ -3512,11 +3725,16 @@ def current_single_stage_common_hardware_snapshot_kwargs(
         else float(tf_current_A)
     )
     poloidal_extent_obj = globals().get("JPoloidalExtent")
-    resolved_poloidal_extent_rad = (
-        None
-        if poloidal_extent_obj is None
-        else poloidal_extent_rad_from_objective(poloidal_extent_obj)
-    )
+    if banana_curve_entries:
+        resolved_poloidal_extent_rad = max_single_stage_banana_poloidal_extent_rad(
+            banana_curve_entries
+        )
+    else:
+        resolved_poloidal_extent_rad = (
+            None
+            if poloidal_extent_obj is None
+            else poloidal_extent_rad_from_objective(poloidal_extent_obj)
+        )
     banana_current_state = globals().get("banana_current_state")
     resolved_banana_current_A = banana_current_A
     if resolved_banana_current_A is None and banana_current_state is not None:
@@ -3565,17 +3783,29 @@ def current_single_stage_hardware_snapshot_kwargs(
         banana_current_max_A=banana_current_max_A,
     )
     coil_width_obj = globals().get("JCoilWidth")
+    coil_width_terms = globals().get("JCoilWidthTerms")
     self_intersect_obj = globals().get("JCurveSelfIntersect")
+    self_intersect_terms = globals().get("JCurveSelfIntersectTerms")
     hardware_keepout_obj = globals().get("JCurveHardwareKeepout")
+    banana_curve_entries = globals().get("banana_curves")
     snapshot_kwargs.update(
         {
             "coil_width": (
-                None if coil_width_obj is None else float(coil_width_obj.J())
+                None
+                if coil_width_obj is None
+                else max(
+                    float(term.J()) for term in (coil_width_terms or (coil_width_obj,))
+                )
             ),
             "width_min_threshold": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
             "width_max_threshold": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             "self_intersect_penalty": (
-                None if self_intersect_obj is None else float(self_intersect_obj.J())
+                None
+                if self_intersect_obj is None
+                else max(
+                    float(term.J())
+                    for term in (self_intersect_terms or (self_intersect_obj,))
+                )
             ),
             "self_intersect_threshold": 0.0,
             # Opt-in keep-out: None when the term is off, so artifacts from
@@ -3588,6 +3818,7 @@ def current_single_stage_hardware_snapshot_kwargs(
             "hardware_keepout_threshold": (
                 None if hardware_keepout_obj is None else 0.0
             ),
+            "banana_curves": banana_curve_entries,
             "lcfs_constraint_mode": LCFS_CONSTRAINT_MODE,
         }
     )
@@ -3747,6 +3978,7 @@ def checkpoint_confinement_objective(
 TOPOLOGY_ARCHIVE_SCHEMA_VERSION = 2
 GREENE_RESIDUE_OBJECTIVE_ARCHIVE_SCHEMA_VERSION = "greene_residue_objective_archive_v1"
 GREENE_RESIDUE_OBJECTIVE_ARCHIVE_FILENAME = "greene_residue_objective_archive.jsonl"
+MAGNETIC_WELL_OBJECTIVE_KIND = "boozer_volume_vprime_proxy"
 
 
 def topology_hardware_status_archive_fields(prefix, hardware_status):
@@ -4697,6 +4929,79 @@ def residue_objective_results_payload(search_eval):
     }
 
 
+def magnetic_well_objective_results_payload(search_eval):
+    objective = globals().get("JMagneticWell")
+    search_eval_enabled = (
+        search_eval is not None
+        and search_eval.get("magnetic_well_objective_enabled") is not None
+    )
+    enabled = (
+        bool(search_eval["magnetic_well_objective_enabled"])
+        if search_eval_enabled
+        else objective is not None
+    )
+    gradient = (
+        None
+        if search_eval is None or search_eval.get("dJ_magnetic_well") is None
+        else np.asarray(search_eval["dJ_magnetic_well"], dtype=float)
+    )
+    proxy = (
+        float(objective.magnetic_well_proxy())
+        if objective is not None and hasattr(objective, "magnetic_well_proxy")
+        else None
+    )
+    target = (
+        float(objective.well_target)
+        if objective is not None and hasattr(objective, "well_target")
+        else float(globals().get("MAGNETIC_WELL_TARGET", 0.0))
+    )
+    surface_labels = (
+        [
+            float(objective.label_inner),
+            float(objective.label_mid),
+            float(objective.label_outer),
+        ]
+        if objective is not None
+        and all(
+            hasattr(objective, field_name)
+            for field_name in ("label_inner", "label_mid", "label_outer")
+        )
+        else None
+    )
+    weight = (
+        search_eval.get("magnetic_well_weight")
+        if search_eval is not None and search_eval.get("magnetic_well_weight") is not None
+        else globals().get("MAGNETIC_WELL_WEIGHT", 0.0)
+    )
+    payload = {
+        "enabled": enabled,
+        "kind": MAGNETIC_WELL_OBJECTIVE_KIND,
+        "is_finite_beta_mercier": False,
+        "weight": float(weight),
+        "target": target,
+        "value": (
+            None
+            if search_eval is None or search_eval.get("J_magnetic_well") is None
+            else float(search_eval["J_magnetic_well"])
+        ),
+        "gradient_norm": None if gradient is None else float(np.linalg.norm(gradient)),
+        "proxy": proxy,
+        "surface_labels": surface_labels,
+    }
+    return {
+        "MAGNETIC_WELL_OBJECTIVE_ENABLED": enabled,
+        "MAGNETIC_WELL_OBJECTIVE_KIND": payload["kind"],
+        "MAGNETIC_WELL_IS_FINITE_BETA_MERCIER": payload["is_finite_beta_mercier"],
+        "MAGNETIC_WELL_OBJECTIVE_WEIGHT": payload["weight"],
+        "MAGNETIC_WELL_OBJECTIVE_TARGET": payload["target"],
+        "MAGNETIC_WELL_OBJECTIVE_VALUE": payload["value"],
+        "MAGNETIC_WELL_OBJECTIVE_GRADIENT_NORM": payload["gradient_norm"],
+        "MAGNETIC_WELL_PROXY": payload["proxy"],
+        "MAGNETIC_WELL_SURFACE_LABELS": payload["surface_labels"],
+        "MAGNETIC_WELL_OBJECTIVE_PAYLOAD": payload,
+    }
+
+
 def record_residue_objective_diagnostics(out_dir, accepted_iteration, objective_eval):
     payload = objective_eval.get("residue_objective_payload")
     if payload is None or payload["enabled"] is not True:
@@ -4720,12 +5025,25 @@ def validate_single_stage_current_args(args):
         "single_stage_banana_current_mode",
         BANANA_CURRENT_MODE_SHARED,
     )
+    banana_geometry_mode = getattr(
+        args,
+        "single_stage_banana_geometry_mode",
+        BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+    )
     if banana_current_mode not in {
         BANANA_CURRENT_MODE_SHARED,
         BANANA_CURRENT_MODE_INDEPENDENT,
     }:
         raise ValueError(
             "--single-stage-banana-current-mode must be one of {shared, independent}"
+        )
+    if banana_geometry_mode not in {
+        BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+        BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
+    }:
+        raise ValueError(
+            "--single-stage-banana-geometry-mode must be one of "
+            "{shared_symmetry, materialized_cws}"
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
@@ -4768,6 +5086,8 @@ class RunIdentityConfig:
     single_stage_selfint_weight: float
     single_stage_hardware_keepout_weight: float
     hardware_keepout_json: str | None
+    single_stage_vessel_keepout_weight: float
+    single_stage_vessel_keepout_clearance: float
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
@@ -4775,6 +5095,7 @@ class RunIdentityConfig:
     curvature_threshold: float
     banana_surf_radius: float
     banana_current_max_A: float
+    single_stage_banana_geometry_mode: str
     single_stage_banana_current_mode: str
     single_stage_banana_current_coordinate_scaling: str
     num_banana_current_controls: int
@@ -4833,6 +5154,8 @@ class RunIdentityConfig:
     warm_start_surface_stem: str | None = None
     stage2_seed_surf_path: str | None = None
     seed_regime: str | None = None
+    magnetic_well_weight: float = 0.0
+    magnetic_well_target: float = 0.0
     residue_objective_weight: float = 0.0
     residue_objective_target_manifest_id: str | None = None
     residue_objective_validation_id: str | None = None
@@ -4877,6 +5200,7 @@ class PreservedTimeoutReplayConfig:
     requested_seed_regime: str | None = None
     effective_seed_regime: str | None = None
     single_stage_goal_mode: str | None = None
+    single_stage_banana_geometry_mode: str | None = None
     single_stage_banana_current_mode: str | None = None
     single_stage_banana_current_coordinate_scaling: str | None = None
     num_banana_current_controls: int | None = None
@@ -4911,6 +5235,10 @@ class PreservedTimeoutReplayConfig:
     stage2_policy_metadata: tuple[tuple[str, object], ...] | None = None
     stage2_seed_surf_path: str | None = None
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
+    toroidal_flux: float | None = None
+    banana_surf_radius: float | None = None
+    curvature_threshold: float | None = None
+    order: int | None = None
 
 
 @dataclass(frozen=True)
@@ -5030,6 +5358,8 @@ def build_frontier_goal_config(
     *,
     initial_iota,
     initial_volume,
+    target_iota=None,
+    target_volume=None,
     initial_qs_objective,
     initial_boozer_objective,
     res_weight,
@@ -5058,6 +5388,14 @@ def build_frontier_goal_config(
 ):
     if volume_weight is None:
         volume_weight = iotas_weight
+    default_iota_reference = _frontier_override_or_default(
+        None,
+        initial_iota if target_iota is None else target_iota,
+    )
+    default_volume_reference = _frontier_override_or_default(
+        None,
+        initial_volume if target_volume is None else target_volume,
+    )
     default_qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
     default_boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
     qs_reference = _frontier_override_or_default(
@@ -5098,20 +5436,20 @@ def build_frontier_goal_config(
     return FrontierGoalConfig(
         iota_reference=_frontier_override_or_default(
             iota_reference_override,
-            float(initial_iota),
+            default_iota_reference,
         ),
         iota_scale=_frontier_override_or_default(
             iota_scale_override,
-            max(abs(float(initial_iota)) * 0.25, 0.05),
+            max(abs(default_iota_reference) * 0.25, 0.05),
             minimum=1e-6,
         ),
         volume_reference=_frontier_override_or_default(
             volume_reference_override,
-            float(initial_volume),
+            default_volume_reference,
         ),
         volume_scale=_frontier_override_or_default(
             volume_scale_override,
-            max(abs(float(initial_volume)) * 0.10, 0.01),
+            max(abs(default_volume_reference) * 0.10, 0.01),
             minimum=1e-6,
         ),
         qs_reference=qs_reference,
@@ -5205,6 +5543,7 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     requested_seed_regime=None,
     effective_seed_regime=None,
     single_stage_goal_mode=None,
+    single_stage_banana_geometry_mode=None,
     single_stage_banana_current_mode=None,
     single_stage_banana_current_coordinate_scaling=None,
     num_banana_current_controls=None,
@@ -5328,6 +5667,8 @@ def make_run_identity_config(
         single_stage_selfint_weight=args.single_stage_selfint_weight,
         single_stage_hardware_keepout_weight=args.single_stage_hardware_keepout_weight,
         hardware_keepout_json=args.hardware_keepout_json,
+        single_stage_vessel_keepout_weight=args.single_stage_vessel_keepout_weight,
+        single_stage_vessel_keepout_clearance=args.single_stage_vessel_keepout_clearance,
         single_stage_poloidal_threshold_rad=getattr(
             args,
             "single_stage_poloidal_threshold_rad",
@@ -5350,6 +5691,11 @@ def make_run_identity_config(
             args,
             "banana_current_max_A",
             BANANA_CURRENT_HARD_LIMIT_A,
+        ),
+        single_stage_banana_geometry_mode=getattr(
+            args,
+            "single_stage_banana_geometry_mode",
+            BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
         ),
         single_stage_banana_current_mode=getattr(
             args,
@@ -5425,6 +5771,8 @@ def make_run_identity_config(
             == _SINGLE_STAGE_SEED_REGIME_AUTO
             else args.seed_regime
         ),
+        magnetic_well_weight=float(getattr(args, "magnetic_well_weight", 0.0)),
+        magnetic_well_target=float(getattr(args, "magnetic_well_target", 0.0)),
         residue_objective_weight=float(getattr(args, "residue_objective_weight", 0.0)),
         residue_objective_target_manifest_id=(
             None if residue_objective is None else residue_objective.target_manifest_id
@@ -5445,6 +5793,15 @@ def build_run_identity_config(config):
         if (
             field.name == "single_stage_banana_current_coordinate_scaling"
             and value == BANANA_CURRENT_COORDINATE_SCALING_NONE
+        ):
+            continue
+        if (
+            field.name == "single_stage_banana_geometry_mode"
+            and value == BANANA_GEOMETRY_MODE_SHARED_SYMMETRY
+        ):
+            continue
+        if field.name in {"magnetic_well_weight", "magnetic_well_target"} and (
+            float(config.magnetic_well_weight) == 0.0
         ):
             continue
         if field.name == "residue_objective_weight" and float(value) == 0.0:
@@ -5532,15 +5889,15 @@ def validate_surface_mode_constraint_args(
             f"--surface-mode={PUBLISHED_MULTISURFACE}"
         )
     if (
-        surface_mode_contract.mode == PUBLISHED_MULTISURFACE
-        and getattr(args, "single_stage_goal_mode", "target") == "frontier"
+        float(getattr(args, "magnetic_well_weight", 0.0)) > 0.0
+        and surface_mode_contract.num_surfaces < 3
     ):
         raise ValueError(
-            "published_multisurface v1 supports only "
-            "--single-stage-goal-mode=target; frontier mode is not enabled for "
-            "the published fixed-stack contract."
+            "--magnetic-well-weight > 0 requires a surface contract with at least "
+            "three Boozer surfaces, such as --surface-mode=published_multisurface. "
+            "This objective is the Boozer-volume magnetic-well proxy, not a "
+            "finite-beta Mercier criterion."
         )
-
 
 def validate_single_stage_alm_formulation_args(args):
     if args.alm_formulation == "weighted_sum":
@@ -5868,7 +6225,7 @@ def hardware_violation_score(hardware_status):
 
 def repair_progress_state(run_dict):
     if not repair_eligible_incumbent(run_dict):
-        return (1, float("inf"))
+        return REPAIR_STATE_BLOCKED
     return (
         0,
         float(hardware_violation_score(run_dict.get("accepted_hardware_status"))),
@@ -6026,7 +6383,7 @@ def frontier_goal_mode_warning_message(frontier_goal_config):
     if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_EPSILON:
         return (
             "INFO: --single-stage-goal-mode=frontier uses an epsilon-constrained "
-            "tradeoff score: the seed-relative frontier objective stays active, but "
+            "tradeoff score: the target-anchored frontier objective stays active, but "
             "QA and/or Boozer residual threshold violations add smooth search penalties "
             f"(qa_max={frontier_goal_config.epsilon_constraint_qa_max}, "
             f"boozer_max={frontier_goal_config.epsilon_constraint_boozer_max}) while "
@@ -6035,8 +6392,8 @@ def frontier_goal_mode_warning_message(frontier_goal_config):
         )
     return (
         "INFO: --single-stage-goal-mode=frontier uses a normalized tradeoff score: "
-        "QA and Boozer residual are normalized to the seed, iota and volume use bounded "
-        f"improvement rewards referenced to the seed (iota_ref={frontier_goal_config.iota_reference:.6f}, "
+        "QA and Boozer residual are normalized to the seed, while iota and volume use bounded "
+        f"improvement rewards referenced to target/ceiling values (iota_ref={frontier_goal_config.iota_reference:.6f}, "
         f"volume_ref={frontier_goal_config.volume_reference:.6f}), and Boozer residuals above "
         f"{frontier_goal_config.boozer_trust_threshold:.6e} incur a smooth threshold-relative trust penalty "
         "during search and still fail final frontier certification. "
@@ -6070,10 +6427,12 @@ def apply_frontier_scalarization_override(
         width_weight=SINGLE_STAGE_WIDTH_WEIGHT,
         selfint_weight=SINGLE_STAGE_SELFINT_WEIGHT,
         hardware_keepout_weight=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
+        vessel_keepout_weight=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
         msc_weight=globals().get("MSC_WEIGHT", 0.0),
         arclen_weight=globals().get("ARCLEN_WEIGHT", 0.0),
         link_weight=globals().get("LINKING_WEIGHT", 0.0),
         force_weight=globals().get("FORCE_WEIGHT", 0.0),
+        magnetic_well_weight=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
         objective_optimizable=globals().get("JF"),
         alm_formulation=alm_formulation,
         alm_multipliers=globals().get("ALM_MULTIPLIERS"),
@@ -6181,10 +6540,11 @@ def build_single_stage_iota_objective(
     In ``target`` mode this returns ``QuadraticPenalty(iota, iota_target)``,
     whose ``J`` is ``0.5 * (iota - iota_target)**2`` (typically O(1e-3) near the
     target). In ``frontier`` mode this returns a smooth bounded reward that
-    measures improvement relative to the fixed seed/reference iota. Minimizing
+    measures improvement relative to the fixed target/reference iota. Minimizing
     this term therefore rewards higher iota without introducing an explicit
-    outer target or an unbounded linear ``-iota`` direction. ``iota_target`` is
-    unused in frontier mode and is accepted only for caller-API symmetry.
+    unbounded linear ``-iota`` direction. ``iota_target`` is accepted for
+    caller-API symmetry; the resolved frontier reference is carried in
+    ``frontier_goal_config``.
     """
     if goal_mode == "target":
         return QuadraticPenalty(surface_iota_term, iota_target)
@@ -6425,6 +6785,23 @@ def boozer_residual_threshold_for_stage(
     return float(alm_boozer_threshold)
 
 
+def banana_curve_order(curve):
+    source_curve = curve
+    while getattr(source_curve, "order", None) is None:
+        source_curve = source_curve.curve
+    return int(source_curve.order)
+
+
+def resolve_keepout_winding_r0(banana_coils):
+    """Major radius, m, of the winding torus orienting the hardware/vessel
+    keep-out U-channel frames: the realized CWS torus when the lineage embeds
+    one, else the hardware-contract spec default (legacy non-CWS coils)."""
+    realized_winding_radii = realized_cws_winding_radii(banana_coils)
+    if realized_winding_radii is None:
+        return BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+    return realized_winding_radii[0]
+
+
 def build_single_stage_objective_bundle(
     stage,
     surface_data,
@@ -6442,6 +6819,8 @@ def build_single_stage_objective_bundle(
     CURVATURE_WEIGHT,
     CURVATURE_THRESHOLD,
     length_target=None,
+    banana_surf_radius=BANANA_WINDING_MINOR_RADIUS_M,
+    banana_surf_major_radius=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     goal_mode="target",
     frontier_goal_config=None,
     boozer_residual_threshold=0.0,
@@ -6453,9 +6832,19 @@ def build_single_stage_objective_bundle(
     coil_force_regularization=0.0,
     SHEAR_TARGET=0.0,
     SHEAR_WEIGHT=0.0,
+    MAGNETIC_WELL_WEIGHT=0.0,
+    MAGNETIC_WELL_TARGET=0.0,
+    LGRADB_WEIGHT=0.0,
+    LGRADB_FLOOR=0.30,
+    LGRADB_NTHETA=32,
+    LGRADB_NPHI=32,
     tf_curves=None,
     tf_length_target=0.0,
+    banana_coils=(),
 ):
+    global HARDWARE_KEEPOUT_GROUP_LABELS
+    global HARDWARE_KEEPOUT_METADATA
+
     boozer_terms = build_boozer_derived_objective_terms(
         stage,
         surface_data,
@@ -6466,7 +6855,8 @@ def build_single_stage_objective_bundle(
     nonQSs = boozer_terms["nonQSs"]
     brs = boozer_terms["brs"]
 
-    curvelength = CurveLength(banana_curves[0])
+    banana_curvelengths = [CurveLength(curve) for curve in banana_curves]
+    curvelength = banana_curvelengths[0]
     if length_target is None:
         length_target = COIL_LENGTH_TARGET_M
     outer_surface = surface_data[-1]["boozer_surface"].surface
@@ -6492,43 +6882,74 @@ def build_single_stage_objective_bundle(
         RES_WEIGHT=RES_WEIGHT,
         IOTAS_WEIGHT=IOTAS_WEIGHT,
     )
-    JCurveLength = QuadraticPenalty(curvelength, length_target, "max")
-    JCurveLengthMin = QuadraticPenalty(
-        curvelength,
-        COIL_LENGTH_MIN_FRACTION * length_target,
-        "min",
+    JCurveLength = average_surface_objectives(
+        [
+            QuadraticPenalty(curve_length, length_target, "max")
+            for curve_length in banana_curvelengths
+        ]
+    )
+    JCurveLengthMin = average_surface_objectives(
+        [
+            QuadraticPenalty(
+                curve_length,
+                COIL_LENGTH_MIN_FRACTION * length_target,
+                "min",
+            )
+            for curve_length in banana_curvelengths
+        ]
     )
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
     JCurveSurface = CurveSurfaceDistance(curves, outer_surface, CS_DIST)
-    JCurvature = LpCurveCurvature(
-        banana_curves[0],
-        CURVATURE_P_NORM,
-        CURVATURE_THRESHOLD,
+    JCurvatureTerms = [
+        LpCurveCurvature(curve, CURVATURE_P_NORM, CURVATURE_THRESHOLD)
+        for curve in banana_curves
+    ]
+    JCurvature = average_surface_objectives(JCurvatureTerms)
+    JPoloidalExtentTerms = [
+        PoloidalExtent(
+            curve,
+            banana_surf_major_radius,
+            SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
+        )
+        for curve in banana_curves
+    ]
+    JPoloidalExtent = average_surface_objectives(JPoloidalExtentTerms)
+    JCoilWidthTerms = [
+        EllipseWidth(
+            curve,
+            banana_surf_major_radius,
+            banana_surf_radius,
+        )
+        for curve in banana_curves
+    ]
+    JCoilWidth = average_surface_objectives(JCoilWidthTerms)
+    JCurveSelfIntersectTerms = [
+        CurveSelfIntersect(
+            curve,
+            BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+            neighbor_skip=int(
+                BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curve_order(curve)
+            ),
+        )
+        for curve in banana_curves
+    ]
+    JCurveSelfIntersect = average_surface_objectives(
+        JCurveSelfIntersectTerms
     )
-    JPoloidalExtent = PoloidalExtent(
-        banana_curves[0],
-        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-        SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
-    )
-    JCoilWidth = EllipseWidth(
-        banana_curves[0],
-        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-        BANANA_WINDING_MINOR_RADIUS_M,
-    )
-    JCurveSelfIntersect = CurveSelfIntersect(
-        banana_curves[0],
-        BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
-        neighbor_skip=int(
-            BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curves[0].order
-        ),
-    )
-    # Opt-in hardware keep-out (default-OFF): constructed only when a weight is
-    # set AND a point-cloud path is provided, so default runs add nothing to the
-    # objective graph and stay byte-identical. The penalty must see the full
-    # banana coil set — each symmetry copy meets different hardware (sensors,
-    # solenoid/REMC mounts); TF coils are deliberately excluded (fixed machine
-    # coils would contribute un-optimizable constant violation).
+    # Default-on hardware keep-out: constructed when a positive weight is set.
+    # The penalty must see the full banana coil set because each symmetry copy
+    # meets different hardware (sensors, solenoid/REMC mounts); TF coils are
+    # deliberately excluded because fixed machine coils would contribute an
+    # un-optimizable constant violation. Operators can still set the weight to
+    # zero for legacy reproduction. Both terms orient their swept U-channel
+    # frame about the realized CWS winding torus, not the 0.903 spec default:
+    # re-centered seeds (0.920/0.934/0.993) measured J=0 in the spec frame
+    # while the true-frame J was 0.04-0.057 (2026-06-10 laneLOW xval).
     JCurveHardwareKeepout = None
+    JCurveVesselEnvelopeKeepout = None
+    HARDWARE_KEEPOUT_GROUP_LABELS = []
+    HARDWARE_KEEPOUT_METADATA = {}
+    keepout_winding_r0 = resolve_keepout_winding_r0(banana_coils)
     if SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT > 0.0:
         if not HARDWARE_KEEPOUT_JSON_PATH:
             raise ValueError(
@@ -6536,8 +6957,18 @@ def build_single_stage_objective_bundle(
                 "--hardware-keepout-json (the exported sensor/mount point cloud)"
             )
         keepout_points, keepout_point_weight, keepout_min_distance, _keepout_prov = (
-            load_hardware_keepout(HARDWARE_KEEPOUT_JSON_PATH)
+            load_hardware_keepout(
+                HARDWARE_KEEPOUT_JSON_PATH,
+                glb_path=HARDWARE_KEEPOUT_GLB_PATH,
+            )
         )
+        HARDWARE_KEEPOUT_METADATA = hardware_keepout_metadata(
+            HARDWARE_KEEPOUT_JSON_PATH,
+            glb_path=HARDWARE_KEEPOUT_GLB_PATH,
+        )
+        HARDWARE_KEEPOUT_GROUP_LABELS = HARDWARE_KEEPOUT_METADATA[
+            "HARDWARE_KEEPOUT_GROUPS"
+        ]
         if not math.isclose(
             keepout_min_distance,
             HARDWARE_KEEPOUT_MIN_DISTANCE_M,
@@ -6554,6 +6985,15 @@ def build_single_stage_objective_bundle(
             keepout_points,
             HARDWARE_KEEPOUT_MIN_DISTANCE_M,
             keepout_point_weight,
+            winding_r0=keepout_winding_r0,
+        )
+    if SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT > 0.0:
+        if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
+            raise ValueError("--single-stage-vessel-keepout-clearance must be positive")
+        JCurveVesselEnvelopeKeepout = CurveVesselEnvelopeKeepout(
+            banana_curves,
+            minimum_clearance=SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE,
+            winding_r0=keepout_winding_r0,
         )
     # Boozer-adjoint major-radius objective for the LCFS upper-bound ALM constraint.
     # Supplies d(major_radius)/d(coils) via the BoozerSurface adjoint; the fixed-surface
@@ -6565,16 +7005,19 @@ def build_single_stage_objective_bundle(
     # dminor_radius_by_dcoeff path is zero over the coil dofs. Reuses the same outer
     # BoozerSurface (and its cached solution), so it adds no fresh solve.
     JLCFSMinorRadius = MinorRadius(surface_data[-1]["boozer_surface"])
-    # Opt-in SIMSOPT coil regularizers (default-OFF): constructed only when the
-    # corresponding weight is set, so default runs add nothing to the objective
-    # graph and stay byte-identical. MSC/arclength regularize the optimized banana
-    # coil; LinkingNumber penalizes coil entanglement across the modular set; the
-    # coil force is the summed mean-squared Lorentz force over the coil set.
+    # SIMSOPT coil regularizers. MSC/arclength/linking remain opt-in, while the
+    # coil-force term is default-on under the Type KK production contract.
     JMeanSquaredCurvature = (
-        MeanSquaredCurvature(banana_curves[0]) if MSC_WEIGHT > 0.0 else None
+        average_surface_objectives(
+            [MeanSquaredCurvature(curve) for curve in banana_curves]
+        )
+        if MSC_WEIGHT > 0.0
+        else None
     )
     JArclengthVariation = (
-        ArclengthVariation(banana_curves[0]) if ARCLEN_WEIGHT > 0.0 else None
+        average_surface_objectives([ArclengthVariation(curve) for curve in banana_curves])
+        if ARCLEN_WEIGHT > 0.0
+        else None
     )
     JLinkingNumber = LinkingNumber(curves) if LINKING_WEIGHT > 0.0 else None
     JCoilForce = None
@@ -6592,6 +7035,48 @@ def build_single_stage_objective_bundle(
         if SHEAR_WEIGHT > 0.0
         else None
     )
+    if MAGNETIC_WELL_WEIGHT > 0.0:
+        _surface_volume_terms = [
+            Volume(entry["boozer_surface"].surface) for entry in surface_data
+        ]
+        _surface_labels = [
+            float(entry["seed_label"]) for entry in surface_data
+        ]
+        JMagneticWell = build_single_stage_magnetic_well_objective(
+            _surface_volume_terms,
+            _surface_labels,
+            MAGNETIC_WELL_TARGET,
+        )
+    else:
+        JMagneticWell = None
+    # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default-OFF):
+    # None when LGRADB_WEIGHT is 0, so default runs add nothing to the objective
+    # graph and stay byte-identical. When enabled, evaluates L_grad_B on a
+    # theta x phi grid over the outer Boozer surface using the BiotSavart field
+    # and penalises the shortfall below LGRADB_FLOOR. Calibration range:
+    # good ~0.34 m / bad ~0.13 m at HBT-EP scale (uncalibrated). Gradient
+    # w.r.t. coil DOFs is finite-difference (no analytic adjoint); use a
+    # Taylor-test or FD check before trusting gradient-based runs with this term.
+    if LGRADB_WEIGHT > 0.0:
+        # Sample the outer Boozer surface on a regular theta x phi grid at its
+        # current quadrature resolution, then sub-sample to the requested grid.
+        # We evaluate at LGRADB_NTHETA x LGRADB_NPHI points (one field period)
+        # using the surface's gamma() at its native quadrature resolution to
+        # build a dense xyz array.  gamma() returns (ntheta, nphi, 3).
+        _outer_boozer_surf = surface_data[-1]["boozer_surface"].surface
+        _gamma = np.asarray(_outer_boozer_surf.gamma(), dtype=float)
+        # _gamma shape: (ntheta_native, nphi_native, 3)
+        # Thin-slice to the requested resolution by index; use modulo wrap.
+        _n_native_theta, _n_native_phi = _gamma.shape[:2]
+        _th_idx = np.linspace(0, _n_native_theta, LGRADB_NTHETA, endpoint=False).astype(int) % _n_native_theta
+        _ph_idx = np.linspace(0, _n_native_phi, LGRADB_NPHI, endpoint=False).astype(int) % _n_native_phi
+        _xyz = _gamma[np.ix_(_th_idx, _ph_idx)].reshape(-1, 3)  # (NTHETA*NPHI, 3)
+        # Use the last boozer-objective BiotSavart (outermost surface) so the
+        # field evaluation is consistent with the optimization graph.
+        _bs_outer = boozer_terms["boozer_objective_biot_savarts"][-1]
+        JMinLGradB = MinLGradBShortfall(_bs_outer, _xyz, LGRADB_FLOOR)
+    else:
+        JMinLGradB = None
     # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
     # tf_curves were unfrozen, so default runs add nothing and stay byte-identical).
     # They reuse the same LpCurveCurvature/CurveLength/QuadraticPenalty helpers and
@@ -6645,6 +7130,12 @@ def build_single_stage_objective_bundle(
         FORCE_WEIGHT=FORCE_WEIGHT,
         JShear=JShear,
         SHEAR_WEIGHT=SHEAR_WEIGHT,
+        JMagneticWell=JMagneticWell,
+        MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+        VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        JMinLGradB=JMinLGradB,
+        LGRADB_WEIGHT=LGRADB_WEIGHT,
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -6654,6 +7145,7 @@ def build_single_stage_objective_bundle(
         "nonQSs": nonQSs,
         "brs": brs,
         "curvelength": curvelength,
+        "banana_curvelengths": banana_curvelengths,
         "length_target": length_target,
         "Jiota": Jiota,
         "surface_volume_term": surface_volume_term,
@@ -6671,10 +7163,17 @@ def build_single_stage_objective_bundle(
         "JCurveCurve": JCurveCurve,
         "JCurveSurface": JCurveSurface,
         "JCurvature": JCurvature,
+        "JCurvatureTerms": JCurvatureTerms,
         "JPoloidalExtent": JPoloidalExtent,
+        "JPoloidalExtentTerms": JPoloidalExtentTerms,
         "JCoilWidth": JCoilWidth,
+        "JCoilWidthTerms": JCoilWidthTerms,
         "JCurveSelfIntersect": JCurveSelfIntersect,
+        "JCurveSelfIntersectTerms": JCurveSelfIntersectTerms,
         "JCurveHardwareKeepout": JCurveHardwareKeepout,
+        "HARDWARE_KEEPOUT_GROUP_LABELS": list(HARDWARE_KEEPOUT_GROUP_LABELS),
+        "HARDWARE_KEEPOUT_METADATA": dict(HARDWARE_KEEPOUT_METADATA),
+        "JCurveVesselEnvelopeKeepout": JCurveVesselEnvelopeKeepout,
         "JLCFSMajorRadius": JLCFSMajorRadius,
         "JLCFSMinorRadius": JLCFSMinorRadius,
         "JResidueObjective": JResidueObjective,
@@ -6683,6 +7182,8 @@ def build_single_stage_objective_bundle(
         "JLinkingNumber": JLinkingNumber,
         "JCoilForce": JCoilForce,
         "JShear": JShear,
+        "JMagneticWell": JMagneticWell,
+        "JMinLGradB": JMinLGradB,
         "JTFCurvature": JTFCurvature,
         "JTFCurveLength": JTFCurveLength,
         "JF": JF,
@@ -6694,6 +7195,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global nonQSs
     global brs
     global curvelength
+    global banana_curvelengths
     global surface_volume_term
     global Jiota
     global JVolume
@@ -6710,10 +7212,17 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCurveCurve
     global JCurveSurface
     global JCurvature
+    global JCurvatureTerms
     global JPoloidalExtent
+    global JPoloidalExtentTerms
     global JCoilWidth
+    global JCoilWidthTerms
     global JCurveSelfIntersect
+    global JCurveSelfIntersectTerms
     global JCurveHardwareKeepout
+    global HARDWARE_KEEPOUT_GROUP_LABELS
+    global HARDWARE_KEEPOUT_METADATA
+    global JCurveVesselEnvelopeKeepout
     global JLCFSMajorRadius
     global JLCFSMinorRadius
     global JResidueObjective
@@ -6722,12 +7231,15 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JLinkingNumber
     global JCoilForce
     global JShear
+    global JMagneticWell
+    global JMinLGradB
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
     nonQSs = objective_bundle["nonQSs"]
     brs = objective_bundle["brs"]
     curvelength = objective_bundle["curvelength"]
+    banana_curvelengths = objective_bundle["banana_curvelengths"]
     surface_volume_term = objective_bundle["surface_volume_term"]
     Jiota = objective_bundle["Jiota"]
     JVolume = objective_bundle["JVolume"]
@@ -6744,10 +7256,19 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCurveCurve = objective_bundle["JCurveCurve"]
     JCurveSurface = objective_bundle["JCurveSurface"]
     JCurvature = objective_bundle["JCurvature"]
+    JCurvatureTerms = objective_bundle["JCurvatureTerms"]
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
+    JPoloidalExtentTerms = objective_bundle["JPoloidalExtentTerms"]
     JCoilWidth = objective_bundle["JCoilWidth"]
+    JCoilWidthTerms = objective_bundle["JCoilWidthTerms"]
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
+    JCurveSelfIntersectTerms = objective_bundle["JCurveSelfIntersectTerms"]
     JCurveHardwareKeepout = objective_bundle["JCurveHardwareKeepout"]
+    HARDWARE_KEEPOUT_GROUP_LABELS = list(
+        objective_bundle["HARDWARE_KEEPOUT_GROUP_LABELS"]
+    )
+    HARDWARE_KEEPOUT_METADATA = dict(objective_bundle["HARDWARE_KEEPOUT_METADATA"])
+    JCurveVesselEnvelopeKeepout = objective_bundle["JCurveVesselEnvelopeKeepout"]
     JLCFSMajorRadius = objective_bundle["JLCFSMajorRadius"]
     JLCFSMinorRadius = objective_bundle["JLCFSMinorRadius"]
     JResidueObjective = objective_bundle["JResidueObjective"]
@@ -6756,6 +7277,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JLinkingNumber = objective_bundle["JLinkingNumber"]
     JCoilForce = objective_bundle["JCoilForce"]
     JShear = objective_bundle["JShear"]
+    JMagneticWell = objective_bundle["JMagneticWell"]
+    JMinLGradB = objective_bundle["JMinLGradB"]
     JF = objective_bundle["JF"]
 
 
@@ -7070,8 +7593,12 @@ def evaluate_total_objective(
     SELFINT_WEIGHT=0.0,
     JCurveHardwareKeepout=None,
     HARDWARE_KEEPOUT_WEIGHT=0.0,
+    JCurveVesselEnvelopeKeepout=None,
+    VESSEL_KEEPOUT_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JMagneticWell=None,
+    MAGNETIC_WELL_WEIGHT=0.0,
 ):
     """Evaluate the fixed descended objective and surface-weighted diagnostics.
 
@@ -7123,6 +7650,8 @@ def evaluate_total_objective(
             SELFINT_WEIGHT=SELFINT_WEIGHT,
             JCurveHardwareKeepout=JCurveHardwareKeepout,
             HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
+            JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+            VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
             JResidueObjective=globals().get("JResidueObjective"),
             JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
             MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
@@ -7134,6 +7663,10 @@ def evaluate_total_objective(
             FORCE_WEIGHT=globals().get("FORCE_WEIGHT", 0.0),
             JShear=JShear,
             SHEAR_WEIGHT=SHEAR_WEIGHT,
+            JMagneticWell=JMagneticWell,
+            MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+            JMinLGradB=globals().get("JMinLGradB"),
+            LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
         ),
         alm_formulation="weighted_sum",
     )
@@ -7171,6 +7704,10 @@ def evaluate_base_objective(
         JResidueObjective=globals().get("JResidueObjective"),
         JShear=globals().get("JShear"),
         SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
+        JMagneticWell=globals().get("JMagneticWell"),
+        MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+        JMinLGradB=globals().get("JMinLGradB"),
+        LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
         include_diagnostics=include_diagnostics,
     )
 
@@ -7190,9 +7727,13 @@ def evaluate_alm_objective(
     multipliers,
     penalty,
     JPoloidalExtent=None,
+    JPoloidalExtentTerms=None,
     JCoilWidth=None,
+    JCoilWidthTerms=None,
     JCurveSelfIntersect=None,
+    JCurveSelfIntersectTerms=None,
     JCurveHardwareKeepout=None,
+    JCurveVesselEnvelopeKeepout=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -7223,6 +7764,7 @@ def evaluate_alm_objective(
             curvature_threshold=CURVATURE_THRESHOLD,
             distance_smoothing=distance_smoothing,
             curvature_smoothing=curvature_smoothing,
+            banana_curves=banana_curves,
             constraint_names=single_stage_alm_constraint_names(
                 alm_formulation=args.alm_formulation,
                 include_surface_stack=single_stage_surface_stack_alm_enabled(
@@ -7255,12 +7797,14 @@ def evaluate_alm_objective(
             iota_penalty_threshold=args.alm_iota_penalty_threshold,
             length_penalty_threshold=args.alm_length_penalty_threshold,
             coil_length_objective=curvelength,
+            coil_length_objectives=banana_curvelengths,
             coil_length_threshold=length_target,
             coil_length_min_threshold=COIL_LENGTH_MIN_FRACTION * length_target,
             banana_current=current_single_stage_alm_banana_current(),
             banana_currents=current_single_stage_alm_banana_currents(),
             banana_current_threshold=args.banana_current_max_A,
             JPoloidalExtent=JPoloidalExtent,
+            JPoloidalExtentTerms=JPoloidalExtentTerms,
             poloidal_extent_threshold=SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
             poloidal_extent_smoothing=curvature_smoothing,
             poloidal_extent_constraint_fn=_smooth_max_poloidal_extent_signed_constraint,
@@ -7268,10 +7812,14 @@ def evaluate_alm_objective(
                 smooth_max_poloidal_extent_signed_constraint_with_hard_signal
             ),
             JCoilWidth=JCoilWidth,
+            JCoilWidthTerms=JCoilWidthTerms,
             width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
             width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
             JCurveSelfIntersect=JCurveSelfIntersect,
+            JCurveSelfIntersectTerms=JCurveSelfIntersectTerms,
             JCurveHardwareKeepout=JCurveHardwareKeepout,
+            JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+            VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
             JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
@@ -7293,6 +7841,10 @@ def evaluate_alm_objective(
             FORCE_WEIGHT=globals().get("FORCE_WEIGHT", 0.0),
             JShear=globals().get("JShear"),
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
+            JMagneticWell=globals().get("JMagneticWell"),
+            MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+            JMinLGradB=globals().get("JMinLGradB"),
+            LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
             include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,
@@ -7319,9 +7871,13 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 ALM_MULTIPLIERS,
                 ALM_PENALTY,
                 JPoloidalExtent=JPoloidalExtent,
+                JPoloidalExtentTerms=JPoloidalExtentTerms,
                 JCoilWidth=JCoilWidth,
+                JCoilWidthTerms=JCoilWidthTerms,
                 JCurveSelfIntersect=JCurveSelfIntersect,
+                JCurveSelfIntersectTerms=JCurveSelfIntersectTerms,
                 JCurveHardwareKeepout=JCurveHardwareKeepout,
+                JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -7352,8 +7908,12 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             SELFINT_WEIGHT=SINGLE_STAGE_SELFINT_WEIGHT,
             JCurveHardwareKeepout=JCurveHardwareKeepout,
             HARDWARE_KEEPOUT_WEIGHT=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
+            JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+            VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
             JShear=globals().get("JShear"),
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
+            JMagneticWell=globals().get("JMagneticWell"),
+            MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
         )
     )
 
@@ -9280,6 +9840,16 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         max_iterations=globals().get("MAXITER", replay_config.max_iterations),
         target_volume=globals().get("vol_target", replay_config.target_volume),
         target_iota=globals().get("iota_target", replay_config.target_iota),
+        toroidal_flux=globals().get("s", replay_config.toroidal_flux),
+        banana_surf_radius=globals().get(
+            "banana_surf_radius",
+            replay_config.banana_surf_radius,
+        ),
+        curvature_threshold=globals().get(
+            "CURVATURE_THRESHOLD",
+            replay_config.curvature_threshold,
+        ),
+        order=globals().get("order", replay_config.order),
         requested_seed_regime=globals().get(
             "REQUESTED_SEED_REGIME",
             replay_config.requested_seed_regime,
@@ -9827,6 +10397,7 @@ def build_preserved_timeout_results_payload(
         "SELF_INTERSECTING": bool(run_dict["intersecting"]),
         **build_single_stage_banana_current_payload_fields(banana_current_state),
         **residue_objective_results_payload(search_eval),
+        **magnetic_well_objective_results_payload(search_eval),
         **build_hardware_constraint_artifact_payload_fields(artifact_hardware_snapshot),
         **search_step_metrics_payload(run_dict),
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(
@@ -9894,6 +10465,31 @@ def build_preserved_timeout_results_payload(
         "PRESERVED_TIMEOUT_SALVAGE_KIND": preservation_kind,
         "PRESERVED_TIMEOUT_SALVAGE_STAGE": source_stage,
         "MAJOR_RADIUS": float(replay_config.major_radius),
+        "TOROIDAL_FLUX": (
+            None
+            if replay_config.toroidal_flux is None
+            else float(replay_config.toroidal_flux)
+        ),
+        "banana_surf_radius": (
+            None
+            if replay_config.banana_surf_radius is None
+            else float(replay_config.banana_surf_radius)
+        ),
+        "CURVATURE_THRESHOLD": (
+            None
+            if replay_config.curvature_threshold is None
+            else float(replay_config.curvature_threshold)
+        ),
+        "order": (
+            None
+            if replay_config.order is None
+            else int(replay_config.order)
+        ),
+        # Timeout-salvage payloads have no coil objects in scope, so these two
+        # keys keep the SPEC constant here; the live final-results writer
+        # records the realized embedded CWS torus instead (which can differ —
+        # M-family lineage: 0.976/0.21). Prefer the final results.json keys
+        # when both exist.
         "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),
@@ -10416,6 +11012,8 @@ def build_total_objective(
     SELFINT_WEIGHT=0.0,
     JCurveHardwareKeepout=None,
     HARDWARE_KEEPOUT_WEIGHT=0.0,
+    JCurveVesselEnvelopeKeepout=None,
+    VESSEL_KEEPOUT_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -10427,6 +11025,10 @@ def build_total_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JMagneticWell=None,
+    MAGNETIC_WELL_WEIGHT=0.0,
+    JMinLGradB=None,
+    LGRADB_WEIGHT=0.0,
     JTFCurvature=None,
     JTFCurveLength=None,
 ):
@@ -10457,6 +11059,8 @@ def build_total_objective(
         SELFINT_WEIGHT=SELFINT_WEIGHT,
         JCurveHardwareKeepout=JCurveHardwareKeepout,
         HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
+        JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+        VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -10468,6 +11072,10 @@ def build_total_objective(
         FORCE_WEIGHT=FORCE_WEIGHT,
         JShear=JShear,
         SHEAR_WEIGHT=SHEAR_WEIGHT,
+        JMagneticWell=JMagneticWell,
+        MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JMinLGradB=JMinLGradB,
+        LGRADB_WEIGHT=LGRADB_WEIGHT,
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -11090,7 +11698,9 @@ def evaluate_search_step(x):
                     ),
                     enforce_nesting=True,
                 )
-                trial_coil_length = curvelength.J()
+                trial_coil_length = max_single_stage_banana_curve_length(
+                    [banana_curve]
+                )
                 trial_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
                     JCurveCurve,
                     CC_DIST,
@@ -11417,7 +12027,7 @@ def callback(x):
     gamma = banana_curve.gamma()
     max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
     max_z = np.max(np.abs(gamma[:, 2]))
-    length = curvelength.J()
+    length = max_single_stage_banana_curve_length(banana_curves)
     hardware_snapshot = evaluate_single_stage_hardware_snapshot(
         JCurveCurve,
         CC_DIST,
@@ -11647,6 +12257,14 @@ def callback(x):
             f"{J_residue:.6e} (dJ = {dJ_residue:.6e})",
             file=buffer,
         )
+    if objective_eval.get("magnetic_well_objective_enabled"):
+        J_magnetic_well = float(objective_eval["J_magnetic_well"])
+        dJ_magnetic_well = np.linalg.norm(objective_eval["dJ_magnetic_well"])
+        print(
+            f"{'Magnetic Well Proxy':{width}} = "
+            f"{J_magnetic_well:.6e} (dJ = {dJ_magnetic_well:.6e})",
+            file=buffer,
+        )
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
     if len(surface_data) > 1:
         print(
@@ -11781,6 +12399,46 @@ def callback(x):
                 surface_data
             ),
         )
+        # Contract-only seed sidecar so this checkpoint is loadable as a seed
+        # via materialize_checkpoint_seed (never named results.json in-place:
+        # run-artifact scanners rglob that name). Sidecar failure must not
+        # kill a multi-hour run (same policy as the diagnostic plots).
+        try:
+            write_checkpoint_seed_sidecar(
+                ckpt_dir,
+                stage2_results,
+                checkpoint_iteration=int(run_dict["accepted_iterations"]),
+                parent_out_dir=OUT_DIR_ITER,
+                runtime_fields={
+                    "MAJOR_RADIUS": R0,
+                    "TOROIDAL_FLUX": s,
+                    "banana_surf_radius": banana_surf_radius,
+                    "order": order,
+                    "mpol": mpol,
+                    "ntor": ntor,
+                    "TF_CURRENT_A": stage2_tf_current_A,
+                    "NUM_TF_COILS": num_tf_coils,
+                    "FINITE_CURRENT_MODE": finite_current_mode,
+                    "EFFECTIVE_CURRENT_MODE": effective_current_mode,
+                    "PLASMA_CURRENT_A": plasma_current_A,
+                    "BOOZER_I": boozer_I,
+                    "OFFSPEC_REPLAY_DEBUG_ONLY": bool(args.offspec_replay_debug_only),
+                    "STRICT_VACUUM_CURRENT": bool(args.strict_vacuum_current),
+                    "ACCEPT_OFFSPEC_R0_SEED": bool(args.accept_offspec_r0_seed),
+                    **wout_convention_artifact_fields(
+                        wout_path=file_loc,
+                        tf_current_A=stage2_tf_current_A,
+                    ),
+                    **build_single_stage_banana_current_payload_fields(
+                        globals().get("banana_current_state")
+                    ),
+                },
+            )
+        except Exception as sidecar_error:
+            print(
+                f"WARNING: checkpoint seed sidecar write failed for {ckpt_dir}: "
+                f"{sidecar_error}"
+            )
         print(
             f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}"
         )
@@ -11813,14 +12471,20 @@ JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
 JCurveHardwareKeepout = None
+JCurveVesselEnvelopeKeepout = None
 JLCFSMajorRadius = None
 JLCFSMinorRadius = None
 JResidueObjective = None
 SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
-SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = 0.0
-HARDWARE_KEEPOUT_JSON_PATH = None
+SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT
+SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
+SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+HARDWARE_KEEPOUT_JSON_PATH = DEFAULT_HARDWARE_KEEPOUT_JSON_PATH
+HARDWARE_KEEPOUT_GLB_PATH = DEFAULT_HARDWARE_KEEPOUT_GLB_PATH
+HARDWARE_KEEPOUT_GROUP_LABELS = []
+HARDWARE_KEEPOUT_METADATA = {}
 SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = POLOIDAL_EXTENT_HALF_WIDTH_RAD
 SINGLE_STAGE_WIDTH_MIN_THRESHOLD = BANANA_WIDTH_MIN_M
 SINGLE_STAGE_WIDTH_MAX_THRESHOLD = BANANA_WIDTH_MAX_M
@@ -12203,7 +12867,12 @@ if __name__ == "__main__":
         max_iterations=MAXITER,
         target_volume=vol_target,
         target_iota=iota_target,
+        toroidal_flux=s,
+        banana_surf_radius=banana_surf_radius,
+        curvature_threshold=float(args.curvature_threshold),
+        order=order,
         single_stage_goal_mode=args.single_stage_goal_mode,
+        single_stage_banana_geometry_mode=args.single_stage_banana_geometry_mode,
         single_stage_banana_current_mode=args.single_stage_banana_current_mode,
         single_stage_banana_current_coordinate_scaling=(
             args.single_stage_banana_current_coordinate_scaling
@@ -12256,6 +12925,7 @@ if __name__ == "__main__":
     )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = replace(
         PRESERVED_TIMEOUT_REPLAY_CONFIG,
+        single_stage_banana_geometry_mode=banana_geometry_state.mode,
         single_stage_banana_current_coordinate_scaling=(
             banana_current_state.coordinate_scaling
         ),
@@ -12269,7 +12939,7 @@ if __name__ == "__main__":
     banana_coils = list(coil_partitions.banana_coils)
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
-    order = int(banana_curve.order)
+    order = banana_curve_order(banana_curve)
     tf_curves = [c.curve for c in tf_coils]
     # --free-tf-geometry unfreezes the TF curve geometry so the optimizer can shape
     # the TF coils (the only field source with a net-nonzero linking current) to
@@ -12304,16 +12974,15 @@ if __name__ == "__main__":
         stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
     initial_banana_current_A = banana_current_state.compatibility_current_A()
-    if CONSTRAINT_METHOD == "penalty":
-        apply_single_stage_penalty_banana_current_bounds(
-            banana_current_state,
-            banana_current_max_A=args.banana_current_max_A,
-            validate_seed=not args.init_only,
-            seed_context="Loaded Stage 2 banana current",
-        )
-    # ALM now checks banana current as a final feasibility constraint as well,
-    # but only penalty/L-BFGS-B mode keeps the hard inner box bound that forbids
-    # infeasible traversal during the search itself.
+    apply_single_stage_penalty_banana_current_bounds(
+        banana_current_state,
+        banana_current_max_A=args.banana_current_max_A,
+        validate_seed=not args.init_only,
+        seed_context="Loaded Stage 2 banana current",
+    )
+    # The banana-current cap is a hardware coordinate bound for every optimizer
+    # path. Penalty and basin-hopping consume it through L-BFGS-B bounds; ALM
+    # receives the same active bounds below and intersects them with its trust box.
     # Keep the toroidal-current seed tied to the TF bundle only. Extra Wataru
     # proxy/VF coils shape the field through the loaded Biot-Savart object and
     # should not perturb G0 a second time here. The bs-aware SSOT helper
@@ -12436,7 +13105,7 @@ if __name__ == "__main__":
         )
     initial_volume = outer_surface_data["boozer_surface"].surface.volume()
     initial_iota = Iotas(outer_surface_data["boozer_surface"]).J()
-    initial_max_curvature = np.max(banana_curve.kappa())
+    initial_max_curvature = max_single_stage_banana_curvature(banana_curves)
     initial_surface_volumes = [
         entry["boozer_surface"].surface.volume() for entry in surface_data
     ]
@@ -12461,7 +13130,14 @@ if __name__ == "__main__":
     SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = float(
         args.single_stage_hardware_keepout_weight
     )
+    SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = float(
+        args.single_stage_vessel_keepout_weight
+    )
+    SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
+        args.single_stage_vessel_keepout_clearance
+    )
     HARDWARE_KEEPOUT_JSON_PATH = args.hardware_keepout_json
+    HARDWARE_KEEPOUT_GLB_PATH = args.hardware_keepout_glb
     SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD = float(
         args.single_stage_poloidal_threshold_rad
     )
@@ -12502,6 +13178,14 @@ if __name__ == "__main__":
     # objective graph stays byte-identical with prior runs).
     SHEAR_TARGET = float(args.shear_target)
     SHEAR_WEIGHT = float(args.shear_weight)
+    MAGNETIC_WELL_WEIGHT = float(args.magnetic_well_weight)
+    MAGNETIC_WELL_TARGET = float(args.magnetic_well_target)
+    # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default weight 0 ->
+    # term not constructed, objective graph byte-identical with prior runs).
+    LGRADB_WEIGHT = float(args.lgradb_weight)
+    LGRADB_FLOOR = float(args.lgradb_floor)
+    LGRADB_NTHETA = int(args.lgradb_ntheta)
+    LGRADB_NPHI = int(args.lgradb_nphi)
     # The coil-force regularization is an externally-owned physical property (the
     # conductor cross-section), so require it explicitly when the force term is on.
     if FORCE_WEIGHT > 0.0 and args.coil_force_conductor_radius <= 0.0:
@@ -12509,7 +13193,7 @@ if __name__ == "__main__":
             "--coil-force-conductor-radius must be > 0 when --coil-force-weight > 0."
         )
     COIL_FORCE_REGULARIZATION = (
-        regularization_circ(float(args.coil_force_conductor_radius))
+        float(regularization_circ(float(args.coil_force_conductor_radius)))
         if FORCE_WEIGHT > 0.0
         else 0.0
     )
@@ -12525,6 +13209,8 @@ if __name__ == "__main__":
         frontier_goal_config = build_frontier_goal_config(
             initial_iota=initial_iota,
             initial_volume=initial_volume,
+            target_iota=iota_target,
+            target_volume=vol_target,
             initial_qs_objective=initial_qs_objective,
             initial_boozer_objective=initial_boozer_objective,
             res_weight=RES_WEIGHT,
@@ -12569,6 +13255,8 @@ if __name__ == "__main__":
             CURVATURE_WEIGHT,
             CURVATURE_THRESHOLD,
             length_target=length_target,
+            banana_surf_radius=banana_surf_radius,
+            banana_surf_major_radius=args.banana_surf_major_radius,
             goal_mode=args.single_stage_goal_mode,
             frontier_goal_config=frontier_goal_config,
             boozer_residual_threshold=boozer_residual_threshold_for_stage(
@@ -12585,8 +13273,15 @@ if __name__ == "__main__":
             coil_force_regularization=COIL_FORCE_REGULARIZATION,
             SHEAR_TARGET=SHEAR_TARGET,
             SHEAR_WEIGHT=SHEAR_WEIGHT,
+            MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+            MAGNETIC_WELL_TARGET=MAGNETIC_WELL_TARGET,
+            LGRADB_WEIGHT=LGRADB_WEIGHT,
+            LGRADB_FLOOR=LGRADB_FLOOR,
+            LGRADB_NTHETA=LGRADB_NTHETA,
+            LGRADB_NPHI=LGRADB_NPHI,
             tf_curves=tf_curves if free_tf_geometry else None,
             tf_length_target=tf_length_ceiling_m,
+            banana_coils=banana_coils,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle
@@ -13000,7 +13695,7 @@ if __name__ == "__main__":
             alm_state=current_solver_checkpoint_alm_state(),
         )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
-    initial_coil_length = curvelength.J()
+    initial_coil_length = max_single_stage_banana_curve_length(banana_curves)
     if initial_best_accepted_updated:
         write_preserved_timeout_artifacts_for_current_state(
             OUT_DIR_ITER,
@@ -13119,7 +13814,7 @@ if __name__ == "__main__":
                     surface_data=surface_data,
                     hardware_snapshot=hardware_snapshot,
                     field_error=field_error,
-                    coil_length=curvelength.J(),
+                    coil_length=max_single_stage_banana_curve_length(banana_curves),
                 )
         finally:
             restore_single_stage_incumbent_state(run_dict, current_state)
@@ -13337,6 +14032,7 @@ if __name__ == "__main__":
             restore_incumbent_state_fn=restore_incumbent_state,
             initial_multipliers=initial_alm_multipliers,
             initial_penalty=initial_alm_penalty,
+            base_bounds=run_dict["active_optimizer_bounds"],
         )
         alm_result = res
         alm_partial_state["history"] = [
@@ -13478,6 +14174,11 @@ if __name__ == "__main__":
             cc_weight=CC_WEIGHT,
             cs_weight=CS_WEIGHT,
             curvature_weight=CURVATURE_WEIGHT,
+            hardware_keepout_weight=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
+            vessel_keepout_weight=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+            selfint_weight=SINGLE_STAGE_SELFINT_WEIGHT,
+            width_weight=SINGLE_STAGE_WIDTH_WEIGHT,
+            poloidal_weight=SINGLE_STAGE_POLOIDAL_WEIGHT,
         )
 
         def restore_accepted_state():
@@ -13951,6 +14652,7 @@ if __name__ == "__main__":
             override_reason=constraint_override_reason,
             trace=single_stage_constraint_trace,
         )
+    realized_winding_radii = realized_cws_winding_radii(banana_coils)
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -14016,6 +14718,7 @@ if __name__ == "__main__":
         "STAGE2_TF_CURRENT_SUM_ABS_A": tf_current_sum_abs_A,
         "NUM_TF_COILS": coil_partitions.num_tf_coils,
         "NUM_BANANA_COILS": coil_partitions.num_banana_coils,
+        **banana_geometry_state.payload_fields(),
         "NUM_PROXY_COILS": 0
         if args.strict_vacuum_current
         else coil_partitions.num_proxy_coils,
@@ -14118,7 +14821,12 @@ if __name__ == "__main__":
         "SINGLE_STAGE_WIDTH_WEIGHT": SINGLE_STAGE_WIDTH_WEIGHT,
         "SINGLE_STAGE_SELFINT_WEIGHT": SINGLE_STAGE_SELFINT_WEIGHT,
         "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT": SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
+        "SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT": SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
+            SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
+        ),
         "HARDWARE_KEEPOUT_JSON": HARDWARE_KEEPOUT_JSON_PATH,
+        "HARDWARE_KEEPOUT_GLB": HARDWARE_KEEPOUT_GLB_PATH,
         "SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD": SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD,
         "SINGLE_STAGE_WIDTH_MIN_THRESHOLD": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
         "SINGLE_STAGE_WIDTH_MAX_THRESHOLD": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
@@ -14134,10 +14842,28 @@ if __name__ == "__main__":
         "IOTAS_WEIGHT": IOTAS_WEIGHT,
         "MAJOR_RADIUS": R0,
         "R0_OFF_SPEC": is_major_radius_offspec(R0),
-        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
-            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        # Record the torus the banana coils are ACTUALLY embedded on
+        # (CurveCWSFourierCPP.surf): warm resumes keep the seed's serialized
+        # torus, which need not match the 0.903 spec constant (M-family
+        # lineage: 0.976/0.21) nor --banana-surf-major-radius (cold-init/
+        # diagnostic reference only). Matches the seed-remap sidecar
+        # convention (scripts/remap_banana_cws_seed_radius.py). The spec
+        # constant stays available under its own explicit key; non-CWS
+        # lineages fall back to the reference constant.
+        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": (
+            realized_winding_radii[0]
+            if realized_winding_radii is not None
+            else float(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
         ),
-        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": (
+            realized_winding_radii[0]
+            if realized_winding_radii is not None
+            else float(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+        ),
+        "BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M": (
+            None if realized_winding_radii is None else realized_winding_radii[1]
+        ),
+        "BANANA_WINDING_SURFACE_SPEC_MAJOR_RADIUS_M": float(
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),
         "TOROIDAL_FLUX": s,
@@ -14519,6 +15245,7 @@ if __name__ == "__main__":
             )
         ),
         **residue_objective_results_payload(run_dict["search_eval"]),
+        **magnetic_well_objective_results_payload(run_dict["search_eval"]),
         "BANANA_CURRENT_DIAGNOSTICS_ENABLED": (
             run_dict.get("banana_current_diagnostics") is not None
         ),
@@ -14642,6 +15369,21 @@ if __name__ == "__main__":
             final_surface_iotas,
         )
     )
+    results.update(
+        hardware_keepout_results_fields(
+            hardware_group_labels=(
+                HARDWARE_KEEPOUT_GROUP_LABELS
+                if JCurveHardwareKeepout is not None
+                else ()
+            ),
+            vessel_active=JCurveVesselEnvelopeKeepout is not None,
+            metadata=(
+                HARDWARE_KEEPOUT_METADATA
+                if JCurveHardwareKeepout is not None
+                else None
+            ),
+        )
+    )
     # Producer-side WOUT convention stamp. Mirrors the Stage 2 producer pattern in
     # ``banana_coil_solver`` so single-stage artifacts carry the same SSOT lane
     # metadata at write time, without depending on the consumer-side legacy upgrader.
@@ -14666,6 +15408,13 @@ if __name__ == "__main__":
             format_captured_command(sys.executable, sys.argv[1:]) + "\n",
             encoding="utf-8",
         )
+    # Bind the artifact pair by content, mirroring the Stage 2 producer
+    # (banana_coil_solver stamps STAGE2_BS_SHA256 on every output): without
+    # this stamp, single-stage outputs — the program's first-preference
+    # donors — are rejected by the checksum-bound stage2 seed loader.
+    final_bs_artifact_path = os.path.join(OUT_DIR_ITER, "biot_savart_opt.json")
+    if os.path.isfile(final_bs_artifact_path):
+        bind_results_to_bs(results, final_bs_artifact_path)
     results_path = os.path.join(OUT_DIR_ITER, "results.json")
     write_json_artifact(results_path, results)
     if args.strict_vacuum_current:
