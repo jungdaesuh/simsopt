@@ -65,7 +65,7 @@ def _surface_directional_error(curve, surface, output_fn, vjp_fn) -> float:
     surface_dofs = surface.get_dofs().copy()
     analytic = np.asarray(vjp_fn(weights)(surface))
     analytic_direction = float(np.dot(analytic, direction))
-    eps = 2.0**-16
+    eps = 1.0e-6
 
     surface.local_full_x = surface_dofs + eps * direction
     plus = float(np.sum(output_fn() * weights))
@@ -85,6 +85,8 @@ def test_curvecwsfouriercpp_surface_vjps_match_centered_finite_difference() -> N
         (curve.gamma, curve.dgamma_by_dcoeff_vjp, 1e-8),
         (curve.gammadash, curve.dgammadash_by_dcoeff_vjp, 1e-7),
         (curve.gammadashdash, curve.dgammadashdash_by_dcoeff_vjp, 1e-5),
+        (curve.zfactor, curve.dzfactor_by_dcoeff_vjp, 1e-6),
+        (curve.rfactor, curve.drfactor_by_dcoeff_vjp, 1e-6),
     ]
     for output_fn, vjp_fn, tolerance in checks:
         assert _surface_directional_error(curve, surface, output_fn, vjp_fn) < tolerance

@@ -209,6 +209,10 @@ from banana_opt.current_contracts import (
     resolve_plasma_current_settings_for_num_surfaces as _resolve_plasma_current_settings_for_num_surfaces_impl,
     resolve_plasma_current_settings_for_surface_mode as _resolve_plasma_current_settings_for_surface_mode_impl,
 )
+from banana_opt.stage2_geometry import (
+    FiniteBuildSettings,
+    finite_build_frame_aware_curvature_limit_inv_m,
+)
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
@@ -245,6 +249,11 @@ from banana_opt.hardware_contracts import (
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_CW_DEFAULT_A,
     TF_CURRENT_HARD_LIMIT_A,
+    TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+    TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
+    TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
     is_major_radius_offspec,
@@ -1374,6 +1383,128 @@ _FREE_TF_GEOMETRY_DISABLED_MESSAGE = (
 )
 
 
+def validate_single_stage_finite_build_cli_args(args) -> None:
+    if not bool(getattr(args, "finite_build", False)):
+        if getattr(args, "finitebuild_frame_aware_curvature_threshold", None) is True:
+            raise ValueError(
+                "--finitebuild-frame-aware-curvature-threshold requires "
+                "--finite-build."
+            )
+        return
+    positive_int_fields = {
+        "--finitebuild-numfilaments-n": args.finitebuild_numfilaments_n,
+        "--finitebuild-numfilaments-b": args.finitebuild_numfilaments_b,
+    }
+    for flag_name, value in positive_int_fields.items():
+        if int(value) <= 0:
+            raise ValueError(f"{flag_name} must be positive.")
+    positive_float_fields = {
+        "--finitebuild-gapsize-n": args.finitebuild_gapsize_n,
+        "--finitebuild-gapsize-b": args.finitebuild_gapsize_b,
+    }
+    for flag_name, value in positive_float_fields.items():
+        value_float = float(value)
+        if not np.isfinite(value_float) or value_float <= 0.0:
+            raise ValueError(f"{flag_name} must be finite and positive.")
+
+
+def resolve_single_stage_finite_build_settings(
+    args,
+) -> FiniteBuildSettings | None:
+    if not bool(getattr(args, "finite_build", False)):
+        return None
+    rotation_order = int(args.finitebuild_rotation_order)
+    return FiniteBuildSettings(
+        numfilaments_n=int(args.finitebuild_numfilaments_n),
+        numfilaments_b=int(args.finitebuild_numfilaments_b),
+        gapsize_n=float(args.finitebuild_gapsize_n),
+        gapsize_b=float(args.finitebuild_gapsize_b),
+        rotation_order=None if rotation_order < 0 else rotation_order,
+        frame=str(args.finitebuild_frame),
+    )
+
+
+def single_stage_frame_aware_curvature_threshold_enabled(args) -> bool:
+    raw_value = getattr(args, "finitebuild_frame_aware_curvature_threshold", None)
+    if raw_value is None:
+        return bool(getattr(args, "finite_build", False))
+    return bool(raw_value)
+
+
+def single_stage_frame_aware_curvature_tightening(
+    curvature_threshold_inv_m,
+    finite_build_settings,
+    opt_in,
+):
+    if not opt_in:
+        return float(curvature_threshold_inv_m), None, False
+    if finite_build_settings is None:
+        raise ValueError(
+            "frame-aware curvature tightening was requested but no finite-build "
+            "settings are present; use --finite-build or disable the threshold."
+        )
+    pack_limit_inv_m = finite_build_frame_aware_curvature_limit_inv_m(
+        finite_build_settings,
+        TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+    )
+    if pack_limit_inv_m < float(curvature_threshold_inv_m):
+        return pack_limit_inv_m, pack_limit_inv_m, True
+    return float(curvature_threshold_inv_m), pack_limit_inv_m, False
+
+
+def single_stage_finite_build_metadata(
+    finite_build_settings,
+    *,
+    threshold_enabled: bool,
+    threshold_applied: bool,
+    pack_limit_inv_m: float | None,
+    final_max_curvature: float | None,
+):
+    if finite_build_settings is None:
+        return {
+            "FINITE_BUILD_ENABLED": False,
+            "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_ENABLED": False,
+            "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_APPLIED": False,
+            "FINITEBUILD_FRAME_AWARE_CURVATURE_LIMIT_INV_M": None,
+            "FINITEBUILD_CURVATURE_OK": None,
+        }
+    finitebuild_curvature_ok = None
+    if final_max_curvature is not None and pack_limit_inv_m is not None:
+        finitebuild_curvature_ok = float(final_max_curvature) <= float(
+            pack_limit_inv_m
+        )
+    return {
+        "FINITE_BUILD_ENABLED": True,
+        "FINITEBUILD_NUMFILAMENTS_N": int(finite_build_settings.numfilaments_n),
+        "FINITEBUILD_NUMFILAMENTS_B": int(finite_build_settings.numfilaments_b),
+        "FINITEBUILD_GAPSIZE_N_M": float(finite_build_settings.gapsize_n),
+        "FINITEBUILD_GAPSIZE_B_M": float(finite_build_settings.gapsize_b),
+        "FINITEBUILD_ROTATION_ORDER": finite_build_settings.rotation_order,
+        "FINITEBUILD_FRAME": finite_build_settings.frame,
+        "FINITEBUILD_FILAMENTS_PER_BANANA": int(finite_build_settings.nfilaments),
+        "FINITEBUILD_PACK_HALF_EXTENT_N_M": float(
+            finite_build_settings.pack_half_extent_n_m
+        ),
+        "FINITEBUILD_PACK_HALF_EXTENT_B_M": float(
+            finite_build_settings.pack_half_extent_b_m
+        ),
+        "FINITEBUILD_PACK_REACH_M": float(finite_build_settings.pack_reach_m),
+        "FINITEBUILD_SINGLE_FILAMENT_MIN_BEND_RADIUS_M": float(
+            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+        ),
+        "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_ENABLED": bool(
+            threshold_enabled
+        ),
+        "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_APPLIED": bool(
+            threshold_applied
+        ),
+        "FINITEBUILD_FRAME_AWARE_CURVATURE_LIMIT_INV_M": (
+            None if pack_limit_inv_m is None else float(pack_limit_inv_m)
+        ),
+        "FINITEBUILD_CURVATURE_OK": finitebuild_curvature_ok,
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run single-stage Boozer/quasi-symmetry optimization from a Stage 2 seed.",
@@ -2104,6 +2235,82 @@ def parse_args():
         "--curvature-threshold",
         type=float,
         default=float(os.environ.get("CURVATURE_THRESHOLD", str(MAX_CURVATURE_INV_M))),
+    )
+    finite_build_group = parser.add_mutually_exclusive_group()
+    finite_build_group.add_argument(
+        "--finite-build",
+        dest="finite_build",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the single-stage Type-KK finite-build contract mode. This "
+            "uses the finite-build winding-pack geometry to tighten the in-run "
+            "centerline curvature cap; the single-stage magnetic field objective "
+            "continues to use the existing centerline coil model."
+        ),
+    )
+    finite_build_group.add_argument(
+        "--filament-only",
+        dest="finite_build",
+        action="store_false",
+        help="Run the historical single-stage zero-thickness centerline contract.",
+    )
+    parser.add_argument(
+        "--finitebuild-numfilaments-n",
+        type=int,
+        default=TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
+        help="Finite-build pack filaments in the normal direction (default 2).",
+    )
+    parser.add_argument(
+        "--finitebuild-numfilaments-b",
+        type=int,
+        default=TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+        help="Finite-build pack filaments in the binormal direction (default 7).",
+    )
+    parser.add_argument(
+        "--finitebuild-gapsize-n",
+        type=float,
+        default=TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+        help="Normal-direction finite-build filament center spacing, meters.",
+    )
+    parser.add_argument(
+        "--finitebuild-gapsize-b",
+        type=float,
+        default=TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+        help="Binormal-direction finite-build filament center spacing, meters.",
+    )
+    parser.add_argument(
+        "--finitebuild-rotation-order",
+        type=int,
+        default=1,
+        help=(
+            "Fourier order recorded for the finite-build pack-rotation profile; "
+            "negative fixes the orientation. Single-stage contract mode uses this "
+            "for metadata only."
+        ),
+    )
+    parser.add_argument(
+        "--finitebuild-frame",
+        choices=("centroid", "frenet", "surface_tangent"),
+        default="surface_tangent",
+        help="Finite-build pack frame used for the Type-KK contract metadata.",
+    )
+    parser.add_argument(
+        "--finitebuild-frame-aware-curvature-threshold",
+        dest="finitebuild_frame_aware_curvature_threshold",
+        action="store_true",
+        default=None,
+        help=(
+            "Tighten --curvature-threshold to the Type-KK frame-aware winding-pack "
+            "limit when --finite-build is active. Enabled by default in "
+            "--finite-build mode."
+        ),
+    )
+    parser.add_argument(
+        "--no-finitebuild-frame-aware-curvature-threshold",
+        dest="finitebuild_frame_aware_curvature_threshold",
+        action="store_false",
+        help="Keep the centerline curvature threshold in --finite-build mode.",
     )
     parser.add_argument(
         "--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100"))
@@ -5092,7 +5299,16 @@ class RunIdentityConfig:
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
     curvature_weight: float
+    requested_curvature_threshold: float
     curvature_threshold: float
+    finite_build: bool
+    finitebuild_numfilaments_n: int | None
+    finitebuild_numfilaments_b: int | None
+    finitebuild_gapsize_n: float | None
+    finitebuild_gapsize_b: float | None
+    finitebuild_rotation_order: int | None
+    finitebuild_frame: str | None
+    finitebuild_frame_aware_curvature_threshold: bool | None
     banana_surf_radius: float
     banana_current_max_A: float
     single_stage_banana_geometry_mode: str
@@ -5685,7 +5901,52 @@ def make_run_identity_config(
             BANANA_WIDTH_MAX_M,
         ),
         curvature_weight=args.curvature_weight,
+        requested_curvature_threshold=float(
+            getattr(args, "requested_curvature_threshold", args.curvature_threshold)
+        ),
         curvature_threshold=args.curvature_threshold,
+        finite_build=bool(getattr(args, "finite_build", False)),
+        finitebuild_numfilaments_n=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else int(args.finitebuild_numfilaments_n)
+        ),
+        finitebuild_numfilaments_b=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else int(args.finitebuild_numfilaments_b)
+        ),
+        finitebuild_gapsize_n=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else float(args.finitebuild_gapsize_n)
+        ),
+        finitebuild_gapsize_b=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else float(args.finitebuild_gapsize_b)
+        ),
+        finitebuild_rotation_order=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else int(args.finitebuild_rotation_order)
+        ),
+        finitebuild_frame=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else str(args.finitebuild_frame)
+        ),
+        finitebuild_frame_aware_curvature_threshold=(
+            None
+            if not bool(getattr(args, "finite_build", False))
+            else bool(
+                getattr(
+                    args,
+                    "finitebuild_frame_aware_threshold_enabled",
+                    single_stage_frame_aware_curvature_threshold_enabled(args),
+                )
+            )
+        ),
         banana_surf_radius=banana_surf_radius,
         banana_current_max_A=getattr(
             args,
@@ -5798,6 +6059,12 @@ def build_run_identity_config(config):
         if (
             field.name == "single_stage_banana_geometry_mode"
             and value == BANANA_GEOMETRY_MODE_SHARED_SYMMETRY
+        ):
+            continue
+        if not config.finite_build and (
+            field.name == "finite_build"
+            or field.name == "requested_curvature_threshold"
+            or field.name.startswith("finitebuild_")
         ):
             continue
         if field.name in {"magnetic_well_weight", "magnetic_well_target"} and (
@@ -12731,6 +12998,7 @@ if __name__ == "__main__":
     validate_confinement_surrogate_args(args)
     validate_residue_objective_args(args)
     validate_single_stage_current_args(args)
+    validate_single_stage_finite_build_cli_args(args)
     validate_boozer_stage_refinement_args(
         args,
         CONSTRAINT_WEIGHT,
@@ -12740,6 +13008,32 @@ if __name__ == "__main__":
         args,
         surface_mode_contract=surface_mode_contract,
     )
+    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+        raise ValueError(
+            f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
+        )
+    args.requested_curvature_threshold = float(args.curvature_threshold)
+    args.single_stage_finite_build_settings = resolve_single_stage_finite_build_settings(
+        args
+    )
+    args.finitebuild_frame_aware_threshold_enabled = (
+        single_stage_frame_aware_curvature_threshold_enabled(args)
+    )
+    SINGLE_STAGE_REQUESTED_CURVATURE_THRESHOLD = args.requested_curvature_threshold
+    SINGLE_STAGE_FINITE_BUILD_SETTINGS = args.single_stage_finite_build_settings
+    SINGLE_STAGE_FINITEBUILD_FRAME_AWARE_THRESHOLD_ENABLED = (
+        args.finitebuild_frame_aware_threshold_enabled
+    )
+    (
+        SINGLE_STAGE_EFFECTIVE_CURVATURE_THRESHOLD,
+        SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M,
+        SINGLE_STAGE_FINITEBUILD_THRESHOLD_APPLIED,
+    ) = single_stage_frame_aware_curvature_tightening(
+        args.curvature_threshold,
+        SINGLE_STAGE_FINITE_BUILD_SETTINGS,
+        SINGLE_STAGE_FINITEBUILD_FRAME_AWARE_THRESHOLD_ENABLED,
+    )
+    args.curvature_threshold = float(SINGLE_STAGE_EFFECTIVE_CURVATURE_THRESHOLD)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
@@ -14831,7 +15125,15 @@ if __name__ == "__main__":
         "SINGLE_STAGE_WIDTH_MIN_THRESHOLD": SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
         "SINGLE_STAGE_WIDTH_MAX_THRESHOLD": SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
+        "REQUESTED_CURVATURE_THRESHOLD": SINGLE_STAGE_REQUESTED_CURVATURE_THRESHOLD,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
+        **single_stage_finite_build_metadata(
+            SINGLE_STAGE_FINITE_BUILD_SETTINGS,
+            threshold_enabled=SINGLE_STAGE_FINITEBUILD_FRAME_AWARE_THRESHOLD_ENABLED,
+            threshold_applied=SINGLE_STAGE_FINITEBUILD_THRESHOLD_APPLIED,
+            pack_limit_inv_m=SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M,
+            final_max_curvature=final_max_curvature,
+        ),
         "MSC_WEIGHT": MSC_WEIGHT,
         "ARCLEN_WEIGHT": ARCLEN_WEIGHT,
         "LINKING_WEIGHT": LINKING_WEIGHT,

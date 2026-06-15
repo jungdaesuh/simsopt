@@ -476,12 +476,14 @@ class FiniteBuildSettings:
     """Banana winding-pack geometry for finite-build Stage-2 optimization.
 
     ``numfilaments_n`` x ``numfilaments_b`` filaments are laid on a regular grid in
-    the pre-rotation frame's normal/binormal directions with the given gap sizes
-    (meters). ``rotation_order`` is the Fourier order of the optimizable
+    the pre-rotation frame's normal/binormal directions with the given
+    center-to-center spacings (meters). ``rotation_order`` is the Fourier order of the optimizable
     pack-rotation profile (``None`` fixes the pack orientation, adding no rotation
-    DOFs). ``frame`` is the pre-rotation orthonormal frame: ``'centroid'`` (robust
-    default) or ``'frenet'``. The pack approximates one finite-build coil per Singh
-    et al., J. Plasma Phys. 86 (2020).
+    DOFs). ``frame`` is the pre-rotation orthonormal frame: ``'centroid'`` or
+    ``'frenet'`` from upstream SIMSOPT, or local-fork ``'surface_tangent'`` (lays
+    the pack flat against the banana winding surface, normal axis tracking the
+    surface normal). The pack approximates one finite-build coil per Singh et al.,
+    J. Plasma Phys. 86 (2020).
     """
 
     numfilaments_n: int
@@ -534,6 +536,10 @@ def build_finite_build_banana_coils(
     is applied once, after the pack is built (finite-build-before-symmetry), matching
     the upstream finite-build example.
     """
+    surface_major_radius = float(surf_coils.get_rc(0, 0))
+    surface_midplane_z = 0.0
+    if not bool(getattr(surf_coils, "stellsym", True)) and hasattr(surf_coils, "get_zc"):
+        surface_midplane_z = float(surf_coils.get_zc(0, 0))
     filaments = create_multifilament_grid(
         master_curve,
         finite_build.numfilaments_n,
@@ -542,6 +548,8 @@ def build_finite_build_banana_coils(
         finite_build.gapsize_b,
         rotation_order=finite_build.rotation_order,
         frame=finite_build.frame,
+        surface_major_radius=surface_major_radius,
+        surface_midplane_z=surface_midplane_z,
     )
     nfilaments = finite_build.nfilaments
     banana_net_current = ScaledCurrent(Current(1), float(total_banana_current_A))
@@ -552,6 +560,52 @@ def build_finite_build_banana_coils(
         surf_coils.nfp,
         surf_coils.stellsym,
     )
+
+
+def configure_winding_surface_shape_dofs(
+    surf_coils,
+    *,
+    free_mpol=0,
+    free_ntor=0,
+):
+    """Fix the CWS by default, then unfix a bounded low-mode shape range."""
+    free_mpol = int(free_mpol)
+    free_ntor = int(free_ntor)
+    if free_mpol < 0:
+        raise ValueError("--winding-surface-free-mpol must be non-negative.")
+    if free_ntor < 0:
+        raise ValueError("--winding-surface-free-ntor must be non-negative.")
+
+    surf_coils.fix_all()
+    if free_mpol == 0 and free_ntor == 0:
+        free_names = ()
+    else:
+        if free_mpol > int(surf_coils.mpol):
+            raise ValueError(
+                "--winding-surface-free-mpol exceeds the winding-surface mpol."
+            )
+        if free_ntor > int(surf_coils.ntor):
+            raise ValueError(
+                "--winding-surface-free-ntor exceeds the winding-surface ntor."
+            )
+        surf_coils.fixed_range(
+            mmin=0,
+            mmax=free_mpol,
+            nmin=-free_ntor,
+            nmax=free_ntor,
+            fixed=False,
+        )
+        base_fixed_names = ("rc(0,0)", "rc(1,0)", "zs(1,0)")
+        available_names = set(surf_coils.local_full_dof_names)
+        for name in base_fixed_names:
+            if name in available_names:
+                surf_coils.fix(name)
+        free_names = tuple(
+            name
+            for name in surf_coils.local_full_dof_names
+            if not surf_coils.is_fixed(name)
+        )
+    return free_names
 
 
 def initialize_coils(
@@ -579,8 +633,15 @@ def initialize_coils(
     flip_banana=False,
     banana_i_fixed_s2=None,
     finite_build=None,
+    winding_surface_free_mpol=0,
+    winding_surface_free_ntor=0,
     return_vf_build_result=False,
 ):
+    winding_surface_free_dof_names = configure_winding_surface_shape_dofs(
+        surf_coils,
+        free_mpol=winding_surface_free_mpol,
+        free_ntor=winding_surface_free_ntor,
+    )
     banana_curve = CurveCWSFourierCPP(
         np.linspace(0, 1, num_quadpoints, endpoint=False),
         order=order,
@@ -662,7 +723,15 @@ def initialize_coils(
     }
     surf.to_vtk(out_dir + "surf_init", extra_data=point_data)
     if return_vf_build_result:
-        return bs, curves, banana_curve, banana_coils, proxy_coils, vf_build_result
+        return (
+            bs,
+            curves,
+            banana_curve,
+            banana_coils,
+            proxy_coils,
+            vf_build_result,
+            winding_surface_free_dof_names,
+        )
     return bs, curves, banana_curve, banana_coils, proxy_coils, vf_coils
 
 
@@ -811,3 +880,148 @@ def magnetic_field_plots(surf, bs, out_dir_iter):
         modBfinal, surf_area, phi, theta, out_dir_iter + "MagFieldPlot"
     )
     return mean_abs_relBfinal_norm
+
+
+def finite_build_frame_aware_curvature_limit_inv_m(
+    finite_build,
+    single_filament_min_bend_radius_m,
+):
+    """Conservative frame-aware centerline curvature cap for a winding pack (1/m).
+
+    Buildability requires, at every quadpoint, centerline bend radius >=
+    projected pack half-extent + single-filament bend-radius floor. The
+    projected half-extent never exceeds the pack corner reach
+    (``pack_reach_m``: the bend direction is a unit vector in the normal/
+    binormal plane, so its projection is at most ``hypot(half_n, half_b)``),
+    so capping centerline curvature at ``1 / (floor + pack_reach_m)``
+    guarantees the post-hoc frame-aware inner-edge bound
+    (``FINITEBUILD_CURVATURE_OK``) for every bend direction.
+    """
+    required_radius_m = float(single_filament_min_bend_radius_m) + float(
+        finite_build.pack_reach_m
+    )
+    if required_radius_m <= 0.0:
+        return float("inf")
+    return 1.0 / required_radius_m
+
+
+def closed_polyline_segments(gamma):
+    """(N, 2, 3) chord segments of a closed curve sampled at ``gamma`` points.
+
+    Includes the wrap-around chord from the last sample back to the first, so
+    the polyline is closed like the underlying periodic curve.
+    """
+    points = np.asarray(gamma, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] < 2:
+        raise ValueError("gamma must be an (N>=2, 3) point array.")
+    return np.ascontiguousarray(
+        np.stack((points, np.roll(points, -1, axis=0)), axis=1)
+    )
+
+
+def _pairwise_point_distances(points_a, points_b):
+    return np.linalg.norm(points_a[:, None, :] - points_b[None, :, :], axis=2)
+
+
+def _segment_pair_endpoint_min_distances(point_distances):
+    """Per segment pair (i, j), min distance among the four chord endpoints.
+
+    Segment ``i`` of a closed polyline spans points ``i`` and ``i+1`` (wrapped),
+    so the four endpoint combinations are the distance matrix and its
+    single-step rolls along each axis.
+    """
+    rolled_rows = np.roll(point_distances, -1, axis=0)
+    return np.minimum.reduce(
+        (
+            point_distances,
+            rolled_rows,
+            np.roll(point_distances, -1, axis=1),
+            np.roll(rolled_rows, -1, axis=1),
+        )
+    )
+
+
+def _min_distance_between_closed_polylines(segments_a, segments_b, point_distances):
+    """Exact min distance between two closed chord polylines.
+
+    Seeds with the point-cloud minimum (a valid upper bound: every sample
+    point is a segment endpoint), then refines only the segment pairs whose
+    distance lower bound ``endpoint_min - (len_i + len_j)`` can beat it,
+    using the exact ``segment_segment_distance`` kernel. Exact because the
+    pruning bound is a true lower bound on the segment-pair distance.
+    """
+    best = float(np.min(point_distances))
+    endpoint_min = _segment_pair_endpoint_min_distances(point_distances)
+    lengths_a = np.linalg.norm(segments_a[:, 1] - segments_a[:, 0], axis=1)
+    lengths_b = np.linalg.norm(segments_b[:, 1] - segments_b[:, 0], axis=1)
+    lower_bounds = endpoint_min - (lengths_a[:, None] + lengths_b[None, :])
+    for i, j in np.argwhere(lower_bounds < best):
+        dist = segment_segment_distance(
+            segments_a[i, 0],
+            segments_a[i, 1],
+            segments_b[j, 0],
+            segments_b[j, 1],
+        )
+        if dist < best:
+            best = float(dist)
+    return best
+
+
+def curve_curve_min_distance_segments_m(curves):
+    """Exact min distance between the closed chord polylines of distinct curves.
+
+    Piecewise-linear analogue of ``CurveCurveDistance.shortest_distance()`` on
+    the same quadrature samples. Because every sample point is a segment
+    endpoint, the result is always <= the point-cloud minimum: it additionally
+    sees closest approaches BETWEEN samples. Relative to the true smooth
+    curves it remains a chord approximation (sagitta error O(kappa * h^2)).
+    """
+    gammas = [np.asarray(curve.gamma(), dtype=np.float64) for curve in curves]
+    segment_sets = [closed_polyline_segments(gamma) for gamma in gammas]
+    best = float("inf")
+    for i in range(len(segment_sets)):
+        for j in range(i):
+            best = min(
+                best,
+                _min_distance_between_closed_polylines(
+                    segment_sets[i],
+                    segment_sets[j],
+                    _pairwise_point_distances(gammas[i], gammas[j]),
+                ),
+            )
+    return best
+
+
+def curve_surface_min_distance_segments_m(curves, surface_points):
+    """Exact min distance from closed chord polylines to a surface point cloud.
+
+    Segment-to-point-cloud method: the curve side becomes exact chord segments
+    (always <= the point-cloud value computed on the same samples, i.e. it can
+    only report a closer-or-equal approach), while the surface side stays the
+    same sampled point cloud, whose discretization can still overestimate the
+    distance to the continuous surface exactly as in
+    ``CurveSurfaceDistance.shortest_distance()``.
+    """
+    points = np.ascontiguousarray(
+        np.asarray(surface_points, dtype=np.float64).reshape(-1, 3)
+    )
+    if points.shape[0] == 0:
+        raise ValueError("surface_points must contain at least one point.")
+    best = float("inf")
+    for curve in curves:
+        segments = closed_polyline_segments(curve.gamma())
+        starts = segments[:, 0]
+        chords = segments[:, 1] - segments[:, 0]
+        chord_sq = np.einsum("ij,ij->i", chords, chords)
+        for s in range(starts.shape[0]):
+            offsets = points - starts[s]
+            if chord_sq[s] < 1.0e-30:
+                dist = float(np.min(np.linalg.norm(offsets, axis=1)))
+            else:
+                t = np.clip(offsets @ chords[s] / chord_sq[s], 0.0, 1.0)
+                dist = float(
+                    np.min(np.linalg.norm(offsets - t[:, None] * chords[s], axis=1))
+                )
+            if dist < best:
+                best = dist
+    return best

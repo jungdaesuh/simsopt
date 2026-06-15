@@ -108,6 +108,41 @@ def gamma_curve_on_surfrz_surface(curve_dofs, qpts, order, G, H, surf_dofs, mpol
     )
 
 
+def unit_normal_curve_on_surfrz_surface(curve_dofs, qpts, order, G, H, surf_dofs, mpol, ntor, nfp, stellsym):
+    gamma2d = gamma_2d(curve_dofs, qpts, order, G, H)
+    phi = gamma2d[:, 0]
+    theta = gamma2d[:, 1]
+    dxdphi = jvp(
+        lambda p: surfrz_gamma_lin_jax(p, theta, mpol, ntor, surf_dofs, nfp, stellsym),
+        (phi,),
+        (jnp.ones_like(phi),),
+    )[1]
+    dxdtheta = jvp(
+        lambda t: surfrz_gamma_lin_jax(phi, t, mpol, ntor, surf_dofs, nfp, stellsym),
+        (theta,),
+        (jnp.ones_like(theta),),
+    )[1]
+    normal = jnp.cross(dxdphi, dxdtheta)
+    return normal / jnp.linalg.norm(normal, axis=1)[:, None]
+
+
+def zfactor_curve_on_surfrz_surface(curve_dofs, qpts, order, G, H, surf_dofs, mpol, ntor, nfp, stellsym, sgn_z):
+    return sgn_z * unit_normal_curve_on_surfrz_surface(
+        curve_dofs, qpts, order, G, H, surf_dofs, mpol, ntor, nfp, stellsym
+    )[:, 2]
+
+
+def rfactor_curve_on_surfrz_surface(curve_dofs, qpts, order, G, H, surf_dofs, mpol, ntor, nfp, stellsym, sgn_r):
+    gamma2d = gamma_2d(curve_dofs, qpts, order, G, H)
+    unit_normal = unit_normal_curve_on_surfrz_surface(
+        curve_dofs, qpts, order, G, H, surf_dofs, mpol, ntor, nfp, stellsym
+    )
+    return sgn_r * (
+        unit_normal[:, 0] * jnp.cos(gamma2d[:, 0])
+        + unit_normal[:, 1] * jnp.sin(gamma2d[:, 0])
+    )
+
+
 class CurveCWSFourierCPP( Curve, sopp.Curve ):
     def __init__(self, quadpoints, order, surf, G=0, H=0, **kwargs):
         # Curve order. Number of Fourier harmonics for phi and theta
@@ -235,7 +270,63 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
             else:
                 self.sgn_z = -1
 
-        
+        self.zfactor_pure = jit(
+            lambda cdofs, sdofs, qpts: zfactor_curve_on_surfrz_surface(
+                cdofs,
+                qpts,
+                self.order,
+                self.G,
+                self.H,
+                sdofs,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.stellsym,
+                self.sgn_z,
+            )
+        )
+        self.zfactor_jax = jit(lambda cdofs, sdofs: self.zfactor_pure(cdofs, sdofs, points))
+        self.dzfactor_by_dcoeff_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.zfactor_jax(dofs, sdofs))(cdofs)
+        )
+        self.dzfactor_by_dsurf_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.zfactor_jax(cdofs, dofs))(sdofs)
+        )
+        self.dzfactor_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.zfactor_jax(dofs, sdofs), cdofs)[1](v)[0]
+        )
+        self.dzfactor_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.zfactor_jax(cdofs, dofs), sdofs)[1](v)[0]
+        )
+
+        self.rfactor_pure = jit(
+            lambda cdofs, sdofs, qpts: rfactor_curve_on_surfrz_surface(
+                cdofs,
+                qpts,
+                self.order,
+                self.G,
+                self.H,
+                sdofs,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.stellsym,
+                self.sgn_r,
+            )
+        )
+        self.rfactor_jax = jit(lambda cdofs, sdofs: self.rfactor_pure(cdofs, sdofs, points))
+        self.drfactor_by_dcoeff_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.rfactor_jax(dofs, sdofs))(cdofs)
+        )
+        self.drfactor_by_dsurf_jax = jit(
+            lambda cdofs, sdofs: jacfwd(lambda dofs: self.rfactor_jax(cdofs, dofs))(sdofs)
+        )
+        self.drfactor_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.rfactor_jax(dofs, sdofs), cdofs)[1](v)[0]
+        )
+        self.drfactor_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda dofs: self.rfactor_jax(cdofs, dofs), sdofs)[1](v)[0]
+        )
 
 
     def set_dofs(self, dofs):
@@ -456,30 +547,60 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         return dunit_normal_by_dcoef
 
     def zfactor(self):
-        return self.sgn_z * self.unit_normal()[:,2]
+        return np.asarray(self.zfactor_jax(self.get_dofs(), self.surf.get_dofs()))
 
     def dzfactor_by_dcoeff(self):
-        return self.sgn_z * self.dunit_normal_by_dcoeff()[:,2,:]
+        return np.asarray(
+            self.dzfactor_by_dcoeff_jax(self.get_dofs(), self.surf.get_dofs())
+        )
+
+    def dzfactor_by_dsurf(self):
+        return np.asarray(
+            self.dzfactor_by_dsurf_jax(self.get_dofs(), self.surf.get_dofs())
+        )
         
     def dzfactor_by_dcoeff_vjp(self,v):
-        return Derivative({self: vjp_contraction_1d(self.dzfactor_by_dcoeff(), v)})
+        return Derivative({
+            self: self.dzfactor_by_dcoeff_vjp_impl(v),
+            self.surf: self.dzfactor_by_dsurf_vjp_impl(v),
+        })
+
+    def dzfactor_by_dcoeff_vjp_impl(self, v):
+        return np.asarray(
+            self.dzfactor_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
+
+    def dzfactor_by_dsurf_vjp_impl(self, v):
+        return np.asarray(
+            self.dzfactor_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
 
     def rfactor(self):
-        g2 = self.gamma_2d()
-        unit_normal = self.unit_normal() # negative sign to point outside the surface...
-
-        # Now project in the radial direction...
-        return self.sgn_r * (unit_normal[:,0]*np.cos(g2[:,0]) + unit_normal[:,1]* np.sin(g2[:,0]))
+        return np.asarray(self.rfactor_jax(self.get_dofs(), self.surf.get_dofs()))
     
     def drfactor_by_dcoeff(self):
-        g2 = self.gamma_2d()
-        dg2_by_dcoef = self.dgamma_2d_by_dcoeff()
-        unit_normal = self.unit_normal()
-        dunit_normal_by_dcoef = self.dunit_normal_by_dcoeff()
+        return np.asarray(
+            self.drfactor_by_dcoeff_jax(self.get_dofs(), self.surf.get_dofs())
+        )
 
-        # Now project in the radial direction...
-        return self.sgn_r * (dunit_normal_by_dcoef[:,0,:]*np.cos(g2[:,0,None]) + dunit_normal_by_dcoef[:,1,:]*np.sin(g2[:,0,None]) + dg2_by_dcoef[:,0,:]*(-unit_normal[:,0,None]*np.sin(g2[:,0,None]) + unit_normal[:,1,None]*np.cos(g2[:,0,None])))
+    def drfactor_by_dsurf(self):
+        return np.asarray(
+            self.drfactor_by_dsurf_jax(self.get_dofs(), self.surf.get_dofs())
+        )
 
     def drfactor_by_dcoeff_vjp(self, v):
-        return Derivative({self: vjp_contraction_1d(self.drfactor_by_dcoeff(), v)})
+        return Derivative({
+            self: self.drfactor_by_dcoeff_vjp_impl(v),
+            self.surf: self.drfactor_by_dsurf_vjp_impl(v),
+        })
+
+    def drfactor_by_dcoeff_vjp_impl(self, v):
+        return np.asarray(
+            self.drfactor_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
+
+    def drfactor_by_dsurf_vjp_impl(self, v):
+        return np.asarray(
+            self.drfactor_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+        )
     

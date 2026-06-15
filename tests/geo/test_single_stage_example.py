@@ -15086,6 +15086,26 @@ class RunIdentityTests(unittest.TestCase):
             self._build_identity(module, materialized_args),
         )
 
+    def test_run_identity_uses_explicit_finite_build_threshold_state(self):
+        module = load_single_stage_example_module()
+        args = self._make_identity_args()
+        args.finite_build = True
+        args.finitebuild_numfilaments_n = module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N
+        args.finitebuild_numfilaments_b = module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B
+        args.finitebuild_gapsize_n = module.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M
+        args.finitebuild_gapsize_b = module.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M
+        args.finitebuild_rotation_order = -1
+        args.finitebuild_frame = "surface_tangent"
+        args.requested_curvature_threshold = 40.0
+        args.curvature_threshold = 24.0
+        args.finitebuild_frame_aware_threshold_enabled = True
+
+        config = self._make_identity_config(module, args)
+
+        self.assertAlmostEqual(config.requested_curvature_threshold, 40.0)
+        self.assertAlmostEqual(config.curvature_threshold, 24.0)
+        self.assertTrue(config.finitebuild_frame_aware_curvature_threshold)
+
     def test_run_identity_distinguishes_explicit_preserve_first_from_auto(self):
         module = load_single_stage_example_module()
         auto_args = self._make_identity_args()
@@ -17623,6 +17643,104 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.alm_iota_penalty_threshold, 1.0e-4)
         self.assertEqual(args.alm_length_penalty_threshold, 1.0e-4)
         self.assertFalse(args.flip_banana)
+        self.assertFalse(args.finite_build)
+        self.assertIsNone(args.finitebuild_frame_aware_curvature_threshold)
+
+    def test_single_stage_finite_build_tightens_curvature_threshold_by_default(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py", "--finite-build"],
+        ):
+            args = module.parse_args()
+
+        module.validate_single_stage_finite_build_cli_args(args)
+        finite_build_settings = module.resolve_single_stage_finite_build_settings(args)
+        enabled = module.single_stage_frame_aware_curvature_threshold_enabled(args)
+        threshold, pack_limit, applied = (
+            module.single_stage_frame_aware_curvature_tightening(
+                args.curvature_threshold,
+                finite_build_settings,
+                enabled,
+            )
+        )
+
+        self.assertTrue(args.finite_build)
+        self.assertTrue(enabled)
+        self.assertTrue(applied)
+        self.assertLess(threshold, args.curvature_threshold)
+        self.assertAlmostEqual(threshold, pack_limit)
+        expected_limit = 1.0 / (
+            module.TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            + np.hypot(
+                0.5
+                * (module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N - 1)
+                * module.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+                0.5
+                * (module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B - 1)
+                * module.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+            )
+        )
+        self.assertAlmostEqual(threshold, expected_limit)
+
+        metadata = module.single_stage_finite_build_metadata(
+            finite_build_settings,
+            threshold_enabled=enabled,
+            threshold_applied=applied,
+            pack_limit_inv_m=pack_limit,
+            final_max_curvature=0.99 * threshold,
+        )
+        self.assertTrue(metadata["FINITE_BUILD_ENABLED"])
+        self.assertTrue(metadata["FINITEBUILD_CURVATURE_OK"])
+        self.assertEqual(metadata["FINITEBUILD_FRAME"], "surface_tangent")
+
+    def test_single_stage_finite_build_can_keep_centerline_curvature_threshold(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--finite-build",
+                "--no-finitebuild-frame-aware-curvature-threshold",
+            ],
+        ):
+            args = module.parse_args()
+
+        finite_build_settings = module.resolve_single_stage_finite_build_settings(args)
+        enabled = module.single_stage_frame_aware_curvature_threshold_enabled(args)
+        threshold, pack_limit, applied = (
+            module.single_stage_frame_aware_curvature_tightening(
+                args.curvature_threshold,
+                finite_build_settings,
+                enabled,
+            )
+        )
+
+        self.assertFalse(enabled)
+        self.assertFalse(applied)
+        self.assertIsNone(pack_limit)
+        self.assertEqual(threshold, args.curvature_threshold)
+
+    def test_single_stage_frame_aware_threshold_requires_finite_build(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--filament-only",
+                "--finitebuild-frame-aware-curvature-threshold",
+            ],
+        ):
+            args = module.parse_args()
+
+        with self.assertRaisesRegex(ValueError, "requires --finite-build"):
+            module.validate_single_stage_finite_build_cli_args(args)
 
     def test_single_stage_uses_quartic_curvature_penalty(self):
         module = load_single_stage_example_module()
@@ -18469,6 +18587,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "ntheta": 8,
             "init_only": True,
             "banana_surf_radius": 0.21,
+            "winding_surface_free_mpol": 0,
+            "winding_surface_free_ntor": 0,
             "tf_current_A": -8.0e4,
             "banana_init_current_A": -1.0e4,
             "banana_current_max_A": 1.6e4,
@@ -18598,6 +18718,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "projected_ellipse_width_args": None,
             "surface_surface_min_distance_labels": None,
             "plasma_geometry_args": None,
+            "build_hbt_reference_surface_kwargs": None,
             "stage2_iota_probes": 0,
             "stage2_iota_probe_kwargs": None,
             "stage2_iota_runtime_calls": 0,
@@ -18963,6 +19084,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 fake_banana_coils,
                 proxy_coils,
                 vf_coils,
+                ("rc(0,1)", "zs(0,1)")
+                if extra_kwargs.get("winding_surface_free_mpol", 0) > 0
+                or extra_kwargs.get("winding_surface_free_ntor", 0) > 0
+                else (),
             )
 
         def fake_curve_curve_distance(curves, *_args, **_kwargs):
@@ -19191,6 +19316,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["plasma_geometry_args"] = args
             return fake_plasma_geometry
 
+        def fake_build_hbt_reference_surfaces(*_args, **kwargs):
+            runtime["build_hbt_reference_surface_kwargs"] = dict(kwargs)
+            return "hbt", "surf_coils", fake_vv
+
         def fake_probe_stage2_seed_bootability(**kwargs):
             runtime["stage2_iota_probes"] += 1
             runtime["stage2_iota_probe_kwargs"] = dict(kwargs)
@@ -19282,7 +19411,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(
                         module,
                         "build_hbt_reference_surfaces",
-                        lambda *_args, **_kwargs: ("hbt", "surf_coils", fake_vv),
+                        side_effect=fake_build_hbt_reference_surfaces,
                     ),
                     patch.object(
                         module,
@@ -20205,6 +20334,59 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             initialize_calls=1,
         )
         self.assertIsNone(runtime["results"]["STAGE2_BS_PATH"])
+
+    def test_stage2_main_fresh_init_forwards_winding_surface_shape_modes(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=False,
+            arg_overrides=(
+                ("winding_surface_free_mpol", 1),
+                ("winding_surface_free_ntor", 1),
+            ),
+        )
+
+        self.assertEqual(
+            runtime["build_hbt_reference_surface_kwargs"][
+                "winding_surface_free_mpol"
+            ],
+            1,
+        )
+        self.assertEqual(
+            runtime["build_hbt_reference_surface_kwargs"][
+                "winding_surface_free_ntor"
+            ],
+            1,
+        )
+        self.assertEqual(
+            runtime["initialize_extra_kwargs"]["winding_surface_free_mpol"],
+            1,
+        )
+        self.assertEqual(
+            runtime["initialize_extra_kwargs"]["winding_surface_free_ntor"],
+            1,
+        )
+
+    def test_configure_winding_surface_shape_dofs_unfixes_low_modes(self):
+        from simsopt.geo import SurfaceRZFourier
+        from banana_opt.stage2_geometry import configure_winding_surface_shape_dofs
+
+        surf = SurfaceRZFourier(nfp=2, stellsym=True, mpol=2, ntor=1)
+        surf.set_rc(0, 0, 0.903)
+        surf.set_rc(1, 0, 0.142)
+        surf.set_zs(1, 0, 0.142)
+
+        free_names = configure_winding_surface_shape_dofs(
+            surf,
+            free_mpol=1,
+            free_ntor=1,
+        )
+
+        self.assertGreater(len(free_names), 0)
+        self.assertTrue(surf.is_fixed("rc(0,0)"))
+        self.assertTrue(surf.is_fixed("rc(1,0)"))
+        self.assertTrue(surf.is_fixed("zs(1,0)"))
+        self.assertTrue(any(name in free_names for name in ("rc(0,1)", "zs(0,1)")))
 
 
 class AlmUtilsTests(unittest.TestCase):

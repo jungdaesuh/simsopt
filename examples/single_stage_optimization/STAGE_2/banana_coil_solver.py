@@ -394,6 +394,20 @@ def validate_finite_build_cli_args(args) -> None:
         )
 
 
+def validate_winding_surface_shape_cli_args(args) -> None:
+    free_mpol = int(getattr(args, "winding_surface_free_mpol", 0))
+    free_ntor = int(getattr(args, "winding_surface_free_ntor", 0))
+    if free_mpol < 0:
+        raise ValueError("--winding-surface-free-mpol must be non-negative.")
+    if free_ntor < 0:
+        raise ValueError("--winding-surface-free-ntor must be non-negative.")
+    if getattr(args, "stage2_bs_path", None) and (free_mpol > 0 or free_ntor > 0):
+        raise ValueError(
+            "--winding-surface-free-* requires fresh Stage 2 initialization; "
+            "loaded seed surfaces preserve their recorded winding surface."
+        )
+
+
 def validate_stage2_vessel_keepout_cli_args(args) -> None:
     if float(args.stage2_vessel_keepout_weight) < 0.0:
         raise ValueError("--stage2-vessel-keepout-weight must be >= 0.")
@@ -938,6 +952,26 @@ def parse_args():
         help=(
             "Coil surface minor radius. Defaults to the hardware contract "
             "banana winding minor radius."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-mpol",
+        type=int,
+        default=int(os.environ.get("WINDING_SURFACE_FREE_MPOL", "0")),
+        help=(
+            "Fresh Stage 2 CWS only: unfix coil-winding-surface R/Z Fourier "
+            "shape modes up to this poloidal index. Default 0 keeps the "
+            "historical fixed circular winding torus."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-ntor",
+        type=int,
+        default=int(os.environ.get("WINDING_SURFACE_FREE_NTOR", "0")),
+        help=(
+            "Fresh Stage 2 CWS only: unfix coil-winding-surface R/Z Fourier "
+            "shape modes up to +/- this toroidal index. Default 0 keeps the "
+            "historical fixed circular winding torus."
         ),
     )
     parser.add_argument(
@@ -1879,6 +1913,42 @@ def parse_args():
         "is > 0.",
     )
     parser.add_argument(
+        "--stage2-hardware-keepout-alm-scale",
+        type=float,
+        default=(
+            float(os.environ["STAGE2_HARDWARE_KEEPOUT_ALM_SCALE"])
+            if "STAGE2_HARDWARE_KEEPOUT_ALM_SCALE" in os.environ
+            else None
+        ),
+        help="Per-constraint ALM normalization scale for the hardware keep-out "
+        "constraint row (default: the schema BANANA_HARDWARE_KEEPOUT_ALM_SCALE). "
+        "Smaller values make the augmented Lagrangian weight the keep-out row "
+        "more heavily relative to the other constraints; larger values soften it. "
+        "Effective ONLY under --constraint-method alm with "
+        "--stage2-hardware-keepout-weight > 0 (in penalty mode the keep-out is a "
+        "weighted objective term and the weight is the dial instead). Tunes ALM "
+        "convergence emphasis only — it does NOT change the zero-slack threshold "
+        "(0) or the contract-pinned min-distance, so the keep-out safety floor is "
+        "unchanged. Must be > 0.",
+    )
+    parser.add_argument(
+        "--stage2-hardware-keepout-tolerance",
+        type=float,
+        default=(
+            float(os.environ["STAGE2_HARDWARE_KEEPOUT_TOLERANCE"])
+            if "STAGE2_HARDWARE_KEEPOUT_TOLERANCE" in os.environ
+            else None
+        ),
+        help="ALM activity tolerance for the hardware keep-out constraint row "
+        "(default: 1e-6, matching self_intersect). This is the band within which "
+        "the row is treated as active for the augmented Lagrangian's adaptive "
+        "smoothing / activity diagnostics; smaller values classify the row as "
+        "active at smaller violations. Effective ONLY under --constraint-method "
+        "alm with --stage2-hardware-keepout-weight > 0. Like the ALM scale, it "
+        "tunes ALM convergence/diagnostics only — not the zero-slack threshold or "
+        "the contract-pinned min-distance.",
+    )
+    parser.add_argument(
         "--stage2-resonant-flux-weight",
         type=float,
         default=float(os.environ.get("STAGE2_RESONANT_FLUX_WEIGHT", "0.0")),
@@ -1952,8 +2022,19 @@ def build_equilibrium_path(args):
     return candidate_paths[0]
 
 
-def build_hbt_reference_surfaces(nfp, banana_surf_radius):
-    surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
+def build_hbt_reference_surfaces(
+    nfp,
+    banana_surf_radius,
+    *,
+    winding_surface_free_mpol=0,
+    winding_surface_free_ntor=0,
+):
+    surfaces = build_banana_reference_surfaces(
+        nfp,
+        banana_surf_radius,
+        coil_winding_surface_mpol=max(1, int(winding_surface_free_mpol)),
+        coil_winding_surface_ntor=max(0, int(winding_surface_free_ntor)),
+    )
     return (
         surfaces.lcfs_clearance_reference,
         surfaces.coil_winding_surface,
@@ -3368,6 +3449,12 @@ def _build_initialize_coils_kwargs(
         "flip_banana": bool(getattr(args, "flip_banana", False)),
         "banana_i_fixed_s2": os.environ.get("BANANA_I_FIXED_S2"),
         "finite_build": resolve_finite_build_settings(args),
+        "winding_surface_free_mpol": int(
+            getattr(args, "winding_surface_free_mpol", 0)
+        ),
+        "winding_surface_free_ntor": int(
+            getattr(args, "winding_surface_free_ntor", 0)
+        ),
     }
 
 
@@ -3467,6 +3554,7 @@ def main(parsed_args=None):
     args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
     validate_stage2_iota_cli_args(args)
+    validate_winding_surface_shape_cli_args(args)
     validate_stage2_buildability_objective_cli_args(args)
     if parsed_args is not None:
         validate_banana_current_cli_args(args)
@@ -3555,7 +3643,12 @@ def main(parsed_args=None):
         lcfs_clearance_reference,
         surf_coils,
         VV,
-    ) = build_hbt_reference_surfaces(lcfs_probe.nfp, banana_surf_radius)
+    ) = build_hbt_reference_surfaces(
+        lcfs_probe.nfp,
+        banana_surf_radius,
+        winding_surface_free_mpol=args.winding_surface_free_mpol,
+        winding_surface_free_ntor=args.winding_surface_free_ntor,
+    )
     if args.stage2_plasma_scaling_mode == "working":
         plasma_geometry = load_plasma_geometry_for_working_major_radius(
             R0,
@@ -3618,6 +3711,7 @@ def main(parsed_args=None):
     finite_build_settings = resolve_finite_build_settings(args)
     FINITE_BUILD = finite_build_settings is not None
     new_vf_build_result = VFCoilBuildResult(coils=[], current_control=None)
+    winding_surface_free_dof_names = ()
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
         (
@@ -3673,6 +3767,7 @@ def main(parsed_args=None):
             new_banana_coils,
             new_proxy_coils,
             raw_vf_build_result,
+            winding_surface_free_dof_names,
         ) = _initialize_coils(
             new_surf,
             surf_coils,
@@ -3707,6 +3802,15 @@ def main(parsed_args=None):
         new_tf_coils = tf_coils
     order = int(new_banana_curve.order)
     new_surf_coils = surf_coils
+    winding_surface_free_mpol = int(getattr(args, "winding_surface_free_mpol", 0))
+    winding_surface_free_ntor = int(getattr(args, "winding_surface_free_ntor", 0))
+    winding_surface_mpol = int(
+        getattr(new_surf_coils, "mpol", max(1, winding_surface_free_mpol))
+    )
+    winding_surface_ntor = int(
+        getattr(new_surf_coils, "ntor", max(0, winding_surface_free_ntor))
+    )
+    winding_surface_free_dof_names = tuple(winding_surface_free_dof_names)
     # SquaredFlux geometry penalties act on the optimizable banana curves only;
     # TF / proxy / VF curves are fixed field sources and must not enter the
     # clearance or length objectives.
@@ -4345,6 +4449,8 @@ def main(parsed_args=None):
                 Jself=Jself,
                 self_intersect_threshold=0.0,
                 Jhardware=Jhardware,
+                hardware_keepout_alm_scale=args.stage2_hardware_keepout_alm_scale,
+                hardware_keepout_tolerance=args.stage2_hardware_keepout_tolerance,
                 length_min_target=LENGTH_MIN_TARGET,
             )
 
@@ -4819,6 +4925,11 @@ def main(parsed_args=None):
         toroidal_flux=s,
         nfp=banana_surf_nfp,
         banana_surf_radius=banana_surf_radius,
+        winding_surface_mpol=winding_surface_mpol,
+        winding_surface_ntor=winding_surface_ntor,
+        winding_surface_free_mpol=winding_surface_free_mpol,
+        winding_surface_free_ntor=winding_surface_free_ntor,
+        winding_surface_free_dof_names=winding_surface_free_dof_names,
         order=order,
         max_iterations=MAXITER,
         iterations=res_nit,

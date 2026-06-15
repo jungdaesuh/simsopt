@@ -16,6 +16,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -26,6 +27,7 @@ from simsopt.objectives import SquaredFlux
 
 from banana_opt.finite_current_profiles import JHALPERN30_FINITE_CURRENT_MODE
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
+from banana_opt import stage2_geometry
 from banana_opt.stage2_geometry import (
     FiniteBuildSettings,
     build_finite_build_banana_coils,
@@ -80,6 +82,24 @@ def _settings(rotation_order=1, frame="centroid"):
         rotation_order=rotation_order,
         frame=frame,
     )
+
+
+class _FrameAwareCurve:
+    def __init__(self, bend_direction, *, kappa=50.0):
+        self._bend_direction = np.asarray(bend_direction, dtype=float)
+        self._kappa = float(kappa)
+
+    def kappa(self):
+        return np.array([self._kappa], dtype=float)
+
+    def gamma(self):
+        return np.array([[1.045, 0.0, 0.0]], dtype=float)
+
+    def gammadash(self):
+        return np.array([[0.0, 1.0, 0.0]], dtype=float)
+
+    def gammadashdash(self):
+        return np.array([self._bend_direction], dtype=float)
 
 
 class FiniteBuildSettingsTest(unittest.TestCase):
@@ -160,6 +180,30 @@ class BuildFiniteBuildBananaCoilsTest(unittest.TestCase):
         self.assertEqual(n_norot, n_thin)
         # rotation_order=1 -> FrameRotation adds 2*order+1 = 3 DOFs, nothing else.
         self.assertEqual(n_rot1, n_thin + 3)
+
+    def test_surface_tangent_frame_uses_realized_winding_surface_axis(self):
+        self.surf_coils.set_rc(0, 0, 0.976)
+        settings = _settings(frame="surface_tangent")
+        captured = {}
+
+        def fake_grid(*args, **kwargs):
+            captured.update(kwargs)
+            return [_master_curve(self.surf_coils)] * settings.nfilaments
+
+        with mock.patch.object(
+            stage2_geometry,
+            "create_multifilament_grid",
+            side_effect=fake_grid,
+        ):
+            build_finite_build_banana_coils(
+                _master_curve(self.surf_coils),
+                NET_BANANA_CURRENT_A,
+                settings,
+                self.surf_coils,
+            )
+
+        self.assertAlmostEqual(captured["surface_major_radius"], 0.976)
+        self.assertAlmostEqual(captured["surface_midplane_z"], 0.0)
 
     def test_field_evaluates_finite(self):
         coils = build_finite_build_banana_coils(
@@ -269,7 +313,7 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         self.assertAlmostEqual(settings.gapsize_n, 0.009906)
         self.assertAlmostEqual(settings.gapsize_b, 0.0398272 / 6)
 
-        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
+        banana_curve = _FrameAwareCurve([1.0, 0.0, 0.0], kappa=1.0)
         metadata = self.module._finite_build_artifact_metadata(
             settings, banana_curve, NET_BANANA_CURRENT_A
         )
@@ -307,10 +351,18 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
     def test_validate_passes_for_valid_fresh_config(self):
         self.module.validate_finite_build_cli_args(self._valid_args())
 
-    def test_validate_rejects_seeded_path(self):
+    def test_validate_accepts_warm_start_seeded_path(self):
+        self.module.validate_finite_build_cli_args(
+            self._valid_args(stage2_bs_path="seed.json")
+        )
+
+    def test_validate_rejects_jhalpern30_seeded_path(self):
         with self.assertRaises(ValueError):
             self.module.validate_finite_build_cli_args(
-                self._valid_args(stage2_bs_path="seed.json")
+                self._valid_args(
+                    stage2_bs_path="seed.json",
+                    finite_current_mode=self.module.JHALPERN30_FINITE_CURRENT_MODE,
+                )
             )
 
     def test_validate_rejects_nonpositive_filament_count(self):
@@ -336,7 +388,7 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
             metadata["BANANA_FILAMENT_CURRENT_A"], NET_BANANA_CURRENT_A / 6
         )
         self.assertAlmostEqual(metadata["FINITEBUILD_MIN_CURVATURE_RADIUS_M"], 1.0)
-        # radius 1.0 m >> pack half-extent 0.04 m -> buildable.
+        # radius 1.0 m >> pack half-extent plus 10 mm wire floor -> buildable.
         self.assertTrue(metadata["FINITEBUILD_CURVATURE_OK"])
 
     def test_metadata_flags_unbuildable_tight_curvature(self):
@@ -347,7 +399,7 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
-    def test_curvature_gate_uses_the_larger_half_build(self):
+    def test_curvature_gate_uses_the_larger_half_build_for_non_surface_tangent(self):
         # half_n = 0.5*(5-1)*0.02 = 0.04 (binding); half_b = 0.5*(3-1)*0.01 = 0.01.
         settings = FiniteBuildSettings(
             numfilaments_n=5,
@@ -369,20 +421,60 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
     def test_curvature_margin_tightens_gate(self):
-        # radius 0.05 m, binding half-build 0.04 -> inner-edge radius 0.01 m.
+        # radius 0.05 m, binding half-build 0.04 -> inner-wire radius 0.01 m.
         banana_curve = SimpleNamespace(kappa=lambda: np.array([20.0]))
         ok = self.module._finite_build_artifact_metadata(
             _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.0
         )
-        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])  # 0.01 >= 0
+        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])  # 0.01 >= 10 mm floor
         tight = self.module._finite_build_artifact_metadata(
             _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.02
         )
-        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # 0.01 < 0.02
+        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # 0.01 < 30 mm floor
+
+    def test_surface_tangent_curvature_gate_projects_type_kk_pack_into_bend_plane(self):
+        settings = FiniteBuildSettings(
+            numfilaments_n=self.module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
+            numfilaments_b=self.module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+            gapsize_n=self.module.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+            gapsize_b=self.module.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+            rotation_order=1,
+            frame="surface_tangent",
+        )
+
+        radial = self.module._finite_build_artifact_metadata(
+            settings,
+            _FrameAwareCurve([1.0, 0.0, 0.0], kappa=50.0),
+            NET_BANANA_CURRENT_A,
+        )
+        self.assertAlmostEqual(
+            radial["FINITEBUILD_FRAME_AWARE_MAX_PROJECTED_HALF_EXTENT_M"],
+            settings.pack_half_extent_n_m,
+        )
+        self.assertTrue(radial["FINITEBUILD_CURVATURE_OK"])
+
+        hard_way = self.module._finite_build_artifact_metadata(
+            settings,
+            _FrameAwareCurve([0.0, 0.0, 1.0], kappa=50.0),
+            NET_BANANA_CURRENT_A,
+        )
+        self.assertAlmostEqual(
+            hard_way["FINITEBUILD_FRAME_AWARE_MAX_PROJECTED_HALF_EXTENT_M"],
+            settings.pack_half_extent_b_m,
+        )
+        self.assertAlmostEqual(
+            hard_way["FINITEBUILD_FRAME_AWARE_CURVATURE_LIMIT_INV_M"],
+            1.0
+            / (
+                settings.pack_half_extent_b_m
+                + self.module.TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            ),
+        )
+        self.assertFalse(hard_way["FINITEBUILD_CURVATURE_OK"])
 
     def test_envelope_clearance_verdicts_use_corner_for_cc_normal_for_cs(self):
-        # CC (pack-to-pack) uses the worst-case corner reach hypot(0.01,0.04)~=0.0412;
-        # CS (pack-to-plasma) uses the NORMAL half-build only (half_n = 0.01).
+        # CC uses the ruled Type KK centerline floor directly; CS
+        # (pack-to-plasma) subtracts the NORMAL half-build only (half_n = 0.01).
         cc_reach = float(np.hypot(0.01, 0.04))
         cs_reach = 0.01
         banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
@@ -397,23 +489,26 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertAlmostEqual(m["FINITEBUILD_PACK_REACH_M"], cc_reach)
         self.assertAlmostEqual(m["FINITEBUILD_CS_REACH_M"], cs_reach)
+        self.assertAlmostEqual(m["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"], 0.20)
+        self.assertAlmostEqual(m["FINITEBUILD_CC_EDGE_GAP_M"], 0.20 - 0.0462)
+        self.assertTrue(m["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.20 >= 0.0462
         self.assertAlmostEqual(
-            m["FINITEBUILD_CC_ENVELOPE_MIN_DIST_M"], 0.20 - 2 * cc_reach
+            m["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"],
+            0.08 - cs_reach,
         )
-        self.assertTrue(m["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.117 >= 0.0462
-        self.assertAlmostEqual(m["FINITEBUILD_CS_ENVELOPE_MIN_DIST_M"], 0.08 - cs_reach)
         self.assertTrue(m["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.07 >= 0.010
-        # Tight gaps fail once the (different) reaches are subtracted.
+        # Tight CC fails only below the ruled centerline floor; tight CS still
+        # fails once the normal reach is subtracted.
         tight = self.module._finite_build_artifact_metadata(
             _settings(),
             banana_curve,
             NET_BANANA_CURRENT_A,
-            cc_min_dist_m=0.10,
+            cc_min_dist_m=0.04,
             cs_min_dist_m=0.012,
             cc_nominal_m=0.0462,
             cs_nominal_m=0.010,
         )
-        self.assertFalse(tight["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.0176 < 0.0462
+        self.assertFalse(tight["FINITEBUILD_CC_ENVELOPE_OK"])  # 0.04 < 0.0462
         self.assertFalse(tight["FINITEBUILD_CS_ENVELOPE_OK"])  # 0.002 < 0.010
 
     def test_metadata_omits_envelope_keys_without_distances(self):
@@ -423,6 +518,62 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertNotIn("FINITEBUILD_CC_ENVELOPE_OK", m)
         self.assertNotIn("FINITEBUILD_CS_ENVELOPE_OK", m)
+
+    def test_metadata_reports_self_envelope_and_fold_verdicts(self):
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
+        metadata = self.module._finite_build_artifact_metadata(
+            _settings(),
+            banana_curve,
+            NET_BANANA_CURRENT_A,
+            self_envelope_min_dist_m=0.050,
+            self_envelope_nominal_m=0.0462,
+            self_distance_window_m=0.060,
+            self_envelope_mode="groc",
+            self_envelope_groc_radius_m=0.025,
+            self_envelope_groc_radius_floor_m=0.0231,
+            fold_geodesic_curvature_max_inv_m=42.0,
+            fold_geodesic_curvature_limit_inv_m=43.3,
+            fold_geodesic_curvature_threshold_inv_m=38.97,
+            fold_penalty=0.125,
+        )
+
+        self.assertAlmostEqual(metadata["FINITEBUILD_SELF_ENVELOPE_MIN_DIST_M"], 0.050)
+        self.assertAlmostEqual(
+            metadata["FINITEBUILD_SELF_ENVELOPE_MIN_DISTANCE_M"],
+            0.0462,
+        )
+        self.assertAlmostEqual(metadata["FINITEBUILD_SELF_DISTANCE_WINDOW_M"], 0.060)
+        self.assertEqual(metadata["FINITEBUILD_SELF_ENVELOPE_MODE"], "groc")
+        self.assertAlmostEqual(
+            metadata["FINITEBUILD_SELF_ENVELOPE_GROC_RADIUS_M"],
+            0.025,
+        )
+        self.assertAlmostEqual(
+            metadata["FINITEBUILD_SELF_ENVELOPE_GROC_RADIUS_FLOOR_M"],
+            0.0231,
+        )
+        self.assertTrue(metadata["FINITEBUILD_SELF_ENVELOPE_OK"])
+        self.assertAlmostEqual(metadata["FOLD_GEODESIC_CURVATURE_MAX_INV_M"], 42.0)
+        self.assertAlmostEqual(metadata["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"], 43.3)
+        self.assertAlmostEqual(
+            metadata["FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"],
+            38.97,
+        )
+        self.assertAlmostEqual(metadata["FOLD_PENALTY"], 0.125)
+        self.assertTrue(metadata["FOLD_OK"])
+
+        failed = self.module._finite_build_artifact_metadata(
+            _settings(),
+            banana_curve,
+            NET_BANANA_CURRENT_A,
+            self_envelope_min_dist_m=0.040,
+            self_envelope_nominal_m=0.0462,
+            self_distance_window_m=0.060,
+            fold_geodesic_curvature_max_inv_m=44.0,
+            fold_geodesic_curvature_limit_inv_m=43.3,
+        )
+        self.assertFalse(failed["FINITEBUILD_SELF_ENVELOPE_OK"])
+        self.assertFalse(failed["FOLD_OK"])
 
 
 if __name__ == "__main__":
