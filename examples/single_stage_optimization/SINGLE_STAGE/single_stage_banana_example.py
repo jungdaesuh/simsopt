@@ -1590,6 +1590,29 @@ def _hostify_single_stage_hardware_constraints(status):
     return host_status
 
 
+def _single_stage_hardware_status_progress_fields(hardware_status):
+    """Select hardware-status details worth persisting in progress logs."""
+    progress_keys = (
+        "success",
+        "violation_keys",
+        "violations",
+        "threshold_margins",
+        "curve_curve_min_dist",
+        "cc_dist",
+        "curve_surface_min_dist",
+        "cs_dist",
+        "surface_vessel_min_dist",
+        "ss_dist",
+        "max_curvature",
+        "curvature_threshold",
+    )
+    return {
+        key: hardware_status[key]
+        for key in progress_keys
+        if key in hardware_status
+    }
+
+
 def evaluate_single_stage_hardware_constraints(
     curve_curve_min_dist,
     cc_dist,
@@ -6862,7 +6885,7 @@ def build_single_stage_target_lane_accepted_step_sync(
             )
         record_reporting_event(
             "target_lane_reporting_hardware_status_returned",
-            success=hardware_status.get("success"),
+            **_single_stage_hardware_status_progress_fields(hardware_status),
         )
         reporting_metrics["hardware_status"] = hardware_status
         if update_run_state:
