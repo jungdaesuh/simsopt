@@ -8,8 +8,9 @@ initialization. These tests pin the two contracts that matter:
 
 - ``_xla_flags_with_cpu_compile_preset`` composes the preset non-destructively
   and idempotently, and never overrides a caller-supplied preset.
-- ``_apply_cpu_compile_preset_env`` applies it on CPU lanes only (the CUDA
-  backend carries the determinism contract in ``XLA_FLAGS`` instead).
+- ``_apply_cpu_compile_preset_env`` applies it on non-parity CPU lanes only (the
+  CUDA backend carries the determinism contract in ``XLA_FLAGS`` instead, and
+  bit-exact parity lanes keep their existing XLA pass set).
 """
 
 from __future__ import annotations
@@ -68,6 +69,14 @@ def test_compose_respects_caller_supplied_preset(existing):
 def test_compose_does_not_match_prefix_lookalike_flag():
     """A flag that merely starts with the preset name must not block appending."""
     existing = "--xla_cpu_opt_preset_extra=1"
+    assert _xla_flags_with_cpu_compile_preset(existing) == (
+        f"{existing} {_CPU_OPT_PRESET_FAST_COMPILE}"
+    )
+
+
+@pytest.mark.parametrize("existing", ['--a="unterminated', "--a='unterminated"])
+def test_compose_preserves_malformed_user_flags(existing):
+    """Malformed user flags are still preserved; the helper must not overwrite them."""
     assert _xla_flags_with_cpu_compile_preset(existing) == (
         f"{existing} {_CPU_OPT_PRESET_FAST_COMPILE}"
     )

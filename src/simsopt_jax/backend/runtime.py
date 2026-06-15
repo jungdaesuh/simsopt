@@ -585,6 +585,7 @@ def _xla_flags_with_cpu_compile_preset(xla_flags: str | None) -> str:
     a caller-provided ``--xla_cpu_opt_preset`` (any value) is respected rather
     than overridden. ``None``/empty input yields just the preset token.
     """
+    stripped_xla_flags = "" if xla_flags is None else xla_flags.strip()
     tokens = _split_xla_flag_tokens(xla_flags)
     if any(
         token == _CPU_OPT_PRESET_FLAG_NAME
@@ -592,9 +593,9 @@ def _xla_flags_with_cpu_compile_preset(xla_flags: str | None) -> str:
         for token in tokens
     ):
         return xla_flags or ""
-    if not tokens:
+    if not stripped_xla_flags:
         return _CPU_OPT_PRESET_FAST_COMPILE
-    return f"{xla_flags.strip()} {_CPU_OPT_PRESET_FAST_COMPILE}"
+    return f"{stripped_xla_flags} {_CPU_OPT_PRESET_FAST_COMPILE}"
 
 
 @dataclass(frozen=True)
