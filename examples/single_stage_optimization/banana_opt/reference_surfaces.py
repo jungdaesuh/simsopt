@@ -22,6 +22,8 @@ def build_banana_reference_surfaces(
     nfp: int,
     banana_surf_radius: float,
     banana_surf_major_radius: float = BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    coil_winding_surface_mpol: int = 1,
+    coil_winding_surface_ntor: int = 0,
 ) -> BananaReferenceSurfaces:
     """Build the vessel, LCFS-clearance, and coil-winding reference tori.
 
@@ -42,7 +44,17 @@ def build_banana_reference_surfaces(
     lcfs_clearance_reference.set_rc(1, 0, LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M)
     lcfs_clearance_reference.set_zs(1, 0, LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M)
 
-    coil_winding_surface = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    if int(coil_winding_surface_mpol) < 1:
+        raise ValueError("coil_winding_surface_mpol must be >= 1.")
+    if int(coil_winding_surface_ntor) < 0:
+        raise ValueError("coil_winding_surface_ntor must be >= 0.")
+
+    coil_winding_surface = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=True,
+        mpol=int(coil_winding_surface_mpol),
+        ntor=int(coil_winding_surface_ntor),
+    )
     coil_winding_surface.set_rc(0, 0, banana_surf_major_radius)
     coil_winding_surface.set_rc(1, 0, banana_surf_radius)
     coil_winding_surface.set_zs(1, 0, banana_surf_radius)

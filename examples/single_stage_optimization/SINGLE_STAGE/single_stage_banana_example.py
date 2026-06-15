@@ -62,6 +62,7 @@ from simsopt.geo.surfaceobjectives import (
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import (
     BiotSavart,
+    coils_via_symmetries,
 )
 from simsopt.field.force import MeanSquaredForce, regularization_circ
 from simsopt.objectives import QuadraticPenalty
@@ -211,6 +212,7 @@ from banana_opt.current_contracts import (
 )
 from banana_opt.stage2_geometry import (
     FiniteBuildSettings,
+    configure_winding_surface_shape_dofs,
     finite_build_frame_aware_curvature_limit_inv_m,
 )
 from banana_opt.hardware_contracts import (
@@ -1142,6 +1144,121 @@ def load_stage2_seed_biot_savart(
     return upgraded_bs, upgraded_partitions
 
 
+def _clone_cws_curve_on_surface(curve, surf_coils):
+    cloned_curve = CurveCWSFourierCPP(
+        np.array(curve.quadpoints, copy=True),
+        order=int(curve.order),
+        surf=surf_coils,
+        G=int(curve.G),
+        H=int(curve.H),
+    )
+    cloned_curve.set_dofs(np.array(curve.get_dofs(), copy=True))
+
+    fixed_source_names = {
+        name
+        for name in curve.local_full_dof_names
+        if curve.is_fixed(name)
+    }
+    cloned_full_names = set(cloned_curve.local_full_dof_names)
+    for name in fixed_source_names & cloned_full_names:
+        cloned_curve.fix(name)
+    return cloned_curve
+
+
+def _resolve_cws_master_banana_seed(banana_coils):
+    for coil in banana_coils:
+        if isinstance(coil.curve, CurveCWSFourierCPP):
+            return coil.curve, coil.current
+    raise ValueError(
+        "Loaded banana coils do not contain a CurveCWSFourierCPP master curve."
+    )
+
+
+def _winding_surface_shape_requested(free_mpol, free_ntor):
+    return bool(int(free_mpol) or int(free_ntor))
+
+
+def reembed_loaded_banana_cws_family_on_surface(
+    biot_savart,
+    coil_partitions,
+    surf_coils,
+    *,
+    winding_surface_free_mpol=0,
+    winding_surface_free_ntor=0,
+):
+    free_mpol = int(winding_surface_free_mpol)
+    free_ntor = int(winding_surface_free_ntor)
+    if not _winding_surface_shape_requested(free_mpol, free_ntor):
+        return biot_savart, coil_partitions, ()
+
+    free_names = configure_winding_surface_shape_dofs(
+        surf_coils,
+        free_mpol=free_mpol,
+        free_ntor=free_ntor,
+    )
+    if not free_names:
+        # Shaping was requested (free_mpol>0 or free_ntor>0) but the requested
+        # low-(m,n) window resolves to zero free shape dofs once the pinned size
+        # modes rc(0,0)/rc(1,0)/zs(1,0) are re-fixed. The canonical degenerate
+        # case is --winding-surface-free-mpol 1 --winding-surface-free-ntor 0,
+        # whose only in-window modes are exactly those pinned size dofs. Re-embed
+        # the family anyway (so the CWS rides the live winding surface), but warn
+        # loudly instead of silently no-opping the shape request.
+        print(
+            "WARNING: winding-surface shape optimization requested "
+            f"(free_mpol={free_mpol}, free_ntor={free_ntor}) but resolved to "
+            "zero free shape dofs after pinning rc(0,0)/rc(1,0)/zs(1,0). The "
+            "banana CWS family is re-embedded on the live winding surface, but "
+            "no surface shape dofs entered the optimizer. Use free_ntor>=1 "
+            "(e.g. free_mpol=1 free_ntor=1) or free_mpol>=2 to free shape modes."
+        )
+    master_curve, master_current = _resolve_cws_master_banana_seed(
+        coil_partitions.banana_coils
+    )
+    reembedded_curve = _clone_cws_curve_on_surface(master_curve, surf_coils)
+    reembedded_banana_coils = tuple(
+        coils_via_symmetries(
+            [reembedded_curve],
+            [master_current],
+            surf_coils.nfp,
+            surf_coils.stellsym,
+        )
+    )
+    if len(reembedded_banana_coils) != len(coil_partitions.banana_coils):
+        raise ValueError(
+            "Re-embedded CWS banana symmetry family changed coil count from "
+            f"{len(coil_partitions.banana_coils)} to {len(reembedded_banana_coils)}."
+        )
+
+    replacement_by_id = {
+        id(source_coil): replacement_coil
+        for source_coil, replacement_coil in zip(
+            coil_partitions.banana_coils,
+            reembedded_banana_coils,
+            strict=True,
+        )
+    }
+    existing_coil_ids = {id(coil) for coil in biot_savart.coils}
+    missing_source_coils = [
+        coil for coil in coil_partitions.banana_coils if id(coil) not in existing_coil_ids
+    ]
+    if missing_source_coils:
+        raise ValueError("Loaded banana coil partitions are not present in BiotSavart.")
+
+    reembedded_biot_savart = BiotSavart(
+        [replacement_by_id.get(id(coil), coil) for coil in biot_savart.coils]
+    )
+    reembedded_biot_savart.set_points(
+        np.array(biot_savart.get_points_cart_ref(), copy=True)
+    )
+    reembedded_partitions = replace(
+        coil_partitions,
+        banana_coils=reembedded_banana_coils,
+        num_banana_coils=len(reembedded_banana_coils),
+    )
+    return reembedded_biot_savart, reembedded_partitions, tuple(free_names)
+
+
 def project_strict_vacuum_seed_biot_savart(biot_savart, coil_partitions):
     projected_coils = [
         *coil_partitions.tf_coils,
@@ -1571,7 +1688,29 @@ def parse_args():
             "(banana coils are angle-dofs pinned to that embedded surface; 2026-06-10 "
             "laneR0920). To re-center a warm seed, rebuild it with "
             "autoresearch/scripts/remap_banana_cws_seed_radius.py "
-            "(--target-winding-major-radius) and resume from the remapped seed."
+            "(--target-winding-major-radius) and resume from the remapped seed. "
+            "When --winding-surface-free-mpol/--winding-surface-free-ntor is "
+            "nonzero, the loaded CWS banana family is re-embedded onto the "
+            "live winding surface, whose mpol/ntor are raised only as needed "
+            "to cover the requested free-mode window."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-mpol",
+        type=int,
+        default=int(os.environ.get("WINDING_SURFACE_FREE_MPOL", "0")),
+        help=(
+            "Opt-in low-m CWS shape DOFs for the single-stage winding surface. "
+            "0 keeps the historical loaded-seed CWS embedding fixed."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-ntor",
+        type=int,
+        default=int(os.environ.get("WINDING_SURFACE_FREE_NTOR", "0")),
+        help=(
+            "Opt-in low-|n| CWS shape DOFs for the single-stage winding surface. "
+            "0 keeps the historical loaded-seed CWS embedding fixed."
         ),
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
@@ -3214,6 +3353,10 @@ def parse_args():
             if args.single_stage_goal_mode == "frontier"
             else DEFAULT_SINGLE_STAGE_IOTA_TARGET
         )
+    if args.winding_surface_free_mpol < 0:
+        parser.error("--winding-surface-free-mpol must be non-negative.")
+    if args.winding_surface_free_ntor < 0:
+        parser.error("--winding-surface-free-ntor must be non-negative.")
     if args.free_tf_geometry:
         parser.error(_FREE_TF_GEOMETRY_DISABLED_MESSAGE)
     return args
@@ -3800,9 +3943,16 @@ def build_hbt_reference_surfaces(
     nfp,
     banana_surf_radius,
     banana_surf_major_radius=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    *,
+    winding_surface_free_mpol=0,
+    winding_surface_free_ntor=0,
 ):
     surfaces = build_banana_reference_surfaces(
-        nfp, banana_surf_radius, banana_surf_major_radius
+        nfp,
+        banana_surf_radius,
+        banana_surf_major_radius,
+        coil_winding_surface_mpol=max(1, int(winding_surface_free_mpol)),
+        coil_winding_surface_ntor=max(0, int(winding_surface_free_ntor)),
     )
     return (
         surfaces.vessel,
@@ -5310,6 +5460,9 @@ class RunIdentityConfig:
     finitebuild_frame: str | None
     finitebuild_frame_aware_curvature_threshold: bool | None
     banana_surf_radius: float
+    banana_surf_major_radius: float
+    winding_surface_free_mpol: int
+    winding_surface_free_ntor: int
     banana_current_max_A: float
     single_stage_banana_geometry_mode: str
     single_stage_banana_current_mode: str
@@ -5453,6 +5606,14 @@ class PreservedTimeoutReplayConfig:
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
     toroidal_flux: float | None = None
     banana_surf_radius: float | None = None
+    winding_surface_free_mpol: int | None = None
+    winding_surface_free_ntor: int | None = None
+    winding_surface_free_dof_names: tuple[str, ...] | None = None
+    coil_winding_surface_mpol: int | None = None
+    coil_winding_surface_ntor: int | None = None
+    coil_winding_surface_major_radius_m: float | None = None
+    banana_cws_embedded_winding_minor_radius_m: float | None = None
+    banana_cws_reembedded_on_live_surface: bool | None = None
     curvature_threshold: float | None = None
     order: int | None = None
 
@@ -5948,6 +6109,19 @@ def make_run_identity_config(
             )
         ),
         banana_surf_radius=banana_surf_radius,
+        banana_surf_major_radius=float(
+            getattr(
+                args,
+                "banana_surf_major_radius",
+                BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+            )
+        ),
+        winding_surface_free_mpol=int(
+            getattr(args, "winding_surface_free_mpol", 0)
+        ),
+        winding_surface_free_ntor=int(
+            getattr(args, "winding_surface_free_ntor", 0)
+        ),
         banana_current_max_A=getattr(
             args,
             "banana_current_max_A",
@@ -6060,6 +6234,17 @@ def build_run_identity_config(config):
             field.name == "single_stage_banana_geometry_mode"
             and value == BANANA_GEOMETRY_MODE_SHARED_SYMMETRY
         ):
+            continue
+        if (
+            field.name == "banana_surf_major_radius"
+            and config.winding_surface_free_mpol == 0
+            and config.winding_surface_free_ntor == 0
+        ):
+            continue
+        if field.name in {
+            "winding_surface_free_mpol",
+            "winding_surface_free_ntor",
+        } and int(value) == 0:
             continue
         if not config.finite_build and (
             field.name == "finite_build"
@@ -9960,6 +10145,35 @@ def boozer_surface_lineage_metadata_from_surface_data(surface_data):
     }
 
 
+def _surface_winding_radii(surf_coils):
+    return float(surf_coils.get_rc(0, 0)), float(surf_coils.get_rc(1, 0))
+
+
+def _preserved_timeout_replay_winding_radii(
+    replay_config,
+    surf_coils,
+    *,
+    reembedded_on_live_surface,
+    coil_partitions,
+):
+    if surf_coils is not None and bool(reembedded_on_live_surface):
+        return _surface_winding_radii(surf_coils)
+
+    major_radius = replay_config.coil_winding_surface_major_radius_m
+    minor_radius = replay_config.banana_cws_embedded_winding_minor_radius_m
+    if major_radius is not None and minor_radius is not None:
+        return major_radius, minor_radius
+
+    realized_radii = (
+        None
+        if coil_partitions is None
+        else realized_cws_winding_radii(coil_partitions.banana_coils)
+    )
+    if realized_radii is not None:
+        return realized_radii
+    return major_radius, minor_radius
+
+
 def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     replay_config = globals().get(
         "PRESERVED_TIMEOUT_REPLAY_CONFIG", PRESERVED_TIMEOUT_REPLAY_CONFIG
@@ -9997,6 +10211,73 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             banana_current_state.coordinate_scaling
         )
         replay_num_banana_current_controls = banana_current_state.num_control_currents()
+    replay_winding_surface_free_mpol = (
+        replay_config.winding_surface_free_mpol
+        if args_value is None
+        else getattr(
+            args_value,
+            "winding_surface_free_mpol",
+            replay_config.winding_surface_free_mpol,
+        )
+    )
+    replay_winding_surface_free_ntor = (
+        replay_config.winding_surface_free_ntor
+        if args_value is None
+        else getattr(
+            args_value,
+            "winding_surface_free_ntor",
+            replay_config.winding_surface_free_ntor,
+        )
+    )
+    replay_winding_surface_free_mpol = (
+        None
+        if replay_winding_surface_free_mpol is None
+        else int(replay_winding_surface_free_mpol)
+    )
+    replay_winding_surface_free_ntor = (
+        None
+        if replay_winding_surface_free_ntor is None
+        else int(replay_winding_surface_free_ntor)
+    )
+    replay_winding_surface_free_dof_names = globals().get(
+        "winding_surface_free_dof_names",
+        replay_config.winding_surface_free_dof_names,
+    )
+    replay_surf_coils = globals().get("surf_coils")
+    replay_banana_cws_reembedded_on_live_surface = globals().get(
+        "winding_surface_shape_requested",
+        replay_config.banana_cws_reembedded_on_live_surface,
+    )
+    if (
+        replay_banana_cws_reembedded_on_live_surface is None
+        and (
+            replay_winding_surface_free_mpol is not None
+            or replay_winding_surface_free_ntor is not None
+        )
+    ):
+        replay_banana_cws_reembedded_on_live_surface = bool(
+            (replay_winding_surface_free_mpol or 0)
+            or (replay_winding_surface_free_ntor or 0)
+        )
+    replay_coil_winding_surface_mpol = (
+        replay_config.coil_winding_surface_mpol
+        if replay_surf_coils is None
+        else int(replay_surf_coils.mpol)
+    )
+    replay_coil_winding_surface_ntor = (
+        replay_config.coil_winding_surface_ntor
+        if replay_surf_coils is None
+        else int(replay_surf_coils.ntor)
+    )
+    (
+        replay_coil_winding_surface_major_radius_m,
+        replay_banana_cws_embedded_winding_minor_radius_m,
+    ) = _preserved_timeout_replay_winding_radii(
+        replay_config,
+        replay_surf_coils,
+        reembedded_on_live_surface=replay_banana_cws_reembedded_on_live_surface,
+        coil_partitions=globals().get("coil_partitions"),
+    )
 
     def frontier_replay_value(replay_attr, config_attr):
         if isinstance(frontier_goal_config, FrontierGoalConfig):
@@ -10111,6 +10392,30 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         banana_surf_radius=globals().get(
             "banana_surf_radius",
             replay_config.banana_surf_radius,
+        ),
+        winding_surface_free_mpol=replay_winding_surface_free_mpol,
+        winding_surface_free_ntor=replay_winding_surface_free_ntor,
+        winding_surface_free_dof_names=(
+            None
+            if replay_winding_surface_free_dof_names is None
+            else tuple(replay_winding_surface_free_dof_names)
+        ),
+        coil_winding_surface_mpol=replay_coil_winding_surface_mpol,
+        coil_winding_surface_ntor=replay_coil_winding_surface_ntor,
+        coil_winding_surface_major_radius_m=(
+            None
+            if replay_coil_winding_surface_major_radius_m is None
+            else float(replay_coil_winding_surface_major_radius_m)
+        ),
+        banana_cws_embedded_winding_minor_radius_m=(
+            None
+            if replay_banana_cws_embedded_winding_minor_radius_m is None
+            else float(replay_banana_cws_embedded_winding_minor_radius_m)
+        ),
+        banana_cws_reembedded_on_live_surface=(
+            None
+            if replay_banana_cws_reembedded_on_live_surface is None
+            else bool(replay_banana_cws_reembedded_on_live_surface)
         ),
         curvature_threshold=globals().get(
             "CURVATURE_THRESHOLD",
@@ -10742,6 +11047,51 @@ def build_preserved_timeout_results_payload(
             if replay_config.banana_surf_radius is None
             else float(replay_config.banana_surf_radius)
         ),
+        "WINDING_SURFACE_FREE_MPOL": (
+            None
+            if replay_config.winding_surface_free_mpol is None
+            else int(replay_config.winding_surface_free_mpol)
+        ),
+        "WINDING_SURFACE_FREE_NTOR": (
+            None
+            if replay_config.winding_surface_free_ntor is None
+            else int(replay_config.winding_surface_free_ntor)
+        ),
+        "WINDING_SURFACE_FREE_DOF_NAMES": (
+            None
+            if replay_config.winding_surface_free_dof_names is None
+            else list(replay_config.winding_surface_free_dof_names)
+        ),
+        "COIL_WINDING_SURFACE_MPOL": (
+            None
+            if replay_config.coil_winding_surface_mpol is None
+            else int(replay_config.coil_winding_surface_mpol)
+        ),
+        "COIL_WINDING_SURFACE_NTOR": (
+            None
+            if replay_config.coil_winding_surface_ntor is None
+            else int(replay_config.coil_winding_surface_ntor)
+        ),
+        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": (
+            float(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+            if replay_config.coil_winding_surface_major_radius_m is None
+            else float(replay_config.coil_winding_surface_major_radius_m)
+        ),
+        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": (
+            float(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+            if replay_config.coil_winding_surface_major_radius_m is None
+            else float(replay_config.coil_winding_surface_major_radius_m)
+        ),
+        "BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M": (
+            None
+            if replay_config.banana_cws_embedded_winding_minor_radius_m is None
+            else float(replay_config.banana_cws_embedded_winding_minor_radius_m)
+        ),
+        "BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE": (
+            None
+            if replay_config.banana_cws_reembedded_on_live_surface is None
+            else bool(replay_config.banana_cws_reembedded_on_live_surface)
+        ),
         "CURVATURE_THRESHOLD": (
             None
             if replay_config.curvature_threshold is None
@@ -10751,17 +11101,6 @@ def build_preserved_timeout_results_payload(
             None
             if replay_config.order is None
             else int(replay_config.order)
-        ),
-        # Timeout-salvage payloads have no coil objects in scope, so these two
-        # keys keep the SPEC constant here; the live final-results writer
-        # records the realized embedded CWS torus instead (which can differ —
-        # M-family lineage: 0.976/0.21). Prefer the final results.json keys
-        # when both exist.
-        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
-            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
-        ),
-        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": float(
-            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),
         "R0_OFF_SPEC": is_major_radius_offspec(replay_config.major_radius),
     }
@@ -13107,6 +13446,10 @@ if __name__ == "__main__":
                 "Strict-vacuum warm-start seed violates the no-current/proxy "
                 f"contract: {failed_checks}."
             )
+    winding_surface_shape_requested = _winding_surface_shape_requested(
+        args.winding_surface_free_mpol,
+        args.winding_surface_free_ntor,
+    )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
         plasma_surf_filename=plasma_surf_filename,
         plasma_surf_path=file_loc,
@@ -13163,6 +13506,18 @@ if __name__ == "__main__":
         target_iota=iota_target,
         toroidal_flux=s,
         banana_surf_radius=banana_surf_radius,
+        winding_surface_free_mpol=int(args.winding_surface_free_mpol),
+        winding_surface_free_ntor=int(args.winding_surface_free_ntor),
+        coil_winding_surface_major_radius_m=(
+            float(args.banana_surf_major_radius)
+            if winding_surface_shape_requested
+            else None
+        ),
+        banana_cws_embedded_winding_minor_radius_m=(
+            float(banana_surf_radius)
+            if winding_surface_shape_requested
+            else None
+        ),
         curvature_threshold=float(args.curvature_threshold),
         order=order,
         single_stage_goal_mode=args.single_stage_goal_mode,
@@ -13199,8 +13554,28 @@ if __name__ == "__main__":
         lcfs_clearance_reference,
         surf_coils,
     ) = build_hbt_reference_surfaces(
-        banana_surf_nfp, banana_surf_radius, args.banana_surf_major_radius
+        banana_surf_nfp,
+        banana_surf_radius,
+        args.banana_surf_major_radius,
+        winding_surface_free_mpol=args.winding_surface_free_mpol,
+        winding_surface_free_ntor=args.winding_surface_free_ntor,
     )
+    bs, coil_partitions, winding_surface_free_dof_names = (
+        reembed_loaded_banana_cws_family_on_surface(
+            bs,
+            coil_partitions,
+            surf_coils,
+            winding_surface_free_mpol=args.winding_surface_free_mpol,
+            winding_surface_free_ntor=args.winding_surface_free_ntor,
+        )
+    )
+    if winding_surface_shape_requested and not args.strict_vacuum_current:
+        mark_inherited_design_only_biot_savart(
+            bs,
+            stage2_results,
+            current_num_proxy_coils=coil_partitions.num_proxy_coils,
+            finite_current_mode=finite_current_mode,
+        )
 
     bs, coil_partitions, banana_geometry_state = (
         _resolve_single_stage_banana_geometry_state_impl(
@@ -13217,6 +13592,11 @@ if __name__ == "__main__":
             coordinate_scaling=args.single_stage_banana_current_coordinate_scaling,
         )
     )
+    timeout_replay_cws_radii = (
+        _surface_winding_radii(surf_coils)
+        if winding_surface_shape_requested
+        else realized_cws_winding_radii(coil_partitions.banana_coils)
+    )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = replace(
         PRESERVED_TIMEOUT_REPLAY_CONFIG,
         single_stage_banana_geometry_mode=banana_geometry_state.mode,
@@ -13224,6 +13604,16 @@ if __name__ == "__main__":
             banana_current_state.coordinate_scaling
         ),
         num_banana_current_controls=banana_current_state.num_control_currents(),
+        winding_surface_free_dof_names=tuple(winding_surface_free_dof_names),
+        coil_winding_surface_mpol=int(surf_coils.mpol),
+        coil_winding_surface_ntor=int(surf_coils.ntor),
+        coil_winding_surface_major_radius_m=(
+            None if timeout_replay_cws_radii is None else timeout_replay_cws_radii[0]
+        ),
+        banana_cws_embedded_winding_minor_radius_m=(
+            None if timeout_replay_cws_radii is None else timeout_replay_cws_radii[1]
+        ),
+        banana_cws_reembedded_on_live_surface=winding_surface_shape_requested,
     )
 
     # Extract coil information
@@ -15145,12 +15535,12 @@ if __name__ == "__main__":
         "MAJOR_RADIUS": R0,
         "R0_OFF_SPEC": is_major_radius_offspec(R0),
         # Record the torus the banana coils are ACTUALLY embedded on
-        # (CurveCWSFourierCPP.surf): warm resumes keep the seed's serialized
-        # torus, which need not match the 0.903 spec constant (M-family
-        # lineage: 0.976/0.21) nor --banana-surf-major-radius (cold-init/
-        # diagnostic reference only). Matches the seed-remap sidecar
-        # convention (scripts/remap_banana_cws_seed_radius.py). The spec
-        # constant stays available under its own explicit key; non-CWS
+        # (CurveCWSFourierCPP.surf): default warm resumes keep the seed's
+        # serialized torus, while --winding-surface-free-* explicitly re-embeds
+        # the CWS family onto the live winding surface. The realized torus can
+        # differ from the 0.903 spec constant (M-family lineage: 0.976/0.21)
+        # and from --banana-surf-major-radius when shape flags are left at zero.
+        # The spec constant stays available under its own explicit key; non-CWS
         # lineages fall back to the reference constant.
         "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": (
             realized_winding_radii[0]
@@ -15165,6 +15555,12 @@ if __name__ == "__main__":
         "BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M": (
             None if realized_winding_radii is None else realized_winding_radii[1]
         ),
+        "WINDING_SURFACE_FREE_MPOL": int(args.winding_surface_free_mpol),
+        "WINDING_SURFACE_FREE_NTOR": int(args.winding_surface_free_ntor),
+        "WINDING_SURFACE_FREE_DOF_NAMES": list(winding_surface_free_dof_names),
+        "COIL_WINDING_SURFACE_MPOL": int(surf_coils.mpol),
+        "COIL_WINDING_SURFACE_NTOR": int(surf_coils.ntor),
+        "BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE": winding_surface_shape_requested,
         "BANANA_WINDING_SURFACE_SPEC_MAJOR_RADIUS_M": float(
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),

@@ -8051,6 +8051,14 @@ class HardwareConstraintTests(unittest.TestCase):
                 ("validation_id", "validation-artifact"),
                 ("local_difference_step", 1.0e-6),
             ),
+            winding_surface_free_mpol=1,
+            winding_surface_free_ntor=1,
+            winding_surface_free_dof_names=("rc(0,1)", "zs(0,1)"),
+            coil_winding_surface_mpol=1,
+            coil_winding_surface_ntor=1,
+            coil_winding_surface_major_radius_m=0.920,
+            banana_cws_embedded_winding_minor_radius_m=0.142,
+            banana_cws_reembedded_on_live_surface=True,
             stage2_policy_metadata=module.stage2_policy_metadata_items(
                 {
                     "BOOZER_CURRENT_CONVENTION": "mu0",
@@ -8199,6 +8207,18 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertTrue(payload["STAGE2_BANANA_CURRENT_PINNED"])
         self.assertEqual(payload["STAGE2_BANANA_I_FIXED_S2_KA"], -14.0)
         self.assertEqual(payload["STAGE2_IOTA_TARGET_SIGN"], -1)
+        self.assertEqual(payload["WINDING_SURFACE_FREE_MPOL"], 1)
+        self.assertEqual(payload["WINDING_SURFACE_FREE_NTOR"], 1)
+        self.assertEqual(
+            payload["WINDING_SURFACE_FREE_DOF_NAMES"],
+            ["rc(0,1)", "zs(0,1)"],
+        )
+        self.assertEqual(payload["COIL_WINDING_SURFACE_MPOL"], 1)
+        self.assertEqual(payload["COIL_WINDING_SURFACE_NTOR"], 1)
+        self.assertEqual(payload["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"], 0.920)
+        self.assertEqual(payload["COIL_WINDING_SURFACE_MAJOR_RADIUS_M"], 0.920)
+        self.assertEqual(payload["BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M"], 0.142)
+        self.assertTrue(payload["BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE"])
         self.assertEqual(
             payload["GREENE_RESIDUE_OBJECTIVE_REPLAY_CONFIG"],
             {
@@ -9196,6 +9216,125 @@ class HardwareConstraintTests(unittest.TestCase):
             module._optional_file_sha256(seeds_file.name),
         )
         self.assertEqual(payload["local_difference_step"], 2.0e-6)
+
+    def test_current_preserved_timeout_replay_config_preserves_cws_shape_metadata(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            winding_surface_free_mpol=1,
+            winding_surface_free_ntor=1,
+        )
+
+        with (
+            patch.object(module, "PRESERVED_TIMEOUT_REPLAY_CONFIG", replay_seed),
+            patch.object(
+                module,
+                "winding_surface_free_dof_names",
+                ("rc(0,1)", "zs(0,1)"),
+                create=True,
+            ),
+            patch.object(
+                module,
+                "surf_coils",
+                SimpleNamespace(
+                    mpol=1,
+                    ntor=1,
+                    get_rc=lambda m, n: 0.920 if (m, n) == (0, 0) else 0.142,
+                ),
+                create=True,
+            ),
+            patch.object(
+                module,
+                "winding_surface_shape_requested",
+                True,
+                create=True,
+            ),
+        ):
+            replay_config = module.current_preserved_timeout_replay_config()
+
+        self.assertEqual(replay_config.winding_surface_free_mpol, 1)
+        self.assertEqual(replay_config.winding_surface_free_ntor, 1)
+        self.assertEqual(
+            replay_config.winding_surface_free_dof_names,
+            ("rc(0,1)", "zs(0,1)"),
+        )
+        self.assertEqual(replay_config.coil_winding_surface_mpol, 1)
+        self.assertEqual(replay_config.coil_winding_surface_ntor, 1)
+        self.assertEqual(replay_config.coil_winding_surface_major_radius_m, 0.920)
+        self.assertEqual(
+            replay_config.banana_cws_embedded_winding_minor_radius_m,
+            0.142,
+        )
+        self.assertTrue(replay_config.banana_cws_reembedded_on_live_surface)
+
+    def test_current_preserved_timeout_replay_config_keeps_seed_cws_radii_without_reembed(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path=str(SIGNED_CW_WOUT_PATH),
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            winding_surface_free_mpol=0,
+            winding_surface_free_ntor=0,
+            coil_winding_surface_major_radius_m=0.976,
+            banana_cws_embedded_winding_minor_radius_m=0.210,
+            banana_cws_reembedded_on_live_surface=False,
+        )
+
+        with (
+            patch.object(module, "PRESERVED_TIMEOUT_REPLAY_CONFIG", replay_seed),
+            patch.object(
+                module,
+                "surf_coils",
+                SimpleNamespace(
+                    mpol=1,
+                    ntor=0,
+                    get_rc=lambda m, n: 0.950 if (m, n) == (0, 0) else 0.142,
+                ),
+                create=True,
+            ),
+            patch.object(
+                module,
+                "winding_surface_shape_requested",
+                False,
+                create=True,
+            ),
+        ):
+            replay_config = module.current_preserved_timeout_replay_config()
+
+        self.assertEqual(replay_config.coil_winding_surface_major_radius_m, 0.976)
+        self.assertEqual(
+            replay_config.banana_cws_embedded_winding_minor_radius_m,
+            0.210,
+        )
+        self.assertFalse(replay_config.banana_cws_reembedded_on_live_surface)
 
     def test_current_preserved_timeout_replay_config_round_trips_frontier_scalarization_overrides(
         self,
@@ -15044,23 +15183,65 @@ class RunIdentityTests(unittest.TestCase):
                 fields(config),
                 module.astuple(config),
             )
-            if field.name
-            not in {
-                "single_stage_banana_current_coordinate_scaling",
-                "single_stage_banana_geometry_mode",
-                "residue_objective_weight",
-                "residue_objective_target_manifest_id",
-                "residue_objective_validation_id",
-                "residue_objective_replay_config",
-                "magnetic_well_weight",
-                "magnetic_well_target",
-                "lcfs_constraint_mode",
-            }
+            if not (
+                field.name
+                in {
+                    "single_stage_banana_current_coordinate_scaling",
+                    "single_stage_banana_geometry_mode",
+                    "residue_objective_weight",
+                    "residue_objective_target_manifest_id",
+                    "residue_objective_validation_id",
+                    "residue_objective_replay_config",
+                    "magnetic_well_weight",
+                    "magnetic_well_target",
+                    "lcfs_constraint_mode",
+                    "banana_surf_major_radius",
+                    "winding_surface_free_mpol",
+                    "winding_surface_free_ntor",
+                }
+                or (
+                    not config.finite_build
+                    and (
+                        field.name == "finite_build"
+                        or field.name == "requested_curvature_threshold"
+                        or field.name.startswith("finitebuild_")
+                    )
+                )
+            )
         ]
 
         self.assertEqual(
             module.build_run_identity_config(config),
             "|".join(str(value) for value in legacy_values),
+        )
+
+    def test_run_identity_changes_when_winding_surface_shape_requested(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        shaped_args = self._make_identity_args()
+        shaped_args.winding_surface_free_mpol = 1
+        shaped_args.winding_surface_free_ntor = 1
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, shaped_args),
+        )
+
+    def test_run_identity_changes_when_shaped_winding_surface_major_radius_changes(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        shifted_args = self._make_identity_args()
+        for args in (base_args, shifted_args):
+            args.winding_surface_free_mpol = 1
+            args.winding_surface_free_ntor = 1
+        base_args.banana_surf_major_radius = 0.903
+        shifted_args.banana_surf_major_radius = 0.950
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, shifted_args),
         )
 
     def test_run_identity_changes_when_banana_current_coordinate_scaling_changes(self):
