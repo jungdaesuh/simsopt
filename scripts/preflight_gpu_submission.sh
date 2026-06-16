@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-$REPO/.conda/jax-0.10.0/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python || true)}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/simsopt-jax-gpu-preflight}"
 
 if [ ! -x "$PYTHON_BIN" ]; then

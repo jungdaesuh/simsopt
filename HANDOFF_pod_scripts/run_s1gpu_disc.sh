@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -x
 source /workspace/run_env.sh
+# nvlink-safe: use the jax[cuda12] wheel's bundled CUDA 12.9 userspace (matches the
+# committed Perlmutter launchers); avoids the container toolkit's 12.9-vs-12.4 nvlink
+# fatal. apply_cuda_toolchain_env strips any --xla_gpu_cuda_data_dir in bundled mode.
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+unset LD_LIBRARY_PATH
 export JAX_PLATFORMS=cuda
-export XLA_FLAGS="--xla_gpu_cuda_data_dir=/usr/local/cuda-12.9 --xla_dump_to=/workspace/xladump_disc --xla_dump_hlo_as_text"
+export XLA_FLAGS="--xla_dump_to=/workspace/xladump_disc --xla_dump_hlo_as_text"
 /usr/bin/time -v python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax --mpol 8 --ntor 8 --nphi 255 --ntheta 64 \
   --plasma-surf-filename wout_s01_1f082f_opt.nc \

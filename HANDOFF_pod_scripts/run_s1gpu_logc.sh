@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -x
 source /workspace/run_env.sh
+# nvlink-safe: use the jax[cuda12] wheel's bundled CUDA 12.9 userspace (matches the
+# committed Perlmutter launchers); avoids the container toolkit's 12.9-vs-12.4 nvlink fatal.
+export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
+unset LD_LIBRARY_PATH
 export JAX_PLATFORMS=cuda
 export JAX_LOG_COMPILES=1
 /usr/bin/time -v python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \

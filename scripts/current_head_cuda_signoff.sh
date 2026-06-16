@@ -16,7 +16,7 @@ if ! REPO_TOPLEVEL="$(git -C "$REQUESTED_REPO" rev-parse --show-toplevel 2>/dev/
 fi
 
 REPO="$REPO_TOPLEVEL"
-PYTHON_BIN="${PYTHON_BIN:-$REPO/.conda/jax/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python || true)}"
 RESULTS_DIR="${RESULTS_DIR:-$REPO/.artifacts/current_head_cuda_signoff}"
 cd "$REPO"
 

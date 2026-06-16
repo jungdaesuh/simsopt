@@ -628,7 +628,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--python-bin",
         type=Path,
-        default=Path(".conda/jax/bin/python"),
+        default=Path(sys.executable),
     )
     parser.add_argument("--results-dir", type=Path, default=_DEFAULT_RESULTS_DIR)
     parser.add_argument(
