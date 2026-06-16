@@ -17,9 +17,11 @@ if EXAMPLES_ROOT_STR not in sys.path:
     sys.path.insert(0, EXAMPLES_ROOT_STR)
 
 from banana_opt.hardware_contracts import (  # noqa: E402
+    HARDWARE_KEEPOUT_MIN_DISTANCE_M,
     TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
 )
 from banana_opt.hardware_keepout import (  # noqa: E402
+    CurveHardwareKeepout,
     CurveHardwareSdfKeepout,
     hardware_sdf_metadata,
     load_hardware_sdf,
@@ -548,6 +550,56 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
                 delta=2e-4 * max(1.0, abs(analytic)),
                 msg=f"SDF gradient analytic {analytic} vs finite-difference {fd}",
             )
+
+    def test_no_solver_smoke_constructs_point_cloud_and_sdf_backends(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            origin = np.array([-1.2, -1.2, -0.1], dtype=float)
+            spacing = 0.02
+            shape = (121, 121, 11)
+            plane_x = 1.012
+            margin = 0.005
+            grid = _plane_sdf_grid(origin, spacing, shape, plane_x)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=origin,
+                spacing=spacing,
+                effective_margin=margin,
+            )
+
+            point_cloud_curve = _circle_curve(radius=1.0, seed=35)
+            point_cloud_points = np.array([
+                [1.0 + 0.011, 0.0, 0.0],
+                [0.0, 1.0 + 0.012, 0.0],
+            ])
+            point_cloud_objective = CurveHardwareKeepout(
+                [point_cloud_curve],
+                point_cloud_points,
+                HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                1e-4,
+                winding_r0=0.0,
+            )
+
+            sdf_curve = _circle_curve(radius=1.0, seed=36)
+            sdf_objective = CurveHardwareSdfKeepout(
+                [sdf_curve], load_hardware_sdf(manifest), winding_r0=0.0
+            )
+
+            smoke = {
+                "point_cloud_J": point_cloud_objective.J(),
+                "point_cloud_grad_norm": float(
+                    np.linalg.norm(point_cloud_objective.dJ())
+                ),
+                "sdf_J": sdf_objective.J(),
+                "sdf_grad_norm": float(np.linalg.norm(sdf_objective.dJ())),
+            }
+
+            for name, value in smoke.items():
+                self.assertTrue(
+                    np.isfinite(value), msg=f"{name} is non-finite in {smoke}"
+                )
+                self.assertGreater(value, 0.0, msg=f"{name} inactive in {smoke}")
 
 
 if __name__ == "__main__":
