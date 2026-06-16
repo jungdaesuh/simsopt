@@ -2,19 +2,17 @@
 
 ``evaluate_single_stage_init_parity`` compares two optimizer END-STATES
 (``FINAL_IOTA``/``FINAL_VOLUME``/``FIELD_ERROR``) at machine-precision tolerances.
-That comparison is only a port-correctness signal when BOTH outer optimizers
-converged: if a lane's L-BFGS-B terminates abnormally (``OPTIMIZER_STATUS=2``,
-e.g. the CPU reference stalling at iota~0.0035 with 39 nfev) it lands on a
-non-optimum, so end-state drift then reflects reference non-convergence -- not a
-port defect. These tests pin that the gate:
+That comparison is only a port-correctness signal when each lane reached a usable
+optimum. A lane whose L-BFGS-B terminated abnormally (``status=2``, line-search
+failure / no progress -- the CPU reference stalling at iota~0.0035 in 39 nfev)
+lands on a non-optimum.
 
-- still FAILS on end-state drift when both lanes converged (strict path intact);
-- does NOT fail on the same drift when a lane did not converge, recording a
-  ``final_metric_parity_skipped_for_nonconvergence`` diagnostic instead.
-
-Real port regressions remain caught by the surface-geometry, self-intersection,
-finite-result, and same-candidate fixed-state channels, none of which depend on
-optimizer convergence.
+The gate is ASYMMETRIC: end-state drift is suspended only when the CPU
+*reference* aborted abnormally while the JAX *target* did not -- there is then no
+converged reference to compare against. A JAX-*target* abnormal stop stays a hard
+failure (a broken target must not hide behind the skip), and ``status=1`` (hit the
+iteration budget -- a normal full-budget stop) stays strictly compared. These
+tests pin that contract.
 """
 
 from __future__ import annotations
@@ -25,9 +23,13 @@ from benchmarks.single_stage_init_parity import (
     evaluate_single_stage_init_parity,
 )
 
+_CONVERGED = 0
+_HIT_MAXITER = 1
+_ABNORMAL = 2
 
-def _result(*, iota: float, success: bool, status: int) -> dict[str, object]:
-    """A complete, finite single-stage lane result with the given convergence."""
+
+def _result(*, iota: float, status: int) -> dict[str, object]:
+    """A complete, finite single-stage lane result with the given L-BFGS-B status."""
     result: dict[str, object] = {key: 1.0 for key in _OUTER_LOOP_REQUIRED_RESULT_KEYS}
     result.update(
         {
@@ -39,7 +41,7 @@ def _result(*, iota: float, success: bool, status: int) -> dict[str, object]:
             "SELF_INTERSECTION_CHECK_AVAILABLE": True,
             "iterations": 5,
             "outer_optimizer_method": _TARGET_OUTER_OPTIMIZER_METHOD,
-            "OPTIMIZER_SUCCESS": success,
+            "OPTIMIZER_SUCCESS": status == _CONVERGED,
             "OPTIMIZER_STATUS": status,
         }
     )
@@ -58,54 +60,72 @@ def _evaluate(cpu: dict[str, object], jax_lane: dict[str, object], *, maxiter: i
     )
 
 
-def test_end_state_drift_fails_when_both_lanes_converged():
-    cpu = _result(iota=0.10, success=True, status=0)
-    jax_lane = _result(iota=0.20, success=True, status=0)  # 0.10 drift >> 1e-10
-    comparison, failures = _evaluate(cpu, jax_lane)
+def _has_iota_failure(failures) -> bool:
+    return any("Final iota disagreement" in f for f in failures)
 
-    assert any("Final iota disagreement" in f for f in failures), failures
+
+def test_end_state_drift_fails_when_both_lanes_converged():
+    comparison, failures = _evaluate(
+        _result(iota=0.10, status=_CONVERGED),
+        _result(iota=0.20, status=_CONVERGED),  # 0.10 drift >> 1e-10
+    )
+    assert _has_iota_failure(failures), failures
     assert not comparison.get("final_metric_parity_skipped_for_nonconvergence")
 
 
-def test_end_state_drift_skipped_when_reference_did_not_converge():
-    # Same large drift, but the CPU reference aborted abnormally (STATUS=2).
-    cpu = _result(iota=0.0035, success=False, status=2)
-    jax_lane = _result(iota=0.143, success=True, status=0)
-    comparison, failures = _evaluate(cpu, jax_lane)
-
-    assert not any("Final iota disagreement" in f for f in failures), failures
+def test_end_state_drift_skipped_when_reference_aborts_abnormally():
+    # The motivating incident: CPU reference aborted (status 2), JAX target fine.
+    comparison, failures = _evaluate(
+        _result(iota=0.0035, status=_ABNORMAL),
+        _result(iota=0.143, status=_CONVERGED),
+    )
+    assert not _has_iota_failure(failures), failures
     assert comparison["final_metric_parity_skipped_for_nonconvergence"] is True
     assert comparison["skipped_final_metric_parity_failures"]
-    assert comparison["cpu_optimizer_success"] is False
-    assert comparison["jax_optimizer_success"] is True
+    assert comparison["cpu_optimizer_status"] == _ABNORMAL
+    assert comparison["jax_optimizer_status"] == _CONVERGED
 
 
-def test_end_state_drift_skipped_when_target_did_not_converge():
-    # Symmetry: a non-converged JAX target also suspends the end-state gate
-    # (its non-convergence is surfaced, not silently passed).
-    cpu = _result(iota=0.10, success=True, status=0)
-    jax_lane = _result(iota=0.20, success=False, status=2)
-    comparison, failures = _evaluate(cpu, jax_lane)
+def test_end_state_drift_kept_when_target_aborts_abnormally():
+    # Escape-hatch guard: a JAX-target abnormal stop must NOT be skipped -- a
+    # broken target that stalls the optimizer is a port-relevant signal.
+    comparison, failures = _evaluate(
+        _result(iota=0.10, status=_CONVERGED),
+        _result(iota=0.20, status=_ABNORMAL),
+    )
+    assert _has_iota_failure(failures), failures
+    assert not comparison.get("final_metric_parity_skipped_for_nonconvergence")
 
-    assert not any("Final iota disagreement" in f for f in failures), failures
-    assert comparison["final_metric_parity_skipped_for_nonconvergence"] is True
+
+def test_end_state_drift_kept_when_both_lanes_abort():
+    # Both aborted -> the target also aborted, so the failure is kept (not skipped).
+    comparison, failures = _evaluate(
+        _result(iota=0.0035, status=_ABNORMAL),
+        _result(iota=0.20, status=_ABNORMAL),
+    )
+    assert _has_iota_failure(failures), failures
+    assert not comparison.get("final_metric_parity_skipped_for_nonconvergence")
 
 
-def test_end_state_drift_skipped_when_both_lanes_did_not_converge():
-    cpu = _result(iota=0.0035, success=False, status=2)
-    jax_lane = _result(iota=0.20, success=False, status=2)
-    comparison, failures = _evaluate(cpu, jax_lane)
-
-    assert not any("Final iota disagreement" in f for f in failures), failures
-    assert comparison["final_metric_parity_skipped_for_nonconvergence"] is True
+def test_end_state_drift_strict_when_both_hit_maxiter():
+    # status 1 (hit the iteration budget) is a normal full-budget stop -- both
+    # lanes ran the full budget, so the end-state comparison is meaningful and
+    # the strict gate is preserved (not relaxed like an abnormal abort).
+    comparison, failures = _evaluate(
+        _result(iota=0.10, status=_HIT_MAXITER),
+        _result(iota=0.20, status=_HIT_MAXITER),
+    )
+    assert _has_iota_failure(failures), failures
+    assert not comparison.get("final_metric_parity_skipped_for_nonconvergence")
 
 
 def test_end_state_drift_strict_when_no_outer_optimizer_runs():
     # maxiter<=0 runs no outer optimizer, so there is no convergence concept and
     # the strict end-state gate is preserved (the relaxation must not leak here).
-    cpu = _result(iota=0.10, success=True, status=0)
-    jax_lane = _result(iota=0.20, success=True, status=0)
-    comparison, failures = _evaluate(cpu, jax_lane, maxiter=0)
-
-    assert any("Final iota disagreement" in f for f in failures), failures
+    comparison, failures = _evaluate(
+        _result(iota=0.10, status=_CONVERGED),
+        _result(iota=0.20, status=_CONVERGED),
+        maxiter=0,
+    )
+    assert _has_iota_failure(failures), failures
     assert not comparison.get("final_metric_parity_skipped_for_nonconvergence")

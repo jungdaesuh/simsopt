@@ -3672,6 +3672,24 @@ def _final_metric_parity_failures(comparison: dict[str, Any]) -> list[str]:
     return failures
 
 
+# scipy L-BFGS-B ``status``: 0 converged, 1 hit the iteration budget, 2 abnormal
+# termination (line-search failure / no progress). Only status 2 means a lane
+# aborted onto a non-optimum; status 1 is a normal full-budget stop. The
+# end-state-parity gate's active path (require_final_metric_parity, i.e. the
+# scipy-jax / scipy-jax-fullgraph production lanes) runs scipy L-BFGS-B.
+_ABNORMAL_OPTIMIZER_STATUS = 2
+
+
+def _optimizer_aborted_abnormally(results: dict[str, Any]) -> bool:
+    """True if the lane's outer optimizer terminated abnormally (or did not run).
+
+    ``OPTIMIZER_STATUS is None`` is the producer's marker for "optimizer did not
+    run"; at maxiter>0 that is anomalous, so it is treated as not-a-usable-optimum.
+    """
+    status = results.get("OPTIMIZER_STATUS")
+    return status is None or int(status) == _ABNORMAL_OPTIMIZER_STATUS
+
+
 def _optimizer_control_split_accepts_final_metric_drift(
     *,
     same_candidate_replay: dict[str, Any] | None,
@@ -3740,33 +3758,32 @@ def evaluate_single_stage_init_parity(
     comparison["final_metric_parity_failures"] = final_metric_failures
 
     # End-state metric parity compares two optimizer end-states; it is a valid
-    # port-correctness signal only when BOTH outer optimizers converged. A lane
-    # whose optimizer terminated abnormally (e.g. L-BFGS-B STATUS=2, no progress)
-    # lands on a non-optimum, so end-state drift then reflects that
-    # non-convergence -- not a port defect -- and must not be reported as a port
-    # failure. maxiter<=0 runs no outer optimizer, so there is nothing to gate.
-    # Real port regressions stay caught by the surface-geometry, self-intersection,
-    # finite-result, and same-candidate fixed-state parity channels, none of which
-    # depend on optimizer convergence.
+    # port-correctness signal only when each lane reached a usable optimum. A lane
+    # that terminated abnormally (status 2: line-search failure / no progress --
+    # the CPU reference stalling at iota~0.0035 in 39 nfev) lands on a non-optimum.
+    # Skip the end-state failure ONLY when the REFERENCE aborted while the JAX
+    # TARGET did not: a JAX-target abnormal stop is itself a port-relevant signal
+    # and stays a hard failure, so a broken target can never hide behind this skip.
+    # status 1 (hit the iteration budget) is a normal terminal state and stays
+    # strictly compared. maxiter<=0 runs no outer optimizer -- nothing to gate.
     if maxiter > 0:
-        comparison["cpu_optimizer_success"] = bool(cpu_results["OPTIMIZER_SUCCESS"])
-        comparison["jax_optimizer_success"] = bool(jax_results["OPTIMIZER_SUCCESS"])
-        comparison["cpu_optimizer_status"] = int(cpu_results["OPTIMIZER_STATUS"])
-        comparison["jax_optimizer_status"] = int(jax_results["OPTIMIZER_STATUS"])
-        both_optimizers_converged = (
-            comparison["cpu_optimizer_success"]
-            and comparison["jax_optimizer_success"]
-        )
+        comparison["cpu_optimizer_status"] = cpu_results.get("OPTIMIZER_STATUS")
+        comparison["jax_optimizer_status"] = jax_results.get("OPTIMIZER_STATUS")
+        comparison["cpu_optimizer_success"] = bool(cpu_results.get("OPTIMIZER_SUCCESS"))
+        comparison["jax_optimizer_success"] = bool(jax_results.get("OPTIMIZER_SUCCESS"))
+        skip_for_reference_nonconvergence = _optimizer_aborted_abnormally(
+            cpu_results
+        ) and not _optimizer_aborted_abnormally(jax_results)
     else:
-        both_optimizers_converged = True
+        skip_for_reference_nonconvergence = False
 
     failures: list[str] = []
     if require_final_metric_parity and final_metric_failures:
-        if both_optimizers_converged:
-            failures.extend(final_metric_failures)
-        else:
+        if skip_for_reference_nonconvergence:
             comparison["final_metric_parity_skipped_for_nonconvergence"] = True
             comparison["skipped_final_metric_parity_failures"] = final_metric_failures
+        else:
+            failures.extend(final_metric_failures)
     if comparison["max_surface_pointwise_rel"] >= SURFACE_GEOMETRY_REL_TOL:
         failures.append(
             "Initial Boozer surface geometry drift too large: "
@@ -4114,12 +4131,14 @@ def main() -> None:
         )
     if comparison.get("final_metric_parity_skipped_for_nonconvergence"):
         warnings.append(
-            "End-state metric parity was not gated because an outer optimizer did "
-            f"not converge (cpu_success={comparison.get('cpu_optimizer_success')}, "
-            f"jax_success={comparison.get('jax_optimizer_success')}); comparing "
-            "non-converged end-states is not a port-correctness signal. The drift "
-            "is recorded under skipped_final_metric_parity_failures; port "
-            "correctness is gated by the fixed-state same-candidate parity proof."
+            "End-state metric parity was not gated: the CPU reference optimizer "
+            f"terminated abnormally (status={comparison.get('cpu_optimizer_status')}) "
+            "while the JAX target did not "
+            f"(status={comparison.get('jax_optimizer_status')}), so there is no "
+            "converged reference optimum to compare against. The drift is recorded "
+            "under skipped_final_metric_parity_failures; this run does not establish "
+            "end-state port parity (a JAX-target abnormal stop would instead remain a "
+            "hard failure)."
         )
 
     print(
