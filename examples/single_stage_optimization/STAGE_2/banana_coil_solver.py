@@ -400,11 +400,15 @@ def validate_finite_build_cli_args(args) -> None:
 def validate_winding_surface_shape_cli_args(args) -> None:
     free_mpol = int(getattr(args, "winding_surface_free_mpol", 0))
     free_ntor = int(getattr(args, "winding_surface_free_ntor", 0))
+    free_r0 = bool(getattr(args, "winding_surface_free_r0", False))
+    free_minor = bool(getattr(args, "winding_surface_free_minor", False))
     if free_mpol < 0:
         raise ValueError("--winding-surface-free-mpol must be non-negative.")
     if free_ntor < 0:
         raise ValueError("--winding-surface-free-ntor must be non-negative.")
-    if getattr(args, "stage2_bs_path", None) and (free_mpol > 0 or free_ntor > 0):
+    if getattr(args, "stage2_bs_path", None) and (
+        free_mpol > 0 or free_ntor > 0 or free_r0 or free_minor
+    ):
         raise ValueError(
             "--winding-surface-free-* requires fresh Stage 2 initialization; "
             "loaded seed surfaces preserve their recorded winding surface."
@@ -975,6 +979,29 @@ def parse_args():
             "Fresh Stage 2 CWS only: unfix coil-winding-surface R/Z Fourier "
             "shape modes up to +/- this toroidal index. Default 0 keeps the "
             "historical fixed circular winding torus."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-r0",
+        action="store_true",
+        default=os.environ.get("WINDING_SURFACE_FREE_R0", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Fresh Stage 2 CWS only: unfix the coil-winding-surface major "
+            "radius rc(0,0) as a bounded translation DOF (vessel-clearance "
+            "corridor). Default OFF keeps the historical fixed winding R0."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-minor",
+        action="store_true",
+        default=os.environ.get("WINDING_SURFACE_FREE_MINOR", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Fresh Stage 2 CWS only: unfix the coil-winding-surface minor "
+            "radius rc(1,0)/zs(1,0) as bounded DOFs (last-resort lever floored "
+            "at the on-spec a). Default OFF keeps the historical fixed minor "
+            "radius."
         ),
     )
     parser.add_argument(
@@ -3480,6 +3507,12 @@ def _build_initialize_coils_kwargs(
         ),
         "winding_surface_free_ntor": int(
             getattr(args, "winding_surface_free_ntor", 0)
+        ),
+        "winding_surface_free_r0": bool(
+            getattr(args, "winding_surface_free_r0", False)
+        ),
+        "winding_surface_free_minor": bool(
+            getattr(args, "winding_surface_free_minor", False)
         ),
     }
 

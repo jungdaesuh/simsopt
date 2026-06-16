@@ -51,6 +51,22 @@ from banana_opt.proxy_current_coils import build_planar_proxy_plasma_current_coi
 LOGGER = logging.getLogger(__name__)
 
 
+# Optional bounded winding-surface size DOFs for Stage 2 (default OFF).
+#
+# rc(0,0) is the coil-winding-surface MAJOR radius (R0 translation). The
+# corridor (0.908, 0.993) m is the T0.3-verified ``both_clear`` vessel-clearance
+# window: the on-spec base R0 of 0.903 m is infeasible (vessel clearance
+# -3.299 mm), so the lower bound sits above it. NOTE: the on-spec seed
+# rc(0,0)=0.903 is BELOW this lower bound by design; at optimize time L-BFGS-B
+# clips the seed x0 into [lb, ub] before the first evaluation. (This module does
+# not run the optimizer; the bound is recorded on the surf DOF for the solver.)
+WINDING_SURFACE_FREE_R0_BOUNDS_M = (0.908, 0.993)
+# rc(1,0)/zs(1,0) are the coil-winding-surface MINOR radius (a). Growing a
+# worsens vessel clearance (T0.2), so this is a last-resort lever floored at the
+# on-spec a=0.142 m with a 0.20 m ceiling.
+WINDING_SURFACE_FREE_MINOR_BOUNDS_M = (0.142, 0.20)
+
+
 @dataclass(frozen=True)
 class PlasmaGeometry:
     working_surface: SurfaceRZFourier
@@ -567,19 +583,39 @@ def configure_winding_surface_shape_dofs(
     *,
     free_mpol=0,
     free_ntor=0,
+    free_r0=False,
+    free_minor=False,
 ):
-    """Fix the CWS by default, then unfix a bounded low-mode shape range."""
+    """Fix the CWS by default, then unfix bounded size / low-mode shape DOFs.
+
+    ``free_mpol`` / ``free_ntor`` unfix a low-(m, n) shape range. ``free_r0``
+    unfixes the major-radius translation ``rc(0,0)``; ``free_minor`` unfixes the
+    minor-radius pair ``rc(1,0)`` / ``zs(1,0)``. The size DOFs are freeable
+    independently of shape modes -- on the on-spec mpol=1/ntor=0 winding surface
+    the shape range frees nothing net, so ``free_r0`` / ``free_minor`` are the
+    real continuation levers. Each requested-free size DOF is bounded from the
+    SSOT corridors above.
+    """
     free_mpol = int(free_mpol)
     free_ntor = int(free_ntor)
+    free_r0 = bool(free_r0)
+    free_minor = bool(free_minor)
     if free_mpol < 0:
         raise ValueError("--winding-surface-free-mpol must be non-negative.")
     if free_ntor < 0:
         raise ValueError("--winding-surface-free-ntor must be non-negative.")
 
+    # (DOF name, (lower, upper)) pairs for each requested-free size DOF.
+    requested_size_bounds = []
+    if free_r0:
+        requested_size_bounds.append(("rc(0,0)", WINDING_SURFACE_FREE_R0_BOUNDS_M))
+    if free_minor:
+        requested_size_bounds.append(("rc(1,0)", WINDING_SURFACE_FREE_MINOR_BOUNDS_M))
+        requested_size_bounds.append(("zs(1,0)", WINDING_SURFACE_FREE_MINOR_BOUNDS_M))
+    requested_size_names = frozenset(name for name, _ in requested_size_bounds)
+
     surf_coils.fix_all()
-    if free_mpol == 0 and free_ntor == 0:
-        free_names = ()
-    else:
+    if free_mpol > 0 or free_ntor > 0:
         if free_mpol > int(surf_coils.mpol):
             raise ValueError(
                 "--winding-surface-free-mpol exceeds the winding-surface mpol."
@@ -595,17 +631,25 @@ def configure_winding_surface_shape_dofs(
             nmax=free_ntor,
             fixed=False,
         )
+        # The shape range can free the base size modes; re-fix them so they stay
+        # pinned UNLESS the caller explicitly requested them free below.
         base_fixed_names = ("rc(0,0)", "rc(1,0)", "zs(1,0)")
         available_names = set(surf_coils.local_full_dof_names)
         for name in base_fixed_names:
-            if name in available_names:
+            if name in available_names and name not in requested_size_names:
                 surf_coils.fix(name)
-        free_names = tuple(
-            name
-            for name in surf_coils.local_full_dof_names
-            if not surf_coils.is_fixed(name)
-        )
-    return free_names
+
+    # Free + bound the requested size DOFs regardless of the shape-mode path.
+    for name, (lower, upper) in requested_size_bounds:
+        surf_coils.unfix(name)
+        surf_coils.set_lower_bound(name, lower)
+        surf_coils.set_upper_bound(name, upper)
+
+    return tuple(
+        name
+        for name in surf_coils.local_full_dof_names
+        if not surf_coils.is_fixed(name)
+    )
 
 
 def initialize_coils(
@@ -635,12 +679,16 @@ def initialize_coils(
     finite_build=None,
     winding_surface_free_mpol=0,
     winding_surface_free_ntor=0,
+    winding_surface_free_r0=False,
+    winding_surface_free_minor=False,
     return_vf_build_result=False,
 ):
     winding_surface_free_dof_names = configure_winding_surface_shape_dofs(
         surf_coils,
         free_mpol=winding_surface_free_mpol,
         free_ntor=winding_surface_free_ntor,
+        free_r0=winding_surface_free_r0,
+        free_minor=winding_surface_free_minor,
     )
     banana_curve = CurveCWSFourierCPP(
         np.linspace(0, 1, num_quadpoints, endpoint=False),
