@@ -565,7 +565,6 @@ class CurveHardwareSdfKeepout(Optimizable):
                 "origin_np": np.asarray(group.origin_m, dtype=np.float64),
                 "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
                 "spacing": float(group.spacing_m),
-                "narrow_band": float(group.narrow_band_m),
                 "effective_margin": float(group.effective_margin_m),
             }
             for group in sdf_data.groups
