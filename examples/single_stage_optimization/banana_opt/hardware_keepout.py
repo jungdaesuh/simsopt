@@ -158,6 +158,7 @@ class HardwareSdfGroup:
     grid: np.ndarray
     origin_m: np.ndarray
     spacing_m: float
+    narrow_band_m: float
     effective_margin_m: float
     sign_method: str
 
@@ -339,8 +340,9 @@ def _sdf_trilinear(grid, origin_m, spacing_m, points, outside_value):
     """Trilinear interpolation for a single regular SDF grid.
 
     Points outside the grid are assigned ``outside_value``.  The caller chooses
-    that value conservatively; the keepout objective uses a violating clearance
-    so an optimizer cannot silently leave the trusted CAD-derived field domain.
+    that value from the manifest contract; narrow-band hardware grids require
+    the band to cover the effective keepout margin, so outside-grid points are
+    safely beyond the active collision shell.
     """
     grid_shape = jnp.asarray(grid.shape)
     local = (points - origin_m) / spacing_m
@@ -386,7 +388,7 @@ def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
         origin_m,
         spacing_m,
         surface_points,
-        outside_value=-scale,
+        outside_value=effective_margin_m,
     )
     violation = jnp.maximum(effective_margin_m - phi, 0.0) / scale
     return jnp.mean(violation ** 2)
@@ -563,6 +565,7 @@ class CurveHardwareSdfKeepout(Optimizable):
                 "origin_np": np.asarray(group.origin_m, dtype=np.float64),
                 "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
                 "spacing": float(group.spacing_m),
+                "narrow_band": float(group.narrow_band_m),
                 "effective_margin": float(group.effective_margin_m),
             }
             for group in sdf_data.groups
@@ -677,7 +680,7 @@ class CurveHardwareSdfKeepout(Optimizable):
                     group["origin_np"],
                     group["spacing"],
                     surface_points,
-                    outside_value=-group["effective_margin"],
+                    outside_value=group["effective_margin"],
                 )
                 best[group["label"]] = min(
                     best[group["label"]], float(values.min())
@@ -688,9 +691,9 @@ class CurveHardwareSdfKeepout(Optimizable):
         """Minimum sampled swept-surface SDF value, m.
 
         Negative values indicate the sampled swept surface is inside a signed
-        field or outside the trusted field domain.  The name is retained for the
-        existing results-writer contract; ``shortest_clearance`` is an alias for
-        callers that want signed wording.
+        field.  Outside-grid samples use the manifest-guaranteed safe margin.
+        The name is retained for the existing results-writer contract;
+        ``shortest_clearance`` is an alias for callers that want signed wording.
         """
         return min(self.per_group_min_clearance().values())
 
@@ -993,6 +996,16 @@ def _validate_hardware_sdf_error_budget(manifest):
     return safety_margin, components, minimum_effective
 
 
+def _validate_hardware_sdf_narrow_band(narrow_band, effective_margin, label):
+    if not np.isfinite(narrow_band) or narrow_band <= 0.0:
+        raise ValueError(
+            f"SDF {label} narrow_band_m must be finite and > 0")
+    if narrow_band + 1.0e-12 < effective_margin:
+        raise ValueError(
+            f"SDF {label} narrow_band_m must cover effective_margin_m "
+            f"({narrow_band} < {effective_margin})")
+
+
 def _validated_hardware_sdf_glb_sha(manifest, path, glb_path):
     if glb_path is None:
         return None
@@ -1052,7 +1065,10 @@ def load_hardware_sdf(path, glb_path=None):
         static_hardware_keys=static_keys,
     )
 
-    top_margin = manifest.get("effective_margin_m")
+    top_margin = float(manifest.get("effective_margin_m"))
+    top_narrow_band = float(manifest.get("narrow_band_m", -1.0))
+    _validate_hardware_sdf_narrow_band(
+        top_narrow_band, top_margin, "manifest")
     groups = []
     with np.load(data_path) as payload:
         for group in group_specs:
@@ -1080,6 +1096,9 @@ def load_hardware_sdf(path, glb_path=None):
                 raise ValueError(
                     f"SDF group {label!r} origin_m must be length 3, got "
                     f"{origin.shape}")
+            if not np.isfinite(origin).all():
+                raise ValueError(
+                    f"SDF group {label!r} origin_m values must be finite")
             spacing = float(group["spacing_m"])
             if not np.isfinite(spacing) or spacing <= 0.0:
                 raise ValueError(
@@ -1094,6 +1113,9 @@ def load_hardware_sdf(path, glb_path=None):
                     f"SDF group {label!r} effective_margin_m must cover "
                     "safety_margin_m plus error_budget_m.e_total_m "
                     f"({effective_margin} < {minimum_effective_margin})")
+            narrow_band = float(group.get("narrow_band_m", top_narrow_band))
+            _validate_hardware_sdf_narrow_band(
+                narrow_band, effective_margin, f"group {label!r}")
             sign_method = str(group.get("sign_method", "unknown"))
             if sign_method not in OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS:
                 allowed = ", ".join(sorted(
@@ -1107,6 +1129,7 @@ def load_hardware_sdf(path, glb_path=None):
                     grid=grid,
                     origin_m=origin,
                     spacing_m=spacing,
+                    narrow_band_m=narrow_band,
                     effective_margin_m=effective_margin,
                     sign_method=sign_method,
                 )

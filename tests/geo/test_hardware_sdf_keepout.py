@@ -63,6 +63,8 @@ def _write_sdf_payload(
     safety_margin=None,
     error_budget=None,
     group_effective_margin=None,
+    narrow_band=0.02,
+    group_narrow_band=None,
     glb_path=None,
 ):
     data_path = root / "hardware_sdf.npz"
@@ -124,6 +126,10 @@ def _write_sdf_payload(
         "documented_gate_only": documented_gate_only,
         "provenance": provenance,
     }
+    if narrow_band is not None:
+        manifest["narrow_band_m"] = narrow_band
+    if group_narrow_band is not None:
+        manifest["groups"][0]["narrow_band_m"] = group_narrow_band
     if static_keys is not None:
         manifest["static_hardware_keys"] = list(static_keys)
     if covered_by_other_in_loop is not None:
@@ -246,6 +252,52 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "safety_margin_m plus"):
                 load_hardware_sdf(manifest)
 
+    def test_loader_rejects_missing_or_underwide_narrow_band(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                narrow_band=None,
+            )
+
+            with self.assertRaisesRegex(ValueError, "narrow_band_m"):
+                load_hardware_sdf(manifest)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                narrow_band=0.004,
+            )
+
+            with self.assertRaisesRegex(ValueError, "narrow_band_m"):
+                load_hardware_sdf(manifest)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                group_narrow_band=0.004,
+            )
+
+            with self.assertRaisesRegex(ValueError, "narrow_band_m"):
+                load_hardware_sdf(manifest)
+
     def test_loader_rejects_nonfinite_sdf_numbers(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -310,6 +362,20 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "grid values"):
+                load_hardware_sdf(manifest)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(float("nan"), 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+            )
+
+            with self.assertRaisesRegex(ValueError, "origin_m"):
                 load_hardware_sdf(manifest)
 
     def test_metadata_sha_binds_data_and_live_glb(self):
@@ -419,8 +485,8 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             tiny_objective = CurveHardwareSdfKeepout(
                 [clear_curve], load_hardware_sdf(tiny_manifest), winding_r0=0.0
             )
-            self.assertGreater(tiny_objective.J(), 0.0)
-            self.assertLess(tiny_objective.shortest_clearance(), 0.0)
+            self.assertEqual(tiny_objective.J(), 0.0)
+            self.assertEqual(tiny_objective.shortest_clearance(), margin)
 
     def test_plane_sdf_gradient_matches_finite_difference(self):
         with tempfile.TemporaryDirectory() as td:
