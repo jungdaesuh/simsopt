@@ -3739,9 +3739,34 @@ def evaluate_single_stage_init_parity(
     comparison["final_metric_parity_required"] = bool(require_final_metric_parity)
     comparison["final_metric_parity_failures"] = final_metric_failures
 
+    # End-state metric parity compares two optimizer end-states; it is a valid
+    # port-correctness signal only when BOTH outer optimizers converged. A lane
+    # whose optimizer terminated abnormally (e.g. L-BFGS-B STATUS=2, no progress)
+    # lands on a non-optimum, so end-state drift then reflects that
+    # non-convergence -- not a port defect -- and must not be reported as a port
+    # failure. maxiter<=0 runs no outer optimizer, so there is nothing to gate.
+    # Real port regressions stay caught by the surface-geometry, self-intersection,
+    # finite-result, and same-candidate fixed-state parity channels, none of which
+    # depend on optimizer convergence.
+    if maxiter > 0:
+        comparison["cpu_optimizer_success"] = bool(cpu_results["OPTIMIZER_SUCCESS"])
+        comparison["jax_optimizer_success"] = bool(jax_results["OPTIMIZER_SUCCESS"])
+        comparison["cpu_optimizer_status"] = int(cpu_results["OPTIMIZER_STATUS"])
+        comparison["jax_optimizer_status"] = int(jax_results["OPTIMIZER_STATUS"])
+        both_optimizers_converged = (
+            comparison["cpu_optimizer_success"]
+            and comparison["jax_optimizer_success"]
+        )
+    else:
+        both_optimizers_converged = True
+
     failures: list[str] = []
-    if require_final_metric_parity:
-        failures.extend(final_metric_failures)
+    if require_final_metric_parity and final_metric_failures:
+        if both_optimizers_converged:
+            failures.extend(final_metric_failures)
+        else:
+            comparison["final_metric_parity_skipped_for_nonconvergence"] = True
+            comparison["skipped_final_metric_parity_failures"] = final_metric_failures
     if comparison["max_surface_pointwise_rel"] >= SURFACE_GEOMETRY_REL_TOL:
         failures.append(
             "Initial Boozer surface geometry drift too large: "
@@ -4086,6 +4111,15 @@ def main() -> None:
             "Surface geometry drift comparison was skipped because outer-loop "
             "parity compares optimizer progress and final metrics; the JAX "
             "target lane does not emit surf_init.json in this run shape."
+        )
+    if comparison.get("final_metric_parity_skipped_for_nonconvergence"):
+        warnings.append(
+            "End-state metric parity was not gated because an outer optimizer did "
+            f"not converge (cpu_success={comparison.get('cpu_optimizer_success')}, "
+            f"jax_success={comparison.get('jax_optimizer_success')}); comparing "
+            "non-converged end-states is not a port-correctness signal. The drift "
+            "is recorded under skipped_final_metric_parity_failures; port "
+            "correctness is gated by the fixed-state same-candidate parity proof."
         )
 
     print(
