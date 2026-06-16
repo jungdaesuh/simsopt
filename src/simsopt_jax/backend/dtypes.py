@@ -81,12 +81,22 @@ def _has_only_traced_jax_leaves(value) -> bool:
 
 
 def _reference_sharding(reference, *, ndim: int | None = None):
+    # A tracer is a ``jax.Array`` but carries no concrete sharding; probing
+    # ``tracer.sharding`` raises ``AttributeError`` whose message eagerly walks
+    # the entire jaxpr (jax's ``_origin_msg``/``find_progenitors``) only to be
+    # discarded by ``getattr(..., None)``. Paid once per ``as_runtime_array``
+    # call across an O(jaxpr) trace, that is an O(jaxpr^2) construction cost that
+    # scales with resolution. Skip tracers: their reference sharding is always
+    # ``None`` and ``as_runtime_array`` bypasses reference placement for traced
+    # values regardless (see ``_has_only_traced_jax_leaves`` guard there).
+    if _is_jax_tracer(reference):
+        return None
     if isinstance(reference, jax.Array):
         sharding = getattr(reference, "sharding", None)
         return _compatible_reference_sharding(sharding, ndim=ndim)
     if isinstance(reference, (list, tuple)):
         for leaf in jax.tree.leaves(reference):
-            if isinstance(leaf, jax.Array):
+            if isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf):
                 sharding = getattr(leaf, "sharding", None)
                 if sharding is not None:
                     return _compatible_reference_sharding(sharding, ndim=ndim)
