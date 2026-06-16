@@ -545,6 +545,45 @@ def bootstrap_local_simsopt() -> None:
     _bootstrap_local_simsopt(SRC_ROOT)
 
 
+def _require_module_within(module, root: Path, *, label: str, context: str) -> None:
+    """Raise unless ``module.__file__`` resolves inside ``root``."""
+    module_file = getattr(module, "__file__", None)
+    resolved_root = root.resolve()
+    if module_file is not None and Path(module_file).resolve().is_relative_to(
+        resolved_root
+    ):
+        return
+    raise RuntimeError(
+        f"{context}: '{label}' resolves to {module_file!r}, outside this repo "
+        f"({resolved_root}). A different simsopt checkout is shadowing the "
+        f"benchmark, so any parity/walltime/memory number would measure the "
+        f"wrong code. Run in a dedicated env built with `pip install -e .`, or "
+        f"call bootstrap_local_simsopt() before the first simsopt import."
+    )
+
+
+def require_local_simsopt_provenance(
+    *, context: str, require_extension: bool = True
+) -> None:
+    """Raise unless ``simsopt`` (and ``simsoptpp`` when ``require_extension``) load from this repo.
+
+    Guards a benchmark lane against a base-environment editable install silently
+    shadowing it with a different ``simsopt`` checkout. Call after
+    ``bootstrap_local_simsopt()`` and before importing the lane under test;
+    ``context`` names the lane in the failure message. ``require_extension`` is
+    True for lanes that time the C++/``simsoptpp`` baseline.
+    """
+    import simsopt
+
+    _require_module_within(simsopt, SRC_ROOT, label="simsopt", context=context)
+    if require_extension:
+        import simsoptpp
+
+        _require_module_within(
+            simsoptpp, REPO_ROOT, label="simsoptpp", context=context
+        )
+
+
 def get_git_sha() -> str:
     """Return the exact repo SHA for provenance."""
     if _SIMSOPT_REPO_SHA_ENV_VAR in os.environ:

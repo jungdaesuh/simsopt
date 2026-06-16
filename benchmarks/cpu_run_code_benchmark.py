@@ -35,12 +35,18 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from repo_bootstrap import configure_entrypoint_jax_runtime
+from benchmarks.validation_ladder_common import (
+    bootstrap_local_simsopt,
+    require_local_simsopt_provenance,
+)
 
 
 configure_entrypoint_jax_runtime(
     default_platform="cpu",
     respect_existing_env=False,
 )
+bootstrap_local_simsopt()
+require_local_simsopt_provenance(context="JAX run_code() CPU benchmark")
 import jax
 
 jax.config.update("jax_enable_x64", True)

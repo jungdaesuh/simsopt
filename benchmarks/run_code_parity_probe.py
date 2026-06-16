@@ -15,13 +15,17 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
     apply_requested_platform,
+    bootstrap_local_simsopt,
     preparse_platform,
+    require_local_simsopt_provenance,
     resolve_probe_lane,
 )
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
+bootstrap_local_simsopt()
+require_local_simsopt_provenance(context="run_code parity probe")
 
 import jax
 import jaxlib

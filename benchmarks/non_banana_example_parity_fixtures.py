@@ -3799,20 +3799,22 @@ def _build_cws_saved_local_flux(*, nfp: int):
         """
         try:
             loaded = simsopt_load(str(coils_path))
-        except TypeError as exc:
-            if "CurveCWSFourier" not in str(exc):
+        except (TypeError, ImportError) as exc:
+            if "curvecwsfourier" not in str(exc).lower():
                 raise
-            # Upstream simsopt JSON loader currently fails to reconstruct
-            # ``CurveCWSFourier`` instances when handing them to the
-            # simsoptpp ``Coil`` constructor. The plan requires fail-closed
+            # simsopt.load() can fail on a saved-CWS artifact two ways: the
+            # simsoptpp ``Coil`` constructor rejects a reconstructed
+            # ``CurveCWSFourier`` (TypeError), or a donor serialized before the
+            # JAX-port relocation names the retired
+            # ``simsopt.geo.curvecwsfourier`` module that has no redirect
+            # (ModuleNotFoundError). The plan requires fail-closed
             # classification: report the fixture as unsupported rather than
             # allowing a silent partial pass.
             raise FixtureNotSupportedError(
-                "Upstream simsopt.load() cannot reconstruct CurveCWSFourier "
-                f"from {coils_path.name}: {exc}. Native JAX parity for "
-                "this saved-CWS artifact is gated on fixing the upstream "
-                "JSON deserialization of CurveCWSFourier (out of scope for "
-                "this non-banana parity plan)."
+                "simsopt.load() cannot reconstruct CurveCWSFourier from "
+                f"{coils_path.name}: {exc}. Native JAX parity for this "
+                "saved-CWS artifact is gated on fixing CurveCWSFourier JSON "
+                "deserialization (out of scope for this non-banana parity plan)."
             ) from exc
         return list(loaded.coils)
 
