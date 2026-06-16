@@ -3653,23 +3653,52 @@ def _append_nonfinite_outer_loop_failures(
             )
 
 
-def _final_metric_parity_failures(comparison: dict[str, Any]) -> list[str]:
+def _metric_parity_failures(
+    *,
+    label: str,
+    iota_abs_diff: float,
+    volume_rel_diff: float,
+    field_error_rel_diff: float,
+) -> list[str]:
+    """Tolerance check shared by the final-state and seed-state parity gates."""
     failures: list[str] = []
-    if comparison["final_iota_abs_diff"] >= IOTA_ABS_TOL:
+    if iota_abs_diff >= IOTA_ABS_TOL:
+        failures.append(f"{label} iota disagreement too large: {iota_abs_diff:.2e}")
+    if volume_rel_diff >= VOLUME_REL_TOL:
         failures.append(
-            f"Final iota disagreement too large: {comparison['final_iota_abs_diff']:.2e}"
+            f"{label} volume relative difference too large: {volume_rel_diff:.2e}"
         )
-    if comparison["final_volume_rel_diff"] >= VOLUME_REL_TOL:
+    if field_error_rel_diff >= FIELD_ERROR_REL_TOL:
         failures.append(
-            "Final volume relative difference too large: "
-            f"{comparison['final_volume_rel_diff']:.2e}"
-        )
-    if comparison["field_error_rel_diff"] >= FIELD_ERROR_REL_TOL:
-        failures.append(
-            "Final field error relative difference too large: "
-            f"{comparison['field_error_rel_diff']:.2e}"
+            f"{label} field error relative difference too large: {field_error_rel_diff:.2e}"
         )
     return failures
+
+
+def _final_metric_parity_failures(comparison: dict[str, Any]) -> list[str]:
+    return _metric_parity_failures(
+        label="Final",
+        iota_abs_diff=comparison["final_iota_abs_diff"],
+        volume_rel_diff=comparison["final_volume_rel_diff"],
+        field_error_rel_diff=comparison["field_error_rel_diff"],
+    )
+
+
+def _initial_metric_parity_failures(comparison: dict[str, Any]) -> list[str]:
+    """Convergence-independent seed-state parity.
+
+    Both lanes evaluate the INITIAL (seed) surface at the identical seed DOFs,
+    before any outer optimizer runs, so agreement here positively proves the JAX
+    port reproduces the C++/CPU reference at a fixed state regardless of optimizer
+    convergence. This is the always-armed backstop behind the (skippable)
+    final-state gate.
+    """
+    return _metric_parity_failures(
+        label="Initial seed-state",
+        iota_abs_diff=comparison["initial_iota_abs_diff"],
+        volume_rel_diff=comparison["initial_volume_rel_diff"],
+        field_error_rel_diff=comparison["initial_field_error_rel_diff"],
+    )
 
 
 # scipy L-BFGS-B ``status``: 0 converged, 1 hit the iteration budget, 2 abnormal
@@ -3731,6 +3760,17 @@ def evaluate_single_stage_init_parity(
             float(jax_results["MAX_CURVATURE"]),
             float(cpu_results["MAX_CURVATURE"]),
         ),
+        "initial_iota_abs_diff": abs(
+            float(jax_results["INITIAL_IOTA"]) - float(cpu_results["INITIAL_IOTA"])
+        ),
+        "initial_volume_rel_diff": relative_error(
+            float(jax_results["INITIAL_VOLUME"]),
+            float(cpu_results["INITIAL_VOLUME"]),
+        ),
+        "initial_field_error_rel_diff": relative_error(
+            float(jax_results["INITIAL_FIELD_ERROR"]),
+            float(cpu_results["INITIAL_FIELD_ERROR"]),
+        ),
         "max_surface_pointwise_abs": max_surface_geometry_abs,
         "max_surface_pointwise_rel": max_surface_geometry_rel,
         "cpu_self_intersecting": bool(cpu_results["SELF_INTERSECTING"]),
@@ -3784,6 +3824,16 @@ def evaluate_single_stage_init_parity(
             comparison["skipped_final_metric_parity_failures"] = final_metric_failures
         else:
             failures.extend(final_metric_failures)
+
+    # Convergence-independent seed-state parity backstop: ALWAYS armed (no skip,
+    # not gated by require_final_metric_parity). Both lanes evaluate the seed
+    # surface at identical DOFs before the outer optimizer runs, so this proves
+    # the JAX port reproduces the reference at a fixed state even when the
+    # final-state gate is skipped for reference non-convergence.
+    initial_metric_failures = _initial_metric_parity_failures(comparison)
+    comparison["initial_metric_parity_failures"] = initial_metric_failures
+    failures.extend(initial_metric_failures)
+
     if comparison["max_surface_pointwise_rel"] >= SURFACE_GEOMETRY_REL_TOL:
         failures.append(
             "Initial Boozer surface geometry drift too large: "

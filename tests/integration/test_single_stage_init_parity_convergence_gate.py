@@ -43,6 +43,11 @@ def _result(*, iota: float, status: int) -> dict[str, object]:
             "outer_optimizer_method": _TARGET_OUTER_OPTIMIZER_METHOD,
             "OPTIMIZER_SUCCESS": status == _CONVERGED,
             "OPTIMIZER_STATUS": status,
+            # Identical seed metrics on both lanes -> the seed-state backstop
+            # passes, isolating these tests to the final-state gate under test.
+            "INITIAL_IOTA": 0.0,
+            "INITIAL_VOLUME": 0.05,
+            "INITIAL_FIELD_ERROR": 1.0e-3,
         }
     )
     return result
