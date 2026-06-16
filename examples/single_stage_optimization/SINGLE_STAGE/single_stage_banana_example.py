@@ -98,7 +98,7 @@ from simsopt_jax.geo.optimizers.single_stage_routing import (
 # SIMSOPT imports
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable, load
-from simsopt_jax.backend import get_jax_platform, get_tolerance_tier, get_transfer_guard
+from simsopt_jax.backend import get_tolerance_tier
 from simsopt_jax.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt_jax.core._math_utils import (
@@ -239,14 +239,12 @@ _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
 _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT = 1e-11
 _TARGET_LANE_BOOZER_NEWTON_TOL_FLOAT32_SMOKE_DEFAULT = 1e-6
-_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "skip-large-strict-cuda"
+_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "run"
 _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "default",
     "run",
     "skip",
-    "skip-large-strict-cuda",
 )
-_TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION = 6
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA = "simsopt.single_stage.jax_runtime_spec"
@@ -8708,27 +8706,20 @@ def resolve_target_lane_boozer_newton_polish_policy(
     return policy
 
 
-def _is_large_target_lane_boozer_resolution(mpol, ntor):
-    return (
-        int(mpol) >= _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION
-        or int(ntor) >= _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION
-    )
-
-
-def _strict_cuda_target_lane_active():
-    return get_jax_platform() == "cuda" and get_transfer_guard() == "disallow"
-
-
 def resolve_effective_boozer_newton_polish_policy_override(
     *,
     field_backend,
     optimizer_backend,
     boozer_optimizer_backend=None,
-    mpol,
-    ntor,
     target_lane_boozer_newton_polish_policy=None,
 ):
-    """Map the target-lane policy onto the BoozerSurfaceJAX option value."""
+    """Map the target-lane policy onto the BoozerSurfaceJAX option value.
+
+    Returns ``None`` for non-JAX or non-ondevice Boozer solves (no override; the
+    adapter applies its own default). Otherwise returns the resolved policy:
+    ``"run"`` (the default — the dense Newton polish always runs, matching the
+    production GPU lane) or ``"skip"`` when explicitly requested.
+    """
     effective_boozer_backend = (
         optimizer_backend
         if boozer_optimizer_backend is None
@@ -8736,16 +8727,11 @@ def resolve_effective_boozer_newton_polish_policy_override(
     )
     if field_backend != "jax" or effective_boozer_backend != "ondevice":
         return None
-    policy = resolve_target_lane_boozer_newton_polish_policy(
+    return resolve_target_lane_boozer_newton_polish_policy(
         field_backend,
         optimizer_backend,
         target_lane_boozer_newton_polish_policy,
     )
-    if policy in {"run", "skip"}:
-        return policy
-    if not _is_large_target_lane_boozer_resolution(mpol, ntor):
-        return None
-    return "skip" if _strict_cuda_target_lane_active() else None
 
 
 @contextmanager
@@ -10456,8 +10442,6 @@ def resolve_target_lane_boozer_init_base_overrides(
     target_lane_boozer_newton_maxiter,
     target_lane_boozer_newton_polish_policy=None,
     tolerance_tier=None,
-    mpol=None,
-    ntor=None,
 ):
     """Return the baseline target-lane init overrides for JAX/ondevice solves."""
     effective_boozer_backend = (
@@ -10513,8 +10497,6 @@ def resolve_target_lane_boozer_init_base_overrides(
             field_backend=field_backend,
             optimizer_backend=optimizer_backend,
             boozer_optimizer_backend=effective_boozer_backend,
-            mpol=0 if mpol is None else mpol,
-            ntor=0 if ntor is None else ntor,
             target_lane_boozer_newton_polish_policy=target_lane_boozer_newton_polish_policy,
         ),
     }
@@ -13746,8 +13728,6 @@ if __name__ == "__main__":
         target_lane_boozer_newton_polish_policy=(
             target_lane_boozer_newton_polish_policy_record
         ),
-        mpol=mpol,
-        ntor=ntor,
     )
     warm_start_boozer_init_overrides = resolve_warm_start_boozer_init_overrides(
         warm_start_state=warm_start_state,

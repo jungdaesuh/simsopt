@@ -950,11 +950,10 @@ blowup) while staying production-resolution.
       (`PROD_MPOL=10 PROD_NTOR=10 PROD_NPHI=64 PROD_NTHETA=32
       PROD_WARM_START_RUN_DIR=<donor>`) across the optimizer variants, or via
       `benchmarks/perlmutter/submit_single_stage_matrix.py --tier mpol10`.
-      Open contract question: `PROD_NEWTON_POLISH_POLICY` at mpol >= 6 -
-      forcing `run` materializes the large dense Newton graph (the
-      compile/memory blowup regime); decide `run` versus skip-policy rows
-      once the donor exists and the ondevice bisect probe (`54357279`)
-      reports.
+      Resolved contract: `PROD_NEWTON_POLISH_POLICY=run` is the default
+      production/parity policy. The old platform-dependent
+      `skip-large-strict-cuda` policy has been removed; `skip` remains an
+      explicit diagnostic escape hatch, not the default mpol >= 6 behavior.
 - [ ] Re-key the smoke-resolution (mpol=2) rows already collected as the
       cheap tier of the report; they measure converged-optimization behavior
       at loose tolerances (reference stops in ~5 steps, scipy-jax in ~34)

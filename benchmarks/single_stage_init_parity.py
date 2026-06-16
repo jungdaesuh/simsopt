@@ -74,6 +74,10 @@ from benchmarks.single_stage_smoke_fixture import (
 from benchmarks.parity_solve_quality import (
     compute_dense_operator_action_max_rel_error,
 )
+from simsopt_jax.geo.optimizers.single_stage_routing import (
+    resolve_single_stage_jax_boozer_optimizer_backend
+    as _resolve_single_stage_jax_boozer_optimizer_backend,
+)
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
@@ -160,14 +164,12 @@ _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
     "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
     "are enabled because that mode does not provide normal cache-reuse evidence"
 )
-_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "skip-large-strict-cuda"
+_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "run"
 _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "default",
     "run",
     "skip",
-    "skip-large-strict-cuda",
 )
-_TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION = 6
 _SAME_CANDIDATE_X_ATOL = 1e-8
 _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL = 1e-12
 _SAME_CANDIDATE_SCALAR_RTOL = 1e-10
@@ -446,11 +448,10 @@ def parse_args() -> argparse.Namespace:
         choices=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES,
         default=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
         help=(
-            "Policy for JAX/ondevice Boozer dense Newton polish in target-lane "
-            "single-stage children. The default skips the dense polish only for "
-            "large strict-CUDA parity runs, including their JAX CPU reference "
-            "children, so acceptance exercises the least-squares solved state "
-            "without materializing the large dense Newton graph."
+            "Policy for the JAX/ondevice Boozer dense Newton polish in "
+            "target-lane single-stage children. Defaults to 'run' (the dense "
+            "polish always runs, matching the production GPU lane); pass 'skip' "
+            "to bypass it and accept the least-squares solved state."
         ),
     )
     parser.add_argument(
@@ -625,19 +626,6 @@ def _resolve_target_boozer_optimizer_backend(
     return None
 
 
-def _target_context_platform(args: argparse.Namespace, child_platform: str) -> str:
-    return str(getattr(args, "platform", child_platform))
-
-
-def _is_large_target_lane_boozer_resolution(args: argparse.Namespace) -> bool:
-    return (
-        int(getattr(args, "mpol"))
-        >= _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION
-        or int(getattr(args, "ntor"))
-        >= _TARGET_LANE_BOOZER_NEWTON_POLISH_SKIP_MIN_RESOLUTION
-    )
-
-
 def _normalize_target_lane_boozer_newton_polish_policy(policy: str | None) -> str:
     normalized = (
         _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
@@ -680,19 +668,14 @@ def _resolve_target_lane_boozer_newton_polish_policy(
         platform=platform,
         args=args,
     )
-    effective_boozer_optimizer_backend = (
-        boozer_optimizer_backend
-        if boozer_optimizer_backend is not None
-        else getattr(args, "optimizer_backend", None)
+    effective_boozer_optimizer_backend = _resolve_single_stage_jax_boozer_optimizer_backend(
+        backend,
+        getattr(args, "optimizer_backend", None),
+        boozer_optimizer_backend,
     )
     if effective_boozer_optimizer_backend != TARGET_OPTIMIZER_BACKEND:
         return None
-    if policy in {"run", "skip"}:
-        return policy
-    if not _is_large_target_lane_boozer_resolution(args):
-        return None
-    target_context_platform = _target_context_platform(args, platform)
-    return "skip" if _target_platform_uses_cuda(target_context_platform) else None
+    return policy
 
 
 def _expected_target_outer_optimizer_method(optimizer_backend: str) -> str:
