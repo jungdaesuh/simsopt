@@ -305,6 +305,7 @@ from banana_opt.hardware_keepout import (
     hardware_sdf_metadata_from_data,
     load_hardware_keepout,
     load_hardware_sdf,
+    resolve_keepout_winding_r0,
 )
 from banana_opt.self_intersect import CurveSelfIntersect
 from banana_opt.wout_convention import wout_convention_artifact_fields
@@ -7266,16 +7267,6 @@ def banana_curve_order(curve):
     while getattr(source_curve, "order", None) is None:
         source_curve = source_curve.curve
     return int(source_curve.order)
-
-
-def resolve_keepout_winding_r0(banana_coils):
-    """Major radius, m, of the winding torus orienting the hardware/vessel
-    keep-out U-channel frames: the realized CWS torus when the lineage embeds
-    one, else the hardware-contract spec default (legacy non-CWS coils)."""
-    realized_winding_radii = realized_cws_winding_radii(banana_coils)
-    if realized_winding_radii is None:
-        return BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
-    return realized_winding_radii[0]
 
 
 def build_single_stage_objective_bundle(

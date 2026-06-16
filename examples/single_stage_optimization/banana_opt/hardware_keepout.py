@@ -103,6 +103,7 @@ from banana_opt.hardware_contracts import (
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     VACUUM_VESSEL_MINOR_RADIUS_M,
 )
+from banana_opt.coil_order_upgrade import realized_cws_winding_radii
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
 from simsopt.geo.jit import jit
@@ -110,6 +111,19 @@ from simsopt.geo.jit import jit
 #: Sentinel coordinate for chunk padding — far from any machine geometry
 #: (HBT-EP fits in ~1.3 m), so padded points never activate the hinge.
 _PAD_COORDINATE = 1.0e3
+
+
+def resolve_keepout_winding_r0(banana_coils):
+    """Return the realized CWS winding major radius, or the spec default.
+
+    Hardware and vessel keepout use this radius to orient their Type-KK
+    U-channel frames; warm CWS resumes must use the torus embedded in the seed.
+    """
+    realized_winding_radii = realized_cws_winding_radii(banana_coils)
+    if realized_winding_radii is None:
+        return BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+    return realized_winding_radii[0]
+
 
 # Surface quadrature over the swept rectangular Type KK U-channel sample box.
 # The triplets are coefficients of (half segment, half width, half depth):
