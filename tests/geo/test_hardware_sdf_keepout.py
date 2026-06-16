@@ -156,6 +156,25 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "frame/units mismatch"):
                 load_hardware_sdf(manifest)
 
+    def test_sdf_penalty_uses_dimensionless_metre_ratio(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.zeros((5, 5, 5), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(-0.1, -0.1, -0.1),
+                spacing=0.05,
+                effective_margin=0.005,
+            )
+            objective = CurveHardwareSdfKeepout(
+                [_circle_curve(radius=0.02)],
+                load_hardware_sdf(manifest),
+                winding_r0=0.0,
+            )
+
+            self.assertAlmostEqual(objective.J(), 1.0, places=12)
+
     def test_loader_fail_closes_static_hardware_coverage(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
