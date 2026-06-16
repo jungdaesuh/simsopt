@@ -171,6 +171,8 @@ class HardwareSdfData:
     manifest_sha256: str
     data_sha256: str
     groups: tuple[HardwareSdfGroup, ...]
+    safety_margin_m: float
+    error_budget_m: dict[str, float]
     documented_gate_only: dict[str, object]
     covered_by_other_in_loop: dict[str, object]
     provenance: dict[str, object]
@@ -772,6 +774,16 @@ def _sha256_file(path):
 
 
 EFFECTIVE_KEEPOUT_GROUPS_KEY = "EFFECTIVE_KEEPOUT_GROUPS"
+OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS = frozenset({
+    "watertight_contains_trimesh_nearest",
+})
+HARDWARE_SDF_ERROR_BUDGET_COMPONENT_KEYS = (
+    "e_sweep_sample_m",
+    "e_grid_m",
+    "e_sign_m",
+    "e_mesh_m",
+    "e_oracle_mapping_m",
+)
 
 
 def _read_hardware_keepout_data(path):
@@ -940,6 +952,47 @@ def validate_hardware_sdf_static_coverage(
             f"{missing}; add represented fields or document them as gate-only")
 
 
+def _validate_hardware_sdf_error_budget(manifest):
+    budget = manifest.get("error_budget_m")
+    if not isinstance(budget, dict):
+        raise ValueError("hardware SDF manifest must declare error_budget_m")
+    components = {}
+    for key in HARDWARE_SDF_ERROR_BUDGET_COMPONENT_KEYS:
+        try:
+            value = float(budget[key])
+        except KeyError as exc:
+            raise ValueError(
+                f"hardware SDF error_budget_m is missing {key!r}") from exc
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(
+                f"hardware SDF error budget {key} must be finite and >= 0")
+        components[key] = value
+    computed_total = sum(components.values())
+    recorded_total = float(budget.get("e_total_m", -1.0))
+    if not np.isfinite(recorded_total):
+        raise ValueError("hardware SDF error_budget_m.e_total_m must be finite")
+    if not np.isclose(recorded_total, computed_total, rtol=0.0, atol=1.0e-12):
+        raise ValueError(
+            "hardware SDF error_budget_m.e_total_m must equal the sum of its "
+            f"components ({recorded_total} vs {computed_total})")
+    safety_margin = float(manifest.get("safety_margin_m", -1.0))
+    if not np.isfinite(safety_margin) or safety_margin <= 0.0:
+        raise ValueError(
+            "hardware SDF manifest safety_margin_m must be finite and > 0")
+    effective_margin = float(manifest.get("effective_margin_m", -1.0))
+    if not np.isfinite(effective_margin):
+        raise ValueError(
+            "hardware SDF manifest effective_margin_m must be finite")
+    minimum_effective = safety_margin + recorded_total
+    if effective_margin + 1.0e-12 < minimum_effective:
+        raise ValueError(
+            "hardware SDF effective_margin_m must cover safety_margin_m plus "
+            f"error_budget_m.e_total_m ({effective_margin} < "
+            f"{minimum_effective})")
+    components["e_total_m"] = recorded_total
+    return safety_margin, components, minimum_effective
+
+
 def _validated_hardware_sdf_glb_sha(manifest, path, glb_path):
     if glb_path is None:
         return None
@@ -959,9 +1012,9 @@ def load_hardware_sdf(path, glb_path=None):
     """Load a manifest-bound ``hardware_sdf.json``/``.npz`` payload.
 
     The manifest must use the machine metre frame, sha-bind its data payload,
-    and either represent every static hardware key it lists or declare the key
-    under ``documented_gate_only``.  The returned object is accepted directly by
-    :class:`CurveHardwareSdfKeepout`.
+    declare the oracle static hardware key set, and either represent each key
+    or declare the key under documented gate-only/other-in-loop coverage.  The
+    returned object is accepted directly by :class:`CurveHardwareSdfKeepout`.
     """
     manifest_path = Path(os.fspath(path))
     manifest = _read_hardware_sdf_manifest(manifest_path)
@@ -972,23 +1025,32 @@ def load_hardware_sdf(path, glb_path=None):
     manifest_sha = _sha256_file(manifest_path)
     data_sha = _sha256_file(data_path)
     recorded_data_sha = manifest.get("data_sha256")
-    if recorded_data_sha is not None and recorded_data_sha != data_sha:
+    if not recorded_data_sha:
+        raise ValueError("hardware SDF manifest must sha-bind data_sha256")
+    if recorded_data_sha != data_sha:
         raise ValueError(
             f"stale hardware SDF data {os.fspath(data_path)!r}: manifest records "
             f"data_sha256 {recorded_data_sha!r}, live file is {data_sha!r}")
+    safety_margin, error_budget, minimum_effective_margin = (
+        _validate_hardware_sdf_error_budget(manifest)
+    )
 
     documented_gate_only = dict(manifest.get("documented_gate_only", {}))
     covered_by_other_in_loop = dict(manifest.get("covered_by_other_in_loop", {}))
     group_specs = tuple(manifest.get("groups", ()))
+    if not group_specs:
+        raise ValueError("hardware SDF manifest must contain at least one group")
     represented = [str(group["label"]) for group in group_specs]
     static_keys = manifest.get("static_hardware_keys")
-    if static_keys is not None:
-        validate_hardware_sdf_static_coverage(
-            represented_groups=represented,
-            documented_gate_only=documented_gate_only,
-            covered_by_other_in_loop=covered_by_other_in_loop,
-            static_hardware_keys=static_keys,
-        )
+    if not static_keys:
+        raise ValueError(
+            "hardware SDF manifest must declare non-empty static_hardware_keys")
+    validate_hardware_sdf_static_coverage(
+        represented_groups=represented,
+        documented_gate_only=documented_gate_only,
+        covered_by_other_in_loop=covered_by_other_in_loop,
+        static_hardware_keys=static_keys,
+    )
 
     top_margin = manifest.get("effective_margin_m")
     groups = []
@@ -1005,6 +1067,9 @@ def load_hardware_sdf(path, glb_path=None):
                 raise ValueError(
                     f"SDF group {label!r} must be a 3-D grid with every "
                     f"dimension >= 2, got {grid.shape}")
+            if not np.isfinite(grid).all():
+                raise ValueError(
+                    f"SDF group {label!r} grid values must be finite")
             expected_shape = group.get("shape")
             if expected_shape is not None and tuple(expected_shape) != grid.shape:
                 raise ValueError(
@@ -1016,12 +1081,26 @@ def load_hardware_sdf(path, glb_path=None):
                     f"SDF group {label!r} origin_m must be length 3, got "
                     f"{origin.shape}")
             spacing = float(group["spacing_m"])
-            if spacing <= 0.0:
-                raise ValueError(f"SDF group {label!r} spacing_m must be > 0")
-            effective_margin = float(group.get("effective_margin_m", top_margin))
-            if effective_margin <= 0.0:
+            if not np.isfinite(spacing) or spacing <= 0.0:
                 raise ValueError(
-                    f"SDF group {label!r} effective_margin_m must be > 0")
+                    f"SDF group {label!r} spacing_m must be finite and > 0")
+            effective_margin = float(group.get("effective_margin_m", top_margin))
+            if not np.isfinite(effective_margin) or effective_margin <= 0.0:
+                raise ValueError(
+                    f"SDF group {label!r} effective_margin_m must be finite "
+                    "and > 0")
+            if effective_margin + 1.0e-12 < minimum_effective_margin:
+                raise ValueError(
+                    f"SDF group {label!r} effective_margin_m must cover "
+                    "safety_margin_m plus error_budget_m.e_total_m "
+                    f"({effective_margin} < {minimum_effective_margin})")
+            sign_method = str(group.get("sign_method", "unknown"))
+            if sign_method not in OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS:
+                allowed = ", ".join(sorted(
+                    OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS))
+                raise ValueError(
+                    f"SDF group {label!r} sign_method {sign_method!r} is not "
+                    f"optimizer-safe; expected one of {allowed}")
             groups.append(
                 HardwareSdfGroup(
                     label=label,
@@ -1029,7 +1108,7 @@ def load_hardware_sdf(path, glb_path=None):
                     origin_m=origin,
                     spacing_m=spacing,
                     effective_margin_m=effective_margin,
-                    sign_method=str(group.get("sign_method", "unknown")),
+                    sign_method=sign_method,
                 )
             )
 
@@ -1043,6 +1122,8 @@ def load_hardware_sdf(path, glb_path=None):
         manifest_sha256=manifest_sha,
         data_sha256=data_sha,
         groups=tuple(groups),
+        safety_margin_m=safety_margin,
+        error_budget_m=error_budget,
         documented_gate_only=documented_gate_only,
         covered_by_other_in_loop=covered_by_other_in_loop,
         provenance=provenance,
@@ -1061,6 +1142,8 @@ def hardware_sdf_metadata_from_data(sdf_data):
         "HARDWARE_SDF_GROUPS": list(sdf_data.group_labels),
         "HARDWARE_SDF_SIGN_METHODS": sdf_data.sign_methods,
         "HARDWARE_SDF_EFFECTIVE_MARGIN_M": sdf_data.effective_margin_m,
+        "HARDWARE_SDF_SAFETY_MARGIN_M": sdf_data.safety_margin_m,
+        "HARDWARE_SDF_ERROR_BUDGET_M": sdf_data.error_budget_m,
         "DOCUMENTED_GATE_ONLY_GROUPS": sorted(
             str(key) for key in sdf_data.documented_gate_only
         ),

@@ -26,6 +26,8 @@ from banana_opt.hardware_keepout import (  # noqa: E402
 )
 from simsopt.geo import CurveXYZFourier  # noqa: E402
 
+SIGNED_TEST_METHOD = "watertight_contains_trimesh_nearest"
+
 
 def _circle_curve(radius=1.0, order=3, quadpoints=64, seed=None):
     curve = CurveXYZFourier(quadpoints, order)
@@ -57,6 +59,10 @@ def _write_sdf_payload(
     static_keys=("sensors", "frame", "sample"),
     documented_gate_only=None,
     covered_by_other_in_loop=None,
+    sign_method=SIGNED_TEST_METHOD,
+    safety_margin=None,
+    error_budget=None,
+    group_effective_margin=None,
     glb_path=None,
 ):
     data_path = root / "hardware_sdf.npz"
@@ -81,6 +87,19 @@ def _write_sdf_payload(
                 "glb_sha256": hashlib.sha256(glb_path.read_bytes()).hexdigest(),
             }
         )
+    if safety_margin is None:
+        safety_margin = effective_margin
+    if error_budget is None:
+        error_budget = {
+            "e_sweep_sample_m": 0.0,
+            "e_grid_m": 0.0,
+            "e_sign_m": 0.0,
+            "e_mesh_m": 0.0,
+            "e_oracle_mapping_m": 0.0,
+            "e_total_m": 0.0,
+        }
+    if group_effective_margin is None:
+        group_effective_margin = effective_margin
     manifest = {
         "schema_version": 1,
         "kind": "hardware_sdf",
@@ -88,7 +107,9 @@ def _write_sdf_payload(
         "units": units,
         "data_file": data_path.name,
         "data_sha256": data_sha,
-        "static_hardware_keys": list(static_keys),
+        "safety_margin_m": safety_margin,
+        "error_budget_m": error_budget,
+        "effective_margin_m": effective_margin,
         "groups": [
             {
                 "label": "sensors",
@@ -96,13 +117,15 @@ def _write_sdf_payload(
                 "origin_m": list(origin),
                 "spacing_m": spacing,
                 "shape": list(grid.shape),
-                "sign_method": "analytic_test_plane",
-                "effective_margin_m": effective_margin,
+                "sign_method": sign_method,
+                "effective_margin_m": group_effective_margin,
             }
         ],
         "documented_gate_only": documented_gate_only,
         "provenance": provenance,
     }
+    if static_keys is not None:
+        manifest["static_hardware_keys"] = list(static_keys)
     if covered_by_other_in_loop is not None:
         manifest["covered_by_other_in_loop"] = covered_by_other_in_loop
     manifest_path = root / "hardware_sdf.json"
@@ -143,6 +166,152 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not cover"):
                 load_hardware_sdf(manifest)
 
+    def test_loader_requires_static_hardware_key_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                static_keys=None,
+            )
+
+            with self.assertRaisesRegex(ValueError, "static_hardware_keys"):
+                load_hardware_sdf(manifest)
+
+    def test_loader_rejects_unsigned_sdf_sign_method(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                sign_method="unsigned_conservative",
+            )
+
+            with self.assertRaisesRegex(ValueError, "optimizer-safe"):
+                load_hardware_sdf(manifest)
+
+    def test_loader_validates_error_budget_components(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                error_budget={
+                    "e_sweep_sample_m": 0.0,
+                    "e_grid_m": 0.001,
+                    "e_sign_m": 0.0,
+                    "e_mesh_m": 0.0,
+                    "e_oracle_mapping_m": 0.0,
+                    "e_total_m": 0.0,
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "e_total_m"):
+                load_hardware_sdf(manifest)
+
+    def test_loader_rejects_group_margin_below_error_budget_floor(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.008,
+                safety_margin=0.005,
+                error_budget={
+                    "e_sweep_sample_m": 0.0,
+                    "e_grid_m": 0.003,
+                    "e_sign_m": 0.0,
+                    "e_mesh_m": 0.0,
+                    "e_oracle_mapping_m": 0.0,
+                    "e_total_m": 0.003,
+                },
+                group_effective_margin=0.001,
+            )
+
+            with self.assertRaisesRegex(ValueError, "safety_margin_m plus"):
+                load_hardware_sdf(manifest)
+
+    def test_loader_rejects_nonfinite_sdf_numbers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=float("nan"),
+                safety_margin=0.005,
+            )
+
+            with self.assertRaisesRegex(ValueError, "effective_margin_m"):
+                load_hardware_sdf(manifest)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=float("inf"),
+                effective_margin=0.005,
+            )
+
+            with self.assertRaisesRegex(ValueError, "spacing_m"):
+                load_hardware_sdf(manifest)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                error_budget={
+                    "e_sweep_sample_m": 0.0,
+                    "e_grid_m": float("inf"),
+                    "e_sign_m": 0.0,
+                    "e_mesh_m": 0.0,
+                    "e_oracle_mapping_m": 0.0,
+                    "e_total_m": float("inf"),
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "finite"):
+                load_hardware_sdf(manifest)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.full((3, 3, 3), np.inf, dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+            )
+
+            with self.assertRaisesRegex(ValueError, "grid values"):
+                load_hardware_sdf(manifest)
+
     def test_metadata_sha_binds_data_and_live_glb(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -168,6 +337,10 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             self.assertEqual(
                 metadata["HARDWARE_SDF_LIVE_GLB_SHA256"],
                 hashlib.sha256(glb.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(metadata["HARDWARE_SDF_SAFETY_MARGIN_M"], 0.005)
+            self.assertEqual(
+                metadata["HARDWARE_SDF_ERROR_BUDGET_M"]["e_total_m"], 0.0
             )
 
             glb.write_bytes(b"changed-cad")
