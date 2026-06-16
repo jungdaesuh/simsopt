@@ -44,6 +44,7 @@ from banana_opt.hardware_constraint_schema import (
     hardware_constraint_alm_names,
     resolve_alm_scale_with_provenance,
 )
+from banana_opt.hardware_keepout import live_winding_r0
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_geometry import build_surface_configs
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
@@ -2647,7 +2648,11 @@ def evaluate_stage2_alm_problem(
             poloidal_extent_hard_violation,
         ) = smooth_poloidal_extent_signed_constraint(
             Jpoloidal.curve,
-            Jpoloidal.R_winding,
+            # B1.3: live winding radius so the ALM poloidal-extent constraint
+            # tracks the moving frame under --winding-surface-free-r0. Use the
+            # module helper (not Jpoloidal.live_R_winding()) so it honors the
+            # curve/R_winding contract for any objective object.
+            live_winding_r0([Jpoloidal.curve], Jpoloidal.R_winding),
             poloidal_extent_threshold_rad,
             poloidal_extent_smoothing_value,
             base_objective_optimizable,

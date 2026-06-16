@@ -1,21 +1,31 @@
-"""Keep-out winding-frame regression tests (2026-06-10 laneLOW xval fix).
+"""Keep-out winding-frame regression tests (2026-06-10 laneLOW xval fix;
+2026-06-16 B1.3 value-live winding_r0).
 
 The single-stage solver used to construct ``CurveHardwareKeepout`` and
 ``CurveVesselEnvelopeKeepout`` without ``winding_r0``, so both penalties
 oriented their swept U-channel frames about the 0.903 spec constant even when
 the banana lineage is re-centered (0.920/0.934/0.993 winding tori are in
 active use). Measured consequence: true-frame hazard violations of
-J = 0.04-0.057 read exactly 0 in the 0.903 frame. The solver now resolves the
+J = 0.04-0.057 read exactly 0 in the 0.903 frame. The solver resolves the
 realized CWS winding torus via ``resolve_keepout_winding_r0`` and passes its
-major radius to both constructors. These tests pin that wiring:
+major radius to both constructors.
+
+B1.3 closed the remaining gap: the constructor value was frozen into the JIT
+closure, so with ``--winding-surface-free-r0`` the ``rc(0,0)`` DOF moved during
+optimisation while the frame stayed pinned to the seed radius. The terms now
+read the winding major radius LIVE from the curves' CWS surface on every
+evaluation, so J scores the true moving frame. The constructor ``winding_r0``
+is now only the fallback for non-CWS lineages (exposed as the back-compat
+``.winding_r0`` attribute; the live value is ``.live_winding_r0()``).
+
+These tests pin that wiring:
 
 * the resolver reports the realized torus for CWS lineages and the spec
   default for legacy non-CWS lineages (including the bundle's empty default),
-* a hardware keep-out constructed the way the solver now constructs it sees a
-  hazard point the 0.903-default construction is blind to (J > 0 vs exactly
-  0), and
-* the vessel-envelope term measures the violation in the realized frame, not
-  the 0.903 frame.
+* ``.winding_r0`` reports the constructor fallback while the term scores the
+  LIVE surface radius (so a stale constructor value no longer mis-scores a
+  CWS lineage, and moving ``rc(0,0)`` moves J), and
+* the vessel-envelope term measures the violation in the live frame.
 """
 
 from __future__ import annotations
@@ -144,7 +154,7 @@ class ResolveKeepoutWindingR0Test(unittest.TestCase):
 
 
 class HardwareKeepoutWindingFrameTest(unittest.TestCase):
-    def test_realized_frame_sees_hazard_the_default_frame_misses(self) -> None:
+    def test_realized_frame_is_read_live_not_from_the_constructor(self) -> None:
         family = _build_cws_banana_family(REALIZED_WINDING_R0_M)
         curves = [coil.curve for coil in family]
 
@@ -153,18 +163,6 @@ class HardwareKeepoutWindingFrameTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             realized.winding_r0, REALIZED_WINDING_R0_M, places=12
-        )
-        # Pre-fix solver construction: no winding_r0, so the 0.903 default.
-        default_frame = CurveHardwareKeepout(
-            curves,
-            FRAME_SPLIT_HAZARD_POINT,
-            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
-            POINT_WEIGHT_M2,
-        )
-        self.assertAlmostEqual(
-            default_frame.winding_r0,
-            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-            places=12,
         )
 
         # True frame: 3.5 mm envelope gap, inside the 5 mm margin -> active.
@@ -181,20 +179,43 @@ class HardwareKeepoutWindingFrameTest(unittest.TestCase):
             msg="realized-frame J should read the 3.5 mm corner violation",
         )
 
-        # 0.903 frame: same point measures ~5.49 mm, beyond the margin -> the
-        # default construction is exactly blind to the violation.
-        self.assertGreater(
-            default_frame.shortest_distance(), HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+        # B1.3: a STALE constructor value no longer mis-scores. This term is
+        # built with the 0.903 fallback, but its curves' CWS surface is the
+        # realized 0.920 torus -- the frame is read live from that surface, so
+        # ``.winding_r0`` (the fallback) is 0.903 while ``.live_winding_r0()``
+        # and J track the live 0.920 surface and match the realized term exactly.
+        stale_ctor = CurveHardwareKeepout(
+            curves,
+            FRAME_SPLIT_HAZARD_POINT,
+            HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+            POINT_WEIGHT_M2,
         )
-        self.assertEqual(
-            default_frame.J(),
-            0.0,
-            msg="0.903-default frame must reproduce the bug signature J=0",
+        self.assertAlmostEqual(
+            stale_ctor.winding_r0,
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+            places=12,
         )
+        self.assertAlmostEqual(
+            stale_ctor.live_winding_r0(), REALIZED_WINDING_R0_M, places=12
+        )
+        self.assertAlmostEqual(stale_ctor.J(), j_realized, places=12)
+
+    def test_moving_the_winding_surface_moves_J(self) -> None:
+        # The bug-exposing assertion: with the OLD frozen-closure code, J was
+        # baked against the construction-time radius and would NOT change when
+        # rc(0,0) moved. Live-reading makes J track the moved surface.
+        family = _build_cws_banana_family(REALIZED_WINDING_R0_M)
+        surface = family[0].curve.surf
+        term = _solver_style_hardware_keepout(family, FRAME_SPLIT_HAZARD_POINT)
+
+        j_before = term.J()
+        surface.set_rc(0, 0, 0.96)
+        self.assertAlmostEqual(term.live_winding_r0(), 0.96, places=12)
+        self.assertNotAlmostEqual(term.J(), j_before, places=9)
 
 
 class VesselEnvelopeWindingFrameTest(unittest.TestCase):
-    def test_vessel_violation_is_measured_in_the_realized_frame(self) -> None:
+    def test_vessel_violation_is_measured_in_the_live_frame(self) -> None:
         family = _build_cws_banana_family(REALIZED_WINDING_R0_M)
         curves = [coil.curve for coil in family]
         # 20 mm required clearance puts the inboard envelope corners inside
@@ -205,30 +226,34 @@ class VesselEnvelopeWindingFrameTest(unittest.TestCase):
         self.assertAlmostEqual(
             realized.winding_r0, REALIZED_WINDING_R0_M, places=12
         )
-        default_frame = CurveVesselEnvelopeKeepout(
+        # B1.3: built with the 0.903 fallback, but its curves embed the realized
+        # 0.920 torus. ``.winding_r0`` reports the fallback; the term scores the
+        # LIVE 0.920 surface, so its J matches the realized construction exactly.
+        stale_ctor = CurveVesselEnvelopeKeepout(
             curves, minimum_clearance=minimum_clearance
         )
         self.assertAlmostEqual(
-            default_frame.winding_r0,
+            stale_ctor.winding_r0,
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
             places=12,
         )
+        self.assertAlmostEqual(
+            stale_ctor.live_winding_r0(), REALIZED_WINDING_R0_M, places=12
+        )
 
         j_realized = realized.J()
-        j_default = default_frame.J()
         self.assertGreater(j_realized, 0.0)
-        self.assertGreater(j_default, 0.0)
-        # Frame roll moves the envelope corners, so the two frames measure
-        # materially different violations (~5.6% here): the term must score
-        # the realized geometry, not the 0.903 spec frame.
-        self.assertGreater(
-            abs(j_realized - j_default) / max(j_realized, j_default),
-            0.02,
-            msg=(
-                f"vessel J realized={j_realized} vs default={j_default}: "
-                "winding_r0 did not reach the vessel term"
-            ),
-        )
+        self.assertAlmostEqual(stale_ctor.J(), j_realized, places=12)
+
+    def test_moving_the_winding_surface_moves_vessel_J(self) -> None:
+        family = _build_cws_banana_family(REALIZED_WINDING_R0_M)
+        surface = family[0].curve.surf
+        term = _solver_style_vessel_keepout(family, minimum_clearance=0.02)
+
+        j_before = term.J()
+        surface.set_rc(0, 0, 0.96)
+        self.assertAlmostEqual(term.live_winding_r0(), 0.96, places=12)
+        self.assertNotAlmostEqual(term.J(), j_before, places=9)
 
 
 if __name__ == "__main__":

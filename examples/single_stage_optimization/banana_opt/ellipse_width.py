@@ -2,6 +2,7 @@ import numpy as np
 from jax import grad
 import jax.numpy as jnp
 
+from banana_opt.hardware_keepout import live_winding_r0
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
 from simsopt.geo.jit import jit
@@ -142,26 +143,48 @@ class ProjectedEllipseWidth(Optimizable):
     def __init__(self, curve, R_winding, a_winding,
                  Z_winding=0.0, scale=_DEFAULT_SCALE, epsilon=_DEFAULT_EPSILON):
         self.curve = curve
+        # Fallback winding major radius for non-CWS lineages; with a CWS curve
+        # the live value (surf.get_rc(0,0), read each evaluation) is what J
+        # scores against, so a freed/moved winding surface projects onto its true
+        # toroidal frame (B1.3 value-live). a_winding (the MINOR radius) stays
+        # frozen here: the minor-radius free DOF (--winding-surface-free-minor)
+        # is a separate blocker, outside the B1.3 winding_r0/rc(0,0) scope.
         self.R_winding = R_winding
         self.a_winding = a_winding
         self.Z_winding = Z_winding
         self.scale = scale
         self.epsilon = epsilon
         super().__init__(depends_on=[curve])
-        self.J_jax = jit(lambda g, gd: _projected_ellipse_width_pure(
-            g, gd, R_winding, a_winding, Z_winding, scale, epsilon))
-        self.dJ_dgamma = jit(lambda g, gd: grad(self.J_jax, argnums=0)(g, gd))
+        # R_winding enters as a CALL-TIME argument sourced live in J/dJ; it stays
+        # in the JAX-traced path (smooth projection metric), preserving
+        # differentiability. B1.3: value-live; frame-orientation gradient
+        # deferred (the curve VJP carries the centerline-translation gradient).
+        self.J_jax = jit(lambda g, gd, r_winding: _projected_ellipse_width_pure(
+            g, gd, r_winding, a_winding, Z_winding, scale, epsilon))
+        self.dJ_dgamma = jit(
+            lambda g, gd, r_winding: grad(self.J_jax, argnums=0)(g, gd, r_winding))
         self.dJ_dgammadash = jit(
-            lambda g, gd: grad(self.J_jax, argnums=1)(g, gd))
+            lambda g, gd, r_winding: grad(self.J_jax, argnums=1)(g, gd, r_winding))
+
+    def live_R_winding(self):
+        """Live winding major radius the projection frame is measured about, m."""
+        return live_winding_r0([self.curve], self.R_winding)
 
     def J(self):
-        return float(self.J_jax(self.curve.gamma(), self.curve.gammadash()))
+        return float(
+            self.J_jax(
+                self.curve.gamma(), self.curve.gammadash(), self.live_R_winding()
+            )
+        )
 
     @derivative_dec
     def dJ(self):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
-        return (self.curve.dgamma_by_dcoeff_vjp(np.asarray(self.dJ_dgamma(g, gd)))
-                + self.curve.dgammadash_by_dcoeff_vjp(np.asarray(self.dJ_dgammadash(g, gd))))
+        r_winding = self.live_R_winding()
+        return (self.curve.dgamma_by_dcoeff_vjp(
+                    np.asarray(self.dJ_dgamma(g, gd, r_winding)))
+                + self.curve.dgammadash_by_dcoeff_vjp(
+                    np.asarray(self.dJ_dgammadash(g, gd, r_winding))))
 
     return_fn_map = {'J': J, 'dJ': dJ}

@@ -151,6 +151,7 @@ from banana_opt.hardware_keepout import (
     hardware_keepout_metadata,
     hardware_keepout_results_fields,
     hardware_sdf_metadata_from_data,
+    live_winding_r0,
     load_hardware_keepout,
     load_hardware_sdf,
 )
@@ -2688,9 +2689,12 @@ def evaluate_stage2_hardware_constraints(
 
 
 def _stage2_poloidal_extent_rad(banana_curve):
+    # B1.3: read the LIVE winding radius (curve's CWS surf) so the recorded
+    # poloidal extent tracks a moved rc(0,0) under --winding-surface-free-r0;
+    # falls back to the spec constant for non-CWS curves.
     return max_poloidal_extent_rad(
         banana_curve,
-        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        live_winding_r0([banana_curve], BANANA_WINDING_SURFACE_MAJOR_RADIUS_M),
     )
 
 
@@ -4007,14 +4011,26 @@ def main(parsed_args=None):
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
+    # The poloidal-extent and ellipse-width buildability frames are oriented
+    # about the REALIZED CWS winding torus (not the 0.903 spec constant), exactly
+    # as the fold/vessel/hardware-keepout terms below are, so a re-centered or
+    # freed winding surface is measured in its true frame. The terms then read
+    # this radius LIVE from the curve each evaluation (B1.3); the value passed
+    # here is the construction-time fallback and the non-CWS fallback.
+    buildability_winding_radii = realized_cws_winding_radii(new_banana_coils)
+    buildability_winding_r0 = (
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        if buildability_winding_radii is None
+        else buildability_winding_radii[0]
+    )
     Jpe = PoloidalExtent(
         new_banana_curve,
-        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        buildability_winding_r0,
         POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     )
     Jw = ProjectedEllipseWidth(
         new_banana_curve,
-        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        buildability_winding_r0,
         banana_surf_radius,
     )
     Jself = CurveSelfIntersect(

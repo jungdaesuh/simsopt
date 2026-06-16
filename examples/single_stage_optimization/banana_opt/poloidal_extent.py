@@ -4,6 +4,7 @@ import numpy as np
 from jax import grad
 import jax.numpy as jnp
 
+from banana_opt.hardware_keepout import live_winding_r0
 from banana_opt.smoothing import smoothmax_selected
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
@@ -54,11 +55,37 @@ def poloidal_extent_signed_constraint(
     return signed_value, max(0.0, signed_value)
 
 
+def _iter_poloidal_extent_objectives(poloidal_extent_obj):
+    if all(
+        hasattr(poloidal_extent_obj, attr)
+        for attr in ("curve", "R_winding", "Z_winding")
+    ):
+        yield poloidal_extent_obj
+        return
+    if hasattr(poloidal_extent_obj, "opt"):
+        yield from _iter_poloidal_extent_objectives(poloidal_extent_obj.opt)
+        return
+    if hasattr(poloidal_extent_obj, "opts"):
+        for opt in poloidal_extent_obj.opts:
+            yield from _iter_poloidal_extent_objectives(opt)
+        return
+    raise AttributeError(
+        "Expected a PoloidalExtent objective or algebraic objective containing one."
+    )
+
+
 def poloidal_extent_rad_from_objective(poloidal_extent_obj) -> float:
-    return max_poloidal_extent_rad(
-        poloidal_extent_obj.curve,
-        poloidal_extent_obj.R_winding,
-        poloidal_extent_obj.Z_winding,
+    return max(
+        max_poloidal_extent_rad(
+            term.curve,
+            # B1.3: read the LIVE winding radius so the poloidal-extent verdict
+            # tracks the moving frame under --winding-surface-free-r0, matching
+            # the term's live J(). Use the module helper (not term.live_R_winding())
+            # so it honors the iterator's curve/R_winding contract for any object.
+            live_winding_r0([term.curve], term.R_winding),
+            term.Z_winding,
+        )
+        for term in _iter_poloidal_extent_objectives(poloidal_extent_obj)
     )
 
 
@@ -140,35 +167,56 @@ def smooth_max_poloidal_extent_signed_constraint_with_hard_signal(
 class PoloidalExtent(Optimizable):
     def __init__(self, curve, R_winding, theta_target, p=4, Z_winding=0.0):
         self.curve = curve
+        # Fallback winding major radius for non-CWS lineages; with a CWS curve
+        # the live value (surf.get_rc(0,0), read each evaluation) is what J
+        # scores against, so a freed/moved winding surface is measured in its
+        # true poloidal frame (B1.3 value-live).
         self.R_winding = float(R_winding)
         self.Z_winding = float(Z_winding)
         self.theta_target = float(theta_target)
         self.p = int(p)
         super().__init__(depends_on=[curve])
+        # R_winding enters as a CALL-TIME argument sourced live in J/dJ; it stays
+        # in the JAX-traced path (smooth arctan2 of R - R_winding), preserving
+        # differentiability. B1.3: value-live; frame-orientation gradient
+        # deferred (the curve VJP carries the centerline-translation gradient).
         self.J_jax = jit(
-            lambda g, gd: _poloidal_extent_pure(
+            lambda g, gd, r_winding: _poloidal_extent_pure(
                 g,
                 gd,
-                self.R_winding,
+                r_winding,
                 self.Z_winding,
                 self.theta_target,
                 self.p,
             )
         )
-        self.dJ_dgamma = jit(lambda g, gd: grad(self.J_jax, argnums=0)(g, gd))
-        self.dJ_dgammadash = jit(lambda g, gd: grad(self.J_jax, argnums=1)(g, gd))
+        self.dJ_dgamma = jit(
+            lambda g, gd, r_winding: grad(self.J_jax, argnums=0)(g, gd, r_winding)
+        )
+        self.dJ_dgammadash = jit(
+            lambda g, gd, r_winding: grad(self.J_jax, argnums=1)(g, gd, r_winding)
+        )
+
+    def live_R_winding(self):
+        """Live winding major radius the poloidal frame is measured about, m."""
+        return live_winding_r0([self.curve], self.R_winding)
 
     def J(self):
-        return float(self.J_jax(self.curve.gamma(), self.curve.gammadash()))
+        return float(
+            self.J_jax(
+                self.curve.gamma(), self.curve.gammadash(), self.live_R_winding()
+            )
+        )
 
     @derivative_dec
     def dJ(self):
         gamma = self.curve.gamma()
         gammadash = self.curve.gammadash()
+        r_winding = self.live_R_winding()
         return self.curve.dgamma_by_dcoeff_vjp(
-            np.asarray(self.dJ_dgamma(gamma, gammadash))
+            np.asarray(self.dJ_dgamma(gamma, gammadash, r_winding))
         ) + self.curve.dgammadash_by_dcoeff_vjp(
-            np.asarray(self.dJ_dgammadash(gamma, gammadash))
+            np.asarray(self.dJ_dgammadash(gamma, gammadash, r_winding))
         )
 
     return_fn_map = {"J": J, "dJ": dJ}

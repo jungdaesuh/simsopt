@@ -125,6 +125,29 @@ def resolve_keepout_winding_r0(banana_coils):
     return realized_winding_radii[0]
 
 
+def live_winding_r0(curves, fallback):
+    """LIVE winding major radius of the curves' embedded CWS torus, or ``fallback``.
+
+    The keepout and buildability steering terms hold *curves* (a symmetry-
+    expanded family or a single master), unlike :func:`resolve_keepout_winding_r0`
+    /:func:`realized_cws_winding_radii`, which read a *coil* list. For a CWS
+    lineage the winding major radius is ``surf.get_rc(0, 0)`` of the master curve
+    sharing the family's winding surface; with ``--winding-surface-free-r0`` that
+    DOF moves during optimisation, so reading it on every evaluation keeps the
+    U-channel frame measured about the TRUE moving torus instead of a value
+    frozen at objective construction (B1.3 value-live). The first curve exposing
+    a ``surf`` with ``get_rc`` is the master (``RotatedCurve`` copies wrap it and
+    expose neither); non-CWS lineages (e.g. ``CurveXYZFourier``) have no such
+    surface, so ``fallback`` -- the constructor's frozen ``winding_r0`` -- is
+    returned unchanged.
+    """
+    for curve in curves:
+        surf = getattr(curve, "surf", None)
+        if surf is not None and hasattr(surf, "get_rc"):
+            return float(surf.get_rc(0, 0))
+    return fallback
+
+
 # Surface quadrature over the swept rectangular Type KK U-channel sample box.
 # The triplets are coefficients of (half segment, half width, half depth):
 # 8 corners, 6 face centers, and 12 edge midpoints.  These points are a
@@ -444,7 +467,10 @@ class CurveHardwareKeepout(Optimizable):
         self.point_weight = float(point_weight)
         self.half_w = float(half_w)
         self.half_d = float(half_d)
-        self.winding_r0 = float(winding_r0)
+        # Fallback winding radius for non-CWS lineages (no embedded surface).
+        # ``winding_r0`` stays the public attribute/kwarg for back-compat; the
+        # live value is read from the curves' CWS surf each evaluation (B1.3).
+        self._winding_r0_fallback = float(winding_r0)
         # The contract distance is centerline corner-reach + safety; the box now
         # carries the corner reach, so the hinge margin is the safety remainder.
         corner_reach = float(np.hypot(half_w, half_d))
@@ -475,13 +501,33 @@ class CurveHardwareKeepout(Optimizable):
             real = chunk[np.any(chunk != _PAD_COORDINATE, axis=1)]
             self._chunk_bounds.append((real.min(axis=0), real.max(axis=0)))
 
-        self.J_jax = jit(lambda gammac, pts_: hardware_keepout_pure(
+        # winding_r0 enters as a CALL-TIME argument (sourced live in J/dJ) so the
+        # frame tracks the moving winding surface; it stays in the JAX-traced path
+        # (smooth cos/sin/normalize), preserving differentiability. B1.3:
+        # value-live; frame-orientation gradient deferred (the curve VJP
+        # dgamma_by_dsurf still carries the centerline-translation gradient).
+        self.J_jax = jit(lambda gammac, pts_, winding_r0_: hardware_keepout_pure(
             gammac, pts_, self.point_weight, self.half_w, self.half_d,
-            self.margin, self.winding_r0))
+            self.margin, winding_r0_))
         self.dJ_dgamma = jit(
-            lambda gammac, pts_: grad(self.J_jax, argnums=0)(gammac, pts_))
+            lambda gammac, pts_, winding_r0_: grad(self.J_jax, argnums=0)(
+                gammac, pts_, winding_r0_))
         self.candidates = None
         super().__init__(depends_on=curves)
+
+    @property
+    def winding_r0(self):
+        """Fallback winding major radius (constructor value), m.
+
+        Public back-compat attribute. The value the term *scores* against is the
+        live :meth:`live_winding_r0`, which equals this for a frozen winding
+        surface and for non-CWS lineages.
+        """
+        return self._winding_r0_fallback
+
+    def live_winding_r0(self):
+        """Live winding major radius the frame is currently measured about, m."""
+        return live_winding_r0(self.curves, self._winding_r0_fallback)
 
     def recompute_bell(self, parent=None):
         self.candidates = None
@@ -507,10 +553,11 @@ class CurveHardwareKeepout(Optimizable):
         the box surface); 0 means the metal touches the cloud. Pads sit ~1 km
         away and cannot win the minimum."""
         best = np.inf
+        winding_r0 = self.live_winding_r0()
         for curve in self.curves:
             g = np.asarray(curve.gamma(), dtype=np.float64)
             t, gw, gd, hseg = (np.asarray(x) for x in _bracket_frame(
-                jnp.asarray(g), self.winding_r0))
+                jnp.asarray(g), winding_r0))
             for chunk in self._chunks_np:
                 d = chunk[None, :, :] - g[:, None, :]
                 a = np.abs(np.sum(d * t[:, None, :], axis=2))
@@ -526,19 +573,22 @@ class CurveHardwareKeepout(Optimizable):
     # ── Optimizable API ────────────────────────────────────────────────
     def J(self):
         self.compute_candidates()
+        winding_r0 = self.live_winding_r0()
         res = 0.0
         for i, j in self.candidates:
             gammac = self.curves[i].gamma()
-            res += float(self.J_jax(gammac, self._chunks[j]))
+            res += float(self.J_jax(gammac, self._chunks[j], winding_r0))
         return res
 
     @derivative_dec
     def dJ(self):
         self.compute_candidates()
+        winding_r0 = self.live_winding_r0()
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         for i, j in self.candidates:
             gammac = self.curves[i].gamma()
-            dgamma_vecs[i] += np.asarray(self.dJ_dgamma(gammac, self._chunks[j]))
+            dgamma_vecs[i] += np.asarray(
+                self.dJ_dgamma(gammac, self._chunks[j], winding_r0))
         res = [
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
@@ -570,7 +620,9 @@ class CurveHardwareSdfKeepout(Optimizable):
         self.sdf_data = sdf_data
         self.half_w = float(half_w)
         self.half_d = float(half_d)
-        self.winding_r0 = float(winding_r0)
+        # Fallback winding radius for non-CWS lineages; the live value (read from
+        # the curves' CWS surf each evaluation) is what the frame scores against.
+        self._winding_r0_fallback = float(winding_r0)
         self._groups = [
             {
                 "label": group.label,
@@ -583,8 +635,11 @@ class CurveHardwareSdfKeepout(Optimizable):
             }
             for group in sdf_data.groups
         ]
+        # winding_r0 is a CALL-TIME argument sourced live in J/dJ (B1.3:
+        # value-live; frame-orientation gradient deferred -- the curve VJP keeps
+        # the centerline-translation gradient). It stays in the JAX-traced path.
         self.J_jax = jit(
-            lambda gammac, grid, origin, spacing, effective_margin:
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
             hardware_sdf_keepout_pure(
                 gammac,
                 grid,
@@ -593,22 +648,32 @@ class CurveHardwareSdfKeepout(Optimizable):
                 effective_margin,
                 self.half_w,
                 self.half_d,
-                self.winding_r0,
+                winding_r0_,
             )
         )
         self.dJ_dgamma = jit(
-            lambda gammac, grid, origin, spacing, effective_margin:
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
             grad(self.J_jax, argnums=0)(
-                gammac, grid, origin, spacing, effective_margin
+                gammac, grid, origin, spacing, effective_margin, winding_r0_
             )
         )
         super().__init__(depends_on=curves)
 
     @property
+    def winding_r0(self):
+        """Fallback winding major radius (constructor value), m. See
+        :meth:`live_winding_r0` for the value the term scores against."""
+        return self._winding_r0_fallback
+
+    def live_winding_r0(self):
+        """Live winding major radius the frame is currently measured about, m."""
+        return live_winding_r0(self.curves, self._winding_r0_fallback)
+
+    @property
     def group_labels(self):
         return self.sdf_data.group_labels
 
-    def _group_value(self, gammac, group):
+    def _group_value(self, gammac, group, winding_r0):
         return float(
             self.J_jax(
                 gammac,
@@ -616,19 +681,22 @@ class CurveHardwareSdfKeepout(Optimizable):
                 group["origin"],
                 group["spacing"],
                 group["effective_margin"],
+                winding_r0,
             )
         )
 
     def J(self):
+        winding_r0 = self.live_winding_r0()
         total = 0.0
         for curve in self.curves:
             gammac = curve.gamma()
             for group in self._groups:
-                total += self._group_value(gammac, group)
+                total += self._group_value(gammac, group, winding_r0)
         return total
 
     @derivative_dec
     def dJ(self):
+        winding_r0 = self.live_winding_r0()
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
@@ -640,6 +708,7 @@ class CurveHardwareSdfKeepout(Optimizable):
                         group["origin"],
                         group["spacing"],
                         group["effective_margin"],
+                        winding_r0,
                     )
                 )
         return sum(
@@ -677,13 +746,14 @@ class CurveHardwareSdfKeepout(Optimizable):
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
         best = {group["label"]: np.inf for group in self._groups}
+        winding_r0 = self.live_winding_r0()
         for curve in self.curves:
             surface_points = np.asarray(
                 swept_channel_surface_points(
                     jnp.asarray(curve.gamma()),
                     self.half_w,
                     self.half_d,
-                    self.winding_r0,
+                    winding_r0,
                 ),
                 dtype=np.float64,
             )
@@ -734,30 +804,48 @@ class CurveVesselEnvelopeKeepout(Optimizable):
         self.half_w = float(half_w)
         self.half_d = float(half_d)
         self.minimum_clearance = float(minimum_clearance)
-        self.winding_r0 = float(winding_r0)
+        # Fallback winding radius for non-CWS lineages; the live value (read from
+        # the curves' CWS surf each evaluation) is what the frame scores against.
+        self._winding_r0_fallback = float(winding_r0)
         self.vessel_r0 = float(vessel_r0)
         self.vessel_minor_radius = float(vessel_minor_radius)
-        self.J_jax = jit(lambda gammac: vessel_envelope_keepout_pure(
+        # winding_r0 is a CALL-TIME argument sourced live in J/dJ (B1.3:
+        # value-live; frame-orientation gradient deferred -- the curve VJP keeps
+        # the centerline-translation gradient). It stays in the JAX-traced path.
+        self.J_jax = jit(lambda gammac, winding_r0_: vessel_envelope_keepout_pure(
             gammac,
             self.half_w,
             self.half_d,
             self.minimum_clearance,
-            self.winding_r0,
+            winding_r0_,
             self.vessel_r0,
             self.vessel_minor_radius,
         ))
-        self.dJ_dgamma = jit(lambda gammac: grad(self.J_jax)(gammac))
+        self.dJ_dgamma = jit(
+            lambda gammac, winding_r0_: grad(self.J_jax, argnums=0)(
+                gammac, winding_r0_))
         super().__init__(depends_on=curves)
+
+    @property
+    def winding_r0(self):
+        """Fallback winding major radius (constructor value), m. See
+        :meth:`live_winding_r0` for the value the term scores against."""
+        return self._winding_r0_fallback
+
+    def live_winding_r0(self):
+        """Live winding major radius the frame is currently measured about, m."""
+        return live_winding_r0(self.curves, self._winding_r0_fallback)
 
     def shortest_clearance(self):
         """Minimum signed Type KK envelope clearance to the vessel, m."""
         best = np.inf
+        winding_r0 = self.live_winding_r0()
         for curve in self.curves:
             clearance = vessel_envelope_clearance_pure(
                 jnp.asarray(curve.gamma()),
                 self.half_w,
                 self.half_d,
-                self.winding_r0,
+                winding_r0,
                 self.vessel_r0,
                 self.vessel_minor_radius,
             )
@@ -765,13 +853,17 @@ class CurveVesselEnvelopeKeepout(Optimizable):
         return best
 
     def J(self):
-        return sum(float(self.J_jax(curve.gamma())) for curve in self.curves)
+        winding_r0 = self.live_winding_r0()
+        return sum(
+            float(self.J_jax(curve.gamma(), winding_r0)) for curve in self.curves
+        )
 
     @derivative_dec
     def dJ(self):
+        winding_r0 = self.live_winding_r0()
         return sum(
             curve.dgamma_by_dcoeff_vjp(
-                np.asarray(self.dJ_dgamma(curve.gamma()))
+                np.asarray(self.dJ_dgamma(curve.gamma(), winding_r0))
             )
             for curve in self.curves
         )
@@ -791,6 +883,7 @@ def _sha256_file(path):
 
 EFFECTIVE_KEEPOUT_GROUPS_KEY = "EFFECTIVE_KEEPOUT_GROUPS"
 OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS = frozenset({
+    "component_union_watertight_contains_trimesh_nearest",
     "watertight_contains_trimesh_nearest",
 })
 HARDWARE_SDF_ERROR_BUDGET_COMPONENT_KEYS = (
