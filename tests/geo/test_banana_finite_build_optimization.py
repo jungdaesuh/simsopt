@@ -27,7 +27,13 @@ from simsopt.objectives import SquaredFlux
 
 from banana_opt.finite_current_profiles import JHALPERN30_FINITE_CURRENT_MODE
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
+from banana_opt import finitebuild_export
 from banana_opt import stage2_geometry
+from banana_opt.finitebuild_export import (
+    FiniteBuildExportConfig,
+    _build_finitebuild_banana_coils,
+)
+from banana_opt.hardware_contracts import BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
 from banana_opt.stage2_geometry import (
     FiniteBuildSettings,
     build_finite_build_banana_coils,
@@ -243,6 +249,97 @@ class BuildFiniteBuildBananaCoilsTest(unittest.TestCase):
         )
         Jf_norot = SquaredFlux(plasma, BiotSavart(coils_norot))
         self.assertEqual(len(Jf.x), len(Jf_norot.x) + 3)
+
+
+def _export_config(frame="surface_tangent"):
+    return FiniteBuildExportConfig(
+        biot_savart_file=Path("/tmp/unused_finitebuild_export.json"),
+        output=None,
+        numfilaments_n=2,
+        numfilaments_b=3,
+        gapsize_n=0.02,
+        gapsize_b=0.04,
+        frame=frame,
+        nfp=NFP,
+        stellsym=True,
+    )
+
+
+def _export_cws_banana_coils(major_radius, minor_radius=BANANA_SURF_RADIUS_M):
+    """An export-shaped CWS banana coil set (NFP symmetry copies) on a torus."""
+    surface = SurfaceRZFourier(nfp=NFP, stellsym=True)
+    surface.set_rc(0, 0, major_radius)
+    surface.set_rc(1, 0, minor_radius)
+    surface.set_zs(1, 0, minor_radius)
+    master = _master_curve(surface)
+    return tuple(
+        coils_via_symmetries(
+            [master],
+            [ScaledCurrent(Current(1), NET_BANANA_CURRENT_A)],
+            NFP,
+            True,
+        )
+    )
+
+
+def _export_xyz_banana_coils():
+    """An export-shaped non-CWS banana coil set (no embedded winding torus)."""
+    from simsopt.geo import CurveXYZFourier
+
+    curve = CurveXYZFourier(np.linspace(0.0, 1.0, 32, endpoint=False), order=1)
+    curve.set("xc(1)", 0.3)
+    curve.set("ys(1)", 0.3)
+    return tuple(
+        coils_via_symmetries(
+            [curve],
+            [ScaledCurrent(Current(1), NET_BANANA_CURRENT_A)],
+            NFP,
+            True,
+        )
+    )
+
+
+class FiniteBuildExportFrameRadiusTest(unittest.TestCase):
+    """The EXPORT surface-tangent frame uses the realized embedded torus radius."""
+
+    def _captured_surface_major_radius(self, banana_coils):
+        captured = {}
+
+        config = _export_config()
+        nfilaments = config.numfilaments_n * config.numfilaments_b
+
+        def fake_grid(curve, *args, **kwargs):
+            captured.update(kwargs)
+            return [curve] * nfilaments
+
+        with mock.patch.object(
+            finitebuild_export,
+            "create_multifilament_grid",
+            side_effect=fake_grid,
+        ):
+            _build_finitebuild_banana_coils(banana_coils, config)
+        return captured["surface_major_radius"]
+
+    def test_export_frame_uses_realized_recentered_winding_radius(self):
+        # A CWS lineage embedded on a non-0.903 torus: the export frame must use
+        # the realized 0.993, not the 0.903 spec constant.
+        surface_major_radius = self._captured_surface_major_radius(
+            _export_cws_banana_coils(0.993)
+        )
+        self.assertAlmostEqual(surface_major_radius, 0.993)
+        self.assertNotAlmostEqual(
+            surface_major_radius, BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        )
+
+    def test_export_frame_falls_back_to_spec_for_non_cws(self):
+        # A non-CWS lineage has no embedded torus -> fall back to the spec
+        # constant.
+        surface_major_radius = self._captured_surface_major_radius(
+            _export_xyz_banana_coils()
+        )
+        self.assertAlmostEqual(
+            surface_major_radius, BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        )
 
 
 class InitializeCoilsFiniteBuildGuardTest(unittest.TestCase):

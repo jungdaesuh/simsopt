@@ -23,11 +23,15 @@ from banana_opt.hardware_contracts import (
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_MIN_FRACTION,
+    LCFS_INBOARD_RADIUS_MIN_M,
+    LCFS_OUTBOARD_RADIUS_MAX_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     fixed_stage2_clearance_contract,
     is_major_radius_offspec,
+    lcfs_inboard_edge_radius_m,
+    lcfs_outboard_edge_radius_m,
 )
 from banana_opt.hardware_constraint_schema import (
     ALMConstraintMetadata,
@@ -945,8 +949,31 @@ def _build_stage2_artifact_hardware_snapshot(
     self_intersect_threshold=None,
     final_shortest_self_distance=None,
     self_intersect_min_distance=None,
+    final_self_envelope_penalty=None,
+    final_self_envelope_min_dist=None,
+    self_envelope_mode=None,
+    self_envelope_min_distance=None,
+    self_envelope_nominal_min_distance=None,
+    self_envelope_sampling_margin=None,
+    self_distance_window=None,
+    self_envelope_groc_radius=None,
+    self_envelope_groc_radius_floor=None,
+    final_fold_penalty=None,
+    final_fold_geodesic_curvature_max=None,
+    fold_geodesic_curvature_limit=None,
+    fold_geodesic_curvature_threshold=None,
+    fold_geodesic_curvature_margin_fraction=None,
+    fold_ok=None,
     length_min_target=None,
 ):
+    final_lcfs_outboard_edge_m = lcfs_outboard_edge_radius_m(
+        final_plasma_major_radius_m,
+        final_plasma_minor_radius_m,
+    )
+    final_lcfs_inboard_edge_m = lcfs_inboard_edge_radius_m(
+        final_plasma_major_radius_m,
+        final_plasma_minor_radius_m,
+    )
     snapshot = {
         "coil_length": final_coil_length,
         "length_target": length_target,
@@ -962,6 +989,10 @@ def _build_stage2_artifact_hardware_snapshot(
         "tf_current_A": tf_current_A,
         "tf_current_limit_A": TF_CURRENT_HARD_LIMIT_A,
         "lcfs_major_radius_m": final_plasma_major_radius_m,
+        "lcfs_outboard_edge_m": final_lcfs_outboard_edge_m,
+        "lcfs_outboard_edge_threshold": LCFS_OUTBOARD_RADIUS_MAX_M,
+        "lcfs_inboard_edge_m": final_lcfs_inboard_edge_m,
+        "lcfs_inboard_edge_threshold": LCFS_INBOARD_RADIUS_MIN_M,
         "lcfs_minor_radius_m": final_plasma_minor_radius_m,
         "artifact_hardware_status": hardware_status,
     }
@@ -981,6 +1012,50 @@ def _build_stage2_artifact_hardware_snapshot(
         snapshot["shortest_self_distance"] = float(final_shortest_self_distance)
     if self_intersect_min_distance is not None:
         snapshot["self_intersect_min_distance"] = float(self_intersect_min_distance)
+    if final_self_envelope_penalty is not None:
+        snapshot["self_envelope_penalty"] = float(final_self_envelope_penalty)
+    if final_self_envelope_min_dist is not None:
+        snapshot["self_envelope_min_dist"] = float(final_self_envelope_min_dist)
+    if self_envelope_mode is not None:
+        snapshot["self_envelope_mode"] = str(self_envelope_mode)
+    if self_envelope_min_distance is not None:
+        snapshot["self_envelope_min_distance"] = float(self_envelope_min_distance)
+    if self_envelope_nominal_min_distance is not None:
+        snapshot["self_envelope_nominal_min_distance"] = float(
+            self_envelope_nominal_min_distance
+        )
+    if self_envelope_sampling_margin is not None:
+        snapshot["self_envelope_sampling_margin"] = float(
+            self_envelope_sampling_margin
+        )
+    if self_distance_window is not None:
+        snapshot["self_distance_window"] = float(self_distance_window)
+    if self_envelope_groc_radius is not None:
+        snapshot["self_envelope_groc_radius"] = float(self_envelope_groc_radius)
+    if self_envelope_groc_radius_floor is not None:
+        snapshot["self_envelope_groc_radius_floor"] = float(
+            self_envelope_groc_radius_floor
+        )
+    if final_fold_penalty is not None:
+        snapshot["fold_penalty"] = float(final_fold_penalty)
+    if final_fold_geodesic_curvature_max is not None:
+        snapshot["fold_geodesic_curvature_max"] = float(
+            final_fold_geodesic_curvature_max
+        )
+    if fold_geodesic_curvature_limit is not None:
+        snapshot["fold_geodesic_curvature_limit"] = float(
+            fold_geodesic_curvature_limit
+        )
+    if fold_geodesic_curvature_threshold is not None:
+        snapshot["fold_geodesic_curvature_threshold"] = float(
+            fold_geodesic_curvature_threshold
+        )
+    if fold_geodesic_curvature_margin_fraction is not None:
+        snapshot["fold_geodesic_curvature_margin_fraction"] = float(
+            fold_geodesic_curvature_margin_fraction
+        )
+    if fold_ok is not None:
+        snapshot["fold_ok"] = bool(fold_ok)
     return snapshot
 
 
@@ -988,6 +1063,7 @@ def _stage2_constraint_names(
     *,
     include_coil_surface: bool,
     include_poloidal_extent: bool = False,
+    include_hardware_keepout: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
     requested_names = [
@@ -1004,6 +1080,8 @@ def _stage2_constraint_names(
         requested_names.insert(3, "coil_surface_spacing")
     if include_poloidal_extent:
         requested_names.append("poloidal_extent")
+    if include_hardware_keepout:
+        requested_names.append("hardware_keepout")
     constraint_names = list(hardware_constraint_alm_names(names=tuple(requested_names)))
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
@@ -1014,6 +1092,7 @@ def _legacy_stage2_constraint_names(
     *,
     include_coil_surface: bool,
     include_poloidal_extent: bool = False,
+    include_hardware_keepout: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
     # Must match the schema-driven order returned by `_stage2_constraint_names`
@@ -1036,14 +1115,13 @@ def _legacy_stage2_constraint_names(
         ]
     if include_poloidal_extent:
         constraint_names.append("poloidal_extent")
-    constraint_names.extend(
-        [
-            "width_min",
-            "width_max",
-            "self_intersect",
-            "banana_current_upper_bound",
-        ]
-    )
+    constraint_names.extend(["width_min", "width_max", "self_intersect"])
+    if include_hardware_keepout:
+        # Schema order places hardware_keepout after self_intersect and before
+        # banana_current (hardware_constraint_schema), so the positional tolerance
+        # zip stays aligned with `_stage2_constraint_names`.
+        constraint_names.append("hardware_keepout")
+    constraint_names.append("banana_current_upper_bound")
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
     return tuple(constraint_names)
@@ -1127,6 +1205,7 @@ def _stage2_alm_constraint_metadata(
     *,
     threshold_overrides: Mapping[str, float],
     activity_tolerance_by_name: Mapping[str, float],
+    scale_overrides: Mapping[str, float] | None = None,
     iota_penalty_threshold: float | None = None,
 ) -> dict[str, ALMConstraintMetadata]:
     metadata_by_name: dict[str, ALMConstraintMetadata] = {}
@@ -1173,11 +1252,15 @@ def _stage2_alm_constraint_metadata(
             and "coil_length" not in threshold_overrides
         ):
             _require_explicit_stage2_alm_threshold("coil_length_upper_bound", None)
+        scale_override = (
+            None if scale_overrides is None else scale_overrides.get(constraint_name)
+        )
         if constraint_name in hard_hardware_names:
             metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
                 constraint_name,
                 threshold_overrides=threshold_overrides,
                 activity_tolerance=activity_tolerance,
+                scale_override=scale_override,
                 objective_value_kind="hard",
                 gradient_value_kind="hard",
                 dual_update_value_kind="hard",
@@ -1189,6 +1272,7 @@ def _stage2_alm_constraint_metadata(
             constraint_name,
             threshold_overrides=threshold_overrides,
             activity_tolerance=activity_tolerance,
+            scale_override=scale_override,
             objective_value_kind="surrogate" if uses_surrogate else "hard",
             gradient_value_kind="surrogate" if uses_surrogate else "hard",
             dual_update_value_kind="hard",
@@ -1267,6 +1351,15 @@ def build_stage2_results(
     final_coil_length,
     final_curve_curve_min_dist,
     hardware_status,
+    winding_surface_mpol=1,
+    winding_surface_ntor=0,
+    winding_surface_free_mpol=0,
+    winding_surface_free_ntor=0,
+    winding_surface_free_dof_names=(),
+    realized_winding_radii=None,
+    winding_surface_reembedded_on_live_surface=False,
+    cc_objective_threshold=None,
+    cc_objective_margin=None,
     final_curve_surface_min_dist=None,
     plasma_vessel_min_dist=None,
     final_poloidal_extent_rad=None,
@@ -1278,6 +1371,21 @@ def build_stage2_results(
     self_intersect_threshold=None,
     final_shortest_self_distance=None,
     self_intersect_min_distance=None,
+    final_self_envelope_penalty=None,
+    final_self_envelope_min_dist=None,
+    self_envelope_mode=None,
+    self_envelope_min_distance=None,
+    self_envelope_nominal_min_distance=None,
+    self_envelope_sampling_margin=None,
+    self_distance_window=None,
+    self_envelope_groc_radius=None,
+    self_envelope_groc_radius_floor=None,
+    final_fold_penalty=None,
+    final_fold_geodesic_curvature_max=None,
+    fold_geodesic_curvature_limit=None,
+    fold_geodesic_curvature_threshold=None,
+    fold_geodesic_curvature_margin_fraction=None,
+    fold_ok=None,
     length_min_target=None,
     proxy_placement_mode="vmec_axis_zeroth_coefficients",
     proxy_vf_current_scalar_policy="nonnegative_magnitude",
@@ -1315,6 +1423,23 @@ def build_stage2_results(
         self_intersect_threshold=self_intersect_threshold,
         final_shortest_self_distance=final_shortest_self_distance,
         self_intersect_min_distance=self_intersect_min_distance,
+        final_self_envelope_penalty=final_self_envelope_penalty,
+        final_self_envelope_min_dist=final_self_envelope_min_dist,
+        self_envelope_mode=self_envelope_mode,
+        self_envelope_min_distance=self_envelope_min_distance,
+        self_envelope_nominal_min_distance=self_envelope_nominal_min_distance,
+        self_envelope_sampling_margin=self_envelope_sampling_margin,
+        self_distance_window=self_distance_window,
+        self_envelope_groc_radius=self_envelope_groc_radius,
+        self_envelope_groc_radius_floor=self_envelope_groc_radius_floor,
+        final_fold_penalty=final_fold_penalty,
+        final_fold_geodesic_curvature_max=final_fold_geodesic_curvature_max,
+        fold_geodesic_curvature_limit=fold_geodesic_curvature_limit,
+        fold_geodesic_curvature_threshold=fold_geodesic_curvature_threshold,
+        fold_geodesic_curvature_margin_fraction=(
+            fold_geodesic_curvature_margin_fraction
+        ),
+        fold_ok=fold_ok,
         length_min_target=length_min_target,
     )
     validate_stage2_coil_partition_counts(
@@ -1329,6 +1454,7 @@ def build_stage2_results(
         raise ValueError("WOUT_OFF_SPEC must be boolean.")
     if wout_convention not in {"signed_cw", "positive_ccw"}:
         raise ValueError("WOUT_CONVENTION must be signed_cw or positive_ccw.")
+    winding_surface_free_dof_names = tuple(winding_surface_free_dof_names)
     coil_groups_manifest = build_contiguous_manifest(
         num_tf_coils=int(num_tf_coils),
         num_banana_coils=int(num_banana_coils),
@@ -1352,6 +1478,9 @@ def build_stage2_results(
         "BANANA_CURRENT_MAX_A": float(args.banana_current_max_A),
         "BANANA_CURRENT_A": float(banana_current_A),
         "BANANA_TO_TF_CURRENT_RATIO": float(banana_to_tf_current_ratio),
+        "BANANA_REPRESENTATION": (
+            "typekk_pack" if bool(getattr(args, "finite_build", False)) else "filament"
+        ),
         "FINITE_CURRENT_MODE": str(finite_current_mode),
         "BOOZER_CURRENT_CONVENTION": str(boozer_current_convention),
         "BOOZER_I": float(boozer_I),
@@ -1375,6 +1504,14 @@ def build_stage2_results(
         "IOTA_TARGET_SIGN": int(iota_target_sign),
         "CC_THRESHOLD": cc_threshold,
         "CC_WEIGHT": cc_weight,
+        "CC_OBJECTIVE_THRESHOLD": (
+            None
+            if cc_objective_threshold is None
+            else float(cc_objective_threshold)
+        ),
+        "CC_OBJECTIVE_MARGIN_M": (
+            None if cc_objective_margin is None else float(cc_objective_margin)
+        ),
         "CURVATURE_WEIGHT": curvature_weight,
         "CURVATURE_THRESHOLD": curvature_threshold,
         "POLOIDAL_EXTENT_RAD": (
@@ -1421,11 +1558,30 @@ def build_stage2_results(
         "LENGTH_TARGET": length_target,
         "MAJOR_RADIUS": major_radius,
         "R0_OFF_SPEC": is_major_radius_offspec(major_radius),
-        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": float(
+        # Record the REALIZED embedded winding torus (warm resumes optimize on
+        # the surface serialized inside the CWS master, which desyncs from the
+        # 0.903 spec constant once free_r0/free_minor re-center it; 2026-06-10
+        # laneR0920 fix, mirroring the single-stage path). Non-CWS lineages fall
+        # back to the spec constant; the spec constant stays available under its
+        # own explicit key.
+        "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": (
+            realized_winding_radii[0]
+            if realized_winding_radii is not None
+            else float(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+        ),
+        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": (
+            realized_winding_radii[0]
+            if realized_winding_radii is not None
+            else float(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+        ),
+        "BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M": (
+            None if realized_winding_radii is None else realized_winding_radii[1]
+        ),
+        "BANANA_WINDING_SURFACE_SPEC_MAJOR_RADIUS_M": float(
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),
-        "COIL_WINDING_SURFACE_MAJOR_RADIUS_M": float(
-            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        "BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE": bool(
+            winding_surface_reembedded_on_live_surface
         ),
         "TOROIDAL_FLUX": toroidal_flux,
         "STAGE2_PLASMA_SCALING_MODE": str(
@@ -1433,6 +1589,15 @@ def build_stage2_results(
         ),
         "NFP": int(nfp),
         "banana_surf_radius": banana_surf_radius,
+        "WINDING_SURFACE_MPOL": int(winding_surface_mpol),
+        "WINDING_SURFACE_NTOR": int(winding_surface_ntor),
+        "WINDING_SURFACE_FREE_MPOL": int(winding_surface_free_mpol),
+        "WINDING_SURFACE_FREE_NTOR": int(winding_surface_free_ntor),
+        "WINDING_SURFACE_FREE_DOF_NAMES": list(winding_surface_free_dof_names),
+        "WINDING_SURFACE_FREE_DOF_COUNT": len(winding_surface_free_dof_names),
+        "WINDING_SURFACE_SHAPE_DOF_ENABLED": bool(
+            winding_surface_free_dof_names
+        ),
         "order": order,
         "init_only": args.init_only,
         "max_iterations": max_iterations,
@@ -1657,6 +1822,39 @@ def build_stage2_results(
             if self_intersect_min_distance is None
             else float(self_intersect_min_distance)
         ),
+        "SELF_ENVELOPE_PENALTY": hardware_snapshot.get("self_envelope_penalty"),
+        "SELF_ENVELOPE_MODE": hardware_snapshot.get("self_envelope_mode"),
+        "SELF_ENVELOPE_MIN_DIST_M": hardware_snapshot.get("self_envelope_min_dist"),
+        "SELF_ENVELOPE_THRESHOLD_M": hardware_snapshot.get(
+            "self_envelope_min_distance"
+        ),
+        "SELF_ENVELOPE_NOMINAL_MIN_DISTANCE_M": hardware_snapshot.get(
+            "self_envelope_nominal_min_distance"
+        ),
+        "SELF_ENVELOPE_SAMPLING_MARGIN_M": hardware_snapshot.get(
+            "self_envelope_sampling_margin"
+        ),
+        "SELF_DISTANCE_WINDOW_M": hardware_snapshot.get("self_distance_window"),
+        "SELF_ENVELOPE_GROC_RADIUS_M": hardware_snapshot.get(
+            "self_envelope_groc_radius"
+        ),
+        "SELF_ENVELOPE_GROC_RADIUS_FLOOR_M": hardware_snapshot.get(
+            "self_envelope_groc_radius_floor"
+        ),
+        "FOLD_PENALTY": hardware_snapshot.get("fold_penalty"),
+        "FOLD_GEODESIC_CURVATURE_MAX_INV_M": hardware_snapshot.get(
+            "fold_geodesic_curvature_max"
+        ),
+        "FOLD_GEODESIC_CURVATURE_LIMIT_INV_M": hardware_snapshot.get(
+            "fold_geodesic_curvature_limit"
+        ),
+        "FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M": hardware_snapshot.get(
+            "fold_geodesic_curvature_threshold"
+        ),
+        "FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION": hardware_snapshot.get(
+            "fold_geodesic_curvature_margin_fraction"
+        ),
+        "FOLD_OK": hardware_snapshot.get("fold_ok"),
         **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
     }
 
@@ -1781,6 +1979,10 @@ def evaluate_stage2_hardware_constraints(
     self_intersect_threshold=None,
     shortest_self_distance=None,
     self_intersect_min_distance=None,
+    self_envelope_min_dist=None,
+    self_envelope_min_distance=None,
+    fold_geodesic_curvature_max=None,
+    fold_geodesic_curvature_limit=None,
     banana_current_A=None,
     banana_current_threshold=None,
     tf_current_A=None,
@@ -1799,6 +2001,8 @@ def evaluate_stage2_hardware_constraints(
             ("width_min", width_min_threshold),
             ("width_max", width_max_threshold),
             ("self_intersect", self_intersect_threshold),
+            ("self_envelope_min_dist", self_envelope_min_distance),
+            ("fold_geodesic_curvature_max", fold_geodesic_curvature_limit),
             ("banana_current", banana_current_threshold),
             ("tf_current", tf_current_threshold),
         )
@@ -1813,6 +2017,8 @@ def evaluate_stage2_hardware_constraints(
         "width_min": coil_width,
         "width_max": coil_width,
         "self_intersect": self_intersect_penalty,
+        "self_envelope_min_dist": self_envelope_min_dist,
+        "fold_geodesic_curvature_max": fold_geodesic_curvature_max,
         "banana_current": banana_current_A,
         "tf_current": tf_current_A,
         "lcfs_major_radius": final_plasma_major_radius_m,
@@ -1857,6 +2063,14 @@ def evaluate_stage2_hardware_constraints(
         status["shortest_self_distance"] = float(shortest_self_distance)
     if self_intersect_min_distance is not None:
         status["self_intersect_min_distance"] = float(self_intersect_min_distance)
+    if self_envelope_min_dist is not None:
+        status["self_envelope_min_dist"] = float(self_envelope_min_dist)
+    if self_envelope_min_distance is not None:
+        status["self_envelope_min_distance"] = float(self_envelope_min_distance)
+    if fold_geodesic_curvature_max is not None:
+        status["fold_geodesic_curvature_max"] = float(fold_geodesic_curvature_max)
+    if fold_geodesic_curvature_limit is not None:
+        status["fold_geodesic_curvature_limit"] = float(fold_geodesic_curvature_limit)
     if banana_current_A is not None and banana_current_threshold is not None:
         status["banana_current_A"] = float(banana_current_A)
         status["banana_current_threshold"] = float(banana_current_threshold)
@@ -1878,8 +2092,10 @@ def stage2_constraint_activity_tolerances(
     banana_current_tolerance: float = 1e-3,
     width_tolerance: float = 1e-3,
     self_intersect_tolerance: float = 1e-6,
+    hardware_keepout_tolerance: float = 1e-6,
     include_coil_surface: bool = False,
     include_poloidal_extent: bool = False,
+    include_hardware_keepout: bool = False,
     include_iota_penalty: bool = False,
     iota_tolerance: float = 0.0,
 ):
@@ -1908,14 +2124,10 @@ def stage2_constraint_activity_tolerances(
         ]
     if include_poloidal_extent:
         tolerances.append(max(float(curvature_smoothing), _SMOOTHING_EPS))
-    tolerances.extend(
-        [
-            width_tolerance,
-            width_tolerance,
-            self_intersect_tolerance,
-            banana_current_tolerance,
-        ]
-    )
+    tolerances.extend([width_tolerance, width_tolerance, self_intersect_tolerance])
+    if include_hardware_keepout:
+        tolerances.append(hardware_keepout_tolerance)
+    tolerances.append(banana_current_tolerance)
     if include_iota_penalty:
         tolerances.append(
             max(stage2_iota_penalty_threshold(iota_tolerance), _SMOOTHING_EPS)
@@ -1930,8 +2142,10 @@ def resolve_stage2_constraint_activity_tolerances(
     *,
     include_coil_surface: bool,
     include_poloidal_extent: bool = False,
+    include_hardware_keepout: bool = False,
     include_iota_penalty: bool = False,
     iota_tolerance: float | None = None,
+    hardware_keepout_tolerance: float | None = None,
 ):
     parameters = inspect.signature(stage2_constraint_activity_tolerances_fn).parameters
     call_kwargs = {}
@@ -1939,6 +2153,13 @@ def resolve_stage2_constraint_activity_tolerances(
         call_kwargs["include_coil_surface"] = include_coil_surface
     if "include_poloidal_extent" in parameters:
         call_kwargs["include_poloidal_extent"] = include_poloidal_extent
+    if "include_hardware_keepout" in parameters:
+        call_kwargs["include_hardware_keepout"] = include_hardware_keepout
+    if (
+        hardware_keepout_tolerance is not None
+        and "hardware_keepout_tolerance" in parameters
+    ):
+        call_kwargs["hardware_keepout_tolerance"] = hardware_keepout_tolerance
     if "include_iota_penalty" in parameters:
         call_kwargs["include_iota_penalty"] = include_iota_penalty
     if "iota_tolerance" in parameters and iota_tolerance is not None:
@@ -1952,6 +2173,7 @@ def resolve_stage2_constraint_activity_tolerances(
     constraint_names = _legacy_stage2_constraint_names(
         include_coil_surface=include_coil_surface,
         include_poloidal_extent=include_poloidal_extent,
+        include_hardware_keepout=include_hardware_keepout,
         include_iota_penalty=include_iota_penalty,
     )
     if len(tolerance_values) != len(constraint_names):
@@ -2264,6 +2486,9 @@ def evaluate_stage2_alm_problem(
     width_max_threshold=None,
     Jself=None,
     self_intersect_threshold=0.0,
+    Jhardware=None,
+    hardware_keepout_alm_scale=None,
+    hardware_keepout_tolerance=None,
     length_min_target=None,
     emit_diagnostics=False,
 ):
@@ -2389,6 +2614,19 @@ def evaluate_stage2_alm_problem(
     self_intersect_violation = max(0.0, self_intersect_signed_value)
     shortest_self_distance = float(Jself.shortest_self_distance())
 
+    include_hardware_keepout = Jhardware is not None
+    if include_hardware_keepout:
+        # Penalty-as-constraint, mirroring self_intersect: the static-hardware
+        # keep-out hinge is exactly zero when clear and strictly positive when
+        # the swept Type-KK envelope intrudes, so the signed value IS the J()
+        # penalty (schema threshold 0.0, zero slack). The ALM row uses the
+        # schema alm_scale, NOT the soft-objective HARDWARE_KEEPOUT_WEIGHT.
+        hardware_keepout_signed_value = float(Jhardware.J())
+        hardware_keepout_grad = np.asarray(
+            Jhardware.dJ(partials=True)(base_objective_optimizable), dtype=float
+        )
+        hardware_keepout_violation = max(0.0, hardware_keepout_signed_value)
+
     include_poloidal_extent = (
         Jpoloidal is not None
         and poloidal_extent_threshold_rad is not None
@@ -2477,6 +2715,7 @@ def evaluate_stage2_alm_problem(
     active_names = _stage2_constraint_names(
         include_coil_surface=include_coil_surface,
         include_poloidal_extent=include_poloidal_extent,
+        include_hardware_keepout=include_hardware_keepout,
         include_iota_penalty=include_iota_penalty,
     )
     hard_by_name = {
@@ -2529,6 +2768,11 @@ def evaluate_stage2_alm_problem(
         surrogate_by_name["coil_surface_spacing"] = curve_surface_signed_value
         grad_by_name["coil_surface_spacing"] = curve_surface_grad
         feasibility_by_name["coil_surface_spacing"] = curve_surface_violation
+    if include_hardware_keepout:
+        hard_by_name["hardware_keepout"] = hardware_keepout_signed_value
+        surrogate_by_name["hardware_keepout"] = hardware_keepout_signed_value
+        grad_by_name["hardware_keepout"] = hardware_keepout_grad
+        feasibility_by_name["hardware_keepout"] = hardware_keepout_violation
     if include_iota_penalty:
         hard_by_name["iota_penalty"] = iota_signed_value
         surrogate_by_name["iota_penalty"] = iota_signed_value
@@ -2578,10 +2822,12 @@ def evaluate_stage2_alm_problem(
         curvature_smoothing,
         include_coil_surface=include_coil_surface,
         include_poloidal_extent=include_poloidal_extent,
+        include_hardware_keepout=include_hardware_keepout,
         include_iota_penalty=include_iota_penalty,
         iota_tolerance=(
             None if stage2_iota_runtime is None else stage2_iota_runtime.tolerance
         ),
+        hardware_keepout_tolerance=hardware_keepout_tolerance,
     )
     raw_constraint_activity_tolerances = np.asarray(
         _ordered_constraint_values(active_names, tolerance_by_name),
@@ -2603,6 +2849,11 @@ def evaluate_stage2_alm_problem(
         active_names,
         threshold_overrides=threshold_overrides,
         activity_tolerance_by_name=tolerance_by_name,
+        scale_overrides=(
+            None
+            if hardware_keepout_alm_scale is None
+            else {"hardware_keepout": float(hardware_keepout_alm_scale)}
+        ),
         iota_penalty_threshold=(
             None if stage2_iota_runtime is None else stage2_iota_penalty_threshold_value
         ),

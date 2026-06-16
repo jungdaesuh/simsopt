@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,8 @@ from scipy.io import netcdf_file
 from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.field.coil import Current, ScaledCurrent
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.geo.framedcurve import FramedCurveSurfaceTangent
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +43,7 @@ SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
 POLOIDAL_EXTENT_PATH = EXAMPLES_ROOT / "banana_opt" / "poloidal_extent.py"
 ELLIPSE_WIDTH_PATH = EXAMPLES_ROOT / "banana_opt" / "ellipse_width.py"
 SELF_INTERSECT_PATH = EXAMPLES_ROOT / "banana_opt" / "self_intersect.py"
+FOLD_BUILDABILITY_PATH = EXAMPLES_ROOT / "banana_opt" / "fold_buildability.py"
 TAYLOR_TEST_EPSILONS = (1.0e-3, 5.0e-4, 2.5e-4, 1.25e-4)
 MANUFACTURABILITY_ALM_CONSTRAINT_NAMES = (
     "width_min",
@@ -407,6 +411,213 @@ class _FakeOptimizableCurve(Optimizable):
         )
 
 
+def _hairpin_geometry(gap_m, *, leg_length=0.20, return_offset=1.0, section_count=48):
+    half_gap = 0.5 * float(gap_m)
+    top_x = np.linspace(-leg_length, leg_length, section_count, endpoint=False)
+    top = np.column_stack(
+        (top_x, np.full(section_count, half_gap), np.zeros(section_count))
+    )
+    right_return = np.column_stack(
+        (
+            np.full(section_count, leg_length + return_offset),
+            np.linspace(half_gap, -half_gap, section_count, endpoint=False),
+            np.ones(section_count),
+        )
+    )
+    bottom_x = np.linspace(leg_length, -leg_length, section_count, endpoint=False)
+    bottom = np.column_stack(
+        (bottom_x, np.full(section_count, -half_gap), np.zeros(section_count))
+    )
+    left_return = np.column_stack(
+        (
+            np.full(section_count, -leg_length - return_offset),
+            np.linspace(-half_gap, half_gap, section_count, endpoint=False),
+            np.ones(section_count),
+        )
+    )
+    return np.vstack((top, right_return, bottom, left_return))
+
+
+def _hairpin_gap_derivative(gap_m, *, section_count=48):
+    delta = 1.0e-6
+    return (
+        _hairpin_geometry(gap_m + delta, section_count=section_count)
+        - _hairpin_geometry(gap_m - delta, section_count=section_count)
+    ) / (2.0 * delta)
+
+
+def _periodic_curve_derivative(points):
+    return 0.5 * len(points) * (
+        np.roll(points, -1, axis=0) - np.roll(points, 1, axis=0)
+    )
+
+
+def _stadium_hairpin_points(gap_m, *, point_count=192, nonuniform=False):
+    half_gap = 0.5 * float(gap_m)
+    leg_half_length = 0.20
+    right_turn_start = 2.0 * leg_half_length
+    bottom_start = right_turn_start + math.pi * half_gap
+    left_turn_start = bottom_start + 2.0 * leg_half_length
+    perimeter = left_turn_start + math.pi * half_gap
+    u = np.linspace(0.0, 1.0, point_count, endpoint=False)
+    if nonuniform:
+        # du_nonuniform/du ranges from 0.5 to 1.5, a deliberate 3x speed spread.
+        u = u + np.sin(2.0 * math.pi * u) / (4.0 * math.pi)
+    arc = np.mod(u * perimeter, perimeter)
+    points = np.zeros((point_count, 3), dtype=float)
+
+    top_mask = arc < right_turn_start
+    top_arc = arc[top_mask]
+    points[top_mask, 0] = -leg_half_length + top_arc
+    points[top_mask, 1] = half_gap
+
+    right_mask = (arc >= right_turn_start) & (arc < bottom_start)
+    right_arc = arc[right_mask] - right_turn_start
+    right_angle = (math.pi / 2.0) - right_arc / half_gap
+    points[right_mask, 0] = leg_half_length + half_gap * np.cos(right_angle)
+    points[right_mask, 1] = half_gap * np.sin(right_angle)
+
+    bottom_mask = (arc >= bottom_start) & (arc < left_turn_start)
+    bottom_arc = arc[bottom_mask] - bottom_start
+    points[bottom_mask, 0] = leg_half_length - bottom_arc
+    points[bottom_mask, 1] = -half_gap
+
+    left_mask = arc >= left_turn_start
+    left_arc = arc[left_mask] - left_turn_start
+    left_angle = (-math.pi / 2.0) - left_arc / half_gap
+    points[left_mask, 0] = -leg_half_length + half_gap * np.cos(left_angle)
+    points[left_mask, 1] = half_gap * np.sin(left_angle)
+    return points
+
+
+def _stadium_hairpin_curve(gap_m, *, point_count=192, nonuniform=False):
+    points = _stadium_hairpin_points(
+        gap_m,
+        point_count=point_count,
+        nonuniform=nonuniform,
+    )
+    return _FakeOptimizableCurve(points, _periodic_curve_derivative(points))
+
+
+def _expected_global_radius_penalty(curve, radius_floor, *, upper_triangle_only=False):
+    gamma = curve.gamma()
+    gammadash = curve.gammadash()
+    speed = np.linalg.norm(gammadash, axis=1)
+    safe_speed = np.where(speed > 0.0, speed, 1.0)
+    tangent = gammadash / safe_speed[:, None]
+    delta = gamma[None, :, :] - gamma[:, None, :]
+    delta_sq = np.sum(delta * delta, axis=2)
+    tangent_projection = np.sum(delta * tangent[:, None, :], axis=2)
+    normal_component = delta - tangent_projection[:, :, None] * tangent[:, None, :]
+    normal_sq = np.sum(normal_component * normal_component, axis=2)
+    safe_normal = np.sqrt(np.where(normal_sq > 0.0, normal_sq, 1.0))
+    radii = delta_sq / (2.0 * safe_normal)
+    valid = (delta_sq > 0.0) & (normal_sq > 0.0)
+    violation = np.maximum(float(radius_floor) - np.where(valid, radii, np.inf), 0.0) ** 2
+    weights = speed[:, None] * speed[None, :]
+    if upper_triangle_only:
+        violation = np.where(np.triu(np.ones_like(violation, dtype=bool), k=1), violation, 0.0)
+    return float(np.sum(weights * violation))
+
+
+class _GapHairpinCurve(Optimizable):
+    def __init__(self, gap_m, *, section_count=48):
+        self._gap_m = float(gap_m)
+        self._section_count = int(section_count)
+        self.quadpoints = np.linspace(0.0, 1.0, 4 * self._section_count, endpoint=False)
+        self.order = 3
+        super().__init__(x0=np.array([self._gap_m], dtype=float))
+
+    @property
+    def x(self):
+        return np.array([self._gap_m], dtype=float)
+
+    @x.setter
+    def x(self, value):
+        self._gap_m = float(np.asarray(value, dtype=float)[0])
+
+    def gamma(self):
+        return _hairpin_geometry(self._gap_m, section_count=self._section_count)
+
+    def gammadash(self):
+        return _periodic_curve_derivative(self.gamma())
+
+    def dgamma_by_dcoeff_vjp(self, point_gradient):
+        gap_derivative = _hairpin_gap_derivative(
+            self._gap_m,
+            section_count=self._section_count,
+        )
+        return _FakeDerivative([float(np.sum(point_gradient * gap_derivative))])
+
+    def dgammadash_by_dcoeff_vjp(self, tangent_gradient):
+        tangent_gap_derivative = _periodic_curve_derivative(
+            _hairpin_gap_derivative(
+                self._gap_m,
+                section_count=self._section_count,
+            )
+        )
+        return _FakeDerivative(
+            [float(np.sum(tangent_gradient * tangent_gap_derivative))]
+        )
+
+
+class _ParallelLegCurve(Optimizable):
+    def __init__(self, gap_m, *, section_count=48, half_length=0.20):
+        self._gap_m = float(gap_m)
+        self._section_count = int(section_count)
+        self._half_length = float(half_length)
+        self.quadpoints = np.linspace(0.0, 1.0, 2 * self._section_count, endpoint=False)
+        super().__init__(x0=np.array([self._gap_m], dtype=float))
+
+    @property
+    def x(self):
+        return np.array([self._gap_m], dtype=float)
+
+    @x.setter
+    def x(self, value):
+        self._gap_m = float(np.asarray(value, dtype=float)[0])
+
+    def gamma(self):
+        half_gap = 0.5 * self._gap_m
+        top_x = np.linspace(
+            -self._half_length,
+            self._half_length,
+            self._section_count,
+            endpoint=False,
+        )
+        bottom_x = np.linspace(
+            self._half_length,
+            -self._half_length,
+            self._section_count,
+            endpoint=False,
+        )
+        top = np.column_stack(
+            (top_x, np.full(self._section_count, half_gap), np.zeros(self._section_count))
+        )
+        bottom = np.column_stack(
+            (
+                bottom_x,
+                np.full(self._section_count, -half_gap),
+                np.zeros(self._section_count),
+            )
+        )
+        return np.vstack((top, bottom))
+
+    def gammadash(self):
+        top = np.tile(np.array([1.0, 0.0, 0.0]), (self._section_count, 1))
+        bottom = np.tile(np.array([-1.0, 0.0, 0.0]), (self._section_count, 1))
+        return np.vstack((top, bottom))
+
+    def dgamma_by_dcoeff_vjp(self, point_gradient):
+        derivative = np.zeros_like(self.gamma())
+        derivative[: self._section_count, 1] = 0.5
+        derivative[self._section_count :, 1] = -0.5
+        return _FakeDerivative([float(np.sum(point_gradient * derivative))])
+
+    def dgammadash_by_dcoeff_vjp(self, tangent_gradient):
+        return _FakeDerivative([0.0])
+
+
 class _FakeCurrentObjective:
     def __init__(self, value, grad):
         self._value = float(value)
@@ -643,6 +854,35 @@ class PoloidalExtentModuleTests(_ModuleTestCase):
             np.pi / 2.0,
         )
 
+    def test_poloidal_extent_rad_from_objective_handles_algebraic_wrappers(self):
+        low_theta = 0.45
+        high_theta = 0.95
+        gammadash = np.array([[0.0, 1.0, 0.0]], dtype=float)
+        low_curve = _FakeOptimizableCurve(
+            self._inboard_poloidal_points(low_theta),
+            gammadash,
+        )
+        high_curve = _FakeOptimizableCurve(
+            self._inboard_poloidal_points(high_theta),
+            gammadash,
+        )
+        low_objective = self.module.PoloidalExtent(
+            low_curve,
+            R_winding=0.976,
+            theta_target=1.0,
+        )
+        high_objective = self.module.PoloidalExtent(
+            high_curve,
+            R_winding=0.976,
+            theta_target=1.0,
+        )
+        wrapped_objective = 0.5 * low_objective + 0.5 * high_objective
+
+        self.assertAlmostEqual(
+            self.module.poloidal_extent_rad_from_objective(wrapped_objective),
+            high_theta,
+        )
+
     def test_smooth_constraint_returns_signed_violation_and_curve_gradient(self):
         curve = _FakeCurve([[0.976, 0.0, 0.2]])
 
@@ -719,6 +959,19 @@ def _manufacturability_test_curve():
     return _FakeOptimizableCurve(gamma, gammadash, order=3)
 
 
+def _fold_test_curve():
+    quadpoints = np.linspace(0.0, 1.0, 64, endpoint=False)
+    curve = CurveXYZFourier(quadpoints, order=2)
+    curve.set("xc(0)", 0.976)
+    curve.set("xc(1)", 0.12)
+    curve.set("ys(1)", 0.10)
+    curve.set("zs(1)", 0.04)
+    curve.set("xc(2)", 0.015)
+    curve.set("ys(2)", -0.01)
+    curve.set("zs(2)", 0.02)
+    return curve
+
+
 class EllipseWidthModuleTests(_ModuleTestCase):
     MODULE_PATH = ELLIPSE_WIDTH_PATH
     MODULE_PREFIX = "banana_ellipse_width"
@@ -751,6 +1004,293 @@ class CurveSelfIntersectModuleTests(_ModuleTestCase):
 
         self.assertGreaterEqual(penalty, 0.0)
         self.assertTrue(np.isfinite(penalty))
+
+    def test_curve_self_distance_allows_compliant_hairpin_gap(self):
+        objective = self.module.CurveSelfDistance(
+            _GapHairpinCurve(0.050),
+            0.0462,
+            self_window_m=0.060,
+        )
+
+        self.assertLess(objective.J(), 1.0e-14)
+        self.assertGreaterEqual(objective.shortest_self_distance(), 0.0462)
+
+    def test_curve_self_distance_sampling_margin_tightens_activation_only(self):
+        objective = self.module.CurveSelfDistance(
+            _GapHairpinCurve(0.050),
+            0.0462,
+            self_window_m=0.060,
+            sampling_margin_m=0.005,
+        )
+
+        self.assertAlmostEqual(objective.activation_distance, 0.0512)
+        self.assertAlmostEqual(objective.shortest_self_distance(), 0.050, delta=5.0e-4)
+        self.assertGreater(objective.J(), 0.0)
+
+    def test_curve_self_distance_penalizes_leg_overlap(self):
+        objective = self.module.CurveSelfDistance(
+            _GapHairpinCurve(0.040),
+            0.0462,
+            self_window_m=0.060,
+        )
+
+        self.assertGreater(objective.J(), 0.0)
+        self.assertAlmostEqual(objective.shortest_self_distance(), 0.040, delta=5.0e-4)
+
+    def test_curve_self_distance_arc_window_is_physical_not_parametric(self):
+        baseline = self.module.CurveSelfDistance(
+            _GapHairpinCurve(0.040, section_count=32),
+            0.0462,
+            self_window_m=0.060,
+        ).shortest_self_distance()
+
+        for section_count in (64, 96):
+            curve = _GapHairpinCurve(0.040, section_count=section_count)
+            curve.quadpoints = curve.quadpoints**2
+            measured = self.module.CurveSelfDistance(
+                curve,
+                0.0462,
+                self_window_m=0.060,
+            ).shortest_self_distance()
+            self.assertLess(abs(measured - baseline) / baseline, 0.01)
+
+        uniform_curve = _stadium_hairpin_curve(0.040, point_count=192)
+        nonuniform_curve = _stadium_hairpin_curve(
+            0.040,
+            point_count=192,
+            nonuniform=True,
+        )
+        uniform_lengths = np.linalg.norm(
+            np.roll(nonuniform_curve.gamma(), -1, axis=0) - nonuniform_curve.gamma(),
+            axis=1,
+        )
+        self.assertGreater(np.max(uniform_lengths) / np.min(uniform_lengths), 2.8)
+        uniform_measured = self.module.CurveSelfDistance(
+            uniform_curve,
+            0.0462,
+            self_window_m=0.060,
+        ).shortest_self_distance()
+        nonuniform_measured = self.module.CurveSelfDistance(
+            nonuniform_curve,
+            0.0462,
+            self_window_m=0.060,
+        ).shortest_self_distance()
+        uniform_objective = self.module.CurveSelfDistance(
+            uniform_curve,
+            0.0462,
+            self_window_m=0.060,
+        )
+        nonuniform_objective = self.module.CurveSelfDistance(
+            nonuniform_curve,
+            0.0462,
+            self_window_m=0.060,
+        )
+        self.assertAlmostEqual(uniform_measured, 0.040, delta=5.0e-4)
+        self.assertLess(
+            abs(nonuniform_measured - uniform_measured) / uniform_measured,
+            0.01,
+        )
+        self.assertGreater(uniform_objective.J(), 0.0)
+        self.assertGreater(nonuniform_objective.J(), 0.0)
+        self.assertLess(
+            abs(nonuniform_objective.J() - uniform_objective.J())
+            / uniform_objective.J(),
+            0.01,
+        )
+
+    def test_curve_self_distance_gap_gradient_matches_finite_difference(self):
+        curve = _GapHairpinCurve(0.040)
+        objective = self.module.CurveSelfDistance(
+            curve,
+            0.0462,
+            self_window_m=0.060,
+        )
+        analytic = float(objective.dJ()[0])
+
+        eps = 1.0e-5
+        curve.x = [0.040 + eps]
+        plus = objective.J()
+        curve.x = [0.040 - eps]
+        minus = objective.J()
+        curve.x = [0.040]
+        finite_difference = (plus - minus) / (2.0 * eps)
+
+        self.assertAlmostEqual(analytic, finite_difference, delta=abs(analytic) * 0.05)
+
+    def test_curve_groc_circle_returns_local_radius(self):
+        radius = 0.13
+        for quadpoint_count in (64, 128, 256, 384):
+            with self.subTest(quadpoint_count=quadpoint_count):
+                quadpoints = np.linspace(0.0, 1.0, quadpoint_count, endpoint=False)
+                curve = CurveXYZFourier(quadpoints, order=1)
+                curve.set("xc(1)", radius)
+                curve.set("ys(1)", radius)
+                objective = self.module.CurveGlobalRadiusOfCurvature(
+                    curve,
+                    0.0230886,
+                )
+
+                self.assertAlmostEqual(
+                    objective.shortest_groc(),
+                    radius,
+                    delta=radius * 1.0e-10,
+                )
+
+    def test_curve_groc_circle_is_invariant_to_nonuniform_sampling(self):
+        radius = 0.13
+        uniform_quadpoints = np.linspace(0.0, 1.0, 128, endpoint=False)
+        nonuniform_quadpoints = uniform_quadpoints**3
+        measurements = []
+        for quadpoints in (uniform_quadpoints, nonuniform_quadpoints):
+            curve = CurveXYZFourier(quadpoints, order=1)
+            curve.set("xc(1)", radius)
+            curve.set("ys(1)", radius)
+            measurements.append(
+                self.module.CurveGlobalRadiusOfCurvature(
+                    curve,
+                    0.0230886,
+                ).shortest_groc()
+            )
+
+        np.testing.assert_allclose(measurements, [radius, radius], rtol=1.0e-4)
+
+    def test_curve_groc_antiparallel_legs_use_half_gap(self):
+        objective = self.module.CurveGlobalRadiusOfCurvature(
+            _ParallelLegCurve(0.050),
+            0.0230886,
+        )
+
+        self.assertAlmostEqual(objective.shortest_groc(), 0.025, delta=5.0e-4)
+        self.assertLess(objective.J(), 1.0e-14)
+
+    def test_curve_groc_penalizes_leg_overlap(self):
+        objective = self.module.CurveGlobalRadiusOfCurvature(
+            _ParallelLegCurve(0.040),
+            0.0230886,
+        )
+
+        self.assertAlmostEqual(objective.shortest_groc(), 0.020, delta=5.0e-4)
+        self.assertGreater(objective.J(), 0.0)
+
+    def test_curve_groc_gap_gradient_matches_finite_difference(self):
+        curve = _ParallelLegCurve(0.040)
+        objective = self.module.CurveGlobalRadiusOfCurvature(curve, 0.0230886)
+        analytic = float(objective.dJ()[0])
+
+        eps = 1.0e-5
+        curve.x = [0.040 + eps]
+        plus = objective.J()
+        curve.x = [0.040 - eps]
+        minus = objective.J()
+        curve.x = [0.040]
+        finite_difference = (plus - minus) / (2.0 * eps)
+
+        self.assertAlmostEqual(analytic, finite_difference, delta=abs(analytic) * 0.05)
+
+    def test_curve_groc_ordered_pair_sum_is_orientation_invariant(self):
+        curve = _ParallelLegCurve(0.040)
+        gamma = curve.gamma()
+        gammadash = curve.gammadash()
+        reversed_curve = _FakeOptimizableCurve(
+            gamma[::-1],
+            -gammadash[::-1],
+        )
+
+        radius_floor = 0.0230886
+        objective = self.module.CurveGlobalRadiusOfCurvature(curve, radius_floor)
+        reversed_objective = self.module.CurveGlobalRadiusOfCurvature(
+            reversed_curve,
+            radius_floor,
+        )
+        expected_full_ordered_sum = _expected_global_radius_penalty(
+            curve,
+            radius_floor,
+        )
+        expected_one_triangle_sum = _expected_global_radius_penalty(
+            curve,
+            radius_floor,
+            upper_triangle_only=True,
+        )
+
+        self.assertGreater(objective.J(), 0.0)
+        self.assertGreater(reversed_objective.J(), 0.0)
+        self.assertGreater(expected_full_ordered_sum, 1.5 * expected_one_triangle_sum)
+        self.assertAlmostEqual(
+            objective.J(),
+            expected_full_ordered_sum,
+            delta=max(1.0e-14, abs(expected_full_ordered_sum) * 1.0e-12),
+        )
+        self.assertAlmostEqual(
+            reversed_objective.shortest_groc(),
+            objective.shortest_groc(),
+            delta=abs(objective.shortest_groc()) * 1.0e-12,
+        )
+        self.assertAlmostEqual(
+            reversed_objective.J(),
+            objective.J(),
+            delta=max(1.0e-14, abs(objective.J()) * 1.0e-12),
+        )
+
+
+class FoldBuildabilityModuleTests(_ModuleTestCase):
+    MODULE_PATH = FOLD_BUILDABILITY_PATH
+    MODULE_PREFIX = "banana_fold_buildability"
+
+    def test_fold_geodesic_hinge_is_zero_above_realized_curvature(self):
+        curve = _fold_test_curve()
+        framedcurve = FramedCurveSurfaceTangent(curve, 0.976, 0.0)
+        diagnostic = self.module.CurveSurfaceGeodesicCurvature(
+            framedcurve,
+            p=2,
+            threshold=0.0,
+        )
+        max_geodesic = diagnostic.max_abs_geodesic_curvature()
+        objective = self.module.CurveSurfaceGeodesicCurvature(
+            framedcurve,
+            p=2,
+            threshold=max_geodesic + 1.0,
+        )
+
+        self.assertAlmostEqual(objective.J(), 0.0)
+        self.assertAlmostEqual(
+            objective.max_abs_geodesic_curvature(),
+            max_geodesic,
+        )
+
+    def test_fold_geodesic_hinge_gradient_matches_finite_difference(self):
+        curve = _fold_test_curve()
+        framedcurve = FramedCurveSurfaceTangent(curve, 0.976, 0.0)
+        diagnostic = self.module.CurveSurfaceGeodesicCurvature(
+            framedcurve,
+            p=2,
+            threshold=0.0,
+        )
+        threshold = 0.5 * diagnostic.max_abs_geodesic_curvature()
+        objective = self.module.CurveSurfaceGeodesicCurvature(
+            framedcurve,
+            p=2,
+            threshold=threshold,
+        )
+        dofs = objective.x.copy()
+        rng = np.random.default_rng(3)
+        direction = rng.standard_normal(size=dofs.shape)
+        direction /= np.linalg.norm(direction)
+        analytic = float(np.dot(objective.dJ(), direction))
+
+        eps = 1.0e-5
+        objective.x = dofs + eps * direction
+        plus = objective.J()
+        objective.x = dofs - eps * direction
+        minus = objective.J()
+        objective.x = dofs
+        finite_difference = (plus - minus) / (2.0 * eps)
+
+        self.assertGreater(objective.J(), 0.0)
+        self.assertAlmostEqual(
+            analytic,
+            finite_difference,
+            delta=max(1.0e-6, abs(analytic) * 0.05),
+        )
 
 
 class Stage2ObjectiveModuleTests(_ModuleTestCase):
@@ -2072,6 +2612,307 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             [0.025, 0.12, 2e-3, 4e-3, 5e-3, 6e-3, 3e-6, 7e-3],
         )
 
+    def test_stage2_constraint_names_insert_hardware_keepout_after_self_intersect(self):
+        # 2026-06-15 ALM-row parity: the static-hardware keep-out is promoted to
+        # a zero-slack ALM constraint row, schema-ordered right after
+        # self_intersect (hardware_constraint_schema).
+        without = self.module._stage2_constraint_names(
+            include_coil_surface=True, include_poloidal_extent=True
+        )
+        self.assertNotIn("hardware_keepout", without)
+        withkeepout = self.module._stage2_constraint_names(
+            include_coil_surface=True,
+            include_poloidal_extent=True,
+            include_hardware_keepout=True,
+        )
+        self.assertEqual(len(withkeepout), len(without) + 1)
+        self.assertEqual(
+            withkeepout.index("hardware_keepout"),
+            withkeepout.index("self_intersect") + 1,
+        )
+
+    def test_stage2_activity_tolerances_insert_hardware_keepout_hinge(self):
+        # The positional tolerance list gains the keep-out hinge tolerance (same
+        # 1e-6 as self_intersect) between self_intersect and banana_current.
+        base = self.module.stage2_constraint_activity_tolerances(0.005, 0.05)
+        withkeepout = self.module.stage2_constraint_activity_tolerances(
+            0.005, 0.05, include_hardware_keepout=True
+        )
+        self.assertEqual(len(withkeepout), len(base) + 1)
+        self.assertEqual(
+            withkeepout,
+            [0.02, 0.2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-6, 1e-6, 1e-3],
+        )
+
+    def test_resolve_activity_tolerances_maps_hardware_keepout_by_name(self):
+        # Reaching a populated mapping proves the legacy name list and the
+        # positional tolerance list stay length-aligned (resolve raises on
+        # mismatch), so the keep-out row cannot silently desync the zip.
+        tolerance_by_name = self.module.resolve_stage2_constraint_activity_tolerances(
+            self.module.stage2_constraint_activity_tolerances,
+            0.005,
+            0.05,
+            include_coil_surface=False,
+            include_hardware_keepout=True,
+        )
+        self.assertIn("hardware_keepout", tolerance_by_name)
+        self.assertEqual(tolerance_by_name["hardware_keepout"], 1e-6)
+
+    def test_resolve_activity_tolerances_hardware_keepout_override(self):
+        # The CLI/env knob (--stage2-hardware-keepout-tolerance) flows through
+        # evaluate_stage2_alm_problem -> resolve_* -> the producer's
+        # hardware_keepout_tolerance kwarg, overriding the 1e-6 default for the
+        # keep-out row only.
+        tolerance_by_name = self.module.resolve_stage2_constraint_activity_tolerances(
+            self.module.stage2_constraint_activity_tolerances,
+            0.005,
+            0.05,
+            include_coil_surface=False,
+            include_hardware_keepout=True,
+            hardware_keepout_tolerance=2e-5,
+        )
+        self.assertEqual(tolerance_by_name["hardware_keepout"], 2e-5)
+        # Sibling rows keep their defaults; only the keep-out tolerance changes.
+        self.assertEqual(tolerance_by_name["self_intersect"], 1e-6)
+
+    def test_stage2_constraint_names_match_legacy_positional_order(self):
+        # The schema-driven _stage2_constraint_names and the hand-maintained
+        # _legacy_stage2_constraint_names (which the positional tolerance list is
+        # zipped against) must agree VALUE-FOR-VALUE, not merely in length — a
+        # transposition of equal-length lists would silently mismap a tolerance
+        # to the wrong constraint. Assert equality across every flag combination,
+        # including the new keep-out row.
+        for include_coil_surface in (False, True):
+            for include_poloidal_extent in (False, True):
+                for include_hardware_keepout in (False, True):
+                    kwargs = dict(
+                        include_coil_surface=include_coil_surface,
+                        include_poloidal_extent=include_poloidal_extent,
+                        include_hardware_keepout=include_hardware_keepout,
+                    )
+                    self.assertEqual(
+                        self.module._stage2_constraint_names(**kwargs),
+                        self.module._legacy_stage2_constraint_names(**kwargs),
+                    )
+
+    def test_evaluate_stage2_alm_problem_adds_hardware_keepout_constraint_row(self):
+        base_objective = _FakeAlgebraicObjective(
+            3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+        )
+        # A positive keep-out penalty: zero-slack hinge, so the raw hard signal
+        # IS the J() value and the row reports an active violation.
+        hardware_keepout_penalty = 0.03
+        result = self.module.evaluate_stage2_alm_problem(
+            dofs=np.array([0.25, -0.4]),
+            base_objective=base_objective,
+            new_bs=_FakeBiotSavart((1, 1, 3)),
+            new_surf=_FakeSurfaceNormals((1, 1, 3)),
+            Jf=_FakeAlgebraicObjective(3.5, [1.2, -0.5]),
+            Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+            length_target=2.0,
+            Jccdist=_FakeCurveDistance(0.05, 0.04),
+            Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+            banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+            banana_current_max_A=16000.0,
+            distance_smoothing=0.005,
+            curvature_smoothing=0.02,
+            multipliers=np.zeros(9),
+            penalty=12.0,
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                ds * 4.0,
+                cs * 4.0,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
+                1e-6,
+                1e-3,
+            ],
+            smooth_min_distance_signed_constraint=lambda *_args: (
+                -0.008,
+                np.array([0.6, 0.2]),
+                -0.008,
+            ),
+            smooth_max_curvature_signed_constraint=lambda *_args: (
+                0.75,
+                np.array([0.9, -0.1]),
+            ),
+            **_default_geometric_parity_kwargs(),
+            Jhardware=_FakeSelfIntersectObjective(
+                hardware_keepout_penalty, [0.5, -0.2]
+            ),
+        )
+
+        names = list(result["constraint_names"])
+        self.assertIn("hardware_keepout", names)
+        idx = names.index("hardware_keepout")
+        # Schema order: keep-out row sits immediately before banana_current.
+        self.assertEqual(names[idx + 1], "banana_current_upper_bound")
+        # The raw (un-normalized) hard signal equals the keep-out J() penalty;
+        # threshold 0.0 means signed value == penalty == an active violation.
+        self.assertAlmostEqual(
+            result["raw_dual_update_values"][idx], hardware_keepout_penalty
+        )
+        self.assertGreater(result["feasibility_values"][idx], 0.0)
+        # Row vectors stay length-consistent with the name set.
+        self.assertEqual(len(result["constraint_grads"]), len(names))
+        # Default ALM normalization scale for the keep-out row is the schema
+        # value (BANANA_HARDWARE_KEEPOUT_ALM_SCALE == 1.0).
+        self.assertAlmostEqual(result["constraint_scales"][idx], 1.0)
+
+    def test_evaluate_stage2_alm_problem_hardware_keepout_alm_scale_override(self):
+        # The CLI/env knob (--stage2-hardware-keepout-alm-scale) flows through
+        # evaluate_stage2_alm_problem -> metadata -> the row's normalization
+        # scale, overriding the schema default for the hardware_keepout row only.
+        override_scale = 4.0
+        result = self.module.evaluate_stage2_alm_problem(
+            dofs=np.array([0.25, -0.4]),
+            base_objective=_FakeAlgebraicObjective(
+                3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+            ),
+            new_bs=_FakeBiotSavart((1, 1, 3)),
+            new_surf=_FakeSurfaceNormals((1, 1, 3)),
+            Jf=_FakeAlgebraicObjective(3.5, [1.2, -0.5]),
+            Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+            length_target=2.0,
+            Jccdist=_FakeCurveDistance(0.05, 0.04),
+            Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+            banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+            banana_current_max_A=16000.0,
+            distance_smoothing=0.005,
+            curvature_smoothing=0.02,
+            multipliers=np.zeros(9),
+            penalty=12.0,
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                ds * 4.0,
+                cs * 4.0,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
+                1e-6,
+                1e-3,
+            ],
+            smooth_min_distance_signed_constraint=lambda *_args: (
+                -0.008,
+                np.array([0.6, 0.2]),
+                -0.008,
+            ),
+            smooth_max_curvature_signed_constraint=lambda *_args: (
+                0.75,
+                np.array([0.9, -0.1]),
+            ),
+            **_default_geometric_parity_kwargs(),
+            Jhardware=_FakeSelfIntersectObjective(0.03, [0.5, -0.2]),
+            hardware_keepout_alm_scale=override_scale,
+        )
+        names = list(result["constraint_names"])
+        idx = names.index("hardware_keepout")
+        self.assertAlmostEqual(result["constraint_scales"][idx], override_scale)
+        # Only the keep-out row is rescaled; a sibling row keeps its schema scale.
+        self.assertNotAlmostEqual(
+            result["constraint_scales"][names.index("self_intersect")], override_scale
+        )
+
+    def test_evaluate_stage2_alm_problem_rejects_nonpositive_keepout_alm_scale(self):
+        # The help text promises "Must be > 0"; a non-positive override is
+        # fail-closed at constraint build (require_positive_alm_threshold), so
+        # the active keep-out row raises rather than silently degrading.
+        with self.assertRaises(ValueError):
+            self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=_FakeAlgebraicObjective(
+                    3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+                ),
+                new_bs=_FakeBiotSavart((1, 1, 3)),
+                new_surf=_FakeSurfaceNormals((1, 1, 3)),
+                Jf=_FakeAlgebraicObjective(3.5, [1.2, -0.5]),
+                Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+                length_target=2.0,
+                Jccdist=_FakeCurveDistance(0.05, 0.04),
+                Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+                banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.zeros(9),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
+                    1e-6,
+                    1e-3,
+                ],
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                    -0.008,
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
+                **_default_geometric_parity_kwargs(),
+                Jhardware=_FakeSelfIntersectObjective(0.03, [0.5, -0.2]),
+                hardware_keepout_alm_scale=-1.0,
+            )
+
+    def test_evaluate_stage2_alm_problem_omits_hardware_keepout_when_absent(self):
+        # With no Jhardware (weight 0 / keep-out off) the row must be absent, so
+        # the ALM problem is byte-identical to the pre-parity constraint set.
+        result = self.module.evaluate_stage2_alm_problem(
+            dofs=np.array([0.25, -0.4]),
+            base_objective=_FakeAlgebraicObjective(
+                3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+            ),
+            new_bs=_FakeBiotSavart((1, 1, 3)),
+            new_surf=_FakeSurfaceNormals((1, 1, 3)),
+            Jf=_FakeAlgebraicObjective(3.5, [1.2, -0.5]),
+            Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+            length_target=2.0,
+            Jccdist=_FakeCurveDistance(0.05, 0.04),
+            Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+            banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+            banana_current_max_A=16000.0,
+            distance_smoothing=0.005,
+            curvature_smoothing=0.02,
+            multipliers=np.zeros(8),
+            penalty=12.0,
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                ds * 4.0,
+                cs * 4.0,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
+                1e-3,
+            ],
+            smooth_min_distance_signed_constraint=lambda *_args: (
+                -0.008,
+                np.array([0.6, 0.2]),
+                -0.008,
+            ),
+            smooth_max_curvature_signed_constraint=lambda *_args: (
+                0.75,
+                np.array([0.9, -0.1]),
+            ),
+            **_default_geometric_parity_kwargs(),
+        )
+        self.assertNotIn("hardware_keepout", result["constraint_names"])
+        # Byte-identical to the pre-parity constraint set (no row added/dropped).
+        self.assertEqual(
+            tuple(result["constraint_names"]),
+            self.module._stage2_constraint_names(include_coil_surface=False),
+        )
+
     def test_evaluate_stage2_alm_problem_includes_iota_penalty_constraint(self):
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
         new_surf = _FakeSurfaceNormals((2, 2, 3))
@@ -3071,71 +3912,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(settings.trust_radius_min, 1e-3)
         self.assertEqual(settings.max_inner_attempts, 5)
 
-    def test_build_stage2_results_maps_hardware_and_alm_fields(self):
-        args = SimpleNamespace(
-            init_only=False,
-            banana_init_current_A=-1.0e4,
-            banana_current_max_A=1.6e4,
-            vf_current_max_A=1.6e4,
-            basin_hops=2,
-            basin_stepsize=0.01,
-            basin_temperature=2.5,
-            basin_niter_success=6,
-            alm_max_outer_iters=7,
-            alm_max_subproblem_continuations=9,
-            alm_penalty_init=2.0,
-            alm_penalty_scale=3.0,
-            alm_penalty_max=50.0,
-            alm_feas_tol=1e-4,
-            alm_stationarity_tol=2e-4,
-            alm_trust_radius_init=0.15,
-            alm_trust_radius_min=1e-3,
-            alm_trust_radius_shrink=0.4,
-            alm_trust_radius_grow=1.8,
-            alm_max_inner_attempts=5,
-            alm_distance_smoothing=0.005,
-            alm_curvature_smoothing=0.05,
-            alm_fix_signal_mismatch_guard=True,
-            alm_taylor_test=True,
-            alm_taylor_test_seed=123,
-        )
-        alm_result = SimpleNamespace(
-            outer_iterations=4,
-            penalty=8.0,
-            multipliers=np.array([0.1, 0.2, 0.3]),
-            constraint_values=np.array([0.0, 0.01, 0.0]),
-            normalized_constraint_values=np.array([0.0, 0.01, 0.0]),
-            raw_constraint_values=np.array([0.0, 1.0, 0.0]),
-            solver_constraint_values=np.array([0.0, 0.2, 0.0]),
-            normalized_solver_constraint_values=np.array([0.0, 0.2, 0.0]),
-            raw_solver_constraint_values=np.array([0.0, 8.0, 0.0]),
-            hard_signed_constraint_values=np.array([0.0, 0.02, 0.0]),
-            raw_hard_signed_constraint_values=np.array([0.0, 2.0, 0.0]),
-            hard_violation_values=np.array([0.0, 0.01, 0.0]),
-            raw_hard_violation_values=np.array([0.0, 1.0, 0.0]),
-            surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0]),
-            raw_surrogate_signed_constraint_values=np.array([0.0, 8.0, 0.0]),
-            constraint_scales=[1.0, 100.0, 1.0],
-            constraint_blocks=["geometry", "current", "physics"],
-            constraint_scale_sources=["one", "limit", "threshold"],
-            raw_dual_estimates=[0.1, 0.002, 0.3],
-            alm_schema_version=ALM_SCHEMA_VERSION,
-            exit_class="feasible_stationarity_unmet",
-            hard_constraints_feasible=True,
-            stationarity_satisfied=False,
-            trust_radius=0.125,
-            multiplier_cap_binding=True,
-            multiplier_cap_binding_indices=[1],
-            final_hard_max_violation=0.01,
-            final_surrogate_max_value=0.2,
-            hard_positive_shift_zero=True,
-            signal_mismatch_active=False,
-            final_penalty_gradient_norm=0.25,
-            history=[{"outer_iteration": 1}],
-        )
-        hardware_status = {"success": False, "violations": ["too_curved"]}
+    @staticmethod
+    def _stage2_results_kwargs(args, alm_result, hardware_status, **overrides):
+        """Full build_stage2_results kwargs shared by the field-mapping tests.
 
-        result = self.module.build_stage2_results(
+        Overrides let a focused test flip a single input (e.g.
+        ``realized_winding_radii``) without re-stating the whole contract.
+        """
+        kwargs = dict(
             args=args,
             plasma_surf_filename="demo.nc",
             file_loc="/tmp/demo.nc",
@@ -3159,6 +3943,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             total_coils=6,
             cc_threshold=0.05,
             cc_weight=100.0,
+            cc_objective_threshold=0.052,
+            cc_objective_margin=0.002,
             curvature_weight=1.0e-4,
             curvature_threshold=40.0,
             length_weight=5.0e-4,
@@ -3205,7 +3991,98 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             final_curve_curve_min_dist=0.04,
             final_curve_surface_min_dist=0.017,
             plasma_vessel_min_dist=0.041,
+            final_self_envelope_penalty=0.25,
+            final_self_envelope_min_dist=0.050,
+            self_envelope_mode="groc",
+            self_envelope_min_distance=0.0461772,
+            self_envelope_groc_radius=0.025,
+            self_envelope_groc_radius_floor=0.0230886,
+            final_fold_penalty=0.125,
+            final_fold_geodesic_curvature_max=42.0,
+            fold_geodesic_curvature_limit=43.3,
+            fold_geodesic_curvature_threshold=38.97,
+            fold_geodesic_curvature_margin_fraction=0.10,
+            fold_ok=True,
             hardware_status=hardware_status,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    @staticmethod
+    def _stage2_results_args():
+        return SimpleNamespace(
+            init_only=False,
+            banana_init_current_A=-1.0e4,
+            banana_current_max_A=1.6e4,
+            vf_current_max_A=1.6e4,
+            basin_hops=2,
+            basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=6,
+            alm_max_outer_iters=7,
+            alm_max_subproblem_continuations=9,
+            alm_penalty_init=2.0,
+            alm_penalty_scale=3.0,
+            alm_penalty_max=50.0,
+            alm_feas_tol=1e-4,
+            alm_stationarity_tol=2e-4,
+            alm_trust_radius_init=0.15,
+            alm_trust_radius_min=1e-3,
+            alm_trust_radius_shrink=0.4,
+            alm_trust_radius_grow=1.8,
+            alm_max_inner_attempts=5,
+            alm_distance_smoothing=0.005,
+            alm_curvature_smoothing=0.05,
+            alm_fix_signal_mismatch_guard=True,
+            alm_taylor_test=True,
+            alm_taylor_test_seed=123,
+            finite_build=True,
+        )
+
+    @staticmethod
+    def _stage2_results_alm_result():
+        return SimpleNamespace(
+            outer_iterations=4,
+            penalty=8.0,
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            constraint_values=np.array([0.0, 0.01, 0.0]),
+            normalized_constraint_values=np.array([0.0, 0.01, 0.0]),
+            raw_constraint_values=np.array([0.0, 1.0, 0.0]),
+            solver_constraint_values=np.array([0.0, 0.2, 0.0]),
+            normalized_solver_constraint_values=np.array([0.0, 0.2, 0.0]),
+            raw_solver_constraint_values=np.array([0.0, 8.0, 0.0]),
+            hard_signed_constraint_values=np.array([0.0, 0.02, 0.0]),
+            raw_hard_signed_constraint_values=np.array([0.0, 2.0, 0.0]),
+            hard_violation_values=np.array([0.0, 0.01, 0.0]),
+            raw_hard_violation_values=np.array([0.0, 1.0, 0.0]),
+            surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0]),
+            raw_surrogate_signed_constraint_values=np.array([0.0, 8.0, 0.0]),
+            constraint_scales=[1.0, 100.0, 1.0],
+            constraint_blocks=["geometry", "current", "physics"],
+            constraint_scale_sources=["one", "limit", "threshold"],
+            raw_dual_estimates=[0.1, 0.002, 0.3],
+            alm_schema_version=ALM_SCHEMA_VERSION,
+            exit_class="feasible_stationarity_unmet",
+            hard_constraints_feasible=True,
+            stationarity_satisfied=False,
+            trust_radius=0.125,
+            multiplier_cap_binding=True,
+            multiplier_cap_binding_indices=[1],
+            final_hard_max_violation=0.01,
+            final_surrogate_max_value=0.2,
+            hard_positive_shift_zero=True,
+            signal_mismatch_active=False,
+            final_penalty_gradient_norm=0.25,
+            history=[{"outer_iteration": 1}],
+        )
+
+    def test_build_stage2_results_maps_hardware_and_alm_fields(self):
+        args = self._stage2_results_args()
+        alm_result = self._stage2_results_alm_result()
+        hardware_status = {"success": False, "violations": ["too_curved"]}
+
+        result = self.module.build_stage2_results(
+            **self._stage2_results_kwargs(args, alm_result, hardware_status)
         )
 
         self.assertFalse(result["HARDWARE_CONSTRAINTS_OK"])
@@ -3219,6 +4096,26 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(result["ALM_HARD_CONSTRAINTS_FEASIBLE"])
         self.assertFalse(result["ALM_STATIONARITY_SATISFIED"])
         self.assertEqual(result["CURVE_CURVE_DISTANCE_METRIC_KIND"], "banana_coils")
+        self.assertAlmostEqual(result["CC_OBJECTIVE_THRESHOLD"], 0.052)
+        self.assertAlmostEqual(result["CC_OBJECTIVE_MARGIN_M"], 0.002)
+        self.assertEqual(result["BANANA_REPRESENTATION"], "typekk_pack")
+        self.assertEqual(result["SELF_ENVELOPE_MODE"], "groc")
+        self.assertAlmostEqual(result["SELF_ENVELOPE_PENALTY"], 0.25)
+        self.assertAlmostEqual(result["SELF_ENVELOPE_MIN_DIST_M"], 0.050)
+        self.assertAlmostEqual(result["SELF_ENVELOPE_THRESHOLD_M"], 0.0461772)
+        self.assertAlmostEqual(result["SELF_ENVELOPE_GROC_RADIUS_M"], 0.025)
+        self.assertAlmostEqual(
+            result["SELF_ENVELOPE_GROC_RADIUS_FLOOR_M"],
+            0.0230886,
+        )
+        self.assertAlmostEqual(result["FOLD_PENALTY"], 0.125)
+        self.assertAlmostEqual(result["FOLD_GEODESIC_CURVATURE_MAX_INV_M"], 42.0)
+        self.assertAlmostEqual(result["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"], 43.3)
+        self.assertAlmostEqual(
+            result["FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"],
+            38.97,
+        )
+        self.assertTrue(result["FOLD_OK"])
         self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         np.testing.assert_allclose(
@@ -3303,6 +4200,90 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["MAX_CURVATURE"], 41.0)
         self.assertEqual(result["CURVE_CURVE_MIN_DIST"], 0.04)
         self.assertEqual(result["CURVE_SURFACE_MIN_DIST"], 0.017)
+        self.assertEqual(result["FINAL_LCFS_OUTBOARD_EDGE_M"], 1.07)
+        self.assertEqual(result["FINAL_LCFS_INBOARD_EDGE_M"], 0.77)
+        self.assertEqual(
+            result["FINAL_LCFS_OUTBOARD_EDGE_MAX_M"],
+            self.module.LCFS_OUTBOARD_RADIUS_MAX_M,
+        )
+        self.assertEqual(
+            result["FINAL_LCFS_INBOARD_EDGE_MIN_M"],
+            self.module.LCFS_INBOARD_RADIUS_MIN_M,
+        )
+
+    def test_build_stage2_results_records_realized_winding_radius(self):
+        """B1.2: a re-embedded CWS lineage records the REALIZED winding torus.
+
+        The recorded major radius (both legacy keys) is the realized 0.993, the
+        minor is the realized 0.142, the spec constant stays available under its
+        own key, the re-embedded flag is True, and the recorded major differs
+        from the 0.903 spec constant.
+        """
+        args = self._stage2_results_args()
+        alm_result = self._stage2_results_alm_result()
+        hardware_status = {"success": True, "violations": []}
+
+        result = self.module.build_stage2_results(
+            **self._stage2_results_kwargs(
+                args,
+                alm_result,
+                hardware_status,
+                realized_winding_radii=(0.993, 0.142),
+                winding_surface_reembedded_on_live_surface=True,
+            )
+        )
+
+        spec_constant = self.module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+        self.assertAlmostEqual(
+            result["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"], 0.993
+        )
+        self.assertAlmostEqual(
+            result["COIL_WINDING_SURFACE_MAJOR_RADIUS_M"], 0.993
+        )
+        self.assertAlmostEqual(
+            result["BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M"], 0.142
+        )
+        self.assertAlmostEqual(
+            result["BANANA_WINDING_SURFACE_SPEC_MAJOR_RADIUS_M"],
+            float(spec_constant),
+        )
+        self.assertTrue(result["BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE"])
+        self.assertNotAlmostEqual(
+            result["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"], float(spec_constant)
+        )
+
+    def test_build_stage2_results_falls_back_to_spec_winding_radius(self):
+        """B1.2: a non-CWS lineage (None radii) falls back to the spec constant.
+
+        Both major-radius keys equal the spec constant, the embedded minor is
+        None, and the re-embedded flag is False -- the historical recorded value.
+        """
+        args = self._stage2_results_args()
+        alm_result = self._stage2_results_alm_result()
+        hardware_status = {"success": True, "violations": []}
+
+        result = self.module.build_stage2_results(
+            **self._stage2_results_kwargs(
+                args,
+                alm_result,
+                hardware_status,
+                realized_winding_radii=None,
+                winding_surface_reembedded_on_live_surface=False,
+            )
+        )
+
+        spec_constant = float(self.module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
+        self.assertAlmostEqual(
+            result["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"], spec_constant
+        )
+        self.assertAlmostEqual(
+            result["COIL_WINDING_SURFACE_MAJOR_RADIUS_M"], spec_constant
+        )
+        self.assertIsNone(result["BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M"])
+        self.assertAlmostEqual(
+            result["BANANA_WINDING_SURFACE_SPEC_MAJOR_RADIUS_M"], spec_constant
+        )
+        self.assertFalse(result["BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE"])
 
     def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
         curve = _FakeCurve(
@@ -4209,10 +5190,12 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             gamma_points=[[0.876, 0.0, 0.0]],
             kappa_values=[5.0],
         )
+        raw_poloidal_extent = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        raw_poloidal_extent.curve = curve
+        raw_poloidal_extent.R_winding = 0.976
+        raw_poloidal_extent.Z_winding = 0.0
         JPoloidalExtent = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
-        JPoloidalExtent.curve = curve
-        JPoloidalExtent.R_winding = 0.976
-        JPoloidalExtent.Z_winding = 0.0
+        JPoloidalExtent.opt = raw_poloidal_extent
 
         def fake_augmented(
             base_value,
@@ -4302,6 +5285,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 1.0e-3,
             ),
             JPoloidalExtent=JPoloidalExtent,
+            JPoloidalExtentTerms=(raw_poloidal_extent,),
             poloidal_extent_threshold=1.0,
             poloidal_extent_smoothing=0.05,
             poloidal_extent_constraint_fn=_constant_constraint_result(
@@ -6947,3 +7931,331 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertFalse(off_diagnostics["shear_objective_enabled"])
         self.assertAlmostEqual(off_diagnostics["J_shear"], 0.5)
         np.testing.assert_allclose(off_diagnostics["dJ_shear"], [0.25, -0.75])
+
+
+class MagneticWellVolumeShortfallTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
+    MODULE_PREFIX = "banana_single_stage_objectives_magnetic_well"
+
+    LABELS = (0.6, 0.8, 1.0)
+
+    def _volume_terms(self, volumes=(0.06, 0.08, 0.11)):
+        return [
+            _LinearIotaLeaf(volumes[0], [1.0]),
+            _LinearIotaLeaf(volumes[1], [1.0]),
+            _LinearIotaLeaf(volumes[2], [1.0]),
+        ]
+
+    def _make_term(self, volumes=(0.06, 0.08, 0.11), target=0.0):
+        inner, mid, outer = self._volume_terms(volumes)
+        return self.module.MagneticWellVolumeShortfall(
+            inner,
+            mid,
+            outer,
+            *self.LABELS,
+            target,
+        )
+
+    def test_magnetic_well_proxy_uses_vmec_favorable_sign(self):
+        term = self._make_term()
+
+        inner_slope = (0.08 - 0.06) / 0.2
+        outer_slope = (0.11 - 0.08) / 0.2
+        expected_proxy = (outer_slope - inner_slope) / (outer_slope + inner_slope)
+
+        self.assertAlmostEqual(term.magnetic_well_proxy(), expected_proxy)
+        self.assertGreater(term.J(), 0.0)
+        self.assertAlmostEqual(term.J(), 0.5 * expected_proxy**2)
+
+    def test_favorable_negative_well_proxy_is_zero_shortfall(self):
+        term = self._make_term(volumes=(0.06, 0.09, 0.10))
+
+        self.assertLess(term.magnetic_well_proxy(), 0.0)
+        self.assertEqual(term.J(), 0.0)
+        np.testing.assert_array_equal(term.dJ(), np.zeros_like(term.x))
+
+    def test_gradient_matches_finite_difference(self):
+        term = self._make_term()
+
+        analytic = term.dJ()
+        x0 = term.x.copy()
+        h = 1.0e-6
+        fd = np.zeros_like(x0)
+        for index in range(x0.size):
+            step = np.zeros_like(x0)
+            step[index] = h
+            term.x = x0 + step
+            j_plus = term.J()
+            term.x = x0 - step
+            j_minus = term.J()
+            fd[index] = (j_plus - j_minus) / (2.0 * h)
+        term.x = x0
+
+        np.testing.assert_allclose(analytic, fd, rtol=1.0e-6, atol=1.0e-8)
+
+    def test_builder_requires_at_least_three_surfaces(self):
+        volumes = self._volume_terms()
+
+        self.assertIsNone(
+            self.module.build_single_stage_magnetic_well_objective(
+                volumes[:2],
+                self.LABELS[:2],
+                0.0,
+            )
+        )
+        built = self.module.build_single_stage_magnetic_well_objective(
+            volumes,
+            self.LABELS,
+            0.0,
+        )
+        self.assertIsInstance(built, self.module.MagneticWellVolumeShortfall)
+
+    def test_build_total_objective_adds_weighted_magnetic_well_term(self):
+        baseline = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args()
+        )
+        well = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        with_well = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args(),
+            JMagneticWell=well,
+            MAGNETIC_WELL_WEIGHT=10.0,
+        )
+
+        self.assertAlmostEqual(with_well.J() - baseline.J(), 10.0 * well.J())
+        np.testing.assert_allclose(
+            with_well.dJ() - baseline.dJ(),
+            10.0 * well.dJ(),
+        )
+
+    def test_evaluate_base_objective_reports_weighted_magnetic_well_term(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        well = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+
+        baseline = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            include_diagnostics=False,
+        )
+        with_well = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JMagneticWell=well,
+            MAGNETIC_WELL_WEIGHT=10.0,
+            include_diagnostics=False,
+        )
+
+        self.assertAlmostEqual(with_well["total"] - baseline["total"], 5.0)
+        np.testing.assert_allclose(
+            with_well["grad"] - baseline["grad"],
+            [2.5, -7.5],
+        )
+
+        diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JMagneticWell=well,
+            MAGNETIC_WELL_WEIGHT=10.0,
+        )
+        self.assertTrue(diagnostics["magnetic_well_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["magnetic_well_weight"], 10.0)
+        self.assertAlmostEqual(diagnostics["J_magnetic_well"], 0.5)
+        np.testing.assert_allclose(diagnostics["dJ_magnetic_well"], [0.25, -0.75])
+
+
+class _FakeVectorBiotSavartForLGradB:
+    """Minimal BiotSavart stub that returns controlled |B| and dB/dX values.
+
+    ``abs_b`` and ``dB_dX`` can be set per-test to exercise the L_grad_B
+    shortfall formula without any real coil geometry.
+    """
+
+    def __init__(self, n_points, abs_b_values=None, dB_dX_values=None):
+        self._n = n_points
+        # Default: |B| = 1.0 everywhere, dB/dX = identity (Frobenius norm = sqrt(3))
+        self._abs_b = (
+            np.ones(n_points, dtype=float)
+            if abs_b_values is None
+            else np.asarray(abs_b_values, dtype=float)
+        )
+        self._dB_dX = (
+            np.tile(np.eye(3, dtype=float), (n_points, 1, 1))
+            if dB_dX_values is None
+            else np.asarray(dB_dX_values, dtype=float)
+        )
+        self._set_points_called_with = None
+
+    def set_points(self, points):
+        self._set_points_called_with = np.asarray(points, dtype=float).copy()
+
+    def AbsB(self):
+        return self._abs_b.copy()
+
+    def dB_by_dX(self):
+        return self._dB_dX.copy()
+
+    # Minimal Optimizable-like interface (no dofs; depends_on=[self] in real code)
+    @property
+    def dofs_free_status(self):
+        return np.array([], dtype=bool)
+
+    def clear_cached_properties(self):
+        pass
+
+
+class MinLGradBShortfallTests(_ModuleTestCase):
+    """Unit tests for the MinLGradBShortfall class (#23).
+
+    These tests exercise the shortfall value formula and the
+    build_total_objective default-OFF contract without any real simsopt
+    geometry (using the _FakeVectorBiotSavartForLGradB stub).
+    """
+
+    MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
+    MODULE_PREFIX = "banana_single_stage_objectives_lgradb"
+
+    # Analytical reference: |B|=1, dB/dX = identity (Frobenius norm = sqrt(3))
+    # L_grad_B = sqrt(2)*1 / sqrt(3) ≈ 0.8165
+    _DEFAULT_LGRADБ = float(np.sqrt(2.0) / np.sqrt(3.0))
+    _FLOOR_ABOVE = 1.0   # shortfall active: floor > min(L_grad_B)
+    _FLOOR_BELOW = 0.5   # shortfall inactive: floor < min(L_grad_B)
+
+    def _surface_points(self, n=4):
+        return np.random.default_rng(0).uniform(-1.0, 1.0, (n, 3))
+
+    def _fake_bs(self, n=4, abs_b=None, dB_dX=None):
+        return _FakeVectorBiotSavartForLGradB(n, abs_b_values=abs_b, dB_dX_values=dB_dX)
+
+    def _make_term(self, floor, n=4):
+        from simsopt._core.optimizable import Optimizable
+
+        module = self.module
+        points = self._surface_points(n)
+
+        class _RealMinOpt(Optimizable):
+            """Real Optimizable stub that wraps the fake BiotSavart interface."""
+            def __init__(self):
+                Optimizable.__init__(self, x0=np.array([]))
+                self._abs_b = np.ones(n, dtype=float)
+                self._dB_dX = np.tile(np.eye(3, dtype=float), (n, 1, 1))
+
+            def set_points(self, pts):
+                pass
+
+            def AbsB(self):
+                return self._abs_b.copy()
+
+            def dB_by_dX(self):
+                return self._dB_dX.copy()
+
+        bs = _RealMinOpt()
+        return module.MinLGradBShortfall(bs, points, floor)
+
+    def test_shortfall_is_active_when_lgradB_below_floor(self):
+        # With |B|=1 and dB/dX=I (Frobenius=sqrt(3)), L_grad_B=sqrt(2)/sqrt(3)~0.816
+        # With floor=1.0 > 0.816: shortfall = floor - min(L_grad_B) > 0.
+        term = self._make_term(self._FLOOR_ABOVE)
+        self.assertGreater(term.J(), 0.0)
+
+    def test_shortfall_is_zero_when_lgradB_meets_floor(self):
+        # With floor below min(L_grad_B)~0.816: shortfall = 0.
+        term = self._make_term(self._FLOOR_BELOW)
+        self.assertEqual(term.J(), 0.0)
+
+    def test_shortfall_value_matches_formula(self):
+        # J = max(0, floor - min(L_grad_B)); check analytically.
+        term = self._make_term(self._FLOOR_ABOVE)
+        expected = max(0.0, self._FLOOR_ABOVE - self._DEFAULT_LGRADБ)
+        self.assertAlmostEqual(term.J(), expected, places=10)
+
+    def test_shortfall_zero_when_floor_equals_lgradB(self):
+        # Exactly at the floor the shortfall is 0.
+        term = self._make_term(self._DEFAULT_LGRADБ)
+        self.assertAlmostEqual(term.J(), 0.0, places=10)
+
+    def test_set_points_is_called_on_bs(self):
+        # The term must call set_points on the field before querying AbsB/dB_by_dX.
+        module = self.module
+
+        class _TrackingOpt(Optimizable):
+            def __init__(self):
+                Optimizable.__init__(self, x0=np.array([]))
+                self.set_points_calls = []
+
+            def set_points(self, pts):
+                self.set_points_calls.append(np.asarray(pts, dtype=float).copy())
+
+            def AbsB(self):
+                return np.ones(4, dtype=float)
+
+            def dB_by_dX(self):
+                return np.tile(np.eye(3, dtype=float), (4, 1, 1))
+
+        pts = np.random.default_rng(1).uniform(-1, 1, (4, 3))
+        bs = _TrackingOpt()
+        term = module.MinLGradBShortfall(bs, pts, 0.5)
+        term.J()
+        self.assertEqual(len(bs.set_points_calls), 1)
+        np.testing.assert_array_equal(bs.set_points_calls[0], pts)
+
+    def test_build_total_objective_lgradb_default_off_is_identical(self):
+        # The assembly contract: weight 0 (and None term) must leave
+        # build_total_objective byte-identical to the call that omits it.
+        baseline = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args()
+        )
+        default_off = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args(),
+            JMinLGradB=None,
+            LGRADB_WEIGHT=0.0,
+        )
+        self.assertEqual(baseline.J(), default_off.J())
+        np.testing.assert_array_equal(baseline.dJ(), default_off.dJ())
+
+        # A nonzero weight with a None term stays inert (the None guard wins).
+        weighted_none = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args(),
+            JMinLGradB=None,
+            LGRADB_WEIGHT=999.0,
+        )
+        self.assertEqual(baseline.J(), weighted_none.J())
+        np.testing.assert_array_equal(baseline.dJ(), weighted_none.dJ())
+
+    def test_build_total_objective_lgradb_term_changes_objective(self):
+        # A non-None term with weight > 0 must change the objective value.
+        term = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        baseline = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args()
+        )
+        with_lgradb = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args(),
+            JMinLGradB=term,
+            LGRADB_WEIGHT=10.0,
+        )
+        self.assertAlmostEqual(with_lgradb.J() - baseline.J(), 10.0 * term.J())
+        np.testing.assert_allclose(
+            with_lgradb.dJ() - baseline.dJ(), 10.0 * term.dJ()
+        )

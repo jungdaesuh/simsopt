@@ -4384,6 +4384,20 @@ def main(parsed_args=None):
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
+    alm_base_bounds = None
+    if CONSTRAINT_METHOD == "alm":
+        # ALM (unlike L-BFGS-B) does not clip the seed into the base bounds, so a
+        # freed winding-surface DOF whose seed sits outside its corridor (e.g.
+        # rc(0,0)=0.903 below the 0.908 lower bound) would invert the first
+        # trust-box intersection and raise. Clip the seed into the corridor up
+        # front, mirroring the penalty path's L-BFGS-B x0 clipping. No-op when the
+        # bounds are unbounded (the default, no freed size DOFs).
+        alm_base_bounds = build_lbfgsb_bounds(BASE_OBJECTIVE)
+        dofs = np.clip(
+            dofs,
+            np.array([lo for lo, _ in alm_base_bounds], dtype=float),
+            np.array([hi for _, hi in alm_base_bounds], dtype=float),
+        )
 
     def capture_artifact_state(candidate_x):
         return _capture_stage2_artifact_state(
@@ -4651,6 +4665,7 @@ def main(parsed_args=None):
             ),
             outer_state_callback=outer_state_callback,
             history_callback=history_callback,
+            base_bounds=alm_base_bounds,
         )
         alm_result = res
         res_nit = res.nit
@@ -4945,6 +4960,14 @@ def main(parsed_args=None):
         banana_i_fixed_s2_kA = None
     final_vf_current_A = _realized_vf_current_A(vf_current_control, vf_current_A)
 
+    stage2_realized_winding_radii = realized_cws_winding_radii(new_banana_coils)
+    stage2_winding_surface_reembedded_on_live_surface = (
+        bool(getattr(args, "winding_surface_free_r0", False))
+        or bool(getattr(args, "winding_surface_free_minor", False))
+        or int(getattr(args, "winding_surface_free_mpol", 0)) > 0
+        or int(getattr(args, "winding_surface_free_ntor", 0)) > 0
+    )
+
     stage2_results_kwargs = dict(
         args=args,
         plasma_surf_filename=plasma_surf_filename,
@@ -5017,6 +5040,10 @@ def main(parsed_args=None):
         winding_surface_free_mpol=winding_surface_free_mpol,
         winding_surface_free_ntor=winding_surface_free_ntor,
         winding_surface_free_dof_names=winding_surface_free_dof_names,
+        realized_winding_radii=stage2_realized_winding_radii,
+        winding_surface_reembedded_on_live_surface=(
+            stage2_winding_surface_reembedded_on_live_surface
+        ),
         order=order,
         max_iterations=MAXITER,
         iterations=res_nit,

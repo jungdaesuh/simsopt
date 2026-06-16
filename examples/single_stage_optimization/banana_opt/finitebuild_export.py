@@ -34,11 +34,13 @@ from banana_opt.coil_groups import (
     build_contiguous_manifest,
     partition_coils_by_manifest,
 )
+from banana_opt.coil_order_upgrade import realized_cws_winding_radii
 from banana_opt.finite_current_profiles import (
     FINITE_CURRENT_PROFILES,
     FiniteCurrentProfile,
     get_finite_current_profile,
 )
+from banana_opt.hardware_contracts import BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
 from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.stage2_single_stage_handoff import (
     Stage2CoilPartitions,
@@ -68,7 +70,7 @@ class FiniteBuildExportConfig:
     gapsize_n: float
     gapsize_b: float
     rotation_order: int | None = None
-    frame: str = "centroid"
+    frame: str = "surface_tangent"
     banana_current_A: float | None = None
     stage2_results: Path | None = None
     finite_current_mode: str | None = None
@@ -143,9 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rotation-order", default=None, type=int)
     parser.add_argument(
         "--frame",
-        default="centroid",
-        choices=("centroid", "frenet"),
-        help="Frame used by simsopt.geo.create_multifilament_grid.",
+        default="surface_tangent",
+        choices=("centroid", "frenet", "surface_tangent"),
+        help=(
+            "Frame used by simsopt.geo.create_multifilament_grid. "
+            "Defaults to 'surface_tangent', which lays the pack flat against "
+            "the banana winding surface (normal axis tracks the surface "
+            "normal)."
+        ),
     )
     parser.add_argument(
         "--banana-current-A",
@@ -653,6 +660,32 @@ def _resolve_metadata_free_profile(
     )
 
 
+def _frame_kwargs(
+    config: FiniteBuildExportConfig,
+    source_banana_coils: Sequence[Coil],
+) -> dict[str, object]:
+    """Extra create_multifilament_grid kwargs implied by the configured frame.
+
+    The surface-tangent frame needs the banana winding-surface major radius
+    (midplane z is the vessel midplane, 0). The radius is the REALIZED embedded
+    CWS torus (re-centered lineages desync from the 0.903 spec constant;
+    2026-06-10 laneR0920 fix), falling back to the spec constant for non-CWS
+    coil sets. Other frames need nothing extra.
+    """
+    if config.frame == "surface_tangent":
+        realized_winding_radii = realized_cws_winding_radii(source_banana_coils)
+        surface_major_radius = (
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
+            if realized_winding_radii is None
+            else realized_winding_radii[0]
+        )
+        return {
+            "surface_major_radius": surface_major_radius,
+            "surface_midplane_z": 0.0,
+        }
+    return {}
+
+
 def _build_finitebuild_banana_coils(
     source_banana_coils: Sequence[Coil],
     config: FiniteBuildExportConfig,
@@ -687,6 +720,7 @@ def _build_finitebuild_banana_coils(
         float(config.gapsize_b),
         rotation_order=config.rotation_order,
         frame=config.frame,
+        **_frame_kwargs(config, source_banana_coils),
     )
     base_filament_currents = tuple(
         Current(filament_current_A) for _ in base_filament_curves
@@ -768,6 +802,8 @@ def _build_finitebuild_loaded_coils(
     numfilaments_b = int(config.numfilaments_b)
     nfilaments = numfilaments_n * numfilaments_b
     finitebuild_coils: list[Coil] = []
+    # source_coils is constant across the loop, so resolve the frame kwargs once.
+    frame_kwargs = _frame_kwargs(config, source_coils)
     for source_coil in source_coils:
         source_current_A = float(source_coil.current.get_value())
         filament_current_A = source_current_A / float(nfilaments)
@@ -779,6 +815,7 @@ def _build_finitebuild_loaded_coils(
             float(config.gapsize_b),
             rotation_order=config.rotation_order,
             frame=config.frame,
+            **frame_kwargs,
         )
         for filament_curve in filament_curves:
             filament_current = Current(filament_current_A)
