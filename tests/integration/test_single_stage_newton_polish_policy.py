@@ -1,12 +1,16 @@
 """Contract for the target-lane Boozer Newton-polish policy resolution.
 
 The single-stage path decides, per lane, whether the JAX ``ondevice`` Boozer
-dense Newton polish runs. It previously defaulted to ``"skip-large-strict-cuda"``.
-The parent resolver keyed that skip on the *parent* ``--platform``, so on a large
-strict-CUDA parity run (mpol/ntor >= 6) it returned ``"skip"`` for **both** the
-GPU target child and its JAX-CPU reference child. Parity therefore compared two
-least-squares-only surfaces (~1e-4 Boozer residual) rather than two fully
-Newton-converged surfaces, and the silent skip was platform-dependent.
+dense Newton polish runs. It previously defaulted to ``"skip-large-strict-cuda"``,
+which made the two parity lanes **asymmetric** at large resolution (mpol/ntor >= 6):
+the GPU target lane resolved to ``"skip"`` (a BFGS-only surface, ~1e-4 Boozer
+residual), while the JAX-CPU reference lane resolved to ``None`` -- the parent
+dropped the override because it computed the effective inner-Boozer backend from
+the *outer* ``"scipy-jax"`` value (a CUDA-only approximation) instead of the routed
+``"ondevice"`` value, so the CPU child fell back to its default and *ran* the full
+Newton. Parity therefore compared a BFGS-only GPU surface against a
+Newton-converged CPU surface (apples-to-oranges), and the CPU Newton was the slow
+lane. Verified against the parent commit's resolver.
 
 The policy is now an explicit ``"run"``/``"skip"`` choice that defaults to
 ``"run"`` on every platform -- matching the production GPU lane, which already
