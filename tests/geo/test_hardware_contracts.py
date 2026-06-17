@@ -54,6 +54,20 @@ def test_type_kk_conductor_pack_and_finite_build_defaults_are_separate() -> None
     assert hc.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M == (
         hc.TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M / 6.0
     )
+    assert hc.TYPE_KK_FORCE_REGULARIZATION_CONDUCTOR_RADIUS_M == (
+        0.5
+        * min(hc.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M, hc.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M)
+    )
+
+
+def test_single_stage_engineering_defaults_are_production_on() -> None:
+    assert hc.SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT > 0.0
+    assert hc.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT > 0.0
+    assert hc.SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT > 0.0
+    assert hc.SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M == (
+        hc.TYPE_KK_FORCE_REGULARIZATION_CONDUCTOR_RADIUS_M
+    )
+    assert hc.SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M > 0.0
 
 
 def test_legacy_pack_aliases_no_longer_point_to_old_placeholder() -> None:

@@ -1450,9 +1450,15 @@ class Stage2IotaReportingTests(unittest.TestCase):
                     J=lambda: 0.0,
                     shortest_self_distance=lambda: 0.02,
                 ),
+                Jself_envelope=SimpleNamespace(
+                    J=lambda: 0.0,
+                    shortest_self_distance=lambda: 0.05,
+                    shortest_groc=lambda: 0.03,
+                ),
                 width_min_threshold=0.05,
                 width_max_threshold=0.17,
                 self_intersect_min_distance=0.01,
+                self_envelope_min_distance=0.0462,
             )
 
         self.assertEqual(state["field_objective"], 0.25)

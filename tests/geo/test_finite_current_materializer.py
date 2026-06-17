@@ -43,6 +43,12 @@ from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
 from workflow_runner_common import load_stage2_artifact_results  # noqa: E402
 
 
+def _ensure_example_root_on_sys_path() -> None:
+    example_root = str(EXAMPLE_ROOT)
+    if example_root not in sys.path:
+        sys.path.insert(0, example_root)
+
+
 def _make_circle_curve(*, center: tuple[float, float, float], radius: float):
     curve = CurveXYZFourier(32, 1)
     center_x, center_y, center_z = center
@@ -540,6 +546,7 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
                 load_stage2_artifact_results(result.output_biot_savart)
 
     def test_cli_smoke_writes_reloadable_artifact(self):
+        _ensure_example_root_on_sys_path()
         from materialize_finite_current_seed import main
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -574,16 +581,19 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
             self.assertEqual(results["FINITE_CURRENT_MODE"], "wataru_proxy_field")
 
     def test_cli_help_exposes_mode_specific_sign_contract(self):
+        _ensure_example_root_on_sys_path()
         from materialize_finite_current_seed import parse_args
 
         _assert_wrapped_cli_sign_help(self, parse_args)
 
     def test_sweep_cli_help_exposes_wrapped_mode_specific_sign_contract(self):
+        _ensure_example_root_on_sys_path()
         from run_materialized_current_sweep import parse_args
 
         _assert_wrapped_cli_sign_help(self, parse_args)
 
     def test_sweep_wrapper_records_untrusted_iota_gate_summary(self):
+        _ensure_example_root_on_sys_path()
         from run_materialized_current_sweep import main
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -646,6 +656,7 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
                 )
 
     def test_sweep_preflights_per_current_outputs_before_writing_any_row(self):
+        _ensure_example_root_on_sys_path()
         from run_materialized_current_sweep import main
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -677,6 +688,7 @@ class FiniteCurrentMaterializerTests(unittest.TestCase):
             )
 
     def test_sweep_prevalidates_all_currents_before_writing_any_row(self):
+        _ensure_example_root_on_sys_path()
         from run_materialized_current_sweep import main
 
         with tempfile.TemporaryDirectory() as tmp_dir:

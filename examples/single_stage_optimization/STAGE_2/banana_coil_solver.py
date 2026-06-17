@@ -81,6 +81,7 @@ from banana_opt.stage2_geometry import (
     VFCoilBuildResult,
     build_finite_build_banana_coils,
     coerce_vf_coil_build_result,
+    configure_winding_surface_shape_dofs,
     curve_curve_min_distance_segments_m,
     curve_surface_min_distance_segments_m,
     finite_build_frame_aware_curvature_limit_inv_m,
@@ -401,19 +402,46 @@ def validate_finite_build_cli_args(args) -> None:
 def validate_winding_surface_shape_cli_args(args) -> None:
     free_mpol = int(getattr(args, "winding_surface_free_mpol", 0))
     free_ntor = int(getattr(args, "winding_surface_free_ntor", 0))
-    free_r0 = bool(getattr(args, "winding_surface_free_r0", False))
-    free_minor = bool(getattr(args, "winding_surface_free_minor", False))
     if free_mpol < 0:
         raise ValueError("--winding-surface-free-mpol must be non-negative.")
     if free_ntor < 0:
         raise ValueError("--winding-surface-free-ntor must be non-negative.")
-    if getattr(args, "stage2_bs_path", None) and (
-        free_mpol > 0 or free_ntor > 0 or free_r0 or free_minor
-    ):
+    # The size DOFs (--winding-surface-free-r0 / --winding-surface-free-minor)
+    # re-center / re-size the winding surface and ARE valid on a loaded seed:
+    # re-centering an already-converged seed is their intended use (T1.5). Only
+    # the shape-mode frees stay fresh-only -- a loaded seed's recorded (m, n)
+    # mode content is what its coils converged against, so reopening those modes
+    # mid-resume has no consistent meaning.
+    if getattr(args, "stage2_bs_path", None) and (free_mpol > 0 or free_ntor > 0):
         raise ValueError(
-            "--winding-surface-free-* requires fresh Stage 2 initialization; "
-            "loaded seed surfaces preserve their recorded winding surface."
+            "--winding-surface-free-mpol / --winding-surface-free-ntor require "
+            "fresh Stage 2 initialization; a loaded seed preserves its recorded "
+            "shape modes. Use --winding-surface-free-r0 / "
+            "--winding-surface-free-minor to re-center or re-size a loaded seed."
         )
+
+
+def free_loaded_winding_surface_size_dofs(banana_curve, args):
+    """Free the bounded winding-surface SIZE DOFs on a LOADED master surface (T1.5).
+
+    The loaded-seed path skips ``_initialize_coils``, so the size-DOF freeing that
+    re-centers (``rc(0,0)``) / re-sizes (``rc(1,0)`` / ``zs(1,0)``) a resumed
+    winding surface happens here instead, directly on ``banana_curve.surf`` -- the
+    same master torus the value-live steering terms read (``live_winding_r0``) and
+    the ALM seed-clip bounds. Only ``free_r0`` / ``free_minor`` reach this point;
+    ``validate_winding_surface_shape_cli_args`` rejects shape-mode frees on loaded
+    seeds. Returns the freed DOF names, or ``()`` when neither lever is requested
+    so the default-off loaded path stays byte-identical (no surface mutation).
+    """
+    free_r0 = bool(getattr(args, "winding_surface_free_r0", False))
+    free_minor = bool(getattr(args, "winding_surface_free_minor", False))
+    if not (free_r0 or free_minor):
+        return ()
+    return configure_winding_surface_shape_dofs(
+        banana_curve.surf,
+        free_r0=free_r0,
+        free_minor=free_minor,
+    )
 
 
 def validate_stage2_vessel_keepout_cli_args(args) -> None:
@@ -988,9 +1016,10 @@ def parse_args():
         default=os.environ.get("WINDING_SURFACE_FREE_R0", "").lower()
         in {"1", "true", "yes", "on"},
         help=(
-            "Fresh Stage 2 CWS only: unfix the coil-winding-surface major "
-            "radius rc(0,0) as a bounded translation DOF (vessel-clearance "
-            "corridor). Default OFF keeps the historical fixed winding R0."
+            "Unfix the coil-winding-surface major radius rc(0,0) as a bounded "
+            "translation DOF (vessel-clearance corridor). Valid on a fresh CWS "
+            "or a loaded seed (re-centers the loaded winding surface; T1.5). "
+            "Default OFF keeps the historical fixed winding R0."
         ),
     )
     parser.add_argument(
@@ -999,10 +1028,10 @@ def parse_args():
         default=os.environ.get("WINDING_SURFACE_FREE_MINOR", "").lower()
         in {"1", "true", "yes", "on"},
         help=(
-            "Fresh Stage 2 CWS only: unfix the coil-winding-surface minor "
-            "radius rc(1,0)/zs(1,0) as bounded DOFs (last-resort lever floored "
-            "at the on-spec a). Default OFF keeps the historical fixed minor "
-            "radius."
+            "Unfix the coil-winding-surface minor radius rc(1,0)/zs(1,0) as "
+            "bounded DOFs (last-resort lever floored at the on-spec a). Valid on "
+            "a fresh CWS or a loaded seed (re-sizes the loaded winding surface; "
+            "T1.5). Default OFF keeps the historical fixed minor radius."
         ),
     )
     parser.add_argument(
@@ -2735,7 +2764,12 @@ def _finite_build_projected_bend_half_extent_m(finite_build, banana_curve):
     surface_normal = np.asarray(
         surface_tangent_normal_direction(
             gamma,
-            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+            # B1.3/T1.4 value-live: read the moving winding R0 so the recorded
+            # finite-build buildability diagnostics (FINITEBUILD_CURVATURE_OK /
+            # _INNER_EDGE_RADIUS_M / _FRAME_AWARE_MIN_RADIUS_MARGIN_M) measure the
+            # pack-projection frame about the TRUE torus under
+            # --winding-surface-free-r0, not the frozen 0.903 spec constant.
+            live_winding_r0([banana_curve], BANANA_WINDING_SURFACE_MAJOR_RADIUS_M),
             0.0,
         ),
         dtype=float,
@@ -3821,6 +3855,13 @@ def main(parsed_args=None):
             accepts_offspec_sign=bool(args.accept_offspec_tf_current_sign),
             accepts_offspec_magnitude=bool(args.accept_offspec_tf_current_magnitude),
             field_name="loaded Stage 2 seed TF current",
+        )
+        # T1.5 warm-seed re-centering: the loaded path skips _initialize_coils,
+        # so free the bounded winding-surface size DOFs on the LOADED master
+        # surface here. Returns () (no surface mutation) when no size lever is
+        # requested, so the default-off loaded path stays byte-identical.
+        winding_surface_free_dof_names = free_loaded_winding_surface_size_dofs(
+            new_banana_curve, args
         )
     else:
         (

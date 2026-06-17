@@ -506,6 +506,34 @@ class VesselKeepoutStage2Tests(unittest.TestCase):
         self.assertEqual(args.stage2_vessel_keepout_weight, 0.0)
         self.assertEqual(args.stage2_hardware_keepout_weight, 0.0)
 
+    def test_cli_hardware_keepout_alm_scale_default_none_and_parses(self):
+        # The ALM-row hardness knob: defaults None (the schema scale applies),
+        # and parses an explicit value when given.
+        argv = ["banana_coil_solver.py"]
+        env = {"CURVATURE_THRESHOLD": "100.0"}
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(
+            "os.environ", env, clear=False
+        ):
+            os.environ.pop("STAGE2_HARDWARE_KEEPOUT_ALM_SCALE", None)
+            default_args = stage2_solver.parse_args()
+        self.assertIsNone(default_args.stage2_hardware_keepout_alm_scale)
+        args = _parse(["--stage2-hardware-keepout-alm-scale", "3.0"])
+        self.assertEqual(args.stage2_hardware_keepout_alm_scale, 3.0)
+
+    def test_cli_hardware_keepout_tolerance_default_none_and_parses(self):
+        # The ALM-row activity-tolerance knob: defaults None (the 1e-6 producer
+        # default applies), and parses an explicit value when given.
+        argv = ["banana_coil_solver.py"]
+        env = {"CURVATURE_THRESHOLD": "100.0"}
+        with mock.patch.object(sys, "argv", argv), mock.patch.dict(
+            "os.environ", env, clear=False
+        ):
+            os.environ.pop("STAGE2_HARDWARE_KEEPOUT_TOLERANCE", None)
+            default_args = stage2_solver.parse_args()
+        self.assertIsNone(default_args.stage2_hardware_keepout_tolerance)
+        args = _parse(["--stage2-hardware-keepout-tolerance", "5e-5"])
+        self.assertEqual(args.stage2_hardware_keepout_tolerance, 5e-5)
+
     def test_cli_weight_rejects_negative(self):
         with self.assertRaises(SystemExit):
             _parse(["--stage2-vessel-keepout-weight", "-1.0"])

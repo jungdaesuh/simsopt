@@ -15,6 +15,11 @@ from banana_opt.design_only_fields import (
     load_design_only_results_metadata,
 )
 from banana_opt.json_compat import load_boozer_finite_i as load
+from banana_opt.trace_transit_normalization import (
+    measure_axis_field,
+    tmax_for_transits,
+    transit_normalization_metadata,
+)
 from topology_scorer import (
     trace_metrics as _trace_metrics,
     extended_surface_seed_radii,
@@ -29,7 +34,9 @@ from topology_scorer import (
 )
 
 
+POINCARE_RENDER_MODE_ORDER = ("validation", "diagnostic", "default")
 SUPPORTED_POINCARE_FIELD_POLICIES = frozenset({"auto", "always", "never"})
+SUPPORTED_POINCARE_RENDER_MODES = frozenset(POINCARE_RENDER_MODE_ORDER)
 POINCARE_DESIGN_ONLY_OVERRIDE_VALUES = frozenset({"1", "true", "yes"})
 
 
@@ -43,6 +50,72 @@ def resolve_poincare_field_policy(env=None):
             "'auto', 'always', or 'never'"
         )
     return field_policy
+
+
+def resolve_poincare_render_mode_names(env=None):
+    """Read the render modes this invocation should trace, preserving defaults."""
+    environ = os.environ if env is None else env
+    modes_spec = str(environ.get("POINCARE_RENDER_MODES", "")).strip()
+    if modes_spec == "":
+        return POINCARE_RENDER_MODE_ORDER
+
+    mode_names = tuple(part.strip() for part in modes_spec.split(","))
+    if any(mode_name == "" for mode_name in mode_names):
+        raise ValueError(
+            "POINCARE_RENDER_MODES must be a comma-separated list of "
+            "'validation', 'diagnostic', and/or 'default'"
+        )
+    unsupported = [
+        mode_name
+        for mode_name in mode_names
+        if mode_name not in SUPPORTED_POINCARE_RENDER_MODES
+    ]
+    if unsupported:
+        raise ValueError(
+            f"Unsupported POINCARE_RENDER_MODES value(s) {unsupported!r}; "
+            "expected 'validation', 'diagnostic', and/or 'default'"
+        )
+    if len(set(mode_names)) != len(mode_names):
+        raise ValueError("POINCARE_RENDER_MODES must not repeat a render mode")
+    return mode_names
+
+
+def select_poincare_render_modes(render_modes, requested_mode_names):
+    """Select validated render-mode contracts by name without rebuilding them."""
+    render_mode_by_name = {render_mode["mode"]: render_mode for render_mode in render_modes}
+    missing_mode_names = [
+        mode_name
+        for mode_name in requested_mode_names
+        if mode_name not in render_mode_by_name
+    ]
+    if missing_mode_names:
+        raise ValueError(f"Requested Poincare mode(s) not built: {missing_mode_names!r}")
+    return [render_mode_by_name[mode_name] for mode_name in requested_mode_names]
+
+
+def assert_no_stale_unselected_metrics(out_dir, field_label, all_render_modes, selected_modes):
+    """Fail partial-mode runs if stale metric sidecars would make evidence ambiguous."""
+    selected_mode_names = {render_mode["mode"] for render_mode in selected_modes}
+    stale_metric_paths = []
+    for render_mode in all_render_modes:
+        if render_mode["mode"] in selected_mode_names:
+            continue
+        metric_path = os.path.join(
+            out_dir,
+            f"PoincareMetrics_{field_label}{render_mode['metrics_suffix']}.json",
+        )
+        if os.path.exists(metric_path):
+            stale_metric_paths.append(metric_path)
+    aggregate_path = os.path.join(out_dir, f"PoincareMetrics_{field_label}.json")
+    if len(selected_mode_names) != len(all_render_modes) and os.path.exists(
+        aggregate_path
+    ):
+        stale_metric_paths.append(aggregate_path)
+    if stale_metric_paths:
+        raise FileExistsError(
+            "Partial Poincare render-mode selection would leave stale metrics "
+            f"beside the new evidence: {stale_metric_paths}"
+        )
 
 
 def _field_policy_for_render_mode(render_field_policy, configured_field_policy):
@@ -351,6 +424,7 @@ if __name__ == "__main__":
     nz = 20  # Number of vertical points for interpolation
     degree = 3  # Degree for interpolation
     field_model_policy = resolve_poincare_field_policy()
+    requested_render_mode_names = resolve_poincare_render_mode_names()
 
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -415,6 +489,42 @@ if __name__ == "__main__":
     )
     surf.to_vtk(os.path.join(OUT_DIR, f"surf_{field_label}_poincare"))
 
+    # Audit-6 (2026-06-11) opt-in transit normalization. Default OFF: with both
+    # env vars unset, tmax_fl and every output stay bit-identical to the frozen
+    # 3-mode contract. POINCARE_TARGET_TRANSITS=<N> renormalizes the horizon so
+    # this artifact's field-line traces cover ~N toroidal transits
+    # (tmax = 2*pi*R0*N/B0, since compute_fieldlines integrates dx/dt = B);
+    # POINCARE_REPORT_TRANSITS=1 only writes the TransitNormalization sidecar.
+    _target_transits_env = os.environ.get("POINCARE_TARGET_TRANSITS")
+    _report_transits = (
+        str(os.environ.get("POINCARE_REPORT_TRANSITS", "")).lower()
+        in POINCARE_DESIGN_ONLY_OVERRIDE_VALUES
+    )
+    if _target_transits_env is not None:
+        _target_transits = float(_target_transits_env)
+        _axis_meta = measure_axis_field(bs, surf)
+        tmax_fl = tmax_for_transits(
+            _target_transits,
+            b_axis_T=_axis_meta["b_axis_T"],
+            r_axis_m=_axis_meta["r_axis_m"],
+        )
+        print(
+            f"Transit normalization ON: target {_target_transits} transits "
+            f"-> tmax={tmax_fl} "
+            f"(B0={_axis_meta['b_axis_T']} T, R0={_axis_meta['r_axis_m']} m)"
+        )
+    if _target_transits_env is not None or _report_transits:
+        _transit_meta = transit_normalization_metadata(bs, surf, tmax_fl)
+        _transit_meta["target_transits"] = (
+            float(_target_transits_env) if _target_transits_env is not None else None
+        )
+        _transit_sidecar = os.path.join(
+            OUT_DIR, f"TransitNormalization_{field_label}.json"
+        )
+        with open(_transit_sidecar, "w", encoding="utf-8") as f:
+            json.dump(_transit_meta, f, indent=2)
+        print(f"Saved: {os.path.basename(_transit_sidecar)}")
+
     # Build stopping criteria from the shared module (single source of truth)
     nfp = surf.nfp
     iteration_limit = topology_iteration_limit(tmax_fl)
@@ -435,7 +545,7 @@ if __name__ == "__main__":
         max_iterations=iteration_limit,
         trace_domain=default_stopping_domain,
     )
-    render_modes, field_trace_domain = build_poincare_render_modes(
+    all_render_modes, field_trace_domain = build_poincare_render_modes(
         surf,
         nfieldlines,
         seed_inset_fraction=seed_inset_fraction,
@@ -444,6 +554,16 @@ if __name__ == "__main__":
         guarded_stop_labels=guarded_stop_labels,
         default_stopping_criteria=default_stopping_criteria,
         default_stop_labels=default_stop_labels,
+    )
+    render_modes = select_poincare_render_modes(
+        all_render_modes,
+        requested_render_mode_names,
+    )
+    assert_no_stale_unselected_metrics(
+        OUT_DIR,
+        field_label,
+        all_render_modes,
+        render_modes,
     )
 
     interpolation_grid = {
@@ -557,22 +677,34 @@ if __name__ == "__main__":
                 mark_lost=False,
             )
             print(f"Saved: {os.path.basename(plot_filename)}")
-        metrics_path = os.path.join(OUT_DIR, f"PoincareMetrics_{field_label}.json")
-        artifact = build_poincare_aggregate_artifact(
-            field_label=field_label,
-            nfieldlines=nfieldlines,
-            tmax=tmax_fl,
-            tol=tol,
-            phis=phis,
-            render_modes=render_modes,
-            field_trace_domain=field_trace_domain,
-            field_models_by_mode=field_models_by_mode,
-            metrics_by_mode=metrics_by_mode,
-            design_only_override=allow_design_only_field,
+        if tuple(metrics_by_mode) == POINCARE_RENDER_MODE_ORDER:
+            metrics_path = os.path.join(OUT_DIR, f"PoincareMetrics_{field_label}.json")
+            artifact = build_poincare_aggregate_artifact(
+                field_label=field_label,
+                nfieldlines=nfieldlines,
+                tmax=tmax_fl,
+                tol=tol,
+                phis=phis,
+                render_modes=render_modes,
+                field_trace_domain=field_trace_domain,
+                field_models_by_mode=field_models_by_mode,
+                metrics_by_mode=metrics_by_mode,
+                design_only_override=allow_design_only_field,
+            )
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(artifact, f, indent=2)
+            print(f"Saved: {os.path.basename(metrics_path)}")
+            return artifact
+
+        print(
+            "Skipping aggregate PoincareMetrics sidecar for partial render-mode "
+            f"selection {tuple(metrics_by_mode)}"
         )
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            json.dump(artifact, f, indent=2)
-        print(f"Saved: {os.path.basename(metrics_path)}")
-        return artifact
+        return {
+            "field_label": field_label,
+            "nfieldlines": nfieldlines,
+            "tmax": tmax_fl,
+            "render_modes": metrics_by_mode,
+        }
 
     trace_fieldlines()

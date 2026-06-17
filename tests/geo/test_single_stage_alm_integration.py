@@ -398,6 +398,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "POLOIDAL_EXTENT_HALF_WIDTH_RAD": 1.5184364492350666,
             "BANANA_WIDTH_MIN_M": 0.1,
             "BANANA_WIDTH_MAX_M": 0.197,
+            "BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": 0.903,
             "BANANA_SELF_INTERSECT_MIN_DISTANCE_M": 0.01,
             "BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR": 1.5,
             "DEFAULT_EQUILIBRIA_DIR": "/tmp/fake_eq",
@@ -412,6 +413,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "DEFAULT_ALM_BOOZER_THRESHOLD": 1.0e-4,
             "DEFAULT_ALM_IOTA_PENALTY_THRESHOLD": 1.0e-4,
             "DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD": 1.0e-4,
+            "DEFAULT_SINGLE_STAGE_IOTA_TARGET": 0.15,
+            "DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET": 0.18,
             "DEFAULT_LBFGSB_MAXCOR": 40,
             "DEFAULT_INNER_SURFACE_RATIO": 0.8,
             "DEFAULT_STAGE2_SEEDS_BY_PLASMA": {},
@@ -443,9 +446,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT": 1.0,
-            "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT": 0.0,
+            "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT": 1000.0,
+            "SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT": 1000.0,
+            "SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT": 1.0,
+            "SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M": 0.0033,
+            "DEFAULT_HARDWARE_KEEPOUT_JSON_PATH": "/tmp/hardware_keepout.json",
+            "HARDWARE_KEEPOUT_SAFETY_MARGIN_M": 0.005,
             "LCFS_CONSTRAINT_MODES": ("centered", "edge_envelope"),
             "LCFS_CONSTRAINT_MODE_DEFAULT": "centered",
+            "BANANA_GEOMETRY_MODE_SHARED_SYMMETRY": "shared_symmetry",
+            "BANANA_GEOMETRY_MODE_MATERIALIZED_CWS": "materialized_cws",
             "env_flag": lambda name: False,
             "_DEFAULT_SINGLE_STAGE_SEED_REGIME": "auto",
             "_SINGLE_STAGE_SEED_REGIME_AUTO": "auto",
@@ -843,6 +853,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "width_min",
                 "width_max",
                 "self_intersect",
+                "self_envelope_min_dist",
+                "fold_geodesic_curvature_max",
                 "hardware_keepout",
                 "banana_current",
                 "tf_current",
@@ -942,12 +954,41 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             ),
             ("self_intersect_penalty", "SELF_INTERSECT_PENALTY"),
         )
+        self.assertTrue(specs["self_envelope_min_dist"].artifact_value_optional)
+        self.assertEqual(
+            specs["self_envelope_min_dist"].applies_to,
+            frozenset({"artifact"}),
+        )
+        self.assertEqual(
+            specs["fold_geodesic_curvature_max"].applies_to,
+            frozenset({"artifact"}),
+        )
+        self.assertTrue(specs["fold_geodesic_curvature_max"].artifact_value_optional)
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names(
+                "self_envelope_min_dist"
+            ),
+            ("self_envelope_min_dist", "SELF_ENVELOPE_MIN_DIST_M"),
+        )
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names(
+                "fold_geodesic_curvature_max"
+            ),
+            (
+                "fold_geodesic_curvature_max",
+                "FOLD_GEODESIC_CURVATURE_MAX_INV_M",
+            ),
+        )
         payload_names = schema_module.hardware_constraint_artifact_payload_field_names()
         self.assertIn("LENGTH_MIN_TARGET", payload_names)
         self.assertIn("WIDTH_MIN_THRESHOLD", payload_names)
         self.assertIn("WIDTH_MAX_THRESHOLD", payload_names)
         self.assertIn("SELF_INTERSECT_PENALTY", payload_names)
         self.assertIn("SELF_INTERSECT_THRESHOLD", payload_names)
+        self.assertIn("SELF_ENVELOPE_MIN_DIST_M", payload_names)
+        self.assertIn("SELF_ENVELOPE_THRESHOLD_M", payload_names)
+        self.assertIn("FOLD_GEODESIC_CURVATURE_MAX_INV_M", payload_names)
+        self.assertIn("FOLD_GEODESIC_CURVATURE_LIMIT_INV_M", payload_names)
         self.assertIn("FINAL_LCFS_OUTBOARD_EDGE_M", payload_names)
         self.assertIn("FINAL_LCFS_OUTBOARD_EDGE_MAX_M", payload_names)
         self.assertIn("FINAL_LCFS_INBOARD_EDGE_M", payload_names)
@@ -1328,6 +1369,41 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "banana_current_upper_bound",
             ),
         )
+
+    def test_stage2_alm_constraint_names_hardware_keepout_matches_inner_builder(self):
+        # The ALM multiplier vector is sized from the OUTER stage2_alm_constraint_names
+        # (banana_coil_solver) while evaluate_stage2_alm_problem rebuilds the INNER
+        # _stage2_constraint_names (stage2_objectives). They MUST produce identical
+        # tuples with the keep-out row on, or the multiplier/constraint vectors
+        # desync. Cross-check directly across coil-surface/poloidal combinations.
+        schema_module = load_hardware_constraint_schema_module()
+        injected = {
+            "hardware_constraint_alm_names": schema_module.hardware_constraint_alm_names,
+        }
+        outer = extract_functions(
+            STAGE2_MODULE_PATH, ["stage2_alm_constraint_names"], injected
+        )["stage2_alm_constraint_names"]
+        inner = extract_functions(
+            STAGE2_OBJECTIVES_MODULE_PATH, ["_stage2_constraint_names"], injected
+        )["_stage2_constraint_names"]
+        for include_coil_surface in (False, True):
+            for include_poloidal_extent in (False, True):
+                outer_names = outer(
+                    include_coil_surface=include_coil_surface,
+                    include_poloidal_extent=include_poloidal_extent,
+                    include_hardware_keepout=True,
+                )
+                inner_names = inner(
+                    include_coil_surface=include_coil_surface,
+                    include_poloidal_extent=include_poloidal_extent,
+                    include_hardware_keepout=True,
+                )
+                self.assertEqual(tuple(outer_names), tuple(inner_names))
+                self.assertIn("hardware_keepout", outer_names)
+                self.assertEqual(
+                    list(outer_names).index("hardware_keepout"),
+                    list(outer_names).index("self_intersect") + 1,
+                )
 
     def test_single_stage_partial_alm_state_payload_serializes_numpy_fields(self):
         from pathlib import PurePath
@@ -3100,6 +3176,319 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertTrue(vtk_calls["close"])
         self.assertEqual(surf.saved_path, "/tmp/out/surf_init")
         self.assertEqual(surf.extra_data["B_N"].shape, (2, 2, 1))
+
+    def _build_finite_build_seed_loader(
+        self,
+        *,
+        banana_curve,
+        finite_current_mode,
+        fake_curvecwsfouriercpp_cls,
+        jhalpern30_sentinel,
+        recorded_calls,
+    ):
+        functions = extract_functions(
+            STAGE2_MODULE_PATH,
+            ["load_stage2_seed_configuration"],
+            {
+                "np": np,
+                "load_boozer_finite_i": None,
+                "curves_to_vtk": None,
+                "partition_loaded_stage2_coils": None,
+                "build_finite_build_banana_coils": None,
+                "BiotSavart": None,
+                "CurveCWSFourierCPP": None,
+                "JHALPERN30_FINITE_CURRENT_MODE": None,
+            },
+        )
+        load_stage2_seed_configuration = functions["load_stage2_seed_configuration"]
+
+        class FakeCurrent:
+            def __init__(self, value):
+                self._value = value
+
+            def get_value(self):
+                return self._value
+
+        class FakeCoil:
+            def __init__(self, curve, current):
+                self.curve = curve
+                self.current = current
+
+        class FakeBiotSavart:
+            def __init__(self, coils):
+                self.coils = coils
+                self.points = None
+
+            def set_points(self, points):
+                self.points = points
+
+            def B(self):
+                return np.zeros_like(self.points)
+
+        class FakeSurface:
+            def gamma(self):
+                return np.zeros((2, 2, 3))
+
+            def unitnormal(self):
+                return np.ones((2, 2, 3))
+
+            def to_vtk(self, path, extra_data):
+                self.saved_path = path
+                self.extra_data = extra_data
+
+        class OtherCurve:
+            pass
+
+        tf_curve_a = OtherCurve()
+        tf_curve_b = OtherCurve()
+        proxy_curve = OtherCurve()
+        vf_curve = OtherCurve()
+
+        tf_coils = [
+            FakeCoil(tf_curve_a, FakeCurrent(100000.0)),
+            FakeCoil(tf_curve_b, FakeCurrent(100000.0)),
+        ]
+        banana_coils = [
+            FakeCoil(banana_curve, FakeCurrent(9500.0)),
+            FakeCoil(OtherCurve(), FakeCurrent(-9500.0)),
+        ]
+        proxy_coils = [FakeCoil(proxy_curve, FakeCurrent(0.0))]
+        vf_coils = [FakeCoil(vf_curve, FakeCurrent(0.0))]
+
+        loaded_bs = FakeBiotSavart(tf_coils + banana_coils + proxy_coils + vf_coils)
+
+        partition = SimpleNamespace(
+            tf_coils=tf_coils,
+            banana_coils=banana_coils,
+            proxy_coils=proxy_coils,
+            vf_coils=vf_coils,
+            finite_current_mode=finite_current_mode,
+        )
+
+        def fake_partition(loaded_coils, *, stage2_results, requested_num_tf_coils):
+            recorded_calls.setdefault("partition_calls", []).append(
+                {
+                    "loaded_coils": loaded_coils,
+                    "stage2_results": stage2_results,
+                    "requested_num_tf_coils": requested_num_tf_coils,
+                }
+            )
+            return partition
+
+        load_stage2_seed_configuration.__globals__["load_boozer_finite_i"] = (
+            lambda path: loaded_bs
+        )
+        load_stage2_seed_configuration.__globals__["CurveCWSFourierCPP"] = (
+            fake_curvecwsfouriercpp_cls
+        )
+        load_stage2_seed_configuration.__globals__["JHALPERN30_FINITE_CURRENT_MODE"] = (
+            jhalpern30_sentinel
+        )
+        load_stage2_seed_configuration.__globals__["curves_to_vtk"] = (
+            lambda curves, path, close=True: recorded_calls.update(
+                {"vtk": {"curves": curves, "path": path, "close": close}}
+            )
+        )
+        load_stage2_seed_configuration.__globals__["partition_loaded_stage2_coils"] = (
+            fake_partition
+        )
+
+        return SimpleNamespace(
+            load_stage2_seed_configuration=load_stage2_seed_configuration,
+            tf_coils=tf_coils,
+            banana_coils=banana_coils,
+            proxy_coils=proxy_coils,
+            vf_coils=vf_coils,
+            loaded_bs=loaded_bs,
+            surface_cls=FakeSurface,
+            biot_savart_cls=FakeBiotSavart,
+        )
+
+    def _forbid_finite_build_seed_rebuild(self, ctx, guard_name):
+        def forbidden_build(*_args, **_kwargs):
+            raise AssertionError(
+                "build_finite_build_banana_coils must not be called on "
+                f"{guard_name} guard"
+            )
+
+        def forbidden_biot_savart(_coils):
+            raise AssertionError(
+                f"BiotSavart must not be re-constructed on {guard_name} guard"
+            )
+
+        ctx.load_stage2_seed_configuration.__globals__[
+            "build_finite_build_banana_coils"
+        ] = forbidden_build
+        ctx.load_stage2_seed_configuration.__globals__["BiotSavart"] = (
+            forbidden_biot_savart
+        )
+
+    def test_stage2_seed_loader_finite_build_rebuilds_banana_pack_from_master_curve(
+        self,
+    ):
+        class FakeCurveCWSFourierCPP:
+            def __init__(self, surf):
+                self.surf = surf
+
+        master_surf = object()
+        banana_curve = FakeCurveCWSFourierCPP(master_surf)
+        finite_build = object()
+        new_banana_filament_curves = [object(), object(), object()]
+
+        class FakeFilamentCoil:
+            def __init__(self, curve):
+                self.curve = curve
+
+        new_banana_coils = [FakeFilamentCoil(c) for c in new_banana_filament_curves]
+        recorded_calls = {}
+        jhalpern30_sentinel = "jhalpern30-current-mode-sentinel"
+
+        ctx = self._build_finite_build_seed_loader(
+            banana_curve=banana_curve,
+            finite_current_mode="thin",
+            fake_curvecwsfouriercpp_cls=FakeCurveCWSFourierCPP,
+            jhalpern30_sentinel=jhalpern30_sentinel,
+            recorded_calls=recorded_calls,
+        )
+
+        def fake_build_finite_build_banana_coils(
+            master_curve, total_current_A, finite_build_arg, surf_coils
+        ):
+            recorded_calls["finite_build"] = {
+                "master_curve": master_curve,
+                "total_current_A": total_current_A,
+                "finite_build": finite_build_arg,
+                "surf_coils": surf_coils,
+            }
+            return new_banana_coils
+
+        constructed_bs = []
+
+        def fake_biot_savart(coils):
+            instance = ctx.biot_savart_cls(coils)
+            constructed_bs.append(instance)
+            return instance
+
+        ctx.load_stage2_seed_configuration.__globals__[
+            "build_finite_build_banana_coils"
+        ] = fake_build_finite_build_banana_coils
+        ctx.load_stage2_seed_configuration.__globals__["BiotSavart"] = fake_biot_savart
+
+        surf = ctx.surface_cls()
+        result = ctx.load_stage2_seed_configuration(
+            "/tmp/seed.json",
+            surf,
+            2,
+            "/tmp/out/",
+            stage2_results={"COIL_GROUPS": "unused-by-test"},
+            finite_build=finite_build,
+        )
+
+        (
+            bs_result,
+            curves_result,
+            banana_curve_result,
+            banana_coils_result,
+            tf_coils_result,
+            proxy_coils_result,
+            vf_coils_result,
+        ) = result
+
+        self.assertEqual(len(constructed_bs), 1)
+        self.assertIs(bs_result, constructed_bs[0])
+        self.assertIsNot(bs_result, ctx.loaded_bs)
+        self.assertEqual(
+            bs_result.coils,
+            ctx.tf_coils + new_banana_coils + ctx.proxy_coils + ctx.vf_coils,
+        )
+
+        finite_build_call = recorded_calls["finite_build"]
+        self.assertIs(finite_build_call["master_curve"], banana_curve)
+        self.assertEqual(finite_build_call["total_current_A"], 9500.0)
+        self.assertIs(finite_build_call["finite_build"], finite_build)
+        self.assertIs(finite_build_call["surf_coils"], master_surf)
+
+        self.assertIs(banana_curve_result, banana_curve)
+        self.assertEqual(banana_coils_result, new_banana_coils)
+        self.assertEqual(tf_coils_result, ctx.tf_coils)
+        self.assertEqual(proxy_coils_result, ctx.proxy_coils)
+        self.assertEqual(vf_coils_result, ctx.vf_coils)
+        self.assertEqual(curves_result, [c.curve for c in bs_result.coils])
+        self.assertEqual(bs_result.points.shape, (4, 3))
+        self.assertEqual(recorded_calls["vtk"]["path"], "/tmp/out/curves_init")
+        self.assertTrue(recorded_calls["vtk"]["close"])
+        self.assertEqual(surf.saved_path, "/tmp/out/surf_init")
+        self.assertEqual(surf.extra_data["B_N"].shape, (2, 2, 1))
+
+    def test_stage2_seed_loader_finite_build_rejects_jhalpern30_seed(self):
+        class FakeCurveCWSFourierCPP:
+            def __init__(self, surf):
+                self.surf = surf
+
+        banana_curve = FakeCurveCWSFourierCPP(object())
+        recorded_calls = {}
+        jhalpern30_sentinel = "jhalpern30-current-mode-sentinel"
+
+        ctx = self._build_finite_build_seed_loader(
+            banana_curve=banana_curve,
+            finite_current_mode=jhalpern30_sentinel,
+            fake_curvecwsfouriercpp_cls=FakeCurveCWSFourierCPP,
+            jhalpern30_sentinel=jhalpern30_sentinel,
+            recorded_calls=recorded_calls,
+        )
+
+        self._forbid_finite_build_seed_rebuild(ctx, "jhalpern30")
+
+        surf = ctx.surface_cls()
+        with self.assertRaises(ValueError) as cm:
+            ctx.load_stage2_seed_configuration(
+                "/tmp/seed.json",
+                surf,
+                2,
+                "/tmp/out/",
+                stage2_results={"COIL_GROUPS": "unused-by-test"},
+                finite_build=object(),
+            )
+
+        self.assertIn("jhalpern30", str(cm.exception))
+        self.assertNotIn("finite_build", recorded_calls)
+
+    def test_stage2_seed_loader_finite_build_requires_curvecwsfouriercpp_master(self):
+        class FakeCurveCWSFourierCPP:
+            def __init__(self, surf):
+                self.surf = surf
+
+        class WrongCurve:
+            def __init__(self):
+                self.surf = object()
+
+        banana_curve = WrongCurve()
+        recorded_calls = {}
+        jhalpern30_sentinel = "jhalpern30-current-mode-sentinel"
+
+        ctx = self._build_finite_build_seed_loader(
+            banana_curve=banana_curve,
+            finite_current_mode="thin",
+            fake_curvecwsfouriercpp_cls=FakeCurveCWSFourierCPP,
+            jhalpern30_sentinel=jhalpern30_sentinel,
+            recorded_calls=recorded_calls,
+        )
+
+        self._forbid_finite_build_seed_rebuild(ctx, "curve-type")
+
+        surf = ctx.surface_cls()
+        with self.assertRaises(ValueError) as cm:
+            ctx.load_stage2_seed_configuration(
+                "/tmp/seed.json",
+                surf,
+                2,
+                "/tmp/out/",
+                stage2_results={"COIL_GROUPS": "unused-by-test"},
+                finite_build=object(),
+            )
+
+        self.assertIn("CurveCWSFourierCPP", str(cm.exception))
+        self.assertNotIn("finite_build", recorded_calls)
 
     def test_single_stage_constraint_activity_tolerances_match_selection_windows(self):
         source = SINGLE_STAGE_CONSTRAINTS_MODULE_PATH.read_text()

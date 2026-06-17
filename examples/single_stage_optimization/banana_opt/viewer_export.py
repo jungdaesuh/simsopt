@@ -32,10 +32,14 @@ if __package__:
     )
     from .coil_groups import (
         COIL_GROUP_ROLE_BANANA,
+        COIL_GROUP_ROLE_PROXY,
         COIL_GROUP_ROLE_TF,
+        COIL_GROUP_ROLE_VF,
+        COIL_GROUPS_RESULTS_KEY,
         CoilGroupsManifest,
         build_contiguous_manifest,
         partition_coils_by_manifest,
+        resolve_manifest,
     )
     from .finite_current_profiles import (
         FINITE_CURRENT_PROFILES,
@@ -59,10 +63,14 @@ else:
     )
     from banana_opt.coil_groups import (
         COIL_GROUP_ROLE_BANANA,
+        COIL_GROUP_ROLE_PROXY,
         COIL_GROUP_ROLE_TF,
+        COIL_GROUP_ROLE_VF,
+        COIL_GROUPS_RESULTS_KEY,
         CoilGroupsManifest,
         build_contiguous_manifest,
         partition_coils_by_manifest,
+        resolve_manifest,
     )
     from banana_opt.finite_current_profiles import (
         FINITE_CURRENT_PROFILES,
@@ -96,6 +104,11 @@ DEFAULT_WINDING_A_M = BANANA_WINDING_MINOR_RADIUS_M
 DEFAULT_BRACKET_WIDTH_MM = TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM
 DEFAULT_BRACKET_DEPTH_MM = TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM
 DEFAULT_CHANNEL_WALL_M = 0.003
+STAGE2_RESULTS_FILENAME = "results.json"
+FINITE_BUILD_ENABLED_KEY = "FINITE_BUILD_ENABLED"
+FINITEBUILD_FILAMENTS_PER_BANANA_KEY = "FINITEBUILD_FILAMENTS_PER_BANANA"
+FINITEBUILD_NUMFILAMENTS_N_KEY = "FINITEBUILD_NUMFILAMENTS_N"
+FINITEBUILD_NUMFILAMENTS_B_KEY = "FINITEBUILD_NUMFILAMENTS_B"
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,8 @@ class ViewerExportConfig:
     conversion_mode: str = "centerline_only"
     coil_scope: str = "banana"
     finite_current_mode: str | None = None
+    num_tf_coils: int | None = None
+    filaments_per_banana: int | None = None
     winding_r0_m: float = DEFAULT_WINDING_R0_M
     winding_a_m: float = DEFAULT_WINDING_A_M
     bracket_width_mm: float = DEFAULT_BRACKET_WIDTH_MM
@@ -126,12 +141,41 @@ class SourcePartition:
 class PartitionSpec:
     manifest: CoilGroupsManifest
     finite_current_mode: str
+    filaments_per_banana: int = 1
 
 
 @dataclass(frozen=True)
 class LoadedSource:
     biot_savart: BiotSavart
     source_object_class: str
+
+
+@dataclass(frozen=True, eq=False)
+class PackCenterlineCurve:
+    """Duck-typed curve holding a reduced pack centerline (``gamma()`` only)."""
+
+    points: np.ndarray
+
+    def gamma(self) -> np.ndarray:
+        return self.points
+
+
+@dataclass(frozen=True)
+class PackNetCurrent:
+    """Duck-typed current holding a pack's net current in amperes."""
+
+    value_A: float
+
+    def get_value(self) -> float:
+        return self.value_A
+
+
+@dataclass(frozen=True, eq=False)
+class PackCenterlineCoil:
+    """One finite-build filament pack reduced to a renderable centerline coil."""
+
+    curve: PackCenterlineCurve
+    current: PackNetCurrent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,6 +207,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Finite-current profile used to partition metadata-free inputs.",
     )
+    parser.add_argument(
+        "--num-tf-coils",
+        type=int,
+        default=None,
+        help=(
+            "TF-coil count of a finite-build pack payload; requires "
+            "--filaments-per-banana."
+        ),
+    )
+    parser.add_argument(
+        "--filaments-per-banana",
+        type=int,
+        default=None,
+        help=(
+            "Filaments per banana pack in a finite-build payload; each pack is "
+            "reduced to its centerline curve. Requires --num-tf-coils. Without "
+            "these flags, pack payloads are partitioned from the Stage-2 "
+            "results.json next to the input."
+        ),
+    )
     parser.add_argument("--winding-r0-m", type=float, default=DEFAULT_WINDING_R0_M)
     parser.add_argument("--winding-a-m", type=float, default=DEFAULT_WINDING_A_M)
     parser.add_argument("--bracket-width-mm", type=float, default=DEFAULT_BRACKET_WIDTH_MM)
@@ -181,6 +245,8 @@ def config_from_args(args: argparse.Namespace) -> ViewerExportConfig:
         conversion_mode=str(args.conversion_mode),
         coil_scope=str(args.coil_scope),
         finite_current_mode=args.finite_current_mode,
+        num_tf_coils=args.num_tf_coils,
+        filaments_per_banana=args.filaments_per_banana,
         winding_r0_m=float(args.winding_r0_m),
         winding_a_m=float(args.winding_a_m),
         bracket_width_mm=float(args.bracket_width_mm),
@@ -205,6 +271,9 @@ def export_viewer_artifact(config: ViewerExportConfig) -> dict[str, object]:
         contract_family=contract_family,
         coil_scope=config.coil_scope,
         finite_current_mode=config.finite_current_mode,
+        num_tf_coils=config.num_tf_coils,
+        filaments_per_banana=config.filaments_per_banana,
+        source_path=source_path,
     )
     payload = build_artifact_payload(
         config,
@@ -226,6 +295,24 @@ def validate_config(config: ViewerExportConfig) -> None:
         raise ValueError(f"Unsupported conversion mode {config.conversion_mode!r}.")
     if config.coil_scope not in COIL_SCOPES:
         raise ValueError(f"Unsupported coil scope {config.coil_scope!r}.")
+    pack_flags_set = (
+        config.num_tf_coils is not None or config.filaments_per_banana is not None
+    )
+    if pack_flags_set and config.finite_current_mode is not None:
+        raise ValueError(
+            "--finite-current-mode conflicts with --num-tf-coils/"
+            "--filaments-per-banana; pass exactly one partition source."
+        )
+    if pack_flags_set and (
+        config.num_tf_coils is None or config.filaments_per_banana is None
+    ):
+        raise ValueError(
+            "--num-tf-coils and --filaments-per-banana must be passed together."
+        )
+    if config.filaments_per_banana is not None and int(config.filaments_per_banana) < 1:
+        raise ValueError("--filaments-per-banana must be a positive integer.")
+    if config.num_tf_coils is not None and int(config.num_tf_coils) < 0:
+        raise ValueError("--num-tf-coils must be non-negative.")
     for name, value in (
         ("winding_r0_m", config.winding_r0_m),
         ("winding_a_m", config.winding_a_m),
@@ -316,16 +403,35 @@ def partition_source_coils(
     contract_family: str,
     coil_scope: str,
     finite_current_mode: str | None,
+    num_tf_coils: int | None = None,
+    filaments_per_banana: int | None = None,
+    source_path: Path | None = None,
 ) -> SourcePartition:
     partition_spec = resolved_partition_spec(
         total_coils=len(coils),
         contract_family=contract_family,
         finite_current_mode=finite_current_mode,
+        num_tf_coils=num_tf_coils,
+        filaments_per_banana=filaments_per_banana,
+        source_path=source_path,
     )
     role_partitions = partition_coils_by_manifest(coils, partition_spec.manifest)
     tf_coils = tuple(role_partitions.get(COIL_GROUP_ROLE_TF, ()))
     banana_coils = tuple(role_partitions.get(COIL_GROUP_ROLE_BANANA, ()))
-    render_coils = tuple(coils) if coil_scope == "all" else banana_coils
+    if partition_spec.filaments_per_banana > 1:
+        banana_coils = reduce_filament_packs_to_centerlines(
+            banana_coils, partition_spec.filaments_per_banana
+        )
+        render_coils = (
+            tf_coils
+            + banana_coils
+            + tuple(role_partitions.get(COIL_GROUP_ROLE_PROXY, ()))
+            + tuple(role_partitions.get(COIL_GROUP_ROLE_VF, ()))
+            if coil_scope == "all"
+            else banana_coils
+        )
+    else:
+        render_coils = tuple(coils) if coil_scope == "all" else banana_coils
     if not render_coils:
         raise ValueError("Selected coil scope contains no coils to render.")
     return SourcePartition(
@@ -340,12 +446,22 @@ def resolved_partition_spec(
     total_coils: int,
     contract_family: str,
     finite_current_mode: str | None,
+    num_tf_coils: int | None = None,
+    filaments_per_banana: int | None = None,
+    source_path: Path | None = None,
 ) -> PartitionSpec:
     if finite_current_mode is not None:
         profile = get_finite_current_profile(finite_current_mode)
         return PartitionSpec(
             manifest=profile.build_default_coil_groups_manifest(),
             finite_current_mode=str(profile.mode),
+        )
+
+    if num_tf_coils is not None or filaments_per_banana is not None:
+        return pack_partition_spec_from_flags(
+            total_coils=total_coils,
+            num_tf_coils=num_tf_coils,
+            filaments_per_banana=filaments_per_banana,
         )
 
     if contract_family in {"baseline_original_vacuum", "simsopt_surrogate_vacuum"}:
@@ -392,10 +508,171 @@ def resolved_partition_spec(
             ),
         )
 
+    if source_path is not None:
+        metadata_spec = pack_partition_spec_from_stage2_results(
+            source_path, total_coils=total_coils
+        )
+        if metadata_spec is not None:
+            return metadata_spec
+
     raise ValueError(
         "Metadata-free input cannot be partitioned uniquely; pass "
-        "--finite-current-mode."
+        "--finite-current-mode, or --num-tf-coils with --filaments-per-banana "
+        "for finite-build pack payloads (a Stage-2 results.json next to the "
+        "input is read automatically)."
     )
+
+
+def pack_partition_spec_from_flags(
+    *,
+    total_coils: int,
+    num_tf_coils: int | None,
+    filaments_per_banana: int | None,
+) -> PartitionSpec:
+    """Explicit TF + banana-filament partition from the CLI pack flags."""
+    if num_tf_coils is None or filaments_per_banana is None:
+        raise ValueError(
+            "--num-tf-coils and --filaments-per-banana must be passed together."
+        )
+    tf_count = int(num_tf_coils)
+    filaments = int(filaments_per_banana)
+    if filaments < 1:
+        raise ValueError("--filaments-per-banana must be a positive integer.")
+    if tf_count < 0 or tf_count >= total_coils:
+        raise ValueError(
+            f"--num-tf-coils={tf_count} leaves no banana coils in a "
+            f"{total_coils}-coil payload."
+        )
+    filament_coil_count = total_coils - tf_count
+    if filament_coil_count % filaments:
+        raise ValueError(
+            f"{filament_coil_count} banana filament coils are not divisible by "
+            f"--filaments-per-banana={filaments}."
+        )
+    return PartitionSpec(
+        manifest=build_contiguous_manifest(
+            num_tf_coils=tf_count,
+            num_banana_coils=filament_coil_count,
+            num_proxy_coils=0,
+            num_vf_coils=0,
+        ),
+        finite_current_mode=(
+            f"pack_flags_{tf_count}tf_{filament_coil_count}banana_{filaments}fil"
+        ),
+        filaments_per_banana=filaments,
+    )
+
+
+def pack_partition_spec_from_stage2_results(
+    source_path: Path,
+    *,
+    total_coils: int,
+) -> PartitionSpec | None:
+    """Pack partition from the Stage-2 ``results.json`` sibling of the input.
+
+    Returns ``None`` when no sibling exists or it carries no coil-layout keys;
+    raises when the recorded layout contradicts the loaded coil payload.
+    """
+    results_path = source_path.parent / STAGE2_RESULTS_FILENAME
+    if not results_path.is_file():
+        return None
+    stage2_results = read_json_mapping(results_path)
+    if (
+        stage2_results.get(COIL_GROUPS_RESULTS_KEY) is None
+        and stage2_results.get("NUM_TF_COILS") is None
+    ):
+        return None
+    resolution = resolve_manifest(stage2_results, total_loaded_coils=total_coils)
+    manifest = resolution.manifest
+    filaments = stage2_filaments_per_banana(stage2_results)
+    banana_count = manifest.count_for_role(COIL_GROUP_ROLE_BANANA)
+    if filaments > 1 and banana_count % filaments:
+        raise ValueError(
+            f"{results_path} records {banana_count} banana filament coils, not "
+            f"divisible by {FINITEBUILD_FILAMENTS_PER_BANANA_KEY}={filaments}."
+        )
+    return PartitionSpec(
+        manifest=manifest,
+        finite_current_mode=(
+            "stage2_results_metadata_"
+            f"{manifest.count_for_role(COIL_GROUP_ROLE_TF)}tf_"
+            f"{banana_count}banana_"
+            f"{manifest.count_for_role(COIL_GROUP_ROLE_PROXY)}proxy_"
+            f"{manifest.count_for_role(COIL_GROUP_ROLE_VF)}vf_"
+            f"{filaments}fil"
+        ),
+        filaments_per_banana=filaments,
+    )
+
+
+def stage2_filaments_per_banana(stage2_results: Mapping[str, object]) -> int:
+    """Filaments per banana pack recorded by Stage-2 finite-build metadata (1 = thin)."""
+    if not stage2_results.get(FINITE_BUILD_ENABLED_KEY):
+        return 1
+    recorded = stage2_results.get(FINITEBUILD_FILAMENTS_PER_BANANA_KEY)
+    numfilaments_n = stage2_results.get(FINITEBUILD_NUMFILAMENTS_N_KEY)
+    numfilaments_b = stage2_results.get(FINITEBUILD_NUMFILAMENTS_B_KEY)
+    derived = (
+        int(numfilaments_n) * int(numfilaments_b)
+        if numfilaments_n is not None and numfilaments_b is not None
+        else None
+    )
+    if recorded is None and derived is None:
+        raise ValueError(
+            f"{FINITE_BUILD_ENABLED_KEY} Stage-2 results lack "
+            f"{FINITEBUILD_FILAMENTS_PER_BANANA_KEY} and "
+            f"{FINITEBUILD_NUMFILAMENTS_N_KEY}/{FINITEBUILD_NUMFILAMENTS_B_KEY}; "
+            "cannot reduce filament packs."
+        )
+    if recorded is not None and derived is not None and int(recorded) != derived:
+        raise ValueError(
+            f"Stage-2 results record {FINITEBUILD_FILAMENTS_PER_BANANA_KEY}="
+            f"{int(recorded)} but {FINITEBUILD_NUMFILAMENTS_N_KEY}*"
+            f"{FINITEBUILD_NUMFILAMENTS_B_KEY}={derived}; refusing inconsistent "
+            "pack metadata."
+        )
+    filaments = int(recorded) if recorded is not None else int(derived)
+    if filaments < 1:
+        raise ValueError(
+            f"Finite-build filament count must be positive; got {filaments}."
+        )
+    return filaments
+
+
+def reduce_filament_packs_to_centerlines(
+    filament_coils: Sequence[object],
+    filaments_per_banana: int,
+) -> tuple[PackCenterlineCoil, ...]:
+    """Collapse consecutive filament packs into per-banana centerline coils.
+
+    ``create_multifilament_grid`` lays each pack's filaments on a zero-mean
+    shift grid around the centerline, and symmetry expansion transforms packs
+    linearly as contiguous wholes, so the pointwise mean of one pack's filament
+    gammas is exactly that pack's centerline (to float rounding) and the pack's
+    net current is the sum of its filament currents.
+    """
+    filaments = int(filaments_per_banana)
+    if filaments < 1:
+        raise ValueError("filaments_per_banana must be a positive integer.")
+    if not filament_coils or len(filament_coils) % filaments:
+        raise ValueError(
+            f"Cannot reduce {len(filament_coils)} filament coils into packs of "
+            f"{filaments}."
+        )
+    centerline_coils: list[PackCenterlineCoil] = []
+    for pack_start in range(0, len(filament_coils), filaments):
+        pack = filament_coils[pack_start : pack_start + filaments]
+        centerline = np.mean(np.stack([coil_points(coil) for coil in pack]), axis=0)
+        centerline.setflags(write=False)
+        centerline_coils.append(
+            PackCenterlineCoil(
+                curve=PackCenterlineCurve(points=centerline),
+                current=PackNetCurrent(
+                    value_A=math.fsum(coil_current_A(coil) for coil in pack)
+                ),
+            )
+        )
+    return tuple(centerline_coils)
 
 
 def build_artifact_payload(

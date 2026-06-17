@@ -2480,6 +2480,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("FRONTIER_INVARIANT_TORUS_MIN", None)
             os.environ.pop("FRONTIER_KAM_MIN", None)
+            os.environ.pop("IOTA_TARGET", None)
             with patch.object(
                 sys,
                 "argv",
@@ -2495,10 +2496,39 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
 
         self.assertEqual(args.cs_dist, module.COIL_PLASMA_MIN_DIST_M)
         self.assertEqual(args.curvature_threshold, 100.0)
+        self.assertIsNone(args.iota_target)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
         self.assertEqual(args.maxcor, 40)
         self.assertEqual(module.resolve_frontier_invariant_torus_min_arg(args), 0.30)
+
+    def test_build_single_stage_goal_mode_command_omits_unset_iota_target(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.iota_target = None
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertNotIn("--iota-target", command)
+
+    def test_build_single_stage_goal_mode_command_forwards_explicit_iota_target(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.iota_target = 0.18
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertEqual(command[command.index("--iota-target") + 1], "0.18")
 
     def test_goal_mode_comparison_wrapper_parse_args_accepts_seed_order_upgrade(self):
         module = load_goal_mode_comparison_module()

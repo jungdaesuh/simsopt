@@ -77,6 +77,14 @@ def _is_negative_number(value: object) -> bool:
     return False
 
 
+def _number_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def _is_zero_or_missing(value: object) -> bool:
     return value is None or value == "" or _is_zero_number(value)
 
@@ -102,11 +110,67 @@ def _signed_tf_current_negative(results: Mapping[str, object]) -> bool:
     return _is_negative_number(tf_current)
 
 
+def _independent_banana_currents_have_signed_max_abs_control(
+    results: Mapping[str, object],
+    banana_currents: Sequence[object],
+) -> bool:
+    if results.get("BANANA_CURRENT_MODE") != "independent":
+        return False
+    if results.get("BANANA_CURRENT_CONTROL_METRIC") != "max_abs":
+        return False
+    current_values: list[float] = []
+    for current in banana_currents:
+        current_value = _number_or_none(current)
+        if current_value is None:
+            return False
+        current_values.append(current_value)
+    if not current_values:
+        return False
+    recorded_max_abs = _number_or_none(results.get("BANANA_CURRENT_MAX_ABS_A"))
+    if recorded_max_abs is None:
+        return False
+    actual_max_abs = max(abs(current) for current in current_values)
+    max_abs_tolerance = max(1.0e-9, 1.0e-12 * actual_max_abs)
+    return (
+        current_values[0] < -STRICT_VACUUM_ZERO_TOL
+        and all(abs(current) > STRICT_VACUUM_ZERO_TOL for current in current_values)
+        and abs(recorded_max_abs - actual_max_abs) <= max_abs_tolerance
+    )
+
+
+def _shared_mode_banana_currents_signed(banana_currents) -> bool:
+    # Shared-mode sign contract (program Hard Invariant 12): one shared current
+    # DOF drives every coil through ScaledCurrent(shared, +/-1), so the realized
+    # per-coil list is values in {-I, +I} with a NEGATIVE base (CW lane). A fresh
+    # shared state reports the control value only (all -I); a resumed seed
+    # reports realized per-coil values (alternating -I/+I). Both are valid here:
+    # this metadata check enforces the sign convention (negative base, single
+    # shared magnitude); alternation-vs-flattened ORDERING is enforced by the
+    # seed-loading contract, which sees the coil graph rather than a bare list.
+    values: list[float] = []
+    for current in banana_currents:
+        if not isinstance(current, (int, float)) or isinstance(current, bool):
+            return False
+        values.append(float(current))
+    if not values or values[0] >= 0.0:
+        return False
+    magnitude = abs(values[0])
+    tolerance = 1e-6 * max(magnitude, 1.0)
+    return all(abs(abs(value) - magnitude) <= tolerance for value in values)
+
+
 def _signed_banana_current_negative(results: Mapping[str, object]) -> bool:
     banana_currents = results.get("BANANA_CURRENTS_A")
     if isinstance(banana_currents, (list, tuple)):
         if not banana_currents:
             return False
+        if _independent_banana_currents_have_signed_max_abs_control(
+            results,
+            banana_currents,
+        ):
+            return True
+        if results.get("BANANA_CURRENT_MODE") == "shared":
+            return _shared_mode_banana_currents_signed(banana_currents)
         return all(_is_negative_number(current) for current in banana_currents)
     observed_currents: list[object] = []
     for key in ("BANANA_INIT_CURRENT_A", "BANANA_CURRENT_A"):

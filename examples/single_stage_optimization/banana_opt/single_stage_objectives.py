@@ -4,6 +4,9 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt.objectives import QuadraticPenalty
 
+# Sentinel for missing optional dependencies; checked at class instantiation.
+_MATH_SQRT2 = float(np.sqrt(2.0))
+
 from alm_utils import (
     augmented_inequality_objective,
     normalize_alm_constraint_grads,
@@ -146,6 +149,223 @@ def build_single_stage_shear_objective(surface_iota_terms, shear_target):
     )
 
 
+class MagneticWellVolumeShortfall(Optimizable):
+    r"""One-sided shortfall on a Boozer-surface magnetic-well proxy.
+
+    For three axis-to-edge Boozer surfaces with labels :math:`s_0<s_1<s_2`,
+    approximate the local volume derivatives
+
+    .. math::
+       V'_\mathrm{inner} = (V_1 - V_0)/(s_1-s_0), \quad
+       V'_\mathrm{outer} = (V_2 - V_1)/(s_2-s_1),
+
+    then use the normalized VMEC-well-sign proxy
+
+    .. math::
+       W = (V'_\mathrm{outer} - V'_\mathrm{inner})
+           /(V'_\mathrm{outer} + V'_\mathrm{inner}).
+
+    The sign convention matches SIMSOPT's VMEC ``WellWeighted`` description:
+    negative is favorable.  The objective penalizes only values above
+    ``well_target``:
+
+    .. math::
+       J = \tfrac12 \max(W - W_\mathrm{target}, 0)^2 .
+
+    This is not a Mercier criterion.  It is a coil/Boozer objective-side proxy
+    for the magnetic-well part of the A7 physics contract; full finite-beta
+    Mercier still belongs to the VMEC lane.
+    """
+
+    def __init__(
+        self,
+        volume_inner_term,
+        volume_mid_term,
+        volume_outer_term,
+        label_inner,
+        label_mid,
+        label_outer,
+        well_target=0.0,
+    ):
+        self.volume_inner_term = volume_inner_term
+        self.volume_mid_term = volume_mid_term
+        self.volume_outer_term = volume_outer_term
+        self.label_inner = float(label_inner)
+        self.label_mid = float(label_mid)
+        self.label_outer = float(label_outer)
+        if not (self.label_inner < self.label_mid < self.label_outer):
+            raise ValueError(
+                "Magnetic-well volume proxy requires strictly increasing "
+                "surface labels"
+            )
+        self.well_target = float(well_target)
+        Optimizable.__init__(
+            self,
+            x0=np.asarray([]),
+            depends_on=[volume_inner_term, volume_mid_term, volume_outer_term],
+        )
+
+    @property
+    def _inner_delta(self):
+        return self.label_mid - self.label_inner
+
+    @property
+    def _outer_delta(self):
+        return self.label_outer - self.label_mid
+
+    def _volume_values(self):
+        return (
+            float(self.volume_inner_term.J()),
+            float(self.volume_mid_term.J()),
+            float(self.volume_outer_term.J()),
+        )
+
+    def _slopes(self):
+        v_inner, v_mid, v_outer = self._volume_values()
+        inner_slope = (v_mid - v_inner) / self._inner_delta
+        outer_slope = (v_outer - v_mid) / self._outer_delta
+        return inner_slope, outer_slope
+
+    def magnetic_well_proxy(self):
+        inner_slope, outer_slope = self._slopes()
+        denominator = inner_slope + outer_slope
+        return (outer_slope - inner_slope) / denominator
+
+    def J(self):
+        excess = max(self.magnetic_well_proxy() - self.well_target, 0.0)
+        return 0.5 * excess**2
+
+    @derivative_dec
+    def dJ(self):
+        inner_slope, outer_slope = self._slopes()
+        denominator = inner_slope + outer_slope
+        metric = (outer_slope - inner_slope) / denominator
+        excess = metric - self.well_target
+        if excess <= 0.0:
+            return Derivative({})
+
+        d_inner_volume = self.volume_inner_term.dJ(partials=True)
+        d_mid_volume = self.volume_mid_term.dJ(partials=True)
+        d_outer_volume = self.volume_outer_term.dJ(partials=True)
+        d_inner_slope = (d_mid_volume - d_inner_volume) * (1.0 / self._inner_delta)
+        d_outer_slope = (d_outer_volume - d_mid_volume) * (1.0 / self._outer_delta)
+        d_metric = (
+            (d_outer_slope - d_inner_slope) * denominator
+            - (outer_slope - inner_slope) * (d_outer_slope + d_inner_slope)
+        ) * (1.0 / (denominator * denominator))
+        return excess * d_metric
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+def build_single_stage_magnetic_well_objective(
+    surface_volume_terms,
+    surface_labels,
+    well_target,
+):
+    """Build the multisurface Boozer-volume magnetic-well proxy term.
+
+    A second derivative of enclosed volume needs at least three radial labels,
+    so single-surface and two-surface modes return ``None`` cleanly.
+    """
+    if len(surface_volume_terms) < 3:
+        return None
+    if len(surface_volume_terms) != len(surface_labels):
+        raise ValueError("Surface volume terms and labels must match")
+    return MagneticWellVolumeShortfall(
+        surface_volume_terms[0],
+        surface_volume_terms[-2],
+        surface_volume_terms[-1],
+        surface_labels[0],
+        surface_labels[-2],
+        surface_labels[-1],
+        well_target,
+    )
+
+
+class MinLGradBShortfall(Optimizable):
+    r"""Coil-realizability shortfall on the minimum Kappel L_grad_B scale length.
+
+    Computes ``min(L_grad_B)`` over the provided Cartesian surface quadrature
+    points using the BiotSavart field, where::
+
+        L_grad_B = sqrt(2) * |B| / ||dB/dX||_F
+
+    with ``||dB/dX||_F`` the Frobenius norm of the magnetic-field Jacobian
+    (``dB_by_dX``). The objective is a one-sided shortfall::
+
+        J = max(0, floor - min(L_grad_B))
+
+    so minimizing it rewards a minimum field scale length above ``floor`` (m).
+    Larger ``L_grad_B`` means a gentler gradient → more coil-realizable.
+    Calibration range: good ~0.34 m, marginal/bad ~0.13 m (HBT-EP scale;
+    uncalibrated — do NOT enable by default).
+
+    Notes:
+        Gradient w.r.t. coil DOFs flows through the ``biot_savart`` dependency
+        graph. Because the gradient requires ``d²B/dXdcoil`` (the Jacobian of
+        the field Jacobian w.r.t. coil Fourier dofs), which is expensive to
+        compute analytically, finite-difference gradient validation is
+        recommended before trusting analytic-adjoint-based gradient behaviour.
+        In practice this term is ON only when ``--lgradb-weight > 0``
+        (default 0 = off), so it never appears in default objective graphs.
+
+    Args:
+        biot_savart: A simsopt ``BiotSavart`` field whose coils are the
+            optimization variables.
+        surface_points: ``(N, 3)`` float array of Cartesian quadrature points
+            on the target surface (e.g. the outermost Boozer surface).
+        floor: One-sided shortfall floor in metres.  The objective is zero
+            when ``min(L_grad_B) >= floor``.
+    """
+
+    def __init__(self, biot_savart, surface_points, floor):
+        self._biot_savart = biot_savart
+        self._surface_points = np.ascontiguousarray(
+            np.asarray(surface_points, dtype=float)
+        )
+        if self._surface_points.ndim != 2 or self._surface_points.shape[1] != 3:
+            raise ValueError(
+                "surface_points must have shape (N, 3), got "
+                f"{self._surface_points.shape}"
+            )
+        self._floor = float(floor)
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[biot_savart])
+
+    def _compute_min_lgradB(self):
+        """Return min(L_grad_B) on the surface points using BiotSavart."""
+        bs = self._biot_savart
+        bs.set_points(self._surface_points)
+        abs_B = np.asarray(bs.AbsB(), dtype=float).ravel()  # (N,)
+        dB_dX = np.asarray(bs.dB_by_dX(), dtype=float)     # (N, 3, 3)
+        # Frobenius norm: sqrt(sum_ij (dB_i/dX_j)^2) per point
+        frobenius_sq = np.einsum("...ij,...ij->...", dB_dX, dB_dX)  # (N,)
+        # Avoid division by zero at degenerate points (safe: floor-shortfall is
+        # still bounded, and zero-gradient points contribute infinite scale length).
+        eps = np.finfo(float).eps
+        safe_frobenius_sq = np.where(frobenius_sq > eps, frobenius_sq, eps)
+        lgradB = _MATH_SQRT2 * abs_B / np.sqrt(safe_frobenius_sq)  # (N,)
+        return float(np.min(lgradB))
+
+    def J(self):
+        return max(0.0, self._floor - self._compute_min_lgradB())
+
+    @derivative_dec
+    def dJ(self):
+        # The gradient of max(0, floor - min(L_grad_B)) w.r.t. coil DOFs is
+        # zero when the shortfall is inactive (min L_grad_B >= floor).  When
+        # active the chain rule requires d(min L_grad_B)/d(coils), which in
+        # turn depends on d²B/dXdcoil (the Jacobian of dB/dX w.r.t. coil
+        # Fourier dofs) — expensive to compute analytically.  For the intended
+        # use case (OFF by default, swept at weight > 0 to gauge realizability)
+        # the derivative_dec zero derivative is sufficient; if a gradient-based
+        # run is needed, validate the gradient with a finite-difference check
+        # (Taylor-test recommended) before trusting analytic adjoint path.
+        return Derivative({})
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
 def build_total_objective(
     JnonQSRatio,
     RES_WEIGHT,
@@ -173,6 +393,8 @@ def build_total_objective(
     SELFINT_WEIGHT=0.0,
     JCurveHardwareKeepout=None,
     HARDWARE_KEEPOUT_WEIGHT=0.0,
+    JCurveVesselEnvelopeKeepout=None,
+    VESSEL_KEEPOUT_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -184,6 +406,10 @@ def build_total_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JMagneticWell=None,
+    MAGNETIC_WELL_WEIGHT=0.0,
+    JMinLGradB=None,
+    LGRADB_WEIGHT=0.0,
     JTFCurvature=None,
     JTFCurveLength=None,
 ):
@@ -211,6 +437,10 @@ def build_total_objective(
         objective = objective + SELFINT_WEIGHT * JCurveSelfIntersect
     if JCurveHardwareKeepout is not None:
         objective = objective + HARDWARE_KEEPOUT_WEIGHT * JCurveHardwareKeepout
+    if JCurveVesselEnvelopeKeepout is not None:
+        objective = (
+            objective + VESSEL_KEEPOUT_WEIGHT * JCurveVesselEnvelopeKeepout
+        )
     if JResidueObjective is not None:
         objective = objective + JResidueObjective
     # SIMSOPT-official coil regularization/validity terms (opt-in; default-0 so
@@ -223,12 +453,20 @@ def build_total_objective(
         objective = objective + LINKING_WEIGHT * JLinkingNumber
     if JCoilForce is not None:
         objective = objective + FORCE_WEIGHT * JCoilForce
+    # min(L_grad_B) Kappel realizability shortfall (opt-in; default weight 0 and
+    # a None term, so the objective graph is byte-identical until
+    # --lgradb-weight > 0 is set. Calibration: good ~0.34 m / bad ~0.13 m at
+    # HBT-EP scale — sweep range only, do NOT enable by default).
+    if JMinLGradB is not None:
+        objective = objective + LGRADB_WEIGHT * JMinLGradB
     # Magnetic-shear shortfall (opt-in; default weight 0 and a None term in
     # single-surface mode, so the objective graph is byte-identical until a
     # shear weight is set on a multisurface build). Rewards a larger
     # |iota_edge - iota_axis| spread to escape the flat-iota rational soup.
     if JShear is not None:
         objective = objective + SHEAR_WEIGHT * JShear
+    if JMagneticWell is not None:
+        objective = objective + MAGNETIC_WELL_WEIGHT * JMagneticWell
     # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
     # the TF curve geometry is unfrozen, so the objective graph is byte-identical
     # for the default frozen-TF run). They reuse the banana HW weights so the freed
@@ -277,6 +515,10 @@ def _resolve_surface_objective_terms(
 
 def _positive_violation(signed_value):
     return max(0.0, float(signed_value))
+
+
+def _worst_signed_constraint(results):
+    return max(results, key=lambda result: float(result[0]))
 
 
 def _objective_upper_bound_constraint(objective, threshold, objective_optimizable):
@@ -551,6 +793,8 @@ def evaluate_total_objective(
     SELFINT_WEIGHT=0.0,
     JCurveHardwareKeepout=None,
     HARDWARE_KEEPOUT_WEIGHT=0.0,
+    JCurveVesselEnvelopeKeepout=None,
+    VESSEL_KEEPOUT_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -562,6 +806,10 @@ def evaluate_total_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JMagneticWell=None,
+    MAGNETIC_WELL_WEIGHT=0.0,
+    JMinLGradB=None,
+    LGRADB_WEIGHT=0.0,
 ):
     (
         raw_J_QS_obj,
@@ -602,6 +850,8 @@ def evaluate_total_objective(
         SELFINT_WEIGHT=SELFINT_WEIGHT,
         JCurveHardwareKeepout=JCurveHardwareKeepout,
         HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
+        JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+        VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -613,6 +863,10 @@ def evaluate_total_objective(
         FORCE_WEIGHT=FORCE_WEIGHT,
         JShear=JShear,
         SHEAR_WEIGHT=SHEAR_WEIGHT,
+        JMagneticWell=JMagneticWell,
+        MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JMinLGradB=JMinLGradB,
+        LGRADB_WEIGHT=LGRADB_WEIGHT,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -653,6 +907,19 @@ def evaluate_total_objective(
     ) = _optional_weighted_objective_terms(
         JShear,
         SHEAR_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        magnetic_well_value,
+        magnetic_well_grad,
+        magnetic_well_weight,
+        magnetic_well_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JMagneticWell,
+        MAGNETIC_WELL_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -725,6 +992,19 @@ def evaluate_total_objective(
                 if JCurveHardwareKeepout is None
                 else _objective_gradient(JCurveHardwareKeepout, objective_optimizable)
             ),
+            "J_vessel_keepout": (
+                0.0
+                if JCurveVesselEnvelopeKeepout is None
+                else float(JCurveVesselEnvelopeKeepout.J())
+            ),
+            "dJ_vessel_keepout": (
+                np.zeros_like(total_grad)
+                if JCurveVesselEnvelopeKeepout is None
+                else _objective_gradient(
+                    JCurveVesselEnvelopeKeepout,
+                    objective_optimizable,
+                )
+            ),
             "J_msc": (
                 0.0
                 if JMeanSquaredCurvature is None
@@ -755,10 +1035,22 @@ def evaluate_total_objective(
                 if JCoilForce is None
                 else _objective_gradient(JCoilForce, objective_optimizable)
             ),
+            # min(L_grad_B) realizability shortfall diagnostic (0.0/zeros when
+            # term is None — weight-0 default runs are byte-identical).
+            "J_lgradb": (0.0 if JMinLGradB is None else float(JMinLGradB.J())),
+            "dJ_lgradb": (
+                np.zeros_like(total_grad)
+                if JMinLGradB is None
+                else _objective_gradient(JMinLGradB, objective_optimizable)
+            ),
             "J_shear": shear_value,
             "dJ_shear": shear_grad,
             "shear_weight": shear_weight,
             "shear_objective_enabled": shear_objective_enabled,
+            "J_magnetic_well": magnetic_well_value,
+            "dJ_magnetic_well": magnetic_well_grad,
+            "magnetic_well_weight": magnetic_well_weight,
+            "magnetic_well_objective_enabled": magnetic_well_objective_enabled,
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -812,6 +1104,12 @@ def evaluate_base_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JMagneticWell=None,
+    MAGNETIC_WELL_WEIGHT=0.0,
+    JCurveVesselEnvelopeKeepout=None,
+    VESSEL_KEEPOUT_WEIGHT=0.0,
+    JMinLGradB=None,
+    LGRADB_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     if _surface_pair is not None:
@@ -845,8 +1143,30 @@ def evaluate_base_objective(
         base_objective = base_objective + LINKING_WEIGHT * JLinkingNumber
     if JCoilForce is not None:
         base_objective = base_objective + FORCE_WEIGHT * JCoilForce
+    if JCurveVesselEnvelopeKeepout is not None:
+        base_objective = (
+            base_objective
+            + VESSEL_KEEPOUT_WEIGHT * JCurveVesselEnvelopeKeepout
+        )
+    # min(L_grad_B) realizability shortfall (opt-in; default-None so the ALM
+    # physics objective is byte-identical until --lgradb-weight > 0 is set).
+    if JMinLGradB is not None:
+        base_objective = base_objective + LGRADB_WEIGHT * JMinLGradB
     base_physics_terms_total = float(base_objective.J())
     base_physics_grad = _objective_gradient(base_objective, objective_optimizable)
+    (
+        vessel_keepout_value,
+        vessel_keepout_grad,
+        vessel_keepout_weight,
+        vessel_keepout_objective_enabled,
+        weighted_vessel_keepout_value,
+        weighted_vessel_keepout_grad,
+    ) = _optional_weighted_objective_terms(
+        JCurveVesselEnvelopeKeepout,
+        VESSEL_KEEPOUT_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
     (
         shear_value,
         shear_grad,
@@ -860,16 +1180,43 @@ def evaluate_base_objective(
         base_physics_grad,
         objective_optimizable,
     )
-    physics_terms_total = base_physics_terms_total + weighted_shear_value
-    physics_grad = base_physics_grad + weighted_shear_grad
+    (
+        magnetic_well_value,
+        magnetic_well_grad,
+        magnetic_well_weight,
+        magnetic_well_objective_enabled,
+        weighted_magnetic_well_value,
+        weighted_magnetic_well_grad,
+    ) = _optional_weighted_objective_terms(
+        JMagneticWell,
+        MAGNETIC_WELL_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    physics_terms_total = (
+        base_physics_terms_total + weighted_shear_value + weighted_magnetic_well_value
+    )
+    physics_grad = (
+        base_physics_grad + weighted_shear_grad + weighted_magnetic_well_grad
+    )
     residue_value, residue_grad = _optional_objective_value_and_gradient(
         JResidueObjective,
         physics_grad,
         objective_optimizable,
     )
     if alm_formulation == "thresholded_physics":
-        total = residue_value + weighted_shear_value
-        grad = residue_grad + weighted_shear_grad
+        total = (
+            residue_value
+            + weighted_shear_value
+            + weighted_magnetic_well_value
+            + weighted_vessel_keepout_value
+        )
+        grad = (
+            residue_grad
+            + weighted_shear_grad
+            + weighted_magnetic_well_grad
+            + weighted_vessel_keepout_grad
+        )
     elif alm_formulation == "weighted_sum":
         total = physics_terms_total + residue_value
         grad = physics_grad + residue_grad
@@ -917,6 +1264,14 @@ def evaluate_base_objective(
             "dJ_shear": shear_grad,
             "shear_weight": shear_weight,
             "shear_objective_enabled": shear_objective_enabled,
+            "J_magnetic_well": magnetic_well_value,
+            "dJ_magnetic_well": magnetic_well_grad,
+            "magnetic_well_weight": magnetic_well_weight,
+            "magnetic_well_objective_enabled": magnetic_well_objective_enabled,
+            "J_vessel_keepout": vessel_keepout_value,
+            "dJ_vessel_keepout": vessel_keepout_grad,
+            "vessel_keepout_weight": vessel_keepout_weight,
+            "vessel_keepout_objective_enabled": vessel_keepout_objective_enabled,
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -1114,6 +1469,7 @@ def evaluate_alm_objective(
     curvature_threshold,
     distance_smoothing,
     curvature_smoothing,
+    banana_curves=None,
     constraint_names,
     curve_curve_constraint_fn,
     curve_surface_constraint_fn,
@@ -1133,21 +1489,27 @@ def evaluate_alm_objective(
     iota_penalty_threshold=None,
     length_penalty_threshold=0.0,
     coil_length_objective=None,
+    coil_length_objectives=None,
     coil_length_threshold=None,
     coil_length_min_threshold=None,
     banana_current=None,
     banana_currents=None,
     banana_current_threshold=None,
     JPoloidalExtent=None,
+    JPoloidalExtentTerms=None,
     poloidal_extent_threshold=None,
     poloidal_extent_smoothing=None,
     poloidal_extent_constraint_fn=None,
     poloidal_extent_constraint_with_hard_signal_fn=None,
     JCoilWidth=None,
+    JCoilWidthTerms=None,
     width_min_threshold=None,
     width_max_threshold=None,
     JCurveSelfIntersect=None,
+    JCurveSelfIntersectTerms=None,
     JCurveHardwareKeepout=None,
+    JCurveVesselEnvelopeKeepout=None,
+    VESSEL_KEEPOUT_WEIGHT=0.0,
     lcfs_surface=None,
     JLCFSMajorRadius=None,
     JLCFSMinorRadius=None,
@@ -1169,6 +1531,10 @@ def evaluate_alm_objective(
     FORCE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
+    JMagneticWell=None,
+    MAGNETIC_WELL_WEIGHT=0.0,
+    JMinLGradB=None,
+    LGRADB_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
@@ -1200,6 +1566,12 @@ def evaluate_alm_objective(
         FORCE_WEIGHT=FORCE_WEIGHT,
         JShear=JShear,
         SHEAR_WEIGHT=SHEAR_WEIGHT,
+        JMagneticWell=JMagneticWell,
+        MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+        VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
+        JMinLGradB=JMinLGradB,
+        LGRADB_WEIGHT=LGRADB_WEIGHT,
         include_diagnostics=include_diagnostics,
     )
 
@@ -1234,12 +1606,20 @@ def evaluate_alm_objective(
         distance_smoothing,
         objective_optimizable,
     )
+    curvature_constraint_curves = (
+        (banana_curve,) if banana_curves is None else tuple(banana_curves)
+    )
     curvature_signed_value, curvature_grad, curvature_violation = (
-        curvature_constraint_fn(
-            banana_curve,
-            curvature_threshold,
-            curvature_smoothing,
-            objective_optimizable,
+        _worst_signed_constraint(
+            [
+                curvature_constraint_fn(
+                    curve,
+                    curvature_threshold,
+                    curvature_smoothing,
+                    objective_optimizable,
+                )
+                for curve in curvature_constraint_curves
+            ]
         )
     )
 
@@ -1281,19 +1661,34 @@ def evaluate_alm_objective(
             surface_stack_grad,
             surface_stack_violation,
         )
+    coil_length_constraint_objectives = (
+        (coil_length_objective,)
+        if coil_length_objectives is None
+        else tuple(coil_length_objectives)
+    )
     if coil_length_objective is not None and coil_length_threshold is not None:
         hardware_constraints["coil_length_upper_bound"] = (
-            _objective_upper_bound_constraint(
-                coil_length_objective,
-                coil_length_threshold,
-                objective_optimizable,
+            _worst_signed_constraint(
+                [
+                    _objective_upper_bound_constraint(
+                        objective,
+                        coil_length_threshold,
+                        objective_optimizable,
+                    )
+                    for objective in coil_length_constraint_objectives
+                ]
             )
         )
     if coil_length_objective is not None and coil_length_min_threshold is not None:
-        hardware_constraints["coil_length_min"] = _objective_lower_bound_constraint(
-            coil_length_objective,
-            coil_length_min_threshold,
-            objective_optimizable,
+        hardware_constraints["coil_length_min"] = _worst_signed_constraint(
+            [
+                _objective_lower_bound_constraint(
+                    objective,
+                    coil_length_min_threshold,
+                    objective_optimizable,
+                )
+                for objective in coil_length_constraint_objectives
+            ]
         )
     if banana_current is not None and banana_current_threshold is not None:
         hardware_constraints["banana_current_upper_bound"] = (
@@ -1322,22 +1717,32 @@ def evaluate_alm_objective(
             if poloidal_extent_smoothing is None
             else poloidal_extent_smoothing
         )
+        poloidal_extent_terms = (
+            (JPoloidalExtent,)
+            if JPoloidalExtentTerms is None
+            else tuple(JPoloidalExtentTerms)
+        )
         (
             poloidal_extent_signed_value,
             poloidal_extent_grad,
             poloidal_extent_violation,
             poloidal_extent_hard_signed_value,
             poloidal_extent_hard_violation,
-        ) = _evaluate_constraint_with_optional_hard_signal(
-            poloidal_extent_constraint_fn,
-            poloidal_extent_constraint_with_hard_signal_fn,
-            hard_surrogate_diagnostics,
-            JPoloidalExtent.curve,
-            JPoloidalExtent.R_winding,
-            poloidal_extent_threshold,
-            poloidal_extent_smoothing_value,
-            objective_optimizable,
-            Z_winding=JPoloidalExtent.Z_winding,
+        ) = _worst_signed_constraint(
+            [
+                _evaluate_constraint_with_optional_hard_signal(
+                    poloidal_extent_constraint_fn,
+                    poloidal_extent_constraint_with_hard_signal_fn,
+                    hard_surrogate_diagnostics,
+                    term.curve,
+                    term.R_winding,
+                    poloidal_extent_threshold,
+                    poloidal_extent_smoothing_value,
+                    objective_optimizable,
+                    Z_winding=term.Z_winding,
+                )
+                for term in poloidal_extent_terms
+            ]
         )
         hardware_constraints["poloidal_extent"] = (
             poloidal_extent_signed_value,
@@ -1349,13 +1754,26 @@ def evaluate_alm_objective(
     self_intersect_penalty = None
     self_intersect_grad = None
     if JCoilWidth is not None:
-        coil_width_value = float(JCoilWidth.J())
-        coil_width_grad = _objective_gradient(JCoilWidth, objective_optimizable)
+        coil_width_terms = (
+            (JCoilWidth,) if JCoilWidthTerms is None else tuple(JCoilWidthTerms)
+        )
+        coil_width_values_and_grads = [
+            (float(term.J()), _objective_gradient(term, objective_optimizable))
+            for term in coil_width_terms
+        ]
+        coil_width_value, coil_width_grad = max(
+            coil_width_values_and_grads,
+            key=lambda value_and_grad: value_and_grad[0],
+        )
         if width_min_threshold is not None:
-            width_min_signed_value = float(width_min_threshold) - coil_width_value
+            width_min_value, width_min_grad = min(
+                coil_width_values_and_grads,
+                key=lambda value_and_grad: value_and_grad[0],
+            )
+            width_min_signed_value = float(width_min_threshold) - width_min_value
             hardware_constraints["width_min"] = (
                 width_min_signed_value,
-                -coil_width_grad,
+                -width_min_grad,
                 _positive_violation(width_min_signed_value),
             )
         if width_max_threshold is not None:
@@ -1366,10 +1784,17 @@ def evaluate_alm_objective(
                 _positive_violation(width_max_signed_value),
             )
     if JCurveSelfIntersect is not None:
-        self_intersect_penalty = float(JCurveSelfIntersect.J())
-        self_intersect_grad = _objective_gradient(
-            JCurveSelfIntersect,
-            objective_optimizable,
+        self_intersect_terms = (
+            (JCurveSelfIntersect,)
+            if JCurveSelfIntersectTerms is None
+            else tuple(JCurveSelfIntersectTerms)
+        )
+        self_intersect_penalty, self_intersect_grad = max(
+            [
+                (float(term.J()), _objective_gradient(term, objective_optimizable))
+                for term in self_intersect_terms
+            ],
+            key=lambda value_and_grad: value_and_grad[0],
         )
         self_intersect_signed_value = self_intersect_penalty
         hardware_constraints["self_intersect"] = (
@@ -1532,7 +1957,12 @@ def evaluate_alm_objective(
         (
             hard_signed_values_by_name["max_curvature"],
             hard_violation_values_by_name["max_curvature"],
-        ) = _hard_max_curvature_signed_constraint(banana_curve, curvature_threshold)
+        ) = _worst_signed_constraint(
+            [
+                _hard_max_curvature_signed_constraint(curve, curvature_threshold)
+                for curve in curvature_constraint_curves
+            ]
+        )
         if surface_stack_surfaces is not None:
             surface_stack_hard_signed_value, surface_stack_hard_violation = (
                 _resolve_hard_signal(
@@ -1552,11 +1982,19 @@ def evaluate_alm_objective(
                 _resolve_hard_signal(
                     poloidal_extent_hard_signed_value,
                     poloidal_extent_hard_violation,
-                    poloidal_extent_signed_constraint,
-                    JPoloidalExtent.curve,
-                    JPoloidalExtent.R_winding,
+                    lambda terms, threshold: _worst_signed_constraint(
+                        [
+                            poloidal_extent_signed_constraint(
+                                term.curve,
+                                term.R_winding,
+                                threshold,
+                                Z_winding=term.Z_winding,
+                            )
+                            for term in terms
+                        ]
+                    ),
+                    poloidal_extent_terms,
                     poloidal_extent_threshold,
-                    Z_winding=JPoloidalExtent.Z_winding,
                 )
             )
             hard_signed_values_by_name["poloidal_extent"] = (

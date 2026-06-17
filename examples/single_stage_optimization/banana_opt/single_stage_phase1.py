@@ -47,12 +47,29 @@ _SEED_REGIME_PRESERVE_FIRST = "preserve_first"
 _SEED_REGIME_REPAIR_FIRST = "repair_first"
 _SEED_REGIME_BRIDGE_ONLY = "bridge_only"
 
+# Single source of the repair_progress_state encoding: a lexicographic tuple
+# (blocked_rank, hardware_violation_score) where lower is better. The clean
+# floor is reached exactly when the incumbent is repair-eligible with zero
+# hardware violation score; producers (repair_progress_state in the example)
+# and consumers (the regime rules below) must share these, never the literals.
+REPAIR_STATE_CLEAN = (0, 0.0)
+REPAIR_STATE_BLOCKED = (1, float("inf"))
+
+
+def repair_state_is_clean(repair_state):
+    return tuple(repair_state) == REPAIR_STATE_CLEAN
+
 
 @dataclass(frozen=True)
 class Phase1Config:
     cc_weight: float = 0.0
     cs_weight: float = 0.0
     curvature_weight: float = 0.0
+    hardware_keepout_weight: float = 0.0
+    vessel_keepout_weight: float = 0.0
+    selfint_weight: float = 0.0
+    width_weight: float = 0.0
+    poloidal_weight: float = 0.0
     local_maxiter: int = _PENALTY_FEASIBLE_START_LOCAL_MAXITER
     local_relative_radius: float = _PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS
     local_max_attempts: int = _PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS
@@ -72,6 +89,11 @@ def build_phase1_config(
     cc_weight=0.0,
     cs_weight=0.0,
     curvature_weight=0.0,
+    hardware_keepout_weight=0.0,
+    vessel_keepout_weight=0.0,
+    selfint_weight=0.0,
+    width_weight=0.0,
+    poloidal_weight=0.0,
     local_maxiter=_PENALTY_FEASIBLE_START_LOCAL_MAXITER,
     local_relative_radius=_PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
     local_max_attempts=_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS,
@@ -87,6 +109,11 @@ def build_phase1_config(
         cc_weight=float(cc_weight),
         cs_weight=float(cs_weight),
         curvature_weight=float(curvature_weight),
+        hardware_keepout_weight=float(hardware_keepout_weight),
+        vessel_keepout_weight=float(vessel_keepout_weight),
+        selfint_weight=float(selfint_weight),
+        width_weight=float(width_weight),
+        poloidal_weight=float(poloidal_weight),
         local_maxiter=int(local_maxiter),
         local_relative_radius=float(local_relative_radius),
         local_max_attempts=int(local_max_attempts),
@@ -365,9 +392,9 @@ def evaluate_penalty_phase1_local_accept(
         recovered_local_accept
         and step_rms <= float(phase1_config.safe_step_rms_limit)
     )
-    # Hardware-clean anchors sit at the repair_progress_state floor (0, 0.0);
+    # Hardware-clean anchors sit at the repair_progress_state floor;
     # repair_state_improved is structurally unreachable for them.
-    anchor_already_clean = anchor_repair_state == (0, 0.0)
+    anchor_already_clean = repair_state_is_clean(anchor_repair_state)
     (
         phase1_graduated,
         phase1_outcome,
@@ -479,6 +506,26 @@ def build_penalty_phase2_bounds(
 
 
 def _repair_phase1_total_grad(objective_eval, *, phase1_config):
+    """Repair-phase objective: the weighted sum of every HARD hardware axis
+    exposed by the search eval. Covers the full feasibility classifier
+    (cc/cs/curvature plus keep-out, vessel envelope, self-intersect, width,
+    poloidal extent) so repair descent can reduce whichever axis binds —
+    a keep-out-violating seed was previously invisible to this objective.
+    Zero-weight terms contribute nothing and are skipped. A nonzero-weight
+    term whose keys are missing or None is a broken eval contract and raises;
+    a config with no live term at all is a misconfigured repair phase and
+    raises — neither silently optimizes something else.
+
+    Rejected-step evals are a separate, documented contract: when the surface
+    solve / precheck rejects a candidate, evaluate_search_step returns ONLY
+    {"total": elevated, "grad": last-accepted} to drive line-search
+    backtracking (no term keys at all). That shape passes through unchanged —
+    it is the rejection signal, not a degraded repair objective."""
+    if "J_cc" not in objective_eval:
+        return (
+            float(objective_eval["total"]),
+            np.asarray(objective_eval["grad"], dtype=float),
+        )
     total = 0.0
     grad = np.zeros_like(np.asarray(objective_eval["grad"], dtype=float))
     used_term = False
@@ -486,15 +533,41 @@ def _repair_phase1_total_grad(objective_eval, *, phase1_config):
         ("J_cc", "dJ_cc", phase1_config.cc_weight),
         ("J_cs", "dJ_cs", phase1_config.cs_weight),
         ("J_curvature", "dJ_curvature", phase1_config.curvature_weight),
+        (
+            "J_hardware_keepout",
+            "dJ_hardware_keepout",
+            phase1_config.hardware_keepout_weight,
+        ),
+        (
+            "J_vessel_keepout",
+            "dJ_vessel_keepout",
+            phase1_config.vessel_keepout_weight,
+        ),
+        ("J_self_intersect", "dJ_self_intersect", phase1_config.selfint_weight),
+        ("J_coil_width", "dJ_coil_width", phase1_config.width_weight),
+        ("J_poloidal_extent", "dJ_poloidal_extent", phase1_config.poloidal_weight),
     ):
-        if value_key not in objective_eval or grad_key not in objective_eval:
+        if float(weight) == 0.0:
             continue
+        if objective_eval.get(value_key) is None or objective_eval.get(grad_key) is None:
+            raise ValueError(
+                f"repair phase-1 weight for {value_key!r} is {float(weight)} but the "
+                f"search eval does not carry {value_key!r}/{grad_key!r}; the repair "
+                "objective would silently drop a weighted hardware axis."
+            )
         total += float(weight) * float(objective_eval[value_key])
-        grad = grad + float(weight) * np.asarray(objective_eval[grad_key], dtype=float)
+        grad = grad + float(weight) * np.asarray(
+            objective_eval[grad_key], dtype=float
+        )
         used_term = True
-    if used_term:
-        return float(total), grad
-    return float(objective_eval["total"]), np.asarray(objective_eval["grad"], dtype=float)
+    if not used_term:
+        raise ValueError(
+            "repair phase-1 objective has no live hardware term: every repair "
+            "weight (cc/cs/curvature/hardware_keepout/vessel_keepout/selfint/"
+            "width/poloidal) is zero. Pass at least one nonzero weight via "
+            "build_phase1_config."
+        )
+    return float(total), grad
 
 
 def _build_repair_phase1_objective(*, objective_fn, objective_eval_fn, seed_regime, phase1_config):
@@ -509,6 +582,72 @@ def _build_repair_phase1_objective(*, objective_fn, objective_eval_fn, seed_regi
         )
 
     return phase1_objective
+
+
+def _phase1_incumbent_recovery(
+    run_dict,
+    *,
+    anchor_state,
+    anchor_x,
+    anchor_near_miss_metric,
+    seed_regime,
+    local_radius,
+    phase1_config,
+):
+    """When the FINAL accepted state of a phase-1 attempt fails the regime
+    rule, pick the best incumbent reached DURING the attempt to graduate from
+    instead of rolling everything back to the anchor (which also erases the
+    in-attempt best_feasible incumbent). Returns (incumbent, outcome,
+    step_rms) or None.
+
+    Fail-closed: the incumbent must be a meaningful step from the anchor
+    inside the local radius. A hardware-clean (best_feasible) incumbent that
+    improved on the anchor's is accepted for every regime; repair_first may
+    additionally graduate from a strictly-improved hardware near-miss
+    incumbent — the same monotone-violation-reduction rule the regime already
+    applies to final states. Feasibility semantics are untouched: a near-miss
+    graduation ships an honestly-infeasible state into phase 2, never into
+    best_feasible."""
+
+    def _step_rms_ok(incumbent):
+        step_rms = basin_normalized_step_rms(
+            anchor_x, np.asarray(incumbent.x, dtype=float)
+        )
+        if not np.isfinite(step_rms):
+            return None
+        if step_rms <= float(phase1_config.min_accepted_step_rms):
+            return None
+        if local_radius is not None and step_rms > float(local_radius) + 1.0e-12:
+            return None
+        return float(step_rms)
+
+    feasible_incumbent = run_dict.get("best_feasible_incumbent")
+    if feasible_incumbent is not None:
+        anchor_metric = anchor_state.get("best_feasible_metric")
+        candidate_metric = run_dict.get("best_feasible_metric")
+        if candidate_metric is not None and (
+            anchor_metric is None or float(candidate_metric) < float(anchor_metric)
+        ):
+            step_rms = _step_rms_ok(feasible_incumbent)
+            if step_rms is not None:
+                return feasible_incumbent, "feasible_incumbent_recovery", step_rms
+
+    if seed_regime == _SEED_REGIME_REPAIR_FIRST:
+        near_miss_incumbent = run_dict.get("best_hardware_near_miss_incumbent")
+        candidate_metric = run_dict.get("best_hardware_near_miss_metric")
+        if near_miss_incumbent is not None and candidate_metric is not None:
+            if anchor_near_miss_metric is None or tuple(candidate_metric) < tuple(
+                anchor_near_miss_metric
+            ):
+                step_rms = _step_rms_ok(near_miss_incumbent)
+                if step_rms is not None:
+                    return (
+                        near_miss_incumbent,
+                        "repair_incumbent_recovery",
+                        step_rms,
+                    )
+
+    return None
 
 
 def _local_phase_failure_result(seed_regime):
@@ -607,6 +746,11 @@ def run_penalty_phase1(
         anchor_state = snapshot_penalty_phase1_anchor(run_dict)
         anchor_x = np.asarray(run_dict["accepted_x"], dtype=float).copy()
         anchor_repair_state = repair_progress_state_fn(run_dict)
+        anchor_near_miss_metric = (
+            None
+            if run_dict.get("best_hardware_near_miss_metric") is None
+            else tuple(run_dict["best_hardware_near_miss_metric"])
+        )
         accepted_before_attempt = int(run_dict.get("accepted_iterations", 0))
         invalid_rejects_before_attempt = int(
             run_dict.get("invalid_state_rejects_total", 0)
@@ -738,6 +882,55 @@ def run_penalty_phase1(
                     local_preservation_attempts=local_attempts_used,
                     local_preservation_radius=accept_summary["phase2_radius"],
                     local_preservation_step_rms=accept_summary["step_rms"],
+                    phase1_first_accepted_step_rms=phase1_first_accepted_step_rms,
+                    phase1_max_accepted_step_rms=phase1_max_accepted_step_rms,
+                    phase1_anchor_restore_used=phase1_anchor_restore_used,
+                    phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
+                    phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
+                    startup_local_phase_regime=(
+                        seed_regime if settings["use_local_bounds"] else None
+                    ),
+                    startup_local_recovery_achieved=startup_local_recovery_achieved,
+                    bridge_local_donor_ready=bridge_local_donor_ready,
+                )
+            recovery = _phase1_incumbent_recovery(
+                run_dict,
+                anchor_state=anchor_state,
+                anchor_x=anchor_x,
+                anchor_near_miss_metric=anchor_near_miss_metric,
+                seed_regime=seed_regime,
+                local_radius=local_radius,
+                phase1_config=phase1_config,
+            )
+            if recovery is not None:
+                recovery_incumbent, recovery_outcome, recovery_step_rms = recovery
+                restore_single_stage_incumbent_state(run_dict, recovery_incumbent)
+                restore_accepted_state_fn()
+                phase1_messages.append(
+                    f"{recovery_outcome}(step_rms={recovery_step_rms:.3e})"
+                )
+                return _build_penalty_phase1_result(
+                    used_phase1=True,
+                    phase1_iterations=phase1_iterations,
+                    phase1_termination_message="; ".join(phase1_messages),
+                    phase1_success=phase1_success,
+                    phase1_outcome=(
+                        f"{recovery_outcome}_after_recovery"
+                        if phase1_anchor_restore_used
+                        else recovery_outcome
+                    ),
+                    continue_search=True,
+                    next_dofs=run_dict["accepted_x"],
+                    local_preservation_used=settings["use_local_bounds"],
+                    local_preservation_preserved_start=False,
+                    local_preservation_attempts=local_attempts_used,
+                    local_preservation_radius=resolve_penalty_phase2_local_radius(
+                        recovery_step_rms,
+                        local_radius=local_radius,
+                        seed_regime=seed_regime,
+                        phase1_config=phase1_config,
+                    ),
+                    local_preservation_step_rms=recovery_step_rms,
                     phase1_first_accepted_step_rms=phase1_first_accepted_step_rms,
                     phase1_max_accepted_step_rms=phase1_max_accepted_step_rms,
                     phase1_anchor_restore_used=phase1_anchor_restore_used,

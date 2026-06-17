@@ -488,7 +488,7 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        return self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), v))
 
     def gammadash_impl(self, gammadash):
         r"""
@@ -522,7 +522,7 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        return self.dgammadash_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgammadash_by_dcoeff_vjp_jax(self.get_dofs(), v))
 
     def gammadashdash_impl(self, gammadashdash):
         r"""
@@ -557,7 +557,7 @@ class JaxCurve(sopp.Curve, Curve):
 
         """
 
-        return self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), v))
 
     def gammadashdashdash_impl(self, gammadashdashdash):
         r"""
@@ -592,7 +592,7 @@ class JaxCurve(sopp.Curve, Curve):
 
         """
 
-        return self.dgammadashdashdash_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgammadashdashdash_by_dcoeff_vjp_jax(self.get_dofs(), v))
 
     def dkappa_by_dcoeff_vjp(self, v):
         r"""
@@ -604,7 +604,7 @@ class JaxCurve(sopp.Curve, Curve):
         where :math:`\mathbf{c}` are the curve dofs and :math:`\kappa` is the curvature.
 
         """
-        return Derivative({self: self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), v)})
+        return Derivative({self: np.asarray(self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), v))})
 
     def dtorsion_by_dcoeff_vjp(self, v):
         r"""
@@ -617,7 +617,7 @@ class JaxCurve(sopp.Curve, Curve):
 
         """
 
-        return Derivative({self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v)})
+        return Derivative({self: np.asarray(self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v))})
 
 
 class RotatedCurve(sopp.Curve, Curve):
@@ -1436,7 +1436,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         of the curve.
         """
 
-        return self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), v))
     
     def dgamma_by_dsurf_vjp_impl(self, v):
         r"""
@@ -1448,7 +1448,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         where :math:`\mathbf{c}` are the surface dofs, and :math:`\Gamma` are the x, y, z coordinates of the curve.
         """
 
-        return self.dgamma_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
+        return np.asarray(self.dgamma_by_dsurf_vjp_jax(self.surf.get_dofs(), v))
 
     # GAMMA DASH
     # ==========
@@ -1505,7 +1505,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         of the curve.
         """
 
-        return self.dgammadash_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgammadash_by_dcoeff_vjp_jax(self.get_dofs(), v))
 
     def dgammadash_by_dsurf_vjp_impl(self, v):
         r"""
@@ -1518,7 +1518,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         of the curve.
         """
 
-        return self.dgammadash_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
+        return np.asarray(self.dgammadash_by_dsurf_vjp_jax(self.surf.get_dofs(), v))
 
     # GAMMA DASH DASH
     # ===============
@@ -1576,7 +1576,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
         """
 
-        return self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), v))
     
     def dgammadashdash_by_dsurf_vjp_impl(self, v):
         r"""
@@ -1590,7 +1590,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
         """
 
-        return self.dgammadashdash_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
+        return np.asarray(self.dgammadashdash_by_dsurf_vjp_jax(self.surf.get_dofs(), v))
 
     # GAMMA DASH DASH DASH
     # ====================
@@ -1649,7 +1649,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
         """
 
-        return self.dgammadashdashdash_by_dcoeff_vjp_jax(self.get_dofs(), v)
+        return np.asarray(self.dgammadashdashdash_by_dcoeff_vjp_jax(self.get_dofs(), v))
     
     def dgammadashdashdash_by_dsurf_vjp_impl(self, v):
         r"""
@@ -1663,7 +1663,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
         """
 
-        return self.dgammadashdashdash_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
+        return np.asarray(self.dgammadashdashdash_by_dsurf_vjp_jax(self.surf.get_dofs(), v))
 
 
     # KAPPA
@@ -1679,8 +1679,8 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
         """
         return Derivative({
-            self: self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v),
-            self.surf: self.dkappa_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
+            self: np.asarray(self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)),
+            self.surf: np.asarray(self.dkappa_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v))
             })
         # return Derivative({
         #     self: self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), v),
@@ -1701,7 +1701,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         """
 
         return Derivative({
-            self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v)
+            self: np.asarray(self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v))
             })
         # return Derivative({
         #     self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v),
@@ -1723,7 +1723,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
     def dzfactor_by_dcoeff_vjp(self, v):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
-        return Derivative({self: self.dsnz_by_dcoeff_vjp_jax(cdofs, sdofs, v)})
+        return Derivative({self: np.asarray(self.dsnz_by_dcoeff_vjp_jax(cdofs, sdofs, v))})
     
     def zfactor_hessian(self):
         cdofs = self.get_dofs()
@@ -1743,7 +1743,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
     def drfactor_by_dcoeff_vjp(self, v):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
-        return Derivative({self: self.dsnr_by_dcoeff_vjp_jax(cdofs, sdofs, v)})
+        return Derivative({self: np.asarray(self.dsnr_by_dcoeff_vjp_jax(cdofs, sdofs, v))})
 
     def rfactor_hessian(self):
         cdofs = self.get_dofs()

@@ -279,6 +279,16 @@ COLD_VOLUME = float(os.environ.get('BANANA_VOLUME', s1['cold_start_volume']))
 COLD_A = float(np.sqrt(COLD_VOLUME / (2.0 * np.pi**2 * COLD_R0)))
 COLD_PHIEDGE = compute_phiedge(VMEC_RBTOR, COLD_A, COLD_R0)
 
+# Net toroidal PLASMA current (A) for a finite-current "tokamak-base" seed (durable
+# law #8). Default 0.0 = pure vacuum (iota purely geometric). A small current adds
+# axisymmetric (tokamak) transform that current-pins the surfaces, so the 3D shaping
+# only adds a small perturbation — far more coil-realizable. Clamped to the device
+# limit |I| ≤ 25 kA. This is PLASMA current, NOT the TF field (TF is purely toroidal
+# and contributes zero rotational transform).
+_CURTOR_LIMIT_A = 25_000.0
+CURTOR = float(np.clip(float(os.environ.get('BANANA_CURTOR', 0.0)),
+                       -_CURTOR_LIMIT_A, _CURTOR_LIMIT_A))
+
 # Warm-start wout path. BANANA_WARM_WOUT (absolute, or relative to _base_dir)
 # supersedes config.yaml warm_start.wout_filepath, so a caller (e.g. the closed
 # loop) can warm-start each lineage from an arbitrary parent/donor wout without
@@ -468,18 +478,24 @@ if COLD_START:
     vmec.indata.niter_array[:len(NS_ARRAY)] = NITER_ARRAY
     vmec.indata.ftol_array[:len(NS_ARRAY)]  = FTOL_ARRAY
 
-    # Zero-beta, zero-current, shape-derived-iota profile.
-    # ncurr=1 prescribes toroidal current (ac polynomial + curtor) and lets
-    # VMEC solve for iota as an output of the boundary shape. With ac[:]=0 and
-    # curtor=0, the plasma carries no net current and iota is determined purely
-    # by the boundary geometry — this makes iota(s) a meaningful residual
-    # with nonzero gradient w.r.t. boundary DOFs. (The ncurr=0 / ai[0]=target
-    # formulation pinned iota_edge to ai[0] regardless of shape, giving a
-    # constant residual that the optimizer exploited by collapsing to an
+    # Zero-beta, shape-derived-iota profile. ncurr=1 prescribes the toroidal current
+    # (the ac polynomial scaled to curtor) and lets VMEC solve iota as an OUTPUT of
+    # the boundary shape, so iota(s) is a meaningful residual with nonzero gradient
+    # w.r.t. the boundary DOFs. (The ncurr=0 / ai[0]=target formulation pinned
+    # iota_edge to ai[0] regardless of shape, letting the optimizer collapse to an
     # axisymmetric boundary with trivial QS=0 at I=0.)
+    #   CURTOR == 0 -> pure vacuum: ac[:]=0, no net current, iota purely geometric.
+    #   CURTOR != 0 -> finite-current tokamak-base seed: a standard parabolic current
+    #     density j ~ (1 - s^2) via AC=[1,0,-1] (VMEC default pcurr_type; curtor sets
+    #     the magnitude) adds axisymmetric transform that current-pins the surfaces,
+    #     so the 3D shaping only adds a small perturbation (durable law #8). This is
+    #     PLASMA current, not TF (the TF field is purely toroidal — zero transform).
     vmec.indata.ncurr = 1
     vmec.indata.ac[:] = 0.0
-    vmec.indata.curtor = 0.0
+    if CURTOR != 0.0:
+        vmec.indata.ac[0] = 1.0
+        vmec.indata.ac[2] = -1.0
+    vmec.indata.curtor = CURTOR
     vmec.indata.ai[:] = 0.0
     vmec.indata.pres_scale = 0.0
     vmec.indata.am[:] = 0.0

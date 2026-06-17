@@ -51,7 +51,11 @@ def _accumulate_derivative_entry(result, key, value):
         return
     if value.shape[0] == 0:
         return
+    # Write back explicitly: for immutable array types (e.g. JAX), augmented
+    # assignment rebinds the local name instead of mutating result[key], which
+    # silently drops the contribution. For numpy this is a same-object no-op.
     existing += value
+    result[key] = existing
 
 
 def sum_derivatives(derivatives):

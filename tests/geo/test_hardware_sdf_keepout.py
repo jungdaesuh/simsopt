@@ -29,6 +29,7 @@ from banana_opt.hardware_keepout import (  # noqa: E402
 from simsopt.geo import CurveXYZFourier  # noqa: E402
 
 SIGNED_TEST_METHOD = "watertight_contains_trimesh_nearest"
+COMPONENT_UNION_TEST_METHOD = "component_union_watertight_contains_trimesh_nearest"
 
 
 def _circle_curve(radius=1.0, order=3, quadpoints=64, seed=None):
@@ -224,6 +225,26 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "optimizer-safe"):
                 load_hardware_sdf(manifest)
+
+    def test_loader_accepts_component_union_sign_method(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            grid = np.ones((3, 3, 3), dtype=float)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.01,
+                effective_margin=0.005,
+                sign_method=COMPONENT_UNION_TEST_METHOD,
+            )
+
+            sdf_data = load_hardware_sdf(manifest)
+
+            self.assertEqual(
+                sdf_data.sign_methods,
+                {"sensors": COMPONENT_UNION_TEST_METHOD},
+            )
 
     def test_loader_validates_error_budget_components(self):
         with tempfile.TemporaryDirectory() as td:

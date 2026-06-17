@@ -720,6 +720,7 @@ def evaluate_single_stage_search_hardware_snapshot(
     lcfs_minor_radius_m=None,
     lcfs_outboard_edge_m=None,
     lcfs_inboard_edge_m=None,
+    banana_curves=None,
     lcfs_major_radius_threshold=None,
     lcfs_minor_radius_threshold=None,
     lcfs_outboard_edge_threshold=None,
@@ -775,6 +776,11 @@ def evaluate_single_stage_search_hardware_snapshot(
         max_curvature = _upper_bound_measurement_from_signed(
             curvature_threshold,
             signed_values["max_curvature"],
+        )
+    elif banana_curves is not None:
+        max_curvature = max(
+            float(np.max(np.asarray(curve.kappa(), dtype=float)))
+            for curve in tuple(banana_curves)
         )
     if banana_current_A is None and banana_current_max_A is not None:
         banana_current_signed_values = _signed_values_for_hardware_constraint(
@@ -1033,6 +1039,7 @@ def evaluate_single_stage_hardware_snapshot(
     curvature_threshold,
     outer_surface=None,
     vessel_surface=None,
+    banana_curves=None,
     coil_length=None,
     length_target=None,
     poloidal_extent_rad=None,
@@ -1066,7 +1073,11 @@ def evaluate_single_stage_hardware_snapshot(
     if outer_surface is not None:
         resolved_lcfs_major_radius_m = outer_surface.major_radius()
         resolved_lcfs_minor_radius_m = outer_surface.minor_radius()
-    max_curvature = float(np.max(banana_curve.kappa()))
+    curvature_curves = (banana_curve,) if banana_curves is None else tuple(banana_curves)
+    max_curvature = max(
+        float(np.max(np.asarray(curve.kappa(), dtype=float)))
+        for curve in curvature_curves
+    )
     return evaluate_single_stage_hardware_constraints(
         curve_curve_min_dist,
         cc_dist,

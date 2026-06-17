@@ -52,6 +52,8 @@ STAGE2_SIDECAR_REQUIRED_ERROR = (
     "Stage 2 restarts require the sibling results.json sidecar so the "
     "loaded coils can be partitioned via the coil_groups manifest."
 )
+DEFAULT_SINGLE_STAGE_IOTA_TARGET = 0.15
+DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET = 0.18
 
 T = TypeVar("T")
 STAGE2_ARTIFACT_PATH_FIELD_NAMES = tuple(
@@ -1289,7 +1291,18 @@ def append_bool_flag(command: list[str], flag: str, enabled: bool) -> None:
 
 
 def resolve_single_stage_iota_target_arg(args: object) -> float:
-    iota_target = float(getattr(args, "iota_target"))
+    raw_iota_target = getattr(args, "iota_target")
+    if raw_iota_target is None:
+        goal_mode = getattr(args, "single_stage_goal_mode", None)
+        if goal_mode is None:
+            goal_mode = getattr(args, "goal_mode", None)
+        iota_target = (
+            DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET
+            if goal_mode == "frontier"
+            else DEFAULT_SINGLE_STAGE_IOTA_TARGET
+        )
+    else:
+        iota_target = float(raw_iota_target)
     return -iota_target if bool(getattr(args, "flip_banana", False)) else iota_target
 
 

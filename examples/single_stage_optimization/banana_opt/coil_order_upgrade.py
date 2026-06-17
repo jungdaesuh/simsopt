@@ -83,6 +83,31 @@ def _resolve_master_banana_seed(
     )
 
 
+def realized_cws_winding_radii(
+    banana_coils: Sequence[Coil],
+) -> tuple[float, float] | None:
+    """Return ``(major_radius_m, minor_radius_m)`` of the master CWS curve's
+    EMBEDDED winding torus, or ``None`` when the lineage has no CWS master.
+
+    Warm resumes optimize on the torus serialized inside the seed's
+    ``CurveCWSFourierCPP`` — NOT on the ``--banana-surf-major-radius``
+    reference torus (plot/cold-init only) and NOT necessarily on the
+    ``BANANA_WINDING_SURFACE_MAJOR_RADIUS_M`` spec constant (the M-family
+    lineage is embedded on 0.976/0.21; 2026-06-10 laneR0920 finding). Results
+    artifacts must record the embedded torus so downstream consumers (seed
+    remaps, hardware audits, ledgers) see the geometry the coils actually
+    live on.
+    """
+    try:
+        master_curve, _ = _resolve_master_banana_seed(banana_coils)
+    except ValueError:
+        return None
+    surf = master_curve.surf
+    if not hasattr(surf, "get_rc"):
+        return None
+    return float(surf.get_rc(0, 0)), float(surf.get_rc(1, 0))
+
+
 def upgrade_loaded_seed_biot_savart_order(
     bs: BiotSavart,
     *,

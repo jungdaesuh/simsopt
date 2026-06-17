@@ -57,6 +57,14 @@ HARDWARE_KEEPOUT_MIN_DISTANCE_M = (
 # wh_notes.md does not define this as an engineering acceptance floor.
 PLASMA_VESSEL_MIN_DIST_M = 0.04
 MAX_CURVATURE_INV_M = 100.0
+TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M = 1.0 / MAX_CURVATURE_INV_M
+BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M = (
+    1.0 / TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
+)
+BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION = 0.10
+# PENDING HW RULING: optimization steering margin only; hard pass/fail gate
+# remains the ruled face-touch centerline floor COIL_COIL_MIN_DIST_M.
+BANANA_CC_OBJECTIVE_MARGIN_M = 0.002
 
 VACUUM_VESSEL_MAJOR_RADIUS_M = 0.976
 VACUUM_VESSEL_MINOR_RADIUS_M = 0.222
@@ -87,6 +95,9 @@ TYPE_KK_FINITE_BUILD_GAPSIZE_B_M = (
     TYPE_KK_CONDUCTOR_PACK_WIDTH_BINORMAL_M
     / (TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B - 1)
 )
+TYPE_KK_FORCE_REGULARIZATION_CONDUCTOR_RADIUS_M = (
+    0.5 * min(TYPE_KK_FINITE_BUILD_GAPSIZE_N_M, TYPE_KK_FINITE_BUILD_GAPSIZE_B_M)
+)
 # Legacy compatibility aliases for magnetic finite-build callers. They now point
 # to the Type KK conductor pack, not the outer clearance channel or retired
 # placeholder dimensions.
@@ -109,11 +120,19 @@ BANANA_HARDWARE_KEEPOUT_ALM_SCALE = 1.0
 # jhalpern30 driver activates `CurveSelfIntersect` at 1/CURVATURE_THRESHOLD,
 # which matches our reciprocal of the maximum allowed curvature.
 BANANA_SELF_INTERSECT_MIN_DISTANCE_M = 1.0 / MAX_CURVATURE_INV_M
-# Neighbor-skip factor for CurveSelfIntersect: at runtime, neighbor_skip is
-# computed as int(BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * curve.order).
-# 1.5x order matches the external driver convention so the mask excludes
-# nearest curve-parameter neighbors that are trivially close but not
-# topologically self-intersecting.
+# Type KK self-envelope clearance is a physical channel/leg spacing contract,
+# not a topology guard. The arc window masks local hairpin adjacency while
+# still checking nonlocal leg-to-leg overlap against the face-touch floor.
+BANANA_SELF_ENVELOPE_MIN_DISTANCE_M = COIL_COIL_MIN_DIST_M
+BANANA_SELF_ENVELOPE_MIN_DIST_M = BANANA_SELF_ENVELOPE_MIN_DISTANCE_M
+BANANA_SELF_ENVELOPE_GROC_RADIUS_FLOOR_M = (
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
+)
+BANANA_SELF_DISTANCE_WINDOW_M = 0.060
+# Legacy topology-only neighbor-skip factor for CurveSelfIntersect; Type KK
+# self-envelope clearance uses BANANA_SELF_DISTANCE_WINDOW_M with
+# CurveSelfDistance instead. Keep this only for the old topological
+# self-intersection guard until those call sites are retired.
 BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR = 1.5
 # Initial scalarization weights for the new geometric parity terms. These are
 # intentionally 100x below the external driver's 1e2 width/self weights and
@@ -123,9 +142,23 @@ STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
 STAGE2_POLOIDAL_WEIGHT_DEFAULT = 1.0
 SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT = 1.0
 SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
-# Hardware keep-out is opt-in (default-OFF): existing runs stay byte-identical
-# until a weight is set AND a keep-out point cloud path is provided.
-SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT = 0.0
+# Default-on engineering steering terms. Operators can still pass an explicit
+# zero weight for legacy reproduction, but unconfigured production runs should
+# feel the fixed hardware cloud, swept vessel envelope, and JxB force terms.
+SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT = 1000.0
+SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT = 1000.0
+# Stage-2 mirrors the single-stage production keep-out weights verbatim so an
+# unconfigured Stage-2 run feels the same in-vessel hardware cloud and swept
+# vessel envelope (on-by-default keep-out parity, user decision 2026-06-15).
+# Aliased to the single-stage SSOT above — never a second literal — so the two
+# solver paths cannot silently drift. Pass an explicit 0 weight (or export
+# STAGE2_{HARDWARE,VESSEL}_KEEPOUT_WEIGHT=0) for legacy/byte-identical reproduction.
+STAGE2_HARDWARE_KEEPOUT_WEIGHT_DEFAULT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT
+STAGE2_VESSEL_KEEPOUT_WEIGHT_DEFAULT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
+SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT = 1.0
+SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M = (
+    TYPE_KK_FORCE_REGULARIZATION_CONDUCTOR_RADIUS_M
+)
 POLOIDAL_EXTENT_IDEAL_HALF_WIDTH_RAD = 70.0 * math.pi / 180.0
 POLOIDAL_EXTENT_HALF_WIDTH_RAD = 87.0 * math.pi / 180.0
 SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT = 1.0
@@ -238,6 +271,11 @@ def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
             f"minor radius {VACUUM_VESSEL_MINOR_RADIUS_M:.3f} m."
         )
     return radius
+
+
+def required_banana_cc_centerline_m() -> float:
+    """Ruled Type KK coil-to-coil centerline floor."""
+    return COIL_COIL_MIN_DIST_M
 
 
 def validate_target_lcfs_major_radius(target_major_radius_m: float) -> float:

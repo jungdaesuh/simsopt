@@ -78,6 +78,9 @@ FAILURE_ESCAPED = "all_lines_escaped"
 FAILURE_INSUFFICIENT_TRANSITS = "insufficient_transits"
 FAILURE_NO_HISTORY = "tracer_returned_no_history"
 FAILURE_TRACER_EXCEPTION = "tracer_exception"
+_CROSS_SECTION_MONOTONICITY_FAILURE = (
+    "An error occured during calculation of the cross section"
+)
 
 
 @dataclass(frozen=True)
@@ -348,8 +351,10 @@ def safe_compute_fieldline_iota_proxy(
     optimization has already completed.
 
     Narrow contract: ``ValueError`` (parameter validation in
-    :func:`compute_fieldline_iota_proxy`) and ``RuntimeError`` (simsoptpp
-    numerical-breakdown failures) are caught and converted to a
+    :func:`compute_fieldline_iota_proxy`), ``RuntimeError`` (simsoptpp
+    numerical-breakdown failures), and the known
+    ``surface.cross_section`` monotonicity failure for invalid surfaces
+    are caught and converted to a
     :class:`Phase3aFieldlineIotaProxyResult` with ``valid=False``,
     ``iota_proxy=None``, and ``reason=FAILURE_TRACER_EXCEPTION``. Every
     other exception propagates so genuine bugs are not masked.
@@ -370,6 +375,17 @@ def safe_compute_fieldline_iota_proxy(
             n_transits_target=n_transits_target,
         )
     except (ValueError, RuntimeError):
+        return Phase3aFieldlineIotaProxyResult(
+            iota_proxy=None,
+            valid=False,
+            n_surviving=0,
+            n_transits_used=0,
+            escape_count=0,
+            reason=FAILURE_TRACER_EXCEPTION,
+        )
+    except Exception as exc:
+        if _CROSS_SECTION_MONOTONICITY_FAILURE not in str(exc):
+            raise
         return Phase3aFieldlineIotaProxyResult(
             iota_proxy=None,
             valid=False,

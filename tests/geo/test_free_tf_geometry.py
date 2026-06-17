@@ -1,13 +1,12 @@
-"""Regression tests for the dormant ``--free-tf-geometry`` capability.
+"""Regression tests for the experimental ``--free-tf-geometry`` capability.
 
 ``--free-tf-geometry`` unfreezes the TF coil curve geometry so the optimizer can
 shape the TF coils to supply rotational transform (decoupling banana poloidal
 extent from iota), while keeping the freed TF coils buildable via curvature,
-length, and clearance penalties. The CLI flag is disabled for the current
-CW-poloidal HBT workflow, but the dormant objective plumbing remains tested.
+length, and clearance penalties. The CLI flag is experimental and default-off.
 These tests pin four contracts:
 
-1. The CLI rejects ``--free-tf-geometry`` before a run can launch.
+1. The CLI accepts ``--free-tf-geometry`` only when explicitly requested.
 2. Default-off is byte-identical: ``build_total_objective`` with the TF terms
    absent and with them explicitly ``None`` produce the same ``J`` and ``dJ``.
 3. The TF buildability terms are real, finite, and gradient-bearing on the freed
@@ -125,8 +124,8 @@ def _build_total(module, terms, **extra):
     )
 
 
-class TestFreeTFGeometryDisabledAtCli:
-    def test_parse_args_rejects_free_tf_geometry(self, monkeypatch, capsys):
+class TestFreeTFGeometryCli:
+    def test_parse_args_accepts_explicit_free_tf_geometry(self, monkeypatch):
         module = _example_module()
         monkeypatch.setattr(
             sys,
@@ -134,13 +133,17 @@ class TestFreeTFGeometryDisabledAtCli:
             ["single_stage_banana_example.py", "--free-tf-geometry"],
         )
 
-        with pytest.raises(SystemExit) as excinfo:
-            module.parse_args()
+        args = module.parse_args()
 
-        assert excinfo.value.code == 2
-        err = capsys.readouterr().err
-        assert "--free-tf-geometry is temporarily disabled" in err
-        assert "TF coil geometry must stay fixed" in err
+        assert args.free_tf_geometry is True
+
+    def test_parse_args_keeps_free_tf_geometry_default_off(self, monkeypatch):
+        module = _example_module()
+        monkeypatch.setattr(sys, "argv", ["single_stage_banana_example.py"])
+
+        args = module.parse_args()
+
+        assert args.free_tf_geometry is False
 
 
 class TestBuildTotalObjectiveTFTermsDefaultOff:
@@ -291,8 +294,25 @@ class TestObjectiveBundleThreadsTFTerms:
             "MajorRadius",
             "MinorRadius",
             "CurveSelfIntersect",
+            "CurveHardwareKeepout",
+            "CurveVesselEnvelopeKeepout",
         ):
             stack.enter_context(patch.object(module, name, return_value=object()))
+        stack.enter_context(
+            patch.object(
+                module,
+                "load_hardware_keepout",
+                return_value=(
+                    object(),
+                    1.0,
+                    module.HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+                    {},
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(module, "resolve_keepout_winding_r0", return_value=0.903)
+        )
         stack.enter_context(
             patch.object(
                 module,

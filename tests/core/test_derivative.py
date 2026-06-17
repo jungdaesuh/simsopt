@@ -140,6 +140,21 @@ class DerivativeTests(unittest.TestCase):
         np.testing.assert_allclose(first.data[opt1], [1.0, 2.0, 3.0])
         np.testing.assert_allclose(first.data[opt2], [4.0, 5.0])
 
+    def test_sum_derivatives_keeps_contributions_from_immutable_arrays(self):
+        # JAX vjps hand Derivative immutable arrays; augmented assignment on a
+        # local name rebinds instead of mutating result[key], so without an
+        # explicit write-back the second contribution is silently dropped and
+        # the summed gradient is wrong (observed as Taylor-test plateaus).
+        import jax.numpy as jnp
+
+        opt = Opt(n=2)
+        first = Derivative({opt: jnp.array([1.0, 2.0])})
+        second = Derivative({opt: jnp.array([10.0, 20.0])})
+
+        total = sum_derivatives([first, second])
+
+        np.testing.assert_allclose(np.asarray(total.data[opt]), [11.0, 22.0])
+
     def test_taylor_graph(self):
         # built a reasonably complex graph of two inputs, that both feed into
         # two intermediary results and then are combined into a final result.

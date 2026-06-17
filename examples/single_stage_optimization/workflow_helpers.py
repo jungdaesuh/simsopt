@@ -22,6 +22,7 @@ from banana_opt.finite_current_profiles import (
     WATARU_FINITE_CURRENT_MODE,
     get_finite_current_profile,
 )
+from banana_opt.flux_validation import validate_normalized_toroidal_flux
 from banana_opt.jhalpern30_compat import (
     resolve_jhalpern30_vf_template_path,
 )
@@ -31,19 +32,6 @@ _FLOAT_DEFAULT_ABS_TOL = 1.0e-12
 
 def format_compact_float(value: float) -> str:
     return f"{value:g}"
-
-
-def validate_normalized_toroidal_flux(
-    value: float,
-    *,
-    field_name: str = "toroidal_flux",
-) -> float:
-    flux = float(value)
-    if not 0.0 <= flux <= 1.0:
-        raise ValueError(
-            f"{field_name} must be between 0 and 1 inclusive, got {value!r}."
-        )
-    return flux
 
 
 def default_wataru_vf_template_path() -> str | None:

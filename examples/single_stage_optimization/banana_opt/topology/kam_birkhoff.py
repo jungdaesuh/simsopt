@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
@@ -36,6 +36,14 @@ KAM_CLASS_INSUFFICIENT_RETURNS = "insufficient_returns"
 KAM_CLASS_INVALID_POLAR_REFERENCE = "invalid_poloidal_reference"
 KAM_CLASS_MISSING_MAGNETIC_AXIS = "missing_magnetic_axis"
 KAM_CLASS_LOST = "lost"
+
+KAM_CLASSIFIABLE_STATES = frozenset(
+    (
+        KAM_CLASS_INVARIANT_TORUS,
+        KAM_CLASS_ISLAND_CHAIN,
+        KAM_CLASS_CHAOTIC,
+    )
+)
 
 WBA_EVALUATION_EVALUATED = "evaluated"
 WBA_EVALUATION_NOT_EVALUATED_NO_SEEDS = "not_evaluated_no_seeds"
@@ -527,4 +535,101 @@ def summarize_seed_classifications(
             None if not matching_digits else float(np.median(matching_digits))
         ),
         "wba_seed_classifications": [asdict(item) for item in classifications],
+    }
+
+
+def _seed_entry_classification(entry: object) -> str:
+    """Return the classification label of one WBA seed payload entry.
+
+    Accepts either a mapping (the ``asdict`` payload stored in topology
+    results) or a :class:`SeedClassification`. Raises loudly when the field is
+    absent so a misconfigured certification gate fails closed instead of
+    silently treating an unlabelled line as benign.
+    """
+
+    if isinstance(entry, SeedClassification):
+        return str(entry.classification)
+    if isinstance(entry, Mapping):
+        if "classification" not in entry:
+            raise ValueError(
+                "WBA seed classification entry is missing the 'classification' "
+                "field; cannot evaluate the island/classifiability verdict"
+            )
+        return str(entry["classification"])
+    raise TypeError(
+        "WBA seed classification entry must be a SeedClassification or mapping, "
+        f"got {type(entry).__name__}"
+    )
+
+
+def _seed_entry_return_count(entry: object) -> int:
+    if isinstance(entry, SeedClassification):
+        return int(entry.return_count)
+    if isinstance(entry, Mapping):
+        if "return_count" not in entry or entry["return_count"] is None:
+            raise ValueError(
+                "WBA seed classification entry is missing the 'return_count' "
+                "field; cannot evaluate the classifiability floor"
+            )
+        return int(entry["return_count"])
+    raise TypeError(
+        "WBA seed classification entry must be a SeedClassification or mapping, "
+        f"got {type(entry).__name__}"
+    )
+
+
+def island_verdict_counts(
+    seed_classifications: Sequence[object],
+    *,
+    min_returns: int = DEFAULT_WBA_MIN_RETURNS,
+) -> dict[str, object]:
+    """Tally per-line island + classifiability statistics for a strict verdict.
+
+    Single pass over the per-line WBA payload (``wba_seed_classifications``).
+    A *surviving* line is any line not classified ``lost``; a surviving line is
+    *classifiable* only when it accumulated at least ``min_returns`` Poincare
+    returns (below that floor the WBA rotation number is unreliable, so the line
+    is treated as not-classifiable). Island lines are counted by the absence
+    test the certification verdict keys on -- the explicit ``island_chain``
+    label -- never by the presence of ``invariant_torus``.
+    """
+
+    if int(min_returns) <= 0:
+        raise ValueError("min_returns must be a positive integer")
+
+    total = 0
+    surviving = 0
+    classifiable = 0
+    island_chain = 0
+    island_chain_seed_indices: list[int] = []
+    for position, entry in enumerate(seed_classifications):
+        total += 1
+        classification = _seed_entry_classification(entry)
+        if classification == KAM_CLASS_ISLAND_CHAIN:
+            island_chain += 1
+            if isinstance(entry, SeedClassification):
+                island_chain_seed_indices.append(int(entry.seed_index))
+            elif isinstance(entry, Mapping) and entry.get("seed_index") is not None:
+                island_chain_seed_indices.append(int(entry["seed_index"]))
+            else:
+                island_chain_seed_indices.append(int(position))
+        if classification != KAM_CLASS_LOST:
+            surviving += 1
+            if (
+                classification in KAM_CLASSIFIABLE_STATES
+                and _seed_entry_return_count(entry) >= int(min_returns)
+            ):
+                classifiable += 1
+
+    classifiable_fraction = (
+        None if surviving == 0 else float(classifiable) / float(surviving)
+    )
+    return {
+        "seed_count": int(total),
+        "surviving_seed_count": int(surviving),
+        "classifiable_seed_count": int(classifiable),
+        "classifiable_fraction": classifiable_fraction,
+        "island_chain_count": int(island_chain),
+        "island_chain_seed_indices": island_chain_seed_indices,
+        "min_returns": int(min_returns),
     }

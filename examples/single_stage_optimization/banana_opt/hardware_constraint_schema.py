@@ -8,8 +8,10 @@ from typing import Collection, Iterable, Literal, Mapping
 from alm_utils import require_positive_alm_threshold
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
     BANANA_HARDWARE_KEEPOUT_ALM_SCALE,
     BANANA_SELF_INTERSECT_ALM_SCALE,
+    BANANA_SELF_ENVELOPE_MIN_DISTANCE_M,
     BANANA_WIDTH_MAX_M,
     BANANA_WIDTH_MIN_M,
     COIL_COIL_MIN_DIST_M,
@@ -211,6 +213,22 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         allow_zero_threshold=True,
     ),
     HardwareConstraintSpec(
+        name="self_envelope_min_dist",
+        kind="lower_bound",
+        threshold=BANANA_SELF_ENVELOPE_MIN_DISTANCE_M,
+        applies_to=frozenset({"artifact"}),
+        traversal_policy="allowed",
+        artifact_value_optional=True,
+    ),
+    HardwareConstraintSpec(
+        name="fold_geodesic_curvature_max",
+        kind="upper_bound",
+        threshold=BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
+        applies_to=frozenset({"artifact"}),
+        traversal_policy="allowed",
+        artifact_value_optional=True,
+    ),
+    HardwareConstraintSpec(
         name="hardware_keepout",
         kind="upper_bound",
         threshold=0.0,
@@ -291,6 +309,8 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "width_min": "geometry",
     "width_max": "geometry",
     "self_intersect": "geometry",
+    "self_envelope_min_dist": "geometry",
+    "fold_geodesic_curvature_max": "geometry",
     "hardware_keepout": "geometry",
     "banana_current": "current",
     "tf_current": "current",
@@ -309,6 +329,14 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "width_min": ("coil_width", "COIL_WIDTH"),
     "width_max": ("coil_width", "COIL_WIDTH"),
     "self_intersect": ("self_intersect_penalty", "SELF_INTERSECT_PENALTY"),
+    "self_envelope_min_dist": (
+        "self_envelope_min_dist",
+        "SELF_ENVELOPE_MIN_DIST_M",
+    ),
+    "fold_geodesic_curvature_max": (
+        "fold_geodesic_curvature_max",
+        "FOLD_GEODESIC_CURVATURE_MAX_INV_M",
+    ),
     "hardware_keepout": ("hardware_keepout_penalty", "HARDWARE_KEEPOUT_PENALTY"),
     "banana_current": ("banana_current_A", "BANANA_CURRENT_A"),
     "tf_current": ("tf_current_A", "TF_CURRENT_A"),
@@ -330,6 +358,14 @@ _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "width_min": ("width_min_threshold", "WIDTH_MIN_THRESHOLD"),
     "width_max": ("width_max_threshold", "WIDTH_MAX_THRESHOLD"),
     "self_intersect": ("self_intersect_threshold", "SELF_INTERSECT_THRESHOLD"),
+    "self_envelope_min_dist": (
+        "self_envelope_min_distance",
+        "SELF_ENVELOPE_THRESHOLD_M",
+    ),
+    "fold_geodesic_curvature_max": (
+        "fold_geodesic_curvature_limit",
+        "FOLD_GEODESIC_CURVATURE_LIMIT_INV_M",
+    ),
     "hardware_keepout": ("hardware_keepout_threshold", "HARDWARE_KEEPOUT_THRESHOLD"),
     "banana_current": ("banana_current_max_A", "BANANA_CURRENT_MAX_A"),
     "tf_current": ("tf_current_limit_A", "TF_CURRENT_LIMIT_A"),
@@ -441,15 +477,21 @@ def get_hardware_constraint_spec_for_alm_name(name: str) -> HardwareConstraintSp
 
 
 def _resolved_alm_scale_with_provenance(
-    spec: HardwareConstraintSpec, raw_threshold: float
+    spec: HardwareConstraintSpec,
+    raw_threshold: float,
+    scale_override: float | None = None,
 ) -> tuple[float, bool, str]:
-    candidate = raw_threshold if spec.alm_scale is None else float(spec.alm_scale)
+    if scale_override is not None:
+        candidate = float(scale_override)
+        base_source = f"override:{spec.name}.alm_scale"
+    else:
+        candidate = raw_threshold if spec.alm_scale is None else float(spec.alm_scale)
+        base_source = (
+            f"threshold:{spec.name}"
+            if spec.alm_scale is None
+            else f"schema:{spec.name}.alm_scale"
+        )
     require_positive_alm_threshold(f"hardware:{spec.name}.alm_scale", candidate)
-    base_source = (
-        f"threshold:{spec.name}"
-        if spec.alm_scale is None
-        else f"schema:{spec.name}.alm_scale"
-    )
     return resolve_alm_scale_with_provenance(
         candidate, ALM_PHYSICAL_SCALE_FLOOR, base_source
     )
@@ -503,6 +545,7 @@ def hardware_constraint_alm_metadata(
     *,
     threshold_overrides: Mapping[str, float] | None = None,
     activity_tolerance: float | None = None,
+    scale_override: float | None = None,
     objective_value_kind: ALMValueKind = "surrogate",
     gradient_value_kind: ALMValueKind = "surrogate",
     dual_update_value_kind: Literal["surrogate", "hard"] = "surrogate",
@@ -512,7 +555,7 @@ def hardware_constraint_alm_metadata(
     spec = get_hardware_constraint_spec(schema_name)
     raw_threshold = _resolved_threshold(spec, threshold_overrides)
     scale, scale_floor_applied, source = _resolved_alm_scale_with_provenance(
-        spec, raw_threshold
+        spec, raw_threshold, scale_override
     )
     metadata = ALMConstraintMetadata(
         scale=scale,

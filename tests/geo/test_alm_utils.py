@@ -43,35 +43,57 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
         doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
         doc = doc_path.read_text(encoding="utf-8")
         citations = {
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2599-2606": (
-                "augmented_inequality_objective("
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2831-2838": (
+                "augmented_inequality_objective(",
+                "normalized_surrogate_signed_constraint_values",
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2611-2639": (
-                '"hard_dual_update_values"'
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2839-2861": (
+                '"hard_dual_update_values"',
+                '"surrogate_signed_constraint_values"',
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2621-2628": (
-                '"raw_dual_update_values"'
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2853-2860": (
+                '"raw_dual_update_values"',
             ),
-            "examples/single_stage_optimization/alm_utils.py:2197-2249": (
-                "def _extract_stage2_constraint_signal_state"
+            "examples/single_stage_optimization/alm_utils.py:2264-2325": (
+                "def _extract_stage2_constraint_signal_state",
+                'evaluation["hard_dual_update_values"]',
+                "preferred_dual_update_values",
             ),
-            "examples/single_stage_optimization/alm_utils.py:3414-3430": (
-                "routing_state.signal_state.preferred_dual_update_values"
+            "examples/single_stage_optimization/alm_utils.py:3466-3481": (
+                "def _handle_alm_dual_update_transition",
+                "_project_nonnegative_multipliers_with_diagnostics",
+                "routing_state.signal_state.preferred_dual_update_values",
             ),
-            "examples/single_stage_optimization/alm_utils.py:2291-2349": (
-                "def _constraint_routing_state"
+            "examples/single_stage_optimization/alm_utils.py:2358-2418": (
+                "def _constraint_routing_state",
+                "hard_activity_mask",
+                "surrogate_activity_mask",
+                "signal_mismatch_active",
             ),
-            "examples/single_stage_optimization/alm_utils.py:4605-4614": (
-                "and not signal_mismatch_active"
+            "examples/single_stage_optimization/alm_utils.py:4663-4672": (
+                "and not signal_mismatch_active",
+                "and not run_state.last_cap_binding_active",
             ),
-            "examples/single_stage_optimization/alm_utils.py:4301-4314": (
-                "and not run_state.last_cap_binding_active"
+            "examples/single_stage_optimization/alm_utils.py:4655-4661": (
+                "constraints_inactive_candidate = (",
+                "and not signal_mismatch_active",
+            ),
+            "examples/single_stage_optimization/alm_utils.py:4699-4702": (
+                "stationarity_norm <= settings.stationarity_tol",
+                "and not run_state.last_cap_binding_active",
+            ),
+            "examples/single_stage_optimization/alm_utils.py:4358-4370": (
+                "current_max_feasibility_violation <= settings.feasibility_tol",
+                "and not current_signal_mismatch_active",
+                "and not run_state.last_cap_binding_active",
             ),
         }
-        for citation, anchor in citations.items():
+        for citation, anchors in citations.items():
             with self.subTest(citation=citation):
                 self.assertIn(citation, doc)
-                self.assertIn(anchor, _read_cited_source(repo_root, citation))
+                cited_source = _read_cited_source(repo_root, citation)
+                for anchor in anchors:
+                    self.assertIn(anchor, cited_source)
 
         alm_utils_lines = (
             repo_root / "examples" / "single_stage_optimization" / "alm_utils.py"
@@ -1945,6 +1967,69 @@ class MinimizeAlmTests(unittest.TestCase):
         )
 
         self.assertEqual(profile.name, "unbounded")
+
+    def test_box_bounds_intersect_trust_region_with_base_bounds(self):
+        module = load_alm_utils_module()
+
+        bounds = module._build_box_bounds(
+            np.array([10.0, -2.0]),
+            0.5,
+            base_bounds=[(6.0, 12.0), (-1.5, 1.0)],
+        )
+
+        self.assertEqual(bounds, [(6.0, 12.0), (-1.5, -1.0)])
+
+    def test_box_bounds_return_base_bounds_when_trust_radius_disabled(self):
+        module = load_alm_utils_module()
+
+        bounds = module._build_box_bounds(
+            np.array([1.0, -1.0]),
+            0.0,
+            base_bounds=[(-2.0, 2.0), (-3.0, 3.0)],
+        )
+
+        self.assertEqual(bounds, [(-2.0, 2.0), (-3.0, 3.0)])
+
+    def test_minimize_alm_threads_base_bounds_to_inner_optimizer(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            trust_radius_init=0.5,
+        )
+        captured_bounds = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            return _complete_alm_evaluation({
+                "total": float(x[0] ** 2),
+                "grad": 2.0 * x,
+                "constraint_values": np.array([1.0]),
+                "stationarity_norm": float(np.linalg.norm(2.0 * x)),
+            })
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, callback, options
+            captured_bounds.append(bounds)
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            module.minimize_alm(
+                np.array([10.0]),
+                ["c0"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+                base_bounds=[(0.0, 12.0)],
+            )
+
+        self.assertEqual(captured_bounds[0], [(5.0, 12.0)])
 
     def test_minimize_alm_rejects_asymmetric_incumbent_hooks(self):
         module = load_alm_utils_module()

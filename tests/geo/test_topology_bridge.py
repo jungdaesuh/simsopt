@@ -757,6 +757,32 @@ class TestSafeWrapper:
         assert result.iota_proxy is None
         assert result.reason == bridge.FAILURE_TRACER_EXCEPTION
 
+    def test_safe_wrapper_catches_cross_section_monotonicity_failure(self):
+        bridge = load_topology_bridge()
+
+        def cross_section(*_args, **_kwargs):
+            raise Exception(
+                "An error occured during calculation of the cross section. "
+                "This happens when a surface 'goes back' on itself."
+            )
+
+        surface = SimpleNamespace(
+            gamma=_toroid_surface().gamma,
+            cross_section=cross_section,
+        )
+        result = bridge.safe_compute_fieldline_iota_proxy(
+            field=object(),
+            surface=surface,
+            nfieldlines=3,
+            tmax=10.0,
+            tol=1e-8,
+            escape_radius=2.0,
+            n_transits_target=10,
+        )
+        assert result.valid is False
+        assert result.iota_proxy is None
+        assert result.reason == bridge.FAILURE_TRACER_EXCEPTION
+
     def test_safe_wrapper_does_not_swallow_unrelated_exceptions(self, monkeypatch):
         bridge = load_topology_bridge()
 

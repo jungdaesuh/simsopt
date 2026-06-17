@@ -221,10 +221,12 @@ def apply_frontier_scalarization_override(
     width_weight=0.0,
     selfint_weight=0.0,
     hardware_keepout_weight=0.0,
+    vessel_keepout_weight=0.0,
     msc_weight=0.0,
     arclen_weight=0.0,
     link_weight=0.0,
     force_weight=0.0,
+    magnetic_well_weight=0.0,
     objective_optimizable=None,
     alm_formulation="weighted_sum",
     alm_multipliers=None,
@@ -305,10 +307,12 @@ def apply_frontier_scalarization_override(
             width_weight=width_weight,
             selfint_weight=selfint_weight,
             hardware_keepout_weight=hardware_keepout_weight,
+            vessel_keepout_weight=vessel_keepout_weight,
             msc_weight=msc_weight,
             arclen_weight=arclen_weight,
             link_weight=link_weight,
             force_weight=force_weight,
+            magnetic_well_weight=magnetic_well_weight,
         )
         if "constraint_values" in annotated and "constraint_grads" in annotated:
             if alm_multipliers is None or alm_penalty is None:
@@ -370,10 +374,12 @@ def _frontier_penalty_geometry_total_grad(
     width_weight=0.0,
     selfint_weight=0.0,
     hardware_keepout_weight=0.0,
+    vessel_keepout_weight=0.0,
     msc_weight=0.0,
     arclen_weight=0.0,
     link_weight=0.0,
     force_weight=0.0,
+    magnetic_well_weight=0.0,
 ):
     total = (
         float(length_weight) * float(objective_eval["J_len"])
@@ -411,6 +417,14 @@ def _frontier_penalty_geometry_total_grad(
             objective_eval["dJ_hardware_keepout"],
             dtype=float,
         )
+    if float(vessel_keepout_weight) != 0.0:
+        total += float(vessel_keepout_weight) * float(
+            objective_eval["J_vessel_keepout"]
+        )
+        grad = grad + float(vessel_keepout_weight) * np.asarray(
+            objective_eval["dJ_vessel_keepout"],
+            dtype=float,
+        )
     # Opt-in SIMSOPT coil regularizers (guarded by weight so default runs read no
     # extra diagnostics and stay byte-identical with the prior frontier objective).
     if float(msc_weight) != 0.0:
@@ -432,6 +446,13 @@ def _frontier_penalty_geometry_total_grad(
         total += float(force_weight) * float(objective_eval["J_coil_force"])
         grad = grad + float(force_weight) * np.asarray(
             objective_eval["dJ_coil_force"], dtype=float
+        )
+    if float(magnetic_well_weight) != 0.0:
+        total += float(magnetic_well_weight) * float(
+            objective_eval["J_magnetic_well"]
+        )
+        grad = grad + float(magnetic_well_weight) * np.asarray(
+            objective_eval["dJ_magnetic_well"], dtype=float
         )
     return float(total), grad
 

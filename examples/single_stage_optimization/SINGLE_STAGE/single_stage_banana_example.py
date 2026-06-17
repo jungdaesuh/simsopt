@@ -64,6 +64,7 @@ from simsopt.field import (
     BiotSavart,
     coils_via_symmetries,
 )
+from simsopt.field.coil import Coil
 from simsopt.field.force import MeanSquaredForce, regularization_circ
 from simsopt.objectives import QuadraticPenalty
 from simsopt._core.derivative import Derivative
@@ -1220,7 +1221,7 @@ def reembed_loaded_banana_cws_family_on_surface(
         coil_partitions.banana_coils
     )
     reembedded_curve = _clone_cws_curve_on_surface(master_curve, surf_coils)
-    reembedded_banana_coils = tuple(
+    expanded_banana_coils = tuple(
         coils_via_symmetries(
             [reembedded_curve],
             [master_current],
@@ -1228,6 +1229,10 @@ def reembed_loaded_banana_cws_family_on_surface(
             surf_coils.stellsym,
         )
     )
+    if len(coil_partitions.banana_coils) == 1:
+        reembedded_banana_coils = (Coil(reembedded_curve, master_current),)
+    else:
+        reembedded_banana_coils = expanded_banana_coils
     if len(reembedded_banana_coils) != len(coil_partitions.banana_coils):
         raise ValueError(
             "Re-embedded CWS banana symmetry family changed coil count from "
@@ -1496,12 +1501,6 @@ def apply_default_stage2_seed_args(args):
                 plasma_profile.get(attr_name, default_value),
             )
     return args
-
-
-_FREE_TF_GEOMETRY_DISABLED_MESSAGE = (
-    "--free-tf-geometry is temporarily disabled; TF coil geometry must stay fixed "
-    "for the current CW-poloidal HBT workflow."
-)
 
 
 def validate_single_stage_finite_build_cli_args(args) -> None:
@@ -2764,10 +2763,9 @@ def parse_args():
         "--free-tf-geometry",
         action="store_true",
         help=(
-            "Temporarily disabled: TF coil geometry must stay fixed for the "
-            "current CW-poloidal HBT workflow. The dormant implementation "
-            "previously unfroze TF CurveXYZFourier geometry while keeping TF "
-            "currents fixed."
+            "Experimental: unfreeze TF CurveXYZFourier geometry while keeping TF "
+            "currents fixed. Default is off; when enabled, TF coils join the "
+            "clearance objectives and receive curvature/length buildability terms."
         ),
     )
     parser.add_argument(
@@ -3382,8 +3380,6 @@ def parse_args():
         parser.error("--winding-surface-free-mpol must be non-negative.")
     if args.winding_surface_free_ntor < 0:
         parser.error("--winding-surface-free-ntor must be non-negative.")
-    if args.free_tf_geometry:
-        parser.error(_FREE_TF_GEOMETRY_DISABLED_MESSAGE)
     return args
 
 

@@ -314,6 +314,10 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             single_stage_poloidal_weight=1.0,
             single_stage_width_weight=1.0,
             single_stage_selfint_weight=1.0,
+            single_stage_hardware_keepout_weight=0.0,
+            hardware_keepout_json=None,
+            single_stage_vessel_keepout_weight=0.0,
+            single_stage_vessel_keepout_clearance=0.0,
             single_stage_poloidal_threshold_rad=1.0,
             single_stage_width_min_threshold=0.01,
             single_stage_width_max_threshold=0.06,
@@ -497,22 +501,39 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             surface_mode_contract=contract,
         )
 
-    def test_validate_surface_mode_constraint_args_rejects_published_frontier(self):
+    def test_validate_surface_mode_constraint_args_allows_published_frontier(self):
         module = load_single_stage_example_module()
         args = make_surface_mode_args(
             surface_mode=module.PUBLISHED_MULTISURFACE,
             constraint_method="penalty",
             single_stage_goal_mode="frontier",
+            magnetic_well_weight=1.0,
         )
         contract = module.resolve_surface_mode_contract(
             args,
             warn_on_legacy_mapping=False,
         )
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "--single-stage-goal-mode=target",
-        ):
+        module.validate_surface_mode_constraint_args(
+            args,
+            surface_mode_contract=contract,
+        )
+
+    def test_validate_surface_mode_constraint_args_rejects_single_surface_magnetic_well(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        args = make_surface_mode_args(
+            surface_mode=module.SINGLE_SURFACE,
+            constraint_method="penalty",
+            magnetic_well_weight=1.0,
+        )
+        contract = module.resolve_surface_mode_contract(
+            args,
+            warn_on_legacy_mapping=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "at least three Boozer surfaces"):
             module.validate_surface_mode_constraint_args(
                 args,
                 surface_mode_contract=contract,

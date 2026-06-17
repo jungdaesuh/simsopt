@@ -21,6 +21,8 @@ if str(EXAMPLES_ROOT) not in sys.path:
 from banana_opt.coil_groups import build_contiguous_manifest  # noqa: E402
 from banana_opt.finitebuild_export import (  # noqa: E402
     FiniteBuildExportConfig,
+    build_parser,
+    config_from_args,
     default_output_path,
     export_finitebuild_biot_savart,
     mgrid_output_path,
@@ -96,7 +98,7 @@ def _finitebuild_config(source_path: Path, **overrides) -> FiniteBuildExportConf
         "gapsize_n": overrides.pop("gapsize_n", 0.003),
         "gapsize_b": overrides.pop("gapsize_b", 0.004),
         "rotation_order": overrides.pop("rotation_order", None),
-        "frame": overrides.pop("frame", "centroid"),
+        "frame": overrides.pop("frame", "surface_tangent"),
         "banana_current_A": overrides.pop("banana_current_A", None),
         "stage2_results": overrides.pop("stage2_results", None),
         "finite_current_mode": overrides.pop("finite_current_mode", None),
@@ -119,6 +121,37 @@ def _finitebuild_config(source_path: Path, **overrides) -> FiniteBuildExportConf
     }
     assert not overrides
     return FiniteBuildExportConfig(**values)
+
+
+def test_typekk_export_defaults_to_surface_tangent_frame(tmp_path):
+    source_path = tmp_path / "biot_savart_opt.json"
+
+    config = FiniteBuildExportConfig(
+        biot_savart_file=source_path,
+        output=None,
+        numfilaments_n=2,
+        numfilaments_b=7,
+        gapsize_n=0.003,
+        gapsize_b=0.004,
+    )
+    cli_config = config_from_args(
+        build_parser().parse_args(
+            [
+                str(source_path),
+                "--numfilaments-n",
+                "2",
+                "--numfilaments-b",
+                "7",
+                "--gapsize-n",
+                "0.003",
+                "--gapsize-b",
+                "0.004",
+            ]
+        )
+    )
+
+    assert config.frame == "surface_tangent"
+    assert cli_config.frame == "surface_tangent"
 
 
 def _small_stage2_source(tmp_path: Path) -> tuple[BiotSavart, Path, Path]:
@@ -199,6 +232,7 @@ def test_vacuum_profile_fallback_converts_and_preserves_current(tmp_path):
         metadata["BANANA_OUTPUT_TOTAL_CURRENT_A"]
     )
     assert metadata["FINITEBUILD_FILAMENT_SETTINGS"]["numfilaments_n"] == 2
+    assert metadata["FINITEBUILD_FILAMENT_SETTINGS"]["frame"] == "surface_tangent"
     assert metadata["OUTPUT_COIL_COUNTS"]["banana"] == 60
 
 

@@ -3529,6 +3529,33 @@ class UnifiedRunnerTests(unittest.TestCase):
             )
 
         self.assertIsNone(probe.call_args.kwargs["constraint_weight"])
+        self.assertEqual(probe.call_args.kwargs["iota_target"], 0.15)
+
+    def test_build_probe_status_uses_frontier_iota_default(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--goal-mode",
+                "frontier",
+            ]
+        )
+
+        with patch.object(
+            wrapper, "probe_stage2_seed_bootability", return_value={}
+        ) as probe:
+            wrapper.build_probe_status(
+                args,
+                stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+                stage2_results={"PLASMA_SURF_FILENAME": "demo.nc"},
+                stage="probe",
+            )
+
+        self.assertEqual(probe.call_args.kwargs["iota_target"], 0.18)
 
     def test_build_probe_status_derives_boozer_current_from_physical_current(self):
         wrapper = load_wrapper_module()

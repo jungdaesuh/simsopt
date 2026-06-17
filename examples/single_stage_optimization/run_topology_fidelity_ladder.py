@@ -19,7 +19,7 @@ from banana_opt.json_compat import load_boozer_finite_i as load
 from banana_opt.topology_fidelity_ladder import (
     DEFAULT_TOPOLOGY_TIER_SPECS,
     build_topology_fidelity_report,
-    topology_tier_passed,
+    topology_tier_verdict,
 )
 from topology_scorer import safe_score_topology
 
@@ -70,11 +70,15 @@ def build_tier_case_record(
     *,
     survival_threshold: float,
 ) -> dict[str, object]:
+    topology_verdict = topology_tier_verdict(
+        result,
+        survival_threshold=survival_threshold,
+        require_island_gate=True,
+        require_classifiability_floor=True,
+    )
     return {
-        "passed": topology_tier_passed(
-            result,
-            survival_threshold=survival_threshold,
-        ),
+        "passed": bool(topology_verdict["passed"]),
+        "topology_verdict": topology_verdict,
         "survival_fraction": float(result["survival_fraction"]),
         "confinement_score": float(result["confinement_score"]),
         "broken": bool(result["broken"]),

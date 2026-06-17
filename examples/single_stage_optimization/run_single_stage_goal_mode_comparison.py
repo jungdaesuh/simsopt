@@ -284,7 +284,15 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         type=float,
         default=float(os.environ["ALM_LENGTH_PENALTY_THRESHOLD"]) if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ else None,
     )
-    parser.add_argument("--iota-target", type=float, default=0.15)
+    parser.add_argument(
+        "--iota-target",
+        type=float,
+        default=float(os.environ["IOTA_TARGET"]) if "IOTA_TARGET" in os.environ else None,
+        help=(
+            "Optional iota target forwarded to the single-stage entrypoint. "
+            "When omitted, the entrypoint applies its goal-mode-specific default."
+        ),
+    )
     parser.add_argument(
         "--flip-banana",
         action="store_true",
@@ -529,8 +537,6 @@ def build_single_stage_goal_mode_command(
         args.single_stage_banana_current_mode,
         "--alm-formulation",
         args.alm_formulation,
-        "--iota-target",
-        str(args.iota_target),
         "--vol-target",
         str(args.vol_target),
         "--res-weight",
@@ -624,6 +630,7 @@ def build_single_stage_goal_mode_command(
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
+    append_optional_flag(command, "--iota-target", args.iota_target)
     append_optional_flag(command, "--length-target", args.length_target)
     append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
     append_optional_flag(

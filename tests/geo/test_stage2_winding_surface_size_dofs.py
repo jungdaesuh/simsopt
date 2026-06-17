@@ -24,6 +24,7 @@ if str(EXAMPLES_ROOT) not in sys.path:
 
 from STAGE_2.banana_coil_solver import (  # noqa: E402
     build_lbfgsb_bounds,
+    free_loaded_winding_surface_size_dofs,
     validate_winding_surface_shape_cli_args,
 )
 from alm_utils import _build_box_bounds  # noqa: E402
@@ -241,23 +242,112 @@ def _loaded_seed_args(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def test_loaded_seed_with_free_r0_raises():
-    """free_r0 on a loaded seed is rejected (fresh-only guard, FIX 1)."""
-    args = _loaded_seed_args(winding_surface_free_r0=True)
-    with pytest.raises(ValueError, match="requires fresh Stage 2 initialization"):
+def test_loaded_seed_with_free_r0_is_allowed():
+    """T1.5: free_r0 on a loaded seed is ALLOWED.
+
+    Re-centering an already-converged seed is the intended use of the major-
+    radius lever, so the validator no longer rejects it (the wiring frees
+    rc(0,0) directly on the loaded master winding surface).
+    """
+    validate_winding_surface_shape_cli_args(
+        _loaded_seed_args(winding_surface_free_r0=True)
+    )
+
+
+def test_loaded_seed_with_free_minor_is_allowed():
+    """T1.5: free_minor on a loaded seed is ALLOWED (re-sizing a converged seed)."""
+    validate_winding_surface_shape_cli_args(
+        _loaded_seed_args(winding_surface_free_minor=True)
+    )
+
+
+def test_loaded_seed_with_free_mpol_still_raises():
+    """The shape-mode frees stay fresh-only: a loaded seed's recorded (m, n)
+    modes are what its coils converged against, so reopening them still raises."""
+    args = _loaded_seed_args(winding_surface_free_mpol=1)
+    with pytest.raises(ValueError, match="fresh Stage 2 initialization"):
         validate_winding_surface_shape_cli_args(args)
 
 
-def test_loaded_seed_with_free_minor_raises():
-    """free_minor on a loaded seed is rejected (fresh-only guard, FIX 1)."""
-    args = _loaded_seed_args(winding_surface_free_minor=True)
-    with pytest.raises(ValueError, match="requires fresh Stage 2 initialization"):
+def test_loaded_seed_with_free_ntor_still_raises():
+    """The ntor shape-mode free is likewise fresh-only on a loaded seed."""
+    args = _loaded_seed_args(winding_surface_free_ntor=1)
+    with pytest.raises(ValueError, match="fresh Stage 2 initialization"):
         validate_winding_surface_shape_cli_args(args)
 
 
 def test_loaded_seed_without_size_frees_passes():
     """A loaded seed with no winding-surface-free flags is accepted."""
     validate_winding_surface_shape_cli_args(_loaded_seed_args())
+
+
+def _fake_loaded_banana_curve():
+    """Stand-in for the loaded master banana curve: only ``.surf`` is read by the
+    loaded-seed wiring (``free_loaded_winding_surface_size_dofs``)."""
+    return SimpleNamespace(surf=_on_spec_cws())
+
+
+def test_free_loaded_winding_dofs_off_is_byte_identical_noop():
+    """T1.5 wiring, default OFF: returns () and leaves the loaded surf UNCHANGED.
+
+    Guards the loaded-seed branch directly (not just the validator): the helper
+    must not mutate the master winding surface when no size lever is requested.
+    Asserted as state-invariance (the real loaded surf arrives with its own
+    fixed/free state from the artifact; the helper must preserve it exactly).
+    """
+    curve = _fake_loaded_banana_curve()
+    before_fixed = [
+        curve.surf.is_fixed(name) for name in curve.surf.local_full_dof_names
+    ]
+    before_x = curve.surf.x.copy()
+    before_lb = curve.surf.local_full_lower_bounds.copy()
+    before_ub = curve.surf.local_full_upper_bounds.copy()
+
+    names = free_loaded_winding_surface_size_dofs(curve, _loaded_seed_args())
+
+    assert names == ()
+    assert [
+        curve.surf.is_fixed(name) for name in curve.surf.local_full_dof_names
+    ] == before_fixed
+    assert np.array_equal(curve.surf.x, before_x)
+    assert np.array_equal(curve.surf.local_full_lower_bounds, before_lb)
+    assert np.array_equal(curve.surf.local_full_upper_bounds, before_ub)
+
+
+def test_free_loaded_winding_dofs_free_r0_frees_bounded_on_loaded_surf():
+    """T1.5 wiring: free_r0 frees+bounds rc(0,0) on the LOADED master surf.
+
+    This is the regression guard for the loaded-seed branch -- a misroute (wrong
+    surface object, dropped guard, renamed flag) would leave rc(0,0) pinned and
+    fail here, instead of silently no-opping at run time.
+    """
+    curve = _fake_loaded_banana_curve()
+
+    names = free_loaded_winding_surface_size_dofs(
+        curve, _loaded_seed_args(winding_surface_free_r0=True)
+    )
+
+    assert "rc(0,0)" in names
+    assert not curve.surf.is_fixed("rc(0,0)")
+    assert _bounds_of(curve.surf, "rc(0,0)") == WINDING_SURFACE_FREE_R0_BOUNDS_M
+    # free_minor not requested: the minor pair stays pinned.
+    assert curve.surf.is_fixed("rc(1,0)")
+    assert curve.surf.is_fixed("zs(1,0)")
+
+
+def test_free_loaded_winding_dofs_free_minor_frees_bounded_on_loaded_surf():
+    """T1.5 wiring: free_minor frees+bounds rc(1,0)/zs(1,0) on the loaded surf."""
+    curve = _fake_loaded_banana_curve()
+
+    names = free_loaded_winding_surface_size_dofs(
+        curve, _loaded_seed_args(winding_surface_free_minor=True)
+    )
+
+    assert "rc(1,0)" in names
+    assert "zs(1,0)" in names
+    assert _bounds_of(curve.surf, "rc(1,0)") == WINDING_SURFACE_FREE_MINOR_BOUNDS_M
+    assert _bounds_of(curve.surf, "zs(1,0)") == WINDING_SURFACE_FREE_MINOR_BOUNDS_M
+    assert curve.surf.is_fixed("rc(0,0)")
 
 
 def test_alm_seed_clip_keeps_trust_box_feasible_for_freed_r0():

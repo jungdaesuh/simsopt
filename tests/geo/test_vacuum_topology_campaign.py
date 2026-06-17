@@ -162,7 +162,35 @@ class VacuumTopologyCampaignTests(unittest.TestCase):
             failed_strict_vacuum_checks(checks),
         )
 
-    def test_strict_vacuum_metadata_status_rejects_mixed_unshared_currents(self):
+    def test_strict_vacuum_metadata_status_accepts_independent_symmetry_currents(self):
+        checks = strict_vacuum_metadata_status(
+            {
+                "STRICT_VACUUM_CURRENT": True,
+                "CURRENT_LINEAGE": STRICT_VACUUM_CURRENT_LINEAGE,
+                "STRICT_VACUUM_SEED_LINEAGE": STRICT_VACUUM_SEED_LINEAGE_LEGACY_CONTROL,
+                "TF_CURRENT_A": -80000.0,
+                "BANANA_CURRENT_MODE": "independent",
+                "BANANA_INIT_CURRENT_A": 15910.0,
+                "BANANA_CURRENT_A": 15910.0,
+                "BANANA_CURRENTS_A": [-15910.0, 15910.0],
+                "BANANA_CURRENT_MAX_ABS_A": 15910.0,
+                "BANANA_CURRENT_CONTROL_METRIC": "max_abs",
+                "EFFECTIVE_CURRENT_MODE": "vacuum",
+                "FINITE_CURRENT_MODE": None,
+                "PLASMA_CURRENT_A": 0.0,
+                "BOOZER_I": 0.0,
+                "PROXY_PLASMA_CURRENT_A": 0.0,
+                "VF_CURRENT_A": 0.0,
+                "NUM_PROXY_COILS": 0,
+                "NUM_VF_COILS": 0,
+                "BOOZER_SURFACE_CLASS": "BoozerSurface",
+                "BOOZER_SURFACE_MODULE": "simsopt.geo.boozersurface",
+            }
+        )
+
+        self.assertTrue(checks["passed"])
+
+    def test_strict_vacuum_metadata_status_rejects_uncontracted_mixed_currents(self):
         checks = strict_vacuum_metadata_status(
             {
                 "STRICT_VACUUM_CURRENT": True,
@@ -220,6 +248,11 @@ class VacuumTopologyCampaignTests(unittest.TestCase):
         self.assertTrue(checks["passed"])
 
     def test_strict_vacuum_metadata_status_rejects_mixed_shared_currents(self):
+        # Positive BASE current = CW-lane sign violation. Note: [-I, +I] with a
+        # negative base is the contract-CORRECT resumed shared-mode shape per
+        # program Hard Invariant 12 (exact alternation after stellarator
+        # symmetry, "negated, not flattened") and is now accepted; the rejected
+        # shapes are a positive base or ragged magnitudes.
         checks = strict_vacuum_metadata_status(
             {
                 "STRICT_VACUUM_CURRENT": True,
@@ -229,7 +262,7 @@ class VacuumTopologyCampaignTests(unittest.TestCase):
                 "BANANA_CURRENT_MODE": "shared",
                 "BANANA_INIT_CURRENT_A": -15910.0,
                 "BANANA_CURRENT_A": -15910.0,
-                "BANANA_CURRENTS_A": [-15910.0, 15910.0],
+                "BANANA_CURRENTS_A": [15910.0, -15910.0],
                 "EFFECTIVE_CURRENT_MODE": "vacuum",
                 "FINITE_CURRENT_MODE": None,
                 "PLASMA_CURRENT_A": 0.0,

@@ -1,6 +1,13 @@
 import numpy as np
 
-from .framedcurve import FramedCurve, FrameRotation, ZeroRotation, FramedCurveCentroid, FramedCurveFrenet
+from .framedcurve import (
+    FrameRotation,
+    FramedCurve,
+    FramedCurveCentroid,
+    FramedCurveFrenet,
+    FramedCurveSurfaceTangent,
+    ZeroRotation,
+)
 
 """
 The functions and classes in this model are used to deal with multifilament
@@ -63,14 +70,17 @@ class CurveFilament(FramedCurve):
 
 
 def create_multifilament_grid(curve, numfilaments_n, numfilaments_b, gapsize_n, gapsize_b,
-                              rotation_order=None, rotation_scaling=None, frame='centroid'):
+                              rotation_order=None, rotation_scaling=None, frame='centroid',
+                              surface_major_radius=None, surface_midplane_z=0.0):
     """
     Create a regular grid of ``numfilaments_n * numfilaments_b`` many
     filaments to approximate a finite-build coil.
 
     Note that "normal" and "binormal" in the function arguments here
-    refer to either the Frenet frame or the "coil centroid
-    frame" defined by Singh et al., before rotation.
+    refer to the pre-rotation reference frame selected by ``frame``: the Frenet
+    frame, the "coil centroid frame" defined by Singh et al., or the
+    surface-tangent frame whose normal tracks a circular toroidal winding
+    surface.
 
     Args:
         curve: The underlying curve.
@@ -84,9 +94,24 @@ def create_multifilament_grid(curve, numfilaments_n, numfilaments_b, gapsize_n, 
                            scaling improves the convergence of first order optimization
                            algorithms. If ``None``, then the default of ``1 / max(gapsize_n, gapsize_b)``
                            is used.
-        frame: orthonormal frame to define normal and binormal before rotation (either 'centroid' or 'frenet')
+        frame: orthonormal frame to define normal and binormal before rotation
+               (``'centroid'``, ``'frenet'``, or ``'surface_tangent'``).
+        surface_major_radius: major radius ``R0`` of the winding surface's circular
+                              axis. Required when ``frame == 'surface_tangent'`` and
+                              ignored otherwise.
+        surface_midplane_z: height ``z0`` of the winding surface's circular axis.
+                            Used only when ``frame == 'surface_tangent'``.
     """
-    assert frame in ['centroid', 'frenet']
+    if frame not in ('centroid', 'frenet', 'surface_tangent'):
+        raise ValueError(
+            f"Unknown frame {frame!r}; expected one of "
+            "'centroid', 'frenet', 'surface_tangent'."
+        )
+    if frame == 'surface_tangent' and surface_major_radius is None:
+        raise ValueError(
+            "frame='surface_tangent' requires surface_major_radius (the winding "
+            "surface major radius)."
+        )
     if numfilaments_n % 2 == 1:
         shifts_n = np.arange(numfilaments_n) - numfilaments_n//2
     else:
@@ -106,6 +131,9 @@ def create_multifilament_grid(curve, numfilaments_n, numfilaments_b, gapsize_n, 
         rotation = FrameRotation(curve.quadpoints, rotation_order, scale=rotation_scaling)
     if frame == 'frenet':
         framedcurve = FramedCurveFrenet(curve, rotation)
+    elif frame == 'surface_tangent':
+        framedcurve = FramedCurveSurfaceTangent(
+            curve, surface_major_radius, surface_midplane_z, rotation)
     else:
         framedcurve = FramedCurveCentroid(curve, rotation)
 

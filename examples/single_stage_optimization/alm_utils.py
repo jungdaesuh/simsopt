@@ -319,6 +319,7 @@ class ALMInnerAttemptRequest:
     inner_callback: Callable[[np.ndarray], None] | None
     constraint_names_tuple: tuple[str, ...]
     constraint_blocks_tuple: tuple[str, ...] | None
+    base_bounds: object | None = None
 
 
 @dataclass(frozen=True)
@@ -1782,19 +1783,70 @@ def _effective_feasibility_gate(
     )
 
 
-def _build_box_bounds(center: np.ndarray, trust_radius: float | None):
+def _normalize_base_bounds(base_bounds, size: int):
+    if base_bounds is None:
+        return None
+    if hasattr(base_bounds, "lb") and hasattr(base_bounds, "ub"):
+        lower_values = np.asarray(base_bounds.lb, dtype=float).reshape(-1)
+        upper_values = np.asarray(base_bounds.ub, dtype=float).reshape(-1)
+        if lower_values.shape != (size,) or upper_values.shape != (size,):
+            raise ValueError("ALM base bounds must match the iterate shape.")
+        raw_pairs = list(zip(lower_values, upper_values))
+    else:
+        raw_pairs = list(base_bounds)
+        if len(raw_pairs) != size:
+            raise ValueError("ALM base bounds must match the iterate shape.")
+    normalized_pairs = []
+    for lower_bound, upper_bound in raw_pairs:
+        lower_value = -np.inf if lower_bound is None else float(lower_bound)
+        upper_value = np.inf if upper_bound is None else float(upper_bound)
+        if lower_value > upper_value:
+            raise ValueError("ALM base lower bound exceeds upper bound.")
+        normalized_pairs.append((lower_value, upper_value))
+    return normalized_pairs
+
+
+def _intersect_bounds(trust_bounds, base_bounds):
+    if trust_bounds is None:
+        return base_bounds
+    if base_bounds is None:
+        return trust_bounds
+    intersected_bounds = []
+    for (trust_lower, trust_upper), (base_lower, base_upper) in zip(
+        trust_bounds,
+        base_bounds,
+    ):
+        lower_bound = max(float(trust_lower), float(base_lower))
+        upper_bound = min(float(trust_upper), float(base_upper))
+        if lower_bound > upper_bound:
+            raise ValueError("ALM trust-region bounds do not intersect base bounds.")
+        intersected_bounds.append((lower_bound, upper_bound))
+    return intersected_bounds
+
+
+def _build_box_bounds(
+    center: np.ndarray,
+    trust_radius: float | None,
+    base_bounds=None,
+):
+    center_array = np.asarray(center, dtype=float)
+    normalized_base_bounds = _normalize_base_bounds(
+        base_bounds,
+        center_array.size,
+    )
     normalized_trust_radius = _normalize_trust_radius(trust_radius)
     if normalized_trust_radius is None:
-        return None
+        return normalized_base_bounds
     # This is a lightweight trust-region proxy implemented with L-BFGS-B bounds:
     # each continuation centers a symmetric box around the current iterate.
     widths = normalized_trust_radius * np.maximum(
-        1.0, np.abs(np.asarray(center, dtype=float))
+        1.0, np.abs(center_array)
     )
-    return [
+    trust_bounds = [
         (float(value - width), float(value + width))
-        for value, width in zip(np.asarray(center, dtype=float), widths)
+        for value, width in zip(center_array, widths)
     ]
+    return _intersect_bounds(trust_bounds, normalized_base_bounds)
 
 
 def _select_inner_solve_profile(
@@ -3566,7 +3618,11 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             request.update_stationarity_tol,
             profile=current_inner_profile,
         )
-        attempt_bounds = _build_box_bounds(request.x, attempt_radius)
+        attempt_bounds = _build_box_bounds(
+            request.x,
+            attempt_radius,
+            base_bounds=request.base_bounds,
+        )
         last_inner_options = dict(inner_attempt_options)
         last_inner_profile = current_inner_profile.name
         try:
@@ -4243,6 +4299,7 @@ def _run_alm_continuation_step(
     constraint_names: Sequence[str],
     constraint_names_tuple: tuple[str, ...],
     constraint_blocks_tuple: tuple[str, ...] | None,
+    base_bounds=None,
 ) -> _ALMContinuationStepResult:
     state = _ContinuationStepState(
         multipliers=multipliers,
@@ -4408,6 +4465,7 @@ def _run_alm_continuation_step(
             settings=settings,
             continuation_iteration=continuation_iteration,
             trust_radius=run_state.trust_radius,
+            base_bounds=base_bounds,
             current_max_feasibility_violation=current_max_feasibility_violation,
             update_feasibility_tol=state.update_feasibility_tol,
             update_stationarity_tol=state.update_stationarity_tol,
@@ -5056,6 +5114,7 @@ def _run_alm_outer_iteration(
     constraint_names: Sequence[str],
     constraint_names_tuple: tuple[str, ...],
     constraint_blocks_tuple: tuple[str, ...] | None,
+    base_bounds=None,
 ) -> _ALMOuterIterationResult:
     if outer_state_callback is not None:
         outer_state_callback(outer_iteration, multipliers.copy(), penalty)
@@ -5087,6 +5146,7 @@ def _run_alm_outer_iteration(
             constraint_names=constraint_names,
             constraint_names_tuple=constraint_names_tuple,
             constraint_blocks_tuple=constraint_blocks_tuple,
+            base_bounds=base_bounds,
         )
         multipliers = step.multipliers
         penalty = step.penalty
@@ -5143,6 +5203,7 @@ def _minimize_alm_impl(
     initial_multipliers: np.ndarray | None = None,
     initial_penalty: float | None = None,
     constraint_blocks: Sequence[str] | None = None,
+    base_bounds=None,
 ):
     normalized = _normalize_alm_run_inputs(
         x0,
@@ -5207,6 +5268,7 @@ def _minimize_alm_impl(
             constraint_names=constraint_names,
             constraint_names_tuple=constraint_names_tuple,
             constraint_blocks_tuple=constraint_blocks_tuple,
+            base_bounds=base_bounds,
         )
         multipliers = outcome.multipliers
         penalty = outcome.penalty
@@ -5276,6 +5338,7 @@ def minimize_alm(
     initial_multipliers: np.ndarray | None = None,
     initial_penalty: float | None = None,
     constraint_blocks: Sequence[str] | None = None,
+    base_bounds=None,
 ):
     return _minimize_alm_impl(
         x0=x0,
@@ -5292,4 +5355,5 @@ def minimize_alm(
         initial_multipliers=initial_multipliers,
         initial_penalty=initial_penalty,
         constraint_blocks=constraint_blocks,
+        base_bounds=base_bounds,
     )

@@ -13,7 +13,7 @@ for path in (str(EXAMPLES_ROOT), str(SINGLE_STAGE_ROOT)):
 import single_stage_banana_example as module  # noqa: E402
 from banana_opt.stage2_single_stage_handoff import Stage2CoilPartitions  # noqa: E402
 from simsopt.field import BiotSavart  # noqa: E402
-from simsopt.field.coil import Current, coils_via_symmetries  # noqa: E402
+from simsopt.field.coil import Coil, Current, coils_via_symmetries  # noqa: E402
 from simsopt.geo import CurveCWSFourierCPP, SurfaceRZFourier  # noqa: E402
 
 
@@ -67,6 +67,17 @@ def _loaded_seed():
             seed_surface.stellsym,
         )
     )
+    biot_savart = BiotSavart(list(banana_coils))
+    biot_savart.set_points(np.zeros((1, 3)))
+    return biot_savart, _partitions(banana_coils), curve
+
+
+def _loaded_single_master_seed():
+    seed_surface = _seed_surface()
+    curve = _banana_curve(seed_surface)
+    current = Current(1.1e4)
+    current.fix_all()
+    banana_coils = (Coil(curve, current),)
     biot_savart = BiotSavart(list(banana_coils))
     biot_savart.set_points(np.zeros((1, 3)))
     return biot_savart, _partitions(banana_coils), curve
@@ -142,6 +153,35 @@ def test_reembed_request_does_not_require_a_free_shape_mode():
     assert free_names == ()
     assert resolved_partitions.banana_coils[0].curve.surf is surf_coils
     assert partitions.banana_coils[0].curve.surf is seed_curve.surf
+
+
+def test_free_shape_reembed_preserves_one_master_shared_symmetry_seed():
+    biot_savart, partitions, seed_curve = _loaded_single_master_seed()
+    _, _, surf_coils = module.build_hbt_reference_surfaces(
+        2,
+        0.142,
+        module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        winding_surface_free_mpol=1,
+        winding_surface_free_ntor=1,
+    )
+
+    resolved_bs, resolved_partitions, free_names = (
+        module.reembed_loaded_banana_cws_family_on_surface(
+            biot_savart,
+            partitions,
+            surf_coils,
+            winding_surface_free_mpol=1,
+            winding_surface_free_ntor=1,
+        )
+    )
+
+    assert resolved_bs is not biot_savart
+    assert len(resolved_bs.coils) == len(biot_savart.coils) == 1
+    assert len(resolved_partitions.banana_coils) == 1
+    assert resolved_partitions.banana_coils[0] is not partitions.banana_coils[0]
+    assert resolved_partitions.banana_coils[0].curve.surf is surf_coils
+    assert partitions.banana_coils[0].curve.surf is seed_curve.surf
+    assert free_names
 
 
 def test_free_shape_flags_reembed_warm_cws_family_on_live_surface():
