@@ -18,10 +18,8 @@ These pin the three fixes audited/completed by agent C2:
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,20 +51,7 @@ from simsopt.field import Coil, Current, coils_via_symmetries  # noqa: E402
 from simsopt.geo import CurveCWSFourierCPP, SurfaceRZFourier  # noqa: E402
 
 SOLVER_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
-
-
-def _load_solver_module():
-    spec = importlib.util.spec_from_file_location(
-        f"banana_coil_solver_audit5_{uuid.uuid4().hex}", SOLVER_PATH
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_SOLVER = _load_solver_module()
+from STAGE_2 import banana_coil_solver as _SOLVER  # noqa: E402
 
 
 def _settings(frame="surface_tangent", numfilaments_n=2, numfilaments_b=7,

@@ -21,10 +21,8 @@ These pin the four sanity contracts of the audit-8 spec:
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
-import uuid
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,21 +49,7 @@ from simsopt.field import BiotSavart, Coil, Current  # noqa: E402
 from simsopt.geo import CurveXYZFourier, SurfaceRZFourier  # noqa: E402
 from simsopt.objectives import SquaredFlux  # noqa: E402
 
-SOLVER_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
-
-
-def _load_solver_module():
-    spec = importlib.util.spec_from_file_location(
-        f"banana_coil_solver_audit8_{uuid.uuid4().hex}", SOLVER_PATH
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_SOLVER = _load_solver_module()
+from STAGE_2 import banana_coil_solver as _SOLVER  # noqa: E402
 
 NPHI = 36
 NTHETA = 30

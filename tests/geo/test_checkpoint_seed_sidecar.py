@@ -9,11 +9,9 @@ resume loader/contract). A sidecar must never carry realized run metrics.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import unittest
-import uuid
 from pathlib import Path
 
 import numpy as np
@@ -36,15 +34,8 @@ from banana_opt.artifact_contracts import (  # noqa: E402
     STAGE2_BS_SHA256_KEY,
     compute_stage2_bs_sha256,
 )
-
-
-def load_module(path: Path, stem: str):
-    spec = importlib.util.spec_from_file_location(f"{stem}_{uuid.uuid4().hex}", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+import workflow_runner_common  # noqa: E402
+from SINGLE_STAGE import single_stage_banana_example  # noqa: E402
 
 
 _NUM_TF = 2
@@ -231,21 +222,18 @@ class MaterializeCheckpointSeedTest(unittest.TestCase):
         self.assertTrue(seed_bs_path.is_file())
 
         # REAL stage2-seed loader: existence + checksum binding.
-        workflow_common = load_module(
-            EXAMPLE_ROOT / "workflow_runner_common.py", "workflow_runner_common"
+        loaded_path, loaded = workflow_runner_common.load_stage2_artifact_results(
+            seed_bs_path
         )
-        loaded_path, loaded = workflow_common.load_stage2_artifact_results(seed_bs_path)
         self.assertEqual(loaded_path, results_path)
 
         # REAL single-stage resume loader + contract.
-        single_stage = load_module(
-            EXAMPLE_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py",
-            "single_stage_banana_example",
+        _, resume_results = (
+            single_stage_banana_example.load_single_stage_resume_seed_results(
+                seed_bs_path
+            )
         )
-        _, resume_results = single_stage.load_single_stage_resume_seed_results(
-            seed_bs_path
-        )
-        single_stage.validate_single_stage_resume_seed_contract(
+        single_stage_banana_example.validate_single_stage_resume_seed_contract(
             resume_results, accept_offspec_r0_seed=False
         )
 
