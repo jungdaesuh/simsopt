@@ -32,6 +32,7 @@ from simsopt.geo.framedcurve import (
     FramedCurveSurfaceTangent,
     surface_tangent_normal_direction,
 )
+from simsopt.geo.strain_optimization import LPTorsionalStrainPenalty
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 from simsopt import load as simsopt_load
 
@@ -93,6 +94,7 @@ from banana_opt.stage2_geometry import (
     load_plasma_geometry as _load_plasma_geometry,
     magnetic_field_plots as _magnetic_field_plots,
     rotation_aware_curvature_report,
+    rotation_aware_projected_half_extent_m,
     select_plasma_geometry_preflight_candidate,
     shared_vf_current_control_for_coils,
     surface_surface_min_distance as _surface_surface_min_distance,
@@ -369,6 +371,27 @@ def validate_finite_build_cli_args(args) -> None:
                 "with --filament-only (the frame-aware limit is derived from "
                 "finite-build winding-pack geometry)."
             )
+        for flag_attr, flag_name in (
+            (
+                "stage2_couple_pack_rotation_to_fold",
+                "--stage2-couple-pack-rotation-to-fold",
+            ),
+            (
+                "stage2_rotation_aware_curvature_cap",
+                "--stage2-rotation-aware-curvature-cap",
+            ),
+        ):
+            if bool(getattr(args, flag_attr, False)):
+                raise ValueError(
+                    f"{flag_name} requires --finite-build (it acts on the "
+                    "winding-pack rotation frame, which only exists for a "
+                    "finite-build pack)."
+                )
+        if float(getattr(args, "stage2_pack_twist_strain_weight", 0.0)) > 0.0:
+            raise ValueError(
+                "--stage2-pack-twist-strain-weight requires --finite-build "
+                "(the torsional-strain regularizer acts on the pack frame)."
+            )
         return
     # --finite-build + --stage2-bs-path is a warm start: the multi-filament pack
     # is built from the seed's master banana curve and seed banana current
@@ -400,6 +423,15 @@ def validate_finite_build_cli_args(args) -> None:
         raise ValueError(
             "--finitebuild-pin-current is supported only with "
             "--constraint-method penalty (the pinned current DOF has no box bound)."
+        )
+    if bool(
+        getattr(args, "stage2_rotation_aware_curvature_cap", False)
+    ) and not bool(getattr(args, "stage2_couple_pack_rotation_to_fold", False)):
+        raise ValueError(
+            "--stage2-rotation-aware-curvature-cap requires "
+            "--stage2-couple-pack-rotation-to-fold: relaxing the in-run cap to "
+            "the realized rotation-aware value is only coherent when the pack "
+            "twist alpha(theta) is actually driven by buildability."
         )
 
 
@@ -1946,6 +1978,40 @@ def parse_args():
         action="store_false",
         help="Diagnostic opt-out: keep the centerline curvature threshold even "
         "when --finite-build is active.",
+    )
+    parser.add_argument(
+        "--stage2-couple-pack-rotation-to-fold",
+        dest="stage2_couple_pack_rotation_to_fold",
+        action="store_true",
+        default=os.environ.get("STAGE2_COUPLE_PACK_ROTATION_TO_FOLD", "")
+        not in ("", "0", "false", "False"),
+        help="T3.2/G2 (default off): build the fold/geodesic-curvature objective "
+        "from the SHARED finite-build pack frame so its live pack-rotation "
+        "alpha(theta) drives buildability, not only the magnetic field. Off = "
+        "byte-identical (fresh ZeroRotation fold frame). Requires --finite-build.",
+    )
+    parser.add_argument(
+        "--stage2-pack-twist-strain-weight",
+        dest="stage2_pack_twist_strain_weight",
+        type=float,
+        default=float(os.environ.get("STAGE2_PACK_TWIST_STRAIN_WEIGHT", "0.0")),
+        help="T3.2/G2 (default 0.0): weight of an LPTorsionalStrainPenalty "
+        "windability regularizer on the shared pack frame (epsilon_tor = "
+        "tau^2 w^2 / 12, Paz-Soldan 2020; width = pack corner span). Weight 0 "
+        "never constructs the term. Bounds the twist rate of a freed alpha(theta). "
+        "Requires --finite-build.",
+    )
+    parser.add_argument(
+        "--stage2-rotation-aware-curvature-cap",
+        dest="stage2_rotation_aware_curvature_cap",
+        action="store_true",
+        help="T3.2/G3 (default off, NON-PROMOTION-READY): relax the in-run "
+        "curvature threshold from the conservative worst-case pack corner cap up "
+        "to the realized rotation-aware cap (scalarized to the tightest realized "
+        "point) using the live pack frame. The honest FINITEBUILD_CURVATURE_OK "
+        "gate (alpha=0 corner frame) is unchanged, so a design that only builds "
+        "with a favorable twist stays non-promotable until the D-5 ruling. "
+        "Requires --stage2-couple-pack-rotation-to-fold.",
     )
     parser.add_argument(
         "--stage2-vessel-keepout-weight",
@@ -4160,6 +4226,38 @@ def main(parsed_args=None):
             f"{CURVATURE_THRESHOLD:.4f} m^-1 "
             "(single-filament bend floor + pack corner reach)"
         )
+    rotation_aware_curvature_cap_applied = False
+    rotation_aware_curvature_cap_inv_m = None
+    if (
+        bool(getattr(args, "stage2_rotation_aware_curvature_cap", False))
+        and FINITE_BUILD
+    ):
+        # T3.2/G3 (NON-PROMOTION-READY): relax the in-run curvature threshold from
+        # the conservative worst-case corner cap up to the realized rotation-aware
+        # cap, scalarized to the TIGHTEST realized point (1/(floor + max reach)).
+        # Derived from the seed pack twist alpha(theta); as the coupled optimizer
+        # improves alpha the true cap only rises, so this is a conservative
+        # construction-time relaxation. The honest FINITEBUILD_CURVATURE_OK gate
+        # (alpha=0 corner frame, recorded below) is UNCHANGED, so a design that
+        # only builds under a favorable twist stays non-promotable until D-5.
+        realized_reach_m = rotation_aware_projected_half_extent_m(
+            finite_build_settings,
+            new_banana_curve,
+            new_banana_coils[0].curve.framedcurve,
+        )
+        rotation_aware_curvature_cap_inv_m = 1.0 / (
+            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            + float(np.max(realized_reach_m))
+        )
+        if rotation_aware_curvature_cap_inv_m > CURVATURE_THRESHOLD:
+            print(
+                "Rotation-aware curvature cap (non-promotion-ready): "
+                f"{CURVATURE_THRESHOLD:.4f} -> "
+                f"{rotation_aware_curvature_cap_inv_m:.4f} m^-1 "
+                "(realized seed twist; FINITEBUILD_CURVATURE_OK unchanged)"
+            )
+            CURVATURE_THRESHOLD = rotation_aware_curvature_cap_inv_m
+            rotation_aware_curvature_cap_applied = True
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs)  # penalty on B dot n
@@ -4238,11 +4336,39 @@ def main(parsed_args=None):
         if fold_winding_radii is None
         else fold_winding_radii[0]
     )
+    couple_pack_rotation_to_fold = (
+        bool(getattr(args, "stage2_couple_pack_rotation_to_fold", False))
+        and FINITE_BUILD
+    )
+    if couple_pack_rotation_to_fold:
+        # T3.2/G2: reuse the SHARED finite-build pack frame (SSOT — one frame for
+        # field and fold) so its live pack twist alpha(theta) drives the
+        # geodesic-curvature buildability penalty, not only the magnetic field.
+        # Off = a fresh ZeroRotation fold frame (byte-identical to legacy).
+        fold_framedcurve = new_banana_coils[0].curve.framedcurve
+    else:
+        fold_framedcurve = FramedCurveSurfaceTangent(
+            new_banana_curve, fold_winding_r0, 0.0
+        )
     Jfold = CurveSurfaceGeodesicCurvature(
-        FramedCurveSurfaceTangent(new_banana_curve, fold_winding_r0, 0.0),
+        fold_framedcurve,
         p=2,
         threshold=FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD,
     )
+    PACK_TWIST_STRAIN_WEIGHT = float(
+        getattr(args, "stage2_pack_twist_strain_weight", 0.0)
+    )
+    Jtwist = None
+    if PACK_TWIST_STRAIN_WEIGHT > 0.0 and FINITE_BUILD:
+        # T3.2/G2 windability regularizer (default off): bound the twist rate of a
+        # freed alpha(theta) via the torsional strain epsilon = tau^2 w^2 / 12
+        # (Paz-Soldan 2020). width = full pack corner span (2 * corner reach), the
+        # worst-case transverse extent. Weight 0 never constructs the term.
+        Jtwist = LPTorsionalStrainPenalty(
+            new_banana_coils[0].curve.framedcurve,
+            width=2.0 * finite_build_settings.pack_reach_m,
+            p=2,
+        )
     # Default-on at single-stage parity (2026-06-15 keep-out parity decision;
     # formulation audit 5c origin): analytic vessel-envelope keep-out, proven in
     # single-stage. Steers the Type KK swept-envelope corners of every
@@ -4476,6 +4602,12 @@ def main(parsed_args=None):
         )
     if FOLD_WEIGHT > 0.0:
         BASE_OBJECTIVE = BASE_OBJECTIVE + FOLD_WEIGHT * Jfold
+    if Jtwist is not None:
+        # T3.2/G2 windability regularizer rides both the penalty total and the
+        # ALM base objective (smooth term, no constraint row), mirroring the fold
+        # / vessel keep-out wiring. Default off (weight 0 -> Jtwist is None).
+        JF = JF + PACK_TWIST_STRAIN_WEIGHT * Jtwist
+        BASE_OBJECTIVE = BASE_OBJECTIVE + PACK_TWIST_STRAIN_WEIGHT * Jtwist
     if Jvessel is not None:
         JF = JF + VESSEL_KEEPOUT_WEIGHT * Jvessel
         # ALM path: the keep-out rides the smooth base objective (no new
@@ -5533,6 +5665,28 @@ def main(parsed_args=None):
                 ),
                 "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_APPLIED": bool(
                     frame_aware_curvature_limit_applied
+                ),
+            }
+        )
+    if FINITE_BUILD:
+        # T3.2/G2-G3 provenance (levers default off): records which pack-rotation
+        # coupling levers were active, for the A/B that quantifies the twist
+        # geometry gain. STAGE2_ROTATION_AWARE_CURVATURE_CAP_APPLIED=True marks a
+        # NON-PROMOTION-READY relaxed run (FINITEBUILD_CURVATURE_OK stays honest).
+        results.update(
+            {
+                "STAGE2_COUPLE_PACK_ROTATION_TO_FOLD": couple_pack_rotation_to_fold,
+                "STAGE2_PACK_TWIST_STRAIN_WEIGHT": PACK_TWIST_STRAIN_WEIGHT,
+                "STAGE2_PACK_TWIST_STRAIN_PENALTY": (
+                    None if Jtwist is None else float(Jtwist.J())
+                ),
+                "STAGE2_ROTATION_AWARE_CURVATURE_CAP_APPLIED": (
+                    rotation_aware_curvature_cap_applied
+                ),
+                "STAGE2_ROTATION_AWARE_CURVATURE_CAP_INV_M": (
+                    None
+                    if rotation_aware_curvature_cap_inv_m is None
+                    else float(rotation_aware_curvature_cap_inv_m)
                 ),
             }
         )
