@@ -446,6 +446,25 @@ def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
     return jnp.mean(violation ** 2)
 
 
+def hardware_sdf_free_space_reward_pure(gammac, grid, origin_m, spacing_m,
+                                        effective_margin_m, half_w, half_d,
+                                        winding_r0):
+    """Bounded reward for sampled swept Type KK surface clearance in CAD SDF."""
+    surface_points = swept_channel_surface_points(
+        gammac, half_w, half_d, winding_r0
+    )
+    scale = jnp.maximum(effective_margin_m, 1.0e-6)
+    phi = _sdf_trilinear(
+        grid,
+        origin_m,
+        spacing_m,
+        surface_points,
+        outside_value=effective_margin_m,
+    )
+    clearance_fraction = jnp.clip(phi, 0.0, effective_margin_m) / scale
+    return -jnp.mean(clearance_fraction ** 2)
+
+
 class CurveHardwareKeepout(Optimizable):
     r"""
     Penalty steering the banana coils away from fixed in-vessel hardware
@@ -797,6 +816,113 @@ class CurveHardwareSdfKeepout(Optimizable):
 
     def shortest_clearance(self):
         return self.shortest_distance()
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class CurveHardwareSdfFreeSpaceReward(Optimizable):
+    r"""
+    Optimizer-visible reward for real CAD/SDF positive hardware clearance.
+
+    The objective samples the same viewer-matched Type KK swept U-channel
+    surface as :class:`CurveHardwareSdfKeepout`.  For each manifest hardware
+    group it rewards positive signed SDF clearance up to that group's effective
+    keepout margin, clips to zero inside hardware, and saturates beyond the
+    margin.  The value is bounded in ``[-ncurves * ngroups, 0]`` and remains a
+    steering term only; ``hardware_contact_report`` stays the promotion oracle.
+    """
+
+    def __init__(self, curves, sdf_data,
+                 half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+                 half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M):
+        if not isinstance(sdf_data, HardwareSdfData):
+            raise TypeError("sdf_data must come from load_hardware_sdf(...)")
+        if not sdf_data.groups:
+            raise ValueError("hardware SDF payload must contain at least one group")
+        self.curves = curves
+        self.sdf_data = sdf_data
+        self.half_w = float(half_w)
+        self.half_d = float(half_d)
+        self._winding_r0_fallback = float(winding_r0)
+        self._groups = [
+            {
+                "grid": jnp.asarray(group.grid),
+                "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
+                "spacing": float(group.spacing_m),
+                "effective_margin": float(group.effective_margin_m),
+            }
+            for group in sdf_data.groups
+        ]
+        self.J_jax = jit(
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
+            hardware_sdf_free_space_reward_pure(
+                gammac,
+                grid,
+                origin,
+                spacing,
+                effective_margin,
+                self.half_w,
+                self.half_d,
+                winding_r0_,
+            )
+        )
+        self.dJ_dgamma = jit(
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
+            grad(self.J_jax, argnums=0)(
+                gammac, grid, origin, spacing, effective_margin, winding_r0_
+            )
+        )
+        super().__init__(depends_on=curves)
+
+    @property
+    def winding_r0(self):
+        """Fallback winding major radius (constructor value), m."""
+        return self._winding_r0_fallback
+
+    def live_winding_r0(self):
+        """Live winding major radius the frame is currently measured about, m."""
+        return live_winding_r0(self.curves, self._winding_r0_fallback)
+
+    def J(self):
+        winding_r0 = self.live_winding_r0()
+        total = 0.0
+        for curve in self.curves:
+            gammac = curve.gamma()
+            for group in self._groups:
+                total += float(
+                    self.J_jax(
+                        gammac,
+                        group["grid"],
+                        group["origin"],
+                        group["spacing"],
+                        group["effective_margin"],
+                        winding_r0,
+                    )
+                )
+        return total
+
+    @derivative_dec
+    def dJ(self):
+        winding_r0 = self.live_winding_r0()
+        dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        for curve_index, curve in enumerate(self.curves):
+            gammac = curve.gamma()
+            for group in self._groups:
+                dgamma_vecs[curve_index] += np.asarray(
+                    self.dJ_dgamma(
+                        gammac,
+                        group["grid"],
+                        group["origin"],
+                        group["spacing"],
+                        group["effective_margin"],
+                        winding_r0,
+                    )
+                )
+        return sum(
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
+            for i in range(len(self.curves))
+        )
 
     return_fn_map = {'J': J, 'dJ': dJ}
 

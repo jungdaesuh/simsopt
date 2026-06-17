@@ -299,6 +299,7 @@ from banana_opt.poloidal_extent import (
 )
 from banana_opt.hardware_keepout import (
     CurveHardwareKeepout,
+    CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
     CurveVesselAvailableEnvelopeReward,
     CurveVesselEnvelopeKeepout,
@@ -2708,6 +2709,22 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-hardware-sdf-free-space-reward-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT",
+                "0.0",
+            )
+        ),
+        help=(
+            "Default-off reward for positive CAD/SDF hardware clearance. "
+            "Requires --hardware-keepout-backend=sdf and "
+            "--hardware-keepout-sdf-manifest; this steering term does not "
+            "replace the posthoc swept-solid CAD contact oracle."
+        ),
+    )
+    parser.add_argument(
         "--msc-weight",
         type=float,
         default=float(os.environ.get("MSC_WEIGHT", "0.0")),
@@ -3469,6 +3486,22 @@ def parse_args():
         parser.error(
             "--single-stage-available-envelope-reward-weight must be non-negative."
         )
+    if args.single_stage_hardware_sdf_free_space_reward_weight < 0.0:
+        parser.error(
+            "--single-stage-hardware-sdf-free-space-reward-weight must be "
+            "non-negative."
+        )
+    if args.single_stage_hardware_sdf_free_space_reward_weight > 0.0:
+        if args.hardware_keepout_backend != "sdf":
+            parser.error(
+                "--single-stage-hardware-sdf-free-space-reward-weight requires "
+                "--hardware-keepout-backend=sdf."
+            )
+        if not args.hardware_keepout_sdf_manifest:
+            parser.error(
+                "--single-stage-hardware-sdf-free-space-reward-weight requires "
+                "--hardware-keepout-sdf-manifest."
+            )
     return args
 
 
@@ -5558,6 +5591,7 @@ class RunIdentityConfig:
     single_stage_vessel_keepout_weight: float
     single_stage_vessel_keepout_clearance: float
     single_stage_available_envelope_reward_weight: float
+    single_stage_hardware_sdf_free_space_reward_weight: float
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
@@ -6226,6 +6260,9 @@ def make_run_identity_config(
         single_stage_available_envelope_reward_weight=(
             args.single_stage_available_envelope_reward_weight
         ),
+        single_stage_hardware_sdf_free_space_reward_weight=(
+            args.single_stage_hardware_sdf_free_space_reward_weight
+        ),
         single_stage_poloidal_threshold_rad=getattr(
             args,
             "single_stage_poloidal_threshold_rad",
@@ -6439,6 +6476,11 @@ def build_run_identity_config(config):
             continue
         if (
             field.name == "single_stage_available_envelope_reward_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_hardware_sdf_free_space_reward_weight"
             and float(value) == 0.0
         ):
             continue
@@ -7079,6 +7121,9 @@ def apply_frontier_scalarization_override(
         available_envelope_reward_weight=(
             SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
         ),
+        hardware_sdf_free_space_reward_weight=(
+            SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+        ),
         msc_weight=globals().get("MSC_WEIGHT", 0.0),
         arclen_weight=globals().get("ARCLEN_WEIGHT", 0.0),
         link_weight=globals().get("LINKING_WEIGHT", 0.0),
@@ -7587,11 +7632,30 @@ def build_single_stage_objective_bundle(
     # re-centered seeds (0.920/0.934/0.993) measured J=0 in the spec frame
     # while the true-frame J was 0.04-0.057 (2026-06-10 laneLOW xval).
     JCurveHardwareKeepout = None
+    JCurveHardwareSdfFreeSpaceReward = None
     JCurveVesselEnvelopeKeepout = None
     JCurveAvailableEnvelopeReward = None
     HARDWARE_KEEPOUT_GROUP_LABELS = []
     HARDWARE_KEEPOUT_METADATA = {}
     keepout_winding_r0 = resolve_keepout_winding_r0(banana_coils)
+    hardware_sdf_data = None
+    if HARDWARE_KEEPOUT_BACKEND == "sdf" and (
+        SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT > 0.0
+        or SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT > 0.0
+    ):
+        if not HARDWARE_KEEPOUT_SDF_MANIFEST_PATH:
+            raise ValueError(
+                "--hardware-keepout-backend=sdf with active hardware SDF terms "
+                "requires --hardware-keepout-sdf-manifest"
+            )
+        hardware_sdf_data = load_hardware_sdf(
+            HARDWARE_KEEPOUT_SDF_MANIFEST_PATH,
+            glb_path=HARDWARE_KEEPOUT_GLB_PATH,
+        )
+        HARDWARE_KEEPOUT_METADATA = hardware_sdf_metadata_from_data(
+            hardware_sdf_data
+        )
+        HARDWARE_KEEPOUT_GROUP_LABELS = list(hardware_sdf_data.group_labels)
     if SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT > 0.0:
         if HARDWARE_KEEPOUT_BACKEND == "point_cloud":
             if not HARDWARE_KEEPOUT_JSON_PATH:
@@ -7632,20 +7696,6 @@ def build_single_stage_objective_bundle(
                 winding_r0=keepout_winding_r0,
             )
         elif HARDWARE_KEEPOUT_BACKEND == "sdf":
-            if not HARDWARE_KEEPOUT_SDF_MANIFEST_PATH:
-                raise ValueError(
-                    "--single-stage-hardware-keepout-weight > 0 with "
-                    "--hardware-keepout-backend=sdf requires "
-                    "--hardware-keepout-sdf-manifest"
-                )
-            hardware_sdf_data = load_hardware_sdf(
-                HARDWARE_KEEPOUT_SDF_MANIFEST_PATH,
-                glb_path=HARDWARE_KEEPOUT_GLB_PATH,
-            )
-            HARDWARE_KEEPOUT_METADATA = hardware_sdf_metadata_from_data(
-                hardware_sdf_data
-            )
-            HARDWARE_KEEPOUT_GROUP_LABELS = list(hardware_sdf_data.group_labels)
             JCurveHardwareKeepout = CurveHardwareSdfKeepout(
                 banana_curves,
                 hardware_sdf_data,
@@ -7655,6 +7705,12 @@ def build_single_stage_objective_bundle(
             raise ValueError(
                 f"unsupported hardware keep-out backend {HARDWARE_KEEPOUT_BACKEND!r}"
             )
+    if SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT > 0.0:
+        JCurveHardwareSdfFreeSpaceReward = CurveHardwareSdfFreeSpaceReward(
+            banana_curves,
+            hardware_sdf_data,
+            winding_r0=keepout_winding_r0,
+        )
     if SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT > 0.0:
         if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
             raise ValueError("--single-stage-vessel-keepout-clearance must be positive")
@@ -7814,6 +7870,10 @@ def build_single_stage_objective_bundle(
         AVAILABLE_ENVELOPE_REWARD_WEIGHT=(
             SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
         ),
+        JCurveHardwareSdfFreeSpaceReward=JCurveHardwareSdfFreeSpaceReward,
+        HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
+            SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+        ),
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         JTFCurvature=JTFCurvature,
@@ -7855,6 +7915,7 @@ def build_single_stage_objective_bundle(
         "HARDWARE_KEEPOUT_METADATA": dict(HARDWARE_KEEPOUT_METADATA),
         "JCurveVesselEnvelopeKeepout": JCurveVesselEnvelopeKeepout,
         "JCurveAvailableEnvelopeReward": JCurveAvailableEnvelopeReward,
+        "JCurveHardwareSdfFreeSpaceReward": JCurveHardwareSdfFreeSpaceReward,
         "JLCFSMajorRadius": JLCFSMajorRadius,
         "JLCFSMinorRadius": JLCFSMinorRadius,
         "JResidueObjective": JResidueObjective,
@@ -7901,6 +7962,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCurveSelfIntersect
     global JCurveSelfIntersectTerms
     global JCurveHardwareKeepout
+    global JCurveHardwareSdfFreeSpaceReward
     global HARDWARE_KEEPOUT_GROUP_LABELS
     global HARDWARE_KEEPOUT_METADATA
     global JCurveVesselEnvelopeKeepout
@@ -7946,6 +8008,9 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
     JCurveSelfIntersectTerms = objective_bundle["JCurveSelfIntersectTerms"]
     JCurveHardwareKeepout = objective_bundle["JCurveHardwareKeepout"]
+    JCurveHardwareSdfFreeSpaceReward = objective_bundle[
+        "JCurveHardwareSdfFreeSpaceReward"
+    ]
     HARDWARE_KEEPOUT_GROUP_LABELS = list(
         objective_bundle["HARDWARE_KEEPOUT_GROUP_LABELS"]
     )
@@ -8282,6 +8347,8 @@ def evaluate_total_objective(
     VESSEL_KEEPOUT_WEIGHT=0.0,
     JCurveAvailableEnvelopeReward=None,
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfFreeSpaceReward=None,
+    HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
@@ -8341,6 +8408,12 @@ def evaluate_total_objective(
             VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
             JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
             AVAILABLE_ENVELOPE_REWARD_WEIGHT=AVAILABLE_ENVELOPE_REWARD_WEIGHT,
+            JCurveHardwareSdfFreeSpaceReward=(
+                JCurveHardwareSdfFreeSpaceReward
+            ),
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
+                HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+            ),
             JResidueObjective=globals().get("JResidueObjective"),
             JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
             MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
@@ -8424,6 +8497,7 @@ def evaluate_alm_objective(
     JCurveHardwareKeepout=None,
     JCurveVesselEnvelopeKeepout=None,
     JCurveAvailableEnvelopeReward=None,
+    JCurveHardwareSdfFreeSpaceReward=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -8514,6 +8588,12 @@ def evaluate_alm_objective(
             AVAILABLE_ENVELOPE_REWARD_WEIGHT=(
                 SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
             ),
+            JCurveHardwareSdfFreeSpaceReward=(
+                JCurveHardwareSdfFreeSpaceReward
+            ),
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
+                SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+            ),
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
             JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
@@ -8573,6 +8653,9 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JCurveHardwareKeepout=JCurveHardwareKeepout,
                 JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
                 JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+                JCurveHardwareSdfFreeSpaceReward=(
+                    JCurveHardwareSdfFreeSpaceReward
+                ),
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -8608,6 +8691,12 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
             AVAILABLE_ENVELOPE_REWARD_WEIGHT=(
                 SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
+            ),
+            JCurveHardwareSdfFreeSpaceReward=(
+                JCurveHardwareSdfFreeSpaceReward
+            ),
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
+                SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
             ),
             JShear=globals().get("JShear"),
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
@@ -11911,6 +12000,8 @@ def build_total_objective(
     VESSEL_KEEPOUT_WEIGHT=0.0,
     JCurveAvailableEnvelopeReward=None,
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfFreeSpaceReward=None,
+    HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -11960,6 +12051,10 @@ def build_total_objective(
         VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
         JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
         AVAILABLE_ENVELOPE_REWARD_WEIGHT=AVAILABLE_ENVELOPE_REWARD_WEIGHT,
+        JCurveHardwareSdfFreeSpaceReward=JCurveHardwareSdfFreeSpaceReward,
+        HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+        ),
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -13370,6 +13465,7 @@ JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
 JCurveHardwareKeepout = None
+JCurveHardwareSdfFreeSpaceReward = None
 JCurveVesselEnvelopeKeepout = None
 JCurveAvailableEnvelopeReward = None
 JLCFSMajorRadius = None
@@ -13381,6 +13477,7 @@ SINGLE_STAGE_SELFINT_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = 0.0
+SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = 0.0
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
 HARDWARE_KEEPOUT_BACKEND = "point_cloud"
 HARDWARE_KEEPOUT_JSON_PATH = DEFAULT_HARDWARE_KEEPOUT_JSON_PATH
@@ -14128,6 +14225,9 @@ if __name__ == "__main__":
     )
     SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = float(
         args.single_stage_available_envelope_reward_weight
+    )
+    SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = float(
+        args.single_stage_hardware_sdf_free_space_reward_weight
     )
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
         args.single_stage_vessel_keepout_clearance
@@ -15832,6 +15932,16 @@ if __name__ == "__main__":
             "search_eval",
             {},
         ).get("J_available_envelope_reward"),
+        "SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT": (
+            SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+        ),
+        "SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_ACTIVE": (
+            JCurveHardwareSdfFreeSpaceReward is not None
+        ),
+        "SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD": run_dict.get(
+            "search_eval",
+            {},
+        ).get("J_hardware_sdf_free_space_reward"),
         "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
             SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
         ),
@@ -16404,13 +16514,19 @@ if __name__ == "__main__":
         hardware_keepout_results_fields(
             hardware_group_labels=(
                 HARDWARE_KEEPOUT_GROUP_LABELS
-                if JCurveHardwareKeepout is not None
+                if (
+                    JCurveHardwareKeepout is not None
+                    or JCurveHardwareSdfFreeSpaceReward is not None
+                )
                 else ()
             ),
             vessel_active=JCurveVesselEnvelopeKeepout is not None,
             metadata=(
                 HARDWARE_KEEPOUT_METADATA
-                if JCurveHardwareKeepout is not None
+                if (
+                    JCurveHardwareKeepout is not None
+                    or JCurveHardwareSdfFreeSpaceReward is not None
+                )
                 else None
             ),
         )

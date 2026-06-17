@@ -22,6 +22,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
 )
 from banana_opt.hardware_keepout import (  # noqa: E402
     CurveHardwareKeepout,
+    CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
     hardware_sdf_metadata,
     load_hardware_sdf,
@@ -177,6 +178,54 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             )
 
             self.assertAlmostEqual(objective.J(), 1.0, places=12)
+
+    def test_sdf_free_space_reward_clips_inside_and_saturates_at_margin(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            margin = 0.004
+            curve = _circle_curve(radius=0.02)
+            inside_root = root / "inside"
+            half_margin_root = root / "half_margin"
+            saturated_root = root / "saturated"
+            inside_root.mkdir()
+            half_margin_root.mkdir()
+            saturated_root.mkdir()
+
+            inside_manifest = _write_sdf_payload(
+                inside_root,
+                grid=np.full((5, 5, 5), -0.001, dtype=float),
+                origin=(-0.1, -0.1, -0.1),
+                spacing=0.05,
+                effective_margin=margin,
+            )
+            half_margin_manifest = _write_sdf_payload(
+                half_margin_root,
+                grid=np.full((5, 5, 5), 0.5 * margin, dtype=float),
+                origin=(-0.1, -0.1, -0.1),
+                spacing=0.05,
+                effective_margin=margin,
+            )
+            saturated_manifest = _write_sdf_payload(
+                saturated_root,
+                grid=np.full((5, 5, 5), 2.0 * margin, dtype=float),
+                origin=(-0.1, -0.1, -0.1),
+                spacing=0.05,
+                effective_margin=margin,
+            )
+
+            inside_objective = CurveHardwareSdfFreeSpaceReward(
+                [curve], load_hardware_sdf(inside_manifest), winding_r0=0.0
+            )
+            half_margin_objective = CurveHardwareSdfFreeSpaceReward(
+                [curve], load_hardware_sdf(half_margin_manifest), winding_r0=0.0
+            )
+            saturated_objective = CurveHardwareSdfFreeSpaceReward(
+                [curve], load_hardware_sdf(saturated_manifest), winding_r0=0.0
+            )
+
+            self.assertEqual(inside_objective.J(), 0.0)
+            self.assertAlmostEqual(half_margin_objective.J(), -0.25, places=12)
+            self.assertAlmostEqual(saturated_objective.J(), -1.0, places=12)
 
     def test_loader_fail_closes_static_hardware_coverage(self):
         with tempfile.TemporaryDirectory() as td:

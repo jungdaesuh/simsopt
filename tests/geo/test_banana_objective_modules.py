@@ -2067,6 +2067,79 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
         self._assert_stage2_alm_signal_contract(result)
 
+    def test_evaluate_stage2_alm_problem_adds_hardware_sdf_reward_to_base_once(
+        self,
+    ):
+        base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
+        reward = _FakeAlgebraicObjective(-0.5, [9.0, 9.0], [0.2, -0.1])
+
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
+            self.assertAlmostEqual(base_value, 1.5)
+            np.testing.assert_allclose(base_grad, [2.0, -0.9])
+            self.assertEqual(len(signed_values), 8)
+            self.assertEqual(len(grads), 8)
+            np.testing.assert_allclose(multipliers, np.zeros(8))
+            self.assertAlmostEqual(penalty, 12.0)
+            return {
+                "total": base_value,
+                "grad": base_grad,
+                "stationarity_norm": 0.5,
+            }
+
+        with mock.patch.object(
+            self.module,
+            "augmented_inequality_objective",
+            side_effect=fake_augmented,
+        ):
+            result = self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=base_objective,
+                new_bs=_FakeBiotSavart((4, 3)),
+                new_surf=_FakeSurfaceNormals((2, 2, 3)),
+                Jf=_FakeScalarObjective(0.25),
+                Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+                length_target=2.0,
+                length_min_target=0.95,
+                Jccdist=_UnexpectedCurveDistance(0.05, 0.04),
+                Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+                banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.zeros(8),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
+                    1e-3,
+                ],
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                    -0.008,
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.01875,
+                    np.array([0.0225, -0.0025]),
+                ),
+                Jw=_FakeWidthObjective(0.10, [0.5, -0.25]),
+                width_min_threshold=0.05,
+                width_max_threshold=0.17,
+                Jself=_FakeSelfIntersectObjective(0.0, [0.1, -0.2]),
+                Jhardware_sdf_free_space_reward=reward,
+                hardware_sdf_free_space_reward_weight=4.0,
+            )
+
+        self.assertAlmostEqual(result["total"], 1.5)
+        np.testing.assert_allclose(result["grad"], [2.0, -0.9])
+
     def test_evaluate_stage2_alm_problem_uses_hard_poloidal_feasibility(self):
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
         new_surf = _FakeSurfaceNormals((2, 2, 3))
@@ -8168,6 +8241,97 @@ class AvailableEnvelopeRewardObjectiveTests(_ModuleTestCase):
         np.testing.assert_allclose(
             diagnostics["dJ_available_envelope_reward"],
             [-0.2, 0.3],
+        )
+
+
+class HardwareSdfFreeSpaceRewardObjectiveTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
+    MODULE_PREFIX = "banana_single_stage_objectives_hardware_sdf_free_space_reward"
+
+    def test_build_total_objective_adds_weighted_hardware_sdf_reward(self):
+        baseline = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args()
+        )
+        reward = _FakeAlgebraicObjective(-0.25, [-0.1, 0.4])
+
+        with_reward = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args(),
+            JCurveHardwareSdfFreeSpaceReward=reward,
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=6.0,
+        )
+
+        self.assertAlmostEqual(with_reward.J() - baseline.J(), 6.0 * reward.J())
+        np.testing.assert_allclose(
+            with_reward.dJ() - baseline.dJ(),
+            6.0 * reward.dJ(),
+        )
+
+    def test_evaluate_base_objective_reports_hardware_sdf_reward(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        reward = _FakeAlgebraicObjective(-0.25, [-0.1, 0.4])
+
+        baseline = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            include_diagnostics=False,
+        )
+        with_reward = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveHardwareSdfFreeSpaceReward=reward,
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=6.0,
+            include_diagnostics=False,
+        )
+
+        self.assertAlmostEqual(with_reward["total"] - baseline["total"], -1.5)
+        np.testing.assert_allclose(
+            with_reward["grad"] - baseline["grad"],
+            [-0.6, 2.4],
+        )
+
+        diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveHardwareSdfFreeSpaceReward=reward,
+            HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=6.0,
+        )
+
+        self.assertTrue(
+            diagnostics["hardware_sdf_free_space_reward_objective_enabled"]
+        )
+        self.assertAlmostEqual(
+            diagnostics["hardware_sdf_free_space_reward_weight"], 6.0
+        )
+        self.assertAlmostEqual(
+            diagnostics["J_hardware_sdf_free_space_reward"], -0.25
+        )
+        np.testing.assert_allclose(
+            diagnostics["dJ_hardware_sdf_free_space_reward"],
+            [-0.1, 0.4],
         )
 
 

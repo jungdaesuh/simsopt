@@ -2496,6 +2496,8 @@ def evaluate_stage2_alm_problem(
     Jhardware=None,
     hardware_keepout_alm_scale=None,
     hardware_keepout_tolerance=None,
+    Jhardware_sdf_free_space_reward=None,
+    hardware_sdf_free_space_reward_weight=0.0,
     length_min_target=None,
     emit_diagnostics=False,
 ):
@@ -2532,6 +2534,19 @@ def evaluate_stage2_alm_problem(
     base_objective.x = dofs
     base_value = float(base_objective.J())
     base_grad = np.asarray(base_objective.dJ(), dtype=float)
+    if (
+        Jhardware_sdf_free_space_reward is not None
+        and float(hardware_sdf_free_space_reward_weight) != 0.0
+    ):
+        base_value += float(hardware_sdf_free_space_reward_weight) * float(
+            Jhardware_sdf_free_space_reward.J()
+        )
+        base_grad = base_grad + float(hardware_sdf_free_space_reward_weight) * (
+            np.asarray(
+                Jhardware_sdf_free_space_reward.dJ(partials=True)(base_objective),
+                dtype=float,
+            )
+        )
     if s_hel_objective is not None and float(s_hel_weight) > 0.0:
         base_value, base_grad = _add_stage2_s_hel_objective(
             base_value,

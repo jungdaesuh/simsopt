@@ -15256,6 +15256,7 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_vessel_keepout_weight=1000.0,
             single_stage_vessel_keepout_clearance=0.005,
             single_stage_available_envelope_reward_weight=0.0,
+            single_stage_hardware_sdf_free_space_reward_weight=0.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             constraint_method="penalty",
@@ -15431,6 +15432,7 @@ class RunIdentityTests(unittest.TestCase):
                     "winding_surface_free_r0",
                     "winding_surface_free_minor",
                     "single_stage_available_envelope_reward_weight",
+                    "single_stage_hardware_sdf_free_space_reward_weight",
                 }
                 or (
                     not config.finite_build
@@ -15678,6 +15680,17 @@ class RunIdentityTests(unittest.TestCase):
         base_args = self._make_identity_args()
         weighted_args = self._make_identity_args()
         weighted_args.single_stage_available_envelope_reward_weight = 7.5
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
+        )
+
+    def test_run_identity_changes_when_hardware_sdf_reward_weight_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_hardware_sdf_free_space_reward_weight = 7.5
 
         self.assertNotEqual(
             self._build_identity(module, base_args),
@@ -16483,6 +16496,31 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.single_stage_available_envelope_reward_weight, 12.5)
 
+    def test_single_stage_parse_args_accepts_hardware_sdf_reward_with_sdf_backend(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--hardware-keepout-backend",
+                "sdf",
+                "--hardware-keepout-sdf-manifest",
+                "/tmp/hardware_sdf.json",
+                "--single-stage-hardware-sdf-free-space-reward-weight",
+                "12.5",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.single_stage_hardware_sdf_free_space_reward_weight,
+            12.5,
+        )
+
     def test_single_stage_parse_args_rejects_negative_available_envelope_reward_weight(
         self,
     ):
@@ -16496,6 +16534,46 @@ class CurrentBaselineContractTests(unittest.TestCase):
                     "single_stage_banana_example.py",
                     "--single-stage-available-envelope-reward-weight",
                     "-0.1",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            module.parse_args()
+
+    def test_single_stage_parse_args_rejects_hardware_sdf_reward_without_sdf_backend(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "single_stage_banana_example.py",
+                    "--single-stage-hardware-sdf-free-space-reward-weight",
+                    "0.5",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            module.parse_args()
+
+    def test_single_stage_parse_args_rejects_hardware_sdf_reward_without_manifest(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "single_stage_banana_example.py",
+                    "--hardware-keepout-backend",
+                    "sdf",
+                    "--single-stage-hardware-sdf-free-space-reward-weight",
+                    "0.5",
                 ],
             ),
             self.assertRaises(SystemExit),
@@ -18101,6 +18179,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = stage2_solver.parse_args()
 
         self.assertEqual(args.stage2_available_envelope_reward_weight, 0.0)
+        self.assertEqual(args.stage2_hardware_sdf_free_space_reward_weight, 0.0)
         self.assertEqual(args.stage2_hardware_keepout_backend, "point_cloud")
         self.assertIsNone(args.stage2_hardware_keepout_sdf_manifest)
         self.assertIsNone(args.stage2_plasma_surface_path)
@@ -19228,6 +19307,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "fold_geodesic_curvature_margin_fraction": 0.10,
             "stage2_vessel_keepout_weight": 0.0,
             "stage2_available_envelope_reward_weight": 0.0,
+            "stage2_hardware_sdf_free_space_reward_weight": 0.0,
             "stage2_hardware_keepout_weight": 0.0,
             "stage2_hardware_keepout_backend": "point_cloud",
             "stage2_hardware_keepout_json": None,

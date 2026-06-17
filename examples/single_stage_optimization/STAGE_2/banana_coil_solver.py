@@ -148,6 +148,7 @@ from banana_opt.hardware_constraint_schema import (
 )
 from banana_opt.hardware_keepout import (
     CurveHardwareKeepout,
+    CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
     CurveVesselAvailableEnvelopeReward,
     CurveVesselEnvelopeKeepout,
@@ -453,6 +454,21 @@ def validate_stage2_vessel_keepout_cli_args(args) -> None:
         raise ValueError(
             "--stage2-available-envelope-reward-weight must be >= 0."
         )
+    if float(args.stage2_hardware_sdf_free_space_reward_weight) < 0.0:
+        raise ValueError(
+            "--stage2-hardware-sdf-free-space-reward-weight must be >= 0."
+        )
+    if float(args.stage2_hardware_sdf_free_space_reward_weight) > 0.0:
+        if args.stage2_hardware_keepout_backend != "sdf":
+            raise ValueError(
+                "--stage2-hardware-sdf-free-space-reward-weight requires "
+                "--stage2-hardware-keepout-backend=sdf."
+            )
+        if not args.stage2_hardware_keepout_sdf_manifest:
+            raise ValueError(
+                "--stage2-hardware-sdf-free-space-reward-weight requires "
+                "--stage2-hardware-keepout-sdf-manifest."
+            )
 
 
 def resolve_stage2_resonant_iota_target(args):
@@ -1957,6 +1973,22 @@ def parse_args():
             "envelope volume with the banana coil channel. This is a smooth "
             "objective term only; direct CAD, finite-build, and confinement "
             "promotion gates remain unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-hardware-sdf-free-space-reward-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT",
+                "0.0",
+            )
+        ),
+        help=(
+            "Default-off reward for positive CAD/SDF hardware clearance. "
+            "Requires --stage2-hardware-keepout-backend=sdf and "
+            "--stage2-hardware-keepout-sdf-manifest; this is a smooth "
+            "steering term and does not replace the posthoc CAD oracle."
         ),
     )
     parser.add_argument(
@@ -4210,6 +4242,9 @@ def main(parsed_args=None):
     AVAILABLE_ENVELOPE_REWARD_WEIGHT = float(
         args.stage2_available_envelope_reward_weight
     )
+    HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = float(
+        args.stage2_hardware_sdf_free_space_reward_weight
+    )
     if VESSEL_KEEPOUT_WEIGHT > 0.0 or AVAILABLE_ENVELOPE_REWARD_WEIGHT > 0.0:
         realized_winding_radii = realized_cws_winding_radii(new_banana_coils)
         envelope_winding_r0 = (
@@ -4247,7 +4282,12 @@ def main(parsed_args=None):
     hardware_keepout_backend = args.stage2_hardware_keepout_backend
     hardware_keepout_group_labels = []
     hardware_keepout_metadata_fields = {}
-    if HARDWARE_KEEPOUT_WEIGHT > 0.0:
+    Jhardware_sdf_free_space_reward = None
+    hardware_sdf_data = None
+    if (
+        HARDWARE_KEEPOUT_WEIGHT > 0.0
+        or HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT > 0.0
+    ):
         hardware_keepout_winding_radii = realized_cws_winding_radii(
             new_banana_coils
         )
@@ -4256,6 +4296,22 @@ def main(parsed_args=None):
             if hardware_keepout_winding_radii is None
             else hardware_keepout_winding_radii[0]
         )
+        if hardware_keepout_backend == "sdf":
+            if not args.stage2_hardware_keepout_sdf_manifest:
+                raise ValueError(
+                    "--stage2-hardware-keepout-backend=sdf with active "
+                    "hardware SDF terms requires "
+                    "--stage2-hardware-keepout-sdf-manifest"
+                )
+            hardware_sdf_data = load_hardware_sdf(
+                args.stage2_hardware_keepout_sdf_manifest,
+                glb_path=args.stage2_hardware_keepout_glb,
+            )
+            hardware_keepout_metadata_fields = hardware_sdf_metadata_from_data(
+                hardware_sdf_data
+            )
+            hardware_keepout_group_labels = list(hardware_sdf_data.group_labels)
+    if HARDWARE_KEEPOUT_WEIGHT > 0.0:
         if hardware_keepout_backend == "point_cloud":
             if not args.stage2_hardware_keepout_json:
                 raise ValueError(
@@ -4294,20 +4350,6 @@ def main(parsed_args=None):
                 winding_r0=hardware_keepout_winding_r0,
             )
         elif hardware_keepout_backend == "sdf":
-            if not args.stage2_hardware_keepout_sdf_manifest:
-                raise ValueError(
-                    "--stage2-hardware-keepout-weight > 0 with "
-                    "--stage2-hardware-keepout-backend=sdf requires "
-                    "--stage2-hardware-keepout-sdf-manifest"
-                )
-            hardware_sdf_data = load_hardware_sdf(
-                args.stage2_hardware_keepout_sdf_manifest,
-                glb_path=args.stage2_hardware_keepout_glb,
-            )
-            hardware_keepout_metadata_fields = hardware_sdf_metadata_from_data(
-                hardware_sdf_data
-            )
-            hardware_keepout_group_labels = list(hardware_sdf_data.group_labels)
             Jhardware = CurveHardwareSdfKeepout(
                 objective_curves,
                 hardware_sdf_data,
@@ -4320,6 +4362,12 @@ def main(parsed_args=None):
             )
     else:
         Jhardware = None
+    if HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT > 0.0:
+        Jhardware_sdf_free_space_reward = CurveHardwareSdfFreeSpaceReward(
+            objective_curves,
+            hardware_sdf_data,
+            winding_r0=hardware_keepout_winding_r0,
+        )
     # Opt-in (2026-06-11 formulation audit 8, active half): static resonant
     # reweighting of the flux spectrum at the target-iota rationals (island
     # suppression at the source). The FFT mode mask is computed ONCE here
@@ -4429,6 +4477,18 @@ def main(parsed_args=None):
             BASE_OBJECTIVE
             + AVAILABLE_ENVELOPE_REWARD_WEIGHT * Javailable_envelope_reward
         )
+    if Jhardware_sdf_free_space_reward is not None:
+        JF = (
+            JF
+            + HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+            * Jhardware_sdf_free_space_reward
+        )
+        if CONSTRAINT_METHOD != "alm":
+            BASE_OBJECTIVE = (
+                BASE_OBJECTIVE
+                + HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+                * Jhardware_sdf_free_space_reward
+            )
     if Jhardware is not None:
         JF = JF + HARDWARE_KEEPOUT_WEIGHT * Jhardware
         # Penalty path: the static-hardware keep-out rides the weighted objective.
@@ -4704,6 +4764,10 @@ def main(parsed_args=None):
                 Jhardware=Jhardware,
                 hardware_keepout_alm_scale=args.stage2_hardware_keepout_alm_scale,
                 hardware_keepout_tolerance=args.stage2_hardware_keepout_tolerance,
+                Jhardware_sdf_free_space_reward=Jhardware_sdf_free_space_reward,
+                hardware_sdf_free_space_reward_weight=(
+                    HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+                ),
                 length_min_target=LENGTH_MIN_TARGET,
             )
 
@@ -5326,6 +5390,17 @@ def main(parsed_args=None):
                     if Javailable_envelope_reward is None
                     else float(Javailable_envelope_reward.J())
                 ),
+                "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT": (
+                    HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+                ),
+                "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD_ACTIVE": (
+                    Jhardware_sdf_free_space_reward is not None
+                ),
+                "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD": (
+                    None
+                    if Jhardware_sdf_free_space_reward is None
+                    else float(Jhardware_sdf_free_space_reward.J())
+                ),
             }
         )
         write_json(secondary_stage2_results_path, secondary_results)
@@ -5364,6 +5439,17 @@ def main(parsed_args=None):
                 None
                 if Javailable_envelope_reward is None
                 else float(Javailable_envelope_reward.J())
+            ),
+            "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT": (
+                HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
+            ),
+            "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD_ACTIVE": (
+                Jhardware_sdf_free_space_reward is not None
+            ),
+            "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD": (
+                None
+                if Jhardware_sdf_free_space_reward is None
+                else float(Jhardware_sdf_free_space_reward.J())
             ),
         }
     )
@@ -5478,13 +5564,19 @@ def main(parsed_args=None):
         hardware_keepout_results_fields(
             hardware_group_labels=(
                 hardware_keepout_group_labels
-                if Jhardware is not None
+                if (
+                    Jhardware is not None
+                    or Jhardware_sdf_free_space_reward is not None
+                )
                 else ()
             ),
             vessel_active=Jvessel is not None,
             metadata=(
                 hardware_keepout_metadata_fields
-                if Jhardware is not None
+                if (
+                    Jhardware is not None
+                    or Jhardware_sdf_free_space_reward is not None
+                )
                 else None
             ),
         )

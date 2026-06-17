@@ -1034,3 +1034,64 @@ class FrontierScalarizationTests(unittest.TestCase):
             rtol=0.0,
             atol=1.0e-12,
         )
+
+    def test_frontier_geometry_bundle_includes_hardware_sdf_free_space_reward(self):
+        module = load_frontier_scalarization_module()
+        grad_dim = 2
+        objective_eval = {
+            "J_QS_objective": 0.0,
+            "dJ_QS_objective": np.zeros(grad_dim),
+            "J_Boozer_objective": 0.0,
+            "dJ_Boozer_objective": np.zeros(grad_dim),
+            "J_iota": 0.0,
+            "dJ_iota": np.zeros(grad_dim),
+            "J_volume": 0.0,
+            "dJ_volume": np.zeros(grad_dim),
+            "J_len": 0.0,
+            "dJ_len": np.zeros(grad_dim),
+            "J_cc": 0.0,
+            "dJ_cc": np.zeros(grad_dim),
+            "J_cs": 0.0,
+            "dJ_cs": np.zeros(grad_dim),
+            "J_curvature": 0.0,
+            "dJ_curvature": np.zeros(grad_dim),
+            "J_poloidal_extent": 0.0,
+            "dJ_poloidal_extent": np.zeros(grad_dim),
+            "J_hardware_sdf_free_space_reward": -0.2,
+            "dJ_hardware_sdf_free_space_reward": np.array([0.3, -0.1]),
+            "total": 0.0,
+            "grad": np.zeros(grad_dim),
+        }
+
+        scalarized = module.apply_frontier_scalarization_override(
+            objective_eval,
+            enabled=True,
+            frontier_goal_config=SimpleNamespace(
+                scalarization_type="weight_schedule_v1",
+            ),
+            surface_iota_term=SimpleNamespace(
+                J=lambda: 0.0,
+                dJ=lambda: np.zeros(grad_dim),
+            ),
+            surface_volume_term=SimpleNamespace(
+                J=lambda: 0.0,
+                dJ=lambda: np.zeros(grad_dim),
+            ),
+            effective_res_weight=0.0,
+            effective_iotas_weight=0.0,
+            effective_volume_weight=0.0,
+            length_weight=0.0,
+            cc_weight=0.0,
+            cs_weight=0.0,
+            curvature_weight=0.0,
+            poloidal_extent_weight=0.0,
+            hardware_sdf_free_space_reward_weight=5.0,
+        )
+
+        self.assertAlmostEqual(float(scalarized["total"]), -1.0)
+        np.testing.assert_allclose(
+            scalarized["grad"],
+            np.array([1.5, -0.5]),
+            rtol=0.0,
+            atol=1.0e-12,
+        )

@@ -72,6 +72,7 @@ def _parse(argv_tail):
     env = {
         "STAGE2_VESSEL_KEEPOUT_WEIGHT": "0.0",
         "STAGE2_AVAILABLE_ENVELOPE_REWARD_WEIGHT": "0.0",
+        "STAGE2_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT": "0.0",
         "CURVATURE_THRESHOLD": "100.0",
     }
     with mock.patch.object(sys, "argv", argv), mock.patch.dict(
@@ -617,12 +618,38 @@ class VesselKeepoutStage2Tests(unittest.TestCase):
             _parse(["--stage2-vessel-keepout-weight", "-1.0"])
         with self.assertRaises(SystemExit):
             _parse(["--stage2-available-envelope-reward-weight", "-1.0"])
+        with self.assertRaises(SystemExit):
+            _parse(["--stage2-hardware-sdf-free-space-reward-weight", "-1.0"])
 
     def test_cli_weight_parses_positive(self):
         args = _parse(["--stage2-vessel-keepout-weight", "250.0"])
         self.assertEqual(args.stage2_vessel_keepout_weight, 250.0)
         args = _parse(["--stage2-available-envelope-reward-weight", "2.5"])
         self.assertEqual(args.stage2_available_envelope_reward_weight, 2.5)
+        args = _parse(
+            [
+                "--stage2-hardware-keepout-backend",
+                "sdf",
+                "--stage2-hardware-keepout-sdf-manifest",
+                "/tmp/hardware_sdf.json",
+                "--stage2-hardware-sdf-free-space-reward-weight",
+                "3.5",
+            ]
+        )
+        self.assertEqual(args.stage2_hardware_sdf_free_space_reward_weight, 3.5)
+
+    def test_cli_hardware_sdf_reward_requires_sdf_backend_and_manifest(self):
+        with self.assertRaises(SystemExit):
+            _parse(["--stage2-hardware-sdf-free-space-reward-weight", "1.0"])
+        with self.assertRaises(SystemExit):
+            _parse(
+                [
+                    "--stage2-hardware-keepout-backend",
+                    "sdf",
+                    "--stage2-hardware-sdf-free-space-reward-weight",
+                    "1.0",
+                ]
+            )
 
     def test_term_zero_inside_vessel_positive_outside(self):
         # Compliant: poloidal circle on the winding axis, deep inside the

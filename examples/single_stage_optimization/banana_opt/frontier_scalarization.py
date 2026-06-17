@@ -223,6 +223,7 @@ def apply_frontier_scalarization_override(
     hardware_keepout_weight=0.0,
     vessel_keepout_weight=0.0,
     available_envelope_reward_weight=0.0,
+    hardware_sdf_free_space_reward_weight=0.0,
     msc_weight=0.0,
     arclen_weight=0.0,
     link_weight=0.0,
@@ -310,6 +311,9 @@ def apply_frontier_scalarization_override(
             hardware_keepout_weight=hardware_keepout_weight,
             vessel_keepout_weight=vessel_keepout_weight,
             available_envelope_reward_weight=available_envelope_reward_weight,
+            hardware_sdf_free_space_reward_weight=(
+                hardware_sdf_free_space_reward_weight
+            ),
             msc_weight=msc_weight,
             arclen_weight=arclen_weight,
             link_weight=link_weight,
@@ -378,6 +382,7 @@ def _frontier_penalty_geometry_total_grad(
     hardware_keepout_weight=0.0,
     vessel_keepout_weight=0.0,
     available_envelope_reward_weight=0.0,
+    hardware_sdf_free_space_reward_weight=0.0,
     msc_weight=0.0,
     arclen_weight=0.0,
     link_weight=0.0,
@@ -434,6 +439,14 @@ def _frontier_penalty_geometry_total_grad(
         )
         grad = grad + float(available_envelope_reward_weight) * np.asarray(
             objective_eval["dJ_available_envelope_reward"],
+            dtype=float,
+        )
+    if float(hardware_sdf_free_space_reward_weight) != 0.0:
+        total += float(hardware_sdf_free_space_reward_weight) * float(
+            objective_eval["J_hardware_sdf_free_space_reward"]
+        )
+        grad = grad + float(hardware_sdf_free_space_reward_weight) * np.asarray(
+            objective_eval["dJ_hardware_sdf_free_space_reward"],
             dtype=float,
         )
     # Opt-in SIMSOPT coil regularizers (guarded by weight so default runs read no
