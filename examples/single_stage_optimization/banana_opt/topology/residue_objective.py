@@ -18,8 +18,16 @@ from .fieldline_map import (
     FieldlineIntegratorOptions,
 )
 from .periodic_orbit import (
+    BRANCH_STATUS_BAD_DETERMINANT,
+    BRANCH_STATUS_BRANCH_MISMATCH,
     BRANCH_STATUS_CONVERGED,
+    BRANCH_STATUS_INTEGRATION_FAILED,
+    BRANCH_STATUS_MAX_ITERATIONS,
+    BRANCH_STATUS_NEWTON_STALLED,
+    BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW,
+    BRANCH_STATUS_WRONG_WINDING,
     DEFAULT_PERIODIC_ORBIT_SOLVER_OPTIONS,
+    PeriodicOrbitResult,
     PeriodicOrbitSolverOptions,
 )
 from .poincare_chart import PoincareChart
@@ -73,6 +81,42 @@ RESIDUE_TARGET_PAYLOAD_KEYS = frozenset(
         "map_convention",
     }
 )
+
+GREENE_RESIDUE_BRANCH_LOSS_RAISE = "raise"
+GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED = "treat_as_satisfied"
+GREENE_RESIDUE_BRANCH_LOSS_POLICIES = frozenset(
+    {
+        GREENE_RESIDUE_BRANCH_LOSS_RAISE,
+        GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED,
+    }
+)
+# Non-converged solver statuses that mean the targeted island can no longer be
+# located as a valid fixed point of the requested type/winding/radial window --
+# the geometric "island healed or drifted away" outcome. Under the
+# treat_as_satisfied policy these contribute zero to J and dJ (the removal goal
+# is met, or the objective can no longer push on this resonance). The numerical
+# -integrity statuses BRANCH_STATUS_BAD_DETERMINANT and
+# BRANCH_STATUS_INTEGRATION_FAILED are deliberately excluded so a broken
+# computation (under-resolved symplectic map, blown-up integration) stays loud
+# regardless of policy, as do any exceptions raised inside the branch solve.
+GREENE_RESIDUE_BRANCH_LOSS_STATUSES = frozenset(
+    {
+        BRANCH_STATUS_MAX_ITERATIONS,
+        BRANCH_STATUS_NEWTON_STALLED,
+        BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW,
+        BRANCH_STATUS_WRONG_WINDING,
+        BRANCH_STATUS_BRANCH_MISMATCH,
+    }
+)
+# Non-converged statuses that signal a broken computation rather than a healed
+# island, and therefore stay loud regardless of the on_branch_loss policy.
+GREENE_RESIDUE_BRANCH_INTEGRITY_FAILURE_STATUSES = frozenset(
+    {
+        BRANCH_STATUS_BAD_DETERMINANT,
+        BRANCH_STATUS_INTEGRATION_FAILED,
+    }
+)
+DEFAULT_RESIDUE_OBJECTIVE_ON_BRANCH_LOSS = GREENE_RESIDUE_BRANCH_LOSS_RAISE
 
 ResidueBranchKey = tuple[str, str]
 SectionState = tuple[float, float]
@@ -224,9 +268,17 @@ class BiotSavartGreeneResidueObjective(Optimizable):
         ),
         r_satisfied: float = DEFAULT_RESIDUE_SATISFIED_THRESHOLD,
         local_difference_step: float = 1.0e-6,
+        on_branch_loss: str = DEFAULT_RESIDUE_OBJECTIVE_ON_BRANCH_LOSS,
     ) -> None:
         if not isinstance(biot_savart, BiotSavart):
             raise TypeError("Greene residue objective requires direct BiotSavart")
+        on_branch_loss_policy = str(on_branch_loss)
+        if on_branch_loss_policy not in GREENE_RESIDUE_BRANCH_LOSS_POLICIES:
+            raise ValueError(
+                "Greene residue objective on_branch_loss must be one of "
+                f"{sorted(GREENE_RESIDUE_BRANCH_LOSS_POLICIES)}, got "
+                f"{on_branch_loss_policy!r}"
+            )
         targets_tuple = tuple(targets)
         if len(targets_tuple) == 0:
             raise ValueError("Greene residue objective requires at least one target")
@@ -274,6 +326,7 @@ class BiotSavartGreeneResidueObjective(Optimizable):
         self.solver_options = solver_options
         self.r_satisfied = float(r_satisfied)
         self.local_difference_step = float(local_difference_step)
+        self.on_branch_loss = on_branch_loss_policy
         requires_branch_validation = objective_weight_value > 0.0 or bool(
             branch_seeds_tuple
         )
@@ -290,6 +343,7 @@ class BiotSavartGreeneResidueObjective(Optimizable):
         self._J: float | None = None
         self._dJ: Derivative | None = None
         self._branch_values: tuple[ResidueObjectiveBranchValue, ...] | None = None
+        self._lost_branch_keys: frozenset[ResidueBranchKey] | None = None
         self._gradient_diagnostics: (
             tuple[BiotSavartBranchResidueVjpDiagnostic, ...] | None
         ) = None
@@ -309,6 +363,7 @@ class BiotSavartGreeneResidueObjective(Optimizable):
         self._J = None
         self._dJ = None
         self._branch_values = None
+        self._lost_branch_keys = None
         self._gradient_diagnostics = None
 
     def branch_values(self) -> tuple[ResidueObjectiveBranchValue, ...]:
@@ -342,6 +397,7 @@ class BiotSavartGreeneResidueObjective(Optimizable):
             ),
             "objective_weight": self.objective_weight,
             "residue_scale": self.residue_scale,
+            "on_branch_loss": self.on_branch_loss,
             "value": self.J(),
             "branches": [value.to_json_dict() for value in self.branch_values()],
         }
@@ -350,9 +406,11 @@ class BiotSavartGreeneResidueObjective(Optimizable):
         if self.objective_weight == 0.0:
             self._J = 0.0
             self._branch_values = ()
+            self._lost_branch_keys = frozenset()
             return
 
         branch_values: list[ResidueObjectiveBranchValue] = []
+        lost_branch_keys: list[ResidueBranchKey] = []
         objective_value = 0.0
         for target in self.targets:
             target_id = target.manifest_key()
@@ -368,52 +426,92 @@ class BiotSavartGreeneResidueObjective(Optimizable):
                     solver_options=self.solver_options,
                 )
                 if result.status != BRANCH_STATUS_CONVERGED:
-                    raise ValueError(
-                        "Greene residue objective branch solve requires "
-                        f"{BRANCH_STATUS_CONVERGED}, got {result.status} for "
-                        f"target {target_id!r} branch {branch!r}: the RK4 Newton "
-                        f"iteration from seed section_state "
-                        f"{tuple(self._branch_state_by_key[key])} settled at "
-                        f"state {result.state} with winding {result.winding:.6g} "
-                        f"(expected {target.expected_winding()}), radial_label "
-                        f"{result.radial_label:.6g} (window {target.radial_window}), "
-                        f"residue {float(result.residue_diagnostic.residue):.6g}. "
-                        "This means the supplied residue seeds do not converge to "
-                        "the requested rational island in the current coil field; "
-                        "supply seeds validated against this equilibrium/field (a "
-                        "real fixed-point solve), not synthetic placeholders, or "
-                        "drop --residue-objective-weight for fields without this "
-                        "island."
+                    if not self._branch_loss_is_satisfied(result.status):
+                        raise ValueError(self._branch_loss_message(target, key, result))
+                    lost_branch_keys.append(key)
+                    branch_values.append(
+                        self._branch_value(target, target_id, branch, result, 0.0)
                     )
+                    continue
                 residue = float(result.residue_diagnostic.residue)
                 branch_objective = self._branch_objective(target, residue)
-                monodromy = np.asarray(result.tangent_result.monodromy, dtype=float)
                 objective_value += branch_objective
                 branch_values.append(
-                    ResidueObjectiveBranchValue(
-                        target_id=target_id,
-                        branch=branch,
-                        residue=residue,
-                        status=result.status,
-                        monodromy=(
-                            (float(monodromy[0, 0]), float(monodromy[0, 1])),
-                            (float(monodromy[1, 0]), float(monodromy[1, 1])),
-                        ),
-                        trace_m=result.tangent_result.trace_m,
-                        det_m=result.tangent_result.det_m,
-                        winding=result.winding,
-                        radial_label=result.radial_label,
-                        closure_residual_norm=result.closure_residual_norm,
-                        min_bphi_over_b=result.min_bphi_over_b,
-                        residue_scale=self.residue_scale,
-                        target_weight=target.weight,
-                        objective_weight=self.objective_weight,
-                        branch_objective=branch_objective,
-                        state=result.state,
+                    self._branch_value(
+                        target, target_id, branch, result, branch_objective
                     )
                 )
         self._J = float(objective_value)
         self._branch_values = tuple(branch_values)
+        self._lost_branch_keys = frozenset(lost_branch_keys)
+
+    def _branch_loss_is_satisfied(self, status: str) -> bool:
+        """True when a non-converged branch should count as satisfied (J += 0).
+
+        Only the geometric loss statuses qualify, and only under the
+        treat_as_satisfied policy; numerical-integrity failures always fall
+        through to the loud raise.
+        """
+        return (
+            self.on_branch_loss == GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED
+            and status in GREENE_RESIDUE_BRANCH_LOSS_STATUSES
+        )
+
+    def _branch_value(
+        self,
+        target: RationalTarget,
+        target_id: str,
+        branch: str,
+        result: PeriodicOrbitResult,
+        branch_objective: float,
+    ) -> ResidueObjectiveBranchValue:
+        monodromy = np.asarray(result.tangent_result.monodromy, dtype=float)
+        return ResidueObjectiveBranchValue(
+            target_id=target_id,
+            branch=branch,
+            residue=float(result.residue_diagnostic.residue),
+            status=result.status,
+            monodromy=(
+                (float(monodromy[0, 0]), float(monodromy[0, 1])),
+                (float(monodromy[1, 0]), float(monodromy[1, 1])),
+            ),
+            trace_m=result.tangent_result.trace_m,
+            det_m=result.tangent_result.det_m,
+            winding=result.winding,
+            radial_label=result.radial_label,
+            closure_residual_norm=result.closure_residual_norm,
+            min_bphi_over_b=result.min_bphi_over_b,
+            residue_scale=self.residue_scale,
+            target_weight=target.weight,
+            objective_weight=self.objective_weight,
+            branch_objective=branch_objective,
+            state=result.state,
+        )
+
+    def _branch_loss_message(
+        self,
+        target: RationalTarget,
+        key: ResidueBranchKey,
+        result: PeriodicOrbitResult,
+    ) -> str:
+        return (
+            "Greene residue objective branch solve requires "
+            f"{BRANCH_STATUS_CONVERGED}, got {result.status} for "
+            f"target {key[0]!r} branch {key[1]!r}: the RK4 Newton "
+            f"iteration from seed section_state "
+            f"{tuple(self._branch_state_by_key[key])} settled at "
+            f"state {result.state} with winding {result.winding:.6g} "
+            f"(expected {target.expected_winding()}), radial_label "
+            f"{result.radial_label:.6g} (window {target.radial_window}), "
+            f"residue {float(result.residue_diagnostic.residue):.6g}. "
+            "This means the supplied residue seeds do not converge to "
+            "the requested rational island in the current coil field; "
+            "supply seeds validated against this equilibrium/field (a "
+            "real fixed-point solve), not synthetic placeholders, drop "
+            "--residue-objective-weight for fields without this island, "
+            "or set on_branch_loss='treat_as_satisfied' to treat a healed "
+            "or drifted island as a satisfied (zero) objective contribution."
+        )
 
     def _compute_gradient(self) -> None:
         if self.objective_weight == 0.0:
@@ -423,6 +521,7 @@ class BiotSavartGreeneResidueObjective(Optimizable):
 
         if self._branch_values is None:
             self._compute_value()
+        lost_branch_keys = self._lost_branch_keys or frozenset()
 
         derivative = Derivative()
         diagnostics: list[BiotSavartBranchResidueVjpDiagnostic] = []
@@ -430,6 +529,11 @@ class BiotSavartGreeneResidueObjective(Optimizable):
             target_id = target.manifest_key()
             for branch in target.branches:
                 key = (target_id, branch)
+                if key in lost_branch_keys:
+                    # Healed/drifted island under treat_as_satisfied: zero
+                    # gradient contribution, mirroring the zero J contribution
+                    # recorded for this branch in _compute_value.
+                    continue
                 diagnostic = branch_resolved_biot_savart_residue_vjp(
                     self.biot_savart,
                     self._branch_state_by_key[key],
