@@ -92,6 +92,7 @@ from banana_opt.stage2_geometry import (
     load_vmec_surface as _load_stage2_vmec_surface,
     load_plasma_geometry as _load_plasma_geometry,
     magnetic_field_plots as _magnetic_field_plots,
+    rotation_aware_curvature_report,
     select_plasma_geometry_preflight_candidate,
     shared_vf_current_control_for_coils,
     surface_surface_min_distance as _surface_surface_min_distance,
@@ -2869,6 +2870,7 @@ def _finite_build_artifact_metadata(
     fold_geodesic_curvature_threshold_inv_m=None,
     fold_penalty=None,
     curvature_margin_m=0.0,
+    pack_framedcurve=None,
 ):
     """results.json fields describing the finite-build banana winding pack.
 
@@ -3009,6 +3011,19 @@ def _finite_build_artifact_metadata(
         metadata["FOLD_OK"] = bool(
             float(fold_geodesic_curvature_max_inv_m)
             <= float(fold_geodesic_curvature_limit_inv_m)
+        )
+    if pack_framedcurve is not None and finite_build.frame == "surface_tangent":
+        # T3.2/G1: realized rotation-aware curvature headroom. Diagnostic only —
+        # the in-loop steering cap and FINITEBUILD_CURVATURE_OK gate are
+        # unchanged; this measures how much of the over-conservative-cap arclength
+        # the live pack twist alpha(theta) actually makes buildable.
+        metadata.update(
+            rotation_aware_curvature_report(
+                finite_build,
+                banana_curve,
+                pack_framedcurve,
+                single_filament_floor_m,
+            )
         )
     return metadata
 
@@ -5489,6 +5504,10 @@ def main(parsed_args=None):
                     "FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"
                 ),
                 fold_penalty=results.get("FOLD_PENALTY"),
+                # Shared finite-build pack frame carries the realized twist
+                # alpha(theta); the metadata helper reads its rotated_frame() for
+                # the rotation-aware curvature measurement (T3.2). None-safe.
+                pack_framedcurve=new_banana_coils[0].curve.framedcurve,
             )
         )
     if FINITE_BUILD and stage2_frame_aware_curvature_threshold_enabled(args):

@@ -1002,6 +1002,103 @@ def finite_build_rotation_aware_curvature_limit_inv_m(
     return 1.0 / required_radius_m
 
 
+def rotation_aware_projected_half_extent_m(finite_build, banana_curve, framedcurve):
+    """Per-quadpoint pack half-extent projected into the centerline bend plane,
+    using the REALIZED rotated pack frame (the live twist ``alpha(theta)``).
+
+    The rotated ``(normal, binormal)`` axes are read straight from
+    ``framedcurve.rotated_frame()`` -- the very frame ``CurveFilament`` lays the
+    filaments on -- so the projection reflects where the pack actually sits, not
+    a worst-case corner. This is the realized-orientation analogue of the scalar
+    ``pack_projected_reach_m`` / ``pack_reach_m`` (T3.2 / G1, measurement only).
+    """
+    half_n_m = float(finite_build.pack_half_extent_n_m)
+    half_b_m = float(finite_build.pack_half_extent_b_m)
+    gammadash = np.asarray(banana_curve.gammadash(), dtype=float)
+    gammadashdash = np.asarray(banana_curve.gammadashdash(), dtype=float)
+    tangent_norm = np.linalg.norm(gammadash, axis=1)
+    tangent = np.divide(
+        gammadash,
+        tangent_norm[:, None],
+        out=np.zeros_like(gammadash),
+        where=tangent_norm[:, None] > 0.0,
+    )
+    curvature_vector = (
+        gammadashdash - np.sum(gammadashdash * tangent, axis=1)[:, None] * tangent
+    )
+    bend_norm = np.linalg.norm(curvature_vector, axis=1)
+    bend_direction = np.divide(
+        curvature_vector,
+        bend_norm[:, None],
+        out=np.zeros_like(curvature_vector),
+        where=bend_norm[:, None] > 0.0,
+    )
+    _, normal_axis, binormal_axis = (
+        np.asarray(axis, dtype=float) for axis in framedcurve.rotated_frame()
+    )
+    return (
+        np.abs(np.sum(bend_direction * normal_axis, axis=1)) * half_n_m
+        + np.abs(np.sum(bend_direction * binormal_axis, axis=1)) * half_b_m
+    )
+
+
+def rotation_aware_curvature_report(
+    finite_build, banana_curve, framedcurve, single_filament_min_bend_radius_m
+):
+    """Realized rotation-aware curvature cap + cashable headroom (T3.2 / G1).
+
+    Diagnostic only. Compares realized centerline ``|kappa|`` against:
+    - the realized rotation-aware cap ``1 / (floor + reach(alpha(theta)))`` from
+      the live rotated pack frame, and
+    - the conservative worst-case corner cap
+      ``finite_build_frame_aware_curvature_limit_inv_m`` (the in-loop steering cap,
+      ~32.77/m for the Type-KK pack).
+
+    Returns the arclength fraction where the live twist turns an
+    over-conservative-cap bend buildable (``...HEADROOM_ARCLEN_FRACTION``) and the
+    fraction still infeasible (``...RESIDUAL_INFEASIBLE_FRACTION``). No objective
+    or gate is touched.
+    """
+    floor_m = float(single_filament_min_bend_radius_m)
+    kappa = np.asarray(banana_curve.kappa(), dtype=float)
+    rotated_half_extent_m = rotation_aware_projected_half_extent_m(
+        finite_build, banana_curve, framedcurve
+    )
+    required_radius_m = rotated_half_extent_m + floor_m
+    rotation_aware_cap_inv_m = np.divide(
+        1.0,
+        required_radius_m,
+        out=np.full(required_radius_m.shape, float("inf"), dtype=float),
+        where=required_radius_m > 0.0,
+    )
+    conservative_cap_inv_m = float(
+        finite_build_frame_aware_curvature_limit_inv_m(finite_build, floor_m)
+    )
+    arclen_weight = np.linalg.norm(
+        np.asarray(banana_curve.gammadash(), dtype=float), axis=1
+    )
+    total_arclen = float(np.sum(arclen_weight))
+    cashed = (kappa > conservative_cap_inv_m) & (kappa <= rotation_aware_cap_inv_m)
+    residual = kappa > rotation_aware_cap_inv_m
+    if total_arclen > 0.0:
+        cashed_fraction = float(np.sum(arclen_weight[cashed]) / total_arclen)
+        residual_fraction = float(np.sum(arclen_weight[residual]) / total_arclen)
+    else:
+        cashed_fraction = 0.0
+        residual_fraction = 0.0
+    return {
+        "FINITEBUILD_ROTATION_AWARE_CAP_MIN_INV_M": float(
+            np.min(rotation_aware_cap_inv_m)
+        ),
+        "FINITEBUILD_ROTATION_AWARE_CAP_MEAN_INV_M": float(
+            np.mean(rotation_aware_cap_inv_m)
+        ),
+        "FINITEBUILD_CONSERVATIVE_CORNER_CAP_INV_M": conservative_cap_inv_m,
+        "FINITEBUILD_ROTATION_AWARE_HEADROOM_ARCLEN_FRACTION": cashed_fraction,
+        "FINITEBUILD_ROTATION_AWARE_RESIDUAL_INFEASIBLE_FRACTION": residual_fraction,
+    }
+
+
 def closed_polyline_segments(gamma):
     """(N, 2, 3) chord segments of a closed curve sampled at ``gamma`` points.
 
