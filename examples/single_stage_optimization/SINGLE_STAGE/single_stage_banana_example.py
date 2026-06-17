@@ -1800,6 +1800,32 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--frontier-iota-ceiling",
+        type=float,
+        default=float(os.environ["FRONTIER_IOTA_CEILING"])
+        if "FRONTIER_IOTA_CEILING" in os.environ
+        else None,
+        help=(
+            "Physics-ceiling anchor for the frontier iota reward. When set, the "
+            "reward reference is the ceiling (not the seed/target) and the -tanh "
+            "scale defaults to span (ceiling - seed) so the gradient does not die "
+            "just past the seed. --frontier-reference-iota / "
+            "--frontier-reference-iota-scale still override. Ignored in target mode."
+        ),
+    )
+    parser.add_argument(
+        "--frontier-volume-ceiling",
+        type=float,
+        default=float(os.environ["FRONTIER_VOLUME_CEILING"])
+        if "FRONTIER_VOLUME_CEILING" in os.environ
+        else None,
+        help=(
+            "Physics-ceiling anchor for the frontier volume reward (analogue of "
+            "--frontier-iota-ceiling). --frontier-reference-volume / "
+            "--frontier-reference-volume-scale still override. Ignored in target mode."
+        ),
+    )
+    parser.add_argument(
         "--frontier-reference-iota", type=float, default=None, help=argparse.SUPPRESS
     )
     parser.add_argument(
@@ -5822,12 +5848,41 @@ def _frontier_override_or_default(override_value, default_value, *, minimum=None
     return float(value)
 
 
+def _ceiling_anchored_reference_and_scale(
+    ceiling, initial_value, *, legacy_scale_floor, metric_name
+):
+    """Frontier reward reference + default scale anchored to a physics ceiling.
+
+    Returns ``(reference, default_scale)``. The reference is the ceiling itself,
+    and the default scale is the seed->ceiling gap ``ceiling - initial_value``
+    FLOORED at ``legacy_scale_floor`` (``max(span, floor)``) so the ``-tanh``
+    reward gradient stays alive across the whole seed->ceiling range instead of
+    saturating ~seed+0.1, while never collapsing to a near-zero scale. Only when
+    the seed already meets/exceeds the ceiling (span non-positive, i.e. nothing
+    left to reward) is a warning emitted; a small-but-positive span is floored
+    silently.
+    """
+    reference = float(ceiling)
+    floor = float(legacy_scale_floor)
+    span = reference - float(initial_value)
+    if span <= 0.0:
+        print(
+            f"WARNING: frontier {metric_name} ceiling {reference:.4g} is at or below "
+            f"the seed {float(initial_value):.4g}; using the reward scale floor "
+            f"{floor:.4g} (no seed->ceiling span to reward)."
+        )
+        return reference, floor
+    return reference, max(span, floor)
+
+
 def build_frontier_goal_config(
     *,
     initial_iota,
     initial_volume,
     target_iota=None,
     target_volume=None,
+    iota_ceiling=None,
+    volume_ceiling=None,
     initial_qs_objective,
     initial_boozer_objective,
     res_weight,
@@ -5856,14 +5911,41 @@ def build_frontier_goal_config(
 ):
     if volume_weight is None:
         volume_weight = iotas_weight
-    default_iota_reference = _frontier_override_or_default(
-        None,
-        initial_iota if target_iota is None else target_iota,
-    )
-    default_volume_reference = _frontier_override_or_default(
-        None,
-        initial_volume if target_volume is None else target_volume,
-    )
+    # T2.3: optional physics-ceiling anchoring. When a ceiling is supplied, the
+    # reward reference is the ceiling and the default scale spans (ceiling - seed)
+    # so the -tanh gradient stays alive to the ceiling instead of dying ~seed+0.1.
+    # ceiling=None reproduces the legacy seed/target anchor byte-for-byte. Explicit
+    # *_reference_override / *_scale_override below still take ultimate precedence.
+    iota_ceiling_scale = None
+    if iota_ceiling is None:
+        default_iota_reference = _frontier_override_or_default(
+            None,
+            initial_iota if target_iota is None else target_iota,
+        )
+    else:
+        default_iota_reference, iota_ceiling_scale = (
+            _ceiling_anchored_reference_and_scale(
+                iota_ceiling,
+                initial_iota,
+                legacy_scale_floor=0.05,
+                metric_name="iota",
+            )
+        )
+    volume_ceiling_scale = None
+    if volume_ceiling is None:
+        default_volume_reference = _frontier_override_or_default(
+            None,
+            initial_volume if target_volume is None else target_volume,
+        )
+    else:
+        default_volume_reference, volume_ceiling_scale = (
+            _ceiling_anchored_reference_and_scale(
+                volume_ceiling,
+                initial_volume,
+                legacy_scale_floor=0.01,
+                metric_name="volume",
+            )
+        )
     default_qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
     default_boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
     qs_reference = _frontier_override_or_default(
@@ -5908,7 +5990,9 @@ def build_frontier_goal_config(
         ),
         iota_scale=_frontier_override_or_default(
             iota_scale_override,
-            max(abs(default_iota_reference) * 0.25, 0.05),
+            iota_ceiling_scale
+            if iota_ceiling_scale is not None
+            else max(abs(default_iota_reference) * 0.25, 0.05),
             minimum=1e-6,
         ),
         volume_reference=_frontier_override_or_default(
@@ -5917,7 +6001,9 @@ def build_frontier_goal_config(
         ),
         volume_scale=_frontier_override_or_default(
             volume_scale_override,
-            max(abs(default_volume_reference) * 0.10, 0.01),
+            volume_ceiling_scale
+            if volume_ceiling_scale is not None
+            else max(abs(default_volume_reference) * 0.10, 0.01),
             minimum=1e-6,
         ),
         qs_reference=qs_reference,
@@ -14123,6 +14209,8 @@ if __name__ == "__main__":
             initial_volume=initial_volume,
             target_iota=iota_target,
             target_volume=vol_target,
+            iota_ceiling=args.frontier_iota_ceiling,
+            volume_ceiling=args.frontier_volume_ceiling,
             initial_qs_objective=initial_qs_objective,
             initial_boozer_objective=initial_boozer_objective,
             res_weight=RES_WEIGHT,

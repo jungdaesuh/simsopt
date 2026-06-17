@@ -953,6 +953,55 @@ def finite_build_frame_aware_curvature_limit_inv_m(
     return 1.0 / required_radius_m
 
 
+def pack_projected_reach_m(half_extent_n_m, half_extent_b_m, bend_angle_rad):
+    """Pack inner-edge reach (m) projected into a centerline bend direction.
+
+    The finite-build pack is a rectangle of half-extents (``half_extent_n_m`` along
+    the pack normal axis, ``half_extent_b_m`` along the binormal). ``bend_angle_rad``
+    is the angle between the centerline bend direction and the pack normal axis, so
+    the inner-edge reach in that direction is the rectangle support function
+    ``half_n*|cos| + half_b*|sin|``: it equals ``half_extent_n_m`` for a bend along
+    the normal (angle 0), ``half_extent_b_m`` for a bend along the binormal
+    (angle pi/2), and is maximal -- the corner reach ``hypot(half_n, half_b)`` =
+    ``FiniteBuildSettings.pack_reach_m`` -- at ``atan2(half_b, half_n)``. Rotating
+    the pack so the bend plane favours the narrow extent shrinks this reach, which
+    is the lever the rotation-aware curvature cap exploits.
+    """
+    half_n = abs(float(half_extent_n_m))
+    half_b = abs(float(half_extent_b_m))
+    return half_n * abs(np.cos(bend_angle_rad)) + half_b * abs(np.sin(bend_angle_rad))
+
+
+def finite_build_rotation_aware_curvature_limit_inv_m(
+    finite_build,
+    single_filament_min_bend_radius_m,
+    bend_angle_rad,
+):
+    """Rotation-aware centerline curvature cap for a winding pack (1/m).
+
+    Identical to ``finite_build_frame_aware_curvature_limit_inv_m`` except it uses
+    the pack reach PROJECTED into the actual centerline bend direction
+    (``pack_projected_reach_m``) instead of the worst-case corner reach. When the
+    pack rotation aligns the bend plane with the narrow pack extent the required
+    inner-edge radius shrinks, so the cap rises above the conservative value (which
+    this reproduces exactly at the worst bend angle ``atan2(half_b, half_n)``, where
+    the projected reach equals ``pack_reach_m``). This quantifies the rotation
+    cap-lift (Phase 3, T3.2); the in-loop gate retains the conservative worst-case
+    cap until the hardware curvature ruling (T3.1).
+    """
+    projected_reach_m = pack_projected_reach_m(
+        finite_build.pack_half_extent_n_m,
+        finite_build.pack_half_extent_b_m,
+        bend_angle_rad,
+    )
+    required_radius_m = float(single_filament_min_bend_radius_m) + float(
+        projected_reach_m
+    )
+    if required_radius_m <= 0.0:
+        return float("inf")
+    return 1.0 / required_radius_m
+
+
 def closed_polyline_segments(gamma):
     """(N, 2, 3) chord segments of a closed curve sampled at ``gamma`` points.
 

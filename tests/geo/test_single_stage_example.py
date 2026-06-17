@@ -13614,6 +13614,188 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(config.effective_iota_weight, 1.0)
         self.assertAlmostEqual(config.effective_volume_weight, 1.5)
 
+    def _frontier_reward_gradient_magnitude(self, module, reference, scale, metric):
+        # |dJ| of the BoundedImprovementReward at a fixed metric value, used to
+        # observe whether the reward still pulls (gradient alive) at that point.
+        class _ConstMetric(module.Optimizable):
+            def __init__(self):
+                super().__init__(x0=np.array([0.0]))
+
+            def J(self):
+                return float(metric)
+
+            def dJ(self, partials=False):
+                if partials:
+                    return lambda _objective: np.array([1.0])
+                return np.array([1.0])
+
+        reward = module.BoundedImprovementReward(
+            _ConstMetric(), reference=reference, scale=scale
+        )
+        return float(np.linalg.norm(reward.dJ()))
+
+    def test_build_frontier_goal_config_iota_ceiling_anchors_reference_and_spans_scale(
+        self,
+    ):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.05,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            iota_ceiling=0.25,
+        )
+
+        # Reference is the ceiling (not the 0.05 seed); scale spans (ceiling-seed)
+        # = 0.20 so the gradient stays alive across the whole seed->ceiling range.
+        self.assertAlmostEqual(config.iota_reference, 0.25)
+        self.assertAlmostEqual(config.iota_scale, 0.20)
+
+    def test_build_frontier_goal_config_iota_ceiling_keeps_reward_gradient_alive_at_ceiling(
+        self,
+    ):
+        module = self.load_module()
+
+        seed = 0.05
+        ceiling = 0.25
+        legacy = module.build_frontier_goal_config(
+            initial_iota=seed,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+        )
+        anchored = module.build_frontier_goal_config(
+            initial_iota=seed,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            iota_ceiling=ceiling,
+        )
+
+        # The legacy reward anchors at the seed and saturates: its gradient is
+        # nearly dead by the time iota reaches the ceiling. The ceiling-anchored
+        # reward is strongest there, so it still pulls toward the limit.
+        legacy_grad = self._frontier_reward_gradient_magnitude(
+            module, legacy.iota_reference, legacy.iota_scale, ceiling
+        )
+        anchored_grad = self._frontier_reward_gradient_magnitude(
+            module, anchored.iota_reference, anchored.iota_scale, ceiling
+        )
+        self.assertGreater(anchored_grad, 10.0 * legacy_grad)
+
+    def test_build_frontier_goal_config_volume_ceiling_anchors_reference_and_spans_scale(
+        self,
+    ):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            volume_ceiling=0.20,
+        )
+
+        self.assertAlmostEqual(config.volume_reference, 0.20)
+        self.assertAlmostEqual(config.volume_scale, 0.10)
+
+    def test_build_frontier_goal_config_ceiling_below_seed_falls_back_to_scale_floor(
+        self,
+    ):
+        module = self.load_module()
+
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            config = module.build_frontier_goal_config(
+                initial_iota=0.30,
+                initial_volume=0.10,
+                initial_qs_objective=2.0e-4,
+                initial_boozer_objective=6.0e-7,
+                res_weight=1000.0,
+                iotas_weight=100.0,
+                iota_ceiling=0.25,
+            )
+
+        # Seed already exceeds the ceiling: reference is still the ceiling, but
+        # there is no seed->ceiling span, so the scale falls back to the floor and
+        # an "at or below" warning fires.
+        self.assertAlmostEqual(config.iota_reference, 0.25)
+        self.assertAlmostEqual(config.iota_scale, 0.05)
+        self.assertIn("at or below", stdout.getvalue())
+
+    def test_build_frontier_goal_config_small_positive_span_floors_scale_without_warning(
+        self,
+    ):
+        module = self.load_module()
+
+        # Seed strictly below the ceiling but within one scale-floor (span 0.04 <
+        # floor 0.05): the scale is floored to 0.05 and NO "at or below" warning is
+        # emitted -- the seed->ceiling span is real, just small.
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            config = module.build_frontier_goal_config(
+                initial_iota=0.21,
+                initial_volume=0.10,
+                initial_qs_objective=2.0e-4,
+                initial_boozer_objective=6.0e-7,
+                res_weight=1000.0,
+                iotas_weight=100.0,
+                iota_ceiling=0.25,
+            )
+
+        self.assertAlmostEqual(config.iota_reference, 0.25)
+        self.assertAlmostEqual(config.iota_scale, 0.05)
+        self.assertNotIn("at or below", stdout.getvalue())
+
+    def test_build_frontier_goal_config_scale_override_wins_over_ceiling(self):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.05,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            iota_ceiling=0.25,
+            iota_scale_override=0.03,
+        )
+
+        # Reference still anchors to the ceiling, but the explicit scale override
+        # beats the ceiling-derived span.
+        self.assertAlmostEqual(config.iota_reference, 0.25)
+        self.assertAlmostEqual(config.iota_scale, 0.03)
+
+    def test_build_frontier_goal_config_no_ceiling_is_byte_identical(self):
+        module = self.load_module()
+
+        common = dict(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            target_iota=0.18,
+            target_volume=0.12,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+        )
+        legacy = module.build_frontier_goal_config(**common)
+        explicit_off = module.build_frontier_goal_config(
+            **common, iota_ceiling=None, volume_ceiling=None
+        )
+
+        self.assertEqual(legacy.iota_reference, explicit_off.iota_reference)
+        self.assertEqual(legacy.iota_scale, explicit_off.iota_scale)
+        self.assertEqual(legacy.volume_reference, explicit_off.volume_reference)
+        self.assertEqual(legacy.volume_scale, explicit_off.volume_scale)
+
     def test_annotate_frontier_search_eval_adds_threshold_relative_trust_penalty(self):
         module = self.load_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
@@ -16336,6 +16518,56 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertTrue(args.winding_surface_free_r0)
         self.assertTrue(args.winding_surface_free_minor)
+
+    def test_single_stage_parse_args_accepts_frontier_ceiling_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--frontier-iota-ceiling",
+                "0.30",
+                "--frontier-volume-ceiling",
+                "0.18",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.frontier_iota_ceiling, 0.30)
+        self.assertEqual(args.frontier_volume_ceiling, 0.18)
+
+    def test_single_stage_parse_args_frontier_ceiling_defaults_none(self):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.object(sys, "argv", ["single_stage_banana_example.py"]),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            args = module.parse_args()
+
+        self.assertIsNone(args.frontier_iota_ceiling)
+        self.assertIsNone(args.frontier_volume_ceiling)
+
+    def test_single_stage_parse_args_frontier_ceiling_env_backed(self):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.object(sys, "argv", ["single_stage_banana_example.py"]),
+            patch.dict(
+                os.environ,
+                {
+                    "FRONTIER_IOTA_CEILING": "0.27",
+                    "FRONTIER_VOLUME_CEILING": "0.16",
+                },
+                clear=True,
+            ),
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.frontier_iota_ceiling, 0.27)
+        self.assertEqual(args.frontier_volume_ceiling, 0.16)
 
     def test_single_stage_parse_args_defaults_engineering_contract_terms_on(self):
         module = load_single_stage_example_module()

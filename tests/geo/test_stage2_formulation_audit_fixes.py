@@ -59,6 +59,8 @@ from banana_opt.stage2_geometry import (  # noqa: E402
     curve_curve_min_distance_segments_m,
     curve_surface_min_distance_segments_m,
     finite_build_frame_aware_curvature_limit_inv_m,
+    finite_build_rotation_aware_curvature_limit_inv_m,
+    pack_projected_reach_m,
 )
 from simsopt.geo import CurveXYZFourier  # noqa: E402
 from simsopt.geo import CurveCurveDistance, CurveLength  # noqa: E402
@@ -178,6 +180,76 @@ class FrameAwareCurvatureThresholdTests(unittest.TestCase):
         )
         self.assertEqual(
             finite_build_frame_aware_curvature_limit_inv_m(settings, 0.0),
+            float("inf"),
+        )
+
+    def test_projected_reach_endpoints_and_maximum_is_corner_reach(self):
+        # T3.2: the projected reach is half_n along the normal (angle 0), half_b
+        # along the binormal (angle pi/2), and maxes out at the corner reach
+        # (pack_reach_m) at the diagonal angle atan2(half_b, half_n).
+        settings = _type_kk_finite_build_settings()
+        half_n = settings.pack_half_extent_n_m
+        half_b = settings.pack_half_extent_b_m
+        self.assertAlmostEqual(pack_projected_reach_m(half_n, half_b, 0.0), half_n)
+        self.assertAlmostEqual(
+            pack_projected_reach_m(half_n, half_b, np.pi / 2.0), half_b
+        )
+        worst_angle = math.atan2(half_b, half_n)
+        self.assertAlmostEqual(
+            pack_projected_reach_m(half_n, half_b, worst_angle),
+            settings.pack_reach_m,
+            places=12,
+        )
+        angles = np.linspace(0.0, 2.0 * np.pi, 720)
+        projected = [pack_projected_reach_m(half_n, half_b, a) for a in angles]
+        self.assertLessEqual(float(np.max(projected)), settings.pack_reach_m + 1e-12)
+
+    def test_rotation_aware_limit_matches_conservative_at_worst_bend_angle(self):
+        # At the corner-reach bend angle the rotation-aware cap reproduces the
+        # conservative worst-case cap exactly (SSOT: same required-radius formula).
+        settings = _type_kk_finite_build_settings()
+        floor = TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+        conservative = finite_build_frame_aware_curvature_limit_inv_m(settings, floor)
+        worst_angle = math.atan2(
+            settings.pack_half_extent_b_m, settings.pack_half_extent_n_m
+        )
+        self.assertAlmostEqual(
+            finite_build_rotation_aware_curvature_limit_inv_m(
+                settings, floor, worst_angle
+            ),
+            conservative,
+            places=12,
+        )
+
+    def test_rotation_aware_limit_lifts_cap_when_bend_favours_narrow_extent(self):
+        # T3.2 cap-lift: aligning the bend plane with the narrow (2-wide normal)
+        # extent lifts the Type KK pack cap from ~32.77 toward the ~50-67 band.
+        settings = _type_kk_finite_build_settings()
+        floor = TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+        conservative = finite_build_frame_aware_curvature_limit_inv_m(settings, floor)
+        narrow_aligned = finite_build_rotation_aware_curvature_limit_inv_m(
+            settings, floor, 0.0
+        )
+        self.assertGreater(narrow_aligned, conservative)
+        self.assertGreater(narrow_aligned, 50.0)
+        # Independent closed form: 1 / (floor + half_n).
+        self.assertAlmostEqual(
+            narrow_aligned,
+            1.0 / (floor + settings.pack_half_extent_n_m),
+            places=12,
+        )
+
+    def test_rotation_aware_limit_degenerate_zero_radius_returns_inf(self):
+        settings = FiniteBuildSettings(
+            numfilaments_n=1,
+            numfilaments_b=1,
+            gapsize_n=1.0e-3,
+            gapsize_b=1.0e-3,
+            rotation_order=None,
+            frame="centroid",
+        )
+        self.assertEqual(
+            finite_build_rotation_aware_curvature_limit_inv_m(settings, 0.0, 0.0),
             float("inf"),
         )
 
