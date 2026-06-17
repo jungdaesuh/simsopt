@@ -11,6 +11,10 @@ for path in (str(EXAMPLES_ROOT), str(SINGLE_STAGE_ROOT)):
         sys.path.insert(0, path)
 
 import single_stage_banana_example as module  # noqa: E402
+from banana_opt.stage2_geometry import (  # noqa: E402
+    WINDING_SURFACE_FREE_MINOR_BOUNDS_M,
+    WINDING_SURFACE_FREE_R0_BOUNDS_M,
+)
 from banana_opt.stage2_single_stage_handoff import Stage2CoilPartitions  # noqa: E402
 from simsopt.field import BiotSavart  # noqa: E402
 from simsopt.field.coil import Coil, Current, coils_via_symmetries  # noqa: E402
@@ -83,6 +87,14 @@ def _loaded_single_master_seed():
     return biot_savart, _partitions(banana_coils), curve
 
 
+def _bounds_of(surface: SurfaceRZFourier, dof_name: str) -> tuple[float, float]:
+    index = list(surface.local_full_dof_names).index(dof_name)
+    return (
+        float(surface.local_full_lower_bounds[index]),
+        float(surface.local_full_upper_bounds[index]),
+    )
+
+
 def test_single_stage_reference_surface_resolution_tracks_free_shape_flags():
     _, _, surf_coils = module.build_hbt_reference_surfaces(
         2,
@@ -127,6 +139,79 @@ def test_zero_free_shape_flags_preserve_loaded_seed_surface_binding():
     assert resolved_partitions is partitions
     assert free_names == ()
     assert resolved_partitions.banana_coils[0].curve.surf is seed_curve.surf
+
+
+def test_free_r0_reembeds_and_bounds_single_stage_loaded_cws_family():
+    biot_savart, partitions, seed_curve = _loaded_seed()
+    _, _, surf_coils = module.build_hbt_reference_surfaces(
+        2,
+        0.142,
+        module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        winding_surface_free_r0=True,
+    )
+
+    resolved_bs, resolved_partitions, free_names = (
+        module.reembed_loaded_banana_cws_family_on_surface(
+            biot_savart,
+            partitions,
+            surf_coils,
+            winding_surface_free_r0=True,
+        )
+    )
+    resolved_curve = resolved_partitions.banana_coils[0].curve
+
+    assert resolved_bs is not biot_savart
+    assert "rc(0,0)" in free_names
+    assert "rc(1,0)" not in free_names
+    assert "zs(1,0)" not in free_names
+    assert _bounds_of(surf_coils, "rc(0,0)") == WINDING_SURFACE_FREE_R0_BOUNDS_M
+    assert resolved_curve.surf is surf_coils
+    assert partitions.banana_coils[0].curve.surf is seed_curve.surf
+
+    before = resolved_curve.gamma().copy()
+    surface_dofs = surf_coils.local_full_x.copy()
+    free_index = list(surf_coils.local_full_dof_names).index("rc(0,0)")
+    surface_dofs[free_index] += 1.0e-3
+    surf_coils.local_full_x = surface_dofs
+    after = resolved_curve.gamma()
+    assert np.max(np.abs(after - before)) > 0.0
+
+
+def test_free_minor_reembeds_and_bounds_single_stage_loaded_cws_family():
+    biot_savart, partitions, seed_curve = _loaded_seed()
+    _, _, surf_coils = module.build_hbt_reference_surfaces(
+        2,
+        0.142,
+        module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        winding_surface_free_minor=True,
+    )
+
+    resolved_bs, resolved_partitions, free_names = (
+        module.reembed_loaded_banana_cws_family_on_surface(
+            biot_savart,
+            partitions,
+            surf_coils,
+            winding_surface_free_minor=True,
+        )
+    )
+    resolved_curve = resolved_partitions.banana_coils[0].curve
+
+    assert resolved_bs is not biot_savart
+    assert "rc(0,0)" not in free_names
+    assert "rc(1,0)" in free_names
+    assert "zs(1,0)" in free_names
+    assert _bounds_of(surf_coils, "rc(1,0)") == WINDING_SURFACE_FREE_MINOR_BOUNDS_M
+    assert _bounds_of(surf_coils, "zs(1,0)") == WINDING_SURFACE_FREE_MINOR_BOUNDS_M
+    assert resolved_curve.surf is surf_coils
+    assert partitions.banana_coils[0].curve.surf is seed_curve.surf
+
+    before = resolved_curve.gamma().copy()
+    surface_dofs = surf_coils.local_full_x.copy()
+    free_index = list(surf_coils.local_full_dof_names).index("rc(1,0)")
+    surface_dofs[free_index] += 1.0e-3
+    surf_coils.local_full_x = surface_dofs
+    after = resolved_curve.gamma()
+    assert np.max(np.abs(after - before)) > 0.0
 
 
 def test_reembed_request_does_not_require_a_free_shape_mode():

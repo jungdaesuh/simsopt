@@ -8086,6 +8086,91 @@ class MagneticWellVolumeShortfallTests(_ModuleTestCase):
         np.testing.assert_allclose(diagnostics["dJ_magnetic_well"], [0.25, -0.75])
 
 
+class AvailableEnvelopeRewardObjectiveTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
+    MODULE_PREFIX = "banana_single_stage_objectives_available_envelope_reward"
+
+    def test_build_total_objective_adds_weighted_available_envelope_reward(self):
+        baseline = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args()
+        )
+        reward = _FakeAlgebraicObjective(-0.4, [-0.2, 0.3])
+
+        with_reward = self.module.build_total_objective(
+            *IotaShearShortfallTests._base_total_objective_args(),
+            JCurveAvailableEnvelopeReward=reward,
+            AVAILABLE_ENVELOPE_REWARD_WEIGHT=8.0,
+        )
+
+        self.assertAlmostEqual(with_reward.J() - baseline.J(), 8.0 * reward.J())
+        np.testing.assert_allclose(
+            with_reward.dJ() - baseline.dJ(),
+            8.0 * reward.dJ(),
+        )
+
+    def test_evaluate_base_objective_reports_available_envelope_reward(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        reward = _FakeAlgebraicObjective(-0.4, [-0.2, 0.3])
+
+        baseline = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            include_diagnostics=False,
+        )
+        with_reward = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveAvailableEnvelopeReward=reward,
+            AVAILABLE_ENVELOPE_REWARD_WEIGHT=8.0,
+            include_diagnostics=False,
+        )
+
+        self.assertAlmostEqual(with_reward["total"] - baseline["total"], -3.2)
+        np.testing.assert_allclose(
+            with_reward["grad"] - baseline["grad"],
+            [-1.6, 2.4],
+        )
+
+        diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveAvailableEnvelopeReward=reward,
+            AVAILABLE_ENVELOPE_REWARD_WEIGHT=8.0,
+        )
+
+        self.assertTrue(diagnostics["available_envelope_reward_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["available_envelope_reward_weight"], 8.0)
+        self.assertAlmostEqual(diagnostics["J_available_envelope_reward"], -0.4)
+        np.testing.assert_allclose(
+            diagnostics["dJ_available_envelope_reward"],
+            [-0.2, 0.3],
+        )
+
+
 class _FakeVectorBiotSavartForLGradB:
     """Minimal BiotSavart stub that returns controlled |B| and dB/dX values.
 

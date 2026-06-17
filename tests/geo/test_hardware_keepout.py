@@ -98,6 +98,76 @@ class HardwareKeepoutObjectiveTests(unittest.TestCase):
         self.assertAlmostEqual(objective.half_d, HALF_D)
         self.assertAlmostEqual(objective.margin, HARDWARE_KEEPOUT_SAFETY_MARGIN_M)
 
+    def test_available_envelope_reward_favors_outer_usable_volume(self):
+        inner = _circle_curve(radius=0.50, seed=41)
+        outer = _circle_curve(radius=1.35, seed=42)
+
+        inner_reward = CurveVesselAvailableEnvelopeReward(
+            [inner],
+            half_w=0.0,
+            half_d=0.0,
+            minimum_clearance=0.20,
+            winding_r0=0.0,
+            vessel_r0=0.0,
+            vessel_minor_radius=2.0,
+        )
+        outer_reward = CurveVesselAvailableEnvelopeReward(
+            [outer],
+            half_w=0.0,
+            half_d=0.0,
+            minimum_clearance=0.20,
+            winding_r0=0.0,
+            vessel_r0=0.0,
+            vessel_minor_radius=2.0,
+        )
+
+        self.assertLess(outer_reward.J(), inner_reward.J())
+        self.assertLessEqual(outer_reward.J(), 0.0)
+        self.assertGreaterEqual(outer_reward.J(), -1.0)
+
+    def test_available_envelope_reward_clips_past_usable_boundary(self):
+        near_wall = _circle_curve(radius=2.40)
+        outside = _circle_curve(radius=3.00)
+
+        near_wall_reward = CurveVesselAvailableEnvelopeReward(
+            [near_wall],
+            half_w=0.0,
+            half_d=0.0,
+            minimum_clearance=0.20,
+            winding_r0=0.0,
+            vessel_r0=0.0,
+            vessel_minor_radius=2.0,
+        )
+        outside_reward = CurveVesselAvailableEnvelopeReward(
+            [outside],
+            half_w=0.0,
+            half_d=0.0,
+            minimum_clearance=0.20,
+            winding_r0=0.0,
+            vessel_r0=0.0,
+            vessel_minor_radius=2.0,
+        )
+
+        self.assertAlmostEqual(near_wall_reward.J(), -1.0)
+        self.assertAlmostEqual(outside_reward.J(), -1.0)
+
+    def test_available_envelope_reward_has_finite_gradient(self):
+        curve = _circle_curve(radius=0.90, seed=43)
+        objective = CurveVesselAvailableEnvelopeReward(
+            [curve],
+            half_w=0.0,
+            half_d=0.0,
+            minimum_clearance=0.20,
+            winding_r0=0.0,
+            vessel_r0=0.0,
+            vessel_minor_radius=2.0,
+        )
+
+        grad = objective.dJ()
+        self.assertEqual(grad.shape, curve.x.shape)
+        self.assertTrue(np.all(np.isfinite(grad)))
+        self.assertGreater(np.linalg.norm(grad), 0.0)
+
     def test_far_cloud_gives_exact_zero_value_and_gradient(self):
         curve = _circle_curve(seed=1)
         # Cloud 10 m away: no envelope can be within the margin.

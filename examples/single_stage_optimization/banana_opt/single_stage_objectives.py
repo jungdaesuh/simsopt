@@ -395,6 +395,8 @@ def build_total_objective(
     HARDWARE_KEEPOUT_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
+    JCurveAvailableEnvelopeReward=None,
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -440,6 +442,11 @@ def build_total_objective(
     if JCurveVesselEnvelopeKeepout is not None:
         objective = (
             objective + VESSEL_KEEPOUT_WEIGHT * JCurveVesselEnvelopeKeepout
+        )
+    if JCurveAvailableEnvelopeReward is not None:
+        objective = (
+            objective
+            + AVAILABLE_ENVELOPE_REWARD_WEIGHT * JCurveAvailableEnvelopeReward
         )
     if JResidueObjective is not None:
         objective = objective + JResidueObjective
@@ -795,6 +802,8 @@ def evaluate_total_objective(
     HARDWARE_KEEPOUT_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
+    JCurveAvailableEnvelopeReward=None,
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -852,6 +861,8 @@ def evaluate_total_objective(
         HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
+        JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+        AVAILABLE_ENVELOPE_REWARD_WEIGHT=AVAILABLE_ENVELOPE_REWARD_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -1005,6 +1016,19 @@ def evaluate_total_objective(
                     objective_optimizable,
                 )
             ),
+            "J_available_envelope_reward": (
+                0.0
+                if JCurveAvailableEnvelopeReward is None
+                else float(JCurveAvailableEnvelopeReward.J())
+            ),
+            "dJ_available_envelope_reward": (
+                np.zeros_like(total_grad)
+                if JCurveAvailableEnvelopeReward is None
+                else _objective_gradient(
+                    JCurveAvailableEnvelopeReward,
+                    objective_optimizable,
+                )
+            ),
             "J_msc": (
                 0.0
                 if JMeanSquaredCurvature is None
@@ -1108,6 +1132,8 @@ def evaluate_base_objective(
     MAGNETIC_WELL_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
+    JCurveAvailableEnvelopeReward=None,
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     include_diagnostics=True,
@@ -1148,6 +1174,11 @@ def evaluate_base_objective(
             base_objective
             + VESSEL_KEEPOUT_WEIGHT * JCurveVesselEnvelopeKeepout
         )
+    if JCurveAvailableEnvelopeReward is not None:
+        base_objective = (
+            base_objective
+            + AVAILABLE_ENVELOPE_REWARD_WEIGHT * JCurveAvailableEnvelopeReward
+        )
     # min(L_grad_B) realizability shortfall (opt-in; default-None so the ALM
     # physics objective is byte-identical until --lgradb-weight > 0 is set).
     if JMinLGradB is not None:
@@ -1164,6 +1195,19 @@ def evaluate_base_objective(
     ) = _optional_weighted_objective_terms(
         JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    (
+        available_envelope_reward_value,
+        available_envelope_reward_grad,
+        available_envelope_reward_weight,
+        available_envelope_reward_objective_enabled,
+        weighted_available_envelope_reward_value,
+        weighted_available_envelope_reward_grad,
+    ) = _optional_weighted_objective_terms(
+        JCurveAvailableEnvelopeReward,
+        AVAILABLE_ENVELOPE_REWARD_WEIGHT,
         base_physics_grad,
         objective_optimizable,
     )
@@ -1210,12 +1254,14 @@ def evaluate_base_objective(
             + weighted_shear_value
             + weighted_magnetic_well_value
             + weighted_vessel_keepout_value
+            + weighted_available_envelope_reward_value
         )
         grad = (
             residue_grad
             + weighted_shear_grad
             + weighted_magnetic_well_grad
             + weighted_vessel_keepout_grad
+            + weighted_available_envelope_reward_grad
         )
     elif alm_formulation == "weighted_sum":
         total = physics_terms_total + residue_value
@@ -1272,6 +1318,12 @@ def evaluate_base_objective(
             "dJ_vessel_keepout": vessel_keepout_grad,
             "vessel_keepout_weight": vessel_keepout_weight,
             "vessel_keepout_objective_enabled": vessel_keepout_objective_enabled,
+            "J_available_envelope_reward": available_envelope_reward_value,
+            "dJ_available_envelope_reward": available_envelope_reward_grad,
+            "available_envelope_reward_weight": available_envelope_reward_weight,
+            "available_envelope_reward_objective_enabled": (
+                available_envelope_reward_objective_enabled
+            ),
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -1510,6 +1562,8 @@ def evaluate_alm_objective(
     JCurveHardwareKeepout=None,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
+    JCurveAvailableEnvelopeReward=None,
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     lcfs_surface=None,
     JLCFSMajorRadius=None,
     JLCFSMinorRadius=None,
@@ -1570,6 +1624,8 @@ def evaluate_alm_objective(
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
+        JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+        AVAILABLE_ENVELOPE_REWARD_WEIGHT=AVAILABLE_ENVELOPE_REWARD_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         include_diagnostics=include_diagnostics,

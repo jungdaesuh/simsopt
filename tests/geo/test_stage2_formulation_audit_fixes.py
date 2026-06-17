@@ -18,6 +18,8 @@ Covers the finite-build default-on and additive changes:
     ``CurveHardwareKeepout`` terms into Stage 2 default-ON at single-stage
     parity (weight ``STAGE2_{VESSEL,HARDWARE}_KEEPOUT_WEIGHT_DEFAULT``); an
     explicit 0 weight restores the legacy objective for reproduction.
+    ``--stage2-available-envelope-reward-weight`` is default-OFF and can steer
+    usable vessel-envelope fill without replacing the hard promotion gates.
 """
 
 import math
@@ -65,7 +67,11 @@ from simsopt.geo import CurveCurveDistance, CurveLength  # noqa: E402
 def _parse(argv_tail):
     argv = ["banana_coil_solver.py", *argv_tail]
     # Neutralize inherited env participating in the argparse defaults under test.
-    env = {"STAGE2_VESSEL_KEEPOUT_WEIGHT": "0.0", "CURVATURE_THRESHOLD": "100.0"}
+    env = {
+        "STAGE2_VESSEL_KEEPOUT_WEIGHT": "0.0",
+        "STAGE2_AVAILABLE_ENVELOPE_REWARD_WEIGHT": "0.0",
+        "CURVATURE_THRESHOLD": "100.0",
+    }
     with mock.patch.object(sys, "argv", argv), mock.patch.dict(
         "os.environ", env, clear=False
     ):
@@ -537,10 +543,14 @@ class VesselKeepoutStage2Tests(unittest.TestCase):
     def test_cli_weight_rejects_negative(self):
         with self.assertRaises(SystemExit):
             _parse(["--stage2-vessel-keepout-weight", "-1.0"])
+        with self.assertRaises(SystemExit):
+            _parse(["--stage2-available-envelope-reward-weight", "-1.0"])
 
     def test_cli_weight_parses_positive(self):
         args = _parse(["--stage2-vessel-keepout-weight", "250.0"])
         self.assertEqual(args.stage2_vessel_keepout_weight, 250.0)
+        args = _parse(["--stage2-available-envelope-reward-weight", "2.5"])
+        self.assertEqual(args.stage2_available_envelope_reward_weight, 2.5)
 
     def test_term_zero_inside_vessel_positive_outside(self):
         # Compliant: poloidal circle on the winding axis, deep inside the

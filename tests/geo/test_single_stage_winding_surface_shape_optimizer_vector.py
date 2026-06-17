@@ -173,6 +173,72 @@ def test_reembed_grows_objective_vector_and_moves_gamma():
     assert len(resolved_bs.coils) == len(biot_savart.coils)
 
 
+def test_free_r0_enters_optimizer_vector_and_moves_gamma():
+    warm_surface = _warm_seed_circle()
+    biot_savart, partitions, _ = _loaded_seed(warm_surface)
+
+    _, _, surf_coils = module.build_hbt_reference_surfaces(
+        2,
+        0.142,
+        module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        winding_surface_free_r0=True,
+    )
+
+    _, resolved_partitions, free_names = (
+        module.reembed_loaded_banana_cws_family_on_surface(
+            biot_savart,
+            partitions,
+            surf_coils,
+            winding_surface_free_r0=True,
+        )
+    )
+    resolved_curve = resolved_partitions.banana_coils[0].curve
+
+    assert free_names == ("rc(0,0)",)
+    assert len(CurveLength(resolved_curve).x) == (
+        resolved_curve.local_dof_size + len(free_names)
+    )
+
+    before = resolved_curve.gamma().copy()
+    surface_dofs = surf_coils.local_full_x.copy()
+    surface_dofs[list(surf_coils.local_full_dof_names).index("rc(0,0)")] += 1.0e-3
+    surf_coils.local_full_x = surface_dofs
+    assert np.max(np.abs(resolved_curve.gamma() - before)) > 0.0
+
+
+def test_free_minor_enters_optimizer_vector_and_moves_gamma():
+    warm_surface = _warm_seed_circle()
+    biot_savart, partitions, _ = _loaded_seed(warm_surface)
+
+    _, _, surf_coils = module.build_hbt_reference_surfaces(
+        2,
+        0.142,
+        module.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        winding_surface_free_minor=True,
+    )
+
+    _, resolved_partitions, free_names = (
+        module.reembed_loaded_banana_cws_family_on_surface(
+            biot_savart,
+            partitions,
+            surf_coils,
+            winding_surface_free_minor=True,
+        )
+    )
+    resolved_curve = resolved_partitions.banana_coils[0].curve
+
+    assert free_names == ("rc(1,0)", "zs(1,0)")
+    assert len(CurveLength(resolved_curve).x) == (
+        resolved_curve.local_dof_size + len(free_names)
+    )
+
+    before = resolved_curve.gamma().copy()
+    surface_dofs = surf_coils.local_full_x.copy()
+    surface_dofs[list(surf_coils.local_full_dof_names).index("rc(1,0)")] += 1.0e-3
+    surf_coils.local_full_x = surface_dofs
+    assert np.max(np.abs(resolved_curve.gamma() - before)) > 0.0
+
+
 def test_warm_seed_circle_carries_no_shape_modes_requires_prebuilt_surface():
     """Defect-2 documentation: shape modes must exist on the surface at build.
 

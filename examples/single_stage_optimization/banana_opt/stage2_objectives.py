@@ -1594,6 +1594,12 @@ def build_stage2_results(
         "WINDING_SURFACE_NTOR": int(winding_surface_ntor),
         "WINDING_SURFACE_FREE_MPOL": int(winding_surface_free_mpol),
         "WINDING_SURFACE_FREE_NTOR": int(winding_surface_free_ntor),
+        "WINDING_SURFACE_FREE_R0": bool(
+            getattr(args, "winding_surface_free_r0", False)
+        ),
+        "WINDING_SURFACE_FREE_MINOR": bool(
+            getattr(args, "winding_surface_free_minor", False)
+        ),
         "WINDING_SURFACE_FREE_DOF_NAMES": list(winding_surface_free_dof_names),
         "WINDING_SURFACE_FREE_DOF_COUNT": len(winding_surface_free_dof_names),
         "WINDING_SURFACE_SHAPE_DOF_ENABLED": bool(

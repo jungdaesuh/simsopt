@@ -13103,10 +13103,12 @@ class HardwareConstraintTests(unittest.TestCase):
         self_objective = object()
         hardware_keepout_objective = object()
         vessel_keepout_objective = object()
+        available_envelope_reward_objective = object()
         coil_force_objective = object()
         recorded_self_intersect_call = {}
         recorded_hardware_keepout_call = {}
         recorded_vessel_keepout_call = {}
+        recorded_available_envelope_reward_call = {}
         recorded_coil_force_call = {}
         recorded_poloidal_extent_call = {}
         recorded_width_call = {}
@@ -13149,6 +13151,16 @@ class HardwareConstraintTests(unittest.TestCase):
                 }
             )
             return vessel_keepout_objective
+
+        def fake_available_envelope_reward(curves, *, minimum_clearance, winding_r0):
+            recorded_available_envelope_reward_call.update(
+                {
+                    "curves": curves,
+                    "minimum_clearance": minimum_clearance,
+                    "winding_r0": winding_r0,
+                }
+            )
+            return available_envelope_reward_objective
 
         def fake_mean_squared_force(coil, coils, regularization):
             recorded_coil_force_call.update(
@@ -13278,6 +13290,13 @@ class HardwareConstraintTests(unittest.TestCase):
                 patch.object(module, "CurveVesselEnvelopeKeepout", fake_vessel_keepout)
             )
             stack.enter_context(
+                patch.object(
+                    module,
+                    "CurveVesselAvailableEnvelopeReward",
+                    fake_available_envelope_reward,
+                )
+            )
+            stack.enter_context(
                 patch.object(module, "MeanSquaredForce", fake_mean_squared_force)
             )
             build_total_mock = stack.enter_context(
@@ -13286,6 +13305,7 @@ class HardwareConstraintTests(unittest.TestCase):
 
             module.SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = 1.0
             module.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = 2.0
+            module.SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = 4.0
             module.SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = 0.006
             module.HARDWARE_KEEPOUT_JSON_PATH = "/tmp/hardware_keepout.json"
             module.HARDWARE_KEEPOUT_GLB_PATH = "/tmp/hbt_assembly.glb"
@@ -13365,6 +13385,18 @@ class HardwareConstraintTests(unittest.TestCase):
             recorded_vessel_keepout_call["minimum_clearance"],
             module.SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE,
         )
+        self.assertIs(
+            bundle["JCurveAvailableEnvelopeReward"],
+            available_envelope_reward_objective,
+        )
+        self.assertEqual(
+            recorded_available_envelope_reward_call["curves"],
+            [banana_curve],
+        )
+        self.assertAlmostEqual(
+            recorded_available_envelope_reward_call["minimum_clearance"],
+            module.SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE,
+        )
         self.assertIs(bundle["JCoilForce"], coil_force_objective)
         self.assertEqual(recorded_coil_force_call["coil"], "coil")
         self.assertEqual(recorded_coil_force_call["coils"], ["coil"])
@@ -13373,9 +13405,17 @@ class HardwareConstraintTests(unittest.TestCase):
             build_total_mock.call_args.kwargs["JCurveVesselEnvelopeKeepout"],
             vessel_keepout_objective,
         )
+        self.assertIs(
+            build_total_mock.call_args.kwargs["JCurveAvailableEnvelopeReward"],
+            available_envelope_reward_objective,
+        )
         self.assertEqual(
             build_total_mock.call_args.kwargs["VESSEL_KEEPOUT_WEIGHT"],
             module.SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        )
+        self.assertEqual(
+            build_total_mock.call_args.kwargs["AVAILABLE_ENVELOPE_REWARD_WEIGHT"],
+            module.SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT,
         )
         self.assertIs(
             build_total_mock.call_args.kwargs["JCoilForce"],
@@ -15030,6 +15070,7 @@ class RunIdentityTests(unittest.TestCase):
             hardware_keepout_json="hardware_keepout.json",
             single_stage_vessel_keepout_weight=1000.0,
             single_stage_vessel_keepout_clearance=0.005,
+            single_stage_available_envelope_reward_weight=0.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             constraint_method="penalty",
@@ -15081,6 +15122,10 @@ class RunIdentityTests(unittest.TestCase):
             confinement_surrogate_early_weight=0.2,
             magnetic_well_weight=0.0,
             magnetic_well_target=0.0,
+            winding_surface_free_mpol=0,
+            winding_surface_free_ntor=0,
+            winding_surface_free_r0=False,
+            winding_surface_free_minor=False,
         )
 
     def _set_residue_objective_args(
@@ -15198,6 +15243,9 @@ class RunIdentityTests(unittest.TestCase):
                     "banana_surf_major_radius",
                     "winding_surface_free_mpol",
                     "winding_surface_free_ntor",
+                    "winding_surface_free_r0",
+                    "winding_surface_free_minor",
+                    "single_stage_available_envelope_reward_weight",
                 }
                 or (
                     not config.finite_build
@@ -15226,6 +15274,18 @@ class RunIdentityTests(unittest.TestCase):
             self._build_identity(module, base_args),
             self._build_identity(module, shaped_args),
         )
+
+    def test_run_identity_changes_when_winding_surface_size_requested(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        shifted_args = self._make_identity_args()
+        shifted_args.winding_surface_free_r0 = True
+        resized_args = self._make_identity_args()
+        resized_args.winding_surface_free_minor = True
+
+        base_identity = self._build_identity(module, base_args)
+        self.assertNotEqual(base_identity, self._build_identity(module, shifted_args))
+        self.assertNotEqual(base_identity, self._build_identity(module, resized_args))
 
     def test_run_identity_changes_when_shaped_winding_surface_major_radius_changes(
         self,
@@ -15426,6 +15486,17 @@ class RunIdentityTests(unittest.TestCase):
         self.assertNotEqual(
             self._build_identity(module, base_args),
             self._build_identity(module, changed_args),
+        )
+
+    def test_run_identity_changes_when_available_envelope_reward_weight_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_available_envelope_reward_weight = 7.5
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
         )
 
     def test_run_identity_changes_when_physical_plasma_current_changes(self):
@@ -16196,6 +16267,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "2.5",
                 "--single-stage-selfint-weight",
                 "3.5",
+                "--single-stage-available-envelope-reward-weight",
+                "1.25",
+                "--winding-surface-free-r0",
+                "--winding-surface-free-minor",
             ],
         ):
             args = module.parse_args()
@@ -16203,6 +16278,61 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.single_stage_poloidal_weight, 4.0)
         self.assertEqual(args.single_stage_width_weight, 2.5)
         self.assertEqual(args.single_stage_selfint_weight, 3.5)
+        self.assertEqual(args.single_stage_available_envelope_reward_weight, 1.25)
+        self.assertTrue(args.winding_surface_free_r0)
+        self.assertTrue(args.winding_surface_free_minor)
+
+    def test_single_stage_parse_args_accepts_available_envelope_reward_flag(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-available-envelope-reward-weight",
+                "12.5",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_available_envelope_reward_weight, 12.5)
+
+    def test_single_stage_parse_args_rejects_negative_available_envelope_reward_weight(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "single_stage_banana_example.py",
+                    "--single-stage-available-envelope-reward-weight",
+                    "-0.1",
+                ],
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            module.parse_args()
+
+    def test_single_stage_parse_args_accepts_winding_surface_size_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--winding-surface-free-r0",
+                "--winding-surface-free-minor",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.winding_surface_free_r0)
+        self.assertTrue(args.winding_surface_free_minor)
 
     def test_single_stage_parse_args_defaults_engineering_contract_terms_on(self):
         module = load_single_stage_example_module()
@@ -16239,6 +16369,9 @@ class CurrentBaselineContractTests(unittest.TestCase):
         )
         self.assertGreater(args.single_stage_hardware_keepout_weight, 0.0)
         self.assertGreater(args.single_stage_vessel_keepout_weight, 0.0)
+        self.assertEqual(args.single_stage_available_envelope_reward_weight, 0.0)
+        self.assertFalse(args.winding_surface_free_r0)
+        self.assertFalse(args.winding_surface_free_minor)
         self.assertGreater(args.coil_force_weight, 0.0)
         self.assertGreater(args.coil_force_conductor_radius, 0.0)
 

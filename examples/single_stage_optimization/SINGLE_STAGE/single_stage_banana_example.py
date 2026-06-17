@@ -300,6 +300,7 @@ from banana_opt.poloidal_extent import (
 from banana_opt.hardware_keepout import (
     CurveHardwareKeepout,
     CurveHardwareSdfKeepout,
+    CurveVesselAvailableEnvelopeReward,
     CurveVesselEnvelopeKeepout,
     hardware_keepout_metadata,
     hardware_keepout_results_fields,
@@ -1183,6 +1184,20 @@ def _winding_surface_shape_requested(free_mpol, free_ntor):
     return bool(int(free_mpol) or int(free_ntor))
 
 
+def _winding_surface_optimization_requested(
+    free_mpol,
+    free_ntor,
+    *,
+    free_r0=False,
+    free_minor=False,
+):
+    return bool(
+        _winding_surface_shape_requested(free_mpol, free_ntor)
+        or bool(free_r0)
+        or bool(free_minor)
+    )
+
+
 def reembed_loaded_banana_cws_family_on_surface(
     biot_savart,
     coil_partitions,
@@ -1190,18 +1205,30 @@ def reembed_loaded_banana_cws_family_on_surface(
     *,
     winding_surface_free_mpol=0,
     winding_surface_free_ntor=0,
+    winding_surface_free_r0=False,
+    winding_surface_free_minor=False,
 ):
     free_mpol = int(winding_surface_free_mpol)
     free_ntor = int(winding_surface_free_ntor)
-    if not _winding_surface_shape_requested(free_mpol, free_ntor):
+    free_r0 = bool(winding_surface_free_r0)
+    free_minor = bool(winding_surface_free_minor)
+    shape_requested = _winding_surface_shape_requested(free_mpol, free_ntor)
+    if not _winding_surface_optimization_requested(
+        free_mpol,
+        free_ntor,
+        free_r0=free_r0,
+        free_minor=free_minor,
+    ):
         return biot_savart, coil_partitions, ()
 
     free_names = configure_winding_surface_shape_dofs(
         surf_coils,
         free_mpol=free_mpol,
         free_ntor=free_ntor,
+        free_r0=free_r0,
+        free_minor=free_minor,
     )
-    if not free_names:
+    if shape_requested and not free_names:
         # Shaping was requested (free_mpol>0 or free_ntor>0) but the requested
         # low-(m,n) window resolves to zero free shape dofs once the pinned size
         # modes rc(0,0)/rc(1,0)/zs(1,0) are re-fixed. The canonical degenerate
@@ -1714,6 +1741,26 @@ def parse_args():
         help=(
             "Opt-in low-|n| CWS shape DOFs for the single-stage winding surface. "
             "0 keeps the historical loaded-seed CWS embedding fixed."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-r0",
+        action="store_true",
+        default=os.environ.get("WINDING_SURFACE_FREE_R0", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Opt-in bounded single-stage CWS major-radius translation DOF "
+            "rc(0,0). Default OFF preserves the loaded-seed winding R0."
+        ),
+    )
+    parser.add_argument(
+        "--winding-surface-free-minor",
+        action="store_true",
+        default=os.environ.get("WINDING_SURFACE_FREE_MINOR", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Opt-in bounded single-stage CWS minor-size DOFs rc(1,0)/zs(1,0). "
+            "Default OFF preserves the loaded-seed winding minor radius."
         ),
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
@@ -2623,6 +2670,18 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-available-envelope-reward-weight",
+        type=float,
+        default=float(
+            os.environ.get("SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT", "0.0")
+        ),
+        help=(
+            "Default-off smooth reward for filling positive-clearance analytic "
+            "vessel envelope space. This steering term does not replace direct "
+            "CAD contact, finite-build, or confinement promotion gates."
+        ),
+    )
+    parser.add_argument(
         "--msc-weight",
         type=float,
         default=float(os.environ.get("MSC_WEIGHT", "0.0")),
@@ -3380,6 +3439,10 @@ def parse_args():
         parser.error("--winding-surface-free-mpol must be non-negative.")
     if args.winding_surface_free_ntor < 0:
         parser.error("--winding-surface-free-ntor must be non-negative.")
+    if args.single_stage_available_envelope_reward_weight < 0.0:
+        parser.error(
+            "--single-stage-available-envelope-reward-weight must be non-negative."
+        )
     return args
 
 
@@ -3967,6 +4030,8 @@ def build_hbt_reference_surfaces(
     *,
     winding_surface_free_mpol=0,
     winding_surface_free_ntor=0,
+    winding_surface_free_r0=False,
+    winding_surface_free_minor=False,
 ):
     surfaces = build_banana_reference_surfaces(
         nfp,
@@ -5466,6 +5531,7 @@ class RunIdentityConfig:
     hardware_keepout_json: str | None
     single_stage_vessel_keepout_weight: float
     single_stage_vessel_keepout_clearance: float
+    single_stage_available_envelope_reward_weight: float
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
@@ -5484,6 +5550,8 @@ class RunIdentityConfig:
     banana_surf_major_radius: float
     winding_surface_free_mpol: int
     winding_surface_free_ntor: int
+    winding_surface_free_r0: bool
+    winding_surface_free_minor: bool
     banana_current_max_A: float
     single_stage_banana_geometry_mode: str
     single_stage_banana_current_mode: str
@@ -5629,6 +5697,8 @@ class PreservedTimeoutReplayConfig:
     banana_surf_radius: float | None = None
     winding_surface_free_mpol: int | None = None
     winding_surface_free_ntor: int | None = None
+    winding_surface_free_r0: bool | None = None
+    winding_surface_free_minor: bool | None = None
     winding_surface_free_dof_names: tuple[str, ...] | None = None
     coil_winding_surface_mpol: int | None = None
     coil_winding_surface_ntor: int | None = None
@@ -6067,6 +6137,9 @@ def make_run_identity_config(
         hardware_keepout_json=args.hardware_keepout_json,
         single_stage_vessel_keepout_weight=args.single_stage_vessel_keepout_weight,
         single_stage_vessel_keepout_clearance=args.single_stage_vessel_keepout_clearance,
+        single_stage_available_envelope_reward_weight=(
+            args.single_stage_available_envelope_reward_weight
+        ),
         single_stage_poloidal_threshold_rad=getattr(
             args,
             "single_stage_poloidal_threshold_rad",
@@ -6142,6 +6215,10 @@ def make_run_identity_config(
         ),
         winding_surface_free_ntor=int(
             getattr(args, "winding_surface_free_ntor", 0)
+        ),
+        winding_surface_free_r0=bool(getattr(args, "winding_surface_free_r0", False)),
+        winding_surface_free_minor=bool(
+            getattr(args, "winding_surface_free_minor", False)
         ),
         banana_current_max_A=getattr(
             args,
@@ -6260,12 +6337,24 @@ def build_run_identity_config(config):
             field.name == "banana_surf_major_radius"
             and config.winding_surface_free_mpol == 0
             and config.winding_surface_free_ntor == 0
+            and not config.winding_surface_free_r0
+            and not config.winding_surface_free_minor
         ):
             continue
         if field.name in {
             "winding_surface_free_mpol",
             "winding_surface_free_ntor",
         } and int(value) == 0:
+            continue
+        if field.name in {
+            "winding_surface_free_r0",
+            "winding_surface_free_minor",
+        } and not bool(value):
+            continue
+        if (
+            field.name == "single_stage_available_envelope_reward_weight"
+            and float(value) == 0.0
+        ):
             continue
         if not config.finite_build and (
             field.name == "finite_build"
@@ -6901,6 +6990,9 @@ def apply_frontier_scalarization_override(
         selfint_weight=SINGLE_STAGE_SELFINT_WEIGHT,
         hardware_keepout_weight=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
         vessel_keepout_weight=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        available_envelope_reward_weight=(
+            SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
+        ),
         msc_weight=globals().get("MSC_WEIGHT", 0.0),
         arclen_weight=globals().get("ARCLEN_WEIGHT", 0.0),
         link_weight=globals().get("LINKING_WEIGHT", 0.0),
@@ -7410,6 +7502,7 @@ def build_single_stage_objective_bundle(
     # while the true-frame J was 0.04-0.057 (2026-06-10 laneLOW xval).
     JCurveHardwareKeepout = None
     JCurveVesselEnvelopeKeepout = None
+    JCurveAvailableEnvelopeReward = None
     HARDWARE_KEEPOUT_GROUP_LABELS = []
     HARDWARE_KEEPOUT_METADATA = {}
     keepout_winding_r0 = resolve_keepout_winding_r0(banana_coils)
@@ -7480,6 +7573,14 @@ def build_single_stage_objective_bundle(
         if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
             raise ValueError("--single-stage-vessel-keepout-clearance must be positive")
         JCurveVesselEnvelopeKeepout = CurveVesselEnvelopeKeepout(
+            banana_curves,
+            minimum_clearance=SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE,
+            winding_r0=keepout_winding_r0,
+        )
+    if SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT > 0.0:
+        if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
+            raise ValueError("--single-stage-vessel-keepout-clearance must be positive")
+        JCurveAvailableEnvelopeReward = CurveVesselAvailableEnvelopeReward(
             banana_curves,
             minimum_clearance=SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE,
             winding_r0=keepout_winding_r0,
@@ -7623,6 +7724,10 @@ def build_single_stage_objective_bundle(
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+        AVAILABLE_ENVELOPE_REWARD_WEIGHT=(
+            SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
+        ),
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         JTFCurvature=JTFCurvature,
@@ -7663,6 +7768,7 @@ def build_single_stage_objective_bundle(
         "HARDWARE_KEEPOUT_GROUP_LABELS": list(HARDWARE_KEEPOUT_GROUP_LABELS),
         "HARDWARE_KEEPOUT_METADATA": dict(HARDWARE_KEEPOUT_METADATA),
         "JCurveVesselEnvelopeKeepout": JCurveVesselEnvelopeKeepout,
+        "JCurveAvailableEnvelopeReward": JCurveAvailableEnvelopeReward,
         "JLCFSMajorRadius": JLCFSMajorRadius,
         "JLCFSMinorRadius": JLCFSMinorRadius,
         "JResidueObjective": JResidueObjective,
@@ -7712,6 +7818,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global HARDWARE_KEEPOUT_GROUP_LABELS
     global HARDWARE_KEEPOUT_METADATA
     global JCurveVesselEnvelopeKeepout
+    global JCurveAvailableEnvelopeReward
     global JLCFSMajorRadius
     global JLCFSMinorRadius
     global JResidueObjective
@@ -7758,6 +7865,9 @@ def apply_single_stage_objective_bundle(objective_bundle):
     )
     HARDWARE_KEEPOUT_METADATA = dict(objective_bundle["HARDWARE_KEEPOUT_METADATA"])
     JCurveVesselEnvelopeKeepout = objective_bundle["JCurveVesselEnvelopeKeepout"]
+    JCurveAvailableEnvelopeReward = objective_bundle[
+        "JCurveAvailableEnvelopeReward"
+    ]
     JLCFSMajorRadius = objective_bundle["JLCFSMajorRadius"]
     JLCFSMinorRadius = objective_bundle["JLCFSMinorRadius"]
     JResidueObjective = objective_bundle["JResidueObjective"]
@@ -8084,6 +8194,8 @@ def evaluate_total_objective(
     HARDWARE_KEEPOUT_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
+    JCurveAvailableEnvelopeReward=None,
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
@@ -8141,6 +8253,8 @@ def evaluate_total_objective(
             HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
             JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
             VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
+            JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+            AVAILABLE_ENVELOPE_REWARD_WEIGHT=AVAILABLE_ENVELOPE_REWARD_WEIGHT,
             JResidueObjective=globals().get("JResidueObjective"),
             JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
             MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
@@ -8223,6 +8337,7 @@ def evaluate_alm_objective(
     JCurveSelfIntersectTerms=None,
     JCurveHardwareKeepout=None,
     JCurveVesselEnvelopeKeepout=None,
+    JCurveAvailableEnvelopeReward=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -8309,6 +8424,10 @@ def evaluate_alm_objective(
             JCurveHardwareKeepout=JCurveHardwareKeepout,
             JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
             VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+            JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+            AVAILABLE_ENVELOPE_REWARD_WEIGHT=(
+                SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
+            ),
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
             JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
@@ -8367,6 +8486,7 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JCurveSelfIntersectTerms=JCurveSelfIntersectTerms,
                 JCurveHardwareKeepout=JCurveHardwareKeepout,
                 JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
+                JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -8399,6 +8519,10 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             HARDWARE_KEEPOUT_WEIGHT=SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
             JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
             VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+            JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+            AVAILABLE_ENVELOPE_REWARD_WEIGHT=(
+                SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
+            ),
             JShear=globals().get("JShear"),
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             JMagneticWell=globals().get("JMagneticWell"),
@@ -10266,6 +10390,24 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             replay_config.winding_surface_free_ntor,
         )
     )
+    replay_winding_surface_free_r0 = (
+        replay_config.winding_surface_free_r0
+        if args_value is None
+        else getattr(
+            args_value,
+            "winding_surface_free_r0",
+            replay_config.winding_surface_free_r0,
+        )
+    )
+    replay_winding_surface_free_minor = (
+        replay_config.winding_surface_free_minor
+        if args_value is None
+        else getattr(
+            args_value,
+            "winding_surface_free_minor",
+            replay_config.winding_surface_free_minor,
+        )
+    )
     replay_winding_surface_free_mpol = (
         None
         if replay_winding_surface_free_mpol is None
@@ -10282,7 +10424,7 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     )
     replay_surf_coils = globals().get("surf_coils")
     replay_banana_cws_reembedded_on_live_surface = globals().get(
-        "winding_surface_shape_requested",
+        "winding_surface_optimization_requested",
         replay_config.banana_cws_reembedded_on_live_surface,
     )
     if (
@@ -10290,11 +10432,15 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         and (
             replay_winding_surface_free_mpol is not None
             or replay_winding_surface_free_ntor is not None
+            or replay_winding_surface_free_r0 is not None
+            or replay_winding_surface_free_minor is not None
         )
     ):
         replay_banana_cws_reembedded_on_live_surface = bool(
             (replay_winding_surface_free_mpol or 0)
             or (replay_winding_surface_free_ntor or 0)
+            or replay_winding_surface_free_r0
+            or replay_winding_surface_free_minor
         )
     replay_coil_winding_surface_mpol = (
         replay_config.coil_winding_surface_mpol
@@ -10432,6 +10578,16 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         ),
         winding_surface_free_mpol=replay_winding_surface_free_mpol,
         winding_surface_free_ntor=replay_winding_surface_free_ntor,
+        winding_surface_free_r0=(
+            None
+            if replay_winding_surface_free_r0 is None
+            else bool(replay_winding_surface_free_r0)
+        ),
+        winding_surface_free_minor=(
+            None
+            if replay_winding_surface_free_minor is None
+            else bool(replay_winding_surface_free_minor)
+        ),
         winding_surface_free_dof_names=(
             None
             if replay_winding_surface_free_dof_names is None
@@ -11094,6 +11250,16 @@ def build_preserved_timeout_results_payload(
             if replay_config.winding_surface_free_ntor is None
             else int(replay_config.winding_surface_free_ntor)
         ),
+        "WINDING_SURFACE_FREE_R0": (
+            None
+            if replay_config.winding_surface_free_r0 is None
+            else bool(replay_config.winding_surface_free_r0)
+        ),
+        "WINDING_SURFACE_FREE_MINOR": (
+            None
+            if replay_config.winding_surface_free_minor is None
+            else bool(replay_config.winding_surface_free_minor)
+        ),
         "WINDING_SURFACE_FREE_DOF_NAMES": (
             None
             if replay_config.winding_surface_free_dof_names is None
@@ -11657,6 +11823,8 @@ def build_total_objective(
     HARDWARE_KEEPOUT_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
+    JCurveAvailableEnvelopeReward=None,
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -11704,6 +11872,8 @@ def build_total_objective(
         HARDWARE_KEEPOUT_WEIGHT=HARDWARE_KEEPOUT_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
+        JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
+        AVAILABLE_ENVELOPE_REWARD_WEIGHT=AVAILABLE_ENVELOPE_REWARD_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -13115,6 +13285,7 @@ JCoilWidth = None
 JCurveSelfIntersect = None
 JCurveHardwareKeepout = None
 JCurveVesselEnvelopeKeepout = None
+JCurveAvailableEnvelopeReward = None
 JLCFSMajorRadius = None
 JLCFSMinorRadius = None
 JResidueObjective = None
@@ -13123,6 +13294,7 @@ SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
+SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = 0.0
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
 HARDWARE_KEEPOUT_BACKEND = "point_cloud"
 HARDWARE_KEEPOUT_JSON_PATH = DEFAULT_HARDWARE_KEEPOUT_JSON_PATH
@@ -13489,6 +13661,12 @@ if __name__ == "__main__":
         args.winding_surface_free_mpol,
         args.winding_surface_free_ntor,
     )
+    winding_surface_optimization_requested = _winding_surface_optimization_requested(
+        args.winding_surface_free_mpol,
+        args.winding_surface_free_ntor,
+        free_r0=args.winding_surface_free_r0,
+        free_minor=args.winding_surface_free_minor,
+    )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
         plasma_surf_filename=plasma_surf_filename,
         plasma_surf_path=file_loc,
@@ -13547,14 +13725,16 @@ if __name__ == "__main__":
         banana_surf_radius=banana_surf_radius,
         winding_surface_free_mpol=int(args.winding_surface_free_mpol),
         winding_surface_free_ntor=int(args.winding_surface_free_ntor),
+        winding_surface_free_r0=bool(args.winding_surface_free_r0),
+        winding_surface_free_minor=bool(args.winding_surface_free_minor),
         coil_winding_surface_major_radius_m=(
             float(args.banana_surf_major_radius)
-            if winding_surface_shape_requested
+            if winding_surface_optimization_requested
             else None
         ),
         banana_cws_embedded_winding_minor_radius_m=(
             float(banana_surf_radius)
-            if winding_surface_shape_requested
+            if winding_surface_optimization_requested
             else None
         ),
         curvature_threshold=float(args.curvature_threshold),
@@ -13598,6 +13778,8 @@ if __name__ == "__main__":
         args.banana_surf_major_radius,
         winding_surface_free_mpol=args.winding_surface_free_mpol,
         winding_surface_free_ntor=args.winding_surface_free_ntor,
+        winding_surface_free_r0=args.winding_surface_free_r0,
+        winding_surface_free_minor=args.winding_surface_free_minor,
     )
     bs, coil_partitions, winding_surface_free_dof_names = (
         reembed_loaded_banana_cws_family_on_surface(
@@ -13606,9 +13788,11 @@ if __name__ == "__main__":
             surf_coils,
             winding_surface_free_mpol=args.winding_surface_free_mpol,
             winding_surface_free_ntor=args.winding_surface_free_ntor,
+            winding_surface_free_r0=args.winding_surface_free_r0,
+            winding_surface_free_minor=args.winding_surface_free_minor,
         )
     )
-    if winding_surface_shape_requested and not args.strict_vacuum_current:
+    if winding_surface_optimization_requested and not args.strict_vacuum_current:
         mark_inherited_design_only_biot_savart(
             bs,
             stage2_results,
@@ -13633,7 +13817,7 @@ if __name__ == "__main__":
     )
     timeout_replay_cws_radii = (
         _surface_winding_radii(surf_coils)
-        if winding_surface_shape_requested
+        if winding_surface_optimization_requested
         else realized_cws_winding_radii(coil_partitions.banana_coils)
     )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = replace(
@@ -13652,7 +13836,7 @@ if __name__ == "__main__":
         banana_cws_embedded_winding_minor_radius_m=(
             None if timeout_replay_cws_radii is None else timeout_replay_cws_radii[1]
         ),
-        banana_cws_reembedded_on_live_surface=winding_surface_shape_requested,
+        banana_cws_reembedded_on_live_surface=winding_surface_optimization_requested,
     )
 
     # Extract coil information
@@ -13855,6 +14039,9 @@ if __name__ == "__main__":
     )
     SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = float(
         args.single_stage_vessel_keepout_weight
+    )
+    SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = float(
+        args.single_stage_available_envelope_reward_weight
     )
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
         args.single_stage_vessel_keepout_clearance
@@ -15547,6 +15734,16 @@ if __name__ == "__main__":
         "SINGLE_STAGE_SELFINT_WEIGHT": SINGLE_STAGE_SELFINT_WEIGHT,
         "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT": SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,
         "SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT": SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
+        "SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT": (
+            SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT
+        ),
+        "SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_ACTIVE": (
+            JCurveAvailableEnvelopeReward is not None
+        ),
+        "SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD": run_dict.get(
+            "search_eval",
+            {},
+        ).get("J_available_envelope_reward"),
         "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
             SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
         ),
@@ -15600,10 +15797,15 @@ if __name__ == "__main__":
         ),
         "WINDING_SURFACE_FREE_MPOL": int(args.winding_surface_free_mpol),
         "WINDING_SURFACE_FREE_NTOR": int(args.winding_surface_free_ntor),
+        "WINDING_SURFACE_FREE_R0": bool(args.winding_surface_free_r0),
+        "WINDING_SURFACE_FREE_MINOR": bool(args.winding_surface_free_minor),
         "WINDING_SURFACE_FREE_DOF_NAMES": list(winding_surface_free_dof_names),
+        "WINDING_SURFACE_FREE_DOF_COUNT": len(winding_surface_free_dof_names),
         "COIL_WINDING_SURFACE_MPOL": int(surf_coils.mpol),
         "COIL_WINDING_SURFACE_NTOR": int(surf_coils.ntor),
-        "BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE": winding_surface_shape_requested,
+        "BANANA_CWS_REEMBEDDED_ON_LIVE_SURFACE": (
+            winding_surface_optimization_requested
+        ),
         "BANANA_WINDING_SURFACE_SPEC_MAJOR_RADIUS_M": float(
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),

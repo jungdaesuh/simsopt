@@ -148,6 +148,7 @@ from banana_opt.hardware_constraint_schema import (
 from banana_opt.hardware_keepout import (
     CurveHardwareKeepout,
     CurveHardwareSdfKeepout,
+    CurveVesselAvailableEnvelopeReward,
     CurveVesselEnvelopeKeepout,
     hardware_keepout_metadata,
     hardware_keepout_results_fields,
@@ -447,6 +448,10 @@ def free_loaded_winding_surface_size_dofs(banana_curve, args):
 def validate_stage2_vessel_keepout_cli_args(args) -> None:
     if float(args.stage2_vessel_keepout_weight) < 0.0:
         raise ValueError("--stage2-vessel-keepout-weight must be >= 0.")
+    if float(args.stage2_available_envelope_reward_weight) < 0.0:
+        raise ValueError(
+            "--stage2-available-envelope-reward-weight must be >= 0."
+        )
 
 
 def resolve_stage2_resonant_iota_target(args):
@@ -1927,6 +1932,17 @@ def parse_args():
         "STAGE2_VESSEL_KEEPOUT_WEIGHT=0) to disable the term entirely for "
         "legacy/byte-identical reproduction. In ALM mode the weighted term "
         "rides the smooth objective rather than adding a constraint row.",
+    )
+    parser.add_argument(
+        "--stage2-available-envelope-reward-weight",
+        type=float,
+        default=float(os.environ.get("STAGE2_AVAILABLE_ENVELOPE_REWARD_WEIGHT", "0.0")),
+        help=(
+            "Default-off reward for filling usable positive-clearance vessel "
+            "envelope volume with the banana coil channel. This is a smooth "
+            "objective term only; direct CAD, finite-build, and confinement "
+            "promotion gates remain unchanged."
+        ),
     )
     parser.add_argument(
         "--stage2-hardware-keepout-weight",
@@ -4134,18 +4150,29 @@ def main(parsed_args=None):
     # their true frame, mirroring the single-stage resolve_keepout_winding_r0
     # wiring (2026-06-10 winding-frame fix). No silent 0.903 fallback.
     VESSEL_KEEPOUT_WEIGHT = float(args.stage2_vessel_keepout_weight)
-    if VESSEL_KEEPOUT_WEIGHT > 0.0:
+    AVAILABLE_ENVELOPE_REWARD_WEIGHT = float(
+        args.stage2_available_envelope_reward_weight
+    )
+    if VESSEL_KEEPOUT_WEIGHT > 0.0 or AVAILABLE_ENVELOPE_REWARD_WEIGHT > 0.0:
         realized_winding_radii = realized_cws_winding_radii(new_banana_coils)
-        vessel_keepout_winding_r0 = (
+        envelope_winding_r0 = (
             BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
             if realized_winding_radii is None
             else realized_winding_radii[0]
         )
+    if VESSEL_KEEPOUT_WEIGHT > 0.0:
         Jvessel = CurveVesselEnvelopeKeepout(
-            objective_curves, winding_r0=vessel_keepout_winding_r0
+            objective_curves, winding_r0=envelope_winding_r0
         )
     else:
         Jvessel = None
+    if AVAILABLE_ENVELOPE_REWARD_WEIGHT > 0.0:
+        Javailable_envelope_reward = CurveVesselAvailableEnvelopeReward(
+            objective_curves,
+            winding_r0=envelope_winding_r0,
+        )
+    else:
+        Javailable_envelope_reward = None
     # Default-on at single-stage parity (2026-06-15 keep-out parity decision;
     # Stage-2 path-parity, hardware keep-out coverage plan 2026-06-13): the
     # static in-vessel hardware keep-out (shells / sensors / solenoid / REMC /
@@ -4334,6 +4361,17 @@ def main(parsed_args=None):
         # ALM path: the keep-out rides the smooth base objective (no new
         # constraint row), mirroring the single-stage weighted-penalty wiring.
         BASE_OBJECTIVE = BASE_OBJECTIVE + VESSEL_KEEPOUT_WEIGHT * Jvessel
+    if Javailable_envelope_reward is not None:
+        JF = (
+            JF
+            + AVAILABLE_ENVELOPE_REWARD_WEIGHT * Javailable_envelope_reward
+        )
+        # Smooth steering reward only: promotion still requires the direct CAD
+        # contact oracle plus finite-build and confinement gates.
+        BASE_OBJECTIVE = (
+            BASE_OBJECTIVE
+            + AVAILABLE_ENVELOPE_REWARD_WEIGHT * Javailable_envelope_reward
+        )
     if Jhardware is not None:
         JF = JF + HARDWARE_KEEPOUT_WEIGHT * Jhardware
         # Penalty path: the static-hardware keep-out rides the weighted objective.
@@ -5217,6 +5255,22 @@ def main(parsed_args=None):
         secondary_results.update(
             _segment_exact_clearance_artifact_fields(objective_curves, lcfs_surf)
         )
+        secondary_results.update(
+            {
+                "STAGE2_VESSEL_KEEPOUT_WEIGHT": VESSEL_KEEPOUT_WEIGHT,
+                "STAGE2_AVAILABLE_ENVELOPE_REWARD_WEIGHT": (
+                    AVAILABLE_ENVELOPE_REWARD_WEIGHT
+                ),
+                "STAGE2_AVAILABLE_ENVELOPE_REWARD_ACTIVE": (
+                    Javailable_envelope_reward is not None
+                ),
+                "STAGE2_AVAILABLE_ENVELOPE_REWARD": (
+                    None
+                    if Javailable_envelope_reward is None
+                    else float(Javailable_envelope_reward.J())
+                ),
+            }
+        )
         write_json(secondary_stage2_results_path, secondary_results)
         secondary_artifact_metadata = build_stage2_secondary_artifact_metadata(
             secondary_stage2_bs_path=secondary_stage2_bs_path,
@@ -5240,6 +5294,22 @@ def main(parsed_args=None):
     if CONSTRAINT_METHOD == "alm":
         results.update(_stage2_alm_adaptive_smoothing_results(alm_smoothing_state))
     results.update(secondary_artifact_metadata)
+    results.update(
+        {
+            "STAGE2_VESSEL_KEEPOUT_WEIGHT": VESSEL_KEEPOUT_WEIGHT,
+            "STAGE2_AVAILABLE_ENVELOPE_REWARD_WEIGHT": (
+                AVAILABLE_ENVELOPE_REWARD_WEIGHT
+            ),
+            "STAGE2_AVAILABLE_ENVELOPE_REWARD_ACTIVE": (
+                Javailable_envelope_reward is not None
+            ),
+            "STAGE2_AVAILABLE_ENVELOPE_REWARD": (
+                None
+                if Javailable_envelope_reward is None
+                else float(Javailable_envelope_reward.J())
+            ),
+        }
+    )
     if FINITE_BUILD:
         results.update(
             _finite_build_artifact_metadata(
