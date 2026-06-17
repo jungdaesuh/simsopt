@@ -33,6 +33,7 @@ from simsopt.geo.framedcurve import (
     surface_tangent_normal_direction,
 )
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
+from simsopt import load as simsopt_load
 
 from alm_utils import (
     minimize_alm,
@@ -922,6 +923,20 @@ def parse_args():
         help=(
             "Optional saved Boozer-surface artifact used to warm-start the "
             "Stage 2 iota runtime."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-plasma-surface-path",
+        default=os.environ.get("STAGE2_PLASMA_SURFACE_PATH"),
+        help=(
+            "Optional saved Surface artifact used DIRECTLY as the Stage-2 plasma "
+            "target (the SquaredFlux field-fit surface), overriding the surface "
+            "derived from --equilibrium-path. For coherent warm-starts: point at a "
+            "converged seed's own boozer surface so loaded coils start at their "
+            "true field error instead of being re-fit to a re-derived surface. "
+            "ONLY the field-fit target changes; the LCFS shell checks, the iota-"
+            "runtime diagnostic, and any cold-path proxy geometry stay derived from "
+            "--equilibrium-path. Default: derive from --equilibrium-path."
         ),
     )
     parser.add_argument(
@@ -3182,6 +3197,38 @@ def _capture_stage2_artifact_state(
     }
 
 
+def load_stage2_plasma_surface(plasma_surface_path, *, expected_nfp):
+    """Load a saved plasma target surface for the Stage-2 SquaredFlux field-fit.
+
+    Warm-start coherence lever: a converged Stage-2 seed fits its OWN boozer
+    surface, which is not generally reproduced by re-deriving a surface from the
+    wout at a clean flux label (different volume/shape). Loading that surface
+    directly as the field-fit target lets the seed's coils start at their true
+    field error instead of being re-fit to a re-derived surface. The artifact must
+    be a Surface whose field-period count matches the device; the major-radius /
+    LCFS shell checks keep using the --equilibrium-path geometry.
+    """
+    path = Path(plasma_surface_path)
+    if not path.is_file():
+        raise ValueError(f"--stage2-plasma-surface-path file not found: {path}")
+    loaded = simsopt_load(str(path))
+    # Saved boozer-surface artifacts deserialize as a BoozerSurface wrapping the
+    # underlying flux Surface; the SquaredFlux target is that inner Surface. A bare
+    # Surface artifact has no ``.surface`` attribute and passes through unchanged.
+    surface = getattr(loaded, "surface", loaded)
+    if not (hasattr(surface, "nfp") and hasattr(surface, "gamma")):
+        raise ValueError(
+            "--stage2-plasma-surface-path did not load a Surface "
+            f"(got {type(loaded).__name__})."
+        )
+    if int(surface.nfp) != int(expected_nfp):
+        raise ValueError(
+            f"--stage2-plasma-surface-path nfp {int(surface.nfp)} does not match "
+            f"the device nfp {int(expected_nfp)} (from --equilibrium-path)."
+        )
+    return surface
+
+
 def load_stage2_seed_configuration(
     seed_bs_path,
     surf,
@@ -3805,6 +3852,16 @@ def main(parsed_args=None):
             ntheta,
         )
     new_surf = plasma_geometry.working_surface
+    if args.stage2_plasma_surface_path:
+        # Warm-start coherence: use a converged seed's own saved plasma surface as
+        # the SquaredFlux field-fit target instead of the wout-re-derived working
+        # surface, so loaded coils start at their true field error. NFP-validated
+        # against the device. SCOPE: only the field-fit target moves; the LCFS shell
+        # checks below, the iota-runtime diagnostic, and any cold-path proxy geometry
+        # keep using the --equilibrium-path-derived plasma_geometry.
+        new_surf = load_stage2_plasma_surface(
+            args.stage2_plasma_surface_path, expected_nfp=lcfs_probe.nfp
+        )
     lcfs_surf = plasma_geometry.lcfs_surface
     banana_surf_nfp = new_surf.nfp
     if (
