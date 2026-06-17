@@ -32,6 +32,7 @@ if EXAMPLES_ROOT_STR not in sys.path:
 
 from banana_opt.hardware_keepout import (  # noqa: E402
     CurveHardwareKeepout,
+    CurveVesselAvailableEnvelopeReward,
     CurveVesselEnvelopeKeepout,
     effective_keepout_groups,
     hardware_keepout_metadata,
@@ -341,6 +342,78 @@ class VesselEnvelopeKeepoutObjectiveTests(unittest.TestCase):
         objective = CurveVesselEnvelopeKeepout([curve])
         x0 = np.asarray(curve.x, dtype=float).copy()
         rng = np.random.default_rng(23)
+        direction = rng.standard_normal(x0.size)
+        direction /= np.linalg.norm(direction)
+
+        analytic = float(np.dot(objective.dJ(), direction))
+        self.assertNotEqual(analytic, 0.0)
+
+        eps = 1e-7
+        curve.x = x0 + eps * direction
+        j_plus = objective.J()
+        curve.x = x0 - eps * direction
+        j_minus = objective.J()
+        curve.x = x0
+        fd = (j_plus - j_minus) / (2.0 * eps)
+
+        self.assertAlmostEqual(
+            analytic, fd, delta=1e-4 * max(1.0, abs(analytic)),
+            msg=f"analytic {analytic} vs finite-difference {fd}",
+        )
+
+
+class VesselAvailableEnvelopeRewardObjectiveTests(unittest.TestCase):
+    def test_defaults_use_hardware_contract(self):
+        curve = _circle_curve(seed=24)
+        objective = CurveVesselAvailableEnvelopeReward([curve])
+
+        self.assertAlmostEqual(objective.half_w, HALF_W)
+        self.assertAlmostEqual(objective.half_d, HALF_D)
+        self.assertAlmostEqual(
+            objective.minimum_clearance,
+            HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
+        )
+        self.assertAlmostEqual(
+            objective.winding_r0,
+            BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        )
+        self.assertAlmostEqual(objective.vessel_r0, VACUUM_VESSEL_MAJOR_RADIUS_M)
+        self.assertAlmostEqual(
+            objective.vessel_minor_radius,
+            VACUUM_VESSEL_MINOR_RADIUS_M,
+        )
+
+    def test_reward_is_bounded_and_prefers_using_available_radius(self):
+        usable_radius = (
+            VACUUM_VESSEL_MINOR_RADIUS_M - HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+        )
+        inner = _circle_curve(
+            radius=VACUUM_VESSEL_MAJOR_RADIUS_M + 0.20 * usable_radius,
+            seed=None,
+        )
+        outer = _circle_curve(
+            radius=VACUUM_VESSEL_MAJOR_RADIUS_M + 0.40 * usable_radius,
+            seed=None,
+        )
+
+        j_inner = CurveVesselAvailableEnvelopeReward([inner]).J()
+        j_outer = CurveVesselAvailableEnvelopeReward([outer]).J()
+
+        self.assertLess(j_inner, 0.0)
+        self.assertLess(j_outer, j_inner)
+        self.assertGreaterEqual(j_outer, -1.0)
+
+    def test_gradient_matches_finite_differences(self):
+        usable_radius = (
+            VACUUM_VESSEL_MINOR_RADIUS_M - HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+        )
+        curve = _circle_curve(
+            radius=VACUUM_VESSEL_MAJOR_RADIUS_M + 0.30 * usable_radius,
+            seed=25,
+        )
+        objective = CurveVesselAvailableEnvelopeReward([curve])
+        x0 = np.asarray(curve.x, dtype=float).copy()
+        rng = np.random.default_rng(26)
         direction = rng.standard_normal(x0.size)
         direction /= np.linalg.norm(direction)
 

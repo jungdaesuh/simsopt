@@ -327,6 +327,21 @@ def vessel_envelope_keepout_pure(gammac, half_w, half_d, minimum_clearance,
     return jnp.mean(violation ** 2)
 
 
+def vessel_available_envelope_reward_pure(gammac, half_w, half_d,
+                                          minimum_clearance, winding_r0,
+                                          vessel_r0, vessel_minor_radius):
+    """Bounded reward for using positive-clearance vessel envelope volume."""
+    corners = _bracket_corners(gammac, half_w, half_d, winding_r0)
+    major_radius = jnp.sqrt(corners[:, 0] ** 2 + corners[:, 1] ** 2)
+    tube_radius = jnp.sqrt(
+        (major_radius - vessel_r0) ** 2 + corners[:, 2] ** 2
+    )
+    usable_radius = jnp.maximum(vessel_minor_radius - minimum_clearance, 1.0e-6)
+    safe_tube_radius = jnp.clip(tube_radius, 0.0, usable_radius)
+    fill_fraction = safe_tube_radius / usable_radius
+    return -jnp.mean(fill_fraction ** 2)
+
+
 def hardware_keepout_pure(gammac, points, point_weight, half_w, half_d,
                           margin, winding_r0):
     r"""Curve-vs-hardware hinge penalty on the **as-built U-channel envelope**.
@@ -851,6 +866,75 @@ class CurveVesselEnvelopeKeepout(Optimizable):
             )
             best = min(best, float(clearance))
         return best
+
+    def J(self):
+        winding_r0 = self.live_winding_r0()
+        return sum(
+            float(self.J_jax(curve.gamma(), winding_r0)) for curve in self.curves
+        )
+
+    @derivative_dec
+    def dJ(self):
+        winding_r0 = self.live_winding_r0()
+        return sum(
+            curve.dgamma_by_dcoeff_vjp(
+                np.asarray(self.dJ_dgamma(curve.gamma(), winding_r0))
+            )
+            for curve in self.curves
+        )
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class CurveVesselAvailableEnvelopeReward(Optimizable):
+    r"""
+    Smooth reward for moving Type KK envelopes into usable vessel volume.
+
+    The value is bounded in ``[-ncurves, 0]`` and clips at the required positive
+    clearance, so it rewards filling available analytic vessel envelope space
+    without creating a reward for crossing the keep-out boundary.  It is only a
+    steering term; the direct CAD contact oracle and confinement gates remain
+    the promotion criteria.
+    """
+
+    def __init__(self, curves,
+                 half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+                 half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                 minimum_clearance=HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+                 vessel_r0=VACUUM_VESSEL_MAJOR_RADIUS_M,
+                 vessel_minor_radius=VACUUM_VESSEL_MINOR_RADIUS_M):
+        self.curves = curves
+        self.half_w = float(half_w)
+        self.half_d = float(half_d)
+        self.minimum_clearance = float(minimum_clearance)
+        self._winding_r0_fallback = float(winding_r0)
+        self.vessel_r0 = float(vessel_r0)
+        self.vessel_minor_radius = float(vessel_minor_radius)
+        self.J_jax = jit(
+            lambda gammac, winding_r0_: vessel_available_envelope_reward_pure(
+                gammac,
+                self.half_w,
+                self.half_d,
+                self.minimum_clearance,
+                winding_r0_,
+                self.vessel_r0,
+                self.vessel_minor_radius,
+            )
+        )
+        self.dJ_dgamma = jit(
+            lambda gammac, winding_r0_: grad(self.J_jax, argnums=0)(
+                gammac, winding_r0_))
+        super().__init__(depends_on=curves)
+
+    @property
+    def winding_r0(self):
+        """Fallback winding major radius (constructor value), m."""
+        return self._winding_r0_fallback
+
+    def live_winding_r0(self):
+        """Live winding major radius the frame is currently measured about, m."""
+        return live_winding_r0(self.curves, self._winding_r0_fallback)
 
     def J(self):
         winding_r0 = self.live_winding_r0()
