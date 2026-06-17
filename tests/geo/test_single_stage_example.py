@@ -22,6 +22,9 @@ from simsopt._core.optimizable import Optimizable
 from examples.single_stage_optimization.banana_opt.topology.kam_birkhoff import (
     KAM_FRACTION_SEMANTICS,
 )
+from examples.single_stage_optimization.STAGE_2 import (
+    banana_coil_solver as stage2_solver,
+)
 from simsopt.field.coil import Current, ScaledCurrent
 from simsopt.objectives.utilities import forward_backward
 
@@ -17858,6 +17861,26 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
         self.assertEqual(args.maxcor, 40)
 
+    def test_stage2_parse_args_exposes_keepout_contract_fields(self):
+        with (
+            patch.object(sys, "argv", ["banana_coil_solver.py"]),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            args = stage2_solver.parse_args()
+
+        self.assertEqual(args.stage2_available_envelope_reward_weight, 0.0)
+        self.assertEqual(args.stage2_hardware_keepout_backend, "point_cloud")
+        self.assertIsNone(args.stage2_hardware_keepout_sdf_manifest)
+        self.assertIsNone(args.stage2_plasma_surface_path)
+        self.assertEqual(
+            args.stage2_hardware_keepout_json,
+            stage2_solver.DEFAULT_HARDWARE_KEEPOUT_JSON_PATH,
+        )
+        self.assertEqual(
+            args.stage2_hardware_keepout_glb,
+            stage2_solver.DEFAULT_HARDWARE_KEEPOUT_GLB_PATH,
+        )
+
     def _stage2_s_hel_argv(self, *extra_args: str) -> list[str]:
         return [
             "banana_coil_solver.py",
@@ -18948,6 +18971,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "target_lcfs_max_major_radius_m": in_bounds_lcfs_major_radius_m(),
             "target_lcfs_max_minor_radius_m": in_bounds_lcfs_minor_radius_m(),
             "stage2_plasma_scaling_mode": "lcfs",
+            "stage2_plasma_surface_path": None,
             "accept_offspec_major_radius": False,
             "accept_offspec_banana_current_sign": False,
             "accept_offspec_banana_current_max": False,
@@ -18971,9 +18995,12 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "fold_geodesic_curvature_limit": 43.3114,
             "fold_geodesic_curvature_margin_fraction": 0.10,
             "stage2_vessel_keepout_weight": 0.0,
+            "stage2_available_envelope_reward_weight": 0.0,
             "stage2_hardware_keepout_weight": 0.0,
+            "stage2_hardware_keepout_backend": "point_cloud",
             "stage2_hardware_keepout_json": None,
             "stage2_hardware_keepout_glb": stage2_hardware_keepout_glb_default,
+            "stage2_hardware_keepout_sdf_manifest": None,
             "stage2_resonant_flux_weight": 0.0,
             "stage2_resonant_iota_target": None,
             "stage2_resonant_delta": 0.02,
@@ -19214,6 +19241,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
             def shortest_clearance(self):
                 return 0.041
+
+        class FakeAvailableEnvelopeReward(FakeStage2Objective):
+            def __init__(self, curves, *, winding_r0):
+                super().__init__(-0.04, [0.0, 0.0])
+                runtime["available_envelope_reward_args"] = {
+                    "curves": tuple(curves),
+                    "winding_r0": winding_r0,
+                }
 
         class FakeHardwareKeepout(FakeStage2Objective):
             def __init__(
@@ -19756,6 +19791,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                         module,
                         "CurveVesselEnvelopeKeepout",
                         side_effect=FakeVesselEnvelopeKeepout,
+                    ),
+                    patch.object(
+                        module,
+                        "CurveVesselAvailableEnvelopeReward",
+                        side_effect=FakeAvailableEnvelopeReward,
                     ),
                     patch.object(
                         module,
