@@ -1991,6 +1991,135 @@ def test_single_stage_failure_penalty_is_finite_before_initial_objective_seed():
     assert summary["reject_class"] == "hardware"
 
 
+def test_cpu_resolved_warm_start_install_is_value_only_and_stales_next_solve():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        def __init__(self):
+            self.x = np.zeros(2, dtype=np.float64)
+
+        def set_dofs(self, dofs):
+            self.x = np.asarray(dofs, dtype=np.float64).copy()
+
+    class _BoozerSurface:
+        def __init__(self):
+            self.surface = _Surface()
+            self.options = {"weight_inv_modB": True}
+            self.boozer_type = "ls"
+            self.need_to_run_code = True
+            self.res = None
+
+    boozer_surface = _BoozerSurface()
+
+    res = single_stage_example.install_cpu_value_only_solved_boozer_state(
+        boozer_surface,
+        sdofs=np.asarray([0.3, 0.4], dtype=np.float64),
+        iota=0.5,
+        G=1.5,
+    )
+
+    np.testing.assert_allclose(boozer_surface.surface.x, [0.3, 0.4])
+    assert boozer_surface.need_to_run_code is False
+    assert res["success"] is True
+    assert res["linearization_kind"] == "value_only"
+    assert res["adjoint_linear_solve_available"] is False
+    assert "PLU" not in res
+    assert "vjp" not in res
+
+    single_stage_example._restore_cpu_boozer_state(
+        boozer_surface,
+        {
+            "sdofs": np.asarray([0.7, 0.8], dtype=np.float64),
+            "iota": 0.9,
+            "G": 2.5,
+        },
+    )
+
+    np.testing.assert_allclose(boozer_surface.surface.x, [0.7, 0.8])
+    assert boozer_surface.res["iota"] == pytest.approx(0.9)
+    assert boozer_surface.res["G"] == pytest.approx(2.5)
+    assert boozer_surface.need_to_run_code is True
+
+
+def test_successful_cpu_candidate_seeds_pending_initial_objective():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        def __init__(self):
+            self.x = np.zeros(2, dtype=np.float64)
+
+        def set_dofs(self, dofs):
+            self.x = np.asarray(dofs, dtype=np.float64).copy()
+
+        def is_self_intersecting(self):
+            return False
+
+        def volume(self):
+            return 1.25
+
+    class _BoozerSurface:
+        def __init__(self):
+            self.surface = _Surface()
+            self.need_to_run_code = True
+            self.run_calls = []
+            self.res = {
+                "success": True,
+                "iota": 0.1,
+                "G": 0.2,
+            }
+
+        def run_code(self, iota, G):
+            self.run_calls.append((float(iota), float(G)))
+            self.need_to_run_code = False
+            self.res = {
+                "success": True,
+                "iota": float(iota),
+                "G": float(G),
+                "residual": np.zeros(1, dtype=np.float64),
+            }
+            return self.res
+
+    class _Objective:
+        def J(self):
+            return 5.0
+
+        def dJ(self):
+            return np.asarray([7.0, 8.0], dtype=np.float64)
+
+    run_dict = {
+        "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+        "iota": 0.5,
+        "G": 1.5,
+        "J": float("nan"),
+        "dJ": np.zeros(2, dtype=np.float64),
+        "initial_objective": float("nan"),
+        "initial_objective_pending": True,
+        "failure_count": 0,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "intersecting": False,
+        "self_intersection_check_available": True,
+    }
+    boozer_surface = _BoozerSurface()
+
+    value, grad = single_stage_example._evaluate_candidate_impl(
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        run_dict,
+        boozer_surface,
+        _Objective(),
+    )
+
+    assert value == pytest.approx(5.0)
+    np.testing.assert_allclose(grad, [7.0, 8.0])
+    assert boozer_surface.run_calls == [(0.5, 1.5)]
+    assert run_dict["initial_objective_pending"] is False
+    assert run_dict["initial_objective"] == pytest.approx(5.0)
+    np.testing.assert_allclose(run_dict["dJ"], [7.0, 8.0])
+
+
 def test_single_stage_failure_penalty_uses_pre_trial_line_search_point():
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,

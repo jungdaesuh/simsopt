@@ -179,3 +179,24 @@ def test_flag_never_reaches_cpp_reference_child(monkeypatch, tmp_path):
     args = _parse([FLAG])
     command = _capture_child_command(monkeypatch, tmp_path, args, "cpu", "cpu")
     assert FLAG not in command
+
+
+def test_explicit_donor_outer_run_reuses_resolved_startup_solve(
+    monkeypatch,
+    tmp_path,
+):
+    args = _parse(["--warm-start-run-dir", "/tmp/seed", "--maxiter", "1500"])
+
+    command = _capture_child_command(monkeypatch, tmp_path, args, "cpu", "cpu")
+
+    assert "--reuse-resolved-warm-start-solve" in command
+    assert "--init-only" not in command
+
+
+def test_init_only_donor_run_replays_setup_solve(monkeypatch, tmp_path):
+    args = _parse(["--warm-start-run-dir", "/tmp/seed", "--maxiter", "0"])
+
+    command = _capture_child_command(monkeypatch, tmp_path, args, "cpu", "cpu")
+
+    assert "--reuse-resolved-warm-start-solve" not in command
+    assert "--init-only" in command

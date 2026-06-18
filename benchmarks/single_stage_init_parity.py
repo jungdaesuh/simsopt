@@ -988,6 +988,14 @@ def _resolve_single_stage_child_platform(
     return platform
 
 
+def _should_reuse_resolved_warm_start_solve(args: argparse.Namespace) -> bool:
+    """Return whether an explicit donor outer run should skip setup replay."""
+    return (
+        getattr(args, "warm_start_run_dir", None) is not None
+        and int(args.maxiter) > 0
+    )
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -1047,6 +1055,8 @@ def _run_single_stage_case(
         warm_start_run_dir = getattr(args, "warm_start_run_dir", None)
         if warm_start_run_dir is not None:
             command.extend(["--warm-start-run-dir", str(warm_start_run_dir)])
+        if _should_reuse_resolved_warm_start_solve(args):
+            command.append("--reuse-resolved-warm-start-solve")
         if int(args.maxiter) <= 0:
             command.append("--init-only")
         else:

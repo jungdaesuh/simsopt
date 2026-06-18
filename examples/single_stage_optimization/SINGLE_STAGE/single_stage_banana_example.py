@@ -4394,9 +4394,10 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "For JAX warm-start continuation from a trusted donor, install the "
+            "For warm-start continuation from a trusted donor, install the "
             "resolved surface/iota/G state instead of replaying the setup "
-            "Boozer solve."
+            "Boozer solve. Later optimizer candidates still run Boozer before "
+            "gradient evaluation."
         ),
     )
     parser.add_argument(
@@ -5491,6 +5492,42 @@ class BoozerResidualExact(Optimizable):
         return dJ_by_dB
 
 
+def install_cpu_value_only_solved_boozer_state(
+    boozer_surface,
+    *,
+    sdofs,
+    iota,
+    G,
+    optimizer_method="resolved-warm-start",
+):
+    """Install a trusted CPU Boozer solved state without adjoint factors."""
+    solved_sdofs = np.asarray(host_array(sdofs), dtype=np.float64)
+    boozer_surface.surface.set_dofs(solved_sdofs)
+    res = {
+        "success": True,
+        "primal_success": True,
+        "converged": True,
+        "finite": True,
+        "sdofs": solved_sdofs.copy(),
+        "iota": float(iota),
+        "G": None if G is None else float(G),
+        "s": boozer_surface.surface,
+        "residual": np.zeros(0, dtype=np.float64),
+        "jacobian": np.zeros(0, dtype=np.float64),
+        "gradient": np.zeros(0, dtype=np.float64),
+        "fun": 0.0,
+        "iter": 0,
+        "type": boozer_surface.boozer_type,
+        "weight_inv_modB": bool(boozer_surface.options.get("weight_inv_modB", True)),
+        "optimizer_method": str(optimizer_method),
+        "linearization_kind": "value_only",
+        "adjoint_linear_solve_available": False,
+    }
+    boozer_surface.res = res
+    boozer_surface.need_to_run_code = False
+    return res
+
+
 def initialize_boozer_surface(
     surf_prev,
     mpol,
@@ -5546,9 +5583,10 @@ def initialize_boozer_surface(
         initial Boozer state instead of the fitted Stage 2 seed surface
     iota_override: optional solved iota warm start for the Boozer replay
     G_override: optional solved G warm start for the Boozer replay
-    reuse_resolved_warm_start_solve: for JAX value-only lanes with a trusted
-        resolved warm start, install the solved runtime state instead of
-        replaying the setup solve
+    reuse_resolved_warm_start_solve: with a trusted resolved warm start,
+        install the solved surface/iota/G state instead of replaying the setup
+        solve. The installed state is value-only; later objective evaluations
+        must still run Boozer before requesting gradients.
     record_scipy_callback_trace: record every SciPy adapter objective
         evaluation for explicit parity trace runs
     """
@@ -5765,28 +5803,38 @@ def initialize_boozer_surface(
     emit_stage("before_boozer_solve")
     solve_start_s = _perf_counter_s()
     if reuse_resolved_warm_start_solve:
-        if backend != "jax" or solve_sdofs is None:
+        if solve_sdofs is None:
             raise RuntimeError(
-                "reuse_resolved_warm_start_solve requires the JAX backend and "
-                "explicit surface_dofs_override."
+                "reuse_resolved_warm_start_solve requires explicit "
+                "surface_dofs_override."
             )
-        install_solved_state = getattr(
-            boozer_surface,
-            "install_value_only_solved_runtime_state",
-            None,
-        )
-        if not callable(install_solved_state):
-            raise RuntimeError(
-                "reuse_resolved_warm_start_solve requires BoozerSurfaceJAX "
-                "install_value_only_solved_runtime_state()."
+        if backend == "jax":
+            install_solved_state = getattr(
+                boozer_surface,
+                "install_value_only_solved_runtime_state",
+                None,
             )
-        print("Reusing resolved JAX Boozer warm-start state.")
-        res = install_solved_state(
-            sdofs=solve_sdofs,
-            iota=solve_iota,
-            G=solve_G,
-            optimizer_method="resolved-warm-start",
-        )
+            if not callable(install_solved_state):
+                raise RuntimeError(
+                    "reuse_resolved_warm_start_solve requires BoozerSurfaceJAX "
+                    "install_value_only_solved_runtime_state()."
+                )
+            print("Reusing resolved JAX Boozer warm-start state.")
+            res = install_solved_state(
+                sdofs=solve_sdofs,
+                iota=solve_iota,
+                G=solve_G,
+                optimizer_method="resolved-warm-start",
+            )
+        else:
+            print("Reusing resolved CPU Boozer warm-start state.")
+            res = install_cpu_value_only_solved_boozer_state(
+                boozer_surface,
+                sdofs=solve_sdofs,
+                iota=solve_iota,
+                G=solve_G,
+                optimizer_method="resolved-warm-start",
+            )
     else:
         res = run_boozer_solve(boozer_surface, solve_iota, solve_G, solve_sdofs)
     solve_end_s = _perf_counter_s()
@@ -10711,9 +10759,10 @@ def resolve_target_lane_boozer_init_base_overrides(
 
 def _restore_cpu_boozer_state(boozer_surface, run_dict):
     """Restore CPU BoozerSurface warm-start state from run_dict snapshot."""
-    boozer_surface.surface.x = run_dict["sdofs"]
+    boozer_surface.surface.set_dofs(np.asarray(run_dict["sdofs"], dtype=np.float64))
     boozer_surface.res["iota"] = run_dict["iota"]
     boozer_surface.res["G"] = run_dict["G"]
+    boozer_surface.need_to_run_code = True
 
 
 def _boozer_surface_supports_explicit_surface_warm_start(boozer_surface):
@@ -11007,6 +11056,12 @@ def _evaluate_candidate_impl(
             populate_standard_jax_surface_objective_gradients(diagnostics)
         J = JF.J()
         dJ = JF.dJ()
+        if bool(run_dict.get("initial_objective_pending", False)):
+            seed_single_stage_initial_objective_from_values(
+                run_dict,
+                objective_value=J,
+                objective_grad=dJ,
+            )
         logger.info("Volume: %s", host_float(boozer_surface.surface.volume()))
         logger.info("Iota: %s", host_float(boozer_surface.res["iota"]))
     else:
@@ -14788,11 +14843,21 @@ if __name__ == "__main__":
         if use_target_lane and args.benchmark_mode
         else _summarize_host_vector(dofs)
     )
+    defer_resolved_warm_start_initial_objective = bool(
+        args.reuse_resolved_warm_start_solve
+        and not (use_target_lane or use_host_jax_outer_objective)
+    )
+    evaluate_snapshot_initial_objective = not (
+        use_target_lane
+        or use_host_jax_outer_objective
+        or defer_resolved_warm_start_initial_objective
+    )
     snapshot_start_s = _perf_counter_s()
     record_outer_optimizer_event(
         "snapshot_started",
-        evaluate_initial_objective=not bool(
-            use_target_lane or use_host_jax_outer_objective
+        evaluate_initial_objective=bool(evaluate_snapshot_initial_objective),
+        deferred_resolved_warm_start_initial_objective=bool(
+            defer_resolved_warm_start_initial_objective
         ),
         optimizer_dofs=snapshot_optimizer_dofs_summary,
         optimizer_dofs_summary_deferred=bool(snapshot_optimizer_dofs_summary is None),
@@ -14809,9 +14874,7 @@ if __name__ == "__main__":
         bs,
         num_tf_coils=num_tf_coils,
         coil_dofs_override=dofs,
-        evaluate_initial_objective=not (
-            use_target_lane or use_host_jax_outer_objective
-        ),
+        evaluate_initial_objective=bool(evaluate_snapshot_initial_objective),
         objective_grad_transform=(
             None
             if full_graph_optimizer_dof_map is None
