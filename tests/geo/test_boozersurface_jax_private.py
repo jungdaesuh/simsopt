@@ -125,7 +125,6 @@ def test_lbfgs_stepwise_driver_host_reads_use_host_boundary_helpers():
 
     assert "jax.device_get" not in source
     assert "np.asarray(" not in source
-    assert "host_bool" in source
     assert "host_array" in source
     assert "host_int" in source
 
@@ -1519,6 +1518,7 @@ class TestOptimizerAdapterPrivate:
 
         assert captured["gtol"] == pytest.approx(1.0e-4)
         assert captured["ftol"] == pytest.approx(1.0e-4)
+        assert captured["run_mode"] == "stepwise"
 
     def test_target_minimize_lbfgs_explicit_ftol_overrides_tol(self, monkeypatch):
         """An explicit L-BFGS ftol option should remain independent from gtol."""
@@ -1545,11 +1545,12 @@ class TestOptimizerAdapterPrivate:
             value_and_grad=True,
             tol=1.0e-4,
             maxiter=3,
-            options={"ftol": 1.0e-7},
+            options={"ftol": 1.0e-7, "lbfgs_run_mode": "monolithic_debug"},
         )
 
         assert captured["gtol"] == pytest.approx(1.0e-4)
         assert captured["ftol"] == pytest.approx(1.0e-7)
+        assert captured["run_mode"] == "monolithic_debug"
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME

@@ -6064,6 +6064,7 @@ def target_minimize(
                 "max_optimizer_state_trace_bytes"
             ),
             diagnostic_event_callback=diagnostic_event_callback,
+            run_mode=options.get("lbfgs_run_mode", "stepwise"),
         )
         _record_target_optimizer_diagnostic_event(
             diagnostic_event_callback,
@@ -6107,6 +6108,7 @@ def target_minimize(
                 "max_optimizer_state_trace_bytes"
             ),
             diagnostic_event_callback=diagnostic_event_callback,
+            run_mode=options.get("lbfgs_run_mode", "stepwise"),
         )
         _record_target_optimizer_diagnostic_event(
             diagnostic_event_callback,

@@ -9,7 +9,6 @@ import jax.numpy as jnp
 
 from simsopt_jax.runtime.host_boundary import (
     host_array,
-    host_bool,
     host_float,
     host_int,
 )
@@ -520,7 +519,8 @@ def _lbfgsb_state_to_lbfgs_results(
 
 
 def _lbfgsb_state_is_terminal(state: lbfgsb.LbfgsbState) -> bool:
-    return host_bool(state.workspace.task[0] >= lbfgsb.CONVERGENCE)
+    task = host_array(state.workspace.task, dtype=np.int32)
+    return bool(task[0] >= lbfgsb.CONVERGENCE)
 
 
 def _lbfgsb_stepwise_driver(
