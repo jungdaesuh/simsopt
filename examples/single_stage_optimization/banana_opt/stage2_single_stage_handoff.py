@@ -47,6 +47,8 @@ from .finite_current_profiles import (
 from .hardware_contracts import (
     MAX_CURVATURE_INV_M,
     TF_CURRENT_HARD_LIMIT_A,
+    lcfs_inboard_edge_radius_m,
+    lcfs_outboard_edge_radius_m,
     validate_banana_winding_surface_radius,
 )
 from .hardware_constraint_schema import (
@@ -205,7 +207,35 @@ def _stage2_seed_measured_values(
             hardware_constraint_artifact_value_field_names(constraint_name),
         )
         measured_values[constraint_name] = None if value is None else float(value)
+    _backfill_lcfs_edge_metrics(measured_values, stage2_results)
     return measured_values
+
+
+def _backfill_lcfs_edge_metrics(
+    measured_values: dict[str, float | None],
+    stage2_results: Mapping[str, object],
+) -> None:
+    """Derive lcfs_outboard_edge / lcfs_inboard_edge from the recorded LCFS geometry
+    when a seed did not record them explicitly. Pre-2026 seeds record
+    FINAL_LCFS_MAJOR_RADIUS_M + FINAL_LCFS_MINOR_RADIUS_M but not these edge metrics;
+    the contract's own edge definition is exactly R0 +/- a (the same SSOT helpers used
+    when the metric is measured live), so this reproduces — never fabricates — the
+    value and lets such seeds load without per-seed metadata stamping. Seeds that did
+    record the metrics are left untouched (only None entries are filled)."""
+    major = stage2_results.get("FINAL_LCFS_MAJOR_RADIUS_M")
+    minor = stage2_results.get("FINAL_LCFS_MINOR_RADIUS_M")
+    if major is None or minor is None:
+        return
+    major_f = float(major)
+    minor_f = float(minor)
+    if measured_values.get("lcfs_outboard_edge") is None:
+        measured_values["lcfs_outboard_edge"] = lcfs_outboard_edge_radius_m(
+            major_f, minor_f
+        )
+    if measured_values.get("lcfs_inboard_edge") is None:
+        measured_values["lcfs_inboard_edge"] = lcfs_inboard_edge_radius_m(
+            major_f, minor_f
+        )
 
 
 def _required_stage2_result_value(
