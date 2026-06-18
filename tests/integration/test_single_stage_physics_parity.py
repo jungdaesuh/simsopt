@@ -2028,6 +2028,19 @@ def test_cpu_resolved_warm_start_install_is_value_only_and_stales_next_solve():
     assert "PLU" not in res
     assert "vjp" not in res
 
+    class _IotaShouldNotRun:
+        def __init__(self, boozer_surface):
+            self.boozer_surface = boozer_surface
+
+        def J(self):
+            raise AssertionError("value-only donor iota should come from res")
+
+    assert single_stage_example.resolve_single_stage_iota_metric(
+        boozer_surface,
+        _IotaShouldNotRun,
+        benchmark_mode=False,
+    ) == pytest.approx(0.5)
+
     single_stage_example._restore_cpu_boozer_state(
         boozer_surface,
         {

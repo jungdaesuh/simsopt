@@ -5930,12 +5930,16 @@ def resolve_single_stage_iota_metric(
     benchmark_mode,
 ):
     """Resolve the reported iota metric without redundant benchmark-mode replay."""
+    res = boozer_surface.res
     if (
-        benchmark_mode
-        and boozer_surface.res is not None
-        and "iota" in boozer_surface.res
+        res is not None
+        and "iota" in res
+        and (
+            benchmark_mode
+            or res.get("linearization_kind") == "value_only"
+        )
     ):
-        return host_float(boozer_surface.res["iota"])
+        return host_float(res["iota"])
     return host_float(build_iota_objective(boozer_surface, iota_cls).J())
 
 
