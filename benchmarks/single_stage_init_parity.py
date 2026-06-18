@@ -109,6 +109,7 @@ VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = "ondevice"
+HOST_JAX_OPTIMIZER_BACKEND = "host-jax"
 SCIPY_JAX_OPTIMIZER_BACKEND = "scipy-jax"
 SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 OPTAX_LBFGS_OPTIMIZER_BACKEND = "optax-lbfgs"
@@ -120,8 +121,17 @@ TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS = (
 )
 TARGET_OPTIMIZER_BACKENDS = (
     *TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS,
+    HOST_JAX_OPTIMIZER_BACKEND,
     SCIPY_JAX_OPTIMIZER_BACKEND,
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND,
+)
+REFERENCE_BACKEND_AUTO = "auto"
+REFERENCE_BACKEND_CPU = "cpu"
+REFERENCE_BACKEND_JAX = "jax"
+REFERENCE_BACKENDS = (
+    REFERENCE_BACKEND_AUTO,
+    REFERENCE_BACKEND_CPU,
+    REFERENCE_BACKEND_JAX,
 )
 DEFAULT_OUTER_MAXITER = 0
 MAX_COLD_SEED_OUTER_RUN_RESOLUTION = 4
@@ -142,6 +152,7 @@ _TARGET_OUTER_OPTIMIZER_METHOD = str(
 )
 _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
     TARGET_OPTIMIZER_BACKEND: "lbfgs-ondevice",
+    HOST_JAX_OPTIMIZER_BACKEND: "lbfgs",
     SCIPY_JAX_OPTIMIZER_BACKEND: _TARGET_OUTER_OPTIMIZER_METHOD,
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND: "lbfgs-scipy-jax-fullgraph",
     OPTAX_LBFGS_OPTIMIZER_BACKEND: "optax-lbfgs-ondevice",
@@ -409,10 +420,11 @@ def parse_args() -> argparse.Namespace:
         help=(
             "JAX outer optimizer backend for the init probe. The default "
             "scipy-jax lane uses SciPy-compatible host control over JAX "
-            "objective evaluations; use ondevice, optax-lbfgs, or "
-            "optimistix-lbfgs for explicit target-lane stress tests, and "
-            "scipy-jax-fullgraph for host control over the full JAX "
-            "value/grad graph."
+            "objective evaluations; use host-jax for host-controlled "
+            "Boozer/outer iteration with JAX kernels, ondevice, optax-lbfgs, "
+            "or optimistix-lbfgs for explicit target-lane stress tests, and "
+            "scipy-jax-fullgraph for host control over the full JAX value/grad "
+            "graph."
         ),
     )
     parser.add_argument(
@@ -423,6 +435,17 @@ def parse_args() -> argparse.Namespace:
             "CPU/reference outer optimizer method. The default lbfgs is the "
             "SciPy CPU/C++ parity lane; lbfgs-trace is a non-SciPy host-core "
             "diagnostic."
+        ),
+    )
+    parser.add_argument(
+        "--reference-backend",
+        choices=REFERENCE_BACKENDS,
+        default=REFERENCE_BACKEND_AUTO,
+        help=(
+            "Reference lane backend. auto preserves the historical warm-start "
+            "behavior: warm-start/runtime-spec runs use a JAX CPU reference, "
+            "while fixture runs use the native CPU/C++ reference. Use cpu to "
+            "force the native CPU/C++ reference lane for seed-matrix parity."
         ),
     )
     parser.add_argument(
@@ -621,6 +644,8 @@ def _resolve_target_boozer_optimizer_backend(
         return None
     if args.boozer_optimizer_backend is not None:
         return args.boozer_optimizer_backend
+    if getattr(args, "optimizer_backend", None) == "host-jax":
+        return "host-jax"
     if _target_platform_uses_cuda(platform):
         return TARGET_OPTIMIZER_BACKEND
     return None
@@ -1047,6 +1072,18 @@ def _run_single_stage_case(
                         boozer_optimizer_backend,
                     ]
                 )
+            boozer_least_squares_algorithm = getattr(
+                args,
+                "boozer_least_squares_algorithm",
+                None,
+            )
+            if boozer_least_squares_algorithm is not None:
+                command.extend(
+                    [
+                        "--boozer-least-squares-algorithm",
+                        str(boozer_least_squares_algorithm),
+                    ]
+                )
         else:
             reference_optimizer_method = getattr(
                 args,
@@ -1265,6 +1302,11 @@ def _compile_jax_runtime_seed_spec_from_run_dir(
 
 def _reference_case_backend(args: argparse.Namespace) -> str:
     """Return the backend that gives the target-lane proof an apples-to-apples reference."""
+    requested_backend = str(
+        getattr(args, "reference_backend", REFERENCE_BACKEND_AUTO)
+    )
+    if requested_backend != REFERENCE_BACKEND_AUTO:
+        return requested_backend
     if (
         getattr(args, "jax_runtime_seed_spec", None) is not None
         or getattr(args, "warm_start_run_dir", None) is not None

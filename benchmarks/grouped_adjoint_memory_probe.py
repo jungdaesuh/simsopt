@@ -159,19 +159,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--boozer-optimizer-backend",
-        choices=(DEFAULT_OPTIMIZER_BACKEND,),
+        choices=("host-jax", "ondevice", "scipy"),
         default=None,
         help=(
             "Optional override for the inner JAX Boozer LS backend. "
-            "When provided it must stay ondevice."
+            "Use host-jax to keep optimizer control on the host while running "
+            "Boozer residual/value-gradient kernels through JAX."
         ),
     )
     parser.add_argument(
         "--boozer-limited-memory",
         action="store_true",
         help=(
-            "Request the limited-memory ondevice Boozer LS route. "
-            "This only takes effect when --boozer-optimizer-backend=ondevice."
+            "Request the limited-memory Boozer LS route. This takes effect for "
+            "--boozer-optimizer-backend=ondevice or host-jax."
         ),
     )
     parser.add_argument(
@@ -205,8 +206,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional prior-HEAD grouped_adjoint_memory_probe JSON. When supplied, "
-            "the probe enforces the ship gate: >=25% steady-state grouped-VJP "
-            "speedup or >=40% peak device-memory reduction."
+            "the probe enforces the ship gate: >=25%% steady-state grouped-VJP "
+            "speedup or >=40%% peak device-memory reduction."
         ),
     )
     return parser.parse_args()

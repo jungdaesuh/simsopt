@@ -26,6 +26,7 @@ from unittest import mock
 
 from benchmarks.single_stage_init_parity import (
     _append_optional_single_stage_flags,
+    _reference_case_backend,
     _run_single_stage_case,
     parse_args,
     resolve_target_lane_compile_diagnostics,
@@ -99,6 +100,28 @@ def test_cli_exposes_compile_diagnostics_flag_default_off():
     assert _parse([FLAG]).record_jax_compile_diagnostics is True
 
 
+def test_warm_start_auto_reference_backend_stays_jax_cpu():
+    args = _parse(["--warm-start-run-dir", "/tmp/seed"])
+    assert _reference_case_backend(args) == "jax"
+
+
+def test_warm_start_can_force_native_cpu_reference_backend():
+    args = _parse(
+        [
+            "--warm-start-run-dir",
+            "/tmp/seed",
+            "--reference-backend",
+            "cpu",
+        ]
+    )
+    assert _reference_case_backend(args) == "cpu"
+
+
+def test_reference_backend_default_fixture_stays_native_cpu():
+    args = _parse([])
+    assert _reference_case_backend(args) == "cpu"
+
+
 def test_relay_appends_child_flag_only_when_enabled():
     assert FLAG in _relay(True)
     assert FLAG not in _relay(False)
@@ -120,6 +143,28 @@ def test_flag_reaches_jax_target_child_command(monkeypatch, tmp_path):
     args = _parse([FLAG])
     command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cpu")
     assert FLAG in command
+
+
+def test_cuda_host_jax_child_uses_host_jax_boozer_backend(monkeypatch, tmp_path):
+    args = _parse(["--optimizer-backend", "host-jax"])
+    command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cuda")
+    index = command.index("--boozer-optimizer-backend")
+    assert command[index + 1] == "host-jax"
+
+
+def test_cuda_scipy_jax_child_keeps_ondevice_boozer_backend(monkeypatch, tmp_path):
+    args = _parse(["--optimizer-backend", "scipy-jax"])
+    command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cuda")
+    index = command.index("--boozer-optimizer-backend")
+    assert command[index + 1] == "ondevice"
+
+
+def test_child_command_forwards_boozer_least_squares_algorithm(monkeypatch, tmp_path):
+    args = _parse([])
+    args.boozer_least_squares_algorithm = "lm"
+    command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cuda")
+    index = command.index("--boozer-least-squares-algorithm")
+    assert command[index + 1] == "lm"
 
 
 def test_flag_absent_from_jax_child_when_not_requested(monkeypatch, tmp_path):

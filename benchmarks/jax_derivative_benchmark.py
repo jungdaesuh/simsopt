@@ -1,5 +1,5 @@
 """
-Benchmark harness for M3 JAX Boozer derivative path.
+Benchmark harness for the composed JAX Boozer derivative path.
 
 Measures compile-time vs steady-state runtime for:
 1. Surface coefficient Jacobians (dgamma_by_dcoeff, etc.)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import sys
 import tempfile
+import types
 from pathlib import Path
 from typing import Any
 
@@ -299,6 +300,26 @@ def test_single_stage_subprocess_env_preserves_existing_xla_flags(monkeypatch):
     cache_dir = Path(env["JAX_COMPILATION_CACHE_DIR"])
     assert cache_dir.parent.name == "jax_compilation_cache"
     assert cache_dir.name.startswith("test_single_stage_physics_parity-cuda-")
+
+
+def test_single_stage_subprocess_env_uses_cuda_only_by_default(monkeypatch):
+    monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+
+    env = _single_stage_subprocess_env(
+        backend="jax",
+        platform="cuda",
+        strict_backend_mode="jax_gpu_parity",
+    )
+
+    assert env["JAX_PLATFORMS"] == "cuda"
+
+
+def test_repo_pythonpath_env_preserves_explicit_cpu_callback_lane(monkeypatch):
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda,cpu")
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["JAX_PLATFORMS"] == "cuda,cpu"
 
 
 def _run_single_stage_script(
@@ -1019,6 +1040,329 @@ class TestSingleStageOuterLoopGpuProof:
         )
 
 
+def test_host_jax_compile_diagnostics_condition_includes_host_outer():
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        should_record_single_stage_jax_compile_diagnostics,
+    )
+
+    args = types.SimpleNamespace(record_jax_compile_diagnostics=True)
+
+    assert should_record_single_stage_jax_compile_diagnostics(
+        args,
+        use_target_lane=False,
+        use_host_jax_outer_objective=True,
+    )
+    assert not should_record_single_stage_jax_compile_diagnostics(
+        args,
+        use_target_lane=False,
+        use_host_jax_outer_objective=False,
+    )
+
+
+def test_single_stage_cli_accepts_reuse_resolved_warm_start_solve(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        parse_args,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_banana_example.py",
+            "--backend",
+            "jax",
+            "--reuse-resolved-warm-start-solve",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.backend == "jax"
+    assert args.reuse_resolved_warm_start_solve is True
+
+
+def test_single_stage_cli_accepts_compact_objective_evaluation_trace(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        parse_args,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_banana_example.py",
+            "--record-objective-evaluation-trace",
+            "--compact-objective-evaluation-trace",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.record_objective_evaluation_trace is True
+    assert args.compact_objective_evaluation_trace is True
+
+
+def test_compact_single_stage_progress_payload_omits_replay_values():
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        compact_single_stage_progress_payload,
+    )
+
+    payload = {
+        "objective": {"value": 1.25, "finite": True},
+        "native_gradient": {
+            "values": [float(index) for index in range(100)],
+            "inf_norm": 99.0,
+            "size": 100,
+            "all_finite": True,
+        },
+        "boozer_solver_metadata": {"linearization_kind": "hessian"},
+        "dense_hessian": {
+            "values": [[1.0, 0.0], [0.0, 1.0]],
+            "shape": [2, 2],
+        },
+    }
+
+    compact = compact_single_stage_progress_payload(payload)
+
+    assert compact["objective"]["value"] == 1.25
+    assert compact["native_gradient"]["inf_norm"] == 99.0
+    assert compact["native_gradient"]["values_omitted"] is True
+    assert compact["native_gradient"]["values_length"] == 100
+    assert "values" not in compact["native_gradient"]
+    assert compact["boozer_solver_metadata"]["linearization_kind"] == "hessian"
+    assert compact["dense_hessian"]["shape"] == [2, 2]
+    assert compact["dense_hessian"]["values_omitted"] is True
+
+
+def test_outer_loop_probe_cli_accepts_host_jax_memory_gate(monkeypatch, tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        _expected_outer_optimizer_method,
+        parse_args,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            str(tmp_path / "probe.json"),
+            "--optimizer-backend",
+            "host-jax",
+            "--boozer-least-squares-algorithm",
+            "lm",
+            "--enable-host-jax-memory-gate",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.optimizer_backend == "host-jax"
+    assert args.boozer_least_squares_algorithm == "lm"
+    assert args.enable_host_jax_memory_gate is True
+    assert _expected_outer_optimizer_method(args.optimizer_backend) == "lbfgs"
+
+
+def test_host_jax_memory_gate_skips_warmup_and_checks_growth(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import evaluate_host_jax_memory_gate
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 100.0, "gpu_memory_mb": 1000.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 120.0, "gpu_memory_mb": 1100.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 120.5, "gpu_memory_mb": 1100.5},
+                },
+            ]
+        },
+    )
+
+    summary, failures = evaluate_host_jax_memory_gate(
+        progress_json=progress_json,
+        warmup_evaluations=1,
+        max_steady_rss_growth_mb=1.0,
+        max_steady_gpu_growth_mb=1.0,
+        require_gpu_memory=True,
+    )
+
+    assert failures == []
+    assert summary["steady_snapshot_count"] == 2
+    assert summary["peak_steady_rss_growth_mb"] == pytest.approx(0.5)
+    assert summary["peak_steady_gpu_memory_growth_mb"] == pytest.approx(0.5)
+
+
+def test_host_jax_memory_gate_rejects_transient_post_warm_spike(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import evaluate_host_jax_memory_gate
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 100.0, "gpu_memory_mb": 1000.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 120.0, "gpu_memory_mb": 1100.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 220.0, "gpu_memory_mb": 1300.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "memory_snapshot": {"rss_mb": 120.5, "gpu_memory_mb": 1100.5},
+                },
+            ]
+        },
+    )
+
+    summary, failures = evaluate_host_jax_memory_gate(
+        progress_json=progress_json,
+        warmup_evaluations=1,
+        max_steady_rss_growth_mb=64.0,
+        max_steady_gpu_growth_mb=64.0,
+        require_gpu_memory=True,
+    )
+
+    assert summary["peak_steady_rss_growth_mb"] == pytest.approx(100.0)
+    assert summary["peak_steady_gpu_memory_growth_mb"] == pytest.approx(200.0)
+    assert any("peak RSS growth" in failure for failure in failures)
+    assert any("peak GPU memory growth" in failure for failure in failures)
+
+
+def test_host_jax_memory_gate_reports_missing_progress_json(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import evaluate_host_jax_memory_gate
+
+    summary, failures = evaluate_host_jax_memory_gate(
+        progress_json=tmp_path / "missing_outer_optimizer_progress.json",
+        warmup_evaluations=1,
+        max_steady_rss_growth_mb=64.0,
+        max_steady_gpu_growth_mb=64.0,
+        require_gpu_memory=True,
+    )
+
+    assert not summary["passed"]
+    assert summary["event_count"] == 0
+    assert any("progress trace" in failure for failure in failures)
+
+
+def test_host_jax_compile_gate_rejects_post_warm_counter_growth(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import evaluate_host_jax_compile_gate
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "compile_diagnostics_snapshot": {
+                        "compile_event_count": 3,
+                        "cache_miss_count": 3,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "compile_diagnostics_snapshot": {
+                        "compile_event_count": 5,
+                        "cache_miss_count": 5,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "compile_diagnostics_snapshot": {
+                        "compile_event_count": 6,
+                        "cache_miss_count": 5,
+                    },
+                },
+            ]
+        },
+    )
+
+    summary, failures = evaluate_host_jax_compile_gate(
+        progress_json=progress_json,
+        warmup_evaluations=1,
+    )
+
+    assert summary["steady_compile_event_count_growth"] == 1
+    assert summary["steady_cache_miss_count_growth"] == 0
+    assert any("compile event growth" in failure for failure in failures)
+
+
+def test_host_jax_compile_gate_reports_missing_progress_json(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import evaluate_host_jax_compile_gate
+
+    summary, failures = evaluate_host_jax_compile_gate(
+        progress_json=tmp_path / "missing_outer_optimizer_progress.json",
+        warmup_evaluations=1,
+    )
+
+    assert not summary["passed"]
+    assert summary["event_count"] == 0
+    assert any("progress trace" in failure for failure in failures)
+
+
+def test_host_jax_compile_gate_accepts_steady_post_warm_counters(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import evaluate_host_jax_compile_gate
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "compile_diagnostics_snapshot": {
+                        "compile_event_count": 3,
+                        "cache_miss_count": 3,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "compile_diagnostics_snapshot": {
+                        "compile_event_count": 5,
+                        "cache_miss_count": 5,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "compile_diagnostics_snapshot": {
+                        "compile_event_count": 5,
+                        "cache_miss_count": 5,
+                    },
+                },
+            ]
+        },
+    )
+
+    summary, failures = evaluate_host_jax_compile_gate(
+        progress_json=progress_json,
+        warmup_evaluations=1,
+    )
+
+    assert failures == []
+    assert summary["passed"] is True
+    assert summary["steady_compile_event_count_growth"] == 0
+    assert summary["steady_cache_miss_count_growth"] == 0
+
+
 # Audit #23: ``TestSingleStageOuterLoopCompileSmoke`` moved to
 # ``tests/test_jax_compile_diagnostics.py`` as
 # ``TestJaxCompileDiagnosticParser``. That test verifies parser
@@ -1162,6 +1506,7 @@ def test_target_lane_optimizer_seed_contract_matches_target_minimize_guard():
     for optimizer_backend in (
         "ondevice",
         "scipy-jax",
+        "host-jax",
         "scipy-jax-fullgraph",
         "optax-lbfgs",
         "optimistix-lbfgs",
@@ -1178,3 +1523,603 @@ def test_target_lane_optimizer_seed_contract_matches_target_minimize_guard():
                 )
             )
     assert seed_supported_methods == {"lbfgs-ondevice"}
+
+
+def test_host_jax_single_stage_contract_uses_host_control():
+    """host-jax must not enter the fused target-lane objective bundle."""
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    contract = single_stage_example.resolve_single_stage_optimizer_contract(
+        "jax",
+        "host-jax",
+    )
+
+    assert isinstance(contract, single_stage_example.ReferenceOptimizerContract)
+    assert (
+        single_stage_example.single_stage_optimizer_contract_method(contract)
+        == "lbfgs"
+    )
+    assert not single_stage_example.single_stage_optimizer_contract_uses_array_native_target_lane(
+        contract,
+        constraint_method="penalty",
+    )
+    single_stage_example.require_single_stage_jax_target_lane(
+        use_jax=True,
+        use_target_lane=False,
+        optimizer_method="lbfgs",
+        optimizer_backend="host-jax",
+    )
+
+
+def test_single_stage_jax_boozer_options_preserve_host_jax_backend():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    options = {"verbose": True}
+
+    resolved_backend = (
+        single_stage_example._configure_single_stage_jax_boozer_solver_options(
+            options,
+            "jax",
+            "ondevice",
+            boozer_optimizer_backend="host-jax",
+            boozer_least_squares_algorithm="lm",
+            boozer_limited_memory=False,
+        )
+    )
+
+    assert resolved_backend == "host-jax"
+    assert options == {
+        "verbose": True,
+        "optimizer_backend": "host-jax",
+        "limited_memory": False,
+        "least_squares_algorithm": "lm",
+    }
+
+
+def test_host_jax_boozer_default_algorithm_is_lm():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+    from simsopt_jax.geo.optimizers.single_stage_routing import (
+        resolve_boozer_least_squares_algorithm,
+    )
+
+    assert (
+        single_stage_example.resolve_single_stage_default_boozer_least_squares_algorithm(
+            "jax",
+            "host-jax",
+            boozer_optimizer_backend="host-jax",
+            boozer_least_squares_algorithm=None,
+        )
+        == "lm"
+    )
+    assert resolve_boozer_least_squares_algorithm("host-jax") == "lm"
+    assert resolve_boozer_least_squares_algorithm("ondevice") == "quasi-newton"
+
+
+def test_host_jax_boozer_budget_flags_drive_kernelized_init_overrides():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    assert single_stage_example.single_stage_boozer_budget_overrides_apply(
+        "jax",
+        "host-jax",
+    )
+
+    overrides = single_stage_example.resolve_target_lane_boozer_init_base_overrides(
+        field_backend="jax",
+        optimizer_backend="host-jax",
+        boozer_optimizer_backend="host-jax",
+        boozer_limited_memory=False,
+        target_lane_boozer_bfgs_tol=None,
+        target_lane_boozer_bfgs_maxiter=1500,
+        target_lane_boozer_newton_tol=None,
+        target_lane_boozer_newton_maxiter=50,
+    )
+
+    assert overrides["bfgs_maxiter_override"] == 1500
+    assert overrides["newton_maxiter_override"] == 50
+    assert overrides["newton_tol_override"] is None
+
+
+def test_host_jax_single_stage_optimizer_forwards_host_control_permission(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    captured_kwargs = {}
+
+    def fake_reference_minimize(fun, dofs, **kwargs):
+        captured_kwargs.update(kwargs)
+        value, gradient = fun(dofs)
+        return types.SimpleNamespace(
+            success=True,
+            nit=0,
+            nfev=1,
+            njev=1,
+            message="ok",
+            x=np.asarray(dofs, dtype=np.float64),
+            fun=value,
+            jac=gradient,
+        )
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "reference_minimize",
+        fake_reference_minimize,
+    )
+
+    def value_and_grad(dofs):
+        dofs_array = np.asarray(dofs, dtype=np.float64)
+        return float(np.sum(dofs_array * dofs_array)), 2.0 * dofs_array
+
+    result = single_stage_example.run_single_stage_optimizer(
+        value_and_grad,
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        contract=single_stage_example.ReferenceOptimizerContract(
+            driver=single_stage_example.Driver.SCIPY_LBFGSB,
+        ),
+        maxiter=3,
+        ftol=1e-9,
+        gtol=1e-9,
+        maxcor=10,
+        outer_maxls=20,
+        callback=None,
+        allow_jax_host_control=True,
+    )
+
+    assert result.success
+    assert captured_kwargs["allow_jax_host_control"] is True
+
+
+def test_host_jax_adapter_uses_solved_state_kernel_without_legacy_objective(tmp_path):
+    """host-jax outer evaluation must not call the mutable graph value/grad."""
+    import jax.numpy as jnp
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        x = np.asarray([0.1, 0.2], dtype=np.float64)
+
+        def is_self_intersecting(self):
+            return False
+
+        def volume(self):
+            return 1.25
+
+    class _BoozerSurface:
+        supports_explicit_surface_warm_start = True
+
+        def __init__(self):
+            self.surface = _Surface()
+            self.run_calls = []
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "iota": jnp.asarray(0.3, dtype=jnp.float64),
+                "G": jnp.asarray(1.7, dtype=jnp.float64),
+            }
+
+        def run_code(self, iota, G, *, sdofs):
+            self.run_calls.append((float(iota), float(G), np.asarray(sdofs).copy()))
+
+        def get_adjoint_runtime_state(self):
+            solved_state = types.SimpleNamespace(
+                sdofs=jnp.asarray([0.4, 0.5], dtype=jnp.float64),
+                iota=jnp.asarray(0.6, dtype=jnp.float64),
+                G=jnp.asarray(1.8, dtype=jnp.float64),
+            )
+            factors = (
+                jnp.eye(3, dtype=jnp.float64),
+                jnp.eye(3, dtype=jnp.float64),
+                jnp.eye(3, dtype=jnp.float64),
+            )
+            return types.SimpleNamespace(
+                solved_state=solved_state,
+                linear_solve_factors=factors,
+            )
+
+        def _pack_decision_vector(self, iota, G, sdofs=None):
+            return jnp.concatenate(
+                [
+                    jnp.asarray(sdofs, dtype=jnp.float64),
+                    jnp.asarray([iota, G], dtype=jnp.float64),
+                ]
+            )
+
+    class _ForbiddenObjective:
+        def J(self):
+            raise AssertionError("host-jax adapter must not call JF.J()")
+
+        def dJ(self):
+            raise AssertionError("host-jax adapter must not call JF.dJ()")
+
+    kernel_calls = []
+
+    def solved_state_value_and_grad(coil_dofs, solved_x, linear_solve_factors):
+        kernel_calls.append(
+            {
+                "coil_dofs": np.asarray(coil_dofs),
+                "solved_x": np.asarray(solved_x),
+                "factor_count": len(linear_solve_factors),
+            }
+        )
+        return jnp.asarray(7.0, dtype=jnp.float64), 3.0 * coil_dofs
+
+    applied_dofs = []
+
+    def apply_coil_dofs(x):
+        applied_dofs.append(np.asarray(x, dtype=np.float64).copy())
+
+    run_dict = {
+        "sdofs": np.asarray([0.1, 0.2], dtype=np.float64),
+        "iota": 0.3,
+        "G": 1.7,
+        "J": float("nan"),
+        "dJ": np.zeros(2, dtype=np.float64),
+        "initial_objective": float("nan"),
+        "initial_objective_pending": True,
+        "it": 1,
+        "lscount": 0,
+        "failure_count": 0,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "intersecting": False,
+        "self_intersection_check_available": True,
+        "latest_local_incumbent": None,
+        "latest_local_metric": None,
+        "latest_local_stage": None,
+        "best_local_incumbent": None,
+        "best_local_metric": None,
+        "best_local_stage": None,
+    }
+    adapter = single_stage_example.HostJaxSingleStageAdapter(
+        run_dict=run_dict,
+        boozer_surface=_BoozerSurface(),
+        JF=_ForbiddenObjective(),
+        bs=object(),
+        objectives={},
+        objective_weights={},
+        diagnostics={},
+        log_path=str(tmp_path / "host_jax.log"),
+        apply_coil_dofs=apply_coil_dofs,
+        solved_state_value_and_grad=solved_state_value_and_grad,
+    )
+
+    value, grad = adapter(np.asarray([1.0, 2.0], dtype=np.float64))
+
+    assert value == pytest.approx(7.0)
+    np.testing.assert_allclose(grad, np.asarray([3.0, 6.0], dtype=np.float64))
+    assert len(kernel_calls) == 1
+    np.testing.assert_allclose(kernel_calls[0]["coil_dofs"], [1.0, 2.0])
+    np.testing.assert_allclose(kernel_calls[0]["solved_x"], [0.4, 0.5, 0.6, 1.8])
+    assert kernel_calls[0]["factor_count"] == 3
+    assert len(applied_dofs) == 1
+    assert run_dict["initial_objective_pending"] is False
+    assert run_dict["J"] == pytest.approx(7.0)
+
+    adapter.callback(np.asarray([1.0, 2.0], dtype=np.float64))
+
+    np.testing.assert_allclose(run_dict["sdofs"], [0.4, 0.5])
+    assert run_dict["iota"] == pytest.approx(0.6)
+    assert run_dict["G"] == pytest.approx(1.8)
+    assert run_dict["lscount"] == 0
+    assert run_dict["it"] == 2
+
+
+def test_host_jax_adapter_builds_solved_state_kernel_after_boozer_solve(tmp_path):
+    """host-jax must not capture startup value-only linearization state."""
+    import jax.numpy as jnp
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        x = np.asarray([0.1, 0.2], dtype=np.float64)
+
+        def is_self_intersecting(self):
+            return False
+
+        def volume(self):
+            return 1.25
+
+    class _BoozerSurface:
+        supports_explicit_surface_warm_start = True
+
+        def __init__(self):
+            self.surface = _Surface()
+            self.run_calls = []
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "iota": jnp.asarray(0.3, dtype=jnp.float64),
+                "G": jnp.asarray(1.7, dtype=jnp.float64),
+                "linearization_kind": "value_only",
+                "adjoint_linear_solve_available": False,
+            }
+
+        def run_code(self, iota, G, *, sdofs):
+            self.run_calls.append((float(iota), float(G), np.asarray(sdofs).copy()))
+            self.res["linearization_kind"] = "hessian"
+            self.res["adjoint_linear_solve_available"] = True
+
+        def get_adjoint_runtime_state(self):
+            assert self.run_calls, "kernel built before Boozer run_code"
+            assert self.res["linearization_kind"] == "hessian"
+            solved_state = types.SimpleNamespace(
+                sdofs=jnp.asarray([0.4, 0.5], dtype=jnp.float64),
+                iota=jnp.asarray(0.6, dtype=jnp.float64),
+                G=jnp.asarray(1.8, dtype=jnp.float64),
+            )
+            factors = (
+                jnp.eye(3, dtype=jnp.float64),
+                jnp.eye(3, dtype=jnp.float64),
+                jnp.eye(3, dtype=jnp.float64),
+            )
+            return types.SimpleNamespace(
+                solved_state=solved_state,
+                linear_solve_factors=factors,
+            )
+
+        def _pack_decision_vector(self, iota, G, sdofs=None):
+            return jnp.concatenate(
+                [
+                    jnp.asarray(sdofs, dtype=jnp.float64),
+                    jnp.asarray([iota, G], dtype=jnp.float64),
+                ]
+            )
+
+    class _ForbiddenObjective:
+        def J(self):
+            raise AssertionError("host-jax adapter must not call JF.J()")
+
+        def dJ(self):
+            raise AssertionError("host-jax adapter must not call JF.dJ()")
+
+    factory_calls = []
+    kernel_calls = []
+
+    def solved_state_value_and_grad_factory():
+        factory_calls.append("built")
+
+        def solved_state_value_and_grad(coil_dofs, solved_x, linear_solve_factors):
+            kernel_calls.append(
+                {
+                    "coil_dofs": np.asarray(coil_dofs),
+                    "solved_x": np.asarray(solved_x),
+                    "factor_count": len(linear_solve_factors),
+                }
+            )
+            return jnp.asarray(7.0, dtype=jnp.float64), 3.0 * coil_dofs
+
+        return solved_state_value_and_grad
+
+    run_dict = {
+        "sdofs": np.asarray([0.1, 0.2], dtype=np.float64),
+        "iota": 0.3,
+        "G": 1.7,
+        "J": float("nan"),
+        "dJ": np.zeros(2, dtype=np.float64),
+        "initial_objective": float("nan"),
+        "initial_objective_pending": True,
+        "it": 1,
+        "lscount": 0,
+        "failure_count": 0,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "intersecting": False,
+        "self_intersection_check_available": True,
+        "latest_local_incumbent": None,
+        "latest_local_metric": None,
+        "latest_local_stage": None,
+        "best_local_incumbent": None,
+        "best_local_metric": None,
+        "best_local_stage": None,
+    }
+    boozer_surface = _BoozerSurface()
+    adapter = single_stage_example.HostJaxSingleStageAdapter(
+        run_dict=run_dict,
+        boozer_surface=boozer_surface,
+        JF=_ForbiddenObjective(),
+        bs=object(),
+        objectives={},
+        objective_weights={},
+        diagnostics={},
+        log_path=str(tmp_path / "host_jax.log"),
+        solved_state_value_and_grad_factory=solved_state_value_and_grad_factory,
+    )
+
+    value, grad = adapter(np.asarray([1.0, 2.0], dtype=np.float64))
+    second_value, second_grad = adapter(np.asarray([1.0, 2.0], dtype=np.float64))
+
+    assert value == pytest.approx(7.0)
+    assert second_value == pytest.approx(7.0)
+    np.testing.assert_allclose(grad, np.asarray([3.0, 6.0], dtype=np.float64))
+    np.testing.assert_allclose(second_grad, np.asarray([3.0, 6.0], dtype=np.float64))
+    assert len(factory_calls) == 1
+    assert len(boozer_surface.run_calls) == 2
+    assert len(kernel_calls) == 2
+    assert kernel_calls[0]["factor_count"] == 3
+
+
+def test_single_stage_failure_penalty_is_finite_before_initial_objective_seed():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    run_dict = {
+        "adaptive_failure_penalty_weight": 1.5,
+        "J": float("nan"),
+        "dJ": np.zeros(2, dtype=np.float64),
+        "initial_objective": float("nan"),
+        "initial_objective_pending": True,
+        "failure_count": 0,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "search_policy": "repair_first",
+        "donor_class": "stage2_seed_only",
+    }
+    penalty, summary = (
+        single_stage_example._compute_single_stage_failure_penalty_from_residual_inf(
+            np.asarray([1.0, 2.0], dtype=np.float64),
+            run_dict,
+            success_solve=True,
+            is_intersecting=False,
+            hardware_status={"success": False, "violation_keys": ["curvature"]},
+            residual_inf=0.0,
+        )
+    )
+
+    assert np.isfinite(penalty)
+    assert penalty == pytest.approx(1.75)
+    failure_objective = single_stage_example._single_stage_failure_objective_value(
+        run_dict,
+        penalty,
+    )
+    assert failure_objective == pytest.approx(2.75)
+    single_stage_example.seed_single_stage_initial_objective_from_values(
+        run_dict,
+        objective_value=failure_objective,
+        objective_grad=run_dict["dJ"],
+    )
+    assert run_dict["initial_objective_pending"] is False
+    assert run_dict["initial_objective"] == pytest.approx(2.75)
+    assert summary["penalty"] == pytest.approx(penalty)
+    assert summary["reject_class"] == "hardware"
+
+
+def test_single_stage_failure_penalty_uses_pre_trial_line_search_point():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    run_dict = {
+        "adaptive_failure_penalty_weight": 1.0,
+        "J": 2.0,
+        "dJ": np.zeros(2, dtype=np.float64),
+        "initial_objective": 2.0,
+        "initial_objective_pending": False,
+        "failure_count": 0,
+        "lscount": 0,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "search_policy": "repair_first",
+        "donor_class": "stage2_seed_only",
+    }
+    trial_x = np.asarray([4.0, 6.0], dtype=np.float64)
+
+    single_stage_example._update_line_search_state(trial_x, run_dict)
+    penalty, summary = (
+        single_stage_example._compute_single_stage_failure_penalty_from_residual_inf(
+            trial_x,
+            run_dict,
+            success_solve=True,
+            is_intersecting=True,
+            hardware_status=None,
+            residual_inf=0.0,
+        )
+    )
+
+    np.testing.assert_allclose(run_dict["x_prev"], trial_x)
+    assert run_dict["lscount"] == 1
+    assert summary["step_norm"] == pytest.approx(5.0)
+    assert summary["step_ratio"] == pytest.approx(5.0 / np.sqrt(5.0))
+    assert summary["reject_class"] == "self_intersection"
+    assert penalty == pytest.approx(2.0 * (1.0 + 5.0 / np.sqrt(5.0) + 0.5))
+
+
+def test_final_penalty_metrics_failed_host_jax_state_skips_solved_objectives(
+    monkeypatch,
+):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        def volume(self):
+            return 0.039
+
+    class BoozerSurfaceJAX:
+        surface = _Surface()
+        res = {"success": False, "G": -2.0, "iota": -1.0e-4}
+
+    class _ForbiddenSolvedStateObjective:
+        def J(self):
+            raise AssertionError("failed solved state objective must not run")
+
+    class _Penalty:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def J(self):
+            return self.value
+
+    class _DistancePenalty(_Penalty):
+        def shortest_distance(self):
+            return self.value
+
+    class _CurvaturePenalty(_Penalty):
+        class _Curve:
+            def kappa(self):
+                return np.asarray([1.0, 3.0], dtype=np.float64)
+
+        curve = _Curve()
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "norm_field_summary",
+        lambda _surface, _bs: (0.123, None, None, None, None, None),
+    )
+
+    metrics = single_stage_example.resolve_single_stage_final_penalty_metrics(
+        use_target_lane=False,
+        benchmark_mode=False,
+        skip_outer_optimizer=False,
+        boozer_surface=BoozerSurfaceJAX(),
+        bs=object(),
+        iota_target=0.3,
+        coil_dofs=np.zeros(2, dtype=np.float64),
+        outer_objective_config=None,
+        success_filter=None,
+        curvelength=_Penalty(4.0),
+        j_non_qs=_ForbiddenSolvedStateObjective(),
+        j_boozer_residual=_ForbiddenSolvedStateObjective(),
+        j_iota=_ForbiddenSolvedStateObjective(),
+        j_curve_length=_Penalty(5.0),
+        j_curve_curve=_DistancePenalty(0.2),
+        j_curve_surface=_DistancePenalty(0.3),
+        j_surface_surface=_DistancePenalty(0.4),
+        j_curvature=_CurvaturePenalty(6.0),
+        cc_dist=0.1,
+        cs_dist=0.1,
+        ss_dist=0.1,
+        curvature_threshold=10.0,
+        run_dict={"last_candidate_failure": {"reject_class": "self_intersection"}},
+    )
+
+    assert metrics["solved_state_metrics_available"] is False
+    assert metrics["solved_state_metrics_unavailable_reason"] == (
+        "failed_boozer_solved_state"
+    )
+    assert np.isnan(metrics["final_non_qs"])
+    assert np.isnan(metrics["final_boozer_residual"])
+    assert np.isnan(metrics["final_iota_penalty"])
+    assert metrics["field_error"] == pytest.approx(0.123)
+    assert metrics["final_iota"] == pytest.approx(-1.0e-4)
+
+
+def test_final_candidate_failure_forces_optimizer_failure_verdict():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    success, message = single_stage_example.apply_final_candidate_failure_verdict(
+        True,
+        "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+        {"last_candidate_failure": {"reject_class": "self_intersection"}},
+    )
+
+    assert success is False
+    assert "final_candidate_failure=self_intersection" in message

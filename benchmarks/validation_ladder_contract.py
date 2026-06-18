@@ -773,6 +773,8 @@ def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
         return "private-optimizer"
     if optimizer_backend == "scipy-jax":
         return "target-scipy-control"
+    if optimizer_backend == "host-jax":
+        return "host-jax-kernelized-control"
     if optimizer_backend == "scipy-jax-fullgraph":
         return "target-scipy-fullgraph-control"
     if optimizer_backend == "optax-lbfgs":

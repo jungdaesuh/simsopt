@@ -78,6 +78,23 @@ _CUDA_PROOF_ENV_VARS = (
     "CUDA_CACHE_PATH",
     "CUDA_VISIBLE_DEVICES",
 )
+
+
+def _platform_spec_requests_cpu_callback_lane(
+    env: MutableMapping[str, str],
+    platform: str,
+) -> bool:
+    if platform != "cuda":
+        return False
+    requested_platforms = env.get("JAX_PLATFORMS")
+    if requested_platforms is None:
+        return False
+    requested = {
+        part.strip().lower()
+        for part in requested_platforms.split(",")
+        if part.strip()
+    }
+    return "cuda" in requested and "cpu" in requested
 _NVIDIA_SMI_CUDA_VERSION_RE = re.compile(r"CUDA Version:\s*([0-9.]+)")
 _NVCC_RELEASE_RE = re.compile(r"release\s+([^,\s]+)")
 _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
@@ -331,6 +348,10 @@ def _append_xla_flag(env: dict[str, str], flag: str) -> None:
 
 def _apply_platform_env(env: dict[str, str], platform: str) -> None:
     """Apply or clear all JAX platform selectors used by this repo."""
+    include_cpu_callback_lane = _platform_spec_requests_cpu_callback_lane(
+        env,
+        platform,
+    )
     for key in _JAX_PLATFORM_ENV_VARS:
         env.pop(key, None)
     for key in _JAX_CUDA_MEMORY_ENV_VARS:
@@ -341,7 +362,9 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
             env.pop(key, None)
     if platform == "auto":
         return
-    env["JAX_PLATFORMS"] = _with_cpu_callback_lane(platform) or platform
+    env["JAX_PLATFORMS"] = (
+        _with_cpu_callback_lane(platform) if include_cpu_callback_lane else platform
+    )
     env["SIMSOPT_JAX_PLATFORM"] = platform
     env["SIMSOPT_JAX_BACKEND"] = platform
     if platform == "cuda":
