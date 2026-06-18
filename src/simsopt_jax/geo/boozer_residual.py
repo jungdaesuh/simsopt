@@ -8,7 +8,7 @@ This module provides two layers:
 and differentiate only through (iota, G).  Surface DOF derivatives are
 zero because field data is treated as constant.
 
-**M3 composed pipeline** — ``boozer_penalty_composed``,
+**Composed derivative pipeline** — ``boozer_penalty_composed``,
 ``boozer_penalty_grad_composed``, ``boozer_penalty_hvp_composed``,
 ``boozer_residual_jvp_composed``, ``boozer_residual_vjp_composed``,
 ``boozer_residual_jacobian_composed``, ``boozer_residual_coil_vjp`` trace
@@ -102,10 +102,7 @@ __all__ = [
 def _split_decision_vector(x, *, optimize_G):
     x_jax = _as_runtime_value(x, reference=x)
     _validate_decision_vector_tail(x_jax, optimize_G=optimize_G)
-    if optimize_G:
-        return _split_decision_vector_with_G_vjp_safe(x_jax)
-    sdofs, iota = _split_decision_vector_without_G_vjp_safe(x_jax)
-    return sdofs, iota, None
+    return _split_decision_vector_lax(x_jax, optimize_G=optimize_G)
 
 
 def _split_decision_vector_jvp_safe(x, *, optimize_G):
@@ -274,7 +271,7 @@ def boozer_residual_scalar(
 
 # ---------------------------------------------------------------------------
 # M1 gradient / Hessian wrappers (iota/G only, surface DOFs are constants).
-# For the full composed pipeline through surface DOFs, use the M3 functions:
+# For the full composed pipeline through surface DOFs, use the composed functions:
 # boozer_penalty_grad_composed() and boozer_residual_jacobian_composed().
 # ---------------------------------------------------------------------------
 
@@ -410,7 +407,7 @@ def boozer_residual_hessian(
 
 
 # ---------------------------------------------------------------------------
-# M3: Composed derivative path (DOFs → geometry → field → residual)
+# Composed derivative path (DOFs → geometry → field → residual)
 # ---------------------------------------------------------------------------
 
 
@@ -608,7 +605,7 @@ def _surface_geometry_from_dofs(
     """Evaluate gamma, gammadash1, gammadash2 from surface DOFs.
 
     Pure function suitable for JAX tracing.  Used by both the composed
-    M3 pipeline and the M4 solver (``boozersurface_jax.py``).
+    composed derivative pipeline and the Boozer solver.
     """
     if surface_kind == "rzfourier":
         del scatter_indices

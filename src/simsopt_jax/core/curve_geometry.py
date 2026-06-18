@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import cast
 
 import jax
@@ -718,6 +719,7 @@ def _closed_curve_segment_arrays(gamma: jax.Array) -> tuple[jax.Array, jax.Array
     return gamma, jnp.roll(gamma, shift=-1, axis=0)
 
 
+@partial(jax.jit, static_argnames=("neighbor_skip",))
 def closed_curve_self_intersection_min_distance(
     gamma: jax.Array,
     *,

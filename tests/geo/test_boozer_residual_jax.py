@@ -176,6 +176,9 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
 
     value_and_grad_with_G = jax.jit(jax.value_and_grad(scalar_with_G_jvp_safe))
     value_and_grad_without_G = jax.jit(jax.value_and_grad(scalar_without_G_jvp_safe))
+    default_jvp_with_G = jax.jit(
+        lambda x, tangent: jax.jvp(scalar_with_G, (x,), (tangent,))
+    )
     hvp_with_G = jax.jit(
         lambda x, tangent: jax.jvp(jax.grad(scalar_with_G_jvp_safe), (x,), (tangent,))[
             1
@@ -190,10 +193,16 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
     with jax.transfer_guard("disallow"):
         _value_with_G_jvp, grad_with_G_jvp = value_and_grad_with_G(x_with_G)
         _value_without_G_jvp, grad_without_G_jvp = value_and_grad_without_G(x_without_G)
+        default_jvp_value_with_G, default_jvp_tangent_with_G = default_jvp_with_G(
+            x_with_G,
+            tangent_with_G,
+        )
         hvp_with_G_result = hvp_with_G(x_with_G, tangent_with_G)
         hvp_without_G_result = hvp_without_G(x_without_G, tangent_without_G)
         grad_with_G_jvp.block_until_ready()
         grad_without_G_jvp.block_until_ready()
+        default_jvp_value_with_G.block_until_ready()
+        default_jvp_tangent_with_G.block_until_ready()
         hvp_with_G_result.block_until_ready()
         hvp_without_G_result.block_until_ready()
 
@@ -207,6 +216,8 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
     np.testing.assert_allclose(host_array(grad_without_G), [1.2, 1.4, 1.0])
     np.testing.assert_allclose(host_array(grad_with_G_jvp), [0.2, 0.4, 0.6, 0.5, 0.4])
     np.testing.assert_allclose(host_array(grad_without_G_jvp), [1.2, 1.4, 1.0])
+    assert host_scalar(default_jvp_value_with_G) == pytest.approx(0.34)
+    assert host_scalar(default_jvp_tangent_with_G) == pytest.approx(2.1)
     np.testing.assert_allclose(host_array(hvp_with_G_result), [2.0, 2.0, 2.0, 1.0, 1.0])
     np.testing.assert_allclose(host_array(hvp_without_G_result), [2.0, 2.0, 0.0])
 
@@ -979,7 +990,7 @@ class TestBoozerResidualM1Limitations:
         """M1 wrappers treat B/xphi/xtheta as constants, so the gradient
         w.r.t. surface_dofs is identically zero.  This test documents
         that behavior explicitly — it is NOT a bug, but a scope limit.
-        The full surface→BiotSavart→residual composed pipeline (M2)
+        The full surface→BiotSavart→residual composed pipeline
         will replace these wrappers."""
         B, xphi, xtheta = _make_synthetic_data(8, 10)
         G, iota = 1.5, 0.3

@@ -184,6 +184,10 @@ def test_traceable_runtime_old_import_path_reexports_public_and_private_helpers(
         is surfaceobjectives_traceable_jax_module.make_traceable_objective
     )
     assert (
+        surfaceobjectives_jax_module.make_traceable_solved_state_value_and_grad
+        is surfaceobjectives_traceable_jax_module.make_traceable_solved_state_value_and_grad
+    )
+    assert (
         surfaceobjectives_jax_module._get_cached_traceable_runtime_entry
         is surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry
     )
@@ -1254,6 +1258,108 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     )
 
 
+def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
+    monkeypatch,
+) -> None:
+    observed_jit_kwargs: dict[str, dict[str, object]] = {}
+    call_checks: dict[str, bool] = {}
+
+    def recording_jit(fun=None, **kwargs):
+        def wrapped(inner):
+            observed_jit_kwargs[inner.__name__] = dict(kwargs)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    def fake_total_objective(solved_x, coil_dofs, coil_set_spec, objective_kwargs):
+        call_checks["value_solved_x"] = isinstance(solved_x, jax.Array)
+        call_checks["value_coil_dofs"] = isinstance(coil_dofs, jax.Array)
+        call_checks["value_coil_set"] = coil_set_spec[0] == "coil-set"
+        call_checks["value_objective_kwargs"] = objective_kwargs["sentinel"] == 17
+        return jnp.sum(solved_x) + jnp.sum(coil_dofs)
+
+    def fake_total_gradient_with_status(
+        _booz_jax,
+        _coil_set_spec_from_dofs,
+        *,
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+        linearization_kind,
+        linear_solve_tol,
+        linear_solve_stab,
+        objective_kwargs,
+    ):
+        call_checks["gradient_coil_dofs"] = isinstance(coil_dofs, jax.Array)
+        call_checks["gradient_solved_x"] = isinstance(solved_x, jax.Array)
+        call_checks["gradient_linearization_kind"] = linearization_kind == "hessian"
+        call_checks["gradient_linear_solve_tol"] = linear_solve_tol == 1.0e-10
+        call_checks["gradient_linear_solve_stab"] = linear_solve_stab == 0.0
+        call_checks["gradient_objective_kwargs"] = objective_kwargs["sentinel"] == 17
+        call_checks["gradient_factors"] = all(
+            isinstance(leaf, jax.Array)
+            for leaf in jax.tree.leaves(solved_linear_solve_factors)
+        )
+        return 3.0 * coil_dofs, jnp.asarray(True, dtype=bool)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module.jax,
+        "jit",
+        recording_jit,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_evaluate_traceable_total_objective",
+        fake_total_objective,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_total_gradient_with_status",
+        fake_total_gradient_with_status,
+    )
+
+    state = {
+        **_minimal_traceable_objective_state(),
+        "objective_kwargs": {"sentinel": 17},
+        "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
+    }
+    value_and_grad = (
+        surfaceobjectives_traceable_jax_module._build_traceable_solved_state_value_and_grad_from_state(
+            object(),
+            state,
+        )
+    )
+
+    value, grad = value_and_grad(
+        jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        jnp.asarray([4.0], dtype=jnp.float64),
+        (
+            jnp.eye(1, dtype=jnp.float64),
+            jnp.eye(1, dtype=jnp.float64),
+            jnp.eye(1, dtype=jnp.float64),
+        ),
+    )
+
+    np.testing.assert_allclose(np.asarray(value), np.asarray(7.0))
+    np.testing.assert_allclose(np.asarray(grad), np.asarray([3.0, 6.0]))
+    assert observed_jit_kwargs == {"_solved_state_value_and_grad_for": {}}
+    assert call_checks == {
+        "value_solved_x": True,
+        "value_coil_dofs": True,
+        "value_coil_set": True,
+        "value_objective_kwargs": True,
+        "gradient_coil_dofs": True,
+        "gradient_solved_x": True,
+        "gradient_linearization_kind": True,
+        "gradient_linear_solve_tol": True,
+        "gradient_linear_solve_stab": True,
+        "gradient_objective_kwargs": True,
+        "gradient_factors": True,
+    }
+
+
 def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None:
     value_and_grad = (
         surfaceobjectives_traceable_jax_module._make_traceable_value_and_grad_boundary(
@@ -1950,7 +2056,7 @@ def test_traceable_plu_unpack_rejects_unsupported_factor_arity():
         )
 
 
-def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
+def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch):
     matrix = jnp.asarray(
         [
             [3.0, 0.25],
@@ -1970,6 +2076,11 @@ def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
     monkeypatch.setattr(
         optimizer_jax_module,
         "_forward_error_success",
+        lambda *_args, **_kwargs: jnp.asarray(False),
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_dense_matrix_backward_error_success",
         lambda *_args, **_kwargs: jnp.asarray(False),
     )
     monkeypatch.setattr(
@@ -1995,6 +2106,54 @@ def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
 
     assert bool(np.asarray(success)) is False
     assert residual_norm_calls["count"] == 1
+
+
+def test_traceable_hessian_plu_solve_accepts_backward_error_success(monkeypatch):
+    matrix = jnp.asarray(
+        [
+            [3.0, 0.25],
+            [-0.5, 2.0],
+        ],
+        dtype=jnp.float64,
+    )
+    rhs = jnp.asarray([0.2, -0.6], dtype=jnp.float64)
+    linear_solve_factors = jax.scipy.linalg.lu(matrix)
+    backward_error_calls = {"count": 0}
+
+    def backward_error_success(current_matrix, solution, current_rhs, *, tol):
+        del solution, current_rhs, tol
+        backward_error_calls["count"] += 1
+        np.testing.assert_allclose(np.asarray(current_matrix), np.asarray(matrix))
+        return jnp.asarray(True)
+
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_forward_error_success",
+        lambda *_args, **_kwargs: jnp.asarray(False),
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_dense_matrix_backward_error_success",
+        backward_error_success,
+    )
+
+    _solution, success = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+            object(),
+            jnp.zeros_like(rhs),
+            rhs,
+            coil_set_spec=None,
+            objective_kwargs={},
+            linear_solve_factors=linear_solve_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            transpose=False,
+        )
+    )
+
+    assert bool(np.asarray(success)) is True
+    assert backward_error_calls["count"] == 1
 
 
 def test_traceable_hessian_plu_solve_is_jittable():
@@ -4515,6 +4674,32 @@ def test_traceable_cache_state_accepts_ondevice_least_squares_methods(
             booz_jax,
             object(),
             0.23,
+        )
+
+
+def test_traceable_cache_state_allows_non_ondevice_for_solved_state_builder(
+    monkeypatch,
+):
+    booz_jax = types.SimpleNamespace(
+        boozer_type="ls",
+        _resolve_optimizer_method=lambda: "bfgs",
+    )
+
+    def stop_after_method_gate(_booz_jax):
+        raise RuntimeError("passed host solved-state method gate")
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_resolved_boozer_solved_runtime_state",
+        stop_after_method_gate,
+    )
+
+    with pytest.raises(RuntimeError, match="passed host solved-state method gate"):
+        surfaceobjectives_traceable_jax_module._build_traceable_objective_cache_state(
+            booz_jax,
+            object(),
+            0.23,
+            require_ondevice_inner=False,
         )
 
 

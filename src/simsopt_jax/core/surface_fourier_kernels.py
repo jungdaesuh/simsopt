@@ -2469,7 +2469,7 @@ def surface_volume_from_dofs(
 
 
 # ---------------------------------------------------------------------------
-# Surface coefficient Jacobians (M3)
+# Surface coefficient Jacobians
 # ---------------------------------------------------------------------------
 
 

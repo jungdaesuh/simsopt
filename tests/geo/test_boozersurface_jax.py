@@ -57,6 +57,11 @@ from simsopt_jax.solve import (
     SimsoptLBFGSBOptions,
 )
 from simsopt_jax.solve.dispatch import minimize
+from simsopt_jax.geo.optimizers.single_stage_routing import (
+    resolve_boozer_limited_memory,
+    resolve_boozer_optimizer_backend,
+    resolve_boozer_optimizer_method,
+)
 
 from .boozersurface_jax_test_helpers import (
     BoozerSurfaceJAX,
@@ -2056,6 +2061,78 @@ class TestOptimizerAdapter:
         assert len(calls) == 2
         np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
 
+    def test_newton_polish_host_control_uses_host_backtracking(self, monkeypatch):
+        """host-jax Newton control must not compile an eager ``lax.while_loop``."""
+
+        def obj(x):
+            return 0.5 * x[0] ** 2
+
+        def forbidden_backtracking(*_args, **_kwargs):
+            raise AssertionError("host-control Newton must use Python backtracking")
+
+        monkeypatch.setattr(
+            _opt,
+            "_backtracking_value_grad_step",
+            forbidden_backtracking,
+        )
+
+        result = newton_polish(
+            obj,
+            jnp.array([1.0], dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-12,
+            materialize_hessian=False,
+            allow_host_control=True,
+        )
+
+        np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
+        assert result["nit"] == 1
+
+    def test_newton_polish_host_control_accepts_dynamic_objective_args(self):
+        """host-jax Newton uses one objective callable with dynamic args."""
+
+        def obj(x, scale):
+            return 0.5 * scale * x[0] ** 2
+
+        result = newton_polish(
+            obj,
+            jnp.array([1.0], dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-12,
+            materialize_hessian=False,
+            allow_host_control=True,
+            args=(jnp.asarray(2.0, dtype=jnp.float64),),
+        )
+
+        np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
+        assert result["nit"] == 1
+
+    def test_newton_polish_host_control_uses_host_dense_materialization(
+        self,
+        monkeypatch,
+    ):
+        """host-jax final Hessian materialization must avoid eager ``lax.map``."""
+        A = jnp.array([[2.0, 0.5], [0.5, 3.0]], dtype=jnp.float64)
+        b = jnp.array([1.0, 2.0], dtype=jnp.float64)
+
+        def obj(x):
+            return 0.5 * x @ A @ x - b @ x
+
+        def forbidden_dense_hessian(*_args, **_kwargs):
+            raise AssertionError("host-control Newton must use host materialization")
+
+        monkeypatch.setattr(_opt, "_materialize_dense_hessian", forbidden_dense_hessian)
+
+        result = newton_polish(
+            obj,
+            jnp.zeros(2, dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-14,
+            allow_host_control=True,
+        )
+
+        np.testing.assert_allclose(result["hessian"], np.asarray(A), atol=1e-12)
+
     def test_newton_polish_dense_steps_use_materialized_solve(self, monkeypatch):
         """CPU-parity Newton polish uses dense steps when explicitly requested.
 
@@ -2953,6 +3030,7 @@ class TestBoozerSurfaceJAXClass:
         [
             ("scipy", "quasi-newton"),
             ("ondevice", "quasi-newton"),
+            ("host-jax", "lm"),
         ],
     )
     def test_instantiation_defaults_least_squares_algorithm_from_backend(
@@ -3051,6 +3129,7 @@ class TestBoozerSurfaceJAXClass:
         ("optimizer_backend", "expected_materialize"),
         [
             ("scipy", True),
+            ("host-jax", True),
             ("ondevice", True),
         ],
     )
@@ -3151,6 +3230,23 @@ class TestBoozerSurfaceJAXClass:
 
         assert booz.options["optimizer_backend"] == expected_optimizer_backend
         assert booz.options["least_squares_algorithm"] == expected_algorithm
+
+    def test_instantiation_accepts_host_jax_inner_backend(self):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"optimizer_backend": "host-jax"},
+        )
+
+        assert booz.options["optimizer_backend"] == "host-jax"
+        assert booz.options["least_squares_algorithm"] == "quasi-newton"
+        assert booz._resolve_optimizer_method() == "bfgs"
 
     def test_instantiation_applies_jax_default_before_private_ls_option_validation(
         self,
@@ -4170,6 +4266,24 @@ class TestBoozerSurfaceJAXClass:
                 options={"line_search_maxiter": 11},
             )
 
+    def test_private_options_rejected_with_host_jax_backend(self):
+        """host-jax has host control and must not accept ondevice-only knobs."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        with pytest.raises(ValueError, match="require optimizer_backend='ondevice'"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={
+                    "optimizer_backend": "host-jax",
+                    "line_search_maxiter": 11,
+                },
+            )
+
     def test_scipy_limited_memory_options_are_accepted(self):
         """SciPy limited-memory solves must keep their public L-BFGS tuning knobs."""
         bs = _MockBiotSavart(_make_mock_coils())
@@ -4325,6 +4439,73 @@ class TestBoozerSurfaceJAXClass:
         """Invalid backend names must fail instead of silently falling through."""
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             resolve_optimizer_backend_method("bogus", limited_memory=False)
+
+    @pytest.mark.parametrize(
+        ("limited_memory", "least_squares_algorithm", "expected_method"),
+        [
+            (False, "quasi-newton", "bfgs"),
+            (True, "quasi-newton", "lbfgs"),
+            (False, "lm", "lm"),
+            (False, "lm-minpack", "lm"),
+        ],
+    )
+    def test_resolve_boozer_inner_optimizer_method_accepts_host_jax(
+        self,
+        limited_memory,
+        least_squares_algorithm,
+        expected_method,
+    ):
+        assert (
+            _opt.resolve_boozer_inner_optimizer_method(
+                "host-jax",
+                limited_memory=limited_memory,
+                least_squares_algorithm=least_squares_algorithm,
+            )
+            == expected_method
+        )
+
+    @pytest.mark.parametrize(
+        ("limited_memory", "expected_method"),
+        [
+            (False, "bfgs"),
+            (True, "lbfgs"),
+        ],
+    )
+    def test_public_outer_optimizer_method_accepts_host_jax(
+        self,
+        limited_memory,
+        expected_method,
+    ):
+        assert (
+            resolve_optimizer_backend_method(
+                "host-jax",
+                limited_memory=limited_memory,
+            )
+            == expected_method
+        )
+
+    def test_single_stage_routing_accepts_host_jax_inner_boozer_backend(self):
+        assert resolve_boozer_optimizer_backend("host-jax", None) == "host-jax"
+        assert (
+            resolve_boozer_optimizer_backend("scipy-jax", "host-jax") == "host-jax"
+        )
+        assert resolve_boozer_limited_memory("host-jax", True) is True
+        assert (
+            resolve_boozer_optimizer_method(
+                "host-jax",
+                limited_memory=True,
+                least_squares_algorithm="quasi-newton",
+            )
+            == "lbfgs"
+        )
+        assert (
+            resolve_boozer_optimizer_method(
+                "host-jax",
+                limited_memory=False,
+                least_squares_algorithm="lm",
+            )
+            == "lm"
+        )
 
     @pytest.mark.parametrize(
         (
@@ -4557,6 +4738,8 @@ class TestBoozerSurfaceJAXClass:
         [
             ("scipy", False, "bfgs"),
             ("scipy", True, "lbfgs"),
+            ("host-jax", False, "bfgs"),
+            ("host-jax", True, "lbfgs"),
             ("ondevice", False, "bfgs-ondevice"),
             ("ondevice", True, "lbfgs-ondevice"),
         ],
@@ -4611,6 +4794,7 @@ class TestBoozerSurfaceJAXClass:
             max_dense_hessian_bytes=None,
             progress_callback=None,
             objective_args=(),
+            allow_host_control=False,
         ):
             del (
                 maxiter,
@@ -4620,6 +4804,7 @@ class TestBoozerSurfaceJAXClass:
                 progress_callback,
                 objective_args,
             )
+            captured["allow_host_control"] = allow_host_control
             if not materialize_hessian:
                 return {
                     "x": x0,
@@ -4633,12 +4818,16 @@ class TestBoozerSurfaceJAXClass:
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "reference_minimize", fake_minimize_runner)
+        monkeypatch.setattr(
+            _bsj, "host_jax_minimize_value_and_grad", fake_minimize_runner
+        )
         monkeypatch.setattr(_bsj, "target_minimize", fake_minimize_runner)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert captured["method"] == expected_method
+        assert captured["allow_host_control"] is (optimizer_backend == "host-jax")
         assert res["success"] is True
         assert res["adjoint_linear_solve_available"] is True
         if optimizer_backend == "ondevice":
@@ -4654,6 +4843,93 @@ class TestBoozerSurfaceJAXClass:
         assert callable(res["vjp"])
         assert "iota" in res
         assert booz.need_to_run_code is False
+
+    def test_host_jax_run_code_reuses_kernel_bundle_after_coil_value_refresh(
+        self,
+        monkeypatch,
+    ):
+        """Repeated host-jax solves must not rebuild kernels for same shapes."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "host-jax"
+
+        captured = {"bundle_ids": [], "cache_sizes": []}
+
+        def fake_host_jax_minimize_runner(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad=False,
+            progress_callback=None,
+        ):
+            del method, tol, maxiter, options, progress_callback
+            assert value_and_grad is True
+            value, grad = fun(x0)
+            bundle = booz._get_penalty_kernel_bundle(
+                True,
+                booz.options["weight_inv_modB"],
+                booz.constraint_weight,
+            )
+            captured["bundle_ids"].append(id(bundle))
+            captured["cache_sizes"].append(bundle.value_and_grad._cache_size())
+            return types.SimpleNamespace(
+                x=x0,
+                fun=value,
+                jac=grad,
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        def fake_newton_polish(
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            materialize_hessian=True,
+            max_dense_hessian_bytes=None,
+            progress_callback=None,
+            objective_args=(),
+            allow_host_control=False,
+        ):
+            del (
+                maxiter,
+                tol,
+                stab,
+                materialize_hessian,
+                max_dense_hessian_bytes,
+                progress_callback,
+                objective_args,
+            )
+            assert allow_host_control is True
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(
+            _bsj, "host_jax_minimize_value_and_grad", fake_host_jax_minimize_runner
+        )
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        booz.run_code(iota=0.3, G=0.05)
+
+        for coil in booz.biotsavart.coils:
+            coil.current._value *= 1.001
+        booz.biotsavart._coil_spec = grouped_coil_set_spec_from_lists(
+            [coil.curve.gamma() for coil in booz.biotsavart.coils],
+            [coil.curve.gammadash() for coil in booz.biotsavart.coils],
+            [coil.current.get_value() for coil in booz.biotsavart.coils],
+        )
+        booz.recompute_bell()
+        booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["bundle_ids"][0] == captured["bundle_ids"][1]
+        assert captured["cache_sizes"] == [1, 1]
 
     def test_scipy_bfgs_pre_newton_contract_uses_cpu_call_shape(self, monkeypatch):
         """The host-SciPy pre-Newton lane uses CPU BFGS method/options/layout."""
@@ -6025,8 +6301,18 @@ class TestBoozerSurfaceJAXClass:
 
         assert adjoint_state.linear_solve_backend == "dense-plu-shared"
         assert adjoint_state.linear_solve_factors is not None
+        assert len(adjoint_state.linear_solve_factors) == 5
         assert adjoint_state.dense_linear_solve_factors_available is True
         np.testing.assert_array_equal(np.asarray(solved), np.asarray(expected))
+        np.testing.assert_array_equal(
+            np.asarray(adjoint_state.linear_solve_factors[3]),
+            np.asarray(lu_piv[0]),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(adjoint_state.linear_solve_factors[4]),
+            np.asarray(lu_piv[1]),
+        )
+        assert adjoint_state.linear_solve_factors[4].dtype == jnp.int32
 
     def test_packed_factor_runtime_status_rejects_high_original_residual(self):
         """Packed LU solves must validate the original operator residual."""
@@ -6294,6 +6580,30 @@ class TestBoozerSurfaceJAXClass:
 
         assert all(factor.device.platform == "cpu" for factor in hosted)
         np.testing.assert_allclose(np.asarray(hosted[0]), np.ones((2, 2)))
+
+    def test_linearization_residency_host_uses_runtime_device_without_cpu_platform(
+        self, monkeypatch
+    ):
+        runtime_device = object()
+        factors = ("P", "L", "U")
+        placements: list[object] = []
+
+        def _reject_cpu_devices(backend):
+            raise AssertionError(f"must not request unavailable backend {backend!r}")
+
+        def _runtime_device_put(factor, *, device):
+            placements.append(device)
+            return factor, device
+
+        monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+        monkeypatch.setattr(_bsj, "get_runtime_jax_device", lambda: runtime_device)
+        monkeypatch.setattr(_bsj.jax, "devices", _reject_cpu_devices)
+        monkeypatch.setattr(_bsj, "runtime_device_put", _runtime_device_put)
+
+        hosted = _bsj._place_linearization_factors_for_residency(factors, "host")
+
+        assert hosted == tuple((factor, runtime_device) for factor in factors)
+        assert placements == [runtime_device, runtime_device, runtime_device]
 
     def test_linearization_residency_host_never_silences_device_to_host_guard(
         self, monkeypatch
@@ -9724,6 +10034,230 @@ class TestUpstreamFactoryBoozerMatrix:
             f"warmup (cache size {cache_after_warmup})"
         )
 
+    def test_host_jax_kernel_bundle_reuses_compiled_kernels_same_shape(self):
+        """host-jax kernels must compile once per static shape, not per x value."""
+        case = _build_upstream_boozer_penalty_case(
+            UPSTREAM_BOOZER_SURFACE_TYPES[0],
+            UPSTREAM_BOOZER_STELLSYM[0],
+            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        )
+        bundle = case.jax_boozer._get_penalty_kernel_bundle(
+            case.optimize_G,
+            case.jax_boozer.options["weight_inv_modB"],
+            case.constraint_weight,
+        )
+        coil_set_spec = case.jax_boozer.coil_set_spec
+        x0 = jnp.asarray(case.x, dtype=jnp.float64)
+        x1 = x0 + jnp.asarray(1e-6, dtype=jnp.float64)
+
+        bundle.value_and_grad(x0, coil_set_spec)
+        value_grad_cache = bundle.value_and_grad._cache_size()
+        bundle.residual(x0, coil_set_spec)
+        residual_cache = bundle.residual._cache_size()
+        bundle.jacobian(x0, coil_set_spec)
+        jacobian_cache = bundle.jacobian._cache_size()
+        bundle.factor_apply(x0, x0, coil_set_spec)
+        factor_apply_cache = bundle.factor_apply._cache_size()
+
+        bundle.value_and_grad(x1, coil_set_spec)
+        bundle.residual(x1, coil_set_spec)
+        bundle.jacobian(x1, coil_set_spec)
+        bundle.factor_apply(x1, x1, coil_set_spec)
+
+        assert value_grad_cache == 1
+        assert residual_cache == 1
+        assert jacobian_cache == 1
+        assert factor_apply_cache == 1
+        assert bundle.value_and_grad._cache_size() == value_grad_cache
+        assert bundle.residual._cache_size() == residual_cache
+        assert bundle.jacobian._cache_size() == jacobian_cache
+        assert bundle.factor_apply._cache_size() == factor_apply_cache
+
+    def test_host_jax_traceable_objective_reuses_optimizer_cached_callables(self):
+        """Host Newton must reuse value/grad and HVP wrappers for one signature."""
+        case = _build_upstream_boozer_penalty_case(
+            UPSTREAM_BOOZER_SURFACE_TYPES[0],
+            UPSTREAM_BOOZER_STELLSYM[0],
+            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        )
+        objective = case.jax_boozer._get_traceable_penalty_objective(
+            case.optimize_G,
+            case.jax_boozer.options["weight_inv_modB"],
+            case.constraint_weight,
+        )
+
+        value_and_grad0 = _opt._cached_jit_value_and_grad(objective)
+        value_and_grad1 = _opt._cached_jit_value_and_grad(objective)
+        hvp0 = _opt._hessian_vector_product_fn(objective)
+        hvp1 = _opt._hessian_vector_product_fn(objective)
+
+        assert value_and_grad1 is value_and_grad0
+        assert hvp1 is hvp0
+
+    def test_geometry_penalty_kernels_reuse_jit_cache_for_same_shape(self):
+        """Self-intersection and pairwise penalties are shape-keyed kernels."""
+        from simsopt_jax.core.curve_geometry import (
+            closed_curve_self_intersection_min_distance,
+        )
+        from simsopt_jax.geo._pairwise_reductions import (
+            pairwise_thresholded_mean_square_distance_pure,
+        )
+
+        theta = jnp.linspace(0.0, 2.0 * jnp.pi, 16, endpoint=False)
+        gamma0 = jnp.stack(
+            (jnp.cos(theta), jnp.sin(theta), jnp.zeros_like(theta)),
+            axis=1,
+        )
+        gamma1 = gamma0.at[:, 2].set(0.25)
+
+        closed_curve_self_intersection_min_distance(gamma0)
+        self_intersection_cache = (
+            closed_curve_self_intersection_min_distance._cache_size()
+        )
+        closed_curve_self_intersection_min_distance(gamma1)
+
+        pairwise_thresholded_mean_square_distance_pure(gamma0, gamma1, 0.1)
+        pairwise_cache = pairwise_thresholded_mean_square_distance_pure._cache_size()
+        pairwise_thresholded_mean_square_distance_pure(gamma1, gamma0, 0.2)
+
+        assert (
+            closed_curve_self_intersection_min_distance._cache_size()
+            == self_intersection_cache
+        )
+        assert pairwise_thresholded_mean_square_distance_pure._cache_size() == pairwise_cache
+
+    def test_host_jax_kernel_bundle_survives_same_signature_coil_refresh(self):
+        """Outer host refreshes dynamic coil values without rebuilding kernels."""
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+        x0 = jnp.asarray(
+            np.concatenate((booz.surface.get_dofs(), [-0.3, 1.0])),
+            dtype=jnp.float64,
+        )
+        x1 = x0 + jnp.asarray(1e-6, dtype=jnp.float64)
+
+        bundle.value_and_grad(x0, booz.coil_set_spec)
+        value_grad_cache = bundle.value_and_grad._cache_size()
+
+        for coil in booz.biotsavart.coils:
+            coil.current._value *= 1.001
+        booz.biotsavart._coil_spec = grouped_coil_set_spec_from_lists(
+            [coil.curve.gamma() for coil in booz.biotsavart.coils],
+            [coil.curve.gammadash() for coil in booz.biotsavart.coils],
+            [coil.current.get_value() for coil in booz.biotsavart.coils],
+        )
+        booz._refresh_coil_data()
+
+        refreshed_bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+        assert refreshed_bundle is bundle
+
+        refreshed_bundle.value_and_grad(x1, booz.coil_set_spec)
+
+        assert value_grad_cache == 1
+        assert refreshed_bundle.value_and_grad._cache_size() == value_grad_cache
+
+    def test_host_jax_kernel_bundle_rebuilds_on_coil_static_signature_change(self):
+        """Changed grouped-coil static shape invalidates the host-jax bundle."""
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+
+        replacement_coils = _make_mock_coils(nquad=32)
+        booz.biotsavart._coils = replacement_coils
+        booz.biotsavart._coil_spec = grouped_coil_set_spec_from_lists(
+            [coil.curve.gamma() for coil in replacement_coils],
+            [coil.curve.gammadash() for coil in replacement_coils],
+            [coil.current.get_value() for coil in replacement_coils],
+        )
+        booz._refresh_coil_data()
+
+        refreshed_bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+
+        assert refreshed_bundle is not bundle
+
+    def test_host_jax_kernel_bundle_compiles_once_per_static_signature(self):
+        """New static signatures get one new executable per bounded kernel."""
+        shape_cache_sizes = []
+        for mpol in (1, 2):
+            booz = _make_mock_boozer_surface(mpol=mpol, ntor=1)
+            bundle = booz._get_penalty_kernel_bundle(
+                True,
+                booz.options["weight_inv_modB"],
+                booz.constraint_weight,
+            )
+            assert (
+                booz._get_penalty_kernel_bundle(
+                    True,
+                    booz.options["weight_inv_modB"],
+                    booz.constraint_weight,
+                )
+                is bundle
+            )
+
+            x = jnp.asarray(
+                np.concatenate((booz.surface.get_dofs(), [-0.3, 1.0])),
+                dtype=jnp.float64,
+            )
+            bundle.value_and_grad(x, booz.coil_set_spec)
+            bundle.residual(x, booz.coil_set_spec)
+            bundle.jacobian(x, booz.coil_set_spec)
+            bundle.factor_apply(x, x, booz.coil_set_spec)
+            shape_cache_sizes.append(
+                (
+                    x.shape,
+                    bundle.value_and_grad._cache_size(),
+                    bundle.residual._cache_size(),
+                    bundle.jacobian._cache_size(),
+                    bundle.factor_apply._cache_size(),
+                )
+            )
+
+        assert shape_cache_sizes[0][0] != shape_cache_sizes[1][0]
+        assert shape_cache_sizes == [((29,), 1, 1, 1, 1), ((47,), 1, 1, 1, 1)]
+
+    def test_host_jax_kernel_bundle_linear_solve_compiles_once_per_static_signature(
+        self,
+    ):
+        """Linear solves are owned by the stable bundle, not rebuilt per step."""
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+        x0 = jnp.asarray(
+            np.concatenate((booz.surface.get_dofs(), [-0.3, 1.0])),
+            dtype=jnp.float64,
+        )
+        x1 = x0 + jnp.asarray(1e-6, dtype=jnp.float64)
+        rhs = jnp.ones_like(x0)
+
+        solve0, status0 = bundle.linear_solve(x0, rhs, booz.coil_set_spec)
+        linear_solve_cache = bundle.linear_solve._cache_size()
+        solve1, status1 = bundle.linear_solve(x1, rhs, booz.coil_set_spec)
+
+        assert solve0.shape == rhs.shape
+        assert solve1.shape == rhs.shape
+        assert status0.success.shape == ()
+        assert status1.success.shape == ()
+        assert linear_solve_cache == 1
+        assert bundle.linear_solve._cache_size() == linear_solve_cache
+
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
     @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
@@ -10391,6 +10925,49 @@ class TestBuildBoozerSurfaceRuntimeState:
         np.testing.assert_allclose(np.asarray(solved_state.iota), 0.23)
         np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
         assert solved_state.weight_inv_modB is False
+
+    def test_install_value_only_solved_runtime_state_has_no_adjoint_factors(self):
+        """Resolved warm-start install exposes values but not fake adjoint factors."""
+        s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
+        coils = _make_mock_coils()
+        bs = _MockBiotSavart(coils)
+        label = _PlumbingVolumeLabel(s)
+        initial_dofs = np.asarray(s.get_dofs(), dtype=np.float64)
+        solved_dofs = initial_dofs.copy()
+        solved_dofs[:3] = solved_dofs[:3] + np.asarray([0.01, -0.02, 0.03])
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            s,
+            label,
+            targetlabel=0.1,
+            constraint_weight=1.0,
+        )
+
+        res = booz.install_value_only_solved_runtime_state(
+            sdofs=jnp.asarray(solved_dofs, dtype=jnp.float64),
+            iota=jnp.asarray(0.23, dtype=jnp.float64),
+            G=jnp.asarray(1.7, dtype=jnp.float64),
+        )
+
+        assert res.mode == "value_only"
+        assert res["success"] is True
+        assert res["primal_success"] is True
+        assert res["adjoint_linear_solve_available"] is False
+        assert res["optimizer_method"] == "resolved-warm-start"
+        assert res["linearization_kind"] == "value_only"
+        assert res["linear_solve_backend"] == "none"
+        assert res["dense_linear_solve_factors_available"] is False
+        assert booz.need_to_run_code is False
+        np.testing.assert_allclose(np.asarray(s.get_dofs()), solved_dofs)
+
+        solved_state = booz.get_solved_runtime_state()
+        _assert_runtime_state_schema(solved_state, _SOLVED_RUNTIME_STATE_FIELDS)
+        np.testing.assert_allclose(np.asarray(solved_state.sdofs), solved_dofs)
+        np.testing.assert_allclose(np.asarray(solved_state.iota), 0.23)
+        np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
+        with pytest.raises(RuntimeError, match="no valid adjoint state"):
+            booz.get_adjoint_runtime_state()
 
     def test_get_adjoint_runtime_state_exposes_runtime_callbacks_and_stream(
         self,

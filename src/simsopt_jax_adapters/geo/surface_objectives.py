@@ -197,6 +197,7 @@ __all__ = [
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_value_and_grad",
+    "make_traceable_solved_state_value_and_grad",
     "make_traceable_objective_profile_suite",
     "surface_area_jax_from_dofs",
     "surface_aspect_ratio_jax_from_dofs",
@@ -3193,5 +3194,6 @@ from .surface_objectives_traceable import (
     make_traceable_objective_runtime_bundle as make_traceable_objective_runtime_bundle,
     make_traceable_objective_seeded_value_and_grad as make_traceable_objective_seeded_value_and_grad,
     make_traceable_objective_value_and_grad as make_traceable_objective_value_and_grad,
+    make_traceable_solved_state_value_and_grad as make_traceable_solved_state_value_and_grad,
     make_traceable_single_stage_alm_runtime_bundle as make_traceable_single_stage_alm_runtime_bundle,
 )

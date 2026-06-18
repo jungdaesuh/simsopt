@@ -285,10 +285,11 @@ def target_scipy_minimize_value_and_grad(
     maxiter,
     options,
 ):
-    """Run SciPy L-BFGS-B control against a JAX target value/grad evaluator."""
-    if method != "lbfgs":
+    """Run SciPy host control against a JAX target value/grad evaluator."""
+    if method not in {"bfgs", "lbfgs"}:
         raise ValueError(
-            "target_scipy_minimize_value_and_grad() only supports method='lbfgs'."
+            "target_scipy_minimize_value_and_grad() only supports "
+            "method='bfgs' or method='lbfgs'."
         )
     return _scipy_minimize_value_and_grad_core(
         fun,
@@ -470,6 +471,7 @@ def reference_minimize(
     progress_callback=None,
     failure_callback=None,
     initial_value_and_grad=None,
+    allow_jax_host_control=False,
 ):
     """Run the CPU/reference optimizer lane."""
     if method in _optimizer._REFERENCE_TRACE_METHODS and not value_and_grad:
@@ -505,16 +507,17 @@ def reference_minimize(
     if failure_callback is not None:
         options["failure_callback"] = failure_callback
 
-    _optimizer._raise_if_target_lane_required(
-        component="optimizer_jax_reference.reference_minimize",
-        method=method,
-        detail=_optimizer._STRICT_REFERENCE_OPTIMIZER_DETAIL,
-    )
-    _optimizer._raise_if_strict_optimizer_fallback(
-        component="optimizer_jax_reference.reference_minimize",
-        method=method,
-        detail=_optimizer._STRICT_REFERENCE_OPTIMIZER_DETAIL,
-    )
+    if not allow_jax_host_control:
+        _optimizer._raise_if_target_lane_required(
+            component="optimizer_jax_reference.reference_minimize",
+            method=method,
+            detail=_optimizer._STRICT_REFERENCE_OPTIMIZER_DETAIL,
+        )
+        _optimizer._raise_if_strict_optimizer_fallback(
+            component="optimizer_jax_reference.reference_minimize",
+            method=method,
+            detail=_optimizer._STRICT_REFERENCE_OPTIMIZER_DETAIL,
+        )
 
     if method in _optimizer._REFERENCE_TRACE_METHODS:
         return finalize(
@@ -530,7 +533,9 @@ def reference_minimize(
         )
 
     scipy_adapter = (
-        _scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize
+        _scipy_minimize_value_and_grad_core
+        if allow_jax_host_control and value_and_grad
+        else (_scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize)
     )
     return finalize(
         scipy_adapter(

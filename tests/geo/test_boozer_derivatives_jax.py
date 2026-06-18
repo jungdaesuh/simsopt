@@ -1,5 +1,5 @@
 """
-FD validation tests for M3 JAX Boozer derivative path.
+FD validation tests for the composed JAX Boozer derivative path.
 
 Tests:
 1. Surface coefficient Jacobians (dgamma_by_dcoeff, etc.) via FD.

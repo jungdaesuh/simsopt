@@ -755,6 +755,9 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
     supports_max_dense_hessian_bytes = (
         "max_dense_hessian_bytes" in inspect.signature(fake_newton_polish).parameters
     )
+    supports_allow_host_control = (
+        "allow_host_control" in inspect.signature(fake_newton_polish).parameters
+    )
 
     def fake_runner(
         self,
@@ -770,7 +773,7 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
         progress_callback=None,
         objective_args=(),
     ):
-        del self, method
+        del method
         kwargs = {
             "maxiter": maxiter,
             "tol": tol,
@@ -783,6 +786,10 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
             kwargs["max_dense_hessian_bytes"] = max_dense_hessian_bytes
         if supports_objective_args:
             kwargs["objective_args"] = objective_args
+        if supports_allow_host_control:
+            kwargs["allow_host_control"] = (
+                self.options["optimizer_backend"] == "host-jax"
+            )
         return fake_newton_polish(obj_fn, x0, **kwargs)
 
     monkeypatch.setattr(

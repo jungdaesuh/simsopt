@@ -68,6 +68,7 @@ __all__ = [
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_value_and_grad",
+    "make_traceable_solved_state_value_and_grad",
     "make_traceable_single_stage_alm_runtime_bundle",
 ]
 
@@ -460,16 +461,13 @@ def _traceable_solve_plu_linearization(
             y = jsp_linalg.solve_triangular(L, P.T @ rhs, lower=True)
             solution = jsp_linalg.solve_triangular(U, y, lower=False)
     matrix = _traceable_plu_matrix(linear_solve_factors)
+    operator_matrix = matrix.T if transpose else matrix
     residual = rhs - _traceable_plu_matvec(
         linear_solve_factors,
         solution,
         transpose=transpose,
     )
     residual_norm = jnp.linalg.norm(residual)
-    residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
-        rhs,
-        linear_solve_tol,
-    )
     residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
     # The Boozer LS Hessian is symmetric by construction (J^T J is symmetric
     # for any J). Therefore κ_1(matrix) == κ_1(matrix.T) and we can estimate
@@ -496,12 +494,17 @@ def _traceable_solve_plu_linearization(
         tol=linear_solve_tol,
         iterations=0,
     )
+    backward_error_success = _optimizer_jax._dense_matrix_backward_error_success(
+        operator_matrix,
+        solution,
+        rhs,
+        tol=linear_solve_tol,
+    )
     success = (
         jnp.all(jnp.isfinite(solution))
         & jnp.all(jnp.isfinite(residual))
         & jnp.isfinite(residual_norm)
-        & (status.residual <= residual_tol)
-        & forward_error_success
+        & ((status.success & forward_error_success) | backward_error_success)
     )
     return solution, status._replace(success=success)
 
@@ -876,11 +879,16 @@ def _traceable_total_gradient(
 
 def _traceable_adjoint_gradient_or_nan(gradient, linear_solve_success):
     """Surface adjoint-solve failures as non-finite gradients, not fallbacks."""
-    return lax.cond(
-        linear_solve_success,
-        lambda _: gradient,
-        lambda _: _traceable_adjoint_fail_gradient_like(gradient),
-        operand=None,
+    failure_gradient = _traceable_adjoint_fail_gradient_like(gradient)
+    success = jnp.asarray(linear_solve_success)
+    return jax.tree.map(
+        lambda valid_gradient, invalid_gradient: jnp.where(
+            success,
+            valid_gradient,
+            invalid_gradient,
+        ),
+        gradient,
+        failure_gradient,
     )
 
 
@@ -1113,12 +1121,16 @@ def _build_traceable_objective_cache_state(
     iota_target,
     *,
     outer_objective_config=None,
+    require_ondevice_inner=True,
 ):
     """Return the cheap traceable-runtime state needed for cache-key checks."""
     objective_method = None
     if booz_jax.boozer_type == "ls":
         objective_method = booz_jax._resolve_optimizer_method()
-        if objective_method not in _ONDEVICE_OPTIMIZER_METHODS:
+        if (
+            require_ondevice_inner
+            and objective_method not in _ONDEVICE_OPTIMIZER_METHODS
+        ):
             raise RuntimeError(
                 "make_traceable_objective() requires an on-device optimizer method; "
                 f"got {objective_method!r}."
@@ -1431,6 +1443,49 @@ def _build_traceable_objective_compiled_bundle_from_state(
     }
 
 
+def _build_traceable_solved_state_value_and_grad_from_state(booz_jax, state):
+    """Compile value/adjoint kernels for caller-provided solved Boozer states."""
+    objective_kwargs = state["objective_kwargs"]
+    linearization_kind = state["linearization_kind"]
+    linear_solve_tol = state["linear_solve_tol"]
+    linear_solve_stab = state["linear_solve_stab"]
+    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+
+    def _solved_state_value_and_grad_for(
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+    ):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        solved_x = _as_jax_float64(solved_x)
+        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+        value = _evaluate_traceable_total_objective(
+            solved_x,
+            coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        )
+        grad, linear_solve_success = _traceable_total_gradient_with_status(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=_traceable_runtime_deviceify_tree(
+                solved_linear_solve_factors
+            ),
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            objective_kwargs=objective_kwargs,
+        )
+        return value, _traceable_adjoint_gradient_or_nan(
+            grad,
+            linear_solve_success,
+        )
+
+    return jax.jit(_solved_state_value_and_grad_for)
+
+
 def _traceable_runtime_option_signature(booz_jax, state):
     """Capture the solver options that affect traceable runtime compilation."""
     option_state = {
@@ -1565,6 +1620,49 @@ def _get_cached_traceable_runtime_entry(
         "alm_runtime_bundles": {},
     }
     booz_jax._traceable_runtime_entry_cache = cached_entry
+    return cached_entry
+
+
+def _get_cached_traceable_solved_state_value_and_grad_entry(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+):
+    """Cache the host-solve/compiled-gradient bridge without a forward graph."""
+    cache_state = _build_traceable_objective_cache_state(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        require_ondevice_inner=False,
+    )
+    cache_key = _traceable_runtime_cache_key(
+        booz_jax,
+        cache_state,
+        success_filter=success_filter,
+    )
+    cached_entry = getattr(
+        booz_jax,
+        "_traceable_solved_state_value_and_grad_entry_cache",
+        None,
+    )
+    if cached_entry is not None and cached_entry["cache_key"] == cache_key:
+        return cached_entry
+
+    state = _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
+    cached_entry = {
+        "cache_key": cache_key,
+        "success_filter": success_filter,
+        "state": state,
+        "value_and_grad": _build_traceable_solved_state_value_and_grad_from_state(
+            booz_jax,
+            state,
+        ),
+    }
+    booz_jax._traceable_solved_state_value_and_grad_entry_cache = cached_entry
     return cached_entry
 
 
@@ -2872,6 +2970,30 @@ def make_traceable_objective_value_and_grad(
         success_filter=success_filter,
     )
     return _ensure_traceable_runtime_optimizer_value_and_grad(runtime_entry, booz_jax)
+
+
+def make_traceable_solved_state_value_and_grad(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+):
+    """Build ``(coil_dofs, solved_x, factors) -> (value, grad)``.
+
+    This is the host-controlled Boozer bridge: Python owns the nonlinear solve
+    and passes the solved state into a bounded compiled value/adjoint kernel.
+    It intentionally does not build or call the traceable forward-solve graph.
+    """
+    runtime_entry = _get_cached_traceable_solved_state_value_and_grad_entry(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    return runtime_entry["value_and_grad"]
 
 
 def _make_traceable_forward_value_pipeline(compiled_forward_result_for):

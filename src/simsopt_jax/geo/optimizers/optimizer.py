@@ -172,6 +172,7 @@ from simsopt_jax.geo.optimizers._shared import (
 )
 from simsopt_jax.geo._optimizer_backend_choices import (
     CONCRETE_OPTIMIZER_BACKENDS,
+    HOST_JAX_OUTER_OPTIMIZER_BACKEND,
     OUTER_OPTIMIZER_BACKEND_MESSAGE,
     RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE,
     TARGET_OUTER_OPTIMIZER_BACKENDS,
@@ -236,11 +237,15 @@ __all__ = [
     "VALID_OPTIMIZER_BACKENDS",
     "VALID_OUTER_OPTIMIZER_BACKENDS",
     "CONCRETE_OPTIMIZER_BACKENDS",
+    "BOOZER_INNER_OPTIMIZER_BACKENDS",
+    "VALID_BOOZER_INNER_OPTIMIZER_BACKENDS",
     "TARGET_OUTER_OPTIMIZER_BACKENDS",
     "TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS",
     "TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
+    "BOOZER_INNER_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "render_invalid_optimizer_backend_message",
+    "render_invalid_boozer_inner_optimizer_backend_message",
     "jax_least_squares",
     "jax_least_squares_optimistix",
     "jax_minimize",
@@ -254,9 +259,12 @@ __all__ = [
     "reference_least_squares",
     "reference_minimize",
     "require_target_backend_x64",
+    "require_boozer_inner_backend_x64",
     "resolve_optimizer_backend",
+    "resolve_boozer_inner_optimizer_backend",
     "resolve_optimizer_backend_driver",
     "resolve_boozer_inner_driver",
+    "resolve_boozer_inner_optimizer_method",
     "resolve_least_squares_optimizer_method",
     "resolve_least_squares_optimizer_driver",
     "resolve_reference_least_squares_optimizer_method",
@@ -270,6 +278,8 @@ __all__ = [
     "resolve_target_optimizer_driver",
     "resolve_target_optimizer_method",
     "resolve_optimizer_backend_method",
+    "host_jax_least_squares",
+    "host_jax_minimize_value_and_grad",
     "reference_driver_method",
     "resolve_reference_outer_loop_optimizer_contract",
     "resolve_target_outer_loop_optimizer_contract",
@@ -289,11 +299,14 @@ OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
     "ondevice": "target",
     "scipy-jax": "target-scipy-control",
+    HOST_JAX_OUTER_OPTIMIZER_BACKEND: "target-host-control",
     "scipy-jax-fullgraph": "target-scipy-control-fullgraph",
     "optax-lbfgs": "target-optax-lbfgs",
     "optimistix-lbfgs": "target-optimistix-lbfgs",
 }
-TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS
+TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS | frozenset(
+    {HOST_JAX_OUTER_OPTIMIZER_BACKEND}
+)
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset(
     {"quasi-newton", "lm", "lm-minpack", "optimistix-lm"}
 )
@@ -443,6 +456,46 @@ def resolve_optimizer_backend(optimizer_backend: str | None) -> str:
         return get_backend_policy().default_optimizer_backend
     if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
         raise ValueError(_RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE)
+    return optimizer_backend
+
+
+HOST_JAX_BOOZER_OPTIMIZER_BACKEND = "host-jax"
+BOOZER_INNER_OPTIMIZER_BACKENDS = CONCRETE_OPTIMIZER_BACKENDS | frozenset(
+    {HOST_JAX_BOOZER_OPTIMIZER_BACKEND}
+)
+VALID_BOOZER_INNER_OPTIMIZER_BACKENDS = (
+    frozenset({"auto"}) | BOOZER_INNER_OPTIMIZER_BACKENDS
+)
+_BOOZER_INNER_OPTIMIZER_BACKEND_DISPLAY_ORDER = (
+    "auto",
+    "scipy",
+    HOST_JAX_BOOZER_OPTIMIZER_BACKEND,
+    "ondevice",
+)
+assert (
+    frozenset(_BOOZER_INNER_OPTIMIZER_BACKEND_DISPLAY_ORDER)
+    == VALID_BOOZER_INNER_OPTIMIZER_BACKENDS
+)
+BOOZER_INNER_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset(
+    {HOST_JAX_BOOZER_OPTIMIZER_BACKEND, "ondevice"}
+)
+
+
+def render_invalid_boozer_inner_optimizer_backend_message() -> str:
+    names = ", ".join(_BOOZER_INNER_OPTIMIZER_BACKEND_DISPLAY_ORDER)
+    return f"optimizer_backend must be one of: {names}."
+
+
+_BOOZER_INNER_OPTIMIZER_BACKEND_MESSAGE = (
+    render_invalid_boozer_inner_optimizer_backend_message()
+)
+
+
+def resolve_boozer_inner_optimizer_backend(optimizer_backend: str | None) -> str:
+    if optimizer_backend is None or optimizer_backend == "auto":
+        return get_backend_policy().default_optimizer_backend
+    if optimizer_backend not in BOOZER_INNER_OPTIMIZER_BACKENDS:
+        raise ValueError(_BOOZER_INNER_OPTIMIZER_BACKEND_MESSAGE)
     return optimizer_backend
 
 
@@ -705,6 +758,25 @@ _BOOZER_INNER_DRIVER_BY_OPTIONS = {
     for driver, options in _BOOZER_INNER_DRIVER_OPTIONS.items()
 }
 assert len(_BOOZER_INNER_DRIVER_BY_OPTIONS) == len(_BOOZER_INNER_DRIVER_OPTIONS)
+_BOOZER_INNER_DRIVER_BY_OPTIONS.update(
+    {
+        (
+            HOST_JAX_BOOZER_OPTIMIZER_BACKEND,
+            False,
+            "quasi-newton",
+        ): Driver.SCIPY_BFGS,
+        (
+            HOST_JAX_BOOZER_OPTIMIZER_BACKEND,
+            True,
+            "quasi-newton",
+        ): Driver.SCIPY_LBFGSB,
+        (
+            HOST_JAX_BOOZER_OPTIMIZER_BACKEND,
+            False,
+            "lm",
+        ): Driver.SIMSOPT_LM_GMRES_HOST,
+    }
+)
 # The reference lane exposes a single residual least-squares driver, so every
 # residual algorithm coalesces onto the one ``"lm"`` table row for that lane.
 _REFERENCE_RESIDUAL_LEAST_SQUARES_OPTION = "lm"
@@ -779,7 +851,7 @@ def _optimizer_method_for_backend_driver(
     *,
     reference_method,
 ):
-    if optimizer_backend == "scipy":
+    if optimizer_backend in {"scipy", HOST_JAX_BOOZER_OPTIMIZER_BACKEND}:
         return reference_method(driver)
     return target_driver_method(
         _target_optimizer_contract_for_backend_driver(optimizer_backend, driver)
@@ -912,11 +984,11 @@ def wrap_strict_target_lane_value_and_grad(fun):
 
 def _cached_jit_value_and_grad(fun):
     if not getattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, False):
-        return jax.jit(jax.value_and_grad(fun))
+        return jax.jit(jax.value_and_grad(fun, argnums=0))
     cached = getattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, None)
     if cached is not None:
         return cached
-    compiled = jax.jit(jax.value_and_grad(fun))
+    compiled = jax.jit(jax.value_and_grad(fun, argnums=0))
     # Double-checked install under the cache lock. ``fun`` has already
     # been marked via ``_mark_cacheable_jit_value_and_grad`` (the marker
     # check above gated this branch), so ``setattr`` cannot raise.
@@ -955,7 +1027,7 @@ def resolve_optimizer_backend_driver(optimizer_backend, *, limited_memory):
         optimizer_backend = resolve_optimizer_backend(optimizer_backend)
     if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
         raise ValueError(_OUTER_OPTIMIZER_BACKEND_MESSAGE)
-    if optimizer_backend == "scipy":
+    if optimizer_backend in {"scipy", HOST_JAX_OUTER_OPTIMIZER_BACKEND}:
         return resolve_reference_optimizer_driver(limited_memory=limited_memory)
     if optimizer_backend in TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS:
         return Driver.SCIPY_LBFGSB
@@ -1045,7 +1117,7 @@ def _resolve_concrete_least_squares_optimizer_driver(
             f"least_squares_algorithm={least_squares_algorithm!r} is incompatible "
             "with limited_memory=True."
         )
-    if optimizer_backend == "scipy":
+    if optimizer_backend in {"scipy", HOST_JAX_BOOZER_OPTIMIZER_BACKEND}:
         least_squares_algorithm = _REFERENCE_RESIDUAL_LEAST_SQUARES_OPTION
     return _boozer_inner_driver_for_options(
         optimizer_backend,
@@ -1061,13 +1133,34 @@ def resolve_boozer_inner_driver(
     least_squares_algorithm,
 ):
     """Map the Boozer LS option contract to the typed inner driver."""
-    resolved_optimizer_backend = resolve_optimizer_backend(optimizer_backend)
-    if resolved_optimizer_backend not in CONCRETE_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
+    resolved_optimizer_backend = resolve_boozer_inner_optimizer_backend(
+        optimizer_backend
+    )
     return _resolve_concrete_least_squares_optimizer_driver(
         resolved_optimizer_backend,
         limited_memory=limited_memory,
         least_squares_algorithm=least_squares_algorithm,
+    )
+
+
+def resolve_boozer_inner_optimizer_method(
+    optimizer_backend,
+    *,
+    limited_memory,
+    least_squares_algorithm,
+):
+    resolved_optimizer_backend = resolve_boozer_inner_optimizer_backend(
+        optimizer_backend
+    )
+    driver = _resolve_concrete_least_squares_optimizer_driver(
+        resolved_optimizer_backend,
+        limited_memory=limited_memory,
+        least_squares_algorithm=least_squares_algorithm,
+    )
+    return _optimizer_method_for_backend_driver(
+        resolved_optimizer_backend,
+        driver,
+        reference_method=_reference_least_squares_driver_method,
     )
 
 
@@ -1192,6 +1285,26 @@ def require_target_backend_x64(optimizer_backend):
     )
 
 
+def require_boozer_inner_backend_x64(optimizer_backend):
+    """Fail fast when a Boozer inner target-kernel backend lacks float64."""
+    optimizer_backend = resolve_boozer_inner_optimizer_backend(optimizer_backend)
+    if optimizer_backend not in BOOZER_INNER_X64_REQUIRED_OPTIMIZER_BACKENDS:
+        return
+    if _x64_enabled():
+        return
+    if is_float32_smoke_policy(get_backend_policy()):
+        return
+    role = (
+        "target-host-control"
+        if optimizer_backend == HOST_JAX_BOOZER_OPTIMIZER_BACKEND
+        else OPTIMIZER_BACKEND_ROLE[optimizer_backend]
+    )
+    raise RuntimeError(
+        f"optimizer_backend='{optimizer_backend}' ({role}) requires "
+        "jax_enable_x64=True before import/use."
+    )
+
+
 def resolve_reference_optimizer_contract(
     field_backend,
     optimizer_backend,
@@ -1206,6 +1319,7 @@ def resolve_reference_optimizer_contract(
         raise ValueError(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+            "optimizer_backend='host-jax', "
             "optimizer_backend='scipy-jax-fullgraph', "
             "optimizer_backend='optax-lbfgs', or "
             "optimizer_backend='optimistix-lbfgs'. "
@@ -1241,6 +1355,7 @@ def resolve_target_optimizer_contract(
         raise ValueError(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+            "optimizer_backend='host-jax', "
             "optimizer_backend='scipy-jax-fullgraph', "
             "optimizer_backend='optax-lbfgs', or "
             "optimizer_backend='optimistix-lbfgs'. "
@@ -1323,6 +1438,23 @@ def _least_squares_linearization_from_jacobian(residual, jacobian):
     gradient = jacobian.T @ residual
     hessian = jacobian.T @ jacobian
     return gradient, hessian
+
+
+def _dense_lm_state_from_residual_jacobian(residual, jacobian):
+    residual = jnp.ravel(jnp.asarray(residual))
+    jacobian = jnp.asarray(jacobian)
+    gradient, hessian = _least_squares_linearization_from_jacobian(
+        residual,
+        jacobian,
+    )
+    return {
+        "residual": residual,
+        "residual_jacobian": jacobian,
+        "grad": gradient,
+        "hessian": hessian,
+        "fun": _least_squares_cost(residual),
+        "grad_norm_inf": _tree_inf_norm(gradient),
+    }
 
 
 def _tree_zeros_like(tree):
@@ -2278,6 +2410,153 @@ def _lm_iteration(flat_residual_fn, state, *, tol, gradient_tol, ftol, xtol, max
     }
 
 
+@jax.jit
+def _dense_lm_propose_step(hessian, gradient, damping):
+    hessian = jnp.asarray(hessian)
+    gradient = jnp.asarray(gradient)
+    dtype = hessian.dtype
+    cols = hessian.shape[1]
+    damped_hessian = hessian + jnp.asarray(damping, dtype=dtype) * jnp.eye(
+        cols,
+        dtype=dtype,
+    )
+    return jnp.linalg.solve(damped_hessian, gradient)
+
+
+@jax.jit
+def _dense_lm_accept_state(
+    x,
+    residual,
+    jacobian,
+    gradient,
+    hessian,
+    cost,
+    grad_norm_inf,
+    candidate_residual,
+    candidate_jacobian,
+    candidate_gradient,
+    candidate_hessian,
+    candidate_cost,
+    candidate_grad_norm_inf,
+    step,
+    damping,
+    delta,
+    nit,
+    status,
+    info,
+    gradient_tol,
+    ftol,
+    xtol,
+    maxiter,
+):
+    del status, info
+    dtype = jnp.asarray(cost).dtype
+    defaults = _lm_defaults(dtype)
+    damping = _clip_lm_damping(damping, dtype=dtype)
+    x_candidate = jnp.asarray(x) - jnp.asarray(step)
+    predicted_reduction = _device_scalar(0.5, dtype=dtype) * (
+        jnp.asarray(damping, dtype=dtype) * jnp.vdot(step, step).real.astype(dtype)
+        + jnp.vdot(step, gradient).real.astype(dtype)
+    )
+    actual_reduction = jnp.asarray(cost) - jnp.asarray(candidate_cost)
+    ratio = actual_reduction / jnp.maximum(
+        predicted_reduction,
+        defaults["predicted_floor"],
+    )
+    finite_candidate = (
+        jnp.all(jnp.isfinite(x_candidate))
+        & jnp.all(jnp.isfinite(step))
+        & jnp.all(jnp.isfinite(candidate_residual))
+        & jnp.all(jnp.isfinite(candidate_jacobian))
+        & jnp.all(jnp.isfinite(candidate_gradient))
+        & jnp.all(jnp.isfinite(candidate_hessian))
+        & jnp.isfinite(candidate_cost)
+        & jnp.isfinite(predicted_reduction)
+    )
+    accepted = finite_candidate & (ratio >= defaults["accept_threshold"])
+    step_norm = jnp.linalg.norm(step)
+    delta_after_step = _lm_delta_after_step(
+        delta,
+        step_norm,
+        jnp.asarray(ratio, dtype=jnp.asarray(delta).dtype),
+        jnp.asarray(actual_reduction, dtype=jnp.asarray(delta).dtype),
+        defaults=defaults,
+    )
+    damping_after_accept = lax.cond(
+        ratio > defaults["ratio_high"],
+        lambda _: damping * defaults["decrease_factor"],
+        lambda _: lax.cond(
+            ratio < defaults["ratio_low"],
+            lambda __: damping * defaults["increase_factor"],
+            lambda __: damping,
+            operand=None,
+        ),
+        operand=None,
+    )
+    next_damping = lax.cond(
+        accepted,
+        lambda _: _clip_lm_damping(damping_after_accept, dtype=dtype),
+        lambda _: _clip_lm_damping(
+            damping * defaults["increase_factor"],
+            dtype=dtype,
+        ),
+        operand=None,
+    )
+    x_next = lax.select(accepted, x_candidate, jnp.asarray(x))
+    residual_next = lax.select(accepted, candidate_residual, residual)
+    jacobian_next = lax.select(accepted, candidate_jacobian, jacobian)
+    gradient_next = lax.select(accepted, candidate_gradient, gradient)
+    hessian_next = lax.select(accepted, candidate_hessian, hessian)
+    cost_next = lax.select(accepted, candidate_cost, cost)
+    grad_norm_next = lax.select(
+        accepted,
+        candidate_grad_norm_inf,
+        grad_norm_inf,
+    )
+    x_norm = jnp.linalg.norm(x_next)
+    next_nit = jnp.asarray(nit, dtype=jnp.int32) + jnp.asarray(1, dtype=jnp.int32)
+    info_candidate = _matrix_free_lm_info(
+        actual_reduction=actual_reduction,
+        predicted_reduction=predicted_reduction,
+        cost=cost,
+        delta=delta_after_step,
+        x_norm=x_norm,
+        nit=next_nit,
+        maxiter=jnp.asarray(maxiter, dtype=jnp.int32),
+        ftol=jnp.asarray(ftol, dtype=dtype),
+        xtol=jnp.asarray(xtol, dtype=dtype),
+        epsmch=jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype),
+    )
+    info_next = lax.select(
+        finite_candidate,
+        info_candidate,
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+    legacy_success = grad_norm_next <= jnp.asarray(gradient_tol, dtype=dtype)
+    info_success = (info_next == 1) | (info_next == 2) | (info_next == 3)
+    status_next = lax.select(
+        finite_candidate,
+        jnp.asarray(1, dtype=jnp.int32),
+        jnp.asarray(2, dtype=jnp.int32),
+    )
+    return {
+        "x": x_next,
+        "residual": residual_next,
+        "residual_jacobian": jacobian_next,
+        "grad": gradient_next,
+        "hessian": hessian_next,
+        "fun": cost_next,
+        "grad_norm_inf": grad_norm_next,
+        "damping": next_damping,
+        "delta": delta_after_step,
+        "nit": next_nit,
+        "status": status_next,
+        "info": info_next,
+        "accepted": accepted,
+        "success": finite_candidate & (legacy_success | info_success),
+    }
+
+
 def _least_squares_result_message(status, success, info=0):
     info_value = int(_host_scalar(info, dtype=np.int64))
     if info_value == 1:
@@ -2301,6 +2580,253 @@ def _least_squares_result_message(status, success, info=0):
     if int(_host_scalar(status, dtype=np.int64)) == 2:
         return "non-finite residual, gradient, or linear solve encountered"
     return "maximum iterations reached"
+
+
+def _normalize_dense_lm_state(state):
+    return {
+        "residual": jnp.ravel(jnp.asarray(state["residual"])),
+        "residual_jacobian": jnp.asarray(state["residual_jacobian"]),
+        "grad": jnp.asarray(state["grad"]),
+        "hessian": jnp.asarray(state["hessian"]),
+        "fun": jnp.asarray(state["fun"]),
+        "grad_norm_inf": jnp.asarray(state["grad_norm_inf"]),
+    }
+
+
+def _dense_jacobian_basis_block(start, cols, chunk_size, dtype):
+    valid = min(int(chunk_size), int(cols) - int(start))
+    basis = np.zeros((int(chunk_size), int(cols)), dtype=np.dtype(dtype))
+    if valid > 0:
+        rows = np.arange(valid)
+        basis[rows, int(start) + rows] = 1.0
+    return jnp.asarray(basis)
+
+
+def _materialize_dense_jacobian_blocks(
+    jacobian_block_fn,
+    x,
+    args,
+    *,
+    chunk_size,
+):
+    x_array = jnp.ravel(jnp.asarray(x))
+    cols = int(x_array.size)
+    blocks = []
+    for start in range(0, cols, int(chunk_size)):
+        valid = min(int(chunk_size), cols - start)
+        basis = _dense_jacobian_basis_block(
+            start,
+            cols,
+            int(chunk_size),
+            x_array.dtype,
+        )
+        block = jnp.asarray(jacobian_block_fn(x, basis, *args))
+        blocks.append(block[:, :valid])
+    return jnp.concatenate(blocks, axis=1)
+
+
+def _levenberg_marquardt_dense_loop(
+    evaluate_state,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    ftol=1e-8,
+    xtol=1e-8,
+    gtol=None,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
+    callback=None,
+    progress_callback=None,
+):
+    x = jnp.asarray(x0)
+    state = _normalize_dense_lm_state(evaluate_state(x))
+    x_dtype = x.dtype
+    gradient_tol = _lm_gradient_tol(tol, gtol, dtype=x_dtype)
+    damping = _lm_defaults(x_dtype)["initial_damping"]
+    delta = _lm_initial_delta(x, dtype=x_dtype)
+    status = 1
+    info = 0
+    nit = 0
+    success = bool(state["grad_norm_inf"] <= gradient_tol)
+
+    while nit < maxiter and not success and info == 0:
+        step = _dense_lm_propose_step(
+            state["hessian"],
+            state["grad"],
+            damping,
+        )
+        candidate_x = x - step
+        candidate = _normalize_dense_lm_state(evaluate_state(candidate_x))
+        step_state = _dense_lm_accept_state(
+            x,
+            state["residual"],
+            state["residual_jacobian"],
+            state["grad"],
+            state["hessian"],
+            state["fun"],
+            state["grad_norm_inf"],
+            candidate["residual"],
+            candidate["residual_jacobian"],
+            candidate["grad"],
+            candidate["hessian"],
+            candidate["fun"],
+            candidate["grad_norm_inf"],
+            step,
+            damping,
+            delta,
+            jnp.asarray(nit, dtype=jnp.int32),
+            jnp.asarray(status, dtype=jnp.int32),
+            jnp.asarray(info, dtype=jnp.int32),
+            gradient_tol,
+            _optimizer_scalar(ftol, dtype=x_dtype),
+            _optimizer_scalar(xtol, dtype=x_dtype),
+            jnp.asarray(maxiter, dtype=jnp.int32),
+        )
+        nit = int(_host_scalar(step_state["nit"], dtype=np.int64))
+        status = int(_host_scalar(step_state["status"], dtype=np.int64))
+        info = int(_host_scalar(step_state["info"], dtype=np.int64))
+        damping = step_state["damping"]
+        delta = step_state["delta"]
+        if bool(_host_bool(step_state["accepted"])):
+            x = step_state["x"]
+            state = _normalize_dense_lm_state(step_state)
+            if callback is not None:
+                callback(_hostify_optimizer_tree(x))
+            if progress_callback is not None:
+                progress_callback(
+                    nit,
+                    float(_host_scalar(state["fun"])),
+                    float(_host_scalar(state["grad_norm_inf"])),
+                )
+        success = bool(_host_bool(step_state["success"]))
+        if status == 2:
+            break
+
+    linearization_rows = int(state["residual"].size)
+    linearization_cols = int(x.size)
+    dense_report = _least_squares_dense_linearization_report(
+        linearization_rows,
+        linearization_cols,
+        x_dtype,
+        max_dense_linearization_bytes,
+    )
+    dense_report["failure_category"] = None
+    dense_report["failure_stage"] = None
+    dense_report["message"] = None
+    dense_linearization_materialized = bool(materialize_dense_linearization)
+    if dense_linearization_materialized:
+        dense_linearization_materialized, dense_report = (
+            _least_squares_dense_linearization_policy(
+                linearization_rows,
+                linearization_cols,
+                x_dtype,
+                max_dense_linearization_bytes,
+            )
+        )
+    residual_jacobian = (
+        state["residual_jacobian"] if dense_linearization_materialized else None
+    )
+    hessian = state["hessian"] if dense_linearization_materialized else None
+    return {
+        "x": x,
+        "residual": state["residual"],
+        "residual_jacobian": residual_jacobian,
+        "fun": state["fun"],
+        "grad": state["grad"],
+        "hessian": hessian,
+        "damping": damping,
+        "nit": nit,
+        "status": status,
+        "info": info,
+        "success": success,
+        "dense_linearization_materialized": dense_linearization_materialized,
+        "dense_linearization_kind": (
+            "in_loop" if dense_linearization_materialized else None
+        ),
+        **dense_report,
+    }
+
+
+def levenberg_marquardt_dense_state(
+    state_fn,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    ftol=1e-8,
+    xtol=1e-8,
+    gtol=None,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
+    callback=None,
+    progress_callback=None,
+    args=(),
+):
+    """Host-driven LM over caller-owned residual/Jacobian state kernels."""
+    normalized_args = _normalize_solver_args(args)
+
+    def evaluate_state(x):
+        return state_fn(x, *normalized_args)
+
+    return _levenberg_marquardt_dense_loop(
+        evaluate_state,
+        x0,
+        maxiter=maxiter,
+        tol=tol,
+        ftol=ftol,
+        xtol=xtol,
+        gtol=gtol,
+        materialize_dense_linearization=materialize_dense_linearization,
+        max_dense_linearization_bytes=max_dense_linearization_bytes,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
+
+
+def levenberg_marquardt_block_jacobian(
+    residual_fn,
+    jacobian_block_fn,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    ftol=1e-8,
+    xtol=1e-8,
+    gtol=None,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
+    callback=None,
+    progress_callback=None,
+    args=(),
+    jacobian_chunk_size=32,
+):
+    """Host-driven LM with a fixed-shape Jacobian-column-block kernel."""
+    normalized_args = _normalize_solver_args(args)
+
+    def evaluate_state(x):
+        residual = jnp.ravel(jnp.asarray(residual_fn(x, *normalized_args)))
+        jacobian = _materialize_dense_jacobian_blocks(
+            jacobian_block_fn,
+            x,
+            normalized_args,
+            chunk_size=jacobian_chunk_size,
+        )
+        return _dense_lm_state_from_residual_jacobian(residual, jacobian)
+
+    return _levenberg_marquardt_dense_loop(
+        evaluate_state,
+        x0,
+        maxiter=maxiter,
+        tol=tol,
+        ftol=ftol,
+        xtol=xtol,
+        gtol=gtol,
+        materialize_dense_linearization=materialize_dense_linearization,
+        max_dense_linearization_bytes=max_dense_linearization_bytes,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
 
 
 def levenberg_marquardt(
@@ -3060,10 +3586,28 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
     return jnp.swapaxes(cols, 0, 1)
 
 
+def _materialize_dense_linear_operator_host(linear_operator_fn, x):
+    x_array = jnp.ravel(jnp.asarray(x))
+    columns = []
+    for index in range(int(x_array.size)):
+        basis = jnp.zeros_like(x_array).at[index].set(
+            _device_scalar(1.0, dtype=x_array.dtype)
+        )
+        columns.append(jnp.ravel(jnp.asarray(linear_operator_fn(x, basis))))
+    return jnp.stack(columns, axis=1)
+
+
 def _hessian_vector_product_fn(objective_fn):
     def build_compiled(fn):
-        grad_fn = jax.grad(fn)
-        return jax.jit(lambda x, v: jax.jvp(grad_fn, (x,), (v,))[1])
+        grad_fn = jax.grad(fn, argnums=0)
+
+        def hvp(x, v, *fn_args):
+            def grad_for_x(x_inner):
+                return grad_fn(x_inner, *fn_args)
+
+            return jax.jvp(grad_for_x, (x,), (v,))[1]
+
+        return jax.jit(hvp)
 
     return _cached_jit_linear_operator(objective_fn, _CACHED_HVP_ATTR, build_compiled)
 
@@ -3077,6 +3621,14 @@ def _jacobian_vector_product_fn(residual_fn):
 
 def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
     dense = _materialize_dense_linear_operator(hvp_fn, x)
+    if not bool(symmetrize):
+        return dense
+    upper = jnp.triu(dense)
+    return upper + jnp.triu(dense, 1).T
+
+
+def _materialize_dense_hessian_host(hvp_fn, x, *, symmetrize=True):
+    dense = _materialize_dense_linear_operator_host(hvp_fn, x)
     if not bool(symmetrize):
         return dense
     upper = jnp.triu(dense)
@@ -3457,6 +4009,55 @@ def _backtracking_value_grad_step(
     return lax.while_loop(_newton_backtracking_continue, body_fun, state0)
 
 
+def _host_backtracking_value_grad_step(
+    val_and_grad_fn,
+    x,
+    dx,
+    current_val,
+    current_grad,
+    current_norm,
+):
+    dtype = jnp.asarray(x).dtype
+    alpha = _device_scalar(1.0, dtype=dtype)
+    half = _device_scalar(0.5, dtype=dtype)
+    state = {
+        "iteration": jnp.asarray(0, dtype=jnp.int32),
+        "alpha": alpha,
+        "x": x,
+        "val": current_val,
+        "grad": current_grad,
+        "norm": current_norm,
+        "accepted": jnp.asarray(False),
+    }
+    for iteration in range(_NEWTON_BACKTRACKING_MAX_STEPS):
+        candidate_x = x - alpha * dx
+        candidate_val, candidate_grad = val_and_grad_fn(candidate_x)
+        candidate_accepted, candidate_norm = _newton_candidate_status(
+            candidate_x,
+            candidate_val,
+            candidate_grad,
+        )
+        candidate_accepted = candidate_accepted & (candidate_norm <= current_norm)
+        next_alpha = alpha * half
+        if _host_bool(candidate_accepted):
+            return {
+                "iteration": jnp.asarray(iteration + 1, dtype=jnp.int32),
+                "alpha": next_alpha,
+                "x": candidate_x,
+                "val": candidate_val,
+                "grad": candidate_grad,
+                "norm": candidate_norm,
+                "accepted": jnp.asarray(True),
+            }
+        state = {
+            **state,
+            "iteration": jnp.asarray(iteration + 1, dtype=jnp.int32),
+            "alpha": next_alpha,
+        }
+        alpha = next_alpha
+    return state
+
+
 def _backtracking_residual_step(residual_eval, x, dx, residual, current_norm):
     dtype = jnp.asarray(x).dtype
     one = _device_scalar(1.0, dtype=dtype)
@@ -3792,6 +4393,10 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
     """
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
+
+    if not any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(matrix)):
+        matrix_host = np.asarray(jax.device_get(matrix))
+        return jnp.asarray(np.linalg.cond(matrix_host, p=1), dtype=matrix.dtype)
 
     if lu_piv is None:
         lu_piv = jsp_linalg.lu_factor(matrix)
@@ -4160,6 +4765,8 @@ def newton_polish(
     max_dense_hessian_bytes=None,
     dense_newton_steps=False,
     progress_callback=None,
+    allow_host_control=False,
+    args=(),
 ):
     """Newton polish using exact Hessian-vector products.
 
@@ -4170,15 +4777,23 @@ def newton_polish(
     The dense Hessian is still materialized once at the final iterate so
     callers retain the existing adjoint/PLU contract.
     """
-    raise_if_strict_jax_fallback(
-        component="newton_polish",
-        detail="host-controlled Newton polish loop",
-    )
+    if not allow_host_control:
+        raise_if_strict_jax_fallback(
+            component="newton_polish",
+            detail="host-controlled Newton polish loop",
+        )
     val_and_grad_fn = _cached_jit_value_and_grad(objective_fn)
     hvp_fn = _hessian_vector_product_fn(objective_fn)
+    normalized_args = _normalize_solver_args(args)
+
+    def value_and_grad_eval(x_value):
+        return val_and_grad_fn(x_value, *normalized_args)
+
+    def hvp_eval(x_value, vector):
+        return hvp_fn(x_value, vector, *normalized_args)
 
     x = x0
-    val, grad = val_and_grad_fn(x)
+    val, grad = value_and_grad_eval(x)
     norm = jnp.linalg.norm(grad)
 
     hessian_size = int(np.asarray(jnp.asarray(x).size))
@@ -4187,6 +4802,16 @@ def newton_polish(
         hessian_size,
         x.dtype,
         max_dense_hessian_bytes,
+    )
+    backtracking_step = (
+        _host_backtracking_value_grad_step
+        if allow_host_control
+        else _backtracking_value_grad_step
+    )
+    materialize_dense_hessian_fn = (
+        _materialize_dense_hessian_host
+        if allow_host_control
+        else _materialize_dense_hessian
     )
 
     nit = 0
@@ -4201,8 +4826,8 @@ def newton_polish(
             refine_step = float(norm) < 1e-9
             dense_refine_step = refine_step
             H_step = _stabilize_dense_hessian(
-                _materialize_dense_hessian(
-                    hvp_fn,
+                materialize_dense_hessian_fn(
+                    hvp_eval,
                     x,
                     symmetrize=False,
                 ),
@@ -4214,7 +4839,7 @@ def newton_polish(
         else:
             refine_step = False
             dx, linear_residual, _ = _gmres_solve_newton_system(
-                hvp_fn,
+                hvp_eval,
                 x,
                 grad,
                 stab=stab,
@@ -4226,7 +4851,7 @@ def newton_polish(
                 and linear_residual_norm > linear_tol
             ):
                 correction, _, _ = _gmres_solve_newton_system(
-                    hvp_fn,
+                    hvp_eval,
                     x,
                     linear_residual,
                     stab=stab,
@@ -4236,8 +4861,8 @@ def newton_polish(
                     dx = dx + correction
                     iterative_refinement_ran = True
                     refine_step = True
-        candidate = _backtracking_value_grad_step(
-            val_and_grad_fn,
+        candidate = backtracking_step(
+            value_and_grad_eval,
             x,
             dx,
             val,
@@ -4268,8 +4893,8 @@ def newton_polish(
     H = None
     if materialize_hessian:
         H = _stabilize_dense_hessian(
-            _materialize_dense_hessian(
-                hvp_fn,
+            materialize_dense_hessian_fn(
+                hvp_eval,
                 x,
                 symmetrize=True,
             ),
@@ -4897,6 +5522,95 @@ def _least_squares_state_to_optimize_result(result):
     )
 
 
+def host_jax_least_squares(
+    residual_fn,
+    x0,
+    *,
+    method="lm",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    callback=None,
+    progress_callback=None,
+    args=(),
+    state_fn=None,
+    jacobian_block_fn=None,
+    jacobian_chunk_size=32,
+):
+    """Host LM control over a compiled JAX residual evaluator."""
+    if method != "lm":
+        raise ValueError(f"host_jax_least_squares() only supports method='lm'. Got {method!r}.")
+    options = dict(options or {})
+    if callback is not None:
+        options["callback"] = callback
+    if progress_callback is not None:
+        options["progress_callback"] = progress_callback
+    require_boozer_inner_backend_x64(HOST_JAX_BOOZER_OPTIMIZER_BACKEND)
+    if jacobian_block_fn is not None:
+        return _least_squares_state_to_optimize_result(
+            levenberg_marquardt_block_jacobian(
+                residual_fn,
+                jacobian_block_fn,
+                x0,
+                maxiter=maxiter,
+                tol=tol,
+                ftol=options.get("ftol", 1e-8),
+                xtol=options.get("xtol", 1e-8),
+                gtol=options.get("gtol"),
+                materialize_dense_linearization=bool(
+                    options.get("materialize_dense_linearization", True)
+                ),
+                max_dense_linearization_bytes=options.get(
+                    "max_dense_linearization_bytes"
+                ),
+                callback=options.get("callback"),
+                progress_callback=options.get("progress_callback"),
+                args=args,
+                jacobian_chunk_size=jacobian_chunk_size,
+            )
+        )
+    if state_fn is not None:
+        return _least_squares_state_to_optimize_result(
+            levenberg_marquardt_dense_state(
+                state_fn,
+                x0,
+                maxiter=maxiter,
+                tol=tol,
+                ftol=options.get("ftol", 1e-8),
+                xtol=options.get("xtol", 1e-8),
+                gtol=options.get("gtol"),
+                materialize_dense_linearization=bool(
+                    options.get("materialize_dense_linearization", True)
+                ),
+                max_dense_linearization_bytes=options.get(
+                    "max_dense_linearization_bytes"
+                ),
+                callback=options.get("callback"),
+                progress_callback=options.get("progress_callback"),
+                args=args,
+            )
+        )
+    return _least_squares_state_to_optimize_result(
+        levenberg_marquardt(
+            residual_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            ftol=options.get("ftol", 1e-8),
+            xtol=options.get("xtol", 1e-8),
+            gtol=options.get("gtol"),
+            materialize_dense_linearization=bool(
+                options.get("materialize_dense_linearization", True)
+            ),
+            max_dense_linearization_bytes=options.get(
+                "max_dense_linearization_bytes"
+            ),
+            callback=options.get("callback"),
+            progress_callback=options.get("progress_callback"),
+        )
+    )
+
+
 def target_least_squares(
     residual_fn,
     x0,
@@ -5031,6 +5745,7 @@ def reference_minimize(
     progress_callback=None,
     failure_callback=None,
     initial_value_and_grad=None,
+    allow_jax_host_control=False,
 ):
     """Explicit CPU/reference scalar optimizer entrypoint."""
     if failure_callback is not None and method not in _REFERENCE_TRACE_METHODS:
@@ -5079,7 +5794,52 @@ def reference_minimize(
         progress_callback=progress_callback,
         failure_callback=failure_callback,
         initial_value_and_grad=initial_value_and_grad,
+        allow_jax_host_control=allow_jax_host_control,
     )
+
+
+def host_jax_minimize_value_and_grad(
+    fun,
+    x0,
+    *,
+    method="bfgs",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    value_and_grad=True,
+    callback=None,
+    progress_callback=None,
+):
+    """Host SciPy control over a compiled JAX value/gradient evaluator."""
+    if method not in {"bfgs", "lbfgs"}:
+        raise ValueError(
+            "host_jax_minimize_value_and_grad() only supports "
+            "method='bfgs' or method='lbfgs'."
+        )
+    if not value_and_grad:
+        raise ValueError("host_jax_minimize_value_and_grad() requires value_and_grad=True.")
+    options = dict(options or {})
+    fun = wrap_strict_target_lane_value_and_grad(fun)
+    fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
+        fun,
+        x0,
+        value_and_grad=True,
+        callback=callback,
+    )
+    if callback is not None:
+        options["callback"] = callback
+    if progress_callback is not None:
+        options["progress_callback"] = progress_callback
+    require_boozer_inner_backend_x64(HOST_JAX_BOOZER_OPTIMIZER_BACKEND)
+    result = optimizer_jax_reference.target_scipy_minimize_value_and_grad(
+        fun,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
+    )
+    return _finalize_optimizer_result(result, pytree_adapter)
 
 
 def target_minimize(

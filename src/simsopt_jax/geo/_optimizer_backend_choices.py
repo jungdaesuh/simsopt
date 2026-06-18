@@ -12,6 +12,7 @@ CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
 TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS = frozenset(
     {"scipy-jax", "scipy-jax-fullgraph"}
 )
+HOST_JAX_OUTER_OPTIMIZER_BACKEND = "host-jax"
 TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS = frozenset({"optax-lbfgs", "optimistix-lbfgs"})
 TARGET_OUTER_OPTIMIZER_BACKENDS = (
     frozenset({"ondevice"})
@@ -23,11 +24,13 @@ VALID_OUTER_OPTIMIZER_BACKENDS = (
     TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS
     | TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS
     | CONCRETE_OPTIMIZER_BACKENDS
+    | frozenset({HOST_JAX_OUTER_OPTIMIZER_BACKEND})
 )
 _OUTER_OPTIMIZER_BACKEND_DISPLAY_ORDER = (
     "scipy",
     "ondevice",
     "scipy-jax",
+    HOST_JAX_OUTER_OPTIMIZER_BACKEND,
     "scipy-jax-fullgraph",
     "optax-lbfgs",
     "optimistix-lbfgs",

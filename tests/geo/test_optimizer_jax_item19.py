@@ -6,6 +6,9 @@ the Boozer M1 Hessian split regression lives in ``test_boozer_residual_jax.py``.
 
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import simsopt_jax.geo.optimizers.optimizer as _opt
@@ -43,9 +46,12 @@ def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():
     [
         ("scipy", False, "quasi-newton", _opt.Driver.SCIPY_BFGS),
         ("scipy", True, "quasi-newton", _opt.Driver.SCIPY_LBFGSB),
+        ("host-jax", False, "quasi-newton", _opt.Driver.SCIPY_BFGS),
+        ("host-jax", True, "quasi-newton", _opt.Driver.SCIPY_LBFGSB),
         ("ondevice", False, "quasi-newton", _opt.Driver.SIMSOPT_BFGS),
         ("ondevice", True, "quasi-newton", _opt.Driver.SIMSOPT_LBFGSB),
         ("scipy", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES_HOST),
+        ("host-jax", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES_HOST),
         ("ondevice", False, "lm", _opt.Driver.SIMSOPT_LM_GMRES),
         ("ondevice", False, "lm-minpack", _opt.Driver.SIMSOPT_LM_QR),
         ("ondevice", False, "optimistix-lm", _opt.Driver.OPTIMISTIX_LM),
@@ -65,6 +71,84 @@ def test_item19_boozer_inner_driver_contract_stays_typed(
         )
         == driver
     )
+
+
+def test_item19_host_jax_least_squares_uses_explicit_dense_state(monkeypatch):
+    monkeypatch.setattr(
+        _opt,
+        "require_boozer_inner_backend_x64",
+        lambda optimizer_backend: None,
+    )
+
+    def residual_fn(_x):
+        raise AssertionError("state_fn path must not call residual_fn directly")
+
+    @jax.jit
+    def dense_state_fn(x, dynamic_state):
+        residual = dynamic_state["matrix"] @ x - dynamic_state["rhs"]
+        return _opt._dense_lm_state_from_residual_jacobian(
+            residual,
+            dynamic_state["matrix"],
+        )
+
+    dynamic_state = {
+        "matrix": jnp.asarray([[2.0, 0.0], [0.0, 4.0]], dtype=jnp.float64),
+        "rhs": jnp.asarray([2.0, 8.0], dtype=jnp.float64),
+    }
+
+    result = _opt.host_jax_least_squares(
+        residual_fn,
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+        method="lm",
+        tol=1e-10,
+        maxiter=20,
+        options={"gtol": 1e-10, "materialize_dense_linearization": True},
+        args=(dynamic_state,),
+        state_fn=dense_state_fn,
+    )
+
+    assert result.success
+    np.testing.assert_allclose(np.asarray(result.x), np.asarray([1.0, 2.0]), rtol=1e-8)
+    np.testing.assert_allclose(np.asarray(result.residual), np.zeros(2), atol=1e-8)
+    assert result.dense_linearization_kind == "in_loop"
+
+
+def test_item19_host_jax_least_squares_uses_jacobian_blocks(monkeypatch):
+    monkeypatch.setattr(
+        _opt,
+        "require_boozer_inner_backend_x64",
+        lambda optimizer_backend: None,
+    )
+
+    @jax.jit
+    def residual_fn(x, dynamic_state):
+        return dynamic_state["matrix"] @ x - dynamic_state["rhs"]
+
+    @jax.jit
+    def jacobian_block_fn(_x, tangent_block, dynamic_state):
+        return (dynamic_state["matrix"] @ tangent_block.T)
+
+    dynamic_state = {
+        "matrix": jnp.asarray([[3.0, 0.0], [0.0, 5.0]], dtype=jnp.float64),
+        "rhs": jnp.asarray([6.0, 5.0], dtype=jnp.float64),
+    }
+
+    result = _opt.host_jax_least_squares(
+        residual_fn,
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+        method="lm",
+        tol=1e-10,
+        maxiter=20,
+        options={"gtol": 1e-10, "materialize_dense_linearization": True},
+        args=(dynamic_state,),
+        jacobian_block_fn=jacobian_block_fn,
+        jacobian_chunk_size=1,
+    )
+
+    assert result.success
+    np.testing.assert_allclose(np.asarray(result.x), np.asarray([2.0, 1.0]), rtol=1e-8)
+    np.testing.assert_allclose(np.asarray(result.residual), np.zeros(2), atol=1e-8)
+    assert result.dense_residual_jacobian_shape == (2, 2)
 
 
 def test_item19_reference_and_target_optimizer_lanes_stay_explicit():
@@ -90,3 +174,41 @@ def test_item19_reference_and_target_optimizer_lanes_stay_explicit():
             "ondevice",
             component_label="item19 reference optimizer",
         )
+
+
+def test_item19_reference_minimize_host_control_permission_is_explicit(monkeypatch):
+    class _StrictJaxConfig:
+        backend = "jax"
+        mode = "jax_gpu_parity"
+
+    monkeypatch.setattr(
+        _opt,
+        "get_backend_config",
+        lambda: _StrictJaxConfig(),
+    )
+
+    def value_and_grad(x):
+        return jnp.sum(x * x), 2.0 * x
+
+    x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+
+    with pytest.raises(RuntimeError, match="requires an ondevice optimizer method"):
+        _opt.reference_minimize(
+            value_and_grad,
+            x0,
+            method="lbfgs",
+            value_and_grad=True,
+            maxiter=10,
+        )
+
+    result = _opt.reference_minimize(
+        value_and_grad,
+        x0,
+        method="lbfgs",
+        value_and_grad=True,
+        maxiter=10,
+        allow_jax_host_control=True,
+    )
+
+    assert result.success
+    np.testing.assert_allclose(np.asarray(result.x), np.zeros(2), atol=1e-8)

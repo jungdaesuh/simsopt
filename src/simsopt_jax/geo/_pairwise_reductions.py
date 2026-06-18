@@ -382,6 +382,7 @@ def _batched_selected_pair_exp_sums(
     )(points_a_stack, points_b_stack)
 
 
+@partial(jax.jit, static_argnames=("chunk_size",))
 def pairwise_thresholded_mean_square_distance_pure(
     points_a,
     points_b,

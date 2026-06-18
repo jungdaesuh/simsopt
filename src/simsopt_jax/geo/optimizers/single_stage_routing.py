@@ -21,17 +21,21 @@ JAX_TARGET_OUTER_OPTIMIZER_BACKENDS = (
 JAX_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax"
 JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD = "lbfgs-scipy-jax-fullgraph"
+JAX_HOST_CONTROL_OUTER_OPTIMIZER_BACKEND = "host-jax"
 JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS = JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
 JAX_TARGET_OUTER_MAXLS_BACKENDS = JAX_TARGET_OUTER_OPTIMIZER_BACKENDS | {
     JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
 }
+JAX_BOOZER_INNER_OPTIMIZER_BACKENDS = frozenset({"host-jax", "ondevice", "scipy"})
 
 __all__ = (
     "JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND",
     "JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD",
+    "JAX_HOST_CONTROL_OUTER_OPTIMIZER_BACKEND",
     "JAX_ONDEVICE_BOOZER_OUTER_OPTIMIZER_BACKENDS",
     "JAX_SCIPY_OUTER_OPTIMIZER_METHOD",
     "JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS",
+    "JAX_BOOZER_INNER_OPTIMIZER_BACKENDS",
     "JAX_TARGET_OUTER_MAXLS_BACKENDS",
     "JAX_TARGET_OUTER_OPTIMIZER_BACKENDS",
     "JAX_TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS",
@@ -56,10 +60,13 @@ def resolve_single_stage_jax_boozer_optimizer_backend(
             "Single-stage JAX backend with optimizer_backend='scipy' is "
             "CPU/reference-only; use optimizer_backend='ondevice', "
             "optimizer_backend='scipy-jax', "
+            "optimizer_backend='host-jax', "
             "optimizer_backend='scipy-jax-fullgraph', "
             "optimizer_backend='optax-lbfgs', or "
             "optimizer_backend='optimistix-lbfgs'. For the JAX target lane, "
-            "select boozer_optimizer_backend='ondevice'."
+            "select boozer_optimizer_backend='ondevice'. For the host-control "
+            "kernelized lane, select optimizer_backend='host-jax' or "
+            "boozer_optimizer_backend='host-jax'."
         )
     return resolve_boozer_optimizer_backend(
         optimizer_backend,
@@ -83,10 +90,10 @@ def resolve_boozer_optimizer_backend(
         )
     else:
         effective_backend = boozer_optimizer_backend
-    if effective_backend not in {"ondevice", "scipy"}:
+    if effective_backend not in JAX_BOOZER_INNER_OPTIMIZER_BACKENDS:
         raise ValueError(
             "Single-stage JAX routing requires "
-            "boozer_optimizer_backend='ondevice' or 'scipy'."
+            "boozer_optimizer_backend='ondevice', 'host-jax', or 'scipy'."
         )
     return effective_backend
 
@@ -97,7 +104,8 @@ def resolve_boozer_limited_memory(
 ) -> bool:
     """Match the current benchmark/example plumbing for effective limited memory."""
     return bool(
-        boozer_optimizer_backend == "ondevice" and boozer_limited_memory_requested
+        boozer_optimizer_backend in {"host-jax", "ondevice"}
+        and boozer_limited_memory_requested
     )
 
 
@@ -107,10 +115,10 @@ def resolve_boozer_optimizer_method(
     limited_memory: bool = False,
     least_squares_algorithm: str | None = None,
 ) -> str:
-    if boozer_optimizer_backend not in {"ondevice", "scipy"}:
+    if boozer_optimizer_backend not in JAX_BOOZER_INNER_OPTIMIZER_BACKENDS:
         raise ValueError(
             "Single-stage JAX routing requires "
-            "boozer_optimizer_backend='ondevice' or 'scipy'."
+            "boozer_optimizer_backend='ondevice', 'host-jax', or 'scipy'."
         )
     if boozer_optimizer_backend == "scipy":
         return "scipy"
@@ -124,7 +132,9 @@ def resolve_boozer_optimizer_method(
                 "least_squares_algorithm='lm' is incompatible with "
                 "limited_memory=True."
             )
-        return "lm-ondevice"
+        return "lm" if boozer_optimizer_backend == "host-jax" else "lm-ondevice"
+    if boozer_optimizer_backend == "host-jax":
+        return "lbfgs" if limited_memory else "bfgs"
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
 
 
@@ -132,11 +142,13 @@ def resolve_boozer_least_squares_algorithm(
     boozer_optimizer_backend: str,
     least_squares_algorithm: str | None = None,
 ) -> str:
-    if boozer_optimizer_backend not in {"ondevice", "scipy"}:
+    if boozer_optimizer_backend not in JAX_BOOZER_INNER_OPTIMIZER_BACKENDS:
         raise ValueError(
             "Single-stage JAX routing requires "
-            "boozer_optimizer_backend='ondevice' or 'scipy'."
+            "boozer_optimizer_backend='ondevice', 'host-jax', or 'scipy'."
         )
     if least_squares_algorithm is not None:
         return least_squares_algorithm
+    if boozer_optimizer_backend == "host-jax":
+        return "lm"
     return "quasi-newton"

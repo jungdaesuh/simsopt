@@ -4,10 +4,14 @@ Lane-aware JAX Boozer surface solver.
 The public/reference lane still permits host-side SciPy minimization via
 ``optimizer_backend="scipy"``. The target lane uses
 ``optimizer_backend="ondevice"`` for JAX-resident execution.
+``optimizer_backend="host-jax"`` is the bounded-kernel lane: Python owns the
+solver iterations while static-shape residual/value-gradient/Jacobian kernels
+run through JAX with dynamic coil state supplied as explicit arguments.
 
 This module owns the LS/exact solver routing contract. Only the
 ``ondevice`` backend is intended to represent the eventual target optimizer
-lane, not a claim that the full workflow is already production-complete.
+lane, while ``host-jax`` is an opt-in bridge for GPU kernel residency without
+tracing the optimizer loop.
 
 Architecture (per M0 contract §5-§6):
   - Adapter pattern: ``BoozerSurfaceJAX`` inherits ``Optimizable`` and
@@ -18,7 +22,7 @@ Architecture (per M0 contract §5-§6):
     optimizer loop; that boundary is isolated to the reference-only optimizer
     module.
 
-Builds on M3's composed derivative path:
+Builds on the composed Boozer derivative path:
   - ``_surface_geometry_from_dofs()`` for surface DOFs → geometry (SSOT)
   - ``boozer_residual_scalar()`` for the forward residual
   - ``boozer_residual_vector()`` for the exact Newton residual vector
@@ -28,6 +32,7 @@ Builds on M3's composed derivative path:
 
 import hashlib
 import inspect
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import functools
@@ -42,6 +47,7 @@ import scipy.linalg
 from simsopt_jax.backend import (
     get_backend_config,
     get_backend_policy,
+    get_runtime_jax_device,
     is_parity_mode,
     raise_if_strict_jax_fallback,
     warn_if_jax_fallback,
@@ -127,8 +133,9 @@ from simsopt_jax.geo.label_constraints import (
 from simsopt_jax.geo.optimizers import optimizer as _optimizer_jax
 from simsopt_jax.geo.optimizers.optimizer import (
     VALID_LEAST_SQUARES_ALGORITHMS,
-    VALID_OPTIMIZER_BACKENDS,
     jax_least_squares_optimistix,
+    host_jax_least_squares,
+    host_jax_minimize_value_and_grad,
     levenberg_marquardt_minpack_traceable,
     levenberg_marquardt_traceable,
     newton_exact,
@@ -137,7 +144,8 @@ from simsopt_jax.geo.optimizers.optimizer import (
     newton_polish_traceable,
     reference_least_squares,
     reference_minimize,
-    require_target_backend_x64,
+    require_boozer_inner_backend_x64,
+    require_target_backend_x64,  # noqa: F401 - preserved for test monkeypatch compatibility
     resolve_reference_least_squares_optimizer_method,
     resolve_target_least_squares_optimizer_method,
     target_least_squares,
@@ -537,6 +545,28 @@ _BOOZER_RESULT_RECORD_TYPES = {
         | frozenset({"grad", "hessian", "optimizer_method"}),
         forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS
         | frozenset({"residual", "jacobian"}),
+    ),
+    "value_only": _BoozerResultRecordType(
+        mode="value_only",
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_LINEARIZED_RESULT_KEYS
+        | frozenset({"fun", "iter", "optimizer_method", "solve_generation"}),
+        forbidden_keys=frozenset(
+            {
+                "gradient",
+                "hessian",
+                "info",
+                "jacobian",
+                "lm",
+                "mask",
+                "PLU",
+                "plu",
+                "residual",
+                "vjp",
+                "vjp_groups",
+            }
+        ),
     ),
 }
 
@@ -972,12 +1002,14 @@ class _BoozerAdjointRuntimeState:
     stream_group_vjps: callable
     linear_solve_backend: str = "operator"
     dense_linear_solve_factors_available: bool = False
-    linear_solve_factors: tuple[jax.Array, jax.Array, jax.Array] | None = None
+    linear_solve_factors: tuple[jax.Array, ...] | None = None
     linearization_residency: str = "device"
 
     @property
     def plu(self):
         """Dense-factor compatibility alias for legacy readers."""
+        if self.linear_solve_factors is not None and len(self.linear_solve_factors) == 5:
+            return self.linear_solve_factors[:3]
         return self.linear_solve_factors
 
 
@@ -1280,6 +1312,25 @@ def _runtime_cache_tree_signature(tree):
         "tree",
         repr(treedef),
         tuple(_runtime_cache_leaf_signature(leaf) for leaf in leaves),
+    )
+
+
+def _array_static_signature(array):
+    return (
+        str(np.dtype(array.dtype)),
+        tuple(int(dim) for dim in array.shape),
+    )
+
+
+def _grouped_coil_set_static_signature(coil_set_spec):
+    return tuple(
+        (
+            _array_static_signature(group.gammas),
+            _array_static_signature(group.gammadashs),
+            _array_static_signature(group.currents),
+            tuple(int(index) for index in group.coil_indices),
+        )
+        for group in coil_set_spec.groups
     )
 
 
@@ -1696,7 +1747,8 @@ def _surface_geometry_and_derivatives_from_dofs(
         parity_policy:
             * ``"production"`` (default) — use the matmul/einsum hot path and
               ``jax.jacfwd`` for the coefficient Jacobians. Same behavior the
-              JAX backend has shipped since M3.
+              JAX backend has shipped since the composed derivative backend
+              landed.
             * ``"cpu_ordered"`` — route through
               :mod:`simsopt_jax.geo.surface_fourier_cpu_ordered`. Mirrors the
               C++ ``surfacexyztensorfourier.h`` accumulation order; used by
@@ -2197,7 +2249,7 @@ def _boozer_penalty_objective(
 ):
     """Scalarized penalty objective for the BoozerLS inner solve.
 
-    Extends M3's ``boozer_penalty_composed`` with label and z-constraints.
+    Extends ``boozer_penalty_composed`` with label and z-constraints.
 
     Pure function: ``x → scalar``.  JAX autodiff gives gradient and
     Hessian for free.
@@ -2478,7 +2530,7 @@ def _boozer_exact_residual_impl(
 ):
     """Residual vector for the BoozerExact Newton system.
 
-    Extends M3's ``boozer_residual_vector`` with masking and constraint
+    Extends ``boozer_residual_vector`` with masking and constraint
     equations (label, z-coordinate).
 
     Returns: (n_eq,) residual vector where ``r(x) = 0`` at the solution.
@@ -3487,7 +3539,18 @@ def _solve_with_nan_on_failure(solution, success):
     )
 
 
+def _jax_platforms_env_requests_cpu() -> bool:
+    platforms = os.environ.get("JAX_PLATFORMS")
+    if platforms is None:
+        return True
+    return any(part.strip().lower() == "cpu" for part in platforms.split(","))
+
+
 def _host_linearization_device():
+    if not _jax_platforms_env_requests_cpu():
+        runtime_device = get_runtime_jax_device()
+        if runtime_device is not None:
+            return runtime_device
     return jax.devices("cpu")[0]
 
 
@@ -3559,7 +3622,8 @@ _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
 
 
 def default_least_squares_algorithm_for_backend(optimizer_backend):
-    del optimizer_backend
+    if optimizer_backend == "host-jax":
+        return "lm"
     return "quasi-newton"
 
 
@@ -3582,7 +3646,7 @@ def _inner_driver_optimizer_backend_conflicts(normalized_options, driver_options
     optimizer_backend = normalized_options.get("optimizer_backend")
     if optimizer_backend is None:
         return False
-    effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+    effective_optimizer_backend = _optimizer_jax.resolve_boozer_inner_optimizer_backend(
         optimizer_backend
     )
     return effective_optimizer_backend != driver_options.optimizer_backend
@@ -3661,7 +3725,7 @@ def _present_option_names(options, option_names):
 
 
 def _private_optimizer_option_names(options):
-    if options.get("optimizer_backend") != "scipy":
+    if options.get("optimizer_backend") == "ondevice":
         return ()
     return _present_option_names(options, _PRIVATE_OPTIMIZER_OPTIONS)
 
@@ -3738,6 +3802,20 @@ _LS_SOLVER_OPTION_INCOMPATIBILITIES = (
 )
 
 
+@dataclass(frozen=True)
+class BoozerKernelBundle:
+    """Static-shape Boozer kernels with dynamic coil state as explicit input."""
+
+    objective: Callable[[object, object], object]
+    residual: Callable[[object, object], object]
+    jacobian: Callable[[object, object], object]
+    jacobian_block: Callable[[object, object, object], object]
+    least_squares_state: Callable[[object, object], Mapping[str, object]]
+    linear_solve: Callable[[object, object, object], tuple[object, object]]
+    factor_apply: Callable[[object, object, object], object]
+    value_and_grad: Callable[[object, object], tuple[object, object]]
+
+
 def _reject_solver_option_incompatibilities(options):
     for rule in _LS_SOLVER_OPTION_INCOMPATIBILITIES:
         option_names = rule.option_names(options)
@@ -3750,7 +3828,7 @@ def _normalize_solver_options(raw_options, boozer_type):
     if "bfgs_method" in raw_options:
         raise ValueError(
             "BoozerSurfaceJAX option 'bfgs_method' was removed. "
-            "Use 'optimizer_backend' with one of: auto, scipy, ondevice."
+            "Use 'optimizer_backend' with one of: auto, scipy, host-jax, ondevice."
         )
 
     allowed_option_keys = (
@@ -3773,10 +3851,13 @@ def _normalize_solver_options(raw_options, boozer_type):
     optimizer_backend = normalized_options.get("optimizer_backend")
     if (
         optimizer_backend is not None
-        and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
+        and optimizer_backend
+        not in _optimizer_jax.VALID_BOOZER_INNER_OPTIMIZER_BACKENDS
     ):
-        raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
-    effective_optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+        raise ValueError(
+            _optimizer_jax.render_invalid_boozer_inner_optimizer_backend_message()
+        )
+    effective_optimizer_backend = _optimizer_jax.resolve_boozer_inner_optimizer_backend(
         optimizer_backend
     )
     linearization_residency = raw_options.get(
@@ -3944,9 +4025,12 @@ class BoozerSurfaceJAX(Optimizable):
         defaults = _solver_option_defaults(self.boozer_type, user_options)
         self.options = {**defaults, **raw_options}
         if self.boozer_type == "ls":
-            if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
+            if (
+                self.options["optimizer_backend"]
+                not in _optimizer_jax.VALID_BOOZER_INNER_OPTIMIZER_BACKENDS
+            ):
                 raise ValueError(
-                    "optimizer_backend must be one of: auto, scipy, ondevice."
+                    _optimizer_jax.render_invalid_boozer_inner_optimizer_backend_message()
                 )
 
         runtime_state = (
@@ -3999,6 +4083,8 @@ class BoozerSurfaceJAX(Optimizable):
         self._reference_penalty_value_and_grad_cache = {}
         self._reference_penalty_residual_cache = {}
         self._reference_exact_residual_cache = {}
+        self._kernel_bundle_cache = {}
+        self._coil_set_static_signature = None
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -4034,6 +4120,51 @@ class BoozerSurfaceJAX(Optimizable):
             G=solved_G,
             weight_inv_modB=bool(self.res["weight_inv_modB"]),
         )
+
+    def install_value_only_solved_runtime_state(
+        self,
+        *,
+        sdofs,
+        iota,
+        G,
+        optimizer_method="resolved-warm-start",
+    ):
+        """Install a trusted solved state without adjoint linearization factors.
+
+        This is for startup continuation from a validated donor state.  It
+        updates live/cached surface DOFs and supports solved-state reads, but
+        callers must run ``run_code`` before requesting adjoint callbacks.
+        """
+        solved_sdofs = _as_jax_float64(sdofs)
+        solved_iota = _as_jax_float64(iota)
+        solved_G = None if G is None else _as_jax_float64(G)
+        self._set_surface_dofs(solved_sdofs)
+        solve_generation = _advance_solver_generation(self)
+        res = {
+            **_boozer_public_result_core(
+                True,
+                False,
+                solved_sdofs,
+                solved_G,
+                self.surface,
+                solved_iota,
+                self.boozer_type,
+                bool(self.options["weight_inv_modB"]),
+            ),
+            **_boozer_public_linearized_result_core(
+                "value_only",
+                "none",
+                False,
+                "none",
+            ),
+            "fun": 0.0,
+            "iter": 0,
+            "optimizer_method": str(optimizer_method),
+            "solve_generation": solve_generation,
+        }
+        res_record = self._store_boozer_result("value_only", res)
+        self.need_to_run_code = False
+        return res_record
 
     def _linear_solve_tolerance_bounds(self):
         policy = get_backend_policy()
@@ -4111,8 +4242,17 @@ class BoozerSurfaceJAX(Optimizable):
             solve_forward_with_status = _with_nan_status(solve_forward_with_status)
             solve_transpose_with_status = _with_nan_status(solve_transpose_with_status)
             if linear_solve_factors is not None:
+                def stage_public_linear_solve_factor(factor):
+                    factor_array = jnp.asarray(factor)
+                    factor_dtype = (
+                        x.dtype
+                        if jnp.issubdtype(factor_array.dtype, jnp.floating)
+                        else factor_array.dtype
+                    )
+                    return stage_linearization_factor(factor_array, dtype=factor_dtype)
+
                 linear_solve_factors = jax.tree.map(
-                    lambda factor: stage_linearization_factor(factor, dtype=x.dtype),
+                    stage_public_linear_solve_factor,
                     linear_solve_factors,
                 )
             return (
@@ -4209,7 +4349,8 @@ class BoozerSurfaceJAX(Optimizable):
                 linear_solve_backend="dense-plu-shared",
                 linear_solve_factors=tuple(
                     jnp.asarray(factor, dtype=x.dtype) for factor in self.res["PLU"]
-                ),
+                )
+                + tuple(self.res["LU_PIV"]),
             )
 
         if (
@@ -4479,13 +4620,23 @@ class BoozerSurfaceJAX(Optimizable):
         different ``num_quad_points`` can coexist without crashing
         on array stacking.
         """
-        self.coil_set_spec = _extract_grouped_coil_set_spec(self.biotsavart)
+        coil_set_spec = _extract_grouped_coil_set_spec(self.biotsavart)
+        coil_set_static_signature = _grouped_coil_set_static_signature(coil_set_spec)
+        previous_coil_set_static_signature = self._coil_set_static_signature
+
+        self.coil_set_spec = coil_set_spec
         self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
         self.coil_currents = grouped_coil_currents_from_spec(self.coil_set_spec)
+        self._coil_set_static_signature = coil_set_static_signature
         self._reference_penalty_objective_cache.clear()
         self._reference_penalty_value_and_grad_cache.clear()
         self._reference_penalty_residual_cache.clear()
         self._reference_exact_residual_cache.clear()
+        if (
+            previous_coil_set_static_signature is not None
+            and previous_coil_set_static_signature != coil_set_static_signature
+        ):
+            self._kernel_bundle_cache.clear()
 
     def _emit_stage_callback(
         self,
@@ -4718,6 +4869,30 @@ class BoozerSurfaceJAX(Optimizable):
             **self._traceable_surface_runtime_args(hostify=False),
         )
 
+    def _make_penalty_objective_host_jax_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
+        bundle = self._get_penalty_kernel_bundle(
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight,
+        )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+
+        def objective(x):
+            return bundle.objective(x, resolved_coil_set_spec)
+
+        return objective
+
     def _make_penalty_value_and_grad_cpu_ordered_with(
         self,
         optimize_G,
@@ -4770,6 +4945,79 @@ class BoozerSurfaceJAX(Optimizable):
             objective_fn = jax.jit(objective_fn)
             self._reference_penalty_value_and_grad_cache[key] = objective_fn
         return objective_fn
+
+    def _make_penalty_value_and_grad_host_jax_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
+        bundle = self._get_penalty_kernel_bundle(
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight,
+        )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+
+        def value_and_grad(x):
+            return bundle.value_and_grad(x, resolved_coil_set_spec)
+
+        return value_and_grad
+
+    def _make_penalty_residual_host_jax_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
+        bundle = self._get_penalty_kernel_bundle(
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight,
+        )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+
+        def residual(x):
+            return bundle.residual(x, resolved_coil_set_spec)
+
+        return residual
+
+    def _make_penalty_least_squares_host_jax_inputs(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
+        bundle = self._get_penalty_kernel_bundle(
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight,
+        )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+        return (
+            bundle.residual,
+            bundle.least_squares_state,
+            bundle.jacobian_block,
+            (resolved_coil_set_spec,),
+        )
 
     def _make_penalty_residual_with(
         self,
@@ -5251,6 +5499,9 @@ class BoozerSurfaceJAX(Optimizable):
                     **surface_args,
                 )
 
+            objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
+                objective_fn
+            )
             objective_fn = _optimizer_jax._mark_traceable_runner_cacheable(
                 objective_fn,
                 cache_token=("boozer-traceable-penalty-objective", key),
@@ -5291,6 +5542,85 @@ class BoozerSurfaceJAX(Optimizable):
             )
             self._traceable_penalty_residual_cache[key] = residual_fn
         return self._traceable_penalty_residual_cache[key]
+
+    def _get_penalty_kernel_bundle(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+    ) -> BoozerKernelBundle:
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        key = self._traceable_penalty_cache_key(
+            optimize_G,
+            weight_inv_modB,
+            resolved_constraint_weight,
+        )
+        bundle = self._kernel_bundle_cache.get(key)
+        if bundle is None:
+            objective_fn = self._get_traceable_penalty_objective(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+            )
+            residual_fn = self._get_traceable_penalty_residual(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+            )
+            jacobian_fn = jax.jacfwd(residual_fn, argnums=0)
+            linear_solve_tol = self._linear_solve_tolerance()
+            linear_solve_stab = float(self.options.get("newton_stab", 0.0))
+
+            def least_squares_state_fn(x, coil_set_spec):
+                return _optimizer_jax._dense_lm_state_from_residual_jacobian(
+                    residual_fn(x, coil_set_spec),
+                    jacobian_fn(x, coil_set_spec),
+                )
+
+            def jacobian_block_fn(x, tangent_block, coil_set_spec):
+                def residual_for_x(x_inner):
+                    return jnp.ravel(jnp.asarray(residual_fn(x_inner, coil_set_spec)))
+
+                def jvp_column(tangent):
+                    return jax.jvp(residual_for_x, (x,), (tangent,))[1]
+
+                return jax.vmap(jvp_column)(tangent_block).T
+
+            def linear_solve_fn(x, rhs, coil_set_spec):
+                def objective_for_x(x_inner):
+                    return objective_fn(x_inner, coil_set_spec)
+
+                return _optimizer_jax._solve_hessian_least_squares_system_with_status(
+                    objective_for_x,
+                    x,
+                    rhs,
+                    stab=linear_solve_stab,
+                    tol=linear_solve_tol,
+                )
+
+            def factor_apply_fn(x, vector, coil_set_spec):
+                def objective_for_x(x_inner):
+                    return objective_fn(x_inner, coil_set_spec)
+
+                operator = _optimizer_jax._hessian_linear_operator(
+                    objective_for_x,
+                    x,
+                    stab=linear_solve_stab,
+                )
+                return operator["matvec"](vector)
+
+            bundle = BoozerKernelBundle(
+                objective=jax.jit(objective_fn),
+                residual=jax.jit(residual_fn),
+                jacobian=jax.jit(jacobian_fn),
+                jacobian_block=jax.jit(jacobian_block_fn),
+                least_squares_state=jax.jit(least_squares_state_fn),
+                linear_solve=jax.jit(linear_solve_fn),
+                factor_apply=jax.jit(factor_apply_fn),
+                value_and_grad=jax.jit(jax.value_and_grad(objective_fn, argnums=0)),
+            )
+            self._kernel_bundle_cache[key] = bundle
+        return bundle
 
     def _get_traceable_exact_residual(self, weight_inv_modB):
         mask_indices = self._compute_stellsym_mask_indices()
@@ -5643,13 +5973,15 @@ class BoozerSurfaceJAX(Optimizable):
 
     def _resolve_optimizer_method(self, limited_memory=None, *, optimize_G=True):
         """Resolve optimizer method string from options."""
-        optimizer_backend = _optimizer_jax.resolve_optimizer_backend(
+        optimizer_backend = _optimizer_jax.resolve_boozer_inner_optimizer_backend(
             self.options["optimizer_backend"]
         )
-        if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-            raise ValueError("optimizer_backend must be one of: auto, scipy, ondevice.")
-        require_target_backend_x64(optimizer_backend)
-        if optimizer_backend != "ondevice":
+        if optimizer_backend not in _optimizer_jax.BOOZER_INNER_OPTIMIZER_BACKENDS:
+            raise ValueError(
+                _optimizer_jax.render_invalid_boozer_inner_optimizer_backend_message()
+            )
+        require_boozer_inner_backend_x64(optimizer_backend)
+        if optimizer_backend == "scipy":
             backend_config = get_backend_config()
             policy_optimizer_backend = get_backend_policy().default_optimizer_backend
             if (
@@ -5698,6 +6030,12 @@ class BoozerSurfaceJAX(Optimizable):
             least_squares_algorithm = "quasi-newton"
         if optimizer_backend == "ondevice":
             return resolve_target_least_squares_optimizer_method(
+                limited_memory=effective_limited_memory,
+                least_squares_algorithm=least_squares_algorithm,
+            )
+        if optimizer_backend == "host-jax":
+            return _optimizer_jax.resolve_boozer_inner_optimizer_method(
+                optimizer_backend,
                 limited_memory=effective_limited_memory,
                 least_squares_algorithm=least_squares_algorithm,
             )
@@ -5769,10 +6107,6 @@ class BoozerSurfaceJAX(Optimizable):
                 progress_callback=progress_callback,
                 args=objective_args,
             )
-        if objective_args:
-            raise ValueError(
-                "Newton objective args are only supported on the ondevice traceable path."
-            )
         return newton_polish(
             obj_fn,
             x0,
@@ -5783,6 +6117,8 @@ class BoozerSurfaceJAX(Optimizable):
             max_dense_hessian_bytes=max_dense_hessian_bytes,
             dense_newton_steps=materialize_hessian,
             progress_callback=progress_callback,
+            allow_host_control=self.options["optimizer_backend"] == "host-jax",
+            args=objective_args,
         )
 
     def _skipped_newton_polish_result(self, ls_res, pre_newton, *, weight_inv_modB):
@@ -5892,7 +6228,9 @@ class BoozerSurfaceJAX(Optimizable):
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
         decision_split_mode = (
-            "jvp" if self.options["optimizer_backend"] == "ondevice" else "reverse"
+            "jvp"
+            if self.options["optimizer_backend"] in {"host-jax", "ondevice"}
+            else "reverse"
         )
         method = self._resolve_optimizer_method(
             limited_memory=limited_memory,
@@ -5900,35 +6238,75 @@ class BoozerSurfaceJAX(Optimizable):
         )
         progress_callback = self._make_solver_progress_callback(method)
         if method in _LEAST_SQUARES_METHODS:
-            residual_fn = self._make_penalty_residual_with(
-                optimize_G,
-                weight_inv_modB,
-                constraint_weight,
-                decision_split_mode=decision_split_mode,
-            )
-            least_squares_runner = (
-                target_least_squares
-                if method.endswith("-ondevice")
-                else reference_least_squares
-            )
-            result = least_squares_runner(
-                residual_fn,
-                x0,
-                method=method,
-                tol=tol,
-                maxiter=maxiter,
-                options=self._collect_least_squares_options(),
-                progress_callback=progress_callback,
-            )
-        else:
-            optimizer_options = self._collect_optimizer_options(method=method)
-            if method in {"bfgs", "lbfgs"}:
-                obj_fn = self._make_penalty_value_and_grad_cpu_ordered_with(
+            host_jax_state_fn = None
+            host_jax_jacobian_block_fn = None
+            residual_args = ()
+            if self.options["optimizer_backend"] == "host-jax":
+                (
+                    residual_fn,
+                    host_jax_state_fn,
+                    host_jax_jacobian_block_fn,
+                    residual_args,
+                ) = self._make_penalty_least_squares_host_jax_inputs(
                     optimize_G,
                     weight_inv_modB,
                     constraint_weight,
                 )
-                result = reference_minimize(
+            else:
+                residual_fn = self._make_penalty_residual_with(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                    decision_split_mode=decision_split_mode,
+                )
+            least_squares_runner = (
+                host_jax_least_squares
+                if self.options["optimizer_backend"] == "host-jax"
+                else
+                target_least_squares
+                if method.endswith("-ondevice")
+                else reference_least_squares
+            )
+            least_squares_kwargs = {
+                "method": method,
+                "tol": tol,
+                "maxiter": maxiter,
+                "options": self._collect_least_squares_options(),
+                "progress_callback": progress_callback,
+            }
+            if self.options["optimizer_backend"] == "host-jax":
+                least_squares_kwargs["args"] = residual_args
+                least_squares_kwargs["state_fn"] = host_jax_state_fn
+                least_squares_kwargs["jacobian_block_fn"] = (
+                    host_jax_jacobian_block_fn
+                )
+            result = least_squares_runner(
+                residual_fn,
+                x0,
+                **least_squares_kwargs,
+            )
+        else:
+            optimizer_options = self._collect_optimizer_options(method=method)
+            if method in {"bfgs", "lbfgs"}:
+                obj_fn = (
+                    self._make_penalty_value_and_grad_host_jax_with(
+                        optimize_G,
+                        weight_inv_modB,
+                        constraint_weight,
+                    )
+                    if self.options["optimizer_backend"] == "host-jax"
+                    else self._make_penalty_value_and_grad_cpu_ordered_with(
+                        optimize_G,
+                        weight_inv_modB,
+                        constraint_weight,
+                    )
+                )
+                minimize_runner = (
+                    host_jax_minimize_value_and_grad
+                    if self.options["optimizer_backend"] == "host-jax"
+                    else reference_minimize
+                )
+                result = minimize_runner(
                     obj_fn,
                     x0,
                     method=method,
@@ -6033,12 +6411,21 @@ class BoozerSurfaceJAX(Optimizable):
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
         method = self._resolve_optimizer_method(optimize_G=optimize_G)
-        obj_fn = self._make_penalty_objective_with(
-            optimize_G,
-            weight_inv_modB,
-            constraint_weight,
-            decision_split_mode="jvp",
-        )
+        objective_args = ()
+        if self.options["optimizer_backend"] == "host-jax":
+            obj_fn = self._get_traceable_penalty_objective(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+            )
+            objective_args = (self.coil_set_spec,)
+        else:
+            obj_fn = self._make_penalty_objective_with(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+                decision_split_mode="jvp",
+            )
 
         result = self._run_newton_polish_for_method(
             method,
@@ -6050,6 +6437,7 @@ class BoozerSurfaceJAX(Optimizable):
             materialize_hessian=bool(self.options["materialize_dense_linearization"]),
             max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
             progress_callback=self._resolve_newton_progress_callback(method),
+            objective_args=objective_args,
         )
 
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
@@ -6242,7 +6630,9 @@ class BoozerSurfaceJAX(Optimizable):
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
         decision_split_mode = (
-            "jvp" if self.options["optimizer_backend"] == "ondevice" else "reverse"
+            "jvp"
+            if self.options["optimizer_backend"] in {"host-jax", "ondevice"}
+            else "reverse"
         )
         # Reuse the centralized backend/algorithm validation seam even though
         # this public method forces an LM/manual route rather than the
@@ -6253,12 +6643,20 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         if method == "manual":
-            residual_fn = self._make_penalty_residual_with(
-                optimize_G,
-                weight_inv_modB,
-                constraint_weight,
-                hostify_inputs=self.options["optimizer_backend"] != "ondevice",
-                decision_split_mode=decision_split_mode,
+            residual_fn = (
+                self._make_penalty_residual_host_jax_with(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                )
+                if self.options["optimizer_backend"] == "host-jax"
+                else self._make_penalty_residual_with(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                    hostify_inputs=self.options["optimizer_backend"] != "ondevice",
+                    decision_split_mode=decision_split_mode,
+                )
             )
             result = self._run_manual_penalty_least_squares(
                 residual_fn,
@@ -6298,13 +6696,28 @@ class BoozerSurfaceJAX(Optimizable):
                 "supports method='lm' or method='manual'."
             )
 
-        residual_fn = self._make_penalty_residual_with(
-            optimize_G,
-            weight_inv_modB,
-            constraint_weight,
-            hostify_inputs=self.options["optimizer_backend"] != "ondevice",
-            decision_split_mode=decision_split_mode,
-        )
+        host_jax_state_fn = None
+        host_jax_jacobian_block_fn = None
+        residual_args = ()
+        if self.options["optimizer_backend"] == "host-jax":
+            (
+                residual_fn,
+                host_jax_state_fn,
+                host_jax_jacobian_block_fn,
+                residual_args,
+            ) = self._make_penalty_least_squares_host_jax_inputs(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+            )
+        else:
+            residual_fn = self._make_penalty_residual_with(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+                hostify_inputs=self.options["optimizer_backend"] != "ondevice",
+                decision_split_mode=decision_split_mode,
+            )
         if self.options["optimizer_backend"] == "ondevice":
             resolved_method = self._resolve_optimizer_method(
                 limited_memory=False,
@@ -6323,6 +6736,19 @@ class BoozerSurfaceJAX(Optimizable):
                 maxiter=maxiter,
                 options=self._collect_least_squares_options(),
             )
+        elif self.options["optimizer_backend"] == "host-jax":
+            result = host_jax_least_squares(
+                residual_fn,
+                x0,
+                method="lm",
+                tol=tol,
+                maxiter=maxiter,
+                options=self._collect_least_squares_options(),
+                args=residual_args,
+                state_fn=host_jax_state_fn,
+                jacobian_block_fn=host_jax_jacobian_block_fn,
+            )
+            optimizer_method = "lm"
         else:
             result = reference_least_squares(
                 residual_fn,
