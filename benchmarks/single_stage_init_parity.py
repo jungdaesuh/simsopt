@@ -543,6 +543,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--minimal-artifacts",
+        action="store_true",
+        help=(
+            "Pass --minimal-artifacts to single-stage child runs so benchmark "
+            "runs keep restart/JSON outputs but skip VTK and plot exports."
+        ),
+    )
+    parser.add_argument(
         "--disable-target-lane-success-filter",
         action="store_true",
         help=(
@@ -844,6 +852,7 @@ def _append_optional_single_stage_flags(
     command: list[str],
     *,
     benchmark_mode: bool,
+    minimal_artifacts: bool,
     profile_target_lane: bool,
     profile_target_lane_only: bool,
     diagnose_target_lane_scaled_phase1: bool,
@@ -864,6 +873,8 @@ def _append_optional_single_stage_flags(
 ) -> None:
     if benchmark_mode:
         command.append("--benchmark-mode")
+    if minimal_artifacts:
+        command.append("--minimal-artifacts")
     if profile_target_lane:
         command.append("--profile-target-lane")
     if profile_target_lane_only:
@@ -1110,6 +1121,7 @@ def _run_single_stage_case(
         _append_optional_single_stage_flags(
             command,
             benchmark_mode=benchmark_mode,
+            minimal_artifacts=bool(getattr(args, "minimal_artifacts", False)),
             profile_target_lane=profile_target_lane,
             profile_target_lane_only=profile_target_lane_only,
             diagnose_target_lane_scaled_phase1=diagnose_target_lane_scaled_phase1,

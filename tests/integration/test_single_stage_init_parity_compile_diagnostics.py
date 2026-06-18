@@ -52,6 +52,7 @@ def _relay(enable: bool, **over) -> list[str]:
     command: list[str] = []
     kwargs = dict(
         benchmark_mode=False,
+        minimal_artifacts=False,
         profile_target_lane=False,
         profile_target_lane_only=False,
         diagnose_target_lane_scaled_phase1=False,
@@ -143,6 +144,12 @@ def test_flag_reaches_jax_target_child_command(monkeypatch, tmp_path):
     args = _parse([FLAG])
     command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cpu")
     assert FLAG in command
+
+
+def test_minimal_artifacts_reaches_child_command(monkeypatch, tmp_path):
+    args = _parse(["--minimal-artifacts"])
+    command = _capture_child_command(monkeypatch, tmp_path, args, "cpu", "cpu")
+    assert "--minimal-artifacts" in command
 
 
 def test_cuda_host_jax_child_uses_host_jax_boozer_backend(monkeypatch, tmp_path):
