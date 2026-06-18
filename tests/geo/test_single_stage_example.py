@@ -2205,6 +2205,8 @@ class SingleStageExampleTests(unittest.TestCase):
                     "invariant_torus_count": 0,
                     "wba_fraction_denominator_policy": None,
                     "wba_fraction_denominator_seed_count": 0,
+                    "wba_min_classifiable_seeds": 2,
+                    "wba_not_evaluated_seed_count": 0,
                     "wba_seed_count": 0,
                     "wba_survived_seed_count": 0,
                     "wba_classified_seed_count": 0,
@@ -15257,6 +15259,13 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_vessel_keepout_clearance=0.005,
             single_stage_available_envelope_reward_weight=0.0,
             single_stage_hardware_sdf_free_space_reward_weight=0.0,
+            single_stage_rational_iota_avoidance_weight=0.0,
+            single_stage_rational_iota_avoidance_max_denominator=10,
+            single_stage_rational_iota_avoidance_sigma=0.012,
+            single_stage_iota_noble_pull_weight=0.0,
+            single_stage_iota_noble_pull_lo=0.276,
+            single_stage_iota_noble_pull_hi=0.281,
+            single_stage_qa_residual_weight=0.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             constraint_method="penalty",
@@ -15433,6 +15442,13 @@ class RunIdentityTests(unittest.TestCase):
                     "winding_surface_free_minor",
                     "single_stage_available_envelope_reward_weight",
                     "single_stage_hardware_sdf_free_space_reward_weight",
+                    "single_stage_rational_iota_avoidance_weight",
+                    "single_stage_rational_iota_avoidance_max_denominator",
+                    "single_stage_rational_iota_avoidance_sigma",
+                    "single_stage_iota_noble_pull_weight",
+                    "single_stage_iota_noble_pull_lo",
+                    "single_stage_iota_noble_pull_hi",
+                    "single_stage_qa_residual_weight",
                 }
                 or (
                     not config.finite_build
@@ -15691,6 +15707,43 @@ class RunIdentityTests(unittest.TestCase):
         base_args = self._make_identity_args()
         weighted_args = self._make_identity_args()
         weighted_args.single_stage_hardware_sdf_free_space_reward_weight = 7.5
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
+        )
+
+    def test_run_identity_changes_when_iota_avoidance_settings_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_rational_iota_avoidance_weight = 1.5
+        weighted_args.single_stage_rational_iota_avoidance_max_denominator = 13
+        weighted_args.single_stage_rational_iota_avoidance_sigma = 0.02
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
+        )
+
+    def test_run_identity_changes_when_noble_pull_settings_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_iota_noble_pull_weight = 2.5
+        weighted_args.single_stage_iota_noble_pull_lo = 0.276
+        weighted_args.single_stage_iota_noble_pull_hi = 0.281
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
+        )
+
+    def test_run_identity_changes_when_qa_residual_weight_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_qa_residual_weight = 3.5
 
         self.assertNotEqual(
             self._build_identity(module, base_args),
@@ -16496,6 +16549,43 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.single_stage_available_envelope_reward_weight, 12.5)
 
+    def test_single_stage_parse_args_accepts_confinement_objective_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-rational-iota-avoidance-weight",
+                "1.5",
+                "--single-stage-rational-iota-avoidance-max-denominator",
+                "13",
+                "--single-stage-rational-iota-avoidance-sigma",
+                "0.02",
+                "--single-stage-iota-noble-pull-weight",
+                "2.5",
+                "--single-stage-iota-noble-pull-lo",
+                "0.276",
+                "--single-stage-iota-noble-pull-hi",
+                "0.281",
+                "--single-stage-qa-residual-weight",
+                "3.5",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_rational_iota_avoidance_weight, 1.5)
+        self.assertEqual(
+            args.single_stage_rational_iota_avoidance_max_denominator,
+            13,
+        )
+        self.assertEqual(args.single_stage_rational_iota_avoidance_sigma, 0.02)
+        self.assertEqual(args.single_stage_iota_noble_pull_weight, 2.5)
+        self.assertEqual(args.single_stage_iota_noble_pull_lo, 0.276)
+        self.assertEqual(args.single_stage_iota_noble_pull_hi, 0.281)
+        self.assertEqual(args.single_stage_qa_residual_weight, 3.5)
+
     def test_single_stage_parse_args_accepts_hardware_sdf_reward_with_sdf_backend(
         self,
     ):
@@ -16539,6 +16629,64 @@ class CurrentBaselineContractTests(unittest.TestCase):
             self.assertRaises(SystemExit),
         ):
             module.parse_args()
+
+    def test_single_stage_parse_args_rejects_invalid_confinement_objective_flags(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        cases = [
+            ("--single-stage-rational-iota-avoidance-weight", "-0.1"),
+            ("--single-stage-rational-iota-avoidance-weight", "nan"),
+            ("--single-stage-rational-iota-avoidance-max-denominator", "0"),
+            ("--single-stage-rational-iota-avoidance-sigma", "0.0"),
+            ("--single-stage-rational-iota-avoidance-sigma", "inf"),
+            ("--single-stage-iota-noble-pull-weight", "-0.1"),
+            ("--single-stage-iota-noble-pull-weight", "nan"),
+            ("--single-stage-qa-residual-weight", "-0.1"),
+            ("--single-stage-qa-residual-weight", "inf"),
+        ]
+        for flag, value in cases:
+            with self.subTest(flag=flag):
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "single_stage_banana_example.py",
+                            flag,
+                            value,
+                        ],
+                    ),
+                    self.assertRaises(SystemExit),
+                ):
+                    module.parse_args()
+
+    def test_single_stage_parse_args_rejects_invalid_noble_pull_window(self):
+        module = load_single_stage_example_module()
+
+        cases = [
+            ("0.3", "0.2"),
+            ("nan", "0.281"),
+            ("0.276", "inf"),
+        ]
+        for lo, hi in cases:
+            with self.subTest(lo=lo, hi=hi):
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "single_stage_banana_example.py",
+                            "--single-stage-iota-noble-pull-lo",
+                            lo,
+                            "--single-stage-iota-noble-pull-hi",
+                            hi,
+                        ],
+                    ),
+                    self.assertRaises(SystemExit),
+                ):
+                    module.parse_args()
 
     def test_single_stage_parse_args_rejects_hardware_sdf_reward_without_sdf_backend(
         self,
@@ -19542,6 +19690,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
             def max_abs_geodesic_curvature(self):
                 return float(fold_geodesic_curvature_max)
+
+            def max_abs_frame_binormal_curvature(self):
+                # Mirror CurveSurfaceGeodesicCurvature, where this is an alias of
+                # max_abs_geodesic_curvature (fold_buildability.py).
+                return self.max_abs_geodesic_curvature()
 
         class FakeVesselEnvelopeKeepout(FakeStage2Objective):
             def __init__(self, curves, *, winding_r0):

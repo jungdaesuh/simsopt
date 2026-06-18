@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import math
 import sys
@@ -12,9 +13,13 @@ import numpy as np
 from scipy.io import netcdf_file
 from simsopt._core import Optimizable
 from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt.configs import get_ncsx_data
+from simsopt.field import BiotSavart, coils_via_symmetries
 from simsopt.field.coil import Current, ScaledCurrent
+from simsopt.geo import BoozerSurface, SurfaceXYZTensorFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.framedcurve import FramedCurveSurfaceTangent
+from simsopt.geo.surfaceobjectives import Volume
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +35,9 @@ SMOOTH_DISTANCE_SELECTION_PATH = (
 )
 SINGLE_STAGE_OBJECTIVES_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
+)
+SINGLE_STAGE_EXAMPLE_PATH = (
+    EXAMPLES_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py"
 )
 HARDWARE_CONSTRAINT_SCHEMA_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "hardware_constraint_schema.py"
@@ -69,6 +77,30 @@ def _load_module(module_path: Path, prefix: str):
     finally:
         sys.path[:] = original_sys_path
     return module
+
+
+def _extract_functions(
+    module_path: Path, function_names: list[str], global_bindings: dict
+) -> dict:
+    """Compile a subset of a module's top-level functions with injected globals.
+
+    Mirrors the established AST-extraction pattern in the sibling example tests: it
+    pulls the *real* function bodies out of ``module_path`` and runs them against a
+    shared namespace seeded with ``global_bindings`` (e.g. the module globals the
+    helper reads as free names). The extracted helpers therefore exercise the genuine
+    production source -- not a hand-written stand-in -- without importing the heavy
+    single-stage example module (simsopt/jax) at module scope.
+    """
+    tree = ast.parse(module_path.read_text(), filename=str(module_path))
+    wanted = set(function_names)
+    selected = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in wanted
+    ]
+    namespace = dict(global_bindings)
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(module_path), "exec"), namespace)
+    return {name: namespace[name] for name in function_names}
 
 
 def _in_bounds_lcfs_major_radius_m():
@@ -6609,6 +6641,134 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             )
 
 
+def _build_nested_boozer_stack():
+    """Two distinct, fully-solved nested ``BoozerSurface`` objects sharing NCSX coils.
+
+    The real fixture for the #12 surface-stack wiring helper: each parent carries the
+    adjoint state (``res['PLU']`` / ``res['vjp']``) the inter-surface spacing constraint
+    needs to route a live coil gradient. Mirrors the sibling spacing-gradient regression
+    test's stack so the helper is exercised against the genuine objects production builds.
+    """
+    base_curves, base_currents, ma = get_ncsx_data()
+    coils = coils_via_symmetries(base_curves, base_currents, 3, True)
+    bs = BiotSavart(coils)
+    current_sum = sum(abs(c.current.get_value()) for c in coils)
+    G0 = 2.0 * np.pi * current_sum * (4 * np.pi * 1e-7 / (2 * np.pi))
+
+    mpol = ntor = 6
+    nfp = 3
+    phis = np.linspace(0, 1 / nfp, 2 * ntor + 1, endpoint=False)
+    thetas = np.linspace(0, 1, 2 * mpol + 1, endpoint=False)
+
+    def solve_at(radius):
+        surface = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=phis,
+            quadpoints_theta=thetas,
+        )
+        surface.fit_to_curve(ma, radius, flip_theta=True)
+        label = Volume(surface)
+        boozer_surface = BoozerSurface(
+            bs, surface, label, label.J(), constraint_weight=None,
+            options={"weight_inv_modB": False},
+        )
+        boozer_surface.run_code(-0.406, G=G0)
+        return boozer_surface
+
+    return (solve_at(0.10), solve_at(0.16))
+
+
+class SingleStageSurfaceStackBoozerHelperTests(unittest.TestCase):
+    """The #12 wiring helper returns the adjoint-capable BoozerSurface parents.
+
+    ``current_single_stage_alm_surface_stack_boozer_surfaces`` (and its sibling
+    ``current_single_stage_alm_surface_stack_surfaces``) are AST-extracted from the real
+    single-stage example source and run against an injected ``surface_data`` of genuine
+    solved ``BoozerSurface`` objects. The existing dispatch-boundary test only proves the
+    *value* the helper returns is forwarded (using a sentinel tuple); it never runs the
+    real helper, so a regression making the helper return ``None`` would silently re-deaden
+    the entire #12 fix and still pass. These tests exercise the helper itself: that it
+    returns the BoozerSurface *parents* (which carry ``res['PLU']`` / ``res['vjp']``), NOT
+    the gradient-dead ``.surface`` geometry, aligned 1:1 with the geometry tuple, and
+    ``None`` when the surface-stack ALM path is inactive.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.boozer_surfaces = _build_nested_boozer_stack()
+        cls.surface_data = [
+            {"boozer_surface": boozer_surface} for boozer_surface in cls.boozer_surfaces
+        ]
+
+    @staticmethod
+    def _extract(surface_data, surface_gap_threshold):
+        # Co-extract the gate predicate the helper calls as a free name; inject the module
+        # globals (surface_data / SURFACE_GAP_THRESHOLD) the production helper reads.
+        return _extract_functions(
+            SINGLE_STAGE_EXAMPLE_PATH,
+            [
+                "single_stage_surface_stack_alm_enabled",
+                "current_single_stage_alm_surface_stack_surfaces",
+                "current_single_stage_alm_surface_stack_boozer_surfaces",
+            ],
+            {
+                "surface_data": surface_data,
+                "SURFACE_GAP_THRESHOLD": surface_gap_threshold,
+            },
+        )
+
+    def test_active_path_returns_adjoint_capable_boozer_parents(self):
+        fns = self._extract(self.surface_data, 0.02)
+        boozer_surfaces = fns[
+            "current_single_stage_alm_surface_stack_boozer_surfaces"
+        ]()
+        geometry = fns["current_single_stage_alm_surface_stack_surfaces"]()
+
+        # A regression returning None here would re-deaden the whole #12 coil gradient.
+        self.assertIsNotNone(
+            boozer_surfaces,
+            "surface-stack ALM is active (2 surfaces, gap>0); helper must not return None",
+        )
+        self.assertEqual(len(boozer_surfaces), len(self.boozer_surfaces))
+        self.assertEqual(len(boozer_surfaces), len(geometry))
+
+        for returned, expected_parent, geometry_surface in zip(
+            boozer_surfaces, self.boozer_surfaces, geometry
+        ):
+            # The exact parent object (identity), not a copy/rebuild that severs the adjoint.
+            self.assertIs(
+                returned,
+                expected_parent,
+                "helper must return the exact BoozerSurface parent (preserves the adjoint)",
+            )
+            # It is a real BoozerSurface that carries the cached adjoint factors the spacing
+            # constraint consumes (res['PLU'] / res['vjp']) -- NOT the bare .surface geometry.
+            self.assertIsInstance(returned, BoozerSurface)
+            self.assertIn("PLU", returned.res)
+            self.assertIn("vjp", returned.res)
+            # 1:1 alignment with the geometry tuple: each returned parent's .surface IS the
+            # matching geometry element, and the parent is not the geometry itself.
+            self.assertIs(returned.surface, geometry_surface)
+            self.assertIsNot(returned, geometry_surface)
+
+    def test_inactive_when_gap_threshold_zero(self):
+        fns = self._extract(self.surface_data, 0.0)
+        self.assertIsNone(
+            fns["current_single_stage_alm_surface_stack_boozer_surfaces"](),
+            "gap threshold 0 disables the surface-stack ALM path; helper returns None",
+        )
+
+    def test_inactive_with_single_surface(self):
+        fns = self._extract(self.surface_data[:1], 0.02)
+        self.assertIsNone(
+            fns["current_single_stage_alm_surface_stack_boozer_surfaces"](),
+            "a single surface cannot form a stack; helper returns None",
+        )
+
+
 class SingleStageGeometryModuleTests(_ModuleTestCase):
     MODULE_PATH = SINGLE_STAGE_GEOMETRY_PATH
     MODULE_PREFIX = "banana_single_stage_geometry"
@@ -8046,6 +8206,49 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertAlmostEqual(built.J(), direct.J())
         np.testing.assert_allclose(built.dJ(), direct.dJ())
 
+    def test_noble_iota_pull_value_and_gradient(self):
+        edge = _LinearIotaLeaf(0.270, [2.0, -1.0])
+        term = self.module.NobleIotaPull(edge, lo=0.276, hi=0.281)
+
+        offset = 0.270 - 0.276
+        self.assertAlmostEqual(term.J(), 0.5 * offset**2)
+        np.testing.assert_allclose(term.dJ(), offset * np.array([2.0, -1.0]))
+
+    def test_noble_iota_pull_zero_inside_window(self):
+        edge = _LinearIotaLeaf(0.278, [2.0, -1.0])
+        term = self.module.NobleIotaPull(edge, lo=0.276, hi=0.281)
+
+        self.assertEqual(term.J(), 0.0)
+        np.testing.assert_allclose(term.dJ(), [0.0, 0.0])
+
+    def test_rational_iota_avoidance_rejects_nonfinite_sigma(self):
+        edge = _LinearIotaLeaf(0.278, [1.0])
+
+        for sigma in (float("nan"), float("inf")):
+            with self.subTest(sigma=sigma):
+                with self.assertRaisesRegex(ValueError, "positive finite sigma"):
+                    self.module.RationalIotaAvoidance(edge, sigma=sigma)
+
+    def test_noble_iota_pull_rejects_nonfinite_window(self):
+        edge = _LinearIotaLeaf(0.278, [1.0])
+
+        cases = [
+            (float("nan"), 0.281),
+            (0.276, float("inf")),
+        ]
+        for lo, hi in cases:
+            with self.subTest(lo=lo, hi=hi):
+                with self.assertRaisesRegex(ValueError, "finite lo < hi"):
+                    self.module.NobleIotaPull(edge, lo=lo, hi=hi)
+
+    def test_noble_iota_pull_builder_noops_without_iota_term(self):
+        self.assertIsNone(
+            self.module.build_single_stage_noble_iota_pull_objective(None)
+        )
+        edge = _LinearIotaLeaf(0.270, [1.0])
+        built = self.module.build_single_stage_noble_iota_pull_objective(edge)
+        self.assertIsInstance(built, self.module.NobleIotaPull)
+
     @staticmethod
     def _base_total_objective_args():
         # The 15 positional build_total_objective args (JnonQSRatio, RES_WEIGHT,
@@ -8101,6 +8304,28 @@ class IotaShearShortfallTests(_ModuleTestCase):
         )
         self.assertAlmostEqual(with_shear.J() - baseline.J(), 10.0 * shear.J())
         np.testing.assert_allclose(with_shear.dJ() - baseline.dJ(), 10.0 * shear.dJ())
+
+    def test_build_total_objective_adds_weighted_noble_and_qa_terms(self):
+        baseline = self.module.build_total_objective(*self._base_total_objective_args())
+        noble = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        qa = _FakeAlgebraicObjective(0.25, [0.1, 0.2])
+
+        with_terms = self.module.build_total_objective(
+            *self._base_total_objective_args(),
+            JNobleIotaPull=noble,
+            NOBLE_IOTA_PULL_WEIGHT=4.0,
+            JQAResidual=qa,
+            QA_RESIDUAL_WEIGHT=6.0,
+        )
+
+        self.assertAlmostEqual(
+            with_terms.J() - baseline.J(),
+            4.0 * noble.J() + 6.0 * qa.J(),
+        )
+        np.testing.assert_allclose(
+            with_terms.dJ() - baseline.dJ(),
+            4.0 * noble.dJ() + 6.0 * qa.dJ(),
+        )
 
     def test_evaluate_base_objective_adds_weighted_shear_term(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
@@ -8196,6 +8421,37 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertFalse(off_diagnostics["shear_objective_enabled"])
         self.assertAlmostEqual(off_diagnostics["J_shear"], 0.5)
         np.testing.assert_allclose(off_diagnostics["dJ_shear"], [0.25, -0.75])
+
+    def test_evaluate_base_objective_reports_noble_and_qa_terms(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        noble = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        qa = _FakeAlgebraicObjective(0.25, [0.1, 0.2])
+
+        diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JNobleIotaPull=noble,
+            NOBLE_IOTA_PULL_WEIGHT=4.0,
+            JQAResidual=qa,
+            QA_RESIDUAL_WEIGHT=6.0,
+        )
+
+        self.assertTrue(diagnostics["noble_iota_pull_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["noble_iota_pull_weight"], 4.0)
+        self.assertAlmostEqual(diagnostics["J_noble_iota_pull"], 0.5)
+        np.testing.assert_allclose(diagnostics["dJ_noble_iota_pull"], [0.25, -0.75])
+        self.assertTrue(diagnostics["qa_residual_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["qa_residual_weight"], 6.0)
+        self.assertAlmostEqual(diagnostics["J_qa_residual"], 0.25)
+        np.testing.assert_allclose(diagnostics["dJ_qa_residual"], [0.1, 0.2])
 
 
 class MagneticWellVolumeShortfallTests(_ModuleTestCase):

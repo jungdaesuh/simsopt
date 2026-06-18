@@ -164,6 +164,8 @@ RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR = 10
 # the descent direction points away from the rational throughout +/-1 sigma_q (a
 # larger sigma0 lets neighbouring wells overlap and locally invert that push).
 RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA = 0.012
+NOBLE_IOTA_PULL_DEFAULT_LO = 0.276
+NOBLE_IOTA_PULL_DEFAULT_HI = 0.281
 
 
 def _low_order_rationals_in_window(center, half_window, max_denominator):
@@ -229,8 +231,8 @@ class RationalIotaAvoidance(Optimizable):
         self.sigma = float(sigma)
         if self.max_denominator < 1:
             raise ValueError("rational-iota avoidance requires max_denominator >= 1")
-        if self.sigma <= 0.0:
-            raise ValueError("rational-iota avoidance requires sigma > 0")
+        if not np.isfinite(self.sigma) or self.sigma <= 0.0:
+            raise ValueError("rational-iota avoidance requires positive finite sigma")
         # Window at 6 * sigma0 (>= 6 sigma_q for every q>=1): a Gaussian is < 1.5e-8 of
         # its peak beyond 6 sigma, so rationals outside the window are negligible.
         self._half_window = 6.0 * self.sigma
@@ -294,6 +296,60 @@ def build_single_stage_rational_iota_avoidance_objective(
         max_denominator=max_denominator,
         sigma=sigma,
     )
+
+
+class NobleIotaPull(Optimizable):
+    r"""One-sided pull toward the iota noble window.
+
+    The wrapped ``iota_term`` is the outer-surface :class:`Iotas` objective used by
+    the regular iota target. The penalty is zero inside ``[lo, hi]`` and quadratic
+    outside, giving campaigns an opt-in way to bias iota toward the noble window
+    without changing the default iota box or fighting in-window solutions.
+    """
+
+    def __init__(
+        self,
+        iota_term,
+        *,
+        lo=NOBLE_IOTA_PULL_DEFAULT_LO,
+        hi=NOBLE_IOTA_PULL_DEFAULT_HI,
+    ):
+        self.iota_term = iota_term
+        self.lo = float(lo)
+        self.hi = float(hi)
+        if not np.isfinite(self.lo) or not np.isfinite(self.hi) or self.lo >= self.hi:
+            raise ValueError("noble iota pull requires finite lo < hi")
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[iota_term])
+
+    def _offset(self):
+        iota = float(self.iota_term.J())
+        if iota < self.lo:
+            return iota - self.lo
+        if iota > self.hi:
+            return iota - self.hi
+        return 0.0
+
+    def J(self):
+        offset = self._offset()
+        return 0.5 * offset * offset
+
+    @derivative_dec
+    def dJ(self):
+        return self._offset() * self.iota_term.dJ(partials=True)
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+def build_single_stage_noble_iota_pull_objective(
+    outer_iota_term,
+    *,
+    lo=NOBLE_IOTA_PULL_DEFAULT_LO,
+    hi=NOBLE_IOTA_PULL_DEFAULT_HI,
+):
+    """Build the optional outer-iota noble-window pull objective."""
+    if outer_iota_term is None:
+        return None
+    return NobleIotaPull(outer_iota_term, lo=lo, hi=hi)
 
 
 class MagneticWellVolumeShortfall(Optimizable):
@@ -561,6 +617,10 @@ def build_total_objective(
     MAGNETIC_WELL_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    JNobleIotaPull=None,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JQAResidual=None,
+    QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     JTFCurvature=None,
@@ -641,6 +701,10 @@ def build_total_objective(
             objective
             + RATIONAL_IOTA_AVOIDANCE_WEIGHT * JRationalIotaAvoidance
         )
+    if JNobleIotaPull is not None:
+        objective = objective + NOBLE_IOTA_PULL_WEIGHT * JNobleIotaPull
+    if JQAResidual is not None:
+        objective = objective + QA_RESIDUAL_WEIGHT * JQAResidual
     # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
     # the TF curve geometry is unfrozen, so the objective graph is byte-identical
     # for the default frozen-TF run). They reuse the banana HW weights so the freed
@@ -988,6 +1052,10 @@ def evaluate_total_objective(
     MAGNETIC_WELL_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    JNobleIotaPull=None,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JQAResidual=None,
+    QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
 ):
@@ -1053,6 +1121,10 @@ def evaluate_total_objective(
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
         JRationalIotaAvoidance=JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+        JNobleIotaPull=JNobleIotaPull,
+        NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JQAResidual=JQAResidual,
+        QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
     )
@@ -1121,6 +1193,32 @@ def evaluate_total_objective(
     ) = _optional_weighted_objective_terms(
         JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        noble_iota_pull_value,
+        noble_iota_pull_grad,
+        noble_iota_pull_weight,
+        noble_iota_pull_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JNobleIotaPull,
+        NOBLE_IOTA_PULL_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        qa_residual_value,
+        qa_residual_grad,
+        qa_residual_weight,
+        qa_residual_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JQAResidual,
+        QA_RESIDUAL_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -1284,6 +1382,14 @@ def evaluate_total_objective(
             "rational_iota_avoidance_objective_enabled": (
                 rational_iota_avoidance_objective_enabled
             ),
+            "J_noble_iota_pull": noble_iota_pull_value,
+            "dJ_noble_iota_pull": noble_iota_pull_grad,
+            "noble_iota_pull_weight": noble_iota_pull_weight,
+            "noble_iota_pull_objective_enabled": noble_iota_pull_objective_enabled,
+            "J_qa_residual": qa_residual_value,
+            "dJ_qa_residual": qa_residual_grad,
+            "qa_residual_weight": qa_residual_weight,
+            "qa_residual_objective_enabled": qa_residual_objective_enabled,
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -1341,6 +1447,10 @@ def evaluate_base_objective(
     MAGNETIC_WELL_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    JNobleIotaPull=None,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JQAResidual=None,
+    QA_RESIDUAL_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
     JCurveAvailableEnvelopeReward=None,
@@ -1482,17 +1592,47 @@ def evaluate_base_objective(
         base_physics_grad,
         objective_optimizable,
     )
+    (
+        noble_iota_pull_value,
+        noble_iota_pull_grad,
+        noble_iota_pull_weight,
+        noble_iota_pull_objective_enabled,
+        weighted_noble_iota_pull_value,
+        weighted_noble_iota_pull_grad,
+    ) = _optional_weighted_objective_terms(
+        JNobleIotaPull,
+        NOBLE_IOTA_PULL_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    (
+        qa_residual_value,
+        qa_residual_grad,
+        qa_residual_weight,
+        qa_residual_objective_enabled,
+        weighted_qa_residual_value,
+        weighted_qa_residual_grad,
+    ) = _optional_weighted_objective_terms(
+        JQAResidual,
+        QA_RESIDUAL_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
     physics_terms_total = (
         base_physics_terms_total
         + weighted_shear_value
         + weighted_magnetic_well_value
         + weighted_rational_iota_avoidance_value
+        + weighted_noble_iota_pull_value
+        + weighted_qa_residual_value
     )
     physics_grad = (
         base_physics_grad
         + weighted_shear_grad
         + weighted_magnetic_well_grad
         + weighted_rational_iota_avoidance_grad
+        + weighted_noble_iota_pull_grad
+        + weighted_qa_residual_grad
     )
     residue_value, residue_grad = _optional_objective_value_and_gradient(
         JResidueObjective,
@@ -1505,6 +1645,8 @@ def evaluate_base_objective(
             + weighted_shear_value
             + weighted_magnetic_well_value
             + weighted_rational_iota_avoidance_value
+            + weighted_noble_iota_pull_value
+            + weighted_qa_residual_value
             + weighted_vessel_keepout_value
             + weighted_available_envelope_reward_value
             + weighted_hardware_sdf_free_space_reward_value
@@ -1514,6 +1656,8 @@ def evaluate_base_objective(
             + weighted_shear_grad
             + weighted_magnetic_well_grad
             + weighted_rational_iota_avoidance_grad
+            + weighted_noble_iota_pull_grad
+            + weighted_qa_residual_grad
             + weighted_vessel_keepout_grad
             + weighted_available_envelope_reward_grad
             + weighted_hardware_sdf_free_space_reward_grad
@@ -1575,6 +1719,14 @@ def evaluate_base_objective(
             "rational_iota_avoidance_objective_enabled": (
                 rational_iota_avoidance_objective_enabled
             ),
+            "J_noble_iota_pull": noble_iota_pull_value,
+            "dJ_noble_iota_pull": noble_iota_pull_grad,
+            "noble_iota_pull_weight": noble_iota_pull_weight,
+            "noble_iota_pull_objective_enabled": noble_iota_pull_objective_enabled,
+            "J_qa_residual": qa_residual_value,
+            "dJ_qa_residual": qa_residual_grad,
+            "qa_residual_weight": qa_residual_weight,
+            "qa_residual_objective_enabled": qa_residual_objective_enabled,
             "J_vessel_keepout": vessel_keepout_value,
             "dJ_vessel_keepout": vessel_keepout_grad,
             "vessel_keepout_weight": vessel_keepout_weight,
@@ -1865,6 +2017,10 @@ def evaluate_alm_objective(
     MAGNETIC_WELL_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    JNobleIotaPull=None,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JQAResidual=None,
+    QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     include_diagnostics=True,
@@ -1902,6 +2058,10 @@ def evaluate_alm_objective(
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
         JRationalIotaAvoidance=JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+        JNobleIotaPull=JNobleIotaPull,
+        NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JQAResidual=JQAResidual,
+        QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
         JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,

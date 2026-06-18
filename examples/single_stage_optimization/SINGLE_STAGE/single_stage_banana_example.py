@@ -164,6 +164,7 @@ from banana_opt.single_stage_search_contracts import (
     evaluate_frontier_hardware_search_contract as _evaluate_frontier_hardware_search_contract_impl,
     evaluate_frontier_hardware_search_penalty as _evaluate_frontier_hardware_search_penalty_impl,
     evaluate_frontier_kam_certification as _evaluate_frontier_kam_certification_impl,
+    target_kam_floor_satisfied as _target_kam_floor_satisfied_impl,
     evaluate_frontier_topology_search_contract as _evaluate_frontier_topology_search_contract_impl,
     evaluate_frontier_topology_search_penalty as _evaluate_frontier_topology_search_penalty_impl,
     evaluate_frontier_trust_penalty as _evaluate_frontier_trust_penalty_impl,
@@ -176,6 +177,7 @@ from banana_opt.frontier_conditioning import (
     build_frontier_conditioning_gate,
     build_frontier_conditioning_report,
 )
+from banana_opt.confinement_gate import ConfinementGateConfig, certify_confinement
 from banana_opt.frontier_solver_checkpoint import (
     load_solver_checkpoint,
     restore_incumbent_from_solver_checkpoint,
@@ -409,6 +411,8 @@ from banana_opt.single_stage_objectives import (
     ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     average_surface_objectives as _average_surface_objectives_impl,
     build_single_stage_magnetic_well_objective,
+    build_single_stage_noble_iota_pull_objective,
+    build_single_stage_rational_iota_avoidance_objective,
     build_single_stage_shear_objective,
     build_total_objective as _build_total_objective_impl,
     evaluate_base_objective as _evaluate_base_objective_impl,
@@ -416,6 +420,10 @@ from banana_opt.single_stage_objectives import (
     evaluate_alm_objective as _evaluate_alm_objective_impl,
     independent_banana_current_alm_constraint_name,
     MinLGradBShortfall,
+    NOBLE_IOTA_PULL_DEFAULT_HI,
+    NOBLE_IOTA_PULL_DEFAULT_LO,
+    RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
+    RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
 )
 from banana_opt.single_stage_banana_current_mode import (
     BANANA_CURRENT_COORDINATE_SCALING_NONE,
@@ -444,11 +452,14 @@ from banana_opt.surface_mode_contracts import (
     DEFAULT_INNER_SURFACE_RATIO,
     EXPERIMENTAL_MULTISURFACE,
     PUBLISHED_MULTISURFACE,
+    PUBLISHED_PRESET_CHOICES,
+    PUBLISHED_PRESET_DEFAULT_V1,
     SINGLE_SURFACE,
     SURFACE_MODE_CHOICES,
     SurfaceModeContract,
     build_surface_mode_contract as _build_surface_mode_contract_impl,
     build_surface_mode_metadata as _build_surface_mode_metadata_impl,
+    published_surface_names as _published_surface_names,
     resolve_surface_mode_inner_surface_ratio,
     surface_mode_supports_alm,
     surface_mode_supports_boozer_stage_refinement,
@@ -561,6 +572,25 @@ def add_confinement_surrogate_args(parser):
         type=float,
         default=float(os.environ.get("CONFINEMENT_SURROGATE_EARLY_WEIGHT", "0.2")),
         help="Weight on early-exit fraction in the checkpoint confinement surrogate (default 0.2).",
+    )
+    # Decisive post-optimization confinement certification (the island-aware strict gate).
+    # Defaults ON for real (non-init) final runs: it runs ONCE at finalization (strict tier,
+    # 50 field lines / tmax 7000), so it is negligible against a multi-hour optimization, yet
+    # it is the only automated gate that fails CLOSED on broken topology / island chains. The
+    # example's own test suite never runs the full optimization end-to-end, so a strict
+    # default does not slow the unit tests. ``off`` is an explicit opt-out that emits a loud
+    # "NOT confinement-certified" marker so an un-certified artifact is never mistaken for a
+    # passed one.
+    parser.add_argument(
+        "--confinement-gate",
+        choices=("strict", "off"),
+        default=os.environ.get("CONFINEMENT_GATE", "strict"),
+        help=(
+            "Post-optimization decisive confinement certification (strict topology + island "
+            "verdict, run once at finalization). 'strict' (default) gates promotion "
+            "fail-closed; 'off' skips it and records a loud not-certified marker "
+            "(run run_confinement_gate.py later to certify)."
+        ),
     )
 
 
@@ -1400,6 +1430,23 @@ def coerce_single_stage_banana_current_state(
     )
 
 
+def parse_published_surface_fractions(raw_value):
+    """Parse the opt-in comma-separated --published-surface-fractions string.
+
+    Returns None when unset (default preset path). Validation of the strictly
+    increasing outer-anchored nested stack is delegated to the surface-mode
+    contract so the CLI and contract share one fail-closed source of truth.
+    """
+    if raw_value is None:
+        return None
+    tokens = [token.strip() for token in str(raw_value).split(",") if token.strip()]
+    if not tokens:
+        raise ValueError(
+            "--published-surface-fractions must list at least one label fraction"
+        )
+    return tuple(float(token) for token in tokens)
+
+
 def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
     should_warn = (
         bool(warn_on_legacy_mapping)
@@ -1415,6 +1462,14 @@ def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
             DEFAULT_INNER_SURFACE_RATIO,
         ),
         warn_on_legacy_mapping=should_warn,
+        published_surface_preset=getattr(
+            args,
+            "published_surface_preset",
+            PUBLISHED_PRESET_DEFAULT_V1,
+        ),
+        published_label_fractions=parse_published_surface_fractions(
+            getattr(args, "published_surface_fractions", None)
+        ),
     )
 
 
@@ -1942,6 +1997,20 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-target-kam-floor-min",
+        type=float,
+        default=None,
+        help=(
+            "Target-mode invariant-torus (KAM) floor in [0, 1]: minimum WBA "
+            "invariant-torus fraction a config must reach to be promotable as an "
+            "incumbent (best_accepted/best_feasible/repair/near-miss). Default None "
+            "disables it (byte-identical). Fail-closed: an unevaluated fraction blocks "
+            "promotion, so raise --topology-scorer-tmax / lower "
+            "--topology-scorer-min-returns so the in-loop scorer evaluates it. Frontier "
+            "mode uses --frontier-invariant-torus-min instead."
+        ),
+    )
+    parser.add_argument(
         "--vol-target",
         type=float,
         default=float(os.environ.get("VOL_TARGET", "0.10")),
@@ -2004,8 +2073,10 @@ def parse_args():
             f"{SINGLE_SURFACE!r} preserves the current one-surface baseline, "
             f"{EXPERIMENTAL_MULTISURFACE!r} preserves the current custom two-surface "
             "continuation lane, and "
-            f"{PUBLISHED_MULTISURFACE!r} selects the fixed three-surface published "
-            "contract. When omitted, legacy --num-surfaces mapping is used."
+            f"{PUBLISHED_MULTISURFACE!r} selects the nested published contract "
+            "(default 3-surface stack; depth opt-in configurable via "
+            "--published-surface-preset / --published-surface-fractions). "
+            "When omitted, legacy --num-surfaces mapping is used."
         ),
     )
     parser.add_argument(
@@ -2031,6 +2102,33 @@ def parse_args():
         help=(
             "Legacy inner-surface ratio used by the experimental two-surface contract. "
             "Ignored by single_surface. Reserved for the future published contract."
+        ),
+    )
+    parser.add_argument(
+        "--published-surface-preset",
+        choices=PUBLISHED_PRESET_CHOICES,
+        default=os.environ.get(
+            "PUBLISHED_SURFACE_PRESET",
+            PUBLISHED_PRESET_DEFAULT_V1,
+        ),
+        help=(
+            "Opt-in depth for the --surface-mode=published_multisurface nested "
+            "Boozer stack. 'default_v1' keeps the byte-identical 3-shell stack "
+            "(label fractions 0.6/0.8/1.0). 'interior_covering' and "
+            "'interior_covering_deep' add inner shells that march toward the core "
+            "(down to fraction 0.2), increasing the BoozerSurface solves per "
+            "iteration. Only applies to published_multisurface."
+        ),
+    )
+    parser.add_argument(
+        "--published-surface-fractions",
+        default=os.environ.get("PUBLISHED_SURFACE_FRACTIONS"),
+        help=(
+            "Opt-in explicit comma-separated label fractions for the "
+            "--surface-mode=published_multisurface nested Boozer stack (e.g. "
+            "'0.3,0.55,0.8,1.0'). Must be strictly increasing in (0, 1] with the "
+            "outermost exactly 1.0. Overrides --published-surface-preset; only "
+            "applies to published_multisurface. When omitted, the preset is used."
         ),
     )
     parser.add_argument(
@@ -2827,6 +2925,106 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-rational-iota-avoidance-weight",
+        type=float,
+        default=float(
+            os.environ.get("SINGLE_STAGE_RATIONAL_IOTA_AVOIDANCE_WEIGHT", "0.0")
+        ),
+        help=(
+            "Opt-in weight for the rational-iota avoidance penalty (default 0 = off, so "
+            "the objective graph is byte-identical until set). Repels the OUTER Boozer "
+            "iota from low-order rationals p/q (q <= max-denominator) that seed magnetic "
+            "islands, using a smooth sum of Gaussian wells weighted 1/q^2 and width "
+            "sigma/q. Most relevant to the frontier iota-reward lane (iota target "
+            "3/10 = 0.30 is itself a low-order rational); the 0.15/0.18 target lanes sit "
+            "between q<=10 rationals so even an accidental enable barely perturbs them. "
+            "Shares the outer Iotas Boozer-adjoint gradient path with the iota target."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-rational-iota-avoidance-max-denominator",
+        type=int,
+        default=int(
+            os.environ.get(
+                "SINGLE_STAGE_RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR",
+                str(RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR),
+            )
+        ),
+        help=(
+            "Largest rational denominator q the avoidance penalty repels from "
+            f"(default {RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR}). Low-order resonances "
+            "(small q) seed the widest islands; q beyond this are both thinner and "
+            "weaker. Only effective when the avoidance weight > 0."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-rational-iota-avoidance-sigma",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_RATIONAL_IOTA_AVOIDANCE_SIGMA",
+                str(RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA),
+            )
+        ),
+        help=(
+            "Avoidance-band scale sigma0 (in iota units) for the rational-iota penalty "
+            f"(default {RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA}). Each rational p/q gets a "
+            "Gaussian well of width sigma0/q. The default keeps the wells isolated "
+            "(>500x peak-to-midpoint contrast at q<=10) and the descent direction "
+            "pointing away from the rational throughout +/-1 sigma_q; larger values let "
+            "neighbouring wells overlap. Only effective when the avoidance weight > 0."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-iota-noble-pull-weight",
+        type=float,
+        default=float(os.environ.get("SINGLE_STAGE_IOTA_NOBLE_PULL_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the outer-iota noble-window pull (default 0 = off). "
+            "The term is zero inside the noble window and quadratic outside, sharing "
+            "the outer Iotas Boozer-adjoint gradient with the iota target."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-iota-noble-pull-lo",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_IOTA_NOBLE_PULL_LO",
+                str(NOBLE_IOTA_PULL_DEFAULT_LO),
+            )
+        ),
+        help=(
+            "Lower edge of the opt-in noble-iota pull window "
+            f"(default {NOBLE_IOTA_PULL_DEFAULT_LO})."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-iota-noble-pull-hi",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_IOTA_NOBLE_PULL_HI",
+                str(NOBLE_IOTA_PULL_DEFAULT_HI),
+            )
+        ),
+        help=(
+            "Upper edge of the opt-in noble-iota pull window "
+            f"(default {NOBLE_IOTA_PULL_DEFAULT_HI})."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-qa-residual-weight",
+        type=float,
+        default=float(os.environ.get("SINGLE_STAGE_QA_RESIDUAL_WEIGHT", "0.0")),
+        help=(
+            "Opt-in extra weight on the existing Boozer QA residual "
+            "NonQuasiSymmetricRatio(quasi_poloidal=False). This up-weights QA "
+            "orthogonally to surface-restoration terms and leaves the base QS term "
+            "unchanged when 0."
+        ),
+    )
+    parser.add_argument(
         "--lgradb-weight",
         type=float,
         default=float(os.environ.get("LGRADB_WEIGHT", "0.0")),
@@ -3305,6 +3503,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--topology-scorer-field-policy",
+        choices=("auto", "never"),
+        default=os.environ.get("TOPOLOGY_SCORER_FIELD_POLICY", "auto"),
+        help=(
+            "auto = interpolated field for long in-loop traces (fast, optimistic, "
+            "default/byte-identical); never = exact Biot-Savart field in the in-loop "
+            "topology scorer (honest, slower)."
+        ),
+    )
+    parser.add_argument(
         "--residue-objective-weight",
         type=float,
         default=float(
@@ -3446,6 +3654,19 @@ def parse_args():
         default=float(os.environ.get("RESIDUE_OBJECTIVE_MAX_NEWTON_STEP_NORM", "0.05")),
     )
     parser.add_argument(
+        "--residue-objective-on-branch-loss",
+        choices=["raise", "treat_as_satisfied"],
+        default=os.environ.get("RESIDUE_OBJECTIVE_ON_BRANCH_LOSS", "raise"),
+        help=(
+            "Policy when a residue island branch no longer converges to the rational "
+            "island in the current field (it drifted or healed as the optimizer moved "
+            "off the seed). 'raise' (default) aborts the run; 'treat_as_satisfied' "
+            "treats a healed/drifted island as a zero objective contribution (the "
+            "island-removal goal achieved) -- required for optimization, where the "
+            "island moves between iterations so static seeds cannot track it."
+        ),
+    )
+    parser.add_argument(
         "--residue-objective-autogenerate-seeds",
         action="store_true",
         default=(
@@ -3544,6 +3765,45 @@ def parse_args():
             "--single-stage-hardware-sdf-free-space-reward-weight must be "
             "non-negative."
         )
+    if (
+        not np.isfinite(args.single_stage_rational_iota_avoidance_weight)
+        or args.single_stage_rational_iota_avoidance_weight < 0.0
+    ):
+        parser.error(
+            "--single-stage-rational-iota-avoidance-weight must be finite and non-negative."
+        )
+    if args.single_stage_rational_iota_avoidance_max_denominator < 1:
+        parser.error(
+            "--single-stage-rational-iota-avoidance-max-denominator must be >= 1."
+        )
+    if (
+        not np.isfinite(args.single_stage_rational_iota_avoidance_sigma)
+        or args.single_stage_rational_iota_avoidance_sigma <= 0.0
+    ):
+        parser.error(
+            "--single-stage-rational-iota-avoidance-sigma must be positive and finite."
+        )
+    if (
+        not np.isfinite(args.single_stage_iota_noble_pull_weight)
+        or args.single_stage_iota_noble_pull_weight < 0.0
+    ):
+        parser.error("--single-stage-iota-noble-pull-weight must be finite and non-negative.")
+    if (
+        not np.isfinite(args.single_stage_iota_noble_pull_lo)
+        or not np.isfinite(args.single_stage_iota_noble_pull_hi)
+        or args.single_stage_iota_noble_pull_lo >= args.single_stage_iota_noble_pull_hi
+    ):
+        parser.error(
+            "--single-stage-iota-noble-pull-lo and "
+            "--single-stage-iota-noble-pull-hi must be finite with "
+            "--single-stage-iota-noble-pull-lo < "
+            "--single-stage-iota-noble-pull-hi."
+        )
+    if (
+        not np.isfinite(args.single_stage_qa_residual_weight)
+        or args.single_stage_qa_residual_weight < 0.0
+    ):
+        parser.error("--single-stage-qa-residual-weight must be finite and non-negative.")
     if args.single_stage_hardware_sdf_free_space_reward_weight > 0.0:
         if args.hardware_keepout_backend != "sdf":
             parser.error(
@@ -3853,15 +4113,17 @@ def _require_published_G_consistency(
 
 
 def _require_published_volume_order(surface_data):
-    volumes_by_name = {
-        entry["name"]: _require_positive_finite_volume(
+    # surface_data is the inner-to-outer config-ordered stack; for the v1
+    # default this is inner0, inner1, outer, but the published stack depth is
+    # opt-in configurable so the ordering is taken from the provided sequence.
+    ordered_names = [entry["name"] for entry in surface_data]
+    ordered_volumes = [
+        _require_positive_finite_volume(
             f"published_multisurface solved {entry['name']}",
             entry["boozer_surface"].surface.volume(),
         )
         for entry in surface_data
-    }
-    ordered_names = ["inner0", "inner1", "outer"]
-    ordered_volumes = [volumes_by_name[name] for name in ordered_names]
+    ]
     if not np.all(np.diff(ordered_volumes) > 0.0):
         raise RuntimeError(
             "published_multisurface solved volumes must be strictly ordered "
@@ -3870,9 +4132,12 @@ def _require_published_volume_order(surface_data):
 
 
 def _require_published_surface_data_postconditions(surface_data):
-    if [entry["name"] for entry in surface_data] != ["inner0", "inner1", "outer"]:
+    actual_names = [entry["name"] for entry in surface_data]
+    expected_names = list(_published_surface_names(len(surface_data)))
+    if actual_names != expected_names:
         raise RuntimeError(
-            "published_multisurface continuation expects inner0, inner1, outer."
+            "published_multisurface continuation expects inner-to-outer "
+            f"{expected_names}; received {actual_names}."
         )
     _require_published_volume_order(surface_data)
     _require_published_G_consistency(surface_data)
@@ -4010,12 +4275,21 @@ def initialize_published_surface_data_from_stage2_seed(
     nfp,
     stage2_seed_surface,
 ):
-    """Solve published stacks outer-to-inner, then return inner-to-outer data."""
+    """Solve published stacks outer-to-inner, then return inner-to-outer data.
+
+    The published stack depth is opt-in configurable, so the expected names are
+    derived from the config count (inner0..innerN-2, outer). The outer surface
+    is solved from the Stage 2 seed; each inner shell is then continued inward
+    by volume-contracting the previous (larger) solved surface, marching from
+    the outermost inner shell down to inner0.
+    """
     _require_published_stage2_solved_seed(stage2_seed_surface)
     configs_by_name = {config["name"]: config for config in surface_configs}
-    if set(configs_by_name) != {"inner0", "inner1", "outer"}:
+    ordered_names = _published_surface_names(len(surface_configs))
+    if set(configs_by_name) != set(ordered_names):
         raise RuntimeError(
-            "published_multisurface continuation expects inner0, inner1, outer."
+            "published_multisurface continuation expects inner-to-outer "
+            f"{list(ordered_names)}; received {sorted(configs_by_name)}."
         )
 
     outer_config = configs_by_name["outer"]
@@ -4041,11 +4315,10 @@ def initialize_published_surface_data_from_stage2_seed(
             "stage2_outer_seed",
         )
     }
+    previous_name = "outer"
     previous_boozer_surface = outer_boozer_surface
-    for surface_name, provenance in (
-        ("inner1", "outer_continuation_inner1"),
-        ("inner0", "inner1_continuation_inner0"),
-    ):
+    # Walk the inner shells from outermost (innerN-2) to innermost (inner0).
+    for surface_name in reversed(ordered_names[:-1]):
         config = configs_by_name[surface_name]
         continuation_surface = contract_surface_to_target_volume(
             previous_boozer_surface.surface,
@@ -4070,13 +4343,12 @@ def initialize_published_surface_data_from_stage2_seed(
         solved_by_name[surface_name] = _surface_data_entry(
             config,
             boozer_surface,
-            provenance,
+            f"{previous_name}_continuation_{surface_name}",
         )
+        previous_name = surface_name
         previous_boozer_surface = boozer_surface
 
-    ordered_surface_data = [
-        solved_by_name[name] for name in ("inner0", "inner1", "outer")
-    ]
+    ordered_surface_data = [solved_by_name[name] for name in ordered_names]
     _require_published_surface_data_postconditions(ordered_surface_data)
     return ordered_surface_data, []
 
@@ -4425,6 +4697,26 @@ def current_single_stage_alm_surface_stack_surfaces():
     ):
         return None
     return tuple(entry["boozer_surface"].surface for entry in surface_data)
+
+
+def current_single_stage_alm_surface_stack_boozer_surfaces():
+    """Adjoint-capable ``BoozerSurface`` siblings of the surface-stack geometry.
+
+    Returns the per-surface ``BoozerSurface`` objects in the SAME axis->edge order
+    as :func:`current_single_stage_alm_surface_stack_surfaces` (each ``.surface`` is
+    the matching geometry there), so the two tuples align one-to-one. Supplying these
+    to the inter-surface spacing ALM constraint routes its per-surface point gradient
+    through each BoozerSurface adjoint, yielding a LIVE coil-dof gradient instead of
+    the gradient-dead fixed-surface-Fourier derivative. Returns ``None`` whenever the
+    surface-stack ALM constraint itself is inactive, so the gradient path is wired
+    exactly when (and only when) the spacing constraint is present.
+    """
+    if not single_stage_surface_stack_alm_enabled(
+        len(surface_data),
+        SURFACE_GAP_THRESHOLD,
+    ):
+        return None
+    return tuple(entry["boozer_surface"] for entry in surface_data)
 
 
 def surface_stack_search_gate_for_solver(
@@ -4989,6 +5281,106 @@ def frontier_reportable_success(
     return bool(final_feasibility_ok and certification_status.get("ok") is True)
 
 
+# Stable results.json keys for the decisive post-optimization confinement gate.
+CONFINEMENT_GATE_RESULT_KEY = "CONFINEMENT_GATE"
+CONFINEMENT_GATE_VERDICT_FILENAME = "confinement_verdict.json"
+# Loud marker recorded as the decisive reason when the gate is skipped (init/resume) or the
+# operator opted out with --confinement-gate off: an absent gate must never read as a pass.
+CONFINEMENT_GATE_NOT_CERTIFIED_MARKER = (
+    "NOT confinement-certified (run --confinement-gate strict or run_confinement_gate.py)"
+)
+
+
+def run_final_confinement_gate(
+    gate_mode,
+    run_dir,
+    *,
+    init_only,
+    nonqs_ratio,
+    beta,
+    magnetic_well,
+    iota_shear,
+    config=None,
+):
+    """Run the decisive confinement gate once at finalization and return its status block.
+
+    This is the single automated caller of the island-aware confinement gate. It composes the
+    STRICT topology tier with the supplied physics values via the SSOT
+    ``certify_confinement`` (shared with the offline ``run_confinement_gate`` CLI) on the saved
+    run-dir artifacts, writes ``confinement_verdict.json`` next to ``results.json``, and
+    returns a status block whose ``accepted`` flag gates promotion FAIL-CLOSED:
+
+      * ``gate_mode == "off"`` or ``init_only`` (no candidate to certify): ``ran=False``,
+        ``accepted=None`` (skipped, not passed), ``decisive_reason`` set to the loud
+        not-certified marker so a skipped gate is never mistaken for a pass.
+      * ``gate_mode == "strict"`` on a real final run: runs the gate; ``accepted`` is the
+        gate verdict (``True``/``False``). A rejection (broken topology, island chains,
+        classifiability shortfall, or any failing required physics criterion) yields
+        ``accepted=False`` -- the caller must treat that as NOT-promoted.
+
+    ``nonqs_ratio`` maps to the gate's QA criterion; ``magnetic_well`` / ``iota_shear`` are
+    advisory physics inputs (``None`` when not cheaply available); ``beta`` selects the
+    Mercier branch (0.0 == vacuum == Mercier N/A). ``config`` is the externally-owned typed
+    threshold set (defaults to the strict ``ConfinementGateConfig``).
+    """
+    if gate_mode == "off" or init_only:
+        return {
+            "ran": False,
+            "mode": gate_mode,
+            "accepted": None,
+            "decisive_reason": CONFINEMENT_GATE_NOT_CERTIFIED_MARKER,
+            "verdict": None,
+        }
+    payload = certify_confinement(
+        run_dir,
+        config=config or ConfinementGateConfig(),
+        beta=float(beta),
+        qa_nonqs_ratio=None if nonqs_ratio is None else float(nonqs_ratio),
+        magnetic_well=None if magnetic_well is None else float(magnetic_well),
+        iota_shear=None if iota_shear is None else float(iota_shear),
+    )
+    verdict = payload["confinement_verdict"]
+    return {
+        "ran": True,
+        "mode": gate_mode,
+        "accepted": bool(verdict["accepted"]),
+        "decisive_reason": verdict["decisive_reason"],
+        "verdict": payload,
+    }
+
+
+def confinement_gate_results_payload(confinement_gate_status):
+    """Flat results.json fields recording the confinement gate outcome + promotion impact."""
+    return {
+        f"{CONFINEMENT_GATE_RESULT_KEY}_MODE": confinement_gate_status["mode"],
+        f"{CONFINEMENT_GATE_RESULT_KEY}_RAN": confinement_gate_status["ran"],
+        f"{CONFINEMENT_GATE_RESULT_KEY}_ACCEPTED": confinement_gate_status["accepted"],
+        f"{CONFINEMENT_GATE_RESULT_KEY}_DECISIVE_REASON": confinement_gate_status[
+            "decisive_reason"
+        ],
+        f"{CONFINEMENT_GATE_RESULT_KEY}_VERDICT_FILENAME": (
+            CONFINEMENT_GATE_VERDICT_FILENAME
+            if confinement_gate_status["ran"]
+            else None
+        ),
+    }
+
+
+def confinement_certified_promotion(confinement_gate_status, base_promotion_ok):
+    """Fold the confinement gate into a promotion flag, FAIL-CLOSED.
+
+    ``base_promotion_ok`` is the upstream feasibility/reportable verdict (e.g.
+    ``final_feasibility_ok`` or ``frontier_reportable_success``). When the gate RAN, promotion
+    requires both the base verdict AND gate acceptance, so a rejected candidate (broken
+    topology / islands) is never promoted. When the gate was skipped (init/off), the candidate
+    is NOT confinement-certified, so the certified-promotion flag is ``False`` regardless of
+    the base verdict -- absence of certification is treated as not-promoted, never as a pass.
+    """
+    if not confinement_gate_status["ran"]:
+        return False
+    return bool(base_promotion_ok) and confinement_gate_status["accepted"] is True
+
+
 def topology_results_fields(topology_entry, *, prefix, artifact_role):
     entry_fields = {} if topology_entry is None else topology_entry
     return {
@@ -5083,6 +5475,18 @@ def restore_topology_checkpoint_entries(run_dict, checkpoint_payload):
             run_dict.pop(topology_key, None)
 
 
+def _topology_geometry_key(accepted_x) -> str:
+    """Stable fingerprint of the accepted optimization vector, used to bind a
+    topology score to the exact geometry it was computed for so the KAM floor never
+    judges a config against a stale score. Returns a sentinel that matches no real
+    key when there is no accepted geometry yet (fail-closed)."""
+    if accepted_x is None:
+        return "no-accepted-geometry"
+    return hashlib.sha1(
+        np.ascontiguousarray(accepted_x, dtype=float).tobytes()
+    ).hexdigest()
+
+
 def maybe_record_topology_score(
     run_dict,
     *,
@@ -5102,6 +5506,7 @@ def maybe_record_topology_score(
         nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
         tmax=TOPOLOGY_SCORER_TMAX,
         wba_min_returns=TOPOLOGY_SCORER_MIN_RETURNS,
+        field_policy=TOPOLOGY_SCORER_FIELD_POLICY,
         **confinement_surrogate_kwargs(),
     )
     checkpoint_objective_total = (
@@ -5130,6 +5535,11 @@ def maybe_record_topology_score(
         topo_entry,
         certification_status,
     )
+    # Bind this score to the geometry it was computed for, so the target KAM floor
+    # can detect a stale entry (restore / scorer-skip) and fail closed. Only stamped
+    # when the floor is active, so default runs' artifacts stay byte-identical.
+    if SINGLE_STAGE_TARGET_KAM_FLOOR_MIN is not None:
+        topo_entry["geometry_key"] = _topology_geometry_key(run_dict.get("accepted_x"))
     run_dict["latest_topology_entry"] = topo_entry
     append_jsonl_artifact(
         os.path.join(OUT_DIR_ITER, "topology_archive.jsonl"),
@@ -5348,6 +5758,7 @@ def build_residue_objective_from_args(args, biot_savart):
         solver_options=solver_options,
         r_satisfied=float(args.residue_objective_r_satisfied),
         local_difference_step=float(args.residue_objective_local_difference_step),
+        on_branch_loss=args.residue_objective_on_branch_loss,
     )
 
 
@@ -5715,6 +6126,13 @@ class RunIdentityConfig:
     single_stage_vessel_keepout_clearance: float
     single_stage_available_envelope_reward_weight: float
     single_stage_hardware_sdf_free_space_reward_weight: float
+    single_stage_rational_iota_avoidance_weight: float
+    single_stage_rational_iota_avoidance_max_denominator: int
+    single_stage_rational_iota_avoidance_sigma: float
+    single_stage_iota_noble_pull_weight: float
+    single_stage_iota_noble_pull_lo: float
+    single_stage_iota_noble_pull_hi: float
+    single_stage_qa_residual_weight: float
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
@@ -6386,6 +6804,43 @@ def make_run_identity_config(
         single_stage_hardware_sdf_free_space_reward_weight=(
             args.single_stage_hardware_sdf_free_space_reward_weight
         ),
+        single_stage_rational_iota_avoidance_weight=float(
+            getattr(args, "single_stage_rational_iota_avoidance_weight", 0.0)
+        ),
+        single_stage_rational_iota_avoidance_max_denominator=int(
+            getattr(
+                args,
+                "single_stage_rational_iota_avoidance_max_denominator",
+                RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
+            )
+        ),
+        single_stage_rational_iota_avoidance_sigma=float(
+            getattr(
+                args,
+                "single_stage_rational_iota_avoidance_sigma",
+                RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
+            )
+        ),
+        single_stage_iota_noble_pull_weight=float(
+            getattr(args, "single_stage_iota_noble_pull_weight", 0.0)
+        ),
+        single_stage_iota_noble_pull_lo=float(
+            getattr(
+                args,
+                "single_stage_iota_noble_pull_lo",
+                NOBLE_IOTA_PULL_DEFAULT_LO,
+            )
+        ),
+        single_stage_iota_noble_pull_hi=float(
+            getattr(
+                args,
+                "single_stage_iota_noble_pull_hi",
+                NOBLE_IOTA_PULL_DEFAULT_HI,
+            )
+        ),
+        single_stage_qa_residual_weight=float(
+            getattr(args, "single_stage_qa_residual_weight", 0.0)
+        ),
         single_stage_poloidal_threshold_rad=getattr(
             args,
             "single_stage_poloidal_threshold_rad",
@@ -6604,6 +7059,39 @@ def build_run_identity_config(config):
             continue
         if (
             field.name == "single_stage_hardware_sdf_free_space_reward_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_rational_iota_avoidance_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name
+            in {
+                "single_stage_rational_iota_avoidance_max_denominator",
+                "single_stage_rational_iota_avoidance_sigma",
+            }
+            and float(config.single_stage_rational_iota_avoidance_weight) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_iota_noble_pull_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name
+            in {
+                "single_stage_iota_noble_pull_lo",
+                "single_stage_iota_noble_pull_hi",
+            }
+            and float(config.single_stage_iota_noble_pull_weight) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_qa_residual_weight"
             and float(value) == 0.0
         ):
             continue
@@ -6972,6 +7460,17 @@ def annotate_frontier_search_eval(search_eval):
 
 
 def preserved_incumbent_eligible(run_dict):
+    # Target-mode KAM ratchet: only promote configs whose CURRENT in-loop
+    # invariant-torus fraction clears the floor. The geometry-key match fails closed
+    # on a stale entry (scorer skipped this iteration, or the entry was left over by
+    # an incumbent restore), so a config is never promoted on another config's KAM.
+    # Guarded so default runs (floor unset) do no extra work and stay byte-identical.
+    if SINGLE_STAGE_TARGET_KAM_FLOOR_MIN is not None and not _target_kam_floor_satisfied_impl(
+        run_dict.get("latest_topology_entry"),
+        floor=SINGLE_STAGE_TARGET_KAM_FLOOR_MIN,
+        current_geometry_key=_topology_geometry_key(run_dict.get("accepted_x")),
+    ):
+        return False
     surface_status = run_dict.get("surface_status")
     search_eval = run_dict.get("search_eval")
     if surface_status is None or not surface_status.get("success", False):
@@ -7643,6 +8142,15 @@ def build_single_stage_objective_bundle(
     SHEAR_WEIGHT=0.0,
     MAGNETIC_WELL_WEIGHT=0.0,
     MAGNETIC_WELL_TARGET=0.0,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR=(
+        RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+    ),
+    RATIONAL_IOTA_AVOIDANCE_SIGMA=RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    NOBLE_IOTA_PULL_LO=NOBLE_IOTA_PULL_DEFAULT_LO,
+    NOBLE_IOTA_PULL_HI=NOBLE_IOTA_PULL_DEFAULT_HI,
+    QA_RESIDUAL_WEIGHT=0.0,
     LGRADB_WEIGHT=0.0,
     LGRADB_FLOOR=0.30,
     LGRADB_NTHETA=32,
@@ -7904,6 +8412,32 @@ def build_single_stage_objective_bundle(
         )
     else:
         JMagneticWell = None
+    # Rational-iota avoidance penalty (opt-in, default-OFF): None when the weight is 0,
+    # so default runs add nothing to the objective graph and stay byte-identical. When
+    # enabled it wraps the SAME outermost Iotas term feeding the iota target (SSOT for
+    # the iota Boozer-adjoint gradient) and repels the outer iota from low-order
+    # rationals p/q with q <= RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR.
+    JRationalIotaAvoidance = (
+        build_single_stage_rational_iota_avoidance_objective(
+            surface_iota_terms[-1],
+            max_denominator=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
+            sigma=RATIONAL_IOTA_AVOIDANCE_SIGMA,
+        )
+        if RATIONAL_IOTA_AVOIDANCE_WEIGHT > 0.0
+        else None
+    )
+    JNobleIotaPull = (
+        build_single_stage_noble_iota_pull_objective(
+            surface_iota_terms[-1],
+            lo=NOBLE_IOTA_PULL_LO,
+            hi=NOBLE_IOTA_PULL_HI,
+        )
+        if NOBLE_IOTA_PULL_WEIGHT > 0.0
+        else None
+    )
+    # ``NonQuasiSymmetricRatio`` defaults to quasi_poloidal=False, the QA branch.
+    # Keep the base QS objective intact and expose an independent default-off QA weight.
+    JQAResidual = JnonQSRatio if QA_RESIDUAL_WEIGHT > 0.0 else None
     # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default-OFF):
     # None when LGRADB_WEIGHT is 0, so default runs add nothing to the objective
     # graph and stay byte-identical. When enabled, evaluates L_grad_B on a
@@ -7987,6 +8521,12 @@ def build_single_stage_objective_bundle(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JRationalIotaAvoidance=JRationalIotaAvoidance,
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+        JNobleIotaPull=JNobleIotaPull,
+        NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JQAResidual=JQAResidual,
+        QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT,
         JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
@@ -8048,6 +8588,9 @@ def build_single_stage_objective_bundle(
         "JCoilForce": JCoilForce,
         "JShear": JShear,
         "JMagneticWell": JMagneticWell,
+        "JRationalIotaAvoidance": JRationalIotaAvoidance,
+        "JNobleIotaPull": JNobleIotaPull,
+        "JQAResidual": JQAResidual,
         "JMinLGradB": JMinLGradB,
         "JTFCurvature": JTFCurvature,
         "JTFCurveLength": JTFCurveLength,
@@ -8099,6 +8642,9 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCoilForce
     global JShear
     global JMagneticWell
+    global JRationalIotaAvoidance
+    global JNobleIotaPull
+    global JQAResidual
     global JMinLGradB
     global JF
 
@@ -8151,6 +8697,9 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCoilForce = objective_bundle["JCoilForce"]
     JShear = objective_bundle["JShear"]
     JMagneticWell = objective_bundle["JMagneticWell"]
+    JRationalIotaAvoidance = objective_bundle["JRationalIotaAvoidance"]
+    JNobleIotaPull = objective_bundle["JNobleIotaPull"]
+    JQAResidual = objective_bundle["JQAResidual"]
     JMinLGradB = objective_bundle["JMinLGradB"]
     JF = objective_bundle["JF"]
 
@@ -8476,6 +9025,12 @@ def evaluate_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JRationalIotaAvoidance=None,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    JNobleIotaPull=None,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JQAResidual=None,
+    QA_RESIDUAL_WEIGHT=0.0,
 ):
     """Evaluate the fixed descended objective and surface-weighted diagnostics.
 
@@ -8550,6 +9105,12 @@ def evaluate_total_objective(
             SHEAR_WEIGHT=SHEAR_WEIGHT,
             JMagneticWell=JMagneticWell,
             MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+            JRationalIotaAvoidance=JRationalIotaAvoidance,
+            RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+            JNobleIotaPull=JNobleIotaPull,
+            NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+            JQAResidual=JQAResidual,
+            QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             JMinLGradB=globals().get("JMinLGradB"),
             LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
         ),
@@ -8591,6 +9152,14 @@ def evaluate_base_objective(
         SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
         JMagneticWell=globals().get("JMagneticWell"),
         MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+        JRationalIotaAvoidance=globals().get("JRationalIotaAvoidance"),
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT=globals().get(
+            "RATIONAL_IOTA_AVOIDANCE_WEIGHT", 0.0
+        ),
+        JNobleIotaPull=globals().get("JNobleIotaPull"),
+        NOBLE_IOTA_PULL_WEIGHT=globals().get("NOBLE_IOTA_PULL_WEIGHT", 0.0),
+        JQAResidual=globals().get("JQAResidual"),
+        QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         JMinLGradB=globals().get("JMinLGradB"),
         LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
         include_diagnostics=include_diagnostics,
@@ -8672,6 +9241,9 @@ def evaluate_alm_objective(
                 _smooth_min_curve_surface_signed_constraint_with_hard_signal
             ),
             surface_stack_surfaces=current_single_stage_alm_surface_stack_surfaces(),
+            surface_stack_boozer_surfaces=(
+                current_single_stage_alm_surface_stack_boozer_surfaces()
+            ),
             surface_stack_min_distance=SURFACE_GAP_THRESHOLD,
             surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint,
             surface_stack_constraint_with_hard_signal_fn=(
@@ -8740,6 +9312,14 @@ def evaluate_alm_objective(
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             JMagneticWell=globals().get("JMagneticWell"),
             MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+            JRationalIotaAvoidance=globals().get("JRationalIotaAvoidance"),
+            RATIONAL_IOTA_AVOIDANCE_WEIGHT=globals().get(
+                "RATIONAL_IOTA_AVOIDANCE_WEIGHT", 0.0
+            ),
+            JNobleIotaPull=globals().get("JNobleIotaPull"),
+            NOBLE_IOTA_PULL_WEIGHT=globals().get("NOBLE_IOTA_PULL_WEIGHT", 0.0),
+            JQAResidual=globals().get("JQAResidual"),
+            QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
             JMinLGradB=globals().get("JMinLGradB"),
             LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
             include_diagnostics=include_diagnostics,
@@ -8825,6 +9405,14 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             JMagneticWell=globals().get("JMagneticWell"),
             MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+            JRationalIotaAvoidance=globals().get("JRationalIotaAvoidance"),
+            RATIONAL_IOTA_AVOIDANCE_WEIGHT=globals().get(
+                "RATIONAL_IOTA_AVOIDANCE_WEIGHT", 0.0
+            ),
+            JNobleIotaPull=globals().get("JNobleIotaPull"),
+            NOBLE_IOTA_PULL_WEIGHT=globals().get("NOBLE_IOTA_PULL_WEIGHT", 0.0),
+            JQAResidual=globals().get("JQAResidual"),
+            QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         )
     )
 
@@ -12138,6 +12726,12 @@ def build_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JRationalIotaAvoidance=None,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
+    JNobleIotaPull=None,
+    NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JQAResidual=None,
+    QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     JTFCurvature=None,
@@ -12191,6 +12785,12 @@ def build_total_objective(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JRationalIotaAvoidance=JRationalIotaAvoidance,
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+        JNobleIotaPull=JNobleIotaPull,
+        NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JQAResidual=JQAResidual,
+        QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         JTFCurvature=JTFCurvature,
@@ -13621,9 +14221,11 @@ TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
 TOPOLOGY_SCORER_MIN_RETURNS = 256
+TOPOLOGY_SCORER_FIELD_POLICY = "auto"
 CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
 FRONTIER_INVARIANT_TORUS_MIN = _default_frontier_invariant_torus_min_impl()
 FRONTIER_KAM_MIN = FRONTIER_INVARIANT_TORUS_MIN
+SINGLE_STAGE_TARGET_KAM_FLOOR_MIN = None
 CONFINEMENT_SURROGATE_WORST_K = 3
 CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
 CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.2
@@ -13803,9 +14405,22 @@ if __name__ == "__main__":
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
     TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
     TOPOLOGY_SCORER_MIN_RETURNS = args.topology_scorer_min_returns
+    TOPOLOGY_SCORER_FIELD_POLICY = args.topology_scorer_field_policy
     CONFINEMENT_OBJECTIVE_WEIGHT = args.confinement_objective_weight
     FRONTIER_INVARIANT_TORUS_MIN = args.frontier_invariant_torus_min
     FRONTIER_KAM_MIN = args.frontier_kam_min
+    SINGLE_STAGE_TARGET_KAM_FLOOR_MIN = args.single_stage_target_kam_floor_min
+    if SINGLE_STAGE_TARGET_KAM_FLOOR_MIN is not None:
+        if not (0.0 <= SINGLE_STAGE_TARGET_KAM_FLOOR_MIN <= 1.0):
+            raise ValueError(
+                "--single-stage-target-kam-floor-min must be a fraction in [0, 1]"
+            )
+        if TOPOLOGY_SCORER_EVERY != 1:
+            raise ValueError(
+                "--single-stage-target-kam-floor-min requires --topology-scorer-every 1 "
+                "so the in-loop invariant-torus fraction is refreshed for every "
+                "candidate; otherwise the floor fails closed on every skipped iteration"
+            )
     CONFINEMENT_SURROGATE_WORST_K = args.confinement_surrogate_worst_k
     CONFINEMENT_SURROGATE_EARLY_THRESHOLD = args.confinement_surrogate_early_threshold
     CONFINEMENT_SURROGATE_MEAN_WEIGHT = args.confinement_surrogate_mean_weight
@@ -14401,6 +15016,57 @@ if __name__ == "__main__":
     SHEAR_WEIGHT = float(args.shear_weight)
     MAGNETIC_WELL_WEIGHT = float(args.magnetic_well_weight)
     MAGNETIC_WELL_TARGET = float(args.magnetic_well_target)
+    # Rational-iota avoidance penalty (opt-in, default weight 0 -> term not constructed,
+    # objective graph byte-identical with prior runs). Q and sigma0 default to the
+    # module constants and only take effect once the weight is > 0.
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT = float(
+        args.single_stage_rational_iota_avoidance_weight
+    )
+    RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR = int(
+        args.single_stage_rational_iota_avoidance_max_denominator
+    )
+    RATIONAL_IOTA_AVOIDANCE_SIGMA = float(
+        args.single_stage_rational_iota_avoidance_sigma
+    )
+    NOBLE_IOTA_PULL_WEIGHT = float(args.single_stage_iota_noble_pull_weight)
+    NOBLE_IOTA_PULL_LO = float(args.single_stage_iota_noble_pull_lo)
+    NOBLE_IOTA_PULL_HI = float(args.single_stage_iota_noble_pull_hi)
+    QA_RESIDUAL_WEIGHT = float(args.single_stage_qa_residual_weight)
+    if (
+        not np.isfinite(RATIONAL_IOTA_AVOIDANCE_WEIGHT)
+        or RATIONAL_IOTA_AVOIDANCE_WEIGHT < 0.0
+    ):
+        raise ValueError(
+            "--single-stage-rational-iota-avoidance-weight must be finite and non-negative"
+        )
+    if RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR < 1:
+        raise ValueError(
+            "--single-stage-rational-iota-avoidance-max-denominator must be >= 1"
+        )
+    if (
+        not np.isfinite(RATIONAL_IOTA_AVOIDANCE_SIGMA)
+        or RATIONAL_IOTA_AVOIDANCE_SIGMA <= 0.0
+    ):
+        raise ValueError(
+            "--single-stage-rational-iota-avoidance-sigma must be positive and finite"
+        )
+    if not np.isfinite(NOBLE_IOTA_PULL_WEIGHT) or NOBLE_IOTA_PULL_WEIGHT < 0.0:
+        raise ValueError(
+            "--single-stage-iota-noble-pull-weight must be finite and non-negative"
+        )
+    if (
+        not np.isfinite(NOBLE_IOTA_PULL_LO)
+        or not np.isfinite(NOBLE_IOTA_PULL_HI)
+        or NOBLE_IOTA_PULL_LO >= NOBLE_IOTA_PULL_HI
+    ):
+        raise ValueError(
+            "--single-stage-iota-noble-pull-lo and "
+            "--single-stage-iota-noble-pull-hi must be finite with "
+            "--single-stage-iota-noble-pull-lo < "
+            "--single-stage-iota-noble-pull-hi"
+        )
+    if not np.isfinite(QA_RESIDUAL_WEIGHT) or QA_RESIDUAL_WEIGHT < 0.0:
+        raise ValueError("--single-stage-qa-residual-weight must be finite and non-negative")
     # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default weight 0 ->
     # term not constructed, objective graph byte-identical with prior runs).
     LGRADB_WEIGHT = float(args.lgradb_weight)
@@ -14498,6 +15164,15 @@ if __name__ == "__main__":
             SHEAR_WEIGHT=SHEAR_WEIGHT,
             MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
             MAGNETIC_WELL_TARGET=MAGNETIC_WELL_TARGET,
+            RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+            RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR=(
+                RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+            ),
+            RATIONAL_IOTA_AVOIDANCE_SIGMA=RATIONAL_IOTA_AVOIDANCE_SIGMA,
+            NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+            NOBLE_IOTA_PULL_LO=NOBLE_IOTA_PULL_LO,
+            NOBLE_IOTA_PULL_HI=NOBLE_IOTA_PULL_HI,
+            QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             LGRADB_WEIGHT=LGRADB_WEIGHT,
             LGRADB_FLOOR=LGRADB_FLOOR,
             LGRADB_NTHETA=LGRADB_NTHETA,
@@ -15794,6 +16469,26 @@ if __name__ == "__main__":
         run_dict,
         final_hardware_status,
     )
+    # Decisive island-aware confinement gate, run ONCE here at finalization on the saved
+    # artifacts (strict 50-line / tmax-7000 tier). iota shear is the cheap |edge-axis| spread
+    # already computed above; the magnetic-well Boozer proxy is not cheaply reconstructed
+    # here, so it is left advisory-None. beta=0 (vacuum campaign default) => Mercier N/A.
+    final_iota_shear = (
+        None
+        if len(final_surface_iotas) < 2
+        else float(max(final_surface_iotas) - min(final_surface_iotas))
+    )
+    confinement_gate_status = run_final_confinement_gate(
+        args.confinement_gate,
+        OUT_DIR_ITER,
+        init_only=args.init_only,
+        nonqs_ratio=nonqs_ratio,
+        beta=0.0,
+        magnetic_well=None,
+        iota_shear=final_iota_shear,
+    )
+    print(f"confinement gate ({confinement_gate_status['mode']}): "
+          f"{confinement_gate_status['decisive_reason']}")
     best_feasible_results = build_best_feasible_results_summary(
         run_dict,
         JCurveCurve,
@@ -16500,6 +17195,22 @@ if __name__ == "__main__":
             frontier_mode_enabled(),
             final_feasibility_ok,
             frontier_certification_status,
+        ),
+        **confinement_gate_results_payload(confinement_gate_status),
+        # Fail-closed certified promotion: the upstream feasibility/reportable verdict AND the
+        # decisive confinement gate. A candidate the gate rejects (or that was not certified)
+        # is never marked promotable here, regardless of its hardware/frontier feasibility.
+        "CONFINEMENT_CERTIFIED_PROMOTION": confinement_certified_promotion(
+            confinement_gate_status,
+            (
+                frontier_reportable_success(
+                    frontier_mode_enabled(),
+                    final_feasibility_ok,
+                    frontier_certification_status,
+                )
+                if frontier_mode_enabled()
+                else final_feasibility_ok
+            ),
         ),
         "SELF_INTERSECTING": run_dict["intersecting"],
         **build_single_stage_banana_current_payload_fields(banana_current_state),
