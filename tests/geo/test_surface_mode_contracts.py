@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 
 EXAMPLE_ROOT = (
     Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
@@ -318,6 +320,8 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             hardware_keepout_json=None,
             single_stage_vessel_keepout_weight=0.0,
             single_stage_vessel_keepout_clearance=0.0,
+            single_stage_available_envelope_reward_weight=0.0,
+            single_stage_hardware_sdf_free_space_reward_weight=0.0,
             single_stage_poloidal_threshold_rad=1.0,
             single_stage_width_min_threshold=0.01,
             single_stage_width_max_threshold=0.06,
@@ -712,6 +716,448 @@ class GoalModeWrapperSurfaceModeTests(unittest.TestCase):
 
         self.assertIn("--surface-mode", command)
         self.assertIn(contracts_module.EXPERIMENTAL_MULTISURFACE, command)
+
+
+class _MonotoneVolumeSurface:
+    """Minimal SurfaceRZFourier stand-in for the config builder.
+
+    ``volume()`` is a strictly increasing function of the normalized-flux label
+    ``s`` and scales with the major-radius rescaling, so the real
+    ``build_surface_configs_for_contract`` volume-ordered target derivation and
+    strict inner-to-outer ordering check are exercised faithfully without a
+    full VMEC equilibrium.
+    """
+
+    def __init__(self, s):
+        self._s = float(s)
+        self._scale = 1.0
+
+    def major_radius(self):
+        return 1.0
+
+    def get_dofs(self):
+        return np.array([1.0])
+
+    def set_dofs(self, dofs):
+        self._scale = float(np.asarray(dofs)[0])
+
+    def volume(self):
+        return (self._s**1.5) * (self._scale**3) * 10.0
+
+
+class _MonotoneVolumeSurfaceFactory:
+    @staticmethod
+    def from_wout(file_loc, range, nphi, ntheta, s):  # noqa: A002 - simsopt API
+        return _MonotoneVolumeSurface(s)
+
+
+def load_single_stage_geometry_module():
+    if str(EXAMPLE_ROOT) not in sys.path:
+        sys.path.insert(0, str(EXAMPLE_ROOT))
+    return load_module(
+        EXAMPLE_ROOT / "banana_opt" / "single_stage_geometry.py",
+        "single_stage_geometry",
+        register_in_sys_modules=True,
+    )
+
+
+class PublishedSurfaceDepthConfigurationTests(unittest.TestCase):
+    """Item #13: opt-in interior-covering published nested-surface stack."""
+
+    def test_default_published_stack_is_byte_identical_lock(self):
+        module = load_surface_mode_contracts_module()
+
+        # No depth knob set: the resolved published contract must match the
+        # current v1 3-shell stack byte-for-byte (count, fractions, names,
+        # weights, vacuum-lock current policy, and physics-contract surface
+        # count). This is the default-off regression lock.
+        default_contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+        )
+        explicit_default_preset = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=module.PUBLISHED_PRESET_DEFAULT_V1,
+        )
+
+        for contract in (default_contract, explicit_default_preset):
+            self.assertEqual(contract.label_fractions, (0.6, 0.8, 1.0))
+            self.assertEqual(contract.weights, (1.0, 1.0, 1.0))
+            self.assertEqual(contract.num_surfaces, 3)
+            self.assertEqual(
+                module.surface_mode_surface_names(contract),
+                ("inner0", "inner1", "outer"),
+            )
+            self.assertEqual(
+                contract.current_policy, module.CURRENT_POLICY_VACUUM_LOCKED
+            )
+            module.validate_surface_mode_runtime_support(contract)
+
+        # The explicit default-v1 preset and the no-knob default resolve to an
+        # identical contract.
+        self.assertEqual(default_contract, explicit_default_preset)
+
+    def test_interior_covering_preset_adds_inner_shell_toward_core(self):
+        module = load_surface_mode_contracts_module()
+
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=module.PUBLISHED_PRESET_INTERIOR_COVERING,
+        )
+
+        self.assertEqual(contract.label_fractions, (0.4, 0.6, 0.8, 1.0))
+        self.assertEqual(contract.weights, (1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(contract.num_surfaces, 4)
+        self.assertEqual(
+            module.surface_mode_surface_names(contract),
+            ("inner0", "inner1", "inner2", "outer"),
+        )
+        # Strictly increasing in (0, 1] with the outermost exactly 1.0, and the
+        # innermost shell reaches below the v1 floor of 0.6 toward the core.
+        fractions = contract.label_fractions
+        self.assertTrue(all(0.0 < value <= 1.0 for value in fractions))
+        self.assertTrue(
+            all(left < right for left, right in zip(fractions[:-1], fractions[1:]))
+        )
+        self.assertEqual(fractions[-1], 1.0)
+        self.assertLess(fractions[0], 0.6)
+        module.validate_surface_mode_runtime_support(contract)
+
+    def test_deep_preset_reaches_fraction_0p2(self):
+        module = load_surface_mode_contracts_module()
+
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=module.PUBLISHED_PRESET_INTERIOR_COVERING_DEEP,
+        )
+
+        self.assertEqual(contract.label_fractions, (0.2, 0.4, 0.6, 0.8, 1.0))
+        self.assertEqual(contract.num_surfaces, 5)
+        module.validate_surface_mode_runtime_support(contract)
+
+    def test_explicit_fractions_produce_valid_interior_stack(self):
+        module = load_surface_mode_contracts_module()
+
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_label_fractions=(0.25, 0.5, 0.75, 1.0),
+        )
+
+        self.assertEqual(contract.label_fractions, (0.25, 0.5, 0.75, 1.0))
+        self.assertEqual(contract.weights, (1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(
+            module.surface_mode_surface_names(contract),
+            ("inner0", "inner1", "inner2", "outer"),
+        )
+        module.validate_surface_mode_runtime_support(contract)
+
+    def test_explicit_fractions_take_precedence_over_default_preset(self):
+        module = load_surface_mode_contracts_module()
+
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=module.PUBLISHED_PRESET_DEFAULT_V1,
+            published_label_fractions=(0.3, 0.65, 1.0),
+        )
+
+        self.assertEqual(contract.label_fractions, (0.3, 0.65, 1.0))
+
+    def test_non_monotone_fractions_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_label_fractions=(0.8, 0.6, 1.0),
+            )
+
+    def test_outermost_not_one_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "exactly 1.0"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_label_fractions=(0.6, 0.8, 0.95),
+            )
+
+    def test_empty_fractions_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "at least one surface"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_label_fractions=(),
+            )
+
+    def test_nonpositive_fraction_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, r"\(0, 1\]"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_label_fractions=(0.0, 0.5, 1.0),
+            )
+
+    def test_unknown_preset_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "Unsupported published surface preset"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_surface_preset="does_not_exist",
+            )
+
+    def test_explicit_fractions_and_nondefault_preset_together_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "not both"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_surface_preset=module.PUBLISHED_PRESET_INTERIOR_COVERING,
+                published_label_fractions=(0.6, 0.8, 1.0),
+            )
+
+    def test_depth_knob_on_non_published_mode_rejected(self):
+        module = load_surface_mode_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "only apply to"):
+            module.build_surface_mode_contract(
+                requested_surface_mode=module.SINGLE_SURFACE,
+                legacy_num_surfaces=1,
+                legacy_inner_surface_ratio=0.8,
+                published_surface_preset=module.PUBLISHED_PRESET_INTERIOR_COVERING,
+            )
+
+    def test_runtime_support_rejects_mutated_nonmonotone_published_stack(self):
+        module = load_surface_mode_contracts_module()
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=module.PUBLISHED_PRESET_INTERIOR_COVERING,
+        )
+        broken = replace(contract, label_fractions=(0.6, 0.4, 0.8, 1.0))
+
+        self.assertFalse(module.surface_mode_runtime_supported(broken))
+        with self.assertRaisesRegex(ValueError, "label_fractions invalid"):
+            module.validate_surface_mode_runtime_support(broken)
+
+    def test_runtime_support_rejects_mutated_outer_fraction(self):
+        module = load_surface_mode_contracts_module()
+        contract = module.build_surface_mode_contract(
+            requested_surface_mode=module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=module.PUBLISHED_PRESET_INTERIOR_COVERING,
+        )
+        broken = replace(contract, label_fractions=(0.4, 0.6, 0.8, 0.95))
+
+        self.assertFalse(module.surface_mode_runtime_supported(broken))
+
+    def test_published_surface_names_generator_matches_v1_default(self):
+        module = load_surface_mode_contracts_module()
+
+        self.assertEqual(
+            module.published_surface_names(3), ("inner0", "inner1", "outer")
+        )
+        self.assertEqual(module.published_surface_names(1), ("outer",))
+        self.assertEqual(
+            module.published_surface_names(5),
+            ("inner0", "inner1", "inner2", "inner3", "outer"),
+        )
+        with self.assertRaisesRegex(ValueError, "at least one surface"):
+            module.published_surface_names(0)
+
+    def test_build_surface_configs_for_contract_builds_volume_ordered_interior_stack(
+        self,
+    ):
+        contracts_module = load_surface_mode_contracts_module()
+        geometry_module = load_single_stage_geometry_module()
+
+        seed_label = 0.9
+        outer_target_volume = 0.5
+        contract = contracts_module.build_surface_mode_contract(
+            requested_surface_mode=contracts_module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+            published_surface_preset=(
+                contracts_module.PUBLISHED_PRESET_INTERIOR_COVERING
+            ),
+        )
+
+        configs = geometry_module.build_surface_configs_for_contract(
+            "dummy.nc",
+            8,
+            8,
+            seed_label,
+            1.0,
+            outer_target_volume,
+            contract,
+            surface_factory=_MonotoneVolumeSurfaceFactory,
+        )
+
+        names = [config["name"] for config in configs]
+        seed_labels = [config["seed_label"] for config in configs]
+        target_volumes = [config["target_volume"] for config in configs]
+
+        # The real builder produced the 4-surface interior-covering stack,
+        # inner-to-outer, with strictly increasing volumes and the inner shell
+        # reaching the configured 0.4 label fraction toward the core.
+        self.assertEqual(names, ["inner0", "inner1", "inner2", "outer"])
+        self.assertTrue(
+            all(
+                left < right
+                for left, right in zip(target_volumes[:-1], target_volumes[1:])
+            )
+        )
+        self.assertAlmostEqual(seed_labels[0], seed_label * 0.4)
+        self.assertAlmostEqual(seed_labels[-1], seed_label)
+        self.assertAlmostEqual(target_volumes[-1], outer_target_volume)
+
+    def test_build_surface_configs_for_contract_default_published_is_unchanged(self):
+        contracts_module = load_surface_mode_contracts_module()
+        geometry_module = load_single_stage_geometry_module()
+
+        contract = contracts_module.build_surface_mode_contract(
+            requested_surface_mode=contracts_module.PUBLISHED_MULTISURFACE,
+            legacy_num_surfaces=1,
+            legacy_inner_surface_ratio=0.8,
+        )
+
+        configs = geometry_module.build_surface_configs_for_contract(
+            "dummy.nc",
+            8,
+            8,
+            0.9,
+            1.0,
+            0.5,
+            contract,
+            surface_factory=_MonotoneVolumeSurfaceFactory,
+        )
+
+        self.assertEqual(
+            [config["name"] for config in configs],
+            ["inner0", "inner1", "outer"],
+        )
+        self.assertEqual(
+            [config["seed_label"] for config in configs],
+            [0.9 * 0.6, 0.9 * 0.8, 0.9 * 1.0],
+        )
+
+
+class SingleStageCliSurfaceDepthTests(unittest.TestCase):
+    """CLI wiring for the opt-in published-stack depth knobs."""
+
+    def _published_cli_args(self, **overrides):
+        # "published_multisurface" / "default_v1" are the SSOT string constants
+        # exercised against the loaded module's PUBLISHED_MULTISURFACE /
+        # PUBLISHED_PRESET_DEFAULT_V1 below.
+        values = {
+            "surface_mode": "published_multisurface",
+            "num_surfaces": 1,
+            "inner_surface_ratio": 0.8,
+            "published_surface_preset": "default_v1",
+            "published_surface_fractions": None,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_default_cli_resolves_byte_identical_published_stack(self):
+        module = load_single_stage_example_module()
+        # Guard the string literals used by these CLI tests against the SSOT.
+        self.assertEqual(module.PUBLISHED_MULTISURFACE, "published_multisurface")
+        self.assertEqual(module.PUBLISHED_PRESET_DEFAULT_V1, "default_v1")
+        args = self._published_cli_args()
+
+        contract = module.resolve_surface_mode_contract(
+            args, warn_on_legacy_mapping=False
+        )
+
+        self.assertEqual(contract.label_fractions, (0.6, 0.8, 1.0))
+        self.assertEqual(contract.num_surfaces, 3)
+
+    def test_cli_preset_selects_interior_covering_stack(self):
+        module = load_single_stage_example_module()
+        args = self._published_cli_args(
+            published_surface_preset="interior_covering",
+        )
+
+        contract = module.resolve_surface_mode_contract(
+            args, warn_on_legacy_mapping=False
+        )
+
+        self.assertEqual(contract.label_fractions, (0.4, 0.6, 0.8, 1.0))
+        self.assertEqual(contract.num_surfaces, 4)
+
+    def test_cli_explicit_fractions_string_is_parsed_and_validated(self):
+        module = load_single_stage_example_module()
+        args = self._published_cli_args(
+            published_surface_fractions="0.3, 0.55, 0.8, 1.0",
+        )
+
+        contract = module.resolve_surface_mode_contract(
+            args, warn_on_legacy_mapping=False
+        )
+
+        self.assertEqual(contract.label_fractions, (0.3, 0.55, 0.8, 1.0))
+
+    def test_cli_explicit_fractions_string_fail_closed_on_bad_stack(self):
+        module = load_single_stage_example_module()
+        args = self._published_cli_args(
+            published_surface_fractions="0.8, 0.6, 1.0",
+        )
+
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            module.resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+
+    def test_cli_empty_fractions_string_rejected(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "at least one label fraction"):
+            module.parse_published_surface_fractions(" , ,")
+
+    def test_cli_default_single_surface_run_is_byte_identical(self):
+        module = load_single_stage_example_module()
+        # A default single-surface run carries the default-v1 preset value but
+        # never sets fractions; the depth knob must be inert for non-published
+        # modes (default preset is allowed; it just resolves to the baseline).
+        args = SimpleNamespace(
+            surface_mode=None,
+            num_surfaces=1,
+            inner_surface_ratio=0.8,
+            published_surface_preset="default_v1",
+            published_surface_fractions=None,
+        )
+
+        contract = module.resolve_surface_mode_contract(
+            args, warn_on_legacy_mapping=False
+        )
+
+        self.assertEqual(contract.mode, module.SINGLE_SURFACE)
+        self.assertEqual(contract.label_fractions, (1.0,))
 
 
 if __name__ == "__main__":
