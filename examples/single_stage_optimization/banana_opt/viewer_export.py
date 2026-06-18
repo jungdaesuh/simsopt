@@ -105,6 +105,14 @@ DEFAULT_BRACKET_WIDTH_MM = TYPE_KK_OUTER_CHANNEL_WIDTH_BINORMAL_MM
 DEFAULT_BRACKET_DEPTH_MM = TYPE_KK_OUTER_CHANNEL_DEPTH_NORMAL_MM
 DEFAULT_CHANNEL_WALL_M = 0.003
 STAGE2_RESULTS_FILENAME = "results.json"
+# Stage results keys carrying the winding-surface geometry the candidate was
+# realized on (single source of truth for the audited winding radius). The major
+# radius is the coil winding-surface R0; the minor radius is the banana winding
+# radius the coil centerlines sit on. An off-spec remap (e.g. a=0.120) records
+# its realized radii here, so the oracle audits the geometry as built rather than
+# the fixed Type-KK contract default.
+RESULTS_WINDING_R0_KEY = "COIL_WINDING_SURFACE_MAJOR_RADIUS_M"
+RESULTS_WINDING_A_KEY = "banana_surf_radius"
 FINITE_BUILD_ENABLED_KEY = "FINITE_BUILD_ENABLED"
 FINITEBUILD_FILAMENTS_PER_BANANA_KEY = "FINITEBUILD_FILAMENTS_PER_BANANA"
 FINITEBUILD_NUMFILAMENTS_N_KEY = "FINITEBUILD_NUMFILAMENTS_N"
@@ -121,13 +129,24 @@ class ViewerExportConfig:
     finite_current_mode: str | None = None
     num_tf_coils: int | None = None
     filaments_per_banana: int | None = None
-    winding_r0_m: float = DEFAULT_WINDING_R0_M
-    winding_a_m: float = DEFAULT_WINDING_A_M
+    # Explicit winding-radius overrides (m). ``None`` (the default) audits the
+    # geometry the candidate was realized on, resolved from the sibling
+    # results.json; a float forces that radius for investigation runs.
+    winding_r0_m: float | None = None
+    winding_a_m: float | None = None
     bracket_width_mm: float = DEFAULT_BRACKET_WIDTH_MM
     bracket_depth_mm: float = DEFAULT_BRACKET_DEPTH_MM
     source_repo: str | None = None
     source_commit: str | None = None
     overwrite: bool = False
+
+
+@dataclass(frozen=True)
+class WindingSurfaceRadii:
+    """The winding-surface major + minor radius (m) the audit is built around."""
+
+    r0_m: float
+    a_m: float
 
 
 @dataclass(frozen=True)
@@ -227,8 +246,18 @@ def build_parser() -> argparse.ArgumentParser:
             "results.json next to the input."
         ),
     )
-    parser.add_argument("--winding-r0-m", type=float, default=DEFAULT_WINDING_R0_M)
-    parser.add_argument("--winding-a-m", type=float, default=DEFAULT_WINDING_A_M)
+    parser.add_argument(
+        "--winding-r0-m",
+        type=float,
+        default=None,
+        help="Override the winding major radius; default audits the realized geometry.",
+    )
+    parser.add_argument(
+        "--winding-a-m",
+        type=float,
+        default=None,
+        help="Override the winding minor radius; default audits the realized geometry.",
+    )
     parser.add_argument("--bracket-width-mm", type=float, default=DEFAULT_BRACKET_WIDTH_MM)
     parser.add_argument("--bracket-depth-mm", type=float, default=DEFAULT_BRACKET_DEPTH_MM)
     parser.add_argument("--source-repo", default=None)
@@ -247,14 +276,64 @@ def config_from_args(args: argparse.Namespace) -> ViewerExportConfig:
         finite_current_mode=args.finite_current_mode,
         num_tf_coils=args.num_tf_coils,
         filaments_per_banana=args.filaments_per_banana,
-        winding_r0_m=float(args.winding_r0_m),
-        winding_a_m=float(args.winding_a_m),
+        winding_r0_m=None if args.winding_r0_m is None else float(args.winding_r0_m),
+        winding_a_m=None if args.winding_a_m is None else float(args.winding_a_m),
         bracket_width_mm=float(args.bracket_width_mm),
         bracket_depth_mm=float(args.bracket_depth_mm),
         source_repo=args.source_repo,
         source_commit=args.source_commit,
         overwrite=bool(args.overwrite),
     )
+
+
+def resolve_realized_winding_surface(
+    source_path: Path,
+    *,
+    override_r0_m: float | None,
+    override_a_m: float | None,
+) -> WindingSurfaceRadii:
+    """Winding-surface major + minor radius (m) the audited candidate was built on.
+
+    The oracle stays independent: it always builds the swept bracket from the
+    Type-KK hardware contract; this resolves only the *winding radius being
+    audited*. Per radius, an explicit override wins; otherwise the realized value
+    is read from the sibling ``results.json`` (``COIL_WINDING_SURFACE_MAJOR_RADIUS_M``
+    / ``banana_surf_radius``); otherwise it falls back to the Type-KK contract
+    default for legacy or metadata-free artifacts that record no sibling results.
+    An on-spec a=0.142 candidate (or a results-free artifact) therefore yields the
+    contract defaults exactly, while an off-spec remap audits its realized radii."""
+    realized = realized_winding_from_results(source_path)
+    r0_m = first_present_radius(override_r0_m, realized.get("r0_m"), DEFAULT_WINDING_R0_M)
+    a_m = first_present_radius(override_a_m, realized.get("a_m"), DEFAULT_WINDING_A_M)
+    return WindingSurfaceRadii(r0_m=r0_m, a_m=a_m)
+
+
+def realized_winding_from_results(source_path: Path) -> dict[str, float]:
+    """Realized winding radii (m) recorded by the sibling ``results.json``.
+
+    Returns only the radii actually present (positive finite numbers) under the
+    canonical results keys; an absent sibling, absent key, or non-positive value
+    is simply omitted so the caller falls back to the contract default."""
+    results_path = source_path.parent / STAGE2_RESULTS_FILENAME
+    if not results_path.is_file():
+        return {}
+    results = read_json_mapping(results_path)
+    return {
+        name: float(value)
+        for name, key in (("r0_m", RESULTS_WINDING_R0_KEY), ("a_m", RESULTS_WINDING_A_KEY))
+        if isinstance(value := results.get(key), int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) > 0.0
+    }
+
+
+def first_present_radius(*candidates: float | None) -> float:
+    """First non-``None`` radius in priority order; raises if all are ``None``."""
+    for candidate in candidates:
+        if candidate is not None:
+            return float(candidate)
+    raise ValueError("No winding radius available; expected a contract default fallback.")
 
 
 def export_viewer_artifact(config: ViewerExportConfig) -> dict[str, object]:
@@ -266,6 +345,11 @@ def export_viewer_artifact(config: ViewerExportConfig) -> dict[str, object]:
 
     contract_family, lineage = resolve_contract_family(source_path, config.contract_family)
     loaded = load_source(source_path, contract_family)
+    winding = resolve_realized_winding_surface(
+        source_path,
+        override_r0_m=config.winding_r0_m,
+        override_a_m=config.winding_a_m,
+    )
     partition = partition_source_coils(
         tuple(loaded.biot_savart.coils),
         contract_family=contract_family,
@@ -282,6 +366,7 @@ def export_viewer_artifact(config: ViewerExportConfig) -> dict[str, object]:
         lineage=lineage,
         loaded=loaded,
         partition=partition,
+        winding=winding,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -313,12 +398,18 @@ def validate_config(config: ViewerExportConfig) -> None:
         raise ValueError("--filaments-per-banana must be a positive integer.")
     if config.num_tf_coils is not None and int(config.num_tf_coils) < 0:
         raise ValueError("--num-tf-coils must be non-negative.")
-    for name, value in (
+    overridable = (
         ("winding_r0_m", config.winding_r0_m),
         ("winding_a_m", config.winding_a_m),
+    )
+    required = (
         ("bracket_width_mm", config.bracket_width_mm),
         ("bracket_depth_mm", config.bracket_depth_mm),
-    ):
+    )
+    for name, value in overridable:
+        if value is not None and (not math.isfinite(float(value)) or float(value) <= 0.0):
+            raise ValueError(f"{name} override must be a finite positive number.")
+    for name, value in required:
         if not math.isfinite(float(value)) or float(value) <= 0.0:
             raise ValueError(f"{name} must be a finite positive number.")
 
@@ -683,12 +774,13 @@ def build_artifact_payload(
     lineage: Mapping[str, object],
     loaded: LoadedSource,
     partition: SourcePartition,
+    winding: WindingSurfaceRadii,
 ) -> dict[str, object]:
     coils_payload = rendered_coil_payloads(partition.render_coils)
     generated_meshes = (
         generated_mesh_payloads(
             partition.render_coils,
-            winding_r0_m=config.winding_r0_m,
+            winding_r0_m=winding.r0_m,
             bracket_width_mm=config.bracket_width_mm,
             bracket_depth_mm=config.bracket_depth_mm,
         )
@@ -716,7 +808,7 @@ def build_artifact_payload(
         },
         "units": "m",
         "coordinate_frame": COORDINATE_FRAME,
-        "winding_surface": {"R0_m": config.winding_r0_m, "a_m": config.winding_a_m},
+        "winding_surface": {"R0_m": winding.r0_m, "a_m": winding.a_m},
         "hardware_contract": {
             "contract_id": TYPE_KK_HARDWARE_CONTRACT_ID,
             "bracket_width_mm": config.bracket_width_mm,
