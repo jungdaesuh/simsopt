@@ -56,9 +56,29 @@ BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE = "biot_savart_branch_resolved_vjp"
 BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE = "biot_savart_branch_resolved_vjp_taylor"
 BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE = "active"
 BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN = "satisfied_frozen"
+# DOF-gradient provenance. The VJP path assembles the DOF gradient through the
+# analytic B/grad-B cotangents (``B_and_dB_vjp``); the directional-Taylor probe
+# that drives the DOF gradient itself by central finite difference over the DOFs
+# (the synthetic-field path) reports the central-difference label instead.
 BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD = "B_and_dB_vjp"
-BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD = "central_finite_difference_rk4"
-BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS = (
+BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD_CENTRAL_DIFFERENCE = (
+    "central_finite_difference_dof"
+)
+# Local-sensitivity provenance. The emitted label is PATH-AWARE: each diagnostic
+# stamps the label for the path it actually took (threaded in at construction by
+# ``_residue_sensitivity_provenance``), not a fixed assumption. Fields exposing
+# an analytic Hessian (d2B_by_dXdX) — i.e. BiotSavart, which the residue
+# objective always uses — compute the 6x6 RK4 state Jacobian, the B/grad-B
+# cotangent assembly, and d(residue)/d(state) analytically (no finite
+# difference) and report the analytic label with no limitations. Fields without
+# a Hessian (synthetic test fields) fall back to the validated central-
+# difference RK4 path and report the *_FD_FALLBACK label and limitation.
+BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD = "analytic_rk4_hessian_vjp"
+BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS: tuple[str, ...] = ()
+BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD_FD_FALLBACK = (
+    "central_finite_difference_rk4"
+)
+BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS_FD_FALLBACK: tuple[str, ...] = (
     "local_state_jacobian_uses_central_finite_difference_rk4",
 )
 DEFAULT_RESIDUE_SATISFIED_THRESHOLD = 1.0e-4
@@ -67,6 +87,68 @@ DEFAULT_RESIDUE_SATISFIED_THRESHOLD = 1.0e-4
 SectionState = tuple[float, float]
 MonodromyMatrix = tuple[tuple[float, float], tuple[float, float]]
 DofDirection = tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResidueSensitivityProvenance:
+    """Path-aware provenance for one residue-sensitivity diagnostic.
+
+    Records the gradient/local-sensitivity method the producing call actually
+    used so ``to_json_dict`` reports the real path rather than a fixed
+    assumption. Immutable.
+    """
+
+    dof_gradient_method: str
+    local_sensitivity_method: str
+    local_sensitivity_limitations: tuple[str, ...]
+
+
+def _vjp_residue_sensitivity_provenance(
+    field: DifferentiableMagneticFieldLike,
+) -> _ResidueSensitivityProvenance:
+    """Provenance for the analytic-adjoint VJP path.
+
+    The DOF gradient is always assembled through ``B_and_dB_vjp``; only the
+    local RK4 state Jacobian / stage cotangents toggle between the analytic
+    Hessian path (fields exposing ``d2B_by_dXdX``) and the validated central-
+    difference RK4 fallback (synthetic fields without a Hessian).
+    """
+    if _field_supports_analytic_hessian(field):
+        return _ResidueSensitivityProvenance(
+            dof_gradient_method=BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+            local_sensitivity_method=(
+                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+            ),
+            local_sensitivity_limitations=(
+                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+            ),
+        )
+    return _ResidueSensitivityProvenance(
+        dof_gradient_method=BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+        local_sensitivity_method=(
+            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD_FD_FALLBACK
+        ),
+        local_sensitivity_limitations=(
+            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS_FD_FALLBACK
+        ),
+    )
+
+
+# The directional-Taylor probe that drives the DOF gradient itself by central
+# finite difference over the DOFs computes everything (DOF gradient and local
+# sensitivity) by central difference; its provenance never reports the analytic
+# adjoint path.
+_CENTRAL_DIFFERENCE_RESIDUE_SENSITIVITY_PROVENANCE = _ResidueSensitivityProvenance(
+    dof_gradient_method=(
+        BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD_CENTRAL_DIFFERENCE
+    ),
+    local_sensitivity_method=(
+        BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD_FD_FALLBACK
+    ),
+    local_sensitivity_limitations=(
+        BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS_FD_FALLBACK
+    ),
+)
 
 
 class ScalarFieldFactory(Protocol):
@@ -232,15 +314,15 @@ class BiotSavartBranchResidueTaylorDiagnostic:
     base_residue_classification: str
     samples: tuple[BiotSavartResidueTaylorSample, ...]
     observed_orders: tuple[float, ...]
+    provenance: _ResidueSensitivityProvenance
 
     def to_json_dict(self) -> dict[str, object]:
         payload = asdict(self)
-        payload["dof_gradient_method"] = BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
-        payload["local_sensitivity_method"] = (
-            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
-        )
+        del payload["provenance"]
+        payload["dof_gradient_method"] = self.provenance.dof_gradient_method
+        payload["local_sensitivity_method"] = self.provenance.local_sensitivity_method
         payload["local_sensitivity_limitations"] = list(
-            BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+            self.provenance.local_sensitivity_limitations
         )
         payload["direction"] = list(self.direction)
         payload["base_state"] = list(self.base_state)
@@ -274,6 +356,7 @@ class BiotSavartBranchResidueVjpDiagnostic:
     gradient_norm: float
     gradient: DofDirection
     derivative: Derivative
+    provenance: _ResidueSensitivityProvenance
 
     @property
     def residue_derivative(self) -> Derivative:
@@ -282,12 +365,10 @@ class BiotSavartBranchResidueVjpDiagnostic:
     def to_json_dict(self) -> dict[str, object]:
         return {
             "mode": self.mode,
-            "dof_gradient_method": BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
-            "local_sensitivity_method": (
-                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
-            ),
+            "dof_gradient_method": self.provenance.dof_gradient_method,
+            "local_sensitivity_method": self.provenance.local_sensitivity_method,
             "local_sensitivity_limitations": list(
-                BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS
+                self.provenance.local_sensitivity_limitations
             ),
             "gradient_status": self.gradient_status,
             "residue": self.residue,
@@ -750,6 +831,7 @@ def branch_resolved_biot_savart_residue_taylor_diagnostic(
         base_residue_classification=classify_greene_residue(derivative.base_residue),
         samples=tuple(samples),
         observed_orders=_observed_orders(tuple(samples)),
+        provenance=_CENTRAL_DIFFERENCE_RESIDUE_SENSITIVITY_PROVENANCE,
     )
 
 
@@ -766,6 +848,7 @@ def branch_resolved_biot_savart_residue_vjp(
     local_difference_step: float = 1.0e-6,
 ) -> BiotSavartBranchResidueVjpDiagnostic:
     field = _require_direct_biot_savart(biot_savart)
+    provenance = _vjp_residue_sensitivity_provenance(field)
     satisfied_threshold = float(r_satisfied)
     if satisfied_threshold < 0.0:
         raise ValueError("Greene residue r_satisfied must be nonnegative")
@@ -798,15 +881,24 @@ def branch_resolved_biot_savart_residue_vjp(
             implicit_adjoint=np.zeros(2, dtype=float),
             cotangent_stats=cotangent_stats,
             gradient_status=BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN,
+            provenance=provenance,
         )
 
-    dresidue_dstate = _rk4_residue_state_gradient(
-        field,
-        orbit.state,
-        target=target,
-        integrator_options=integrator_options,
-        local_difference_step=local_step,
-    )
+    if _field_supports_analytic_hessian(field):
+        dresidue_dstate = _analytic_rk4_residue_state_gradient(
+            field,
+            orbit.state,
+            target=target,
+            integrator_options=integrator_options,
+        )
+    else:
+        dresidue_dstate = _rk4_residue_state_gradient(
+            field,
+            orbit.state,
+            target=target,
+            integrator_options=integrator_options,
+            local_difference_step=local_step,
+        )
     fixed_point_jacobian = monodromy - np.eye(2, dtype=float)
     implicit_adjoint = np.linalg.solve(fixed_point_jacobian.T, dresidue_dstate)
     terminal_adjoint = np.asarray(
@@ -837,6 +929,7 @@ def branch_resolved_biot_savart_residue_vjp(
         implicit_adjoint=implicit_adjoint,
         cotangent_stats=cotangent_stats,
         gradient_status=BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE,
+        provenance=provenance,
     )
 
 
@@ -928,6 +1021,7 @@ def branch_resolved_biot_savart_residue_vjp_taylor_diagnostic(
         base_residue_classification=gradient_diagnostic.residue_classification,
         samples=tuple(samples),
         observed_orders=_observed_orders(tuple(samples)),
+        provenance=gradient_diagnostic.provenance,
     )
 
 
@@ -1380,6 +1474,238 @@ def _rhs_and_jacobian_from_field_data(
     return velocity, jacobian
 
 
+def _field_line_jacobian_field_partials(
+    phi: float,
+    radius: float,
+    b_vector: np.ndarray,
+    field_jacobian_xyz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Closed-form partials of the field-line velocity and Jacobian.
+
+    Returns ``(dvelocity_db, djacobian_db, djacobian_dgrad_b)`` with shapes
+    ``(2, 3)``, ``(2, 2, 3)`` and ``(2, 2, 3, 3)``: the bare partials of the
+    field-line velocity and 2x2 field-line Jacobian ``J`` w.r.t. the magnetic
+    field ``B`` and its Cartesian gradient ``grad_b[j, k] = dB_k/dx_j``, holding
+    the section state fixed. The velocity is independent of ``grad_b``. These are
+    the building blocks for both the augmented-RHS field cotangents (contract
+    with the tangent matrix) and the state Jacobian's field-position chain.
+    """
+    e_r, e_phi, e_z = cylindrical_basis(float(phi))
+    grad_b = np.asarray(field_jacobian_xyz, dtype=float)
+    b_r = float(np.dot(b_vector, e_r))
+    b_phi = float(np.dot(b_vector, e_phi))
+    b_z = float(np.dot(b_vector, e_z))
+    dB_dR = e_r @ grad_b
+    dB_dZ = e_z @ grad_b
+    dbr_dr = float(np.dot(dB_dR, e_r))
+    dbphi_dr = float(np.dot(dB_dR, e_phi))
+    dbz_dr = float(np.dot(dB_dR, e_z))
+    dbr_dz = float(np.dot(dB_dZ, e_r))
+    dbphi_dz = float(np.dot(dB_dZ, e_phi))
+    dbz_dz = float(np.dot(dB_dZ, e_z))
+
+    inv_bphi = 1.0 / b_phi
+    inv_bphi_sq = inv_bphi * inv_bphi
+    inv_bphi_cu = inv_bphi_sq * inv_bphi
+
+    dvelocity_db = np.stack(
+        [
+            radius * (e_r * inv_bphi - b_r * inv_bphi_sq * e_phi),
+            radius * (e_z * inv_bphi - b_z * inv_bphi_sq * e_phi),
+        ]
+    )
+    djacobian_db = np.empty((2, 2, 3), dtype=float)
+    djacobian_db[0, 0] = (
+        e_r * inv_bphi
+        - b_r * inv_bphi_sq * e_phi
+        + radius
+        * (
+            dbr_dr * inv_bphi_sq * e_phi
+            - (dbr_dr * b_phi - b_r * dbphi_dr) * 2.0 * inv_bphi_cu * e_phi
+            - dbphi_dr * inv_bphi_sq * e_r
+        )
+    )
+    djacobian_db[0, 1] = radius * (
+        dbr_dz * inv_bphi_sq * e_phi
+        - (dbr_dz * b_phi - b_r * dbphi_dz) * 2.0 * inv_bphi_cu * e_phi
+        - dbphi_dz * inv_bphi_sq * e_r
+    )
+    djacobian_db[1, 0] = (
+        e_z * inv_bphi
+        - b_z * inv_bphi_sq * e_phi
+        + radius
+        * (
+            dbz_dr * inv_bphi_sq * e_phi
+            - (dbz_dr * b_phi - b_z * dbphi_dr) * 2.0 * inv_bphi_cu * e_phi
+            - dbphi_dr * inv_bphi_sq * e_z
+        )
+    )
+    djacobian_db[1, 1] = radius * (
+        dbz_dz * inv_bphi_sq * e_phi
+        - (dbz_dz * b_phi - b_z * dbphi_dz) * 2.0 * inv_bphi_cu * e_phi
+        - dbphi_dz * inv_bphi_sq * e_z
+    )
+
+    # The second-derivative scalars dbr_dr ... depend on grad_b only through
+    # dbX_dY = (e_Y @ grad_b) @ e_X, whose grad_b[j, k] partial is e_Y[j] e_X[k].
+    er_er = np.outer(e_r, e_r)
+    er_ephi = np.outer(e_r, e_phi)
+    ez_er = np.outer(e_z, e_r)
+    ez_ephi = np.outer(e_z, e_phi)
+    er_ez = np.outer(e_r, e_z)
+    ez_ez = np.outer(e_z, e_z)
+    djacobian_dgrad_b = np.empty((2, 2, 3, 3), dtype=float)
+    djacobian_dgrad_b[0, 0] = radius * inv_bphi_sq * (er_er * b_phi - b_r * er_ephi)
+    djacobian_dgrad_b[0, 1] = radius * inv_bphi_sq * (ez_er * b_phi - b_r * ez_ephi)
+    djacobian_dgrad_b[1, 0] = radius * inv_bphi_sq * (er_ez * b_phi - b_z * er_ephi)
+    djacobian_dgrad_b[1, 1] = radius * inv_bphi_sq * (ez_ez * b_phi - b_z * ez_ephi)
+    return dvelocity_db, djacobian_db, djacobian_dgrad_b
+
+
+def _augmented_rhs_field_partials(
+    phi: float,
+    augmented_state: np.ndarray,
+    b_vector: np.ndarray,
+    field_jacobian_xyz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Closed-form derivatives of the augmented RK4 RHS w.r.t. the stage field.
+
+    Returns ``(daug_db, daug_dgrad_b)`` with shapes ``(6, 3)`` and
+    ``(6, 3, 3)``: the partials of the six-component augmented RHS
+    ``[velocity; (J @ tangent).reshape(4)]`` with respect to the magnetic
+    field ``B`` and its Cartesian gradient ``grad_b[j, k] = dB_k/dx_j`` at the
+    stage point, holding the augmented state fixed. These are exact (no finite
+    difference) and require no field Hessian; the velocity rows are independent
+    of ``grad_b``.
+    """
+    state = np.asarray(augmented_state[:2], dtype=float)
+    tangent_matrix = np.asarray(augmented_state[2:], dtype=float).reshape((2, 2))
+    radius = float(state[0])
+    if radius <= 0.0:
+        raise ValueError("RK4 Greene state requires R > 0")
+    dvelocity_db, djacobian_db, djacobian_dgrad_b = _field_line_jacobian_field_partials(
+        float(phi),
+        radius,
+        np.asarray(b_vector, dtype=float),
+        np.asarray(field_jacobian_xyz, dtype=float),
+    )
+
+    daug_db = np.empty((6, 3), dtype=float)
+    daug_db[0] = dvelocity_db[0]
+    daug_db[1] = dvelocity_db[1]
+    for component in range(3):
+        daug_db[2:, component] = (djacobian_db[:, :, component] @ tangent_matrix).reshape(4)
+    daug_dgrad_b = np.zeros((6, 3, 3), dtype=float)
+    for row in range(3):
+        for column in range(3):
+            daug_dgrad_b[2:, row, column] = (
+                djacobian_dgrad_b[:, :, row, column] @ tangent_matrix
+            ).reshape(4)
+    return daug_db, daug_dgrad_b
+
+
+def _augmented_rhs_state_jacobian(
+    phi: float,
+    augmented_state: np.ndarray,
+    b_vector: np.ndarray,
+    field_jacobian_xyz: np.ndarray,
+    field_hessian_xyz: np.ndarray,
+    *,
+    min_bphi_over_b: float,
+) -> np.ndarray:
+    """Total ``(6, 6)`` Jacobian of the augmented RK4 RHS w.r.t. the state.
+
+    Differentiates ``[velocity; (J @ tangent).reshape(4)]`` with respect to the
+    six-component augmented state ``[R, Z, tangent.reshape(4)]``, including the
+    field-position chain: moving ``(R, Z)`` moves the stage evaluation point, so
+    ``B`` varies by ``grad_b @ e_{R,Z}`` and ``grad_b`` varies by the field
+    Hessian contracted with ``e_{R,Z}``. ``field_hessian_xyz[l, j, k] =
+    d(grad_b[j, k])/dx_l``. Exact; consumes no finite differences.
+    """
+    state = np.asarray(augmented_state[:2], dtype=float)
+    tangent_matrix = np.asarray(augmented_state[2:], dtype=float).reshape((2, 2))
+    radius = float(state[0])
+    if radius <= 0.0:
+        raise ValueError("RK4 Greene state requires R > 0")
+    e_r, e_phi, e_z = cylindrical_basis(float(phi))
+    grad_b = np.asarray(field_jacobian_xyz, dtype=float)
+    hessian = np.asarray(field_hessian_xyz, dtype=float)
+    _velocity, jacobian = _rhs_and_jacobian_from_field_data(
+        float(phi),
+        state,
+        np.asarray(b_vector, dtype=float),
+        grad_b,
+        min_bphi_over_b=float(min_bphi_over_b),
+    )
+    # Bare partials of the field-line velocity and 2x2 Jacobian w.r.t. the field
+    # data (no tangent-matrix contraction); the tangent matrix is applied once at
+    # the very end when assembling the tangent rows.
+    dvelocity_db, djacobian_db, djacobian_dgrad_b = (
+        _field_line_jacobian_field_partials(float(phi), radius, b_vector, grad_b)
+    )
+
+    b_r = float(np.dot(b_vector, e_r))
+    b_phi = float(np.dot(b_vector, e_phi))
+    b_z = float(np.dot(b_vector, e_z))
+    inv_bphi = 1.0 / b_phi
+    inv_bphi_sq = inv_bphi * inv_bphi
+    dB_dR = e_r @ grad_b
+    dB_dZ = e_z @ grad_b
+    # Explicit radius dependence: velocity scales with R, and the second term of
+    # the field-line Jacobian carries an explicit factor of R.
+    dvelocity_dradius = np.asarray([b_r * inv_bphi, b_z * inv_bphi], dtype=float)
+    djacobian_dradius = np.asarray(
+        [
+            [
+                (float(np.dot(dB_dR, e_r)) * b_phi - b_r * float(np.dot(dB_dR, e_phi)))
+                * inv_bphi_sq,
+                (float(np.dot(dB_dZ, e_r)) * b_phi - b_r * float(np.dot(dB_dZ, e_phi)))
+                * inv_bphi_sq,
+            ],
+            [
+                (float(np.dot(dB_dR, e_z)) * b_phi - b_z * float(np.dot(dB_dR, e_phi)))
+                * inv_bphi_sq,
+                (float(np.dot(dB_dZ, e_z)) * b_phi - b_z * float(np.dot(dB_dZ, e_phi)))
+                * inv_bphi_sq,
+            ],
+        ],
+        dtype=float,
+    )
+    dgrad_b_dradius = np.einsum("ljk,l->jk", hessian, e_r)
+    dgrad_b_dz = np.einsum("ljk,l->jk", hessian, e_z)
+
+    # Total derivatives of (velocity, jacobian) w.r.t. R and Z combine the
+    # explicit radius factor with the field-data chain (B and grad_b move).
+    dvelocity_dradius_total = dvelocity_dradius + dvelocity_db @ dB_dR
+    dvelocity_dz_total = dvelocity_db @ dB_dZ
+    djacobian_dradius_total = (
+        djacobian_dradius
+        + djacobian_db @ dB_dR
+        + np.einsum("abjk,jk->ab", djacobian_dgrad_b, dgrad_b_dradius)
+    )
+    djacobian_dz_total = djacobian_db @ dB_dZ + np.einsum(
+        "abjk,jk->ab", djacobian_dgrad_b, dgrad_b_dz
+    )
+
+    state_jacobian = np.zeros((6, 6), dtype=float)
+    state_jacobian[0, 0] = dvelocity_dradius_total[0]
+    state_jacobian[0, 1] = dvelocity_dz_total[0]
+    state_jacobian[1, 0] = dvelocity_dradius_total[1]
+    state_jacobian[1, 1] = dvelocity_dz_total[1]
+    state_jacobian[2:, 0] = (djacobian_dradius_total @ tangent_matrix).reshape(4)
+    state_jacobian[2:, 1] = (djacobian_dz_total @ tangent_matrix).reshape(4)
+    # Tangent rows are linear in the tangent matrix: d(J @ M)_{a,c}/dM_{b,d} =
+    # J_{a,b} delta_{c,d}.
+    for row_block in range(2):
+        for column_block in range(2):
+            output_index = 2 + row_block * 2 + column_block
+            for inner in range(2):
+                state_jacobian[output_index, 2 + inner * 2 + column_block] = jacobian[
+                    row_block, inner
+                ]
+    return state_jacobian
+
+
 def _rk4_residue_state_gradient(
     field: DifferentiableMagneticFieldLike,
     state: SectionState,
@@ -1472,6 +1798,31 @@ def _rk4_vjp_derivative(
     return derivative, stats
 
 
+def _field_supports_analytic_hessian(field: DifferentiableMagneticFieldLike) -> bool:
+    """Whether the field exposes the analytic Hessian the analytic VJP needs.
+
+    The analytic RK4 step Jacobian and the upstream-stage cotangents need
+    ``d(grad_b)/dx`` (the field Hessian) to route the field-position chain.
+    Fields without it (synthetic fields whose ``dB_by_dX`` is itself a finite
+    difference) keep the validated central-difference path.
+    """
+    return callable(getattr(field, "d2B_by_dXdX", None))
+
+
+def _field_hessian_at_point(
+    field: DifferentiableMagneticFieldLike,
+    point: np.ndarray,
+) -> np.ndarray:
+    field.set_points(np.asarray(point, dtype=float).reshape((1, 3)))
+    hessian = np.asarray(field.d2B_by_dXdX(), dtype=float)
+    if hessian.shape != (1, 3, 3, 3):
+        raise ValueError(
+            "Magnetic field d2B_by_dXdX() must have shape (1, 3, 3, 3), "
+            f"got {hessian.shape}"
+        )
+    return hessian[0].copy()
+
+
 def _rk4_step_vjp(
     field: DifferentiableMagneticFieldLike,
     record: _Rk4StepRecord,
@@ -1483,6 +1834,16 @@ def _rk4_step_vjp(
     b_cotangents: list[np.ndarray],
     grad_b_cotangents: list[np.ndarray],
 ) -> np.ndarray:
+    if _field_supports_analytic_hessian(field):
+        return _analytic_rk4_step_vjp(
+            field,
+            record,
+            output_adjoint,
+            integrator_options=integrator_options,
+            points=points,
+            b_cotangents=b_cotangents,
+            grad_b_cotangents=grad_b_cotangents,
+        )
     state_jacobian = _rk4_step_state_jacobian(
         field,
         record,
@@ -1503,6 +1864,199 @@ def _rk4_step_vjp(
         b_cotangents.append(b_cotangent)
         grad_b_cotangents.append(grad_b_cotangent)
     return previous_adjoint
+
+
+def _analytic_rk4_step_vjp(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    output_adjoint: np.ndarray,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+    points: list[np.ndarray],
+    b_cotangents: list[np.ndarray],
+    grad_b_cotangents: list[np.ndarray],
+) -> np.ndarray:
+    """Reverse-mode VJP of one RK4 step, computed analytically.
+
+    Returns the input-state adjoint (= step-state-Jacobian transpose applied to
+    ``output_adjoint``) and appends the four per-stage field cotangents to
+    ``points`` / ``b_cotangents`` / ``grad_b_cotangents``. Both the field
+    cotangents and the input adjoint are exact: the field-position chain is
+    routed through the analytic Hessian-aware augmented-RHS state Jacobian, and
+    each stage's field partials are the closed-form ``_augmented_rhs_field_
+    partials``. This replaces the two central-difference helpers
+    (``_rk4_step_state_jacobian`` and ``_rk4_stage_cotangents``) with no finite
+    difference, eliminating their noise floor.
+    """
+    half_step = 0.5 * record.step
+    stage_evaluations = (record.stage1, record.stage2, record.stage3, record.stage4)
+    stage_states = (
+        record.state,
+        record.stage2_state,
+        record.stage3_state,
+        record.stage4_state,
+    )
+    stage_phis = (
+        record.phi,
+        record.phi + half_step,
+        record.phi + half_step,
+        record.phi + record.step,
+    )
+    # Per-stage analytic augmented-RHS state Jacobians, reused both for the
+    # output adjoint and for routing the field cotangents through downstream
+    # stages.
+    stage_state_jacobians = _analytic_rk4_stage_state_jacobians(
+        field, record, integrator_options=integrator_options
+    )
+
+    # next_state = state + step/6 (k1 + 2 k2 + 2 k3 + k4); k1=f(state),
+    # stage2_state = state + (step/2) k1, etc. Reverse-accumulate the adjoint on
+    # each stage RHS and on each stage input state.
+    bar_k1 = (record.step / 6.0) * output_adjoint
+    bar_k2 = (record.step / 3.0) * output_adjoint
+    bar_k3 = (record.step / 3.0) * output_adjoint
+    bar_k4 = (record.step / 6.0) * output_adjoint
+    # Direct contribution of the input state to next_state is identity.
+    input_adjoint = np.asarray(output_adjoint, dtype=float).copy()
+
+    bar_stage4_state = stage_state_jacobians[3].T @ bar_k4
+    input_adjoint = input_adjoint + bar_stage4_state
+    bar_k3 = bar_k3 + record.step * bar_stage4_state
+
+    bar_stage3_state = stage_state_jacobians[2].T @ bar_k3
+    input_adjoint = input_adjoint + bar_stage3_state
+    bar_k2 = bar_k2 + half_step * bar_stage3_state
+
+    bar_stage2_state = stage_state_jacobians[1].T @ bar_k2
+    input_adjoint = input_adjoint + bar_stage2_state
+    bar_k1 = bar_k1 + half_step * bar_stage2_state
+
+    bar_stage1_state = stage_state_jacobians[0].T @ bar_k1
+    input_adjoint = input_adjoint + bar_stage1_state
+
+    stage_rhs_adjoints = (bar_k1, bar_k2, bar_k3, bar_k4)
+    for evaluation, stage_state, phi, rhs_adjoint in zip(
+        stage_evaluations, stage_states, stage_phis, stage_rhs_adjoints, strict=True
+    ):
+        daug_db, daug_dgrad_b = _augmented_rhs_field_partials(
+            phi,
+            np.asarray(stage_state, dtype=float),
+            evaluation.field_data.b,
+            evaluation.field_data.grad_b,
+        )
+        points.append(evaluation.field_data.point.copy())
+        b_cotangents.append(rhs_adjoint @ daug_db)
+        grad_b_cotangents.append(np.einsum("i,irc->rc", rhs_adjoint, daug_dgrad_b))
+    return input_adjoint
+
+
+def _analytic_rk4_stage_state_jacobians(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The four per-stage analytic augmented-RHS state Jacobians of one step.
+
+    Each entry is ``d(stage RHS)/d(stage state)`` from
+    ``_augmented_rhs_state_jacobian`` evaluated at the recorded stage data; the
+    field Hessian is read fresh at the recorded stage point. Requires the field
+    to expose ``d2B_by_dXdX``.
+    """
+    min_bphi_over_b = integrator_options.min_bphi_over_b
+    half_step = 0.5 * record.step
+    stage_evaluations = (record.stage1, record.stage2, record.stage3, record.stage4)
+    stage_states = (
+        record.state,
+        record.stage2_state,
+        record.stage3_state,
+        record.stage4_state,
+    )
+    stage_phis = (
+        record.phi,
+        record.phi + half_step,
+        record.phi + half_step,
+        record.phi + record.step,
+    )
+    jacobians = []
+    for evaluation, stage_state, phi in zip(
+        stage_evaluations, stage_states, stage_phis, strict=True
+    ):
+        hessian = _field_hessian_at_point(field, evaluation.field_data.point)
+        jacobians.append(
+            _augmented_rhs_state_jacobian(
+                phi,
+                np.asarray(stage_state, dtype=float),
+                evaluation.field_data.b,
+                evaluation.field_data.grad_b,
+                hessian,
+                min_bphi_over_b=min_bphi_over_b,
+            )
+        )
+    return (jacobians[0], jacobians[1], jacobians[2], jacobians[3])
+
+
+def _analytic_rk4_step_state_jacobian(
+    field: DifferentiableMagneticFieldLike,
+    record: _Rk4StepRecord,
+    *,
+    integrator_options: FieldlineIntegratorOptions,
+) -> np.ndarray:
+    """Analytic ``(6, 6)`` Jacobian of one RK4 step w.r.t. the input state.
+
+    Chains the four per-stage augmented-RHS state Jacobians through the RK4
+    Butcher graph: ``next = state + step/6 (k1 + 2 k2 + 2 k3 + k4)`` with
+    ``stage2_state = state + (step/2) k1`` etc. Exact (Hessian-aware); the
+    forward analogue of ``_analytic_rk4_step_vjp``'s adjoint accumulation.
+    """
+    half_step = 0.5 * record.step
+    a1, a2_local, a3_local, a4_local = _analytic_rk4_stage_state_jacobians(
+        field, record, integrator_options=integrator_options
+    )
+    identity = np.eye(6, dtype=float)
+    a2 = a2_local @ (identity + half_step * a1)
+    a3 = a3_local @ (identity + half_step * a2)
+    a4 = a4_local @ (identity + record.step * a3)
+    return identity + record.step * (a1 + 2.0 * a2 + 2.0 * a3 + a4) / 6.0
+
+
+def _analytic_rk4_residue_state_gradient(
+    field: DifferentiableMagneticFieldLike,
+    state: SectionState,
+    *,
+    target: RationalTarget,
+    integrator_options: FieldlineIntegratorOptions,
+) -> np.ndarray:
+    """Analytic ``d(Greene residue)/d(section state)`` for the return map.
+
+    The residue ``R_G = (2 - tr M)/4`` depends on the section state only through
+    the monodromy ``M``, which is chart independent. Propagating the augmented
+    initial state ``[R, Z, I.reshape(4)]`` through the product of the analytic
+    per-step ``(6, 6)`` Jacobians gives ``d(M.reshape(4))/d(R, Z)`` as rows 2..5,
+    columns 0..1; ``d(tr M) = dM00 + dM11``. Replaces the central-difference
+    ``_rk4_residue_state_gradient`` with no finite difference and requires the
+    field to expose ``d2B_by_dXdX``.
+    """
+    section_state = np.asarray(state, dtype=float)
+    _tangent_result, records = _rk4_tangent_return_map(
+        field,
+        section_state,
+        target=target,
+        chart=PoincareChart(
+            axis_r=float(section_state[0]), axis_z=float(section_state[1])
+        ),
+        integrator_options=integrator_options,
+        with_tape=True,
+    )
+    return_map_jacobian = np.eye(6, dtype=float)
+    for record in records:
+        step_jacobian = _analytic_rk4_step_state_jacobian(
+            field, record, integrator_options=integrator_options
+        )
+        return_map_jacobian = step_jacobian @ return_map_jacobian
+    dmonodromy_dstate = return_map_jacobian[2:, :2]
+    dtrace_dstate = dmonodromy_dstate[0] + dmonodromy_dstate[3]
+    return -0.25 * dtrace_dstate
 
 
 def _rk4_step_state_jacobian(
@@ -1678,6 +2232,7 @@ def _vjp_diagnostic_from_parts(
     implicit_adjoint: np.ndarray,
     cotangent_stats: _CotangentStats,
     gradient_status: str,
+    provenance: _ResidueSensitivityProvenance,
 ) -> BiotSavartBranchResidueVjpDiagnostic:
     return BiotSavartBranchResidueVjpDiagnostic(
         mode=BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE,
@@ -1708,6 +2263,7 @@ def _vjp_diagnostic_from_parts(
         gradient_norm=float(np.linalg.norm(gradient)),
         gradient=tuple(float(component) for component in gradient),
         derivative=derivative,
+        provenance=provenance,
     )
 
 

@@ -1,5 +1,7 @@
 import numpy as np
 
+from simsopt.objectives.utilities import forward_backward
+
 from alm_utils import zero_gradient_like
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 from banana_opt.smooth_distance_selection import (
@@ -19,6 +21,42 @@ def _new_derivative():
     from simsopt._core.derivative import Derivative
 
     return Derivative({})
+
+
+def _boozer_adjoint_surface_coeff_gradient(
+    boozer_surface,
+    point_gradient,
+    objective_optimizable,
+):
+    """Route a surface-point gradient through the BoozerSurface adjoint to coil dofs.
+
+    ``point_gradient`` is d(scalar)/d(gamma) for a single surface, shaped like that
+    surface's ``gamma()``. The bare ``surface.dgamma_by_dcoeff_vjp(point_gradient)``
+    derivative lives on the surface FOURIER dofs, which are an implicit function of the
+    coil dofs (the BoozerSurface is re-solved each iter): projected onto the coil-only
+    objective it is identically zero (gradient-dead). This applies the same adjoint as
+    ``simsopt.geo.surfaceobjectives.MajorRadius``: solve (PLU)^T adj = [dJ_ds, 0, 0]
+    using the BoozerSurface's cached LU factorization, then VJP through the Boozer
+    constraint w.r.t. the coils. The BoozerSurface is reused from its last solution, so
+    no fresh Boozer solve is performed.
+    """
+    booz_surf = boozer_surface
+    surface = booz_surf.surface
+    booz_surf.run_code_from_last_solution()
+
+    iota = booz_surf.res["iota"]
+    G = booz_surf.res["G"]
+    P, L, U = booz_surf.res["PLU"]
+    dconstraint_dcoils_vjp = booz_surf.res["vjp"]
+
+    dj_ds = np.asarray(surface.dgamma_by_dcoeff_vjp(point_gradient), dtype=float)
+    # Pad with the iota and G adjoint slots (the spacing scalar has no explicit
+    # dependence on iota or G), matching MajorRadius/MinorRadius.
+    dJ_ds = np.zeros(L.shape[0])
+    dJ_ds[: dj_ds.size] = dj_ds
+    adj = forward_backward(P, L, U, dJ_ds)
+    adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
+    return (-1.0 * adj_times_dg_dcoil)(objective_optimizable)
 
 
 def _with_optional_hard_signal(result, hard_signed_value, include_hard_signal):
@@ -322,8 +360,26 @@ def smooth_min_surface_stack_signed_constraint(
     temperature,
     objective_optimizable,
     *,
+    boozer_surfaces=None,
     include_hard_signal=False,
 ):
+    """Smooth-min spacing of a nested surface stack as a signed ALM constraint.
+
+    ``surfaces`` supplies the geometry (gamma/trees); the nested surfaces are an
+    implicit function of the coil dofs through the per-iteration BoozerSurface solve.
+    The fixed-surface ``surface_dgamma_by_dcoeff_derivative`` path produces a derivative
+    on the surface FOURIER dofs that is gradient-dead over the coil-only objective. When
+    ``boozer_surfaces`` is supplied (the adjoint-capable BoozerSurface objects whose
+    ``.surface`` are ``surfaces``), the per-surface point gradient is routed through the
+    BoozerSurface adjoint to obtain the live coil-dof gradient, exactly as the LCFS
+    MajorRadius/MinorRadius constraints do. When it is None the legacy fixed-surface
+    derivative is returned unchanged.
+    """
+    if boozer_surfaces is not None and len(boozer_surfaces) != len(surfaces):
+        raise ValueError(
+            "boozer_surfaces must align one-to-one with surfaces "
+            f"(got {len(boozer_surfaces)} vs {len(surfaces)})"
+        )
     surface_entries = [surface_points_tree_shape(surface) for surface in surfaces]
     flat_gammas = [points for points, _tree, _shape in surface_entries]
     flat_trees = [tree for _points, tree, _shape in surface_entries]
@@ -382,20 +438,50 @@ def smooth_min_surface_stack_signed_constraint(
             -local_weights[:, None] * directions,
         )
 
-    derivative = _new_derivative()
-    for surface, surface_gamma_shape, point_gradient in zip(
-        surfaces,
-        surface_gamma_shapes,
-        point_gradients,
-    ):
-        if np.any(point_gradient):
-            derivative += surface_dgamma_by_dcoeff_derivative(
-                surface,
-                point_gradient.reshape(surface_gamma_shape),
+    if boozer_surfaces is None:
+        # Legacy fixed-surface derivative: lives on the surface Fourier dofs and is
+        # gradient-dead once projected onto a coil-only objective. Preserved for
+        # callers that do not (yet) supply the adjoint-capable BoozerSurfaces.
+        derivative = _new_derivative()
+        for surface, surface_gamma_shape, point_gradient in zip(
+            surfaces,
+            surface_gamma_shapes,
+            point_gradients,
+        ):
+            if np.any(point_gradient):
+                derivative += surface_dgamma_by_dcoeff_derivative(
+                    surface,
+                    point_gradient.reshape(surface_gamma_shape),
+                )
+        grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    else:
+        # Live coil-dof gradient: each surface is an implicit function of the coils
+        # through its BoozerSurface solve, so the per-surface point gradient is routed
+        # through that surface's Boozer adjoint and summed (the surfaces share the same
+        # coils). Reuses the cached Boozer solution -- no fresh Boozer solve.
+        grad = None
+        for boozer_surface, surface_gamma_shape, point_gradient in zip(
+            boozer_surfaces,
+            surface_gamma_shapes,
+            point_gradients,
+        ):
+            if not np.any(point_gradient):
+                continue
+            surface_grad = np.asarray(
+                _boozer_adjoint_surface_coeff_gradient(
+                    boozer_surface,
+                    point_gradient.reshape(surface_gamma_shape),
+                    objective_optimizable,
+                ),
+                dtype=float,
             )
-    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+            grad = surface_grad if grad is None else grad + surface_grad
+        if grad is None:
+            grad = zero_gradient_like(objective_optimizable.x)
     signed_value = float(minimum_distance) - float(smooth_min)
     hard_signed_value = float(minimum_distance) - float(hard_min)
+    # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
+    # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
     result = (signed_value, -grad, max(0.0, signed_value))
     return _with_optional_hard_signal(result, hard_signed_value, include_hard_signal)
 
@@ -405,12 +491,15 @@ def smooth_min_surface_stack_signed_constraint_with_hard_signal(
     minimum_distance,
     temperature,
     objective_optimizable,
+    *,
+    boozer_surfaces=None,
 ):
     return smooth_min_surface_stack_signed_constraint(
         surfaces,
         minimum_distance,
         temperature,
         objective_optimizable,
+        boozer_surfaces=boozer_surfaces,
         include_hard_signal=True,
     )
 

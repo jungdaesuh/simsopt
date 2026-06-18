@@ -1,5 +1,7 @@
 import json
 import sys
+import types
+import warnings
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,14 @@ from banana_opt.confinement_gate import (  # noqa: E402
     CRITERION_TOPOLOGY,
     ConfinementGateConfig,
     ConfinementMetrics,
+    certify_confinement,
     evaluate_confinement_gate,
     metrics_from_topology_verdict,
+)
+from banana_opt.single_stage_search_contracts import (  # noqa: E402
+    CLAMPED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING,
+    DEFAULT_FRONTIER_INVARIANT_TORUS_MIN,
+    resolve_frontier_invariant_torus_min,
 )
 
 
@@ -275,3 +283,158 @@ def test_adapter_to_gate_endtoend_accept_in_vacuum():
     result = evaluate_confinement_gate(m)
     assert result.accepted
     assert "ACCEPT" in result.decisive_reason
+
+
+# --- #17: configured 0.0 frontier WBA floor is hard-clamped, not silently re-vacuated -----
+# Fail-on-old: before the fix, resolve_frontier_invariant_torus_min(0.0, None) returned 0.0,
+# which re-vacuates the binding invariant-torus certification gate (deficit = max(min-frac,0)
+# == 0 for every config). The resolver must now clamp <=0 / non-finite up to the default with
+# a loud warning, consistent with the calibrator's recommended-floor clamp.
+
+
+@pytest.mark.parametrize("configured", [0.0, -0.1, -1.0])
+def test_configured_nonpositive_floor_is_clamped_to_default_with_warning(configured):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        resolved = resolve_frontier_invariant_torus_min(configured, None)
+    assert resolved == DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+    assert resolved > 0.0  # the binding gate stays non-vacuous
+    messages = [str(w.message) for w in caught]
+    assert CLAMPED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING in messages
+
+
+def test_configured_nonfinite_floor_is_clamped_to_default_with_warning():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        resolved = resolve_frontier_invariant_torus_min(float("nan"), None)
+    assert resolved == DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+    assert any(
+        str(w.message) == CLAMPED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING
+        for w in caught
+    )
+
+
+def test_positive_configured_floor_passes_through_without_warning():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        resolved = resolve_frontier_invariant_torus_min(0.42, None)
+    assert resolved == 0.42
+    assert caught == []
+
+
+def test_unconfigured_floor_returns_default_without_clamp_warning():
+    # The clean default path must stay silent: only an explicitly-vacuated config warns.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        resolved = resolve_frontier_invariant_torus_min(None, None)
+    assert resolved == DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+    assert caught == []
+
+
+def test_zero_kam_min_alias_and_env_are_also_clamped():
+    # The legacy frontier_kam_min positional and the env-var aliases route through the same
+    # clamp, so none of them can silently re-vacuate the gate.
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("ignore")
+        assert (
+            resolve_frontier_invariant_torus_min(None, 0.0)
+            == DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+        )
+        assert (
+            resolve_frontier_invariant_torus_min(
+                None, None, environment={"FRONTIER_INVARIANT_TORUS_MIN": "0.0"}
+            )
+            == DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+        )
+        assert (
+            resolve_frontier_invariant_torus_min(
+                None, None, environment={"FRONTIER_KAM_MIN": "-0.2"}
+            )
+            == DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+        )
+
+
+# --- #1: SSOT strict-tier + gate composition (certify_confinement) ------------------------
+# certify_confinement is the ONE composition shared by the offline CLI and the in-process
+# solver finalization. The strict tier (50 lines / tmax 7000) is too expensive for a unit
+# test, so the strict-tier runner is stubbed; the test asserts the OBSERVABLE composition
+# behavior: the gate runs on the stubbed verdict, writes confinement_verdict.json, and the
+# accept/reject verdict propagates fail-closed.
+
+
+def _install_fake_strict_tier(monkeypatch, topology_verdict, *, passed):
+    fake = types.ModuleType("run_topology_fidelity_ladder")
+
+    def evaluate_case(_run_dir):
+        return {
+            "field_label": "opt",
+            "strict": {
+                "passed": passed,
+                "topology_verdict": topology_verdict,
+            },
+        }
+
+    fake.evaluate_case = evaluate_case
+    monkeypatch.setitem(sys.modules, "run_topology_fidelity_ladder", fake)
+    return fake
+
+
+_STRONG_STRICT_VERDICT = {
+    "broken": False,
+    "survival_fraction": 0.96,
+    "surviving_seed_count": 48,
+    "island_chain_count": 0,
+    "classifiable_fraction": 0.95,
+    "passed": True,
+}
+_BROKEN_STRICT_VERDICT = {"broken": True, "survival_fraction": 0.0}
+
+
+def test_certify_confinement_composes_strict_tier_and_writes_verdict(monkeypatch, tmp_path):
+    _install_fake_strict_tier(monkeypatch, _STRONG_STRICT_VERDICT, passed=True)
+    payload = certify_confinement(
+        tmp_path,
+        config=ConfinementGateConfig(),
+        beta=0.0,
+        qa_nonqs_ratio=3e-3,
+        iota_shear=0.05,
+    )
+    assert payload["confinement_verdict"]["accepted"] is True
+    assert payload["strict_topology_passed"] is True
+    out = tmp_path / "confinement_verdict.json"
+    assert out.exists()
+    on_disk = json.loads(out.read_text())
+    assert on_disk["confinement_verdict"]["accepted"] is True
+
+
+def test_certify_confinement_fails_closed_on_broken_topology(monkeypatch, tmp_path):
+    _install_fake_strict_tier(monkeypatch, _BROKEN_STRICT_VERDICT, passed=False)
+    payload = certify_confinement(tmp_path, config=ConfinementGateConfig())
+    verdict = payload["confinement_verdict"]
+    assert verdict["accepted"] is False
+    assert verdict["decisive_reason"].startswith("REJECT: topology")
+
+
+def test_cli_certify_shares_certify_confinement_composition(monkeypatch, tmp_path):
+    # The CLI certify() must route through the SAME composition (no duplicate wiring): stub
+    # evaluate_case once and assert the CLI path produces the identical accept verdict + file.
+    _install_fake_strict_tier(monkeypatch, _STRONG_STRICT_VERDICT, passed=True)
+    namespace = types.SimpleNamespace(
+        beta=0.0,
+        qa_nonqs=None,
+        magnetic_well=None,
+        iota_shear=None,
+        mercier_dmerc=None,
+        min_survival=0.90,
+        min_classifiable=0.90,
+        advisory_islands=False,
+        advisory_classifiability=False,
+        require_qa=False,
+        require_magnetic_well=False,
+        require_shear=False,
+        qa_nonqs_max=1.0e-2,
+        iota_shear_min=0.0,
+    )
+    payload = driver.certify(str(tmp_path), namespace)
+    assert payload["confinement_verdict"]["accepted"] is True
+    assert (tmp_path / "confinement_verdict.json").exists()

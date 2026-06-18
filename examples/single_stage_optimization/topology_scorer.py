@@ -30,19 +30,68 @@ if str(SCRIPT_DIR) not in sys.path:
 from banana_opt.design_only_fields import assert_topology_field_allowed
 from banana_opt.topology.kam_birkhoff import (
     DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
+    KAM_CLASS_INVARIANT_TORUS,
+    KAM_CLASS_ISLAND_CHAIN,
     KAM_FRACTION_SEMANTICS,
     WBA_EVALUATION_NOT_EVALUATED_AXIS_NOT_LOCATED,
     WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS,
     WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER,
+    WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR,
+    WBA_MIN_CLASSIFIABLE_SEEDS,
+    SeedClassification,
     missing_magnetic_axis_classification,
     classify_fieldline_hits,
     classifier_settings_payload,
     summarize_seed_classifications,
 )
+from banana_opt.topology.rotation_plateau import (
+    CLASS_INVARIANT_TORUS as PLATEAU_CLASS_INVARIANT_TORUS,
+    CLASS_ISLAND_CHAIN as PLATEAU_CLASS_ISLAND_CHAIN,
+    RadialOmegaSeed,
+    reconcile_radial_omega_plateau,
+)
+
+# Fail-fast guard: the pure rotation_plateau discriminator carries its own copy
+# of the class-label strings so it stays simsopt-free; this asserts they have not
+# drifted from the kam_birkhoff SSOT the WBA payload is keyed on.
+assert PLATEAU_CLASS_ISLAND_CHAIN == KAM_CLASS_ISLAND_CHAIN
+assert PLATEAU_CLASS_INVARIANT_TORUS == KAM_CLASS_INVARIANT_TORUS
 
 
 SEED_MODE_MIDPLANE = "midplane_radial_sweep"
 SEED_MODE_EXTENDED_SURFACE = "extended_surface_radial_sweep"
+
+# Provenance marker recorded in the emitted wba_settings.known_limitations when
+# the scorer ran the radial ω-plateau reconciliation: the bare single-surface
+# classifier's missing-radial-discriminator limitation no longer applies to the
+# published invariant_torus_fraction, because this scorer layer supplied that
+# discriminator downstream. SSOT: the bare-classifier limitation is owned by
+# kam_birkhoff; the scorer composes the *effective* limitation set here.
+WBA_RADIAL_PLATEAU_RECONCILED_BY_SCORER = (
+    "radial_rotation_number_plateau_discriminator_applied_by_scorer"
+)
+
+
+def effective_known_limitations(bare_known_limitations, *, reconciliation_applied):
+    """Compose the published WBA limitations for the fraction the scorer emitted.
+
+    ``bare_known_limitations`` is the bare single-surface classifier's limitation
+    list (kam_birkhoff.WBA_CLASSIFIER_KNOWN_LIMITATIONS, the SSOT). When the
+    scorer ran the radial ω-plateau reconciliation, the missing-radial-plateau
+    limitation no longer holds for the published fraction: drop it and record the
+    downstream-discriminator provenance marker instead. When reconciliation did
+    not run, the bare-classifier limitations stand verbatim.
+    """
+
+    if not reconciliation_applied:
+        return list(bare_known_limitations)
+    composed = [
+        limitation
+        for limitation in bare_known_limitations
+        if limitation != WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR
+    ]
+    composed.append(WBA_RADIAL_PLATEAU_RECONCILED_BY_SCORER)
+    return composed
 
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1221,84 @@ def _wba_missing_magnetic_axis_result(fieldlines_phi_hits, settings):
     }
 
 
+def _nearest_rational_value(classification):
+    """Return the p/q float the WBA classifier pinned, or None if unset."""
+
+    rational = classification.nearest_rational
+    if rational is None:
+        return None
+    return float(rational["value"])
+
+
+def reconcile_classifications_radial_omega_plateau(
+    classifications,
+    seed_radial_labels,
+):
+    """Rescue radially-sheared nested tori the single-surface WBA over-flagged.
+
+    The single-surface WBA classifier flags a seed ``island_chain`` whenever its
+    ω is within tolerance of a low-order rational, which conservatively mislabels
+    a nested torus that legitimately sits *at* that rational. This applies the
+    radial ω-plateau discriminator across the seeds' launch radii: an
+    ``island_chain`` seed whose radial neighbours show ω passing monotonically
+    *through* the rational (finite shear) is rescued to ``invariant_torus``; a
+    seed whose neighbours sit on a flat ω plateau is confirmed island; a seed
+    with insufficient/ambiguous radial evidence keeps the conservative island
+    label. The reconciled labels flow into both the WBA invariant-torus fraction
+    and the downstream island verdict, which are keyed on ``classification``.
+
+    Only seeds with a finite WBA rotation number can be radially positioned (a
+    ``lost``/insufficient seed carries no ω), so the discriminator runs over that
+    subset; every other seed -- and the not-rescued islands -- is returned with
+    its class unchanged but its reconciliation reason recorded in ``reason``.
+    """
+
+    labels = np.asarray(seed_radial_labels, dtype=float)
+    if labels.size != len(classifications):
+        raise ValueError(
+            "radial-label count must match the WBA seed-classification count "
+            f"({labels.size} labels vs {len(classifications)} seeds)"
+        )
+    positioned = [
+        index
+        for index, item in enumerate(classifications)
+        if item.rotation_number is not None and np.isfinite(item.rotation_number)
+    ]
+    if len(positioned) < 2:
+        # Too few radially-positioned seeds to form any band: nothing to
+        # reconcile, the single-surface verdict stands unchanged (conservative).
+        return list(classifications)
+
+    radial_seeds = [
+        RadialOmegaSeed(
+            radial_label=float(labels[index]),
+            omega=float(classifications[index].rotation_number),
+            single_surface_class=classifications[index].classification,
+            nearest_rational_value=_nearest_rational_value(classifications[index]),
+        )
+        for index in positioned
+    ]
+    reconciled = reconcile_radial_omega_plateau(radial_seeds)
+    # reconcile_radial_omega_plateau preserves input order, so each reconciled
+    # entry maps back onto its originating seed by position in ``positioned``.
+    reconciled_by_index = dict(zip(positioned, reconciled))
+    out = list(classifications)
+    for index, verdict in reconciled_by_index.items():
+        original = classifications[index]
+        # Annotate every island-flagged seed the discriminator adjudicated -- a
+        # rescue (class changes), a confirmed plateau, or a conservative keep --
+        # so the radial verdict is auditable in the per-seed reason trail.
+        # Non-island seeds carry no island verdict and are left untouched.
+        if original.classification != KAM_CLASS_ISLAND_CHAIN:
+            continue
+        out[index] = dataclasses.replace(
+            original,
+            classification=verdict.reconciled_class,
+            reason=f"{original.reason}|radial_omega_plateau:{verdict.reason}",
+        )
+    return out
+
+
 def invariant_torus_classification(
     fieldlines_phi_hits,
     surface,
@@ -1180,6 +1307,7 @@ def invariant_torus_classification(
     bfield=None,
     axis_point=None,
     min_returns=None,
+    seed_radial_labels=None,
 ):
     # min_returns=None keeps the strict-validation default (256); an explicit
     # value overrides only the returns bar (e.g. a cheaper in-loop pass).
@@ -1212,11 +1340,30 @@ def invariant_torus_classification(
         axis_z=axis["z"],
         settings=settings,
     )
+    # Radial reconciliation: rescue nested tori the single-surface classifier
+    # over-flagged as islands, using ω shear across the seeds' launch radii. Only
+    # runs when the caller supplied per-seed radial labels (the midplane sweep
+    # radii); without them the single-surface verdict stands.
+    reconciliation_applied = seed_radial_labels is not None
+    if reconciliation_applied:
+        classifications = reconcile_classifications_radial_omega_plateau(
+            classifications,
+            seed_radial_labels,
+        )
+    # The persisted wba_settings must describe the layer that produced the
+    # fraction: when this scorer ran the radial ω-plateau reconciliation, the
+    # bare-classifier "no radial discriminator" limitation no longer applies to
+    # the published invariant_torus_fraction, so compose the effective set.
+    wba_settings = classifier_settings_payload(settings)
+    wba_settings["known_limitations"] = effective_known_limitations(
+        wba_settings["known_limitations"],
+        reconciliation_applied=reconciliation_applied,
+    )
     return {
         **summarize_seed_classifications(classifications),
         "wba_axis": axis,
         "wba_poincare_plane_index": int(settings.target_phi_index),
-        "wba_settings": classifier_settings_payload(settings),
+        "wba_settings": wba_settings,
     }
 
 
@@ -1303,6 +1450,13 @@ def wba_not_evaluated_payload(reason):
         "invariant_torus_count": 0,
         "wba_fraction_denominator_policy": None,
         "wba_fraction_denominator_seed_count": 0,
+        # Mirror the new keys the evaluated summary now emits
+        # (kam_birkhoff.summarize_seed_classifications) so the not-evaluated and
+        # evaluated payloads carry a symmetric schema. No seed cleared the
+        # classifiability floor here, so the not-evaluated count is zero; the
+        # floor itself is a module constant, reported verbatim.
+        "wba_min_classifiable_seeds": int(WBA_MIN_CLASSIFIABLE_SEEDS),
+        "wba_not_evaluated_seed_count": 0,
         "wba_seed_count": 0,
         "wba_survived_seed_count": 0,
         "wba_classified_seed_count": 0,
@@ -1513,6 +1667,9 @@ def score_topology(
             bfield=bfield,
             axis_point=magnetic_axis_point,
             min_returns=wba_min_returns,
+            # The midplane sweep launches seed i at radii[i]; this is the
+            # per-seed radial label the ω-plateau discriminator reconciles over.
+            seed_radial_labels=radii,
         )
     else:
         wba = wba_not_evaluated_payload(WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER)
@@ -1553,6 +1710,8 @@ def score_topology(
         "wba_fraction_denominator_seed_count": int(
             wba["wba_fraction_denominator_seed_count"]
         ),
+        "wba_min_classifiable_seeds": int(wba["wba_min_classifiable_seeds"]),
+        "wba_not_evaluated_seed_count": int(wba["wba_not_evaluated_seed_count"]),
         "wba_seed_count": int(wba["wba_seed_count"]),
         "wba_survived_seed_count": int(wba["wba_survived_seed_count"]),
         "wba_classified_seed_count": int(wba["wba_classified_seed_count"]),

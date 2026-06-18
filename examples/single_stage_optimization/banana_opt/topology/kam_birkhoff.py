@@ -14,8 +14,6 @@ DEFAULT_WBA_INVARIANT_MIN_DIGITS = 8.0
 DEFAULT_WBA_ISLAND_MIN_DIGITS = 4.0
 DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR = 24
 DEFAULT_WBA_DIFF_FLOOR = 1.0e-15
-# Known limitation: this single-surface rationality test does not include the
-# radial rotation-number plateau discriminator needed to certify every island.
 DEFAULT_WBA_EXACT_RATIONAL_TOLERANCE = 1.0e-8
 DEFAULT_WBA_MIN_WINDING_SIGN_FRACTION = 0.95
 DEFAULT_WBA_WINDING_INCREMENT_FLOOR = 1.0e-12
@@ -25,8 +23,33 @@ DEFAULT_WBA_ALIAS_ADVANCE_CONCENTRATION_MIN = 0.75
 # (wrapped to [-pi, pi]) so the modulo-one aliasing recovery branch applies.
 _WBA_PRINCIPAL_ANGLE_BOUND = np.pi + 1.0e-12
 WBA_ISLAND_DISCRIMINATOR = "single_surface_exact_low_order_rational"
-WBA_CLASSIFIER_KNOWN_LIMITATIONS = ("no_radial_rotation_number_plateau_discriminator",)
-WBA_FRACTION_DENOMINATOR_POLICY = "survived_non_lost_seeds"
+# Scope: this limitation is a property of the BARE single-surface WBA classifier
+# implemented in this module -- on its own it cannot distinguish a nested torus
+# that legitimately sits *at* a low-order rational from a genuine island chain,
+# because it has no radial rotation-number plateau discriminator. The scorer one
+# layer up (topology_scorer.reconcile_classifications_radial_omega_plateau)
+# *does* supply that discriminator across the seeds' launch radii; when the
+# scorer runs it, the published fraction no longer carries this limitation, so
+# topology_scorer composes the effective limitation set for the emitted payload
+# rather than advertising the bare-classifier limitation verbatim.
+WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR = (
+    "no_radial_rotation_number_plateau_discriminator"
+)
+WBA_CLASSIFIER_KNOWN_LIMITATIONS = (WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR,)
+# The invariant-torus fraction is invariant / classifiable, where a classifiable
+# seed is one that produced a valid WBA rotation-number series (invariant_torus,
+# island_chain, or chaotic). Seeds that could not be evaluated -- lost, too few
+# returns, an invalid poloidal reference, or a missing axis -- are NOT in the
+# denominator: absence of evidence is not evidence of chaos. They are reported
+# separately as wba_not_evaluated_seed_count.
+WBA_FRACTION_DENOMINATOR_POLICY = "classifiable_seeds"
+# Minimum classifiable seeds required to report a fraction. Below this the
+# fraction is too coarse to certify (one classifiable seed yields a degenerate
+# 0/1 ratio), so the summary fails closed with fraction=None rather than
+# certifying a champion on a single seed. Two is the smallest denominator for
+# which the fraction is a ratio over distinct survivors; it admits the cheap
+# tier (4 seeds) while rejecting the single-seed case.
+WBA_MIN_CLASSIFIABLE_SEEDS = 2
 KAM_FRACTION_SEMANTICS = "weighted_birkhoff_invariant_torus_fraction"
 
 KAM_CLASS_INVARIANT_TORUS = "invariant_torus"
@@ -57,6 +80,9 @@ WBA_EVALUATION_NOT_EVALUATED_MISSING_MAGNETIC_AXIS = (
 )
 WBA_EVALUATION_NOT_EVALUATED_AXIS_NOT_LOCATED = "not_evaluated_axis_not_located"
 WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS = "not_evaluated_no_classified_seeds"
+WBA_EVALUATION_NOT_EVALUATED_TOO_FEW_CLASSIFIABLE_SEEDS = (
+    "not_evaluated_too_few_classifiable_seeds"
+)
 WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER = "not_evaluated_skipped_by_caller"
 
 
@@ -267,17 +293,23 @@ def poloidal_angle_series_has_consistent_winding(
     settings: BirkhoffClassifierSettings = DEFAULT_BIRKHOFF_CLASSIFIER_SETTINGS,
 ) -> bool:
     raw_angles = np.asarray(angles_rad, dtype=float)
-    angles = np.unwrap(raw_angles)
-    if angles.ndim != 1:
+    if raw_angles.ndim != 1:
         raise ValueError("WBA winding check requires a one-dimensional angle series")
-    if not np.all(np.isfinite(angles)):
+    if not np.all(np.isfinite(raw_angles)):
         raise ValueError("WBA winding check received NaN/Inf angles")
-    if angles.size < int(settings.min_returns):
+    if raw_angles.size < int(settings.min_returns):
         return True
-    increments = np.diff(angles)
-    significant = increments[
-        np.abs(increments) > float(settings.winding_increment_floor)
-    ]
+    # Reconstruct per-return section advances with the same principal-branch
+    # rewrap the rotation-number path uses (the {raw-1, raw, raw+1}-nearest-
+    # reference trick in normalized_wrapped_rotation_increments). np.unwrap
+    # cannot be used here: it assumes every return advances < 1/2 turn and
+    # aliases a genuine >1/2-turn forward return into an apparent backward step,
+    # which collapses the sign-direction statistic and falsely rejects a
+    # consistently-winding torus. The returned advances are in turn units, so
+    # the radian-scale increment floor is rescaled by 2*pi.
+    increments = normalized_wrapped_rotation_increments(raw_angles)
+    increment_floor = float(settings.winding_increment_floor) / (2.0 * np.pi)
+    significant = increments[np.abs(increments) > increment_floor]
     if significant.size == 0:
         return False
     net_increment = float(np.sum(significant))
@@ -285,15 +317,20 @@ def poloidal_angle_series_has_consistent_winding(
         return False
     direction = 1.0 if net_increment > 0.0 else -1.0
     same_direction_fraction = float(np.mean(significant * direction > 0.0))
-    if same_direction_fraction >= float(settings.min_winding_sign_fraction):
+    # |mean(exp(2*pi*i*advance))|: ~1 when the advances cluster about a single
+    # rotation number (a genuine winding), ~0 when they are spread around the
+    # circle (a non-winding reference). The rewrap snaps every increment toward
+    # this cluster's circular mean, so on uniform-random advances it manufactures
+    # an apparent sign consistency; the concentration gate rejects that case.
+    advance_concentration = float(abs(np.mean(np.exp(2j * np.pi * increments))))
+    if (
+        same_direction_fraction >= float(settings.min_winding_sign_fraction)
+        and advance_concentration >= DEFAULT_WBA_ALIAS_ADVANCE_CONCENTRATION_MIN
+    ):
         return True
 
     if not np.all(np.abs(raw_angles) <= _WBA_PRINCIPAL_ANGLE_BOUND):
         return False
-    modulo_advances = normalized_wrapped_rotation_increments(raw_angles)
-    if modulo_advances.size == 0:
-        return False
-    advance_concentration = float(abs(np.mean(np.exp(2j * np.pi * modulo_advances))))
     if advance_concentration < DEFAULT_WBA_ALIAS_ADVANCE_CONCENTRATION_MIN:
         return False
     phasor_concentration = float(abs(np.mean(np.exp(1j * raw_angles))))
@@ -482,8 +519,18 @@ def summarize_seed_classifications(
 
     survived_count = len(survived)
     classified_count = len(classified)
-    fraction = None if classified_count == 0 else len(invariant) / float(survived_count)
-    if classified_count > 0:
+    # Not-evaluated survivors: lines that survived the trace horizon but produced
+    # no valid rotation-number series (too few returns, invalid poloidal
+    # reference, or missing axis). Reported separately; never in the denominator.
+    not_evaluated_seed_count = survived_count - classified_count
+    # Denominator = classifiable seeds. Fail closed below the minimum so a
+    # champion cannot be certified on a fraction over one or zero seeds.
+    fraction = (
+        len(invariant) / float(classified_count)
+        if classified_count >= WBA_MIN_CLASSIFIABLE_SEEDS
+        else None
+    )
+    if classified_count >= WBA_MIN_CLASSIFIABLE_SEEDS:
         evaluation_state = WBA_EVALUATION_EVALUATED
         not_evaluated_reason = None
     elif total == 0:
@@ -491,6 +538,9 @@ def summarize_seed_classifications(
         not_evaluated_reason = evaluation_state
     elif survived_count == 0:
         evaluation_state = WBA_EVALUATION_NOT_EVALUATED_NO_SURVIVED_SEEDS
+        not_evaluated_reason = evaluation_state
+    elif classified_count > 0:
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_TOO_FEW_CLASSIFIABLE_SEEDS
         not_evaluated_reason = evaluation_state
     elif counts[KAM_CLASS_INSUFFICIENT_RETURNS] == survived_count:
         evaluation_state = WBA_EVALUATION_NOT_EVALUATED_INSUFFICIENT_RETURNS
@@ -518,10 +568,12 @@ def summarize_seed_classifications(
         "invariant_torus_fraction": (None if fraction is None else float(fraction)),
         "invariant_torus_count": int(len(invariant)),
         "wba_fraction_denominator_policy": WBA_FRACTION_DENOMINATOR_POLICY,
-        "wba_fraction_denominator_seed_count": int(survived_count),
+        "wba_fraction_denominator_seed_count": int(classified_count),
+        "wba_min_classifiable_seeds": int(WBA_MIN_CLASSIFIABLE_SEEDS),
         "wba_seed_count": int(total),
         "wba_survived_seed_count": int(survived_count),
         "wba_classified_seed_count": int(classified_count),
+        "wba_not_evaluated_seed_count": int(not_evaluated_seed_count),
         "wba_evaluation_state": evaluation_state,
         "wba_not_evaluated_reason": not_evaluated_reason,
         "wba_classification_counts": counts,

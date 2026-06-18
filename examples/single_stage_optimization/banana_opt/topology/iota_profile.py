@@ -49,10 +49,26 @@ DEFAULT_IOTA_PROFILE_TORUS_TURNS = 40
 # locator. A search bound, not a model parameter; override per device scale.
 DEFAULT_AXIS_SEARCH_HALF_WIDTH = 0.05
 
+# Largest rational denominator this module is asked to keep distinct. The WBA
+# island scan enumerates up to q=24 (kam_birkhoff.DEFAULT_WBA_RATIONAL_MAX_DENOMINATOR);
+# kept as the module's own resolution-band SSOT so the match tolerance below is
+# derived rather than guessed, without coupling to that module's import.
+MATCH_TOLERANCE_REFERENCE_DENOMINATOR = 24
+
 # Absolute |ι − p/q| at which a traced sample counts as sitting on the rational
-# (e.g. a flat profile pinned to a rational surface). Far below the spacing of
-# low-order rationals, so it never conflates neighbouring p/q.
-DEFAULT_IOTA_MATCH_TOLERANCE = 1.0e-6
+# (e.g. a flat profile pinned to a rational surface). Derived as a small fraction
+# of the worst-case spacing between distinct reduced fractions: two Farey
+# neighbours with denominators ≤ Q are at least 1/(Q·(Q−1)) apart (e.g. for
+# Q=24 that is 1.81e-3). At 1/1000 of that worst-case gap a sample can sit on
+# its own rational without ever being mistaken for an adjacent one, while still
+# admitting realistic return-map winding error (ι resolved to well below 1e-4
+# over tens of turns). The 1/1000 margin is the safety factor between "measured
+# ι noise" and "adjacent-rational confusion", the two scales this gate separates.
+_MATCH_TOLERANCE_GAP_SAFETY_FACTOR = 1.0e-3
+DEFAULT_IOTA_MATCH_TOLERANCE = _MATCH_TOLERANCE_GAP_SAFETY_FACTOR / (
+    MATCH_TOLERANCE_REFERENCE_DENOMINATOR
+    * (MATCH_TOLERANCE_REFERENCE_DENOMINATOR - 1)
+)
 
 # Reasons attached to a freezing resolution (the contract a caller reports).
 FREEZE_IN_DOMAIN = "iota_crossing_in_profile"
@@ -240,7 +256,10 @@ class RationalCrossing:
     which may exceed 1); ``radial_label`` is the (linearly interpolated) label at
     which it occurs; ``bracket_lower_label``/``bracket_upper_label`` are the
     adjacent traced samples enclosing it — a data-derived radial window
-    guaranteed to contain the resonance.
+    guaranteed to contain the resonance. ``local_shear`` is the finite-difference
+    dι/dlabel across that bracket (signed): its sign tells the caller whether ι
+    is rising or falling through the resonance, so multiple crossings of the same
+    p/q on a non-monotonic ι(r) are distinguishable rather than silently merged.
     """
 
     p: int
@@ -249,6 +268,7 @@ class RationalCrossing:
     radial_label: float
     bracket_lower_label: float
     bracket_upper_label: float
+    local_shear: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +299,49 @@ class IotaProfile:
         iotas = [float(sample.iota) for sample in valid]
         return (min(iotas), max(iotas))
 
+    def all_rational_crossings(
+        self,
+        p: int,
+        q: int,
+        *,
+        match_tolerance: float = DEFAULT_IOTA_MATCH_TOLERANCE,
+    ) -> tuple[RationalCrossing, ...]:
+        """Return every realized p/q crossing in the profile, sorted by label.
+
+        A p/q island chain sits where ι ≡ p/q (mod 1): the full-torus poloidal
+        winding about the axis carries an integer geometric/section offset that
+        the residue map removes (e.g. a field rotating at nfp + p/q is a p/q
+        resonance). So every integer branch ``n + p/q`` inside the traced band is
+        a candidate. Within each branch this scans **all** adjacent-sample
+        brackets, not just the first: a non-monotonic ι(r) can cross the same
+        rational more than once (distinct island chains), and each crossing is a
+        real resonance the caller must see rather than have silently collapsed to
+        one. Each returned ``RationalCrossing`` carries the signed ``local_shear``
+        across its bracket. A sample within ``match_tolerance`` of the branch is
+        treated as on-resonance; otherwise the sign change is interpolated.
+        """
+
+        valid = self.valid_samples()
+        bounds = self.iota_bounds()
+        if len(valid) == 0 or bounds is None:
+            return ()
+        minimum_iota, maximum_iota = bounds
+        base_fraction = (float(p) / float(q)) % 1.0
+        tolerance = float(match_tolerance)
+        lowest_branch = int(ceil(minimum_iota - base_fraction - tolerance))
+        highest_branch = int(floor(maximum_iota - base_fraction + tolerance))
+        crossings: list[RationalCrossing] = []
+        for branch in range(lowest_branch, highest_branch + 1):
+            crossings.extend(
+                self._crossings_for_transform_value(
+                    p,
+                    q,
+                    base_fraction + float(branch),
+                    tolerance,
+                )
+            )
+        return tuple(sorted(crossings, key=lambda crossing: crossing.radial_label))
+
     def locate_rational(
         self,
         p: int,
@@ -286,86 +349,109 @@ class IotaProfile:
         *,
         match_tolerance: float = DEFAULT_IOTA_MATCH_TOLERANCE,
     ) -> RationalCrossing | None:
-        """Return where the p/q resonance is realized, or None if out of domain.
+        """Return the innermost realized p/q crossing, or None if out of domain.
 
-        A p/q island chain sits where ι ≡ p/q (mod 1): the full-torus poloidal
-        winding about the axis carries an integer geometric/section offset that
-        the residue map removes (e.g. a field rotating at nfp + p/q is a p/q
-        resonance). So every integer branch ``n + p/q`` inside the traced band is
-        a candidate; the innermost (lowest radial label) realized branch is
-        returned. ``RationalCrossing.iota`` records the realized transform there
-        (which may sit outside [0, 1)). Within a branch, a sample within
-        ``match_tolerance`` is treated as on-resonance, else the sign change is
-        interpolated.
+        Convenience over :meth:`all_rational_crossings` that selects the crossing
+        at the lowest radial label (the innermost island chain). When ι(r) is
+        non-monotonic and a rational is crossed more than once, the outer
+        crossings are *not* spurious — callers that must see them use
+        ``all_rational_crossings``; this method only narrows the full set to the
+        innermost, it never hides crossings it was unaware of.
         """
 
-        valid = self.valid_samples()
-        if len(valid) == 0:
+        crossings = self.all_rational_crossings(
+            p, q, match_tolerance=match_tolerance
+        )
+        if len(crossings) == 0:
             return None
-        bounds = self.iota_bounds()
-        if bounds is None:
-            return None
-        minimum_iota, maximum_iota = bounds
-        base_fraction = (float(p) / float(q)) % 1.0
-        best: RationalCrossing | None = None
-        tolerance = float(match_tolerance)
-        lowest_branch = int(ceil(minimum_iota - base_fraction - tolerance))
-        highest_branch = int(floor(maximum_iota - base_fraction + tolerance))
-        for branch in range(lowest_branch, highest_branch + 1):
-            crossing = self._locate_transform_value(
-                p,
-                q,
-                base_fraction + float(branch),
-                match_tolerance,
-            )
-            if crossing is not None and (
-                best is None or crossing.radial_label < best.radial_label
-            ):
-                best = crossing
-        return best
+        return crossings[0]
 
-    def _locate_transform_value(
+    def _crossings_for_transform_value(
         self,
         p: int,
         q: int,
         transform_value: float,
         match_tolerance: float,
-    ) -> RationalCrossing | None:
+    ) -> tuple[RationalCrossing, ...]:
+        """Collect every bracket of ``valid_samples`` that realizes ``transform_value``.
+
+        On-resonance samples (within ``match_tolerance``) and strict sign-change
+        brackets are both reported; a sample that is itself within tolerance is
+        attributed once to its own bracket and excluded from the sign-change scan
+        of its neighbouring pairs so the same crossing is not counted twice.
+        """
+
         valid = self.valid_samples()
-        nearest_index = min(
-            range(len(valid)),
-            key=lambda index: abs(float(valid[index].iota) - transform_value),
-        )
-        if abs(float(valid[nearest_index].iota) - transform_value) <= float(
-            match_tolerance
-        ):
-            lower = valid[max(0, nearest_index - 1)]
-            upper = valid[min(len(valid) - 1, nearest_index + 1)]
-            return RationalCrossing(
-                p=int(p),
-                q=int(q),
-                iota=float(transform_value),
-                radial_label=float(valid[nearest_index].radial_label),
-                bracket_lower_label=float(lower.radial_label),
-                bracket_upper_label=float(upper.radial_label),
+        crossings: list[RationalCrossing] = []
+        on_resonance = [
+            abs(float(sample.iota) - transform_value) <= match_tolerance
+            for sample in valid
+        ]
+        for index, sample in enumerate(valid):
+            if not on_resonance[index]:
+                continue
+            lower = valid[max(0, index - 1)]
+            upper = valid[min(len(valid) - 1, index + 1)]
+            crossings.append(
+                self._make_crossing(
+                    p,
+                    q,
+                    transform_value,
+                    radial_label=float(sample.radial_label),
+                    lower=lower,
+                    upper=upper,
+                )
             )
-        for lower, upper in zip(valid, valid[1:], strict=False):
+        for index in range(len(valid) - 1):
+            if on_resonance[index] or on_resonance[index + 1]:
+                continue
+            lower = valid[index]
+            upper = valid[index + 1]
             lower_offset = float(lower.iota) - transform_value
             upper_offset = float(upper.iota) - transform_value
-            if lower_offset * upper_offset < 0.0:
-                fraction = lower_offset / (lower_offset - upper_offset)
-                label = lower.radial_label + fraction * (
-                    upper.radial_label - lower.radial_label
-                )
-                return RationalCrossing(
-                    p=int(p),
-                    q=int(q),
-                    iota=float(transform_value),
+            if lower_offset * upper_offset >= 0.0:
+                continue
+            fraction = lower_offset / (lower_offset - upper_offset)
+            label = lower.radial_label + fraction * (
+                upper.radial_label - lower.radial_label
+            )
+            crossings.append(
+                self._make_crossing(
+                    p,
+                    q,
+                    transform_value,
                     radial_label=float(label),
-                    bracket_lower_label=float(lower.radial_label),
-                    bracket_upper_label=float(upper.radial_label),
+                    lower=lower,
+                    upper=upper,
                 )
-        return None
+            )
+        return tuple(crossings)
+
+    @staticmethod
+    def _make_crossing(
+        p: int,
+        q: int,
+        transform_value: float,
+        *,
+        radial_label: float,
+        lower: IotaProfileSample,
+        upper: IotaProfileSample,
+    ) -> RationalCrossing:
+        label_span = float(upper.radial_label) - float(lower.radial_label)
+        local_shear = (
+            0.0
+            if label_span == 0.0
+            else (float(upper.iota) - float(lower.iota)) / label_span
+        )
+        return RationalCrossing(
+            p=int(p),
+            q=int(q),
+            iota=float(transform_value),
+            radial_label=float(radial_label),
+            bracket_lower_label=float(lower.radial_label),
+            bracket_upper_label=float(upper.radial_label),
+            local_shear=float(local_shear),
+        )
 
     def in_domain_rationals(
         self,
@@ -574,6 +660,7 @@ def frozen_target_payload(resolution: FrozenRationalTarget) -> dict[str, object]
                 float(crossing.bracket_upper_label),
             ]
         ),
+        "local_shear": None if crossing is None else float(crossing.local_shear),
     }
 
 

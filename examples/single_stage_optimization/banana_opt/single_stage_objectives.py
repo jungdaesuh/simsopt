@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 
 from simsopt._core.derivative import Derivative, derivative_dec
@@ -146,6 +148,151 @@ def build_single_stage_shear_objective(surface_iota_terms, shear_target):
         surface_iota_terms[0],
         surface_iota_terms[-1],
         shear_target,
+    )
+
+
+# Default low-order-rational cutoff for the rational-iota avoidance penalty. q<=10
+# spans the operationally dangerous low-order resonances: for a fixed perturbation
+# spectrum the island half-width scales like 1/q (Chirikov), and the natural
+# resonant-harmonic amplitude itself decays with mode number, so q>10 islands are
+# both thinner and weaker. q=10 also brackets the frontier iota target 3/10=0.30.
+RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR = 10
+# Default avoidance band scale (in iota units). Each rational p/q gets a Gaussian
+# well of width sigma_q = sigma0/q, narrower for the thinner high-q islands. sigma0
+# = 0.012 keeps the wells isolated (a >500x peak-to-midpoint contrast at q<=10) while
+# giving each low-order rational a ~+/-2*sigma0/q repulsion basin; it was selected so
+# the descent direction points away from the rational throughout +/-1 sigma_q (a
+# larger sigma0 lets neighbouring wells overlap and locally invert that push).
+RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA = 0.012
+
+
+def _low_order_rationals_in_window(center, half_window, max_denominator):
+    """Reduced rationals p/q (1<=q<=max_denominator) within ``center +- half_window``.
+
+    Restricting to a window around the current iota keeps the bump sum O(window) sized
+    and independent of where iota sits in [0, 1]; rationals outside the window have a
+    Gaussian contribution below machine-meaningful levels (the window is many sigma).
+    Returned as a sorted list of ``(p, q)`` in lowest terms so each rational is counted
+    once with its true (reduced) denominator -- the denominator that sets its weight
+    and width.
+    """
+    lower = center - half_window
+    upper = center + half_window
+    seen: set[tuple[int, int]] = set()
+    for q in range(1, int(max_denominator) + 1):
+        p_min = int(np.floor(lower * q))
+        p_max = int(np.ceil(upper * q))
+        for p in range(p_min, p_max + 1):
+            value = p / q
+            if value < lower or value > upper:
+                continue
+            divisor = math.gcd(p, q)
+            seen.add((p // divisor, q // divisor))
+    return sorted(seen)
+
+
+class RationalIotaAvoidance(Optimizable):
+    r"""Smooth repeller keeping the outer Boozer iota off low-order rationals.
+
+    A near-shearless vacuum field whose outer rotational transform sits on a
+    low-order rational :math:`p/q` seeds magnetic islands of half-width growing with
+    the resonant flux. This term places a smooth Gaussian well on every reduced
+    rational with denominator :math:`q \le Q` and sums them:
+
+    .. math::
+       J(\iota) = \sum_{p/q,\; q\le Q} \frac{1}{q^2}\,
+                  \exp\!\Bigl(-\frac{(\iota - p/q)^2}{2\,(\sigma_0/q)^2}\Bigr).
+
+    The :math:`1/q^2` weight makes lower-order (wider-island) rationals dominate and
+    the :math:`\sigma_q=\sigma_0/q` width makes each well as narrow as its island is
+    thin, so :math:`J` peaks ON each rational and decays to ~0 between them. Minimizing
+    it therefore pushes :math:`\iota` off the nearest low-order rational; far from every
+    rational the term and its gradient are ~0, so it does not fight the iota target.
+
+    The single argument ``iota_term`` is the outer-surface :class:`Iotas` objective --
+    the SAME term the existing :class:`QuadraticPenalty` ``Jiota`` uses -- so ``J()``
+    reads :math:`\iota` and ``dJ()`` reuses that term's Boozer adjoint for the live
+    coil-dof gradient (single source of truth for the iota derivative path). Only the
+    rationals within a many-sigma window of the current :math:`\iota` are summed; the
+    rest contribute below floating-point relevance.
+    """
+
+    def __init__(
+        self,
+        iota_term,
+        *,
+        max_denominator=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
+        sigma=RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
+    ):
+        self.iota_term = iota_term
+        self.max_denominator = int(max_denominator)
+        self.sigma = float(sigma)
+        if self.max_denominator < 1:
+            raise ValueError("rational-iota avoidance requires max_denominator >= 1")
+        if self.sigma <= 0.0:
+            raise ValueError("rational-iota avoidance requires sigma > 0")
+        # Window at 6 * sigma0 (>= 6 sigma_q for every q>=1): a Gaussian is < 1.5e-8 of
+        # its peak beyond 6 sigma, so rationals outside the window are negligible.
+        self._half_window = 6.0 * self.sigma
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[iota_term])
+
+    def _bumps(self):
+        """Per-rational (height, signed_distance/sigma_q^2) at the current iota.
+
+        Returns the bump heights and the d/d(iota) prefactors so ``J`` and ``dJ`` share
+        one evaluation of the (iota-dependent) rational window and exponentials.
+        """
+        iota = float(self.iota_term.J())
+        heights = []
+        d_prefactors = []
+        for p, q in _low_order_rationals_in_window(
+            iota, self._half_window, self.max_denominator
+        ):
+            center = p / q
+            weight = 1.0 / (q * q)
+            sigma_q = self.sigma / q
+            height = weight * np.exp(-((iota - center) ** 2) / (2.0 * sigma_q**2))
+            heights.append(height)
+            # d/d(iota) exp(-(iota-c)^2/(2 s^2)) = exp(...) * -(iota-c)/s^2
+            d_prefactors.append(-(iota - center) / (sigma_q**2))
+        return heights, d_prefactors
+
+    def J(self):
+        heights, _ = self._bumps()
+        return float(sum(heights))
+
+    @derivative_dec
+    def dJ(self):
+        heights, d_prefactors = self._bumps()
+        # dJ/d(iota) = sum_k height_k * d_prefactor_k; chain through the Iotas adjoint.
+        dJ_diota = float(
+            sum(height * prefactor for height, prefactor in zip(heights, d_prefactors))
+        )
+        return dJ_diota * self.iota_term.dJ(partials=True)
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+def build_single_stage_rational_iota_avoidance_objective(
+    outer_iota_term,
+    *,
+    max_denominator=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
+    sigma=RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
+):
+    """Build the outer-iota rational-avoidance penalty term.
+
+    ``outer_iota_term`` is the outermost-surface ``Iotas`` objective (the same term
+    feeding the iota target penalty). Returns ``None`` when ``outer_iota_term`` is
+    ``None`` so callers can pass it through unconditionally; the caller additionally
+    multiplies the term by a weight that defaults to 0, leaving default-OFF runs
+    byte-identical.
+    """
+    if outer_iota_term is None:
+        return None
+    return RationalIotaAvoidance(
+        outer_iota_term,
+        max_denominator=max_denominator,
+        sigma=sigma,
     )
 
 
@@ -412,6 +559,8 @@ def build_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JRationalIotaAvoidance=None,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     JTFCurvature=None,
@@ -482,6 +631,16 @@ def build_total_objective(
         objective = objective + SHEAR_WEIGHT * JShear
     if JMagneticWell is not None:
         objective = objective + MAGNETIC_WELL_WEIGHT * JMagneticWell
+    # Rational-iota avoidance penalty (opt-in; default weight 0 and a None term, so the
+    # objective graph is byte-identical until --single-stage-rational-iota-avoidance-weight
+    # > 0 is set). Repels the outer Boozer iota from low-order rationals (q<=Q) that seed
+    # islands; most relevant to the frontier lane whose iota target 3/10=0.30 is itself a
+    # low-order rational.
+    if JRationalIotaAvoidance is not None:
+        objective = (
+            objective
+            + RATIONAL_IOTA_AVOIDANCE_WEIGHT * JRationalIotaAvoidance
+        )
     # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
     # the TF curve geometry is unfrozen, so the objective graph is byte-identical
     # for the default frozen-TF run). They reuse the banana HW weights so the freed
@@ -827,6 +986,8 @@ def evaluate_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JRationalIotaAvoidance=None,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
 ):
@@ -890,6 +1051,8 @@ def evaluate_total_objective(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JRationalIotaAvoidance=JRationalIotaAvoidance,
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
     )
@@ -945,6 +1108,19 @@ def evaluate_total_objective(
     ) = _optional_weighted_objective_terms(
         JMagneticWell,
         MAGNETIC_WELL_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        rational_iota_avoidance_value,
+        rational_iota_avoidance_grad,
+        rational_iota_avoidance_weight,
+        rational_iota_avoidance_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JRationalIotaAvoidance,
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -1102,6 +1278,12 @@ def evaluate_total_objective(
             "dJ_magnetic_well": magnetic_well_grad,
             "magnetic_well_weight": magnetic_well_weight,
             "magnetic_well_objective_enabled": magnetic_well_objective_enabled,
+            "J_rational_iota_avoidance": rational_iota_avoidance_value,
+            "dJ_rational_iota_avoidance": rational_iota_avoidance_grad,
+            "rational_iota_avoidance_weight": rational_iota_avoidance_weight,
+            "rational_iota_avoidance_objective_enabled": (
+                rational_iota_avoidance_objective_enabled
+            ),
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
             "residue_objective_enabled": JResidueObjective is not None,
@@ -1157,6 +1339,8 @@ def evaluate_base_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JRationalIotaAvoidance=None,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
     VESSEL_KEEPOUT_WEIGHT=0.0,
     JCurveAvailableEnvelopeReward=None,
@@ -1285,11 +1469,30 @@ def evaluate_base_objective(
         base_physics_grad,
         objective_optimizable,
     )
+    (
+        rational_iota_avoidance_value,
+        rational_iota_avoidance_grad,
+        rational_iota_avoidance_weight,
+        rational_iota_avoidance_objective_enabled,
+        weighted_rational_iota_avoidance_value,
+        weighted_rational_iota_avoidance_grad,
+    ) = _optional_weighted_objective_terms(
+        JRationalIotaAvoidance,
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
     physics_terms_total = (
-        base_physics_terms_total + weighted_shear_value + weighted_magnetic_well_value
+        base_physics_terms_total
+        + weighted_shear_value
+        + weighted_magnetic_well_value
+        + weighted_rational_iota_avoidance_value
     )
     physics_grad = (
-        base_physics_grad + weighted_shear_grad + weighted_magnetic_well_grad
+        base_physics_grad
+        + weighted_shear_grad
+        + weighted_magnetic_well_grad
+        + weighted_rational_iota_avoidance_grad
     )
     residue_value, residue_grad = _optional_objective_value_and_gradient(
         JResidueObjective,
@@ -1301,6 +1504,7 @@ def evaluate_base_objective(
             residue_value
             + weighted_shear_value
             + weighted_magnetic_well_value
+            + weighted_rational_iota_avoidance_value
             + weighted_vessel_keepout_value
             + weighted_available_envelope_reward_value
             + weighted_hardware_sdf_free_space_reward_value
@@ -1309,6 +1513,7 @@ def evaluate_base_objective(
             residue_grad
             + weighted_shear_grad
             + weighted_magnetic_well_grad
+            + weighted_rational_iota_avoidance_grad
             + weighted_vessel_keepout_grad
             + weighted_available_envelope_reward_grad
             + weighted_hardware_sdf_free_space_reward_grad
@@ -1364,6 +1569,12 @@ def evaluate_base_objective(
             "dJ_magnetic_well": magnetic_well_grad,
             "magnetic_well_weight": magnetic_well_weight,
             "magnetic_well_objective_enabled": magnetic_well_objective_enabled,
+            "J_rational_iota_avoidance": rational_iota_avoidance_value,
+            "dJ_rational_iota_avoidance": rational_iota_avoidance_grad,
+            "rational_iota_avoidance_weight": rational_iota_avoidance_weight,
+            "rational_iota_avoidance_objective_enabled": (
+                rational_iota_avoidance_objective_enabled
+            ),
             "J_vessel_keepout": vessel_keepout_value,
             "dJ_vessel_keepout": vessel_keepout_grad,
             "vessel_keepout_weight": vessel_keepout_weight,
@@ -1591,6 +1802,7 @@ def evaluate_alm_objective(
     curve_curve_constraint_with_hard_signal_fn=None,
     curve_surface_constraint_with_hard_signal_fn=None,
     surface_stack_surfaces=None,
+    surface_stack_boozer_surfaces=None,
     surface_stack_min_distance=0.0,
     surface_stack_constraint_fn=None,
     surface_stack_constraint_with_hard_signal_fn=None,
@@ -1651,6 +1863,8 @@ def evaluate_alm_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JRationalIotaAvoidance=None,
+    RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     include_diagnostics=True,
@@ -1686,6 +1900,8 @@ def evaluate_alm_objective(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JRationalIotaAvoidance=JRationalIotaAvoidance,
+        RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
         VESSEL_KEEPOUT_WEIGHT=VESSEL_KEEPOUT_WEIGHT,
         JCurveAvailableEnvelopeReward=JCurveAvailableEnvelopeReward,
@@ -1765,6 +1981,17 @@ def evaluate_alm_objective(
         ),
     }
     if surface_stack_surfaces is not None:
+        # Forward the adjoint-capable BoozerSurfaces ONLY when supplied: with them the
+        # constraint routes its per-surface point gradient through each Boozer adjoint
+        # for a LIVE coil-dof gradient; without them (the default) the dispatch stays
+        # byte-identical to the legacy gradient-dead fixed-surface path. Passing the
+        # keyword unconditionally would force every constraint_fn to accept it, so the
+        # legacy/None case omits it and reaches the constraint exactly as before.
+        surface_stack_boozer_kwargs = (
+            {}
+            if surface_stack_boozer_surfaces is None
+            else {"boozer_surfaces": surface_stack_boozer_surfaces}
+        )
         (
             surface_stack_signed_value,
             surface_stack_grad,
@@ -1779,6 +2006,7 @@ def evaluate_alm_objective(
             surface_stack_min_distance,
             distance_smoothing,
             objective_optimizable,
+            **surface_stack_boozer_kwargs,
         )
         hardware_constraints["surface_surface_spacing"] = (
             surface_stack_signed_value,

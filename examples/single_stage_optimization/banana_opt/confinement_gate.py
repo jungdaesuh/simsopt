@@ -30,8 +30,14 @@ Design contract:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+from banana_opt.topology_fidelity_ladder import DEFAULT_TOPOLOGY_TIER_SPECS
+
+STRICT_TIER = "strict"
 
 # Criterion identifiers (stable strings recorded in results.json / the judge ledger).
 CRITERION_TOPOLOGY = "topology"
@@ -386,3 +392,66 @@ def metrics_from_topology_verdict(
         beta=float(beta),
         mercier_dmerc_min=mercier_dmerc_min,
     )
+
+
+def certify_confinement(
+    run_dir: str | Path,
+    *,
+    config: ConfinementGateConfig,
+    beta: float = 0.0,
+    qa_nonqs_ratio: float | None = None,
+    magnetic_well: float | None = None,
+    iota_shear: float | None = None,
+    mercier_dmerc_min: float | None = None,
+    write_verdict: bool = True,
+) -> dict:
+    """SSOT confinement certification for a saved candidate run directory.
+
+    Composes the STRICT topology tier (50 field lines, tmax 7000, + WBA island verdict,
+    reused verbatim from ``run_topology_fidelity_ladder.evaluate_case``) with the supplied
+    physics values into ONE ``ConfinementVerdict`` and (when ``write_verdict``) writes
+    ``confinement_verdict.json`` next to the candidate. This is the single composition shared
+    by the offline CLI (``run_confinement_gate.main``/``certify``) and the in-process solver
+    finalization, so the strict-tier-to-gate wiring is never duplicated.
+
+    The strict tier is read from the run dir's on-disk ``biot_savart_opt.json`` /
+    ``surf_opt.json`` artifacts (the solver writes those before finalization); certifying the
+    persisted artifact -- not a transient in-memory object -- is the correct integrity
+    property for an acceptance gate. ``config`` is supplied by the caller (externally-owned,
+    typed thresholds); the physics values are advisory-by-default inside the gate. Returns the
+    JSON-serializable payload (``run_dir`` / ``field_label`` / ``strict_topology_passed`` /
+    ``confinement_verdict``).
+    """
+    # Import the strict-tier runner lazily: it transitively pulls in the heavy single-stage
+    # module (simsopt/jax), so deferring it keeps this library module importable cheaply --
+    # e.g. to unit-test the pure evaluator / metrics adapter without paying for the full
+    # toolchain. (When the in-process solver calls this, that module is already imported, so
+    # it costs nothing.)
+    from run_topology_fidelity_ladder import evaluate_case
+
+    run_path = Path(run_dir).resolve()
+    case = evaluate_case(run_path)
+    strict_record = case[STRICT_TIER]
+    strict_verdict = strict_record["topology_verdict"]
+    nfieldlines = DEFAULT_TOPOLOGY_TIER_SPECS[STRICT_TIER].nfieldlines
+
+    metrics = metrics_from_topology_verdict(
+        strict_verdict,
+        nfieldlines,
+        qa_nonqs_ratio=qa_nonqs_ratio,
+        magnetic_well=magnetic_well,
+        iota_shear=iota_shear,
+        beta=beta,
+        mercier_dmerc_min=mercier_dmerc_min,
+    )
+    verdict = evaluate_confinement_gate(metrics, config)
+    payload = {
+        "run_dir": str(run_path),
+        "field_label": case.get("field_label"),
+        "strict_topology_passed": bool(strict_verdict.get("passed")),
+        "confinement_verdict": verdict.to_dict(),
+    }
+    if write_verdict:
+        out_path = run_path / "confinement_verdict.json"
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload

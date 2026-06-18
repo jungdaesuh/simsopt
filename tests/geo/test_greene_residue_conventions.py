@@ -83,9 +83,12 @@ from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity 
     BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
     BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE,
     BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD,
+    BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD_CENTRAL_DIFFERENCE,
     BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE,
     BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_SATISFIED_FROZEN,
+    BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS_FD_FALLBACK,
     BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD,
+    BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD_FD_FALLBACK,
     BIOT_SAVART_BRANCH_RESOLVED_VJP_MODE,
     BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE,
     BRANCH_RESOLVED_FD_MODE,
@@ -99,6 +102,25 @@ from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity 
     branch_resolved_residue_central_difference,
     frozen_orbit_residue_central_difference,
     solve_biot_savart_residue_branch,
+)
+
+# Internal helpers exercised by the analytic-vs-finite-difference cross-checks
+# (item #6 validation discipline): the analytic RK4 internal Jacobians must
+# agree numerically with the central-difference reference they replace.
+from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
+    _analytic_rk4_residue_state_gradient,
+    _analytic_rk4_step_state_jacobian,
+    _analytic_rk4_step_vjp,
+    _augmented_rhs_state_jacobian,
+    _field_hessian_at_point,
+    _field_supports_analytic_hessian,
+    _rhs_and_jacobian_from_field_data,
+    _rk4_residue_state_gradient,
+    _rk4_stage_cotangents,
+    _rk4_step_state_jacobian,
+    _rk4_tangent_return_map,
+    _solve_rk4_periodic_orbit,
+    _vjp_residue_sensitivity_provenance,
 )
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import Coil, Current
@@ -1743,11 +1765,74 @@ def test_biot_savart_branch_residue_directional_taylor_gate_serializes_real_coil
     assert payload["mode"] == BIOT_SAVART_BRANCH_RESOLVED_TAYLOR_MODE
     assert payload["branch"] == GREENE_BRANCH_X
     assert payload["expected_winding"] == pytest.approx(target.expected_winding())
+    # This diagnostic drives its DOF gradient by central finite difference over
+    # the DOFs (``branch_resolved_biot_savart_residue_central_difference``); it
+    # never runs the analytic B/grad-B adjoint. Provenance must report the
+    # central-difference path, not the analytic-VJP label.
+    assert (
+        payload["dof_gradient_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD_CENTRAL_DIFFERENCE
+        == "central_finite_difference_dof"
+    )
+    assert payload["dof_gradient_method"] != BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+    assert (
+        payload["local_sensitivity_method"]
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD_FD_FALLBACK
+        == "central_finite_difference_rk4"
+    )
+    assert (
+        payload["local_sensitivity_method"]
+        != BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+    )
+    assert payload["local_sensitivity_limitations"] == list(
+        BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS_FD_FALLBACK
+    )
     assert len(payload["samples"]) == 3
     assert payload["samples"][0]["branch"] == GREENE_BRANCH_X
     assert math.isfinite(payload["samples"][0]["winding"])
     assert len(payload["observed_orders"]) == 2
     np.testing.assert_allclose(field.x, original_x)
+
+
+def test_vjp_residue_sensitivity_provenance_is_path_aware():
+    # The local-sensitivity provenance must describe the path actually taken, not
+    # a fixed assumption. A field exposing the analytic Hessian (real BiotSavart)
+    # routes the closed-form RK4 state Jacobian / adjoint; a Hessian-less field
+    # falls back to the validated central-difference RK4 path and must self-report
+    # that FD fallback (and its limitation) instead of the analytic label.
+    biot_savart = _make_toroidal_field_biot_savart()
+    assert _field_supports_analytic_hessian(biot_savart) is True
+    analytic = _vjp_residue_sensitivity_provenance(biot_savart)
+    assert analytic.dof_gradient_method == BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+    assert (
+        analytic.local_sensitivity_method
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+        == "analytic_rk4_hessian_vjp"
+    )
+    assert analytic.local_sensitivity_limitations == ()
+
+    hessian_free_field = CircularTransformField(axis_r=1.0, axis_z=0.0, iota=0.3)
+    assert _field_supports_analytic_hessian(hessian_free_field) is False
+    fd_fallback = _vjp_residue_sensitivity_provenance(hessian_free_field)
+    assert fd_fallback.dof_gradient_method == BIOT_SAVART_BRANCH_RESIDUE_DOF_GRADIENT_METHOD
+    assert (
+        fd_fallback.local_sensitivity_method
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD_FD_FALLBACK
+        == "central_finite_difference_rk4"
+    )
+    assert (
+        fd_fallback.local_sensitivity_limitations
+        == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_LIMITATIONS_FD_FALLBACK
+        == ("local_state_jacobian_uses_central_finite_difference_rk4",)
+    )
+
+    # The two records must genuinely diverge: same DOF-gradient mechanism, but a
+    # different local-sensitivity label and a non-empty FD-fallback limitation.
+    assert (
+        analytic.local_sensitivity_method != fd_fallback.local_sensitivity_method
+    )
+    assert analytic.local_sensitivity_limitations == ()
+    assert len(fd_fallback.local_sensitivity_limitations) == 1
 
 
 def test_biot_savart_residue_branch_rejects_underresolved_rk4_tangent_map():
@@ -1887,10 +1972,9 @@ def test_biot_savart_residue_vjp_taylor_gate_is_second_order():
     assert (
         gradient_payload["local_sensitivity_method"]
         == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+        == "analytic_rk4_hessian_vjp"
     )
-    assert gradient_payload["local_sensitivity_limitations"] == [
-        "local_state_jacobian_uses_central_finite_difference_rk4"
-    ]
+    assert gradient_payload["local_sensitivity_limitations"] == []
     taylor_payload = taylor.to_json_dict()
     assert (
         taylor_payload["dof_gradient_method"]
@@ -1899,10 +1983,9 @@ def test_biot_savart_residue_vjp_taylor_gate_is_second_order():
     assert (
         taylor_payload["local_sensitivity_method"]
         == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+        == "analytic_rk4_hessian_vjp"
     )
-    assert taylor_payload["local_sensitivity_limitations"] == [
-        "local_state_jacobian_uses_central_finite_difference_rk4"
-    ]
+    assert taylor_payload["local_sensitivity_limitations"] == []
     assert taylor.mode == BIOT_SAVART_BRANCH_RESOLVED_VJP_TAYLOR_MODE
     assert taylor.base_status == BRANCH_STATUS_CONVERGED
     assert taylor.branch == GREENE_BRANCH_O
@@ -1976,10 +2059,9 @@ def test_biot_savart_greene_residue_objective_is_disabled_by_default():
     assert (
         payload["local_sensitivity_method"]
         == BIOT_SAVART_BRANCH_RESIDUE_LOCAL_SENSITIVITY_METHOD
+        == "analytic_rk4_hessian_vjp"
     )
-    assert payload["local_sensitivity_limitations"] == [
-        "local_state_jacobian_uses_central_finite_difference_rk4"
-    ]
+    assert payload["local_sensitivity_limitations"] == []
     assert payload["value"] == pytest.approx(0.0)
     assert payload["branches"] == []
 
@@ -3123,3 +3205,359 @@ def test_residue_objective_gradient_step_reduces_residue():
         assert descended_value < base_value
     finally:
         field.x = original_x
+
+
+class _HessianBackedSyntheticField:
+    """Wrap a closed-form synthetic field, adding a self-consistent Hessian.
+
+    The synthetic island/orbit fields used elsewhere in this module compute
+    ``dB_by_dX`` by central finite difference of their analytic ``_B_at`` and
+    expose no ``d2B_by_dXdX``. The analytic RK4 VJP needs that Hessian, so this
+    wrapper supplies ``dB_by_dX`` and ``d2B_by_dXdX`` from central differences of
+    the same ``_B_at``. The Hessian is therefore consistent with the gradient the
+    finite-difference RK4 path reads, which is exactly what makes an
+    analytic-vs-finite-difference cross-check meaningful: any residual is the
+    finite-difference reference's truncation, not an analytic error.
+    """
+
+    _GRADIENT_STEP = 1.0e-6
+    _HESSIAN_STEP = 1.0e-4
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.points = np.empty((0, 3), dtype=float)
+
+    def set_points(self, points: np.ndarray) -> "_HessianBackedSyntheticField":
+        self.points = np.asarray(points, dtype=float)
+        self.inner.set_points(self.points)
+        return self
+
+    def initial_orbit_state(self):
+        return self.inner.initial_orbit_state()
+
+    def B(self) -> np.ndarray:
+        return self.inner._B_at(self.points)
+
+    def _gradient_at(self, points: np.ndarray) -> np.ndarray:
+        step = self._GRADIENT_STEP
+        gradient = np.empty((points.shape[0], 3, 3), dtype=float)
+        for axis in range(3):
+            shift = np.zeros(3, dtype=float)
+            shift[axis] = step
+            gradient[:, axis, :] = (
+                self.inner._B_at(points + shift) - self.inner._B_at(points - shift)
+            ) / (2.0 * step)
+        return gradient
+
+    def dB_by_dX(self) -> np.ndarray:
+        return self._gradient_at(self.points)
+
+    def d2B_by_dXdX(self) -> np.ndarray:
+        step = self._HESSIAN_STEP
+        hessian = np.empty((self.points.shape[0], 3, 3, 3), dtype=float)
+        for axis in range(3):
+            shift = np.zeros(3, dtype=float)
+            shift[axis] = step
+            hessian[:, axis, :, :] = (
+                self._gradient_at(self.points + shift)
+                - self._gradient_at(self.points - shift)
+            ) / (2.0 * step)
+        return hessian
+
+
+def _resonant_island_field_with_hessian():
+    target = RationalTarget(
+        p=1,
+        q=4,
+        radial_label=0.2,
+        radial_window=(0.2, 0.2),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=4,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    phase0 = 0.25 * math.pi
+    field = _HessianBackedSyntheticField(
+        ResonantIslandField(
+            axis_r=chart.axis_r,
+            axis_z=chart.axis_z,
+            target=target,
+            orbit_radius=0.2,
+            phase0=phase0,
+            shear=0.1,
+            drive=0.01,
+        )
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+    return field, target, chart, integrator_options, solver_options
+
+
+def test_analytic_rk4_internal_jacobians_match_fd_on_resonant_island_p_nonzero():
+    # Validation discipline for item #6 on a genuine p != 0, nonzero-winding
+    # island return map (residue ~ 0.5): the analytic per-step state Jacobian,
+    # the per-stage B/grad-B cotangents, and d(residue)/d(state) must agree with
+    # the central-difference reference they replace. The agreement floor here is
+    # the synthetic field's own finite-difference dB_by_dX (~1e-6), not the
+    # analytic algebra (which is machine-exact on a field with analytic
+    # derivatives -- see the BiotSavart ground-truth test below).
+    field, target, chart, integrator_options, solver_options = (
+        _resonant_island_field_with_hessian()
+    )
+    orbit = _solve_rk4_periodic_orbit(
+        field,
+        field.initial_orbit_state(),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    assert orbit.status == BRANCH_STATUS_CONVERGED
+    assert orbit.winding == pytest.approx(1.0, abs=1.0e-6)
+    assert target.p != 0
+    assert abs(orbit.residue_diagnostic.residue) > 0.1
+
+    _tangent_result, records = _rk4_tangent_return_map(
+        field,
+        orbit.state,
+        target=target,
+        chart=PoincareChart(axis_r=orbit.state[0], axis_z=orbit.state[1]),
+        integrator_options=integrator_options,
+        with_tape=True,
+    )
+    output_adjoint = np.asarray([0.3, -0.2, -0.25, 0.0, 0.0, -0.25], dtype=float)
+    worst_state_jacobian_rel = 0.0
+    worst_cotangent_abs = 0.0
+    for record in records[::11]:
+        fd_jacobian = _rk4_step_state_jacobian(
+            field,
+            record,
+            integrator_options=integrator_options,
+            local_difference_step=1.0e-6,
+        )
+        analytic_jacobian = _analytic_rk4_step_state_jacobian(
+            field, record, integrator_options=integrator_options
+        )
+        worst_state_jacobian_rel = max(
+            worst_state_jacobian_rel,
+            float(
+                np.max(np.abs(analytic_jacobian - fd_jacobian))
+                / max(1.0e-12, np.max(np.abs(fd_jacobian)))
+            ),
+        )
+        fd_b_cotangents = []
+        fd_grad_b_cotangents = []
+        for stage_index in (1, 2, 3, 4):
+            _point, b_cotangent, grad_b_cotangent = _rk4_stage_cotangents(
+                field,
+                record,
+                output_adjoint,
+                stage_index=stage_index,
+                integrator_options=integrator_options,
+                local_difference_step=1.0e-6,
+            )
+            fd_b_cotangents.append(b_cotangent)
+            fd_grad_b_cotangents.append(grad_b_cotangent)
+        analytic_points: list = []
+        analytic_b_cotangents: list = []
+        analytic_grad_b_cotangents: list = []
+        _analytic_rk4_step_vjp(
+            field,
+            record,
+            output_adjoint,
+            integrator_options=integrator_options,
+            points=analytic_points,
+            b_cotangents=analytic_b_cotangents,
+            grad_b_cotangents=analytic_grad_b_cotangents,
+        )
+        for stage in range(4):
+            worst_cotangent_abs = max(
+                worst_cotangent_abs,
+                float(np.max(np.abs(analytic_b_cotangents[stage] - fd_b_cotangents[stage]))),
+                float(
+                    np.max(
+                        np.abs(
+                            analytic_grad_b_cotangents[stage]
+                            - fd_grad_b_cotangents[stage]
+                        )
+                    )
+                ),
+            )
+
+    # Both sides read the same finite-difference field gradient, so they agree to
+    # that gradient's truncation floor (~1e-6); the analytic side carries no extra
+    # error of its own.
+    assert worst_state_jacobian_rel < 1.0e-5
+    assert worst_cotangent_abs < 1.0e-5
+
+    fd_dresidue_dstate = _rk4_residue_state_gradient(
+        field,
+        orbit.state,
+        target=target,
+        integrator_options=integrator_options,
+        local_difference_step=1.0e-6,
+    )
+    analytic_dresidue_dstate = _analytic_rk4_residue_state_gradient(
+        field,
+        orbit.state,
+        target=target,
+        integrator_options=integrator_options,
+    )
+    np.testing.assert_allclose(
+        analytic_dresidue_dstate,
+        fd_dresidue_dstate,
+        rtol=1.0e-4,
+        atol=1.0e-6,
+    )
+
+
+def test_analytic_rk4_state_jacobian_matches_exact_ground_truth_on_biotsavart():
+    # With analytic field derivatives (BiotSavart exposes exact dB_by_dX and
+    # d2B_by_dXdX), the analytic augmented-RHS state Jacobian is exact to machine
+    # precision, validated against a clean central difference of the augmented
+    # RHS that re-reads the analytic field at the moved point. This is the tight
+    # proof that the analytic algebra itself -- not just its agreement with the
+    # finite-difference RK4 step -- is correct. The check is run at generic
+    # off-axis augmented states with a non-trivial tangent matrix so the Jacobian
+    # is O(1) (orbit section points have a near-zero radial RHS dominated by field
+    # rounding and are unsuitable for a tight relative comparison).
+    field, _target, _chart, integrator_options, _solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    min_bphi_over_b = integrator_options.min_bphi_over_b
+
+    def augmented_rhs_total(augmented_state, phi):
+        point = cartesian_from_cylindrical(
+            float(augmented_state[0]), float(phi), float(augmented_state[1])
+        )
+        field.set_points(point.reshape((1, 3)))
+        b = np.asarray(field.B(), dtype=float)[0]
+        grad_b = np.asarray(field.dB_by_dX(), dtype=float)[0]
+        state = np.asarray(augmented_state[:2], dtype=float)
+        tangent = np.asarray(augmented_state[2:], dtype=float).reshape((2, 2))
+        velocity, jacobian = _rhs_and_jacobian_from_field_data(
+            float(phi), state, b, grad_b, min_bphi_over_b=min_bphi_over_b
+        )
+        return np.concatenate([velocity, (jacobian @ tangent).reshape(4)])
+
+    sample_states = (
+        (np.asarray([1.18, 0.07, 1.2, -0.3, 0.4, 0.9], dtype=float), 0.3),
+        (np.asarray([0.83, -0.06, 0.8, 0.5, -0.2, 1.1], dtype=float), 1.4),
+        (np.asarray([1.22, -0.09, 1.0, 0.1, -0.4, 0.7], dtype=float), 4.1),
+    )
+    checked = 0
+    for augmented_state, phi in sample_states:
+        point = cartesian_from_cylindrical(
+            float(augmented_state[0]), float(phi), float(augmented_state[1])
+        )
+        field.set_points(point.reshape((1, 3)))
+        b_vector = np.asarray(field.B(), dtype=float)[0]
+        grad_b = np.asarray(field.dB_by_dX(), dtype=float)[0]
+        hessian = _field_hessian_at_point(field, point)
+        analytic = _augmented_rhs_state_jacobian(
+            float(phi),
+            augmented_state,
+            b_vector,
+            grad_b,
+            hessian,
+            min_bphi_over_b=min_bphi_over_b,
+        )
+        ground_truth = np.empty((6, 6), dtype=float)
+        for index in range(6):
+            step = 1.0e-7 * max(1.0, abs(augmented_state[index]))
+            shift = np.zeros(6, dtype=float)
+            shift[index] = step
+            ground_truth[:, index] = (
+                augmented_rhs_total(augmented_state + shift, phi)
+                - augmented_rhs_total(augmented_state - shift, phi)
+            ) / (2.0 * step)
+        jacobian_scale = float(np.max(np.abs(ground_truth)))
+        assert jacobian_scale > 1.0e-2
+        # Absolute agreement scaled by the Jacobian magnitude; the residual is the
+        # central-difference ground truth's own truncation, not analytic error.
+        np.testing.assert_allclose(
+            analytic,
+            ground_truth,
+            rtol=0.0,
+            atol=1.0e-6 * jacobian_scale,
+        )
+        checked += 1
+    assert checked == len(sample_states)
+
+
+def test_analytic_residue_vjp_matches_true_residue_slope_on_biotsavart():
+    # Decisive end-to-end check: the assembled analytic coil-DOF gradient's
+    # directional derivative equals the true central-difference slope of the
+    # Greene residue along the same coil-DOF direction. This is the property the
+    # gradient exists to deliver, and the apples-to-apples ground truth (a real
+    # residue resolve at +/- h), independent of any internal Jacobian.
+    field, _target, chart, integrator_options, _solver_options = (
+        _biot_savart_residue_gate_inputs()
+    )
+    original_x = np.asarray(field.x, dtype=float).copy()
+    direction = _unit_biot_savart_direction(field, seed=2)
+    field.x = original_x + 1.0e-3 * direction
+    target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=0.126,
+        radial_window=(0.10, 0.16),
+        branches=(GREENE_BRANCH_O,),
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-10,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+    try:
+        diagnostic = branch_resolved_biot_savart_residue_vjp(
+            field,
+            (1.1, 0.05),
+            target=target,
+            chart=chart,
+            branch=GREENE_BRANCH_O,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+            r_satisfied=0.0,
+        )
+        assert diagnostic.gradient_status == BIOT_SAVART_BRANCH_RESIDUE_GRADIENT_ACTIVE
+        analytic_directional_derivative = float(
+            np.dot(np.asarray(diagnostic.gradient, dtype=float), direction)
+        )
+
+        base_x = original_x + 1.0e-3 * direction
+
+        def residue_at(coil_dofs: np.ndarray) -> float:
+            field.x = coil_dofs
+            solved = _solve_rk4_periodic_orbit(
+                field,
+                diagnostic.state,
+                target=target,
+                chart=chart,
+                branch=GREENE_BRANCH_O,
+                integrator_options=integrator_options,
+                solver_options=solver_options,
+            )
+            assert solved.status == BRANCH_STATUS_CONVERGED
+            return float(solved.residue_diagnostic.residue)
+
+        step = 1.0e-5
+        true_slope = (
+            residue_at(base_x + step * direction) - residue_at(base_x - step * direction)
+        ) / (2.0 * step)
+    finally:
+        field.x = original_x
+
+    assert true_slope == pytest.approx(analytic_directional_derivative, rel=1.0e-3, abs=1.0e-7)

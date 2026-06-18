@@ -147,16 +147,21 @@ def test_wba_min_returns_override_flips_insufficient_to_evaluated():
     hits = _golden_invariant_torus_hits(axis_r=axis_r, axis_z=axis_z, count=130)
     axis_point = {"r": axis_r, "z": axis_z, "source": "test_magnetic_axis"}
 
+    # Two invariant-torus field lines clear the WBA_MIN_CLASSIFIABLE_SEEDS=2 floor
+    # (#9 denominator fix), so the fraction is a 2/2 ratio over distinct survivors
+    # rather than a degenerate single-seed certification. The min_returns override
+    # is what flips both from insufficient_returns to evaluated.
     lowered = topology_scorer.invariant_torus_classification(
-        [hits], RingSurface(), axis_point=axis_point, min_returns=128
+        [hits, hits], RingSurface(), axis_point=axis_point, min_returns=128
     )
     assert lowered["wba_evaluation_state"] == "evaluated"
+    assert lowered["wba_classified_seed_count"] == 2
     assert lowered["invariant_torus_fraction"] == 1.0
     assert lowered["wba_settings"]["min_returns"] == 128
 
     # Default (None) keeps the strict 256 bar -> still insufficient on 130 returns.
     default = topology_scorer.invariant_torus_classification(
-        [hits], RingSurface(), axis_point=axis_point
+        [hits, hits], RingSurface(), axis_point=axis_point
     )
     assert default["wba_evaluation_state"] == "not_evaluated_insufficient_returns"
     assert default["invariant_torus_fraction"] is None
@@ -168,12 +173,55 @@ def test_wba_min_returns_override_flips_insufficient_to_evaluated():
 
     # Explicit min_returns=256 is identical to the default (no behavior change).
     explicit_default = topology_scorer.invariant_torus_classification(
-        [hits], RingSurface(), axis_point=axis_point, min_returns=256
+        [hits, hits], RingSurface(), axis_point=axis_point, min_returns=256
     )
     assert (
         explicit_default["wba_evaluation_state"]
         == "not_evaluated_insufficient_returns"
     )
+
+
+def test_wba_settings_known_limitations_reflect_radial_reconciliation():
+    # Honest provenance (F-mb2): the persisted wba_settings.known_limitations must
+    # describe the layer that produced the fraction. When the scorer ran the
+    # radial ω-plateau reconciliation (seed_radial_labels supplied), the published
+    # invariant_torus_fraction already incorporates a radial-plateau discriminator,
+    # so the emitted limitations must NOT still advertise that it is missing; when
+    # reconciliation did not run, the bare single-surface classifier limitation
+    # stands. The bare-classifier limitation is owned by kam_birkhoff (SSOT); the
+    # scorer composes the effective set here.
+    axis_r, axis_z = 1.05, 0.16
+    hits = _golden_invariant_torus_hits(axis_r=axis_r, axis_z=axis_z, count=300)
+    axis_point = {"r": axis_r, "z": axis_z, "source": "test_magnetic_axis"}
+    missing = topology_scorer.WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR
+    marker = topology_scorer.WBA_RADIAL_PLATEAU_RECONCILED_BY_SCORER
+
+    # Reconciliation ran: per-seed radial labels supplied for two seeds.
+    reconciled = topology_scorer.invariant_torus_classification(
+        [hits, hits],
+        RingSurface(),
+        axis_point=axis_point,
+        seed_radial_labels=[axis_r + 0.08, axis_r + 0.10],
+    )
+    assert reconciled["wba_evaluation_state"] == "evaluated"
+    reconciled_limitations = reconciled["wba_settings"]["known_limitations"]
+    # Fail-on-old: before the fix the emitted payload still carried the bare
+    # missing-radial-discriminator limitation even though the scorer reconciled it.
+    assert missing not in reconciled_limitations
+    assert marker in reconciled_limitations
+
+    # Reconciliation did NOT run: no radial labels -> bare-classifier limitation
+    # stands and the downstream-discriminator marker is absent.
+    bare = topology_scorer.invariant_torus_classification(
+        [hits, hits],
+        RingSurface(),
+        axis_point=axis_point,
+        seed_radial_labels=None,
+    )
+    assert bare["wba_evaluation_state"] == "evaluated"
+    bare_limitations = bare["wba_settings"]["known_limitations"]
+    assert missing in bare_limitations
+    assert marker not in bare_limitations
 
 
 def test_score_topology_threads_wba_min_returns_into_classifier(monkeypatch):
@@ -324,8 +372,12 @@ def test_wba_uses_magnetic_axis_instead_of_boundary_centroid():
         )
     )
 
+    # Two identical invariant-torus field lines clear the
+    # WBA_MIN_CLASSIFIABLE_SEEDS=2 floor (#9 denominator fix); both share the same
+    # off-centroid magnetic axis, so the axis-vs-centroid intent is unchanged
+    # while the fraction is now a 2/2 ratio over distinct survivors.
     result = topology_scorer.invariant_torus_classification(
-        [hits],
+        [hits, hits],
         ShiftedCentroidSurface(),
         bfield=ShiftedAxisField(axis_r=axis_r, axis_z=axis_z, iota=rotation_number),
     )
@@ -337,6 +389,7 @@ def test_wba_uses_magnetic_axis_instead_of_boundary_centroid():
     assert abs(result["wba_axis"]["r"] - surface_centroid[0]) > 1.0e-2
     assert abs(result["wba_axis"]["z"] - surface_centroid[1]) > 1.0e-2
     assert result["wba_evaluation_state"] == "evaluated"
+    assert result["wba_classified_seed_count"] == 2
     assert result["invariant_torus_fraction"] == 1.0
 
 
@@ -524,14 +577,17 @@ def test_score_topology_solves_axis_on_exact_field_under_interpolation(monkeypat
         bfield=None,
         axis_point=None,
         min_returns=None,
+        seed_radial_labels=None,
     ):
         captured["axis_field"] = bfield
+        captured["seed_radial_labels"] = seed_radial_labels
         return real_classify(
             fieldlines_phi_hits,
             surface_arg,
             bfield=bfield,
             axis_point=axis_point,
             min_returns=min_returns,
+            seed_radial_labels=seed_radial_labels,
         )
 
     monkeypatch.setattr(simsopt_field, "compute_fieldlines", spy_compute_fieldlines)

@@ -20,7 +20,18 @@ from examples.single_stage_optimization.banana_opt.topology.kam_birkhoff import 
     normalized_wrapped_rotation_increments,
     poloidal_angle_series_has_consistent_winding,
     summarize_seed_classifications,
+    weighted_birkhoff_average,
 )
+
+
+def _weighted_birkhoff_errors_over_doubling_ladder(series, *, levels, reference):
+    # |WBA over the leading N samples - reference| at a geometric ladder of
+    # window lengths N (ascending). The reference is the WBA over an independent,
+    # much longer run so the finest ladder point is not its own reference.
+    return np.array(
+        [abs(weighted_birkhoff_average(series[:n]) - reference) for n in levels],
+        dtype=float,
+    )
 
 
 def standard_map_angles(
@@ -118,6 +129,55 @@ def test_weighted_birkhoff_standard_map_sensitive_orbit_flips_across_breakup_reg
 
     assert below.classification == KAM_CLASS_INVARIANT_TORUS
     assert above.classification == KAM_CLASS_CHAOTIC
+
+
+def test_weighted_birkhoff_super_algebraic_beats_algebraic_convergence_rate():
+    # Characterizes the convergence-rate distinction that motivates the WBA
+    # classifier: on a smooth observable sampled along an irrational (golden)
+    # rotation the weighted Birkhoff average converges super-algebraically
+    # (faster than any power of the window length), while an algebraically
+    # convergent (~1/N) observable gains only a fixed number of digits per
+    # window doubling. Measured as digits gained per doubling in the regime
+    # before the super-algebraic series saturates at machine precision.
+    #
+    # NOTE: this is a property of the WBA primitive, not of classify_angle_series
+    # -- the classifier keys on absolute two-half agreement, because the measured
+    # rate is degenerate (undefined) on the cleanest tori, whose rotation number
+    # is constant so the average is already exact at every window length.
+    golden_ratio = (math.sqrt(5.0) - 1.0) / 2.0
+    reference_count = 8192
+    # Small ascending window sizes: super-algebraic convergence reaches machine
+    # precision quickly, so the rate is only observable before it saturates.
+    levels = [16, 32, 64, 128, 256]
+
+    theta = 2.0 * math.pi * golden_ratio * np.arange(reference_count)
+    super_algebraic = np.cos(theta)
+    algebraic = 1.0 + 1.0 / (np.arange(reference_count) + 1.0)
+
+    super_errors = _weighted_birkhoff_errors_over_doubling_ladder(
+        super_algebraic,
+        levels=levels,
+        reference=weighted_birkhoff_average(super_algebraic),
+    )
+    algebraic_errors = _weighted_birkhoff_errors_over_doubling_ladder(
+        algebraic,
+        levels=levels,
+        reference=weighted_birkhoff_average(algebraic),
+    )
+
+    super_floored = np.maximum(super_errors, 1e-15)
+    algebraic_floored = np.maximum(algebraic_errors, 1e-15)
+    super_digits_per_doubling = -np.diff(np.log10(super_floored))
+    algebraic_digits_per_doubling = -np.diff(np.log10(algebraic_floored))
+
+    # Algebraic ~1/N gains about log10(2) ~ 0.3 digits per doubling and never
+    # accelerates. The super-algebraic series gains several digits per doubling
+    # and the rate grows with N (faster than any power) until it saturates.
+    assert float(np.max(algebraic_digits_per_doubling)) < 0.6
+    assert float(np.max(super_digits_per_doubling)) > 2.0
+    assert float(np.max(super_digits_per_doubling)) > 4.0 * float(
+        np.max(algebraic_digits_per_doubling)
+    )
 
 
 def test_weighted_birkhoff_reports_normalized_large_rotation_branch():
@@ -328,6 +388,53 @@ def test_winding_check_rejects_spread_nonmonotone_principal_angles():
     )
 
 
+def test_winding_check_accepts_principal_winding_above_half_turn():
+    # A genuine torus with rotation number 0.51 turn/return (just above the
+    # 1/2-turn boundary) and a small physical libration of +-0.02 turn, given as
+    # principal-valued (arctan2) section angles. Every per-return advance is
+    # strictly forward, so this is a consistently-winding torus. np.unwrap
+    # aliases the >1/2-turn returns into apparent backward steps, dropping the
+    # sign-direction fraction to ~0.68; the principal-branch rewrap holds it at
+    # 1.0 so the primary winding branch accepts directly.
+    settings = BirkhoffClassifierSettings(min_returns=64)
+    steps = np.arange(512)
+    increments = 0.51 + 0.02 * np.sin(2.0 * math.pi * steps / 53.0)
+    cumulative = np.concatenate([[0.0], np.cumsum(increments)])
+    angles = np.arctan2(
+        np.sin(2.0 * math.pi * cumulative),
+        np.cos(2.0 * math.pi * cumulative),
+    )
+
+    assert bool(np.all(increments > 0.0))
+    assert float(np.mean(increments)) > 0.5
+    unwrap_increments = np.diff(np.unwrap(angles))
+    net = float(np.sum(unwrap_increments))
+    unwrap_direction = 1.0 if net > 0.0 else -1.0
+    unwrap_sign_fraction = float(
+        np.mean(unwrap_increments * unwrap_direction > 0.0)
+    )
+    assert unwrap_sign_fraction < settings.min_winding_sign_fraction
+    assert poloidal_angle_series_has_consistent_winding(angles, settings=settings)
+
+
+def test_winding_check_accepts_nonprincipal_winding_above_half_turn():
+    # The same >1/2-turn winding handed in as raw cumulative angles (|angle|
+    # grows past pi), the regime where the old code could not fall back to the
+    # principal alias-recovery branch (its principal-value guard fails). The old
+    # np.unwrap primary branch aliased every >1/2-turn return and rejected this
+    # genuine winding outright; the principal-branch rewrap reconstructs the
+    # forward advances and accepts.
+    settings = BirkhoffClassifierSettings(min_returns=64)
+    steps = np.arange(512)
+    advance_radians = (0.51 + 0.02 * np.sin(2.0 * math.pi * steps / 53.0)) * (
+        2.0 * math.pi
+    )
+    raw_angles = np.concatenate([[0.0], np.cumsum(advance_radians)])
+
+    assert float(np.max(np.abs(raw_angles))) > math.pi
+    assert poloidal_angle_series_has_consistent_winding(raw_angles, settings=settings)
+
+
 def test_invariant_torus_fraction_denominator_excludes_lost_only():
     classifications = [
         SeedClassification(
@@ -378,17 +485,22 @@ def test_invariant_torus_fraction_denominator_excludes_lost_only():
 
     summary = summarize_seed_classifications(classifications)
 
+    # Denominator is the classifiable seeds (invariant + chaotic = 2), not the
+    # survivors (3, which would include the insufficient-returns line). Counting
+    # the not-evaluated survivor in the denominator deflates the fraction from
+    # 1/2 to 1/3, the deflation this test guards against.
     assert summary["wba_seed_count"] == 4
     assert summary["wba_fraction_denominator_policy"] == WBA_FRACTION_DENOMINATOR_POLICY
-    assert summary["wba_fraction_denominator_seed_count"] == 3
+    assert summary["wba_fraction_denominator_seed_count"] == 2
     assert summary["wba_survived_seed_count"] == 3
     assert summary["wba_classified_seed_count"] == 2
+    assert summary["wba_not_evaluated_seed_count"] == 1
     assert summary["wba_evaluation_state"] == "evaluated"
     assert summary["invariant_torus_count"] == 1
-    assert summary["invariant_torus_fraction"] == 1.0 / 3.0
+    assert summary["invariant_torus_fraction"] == 0.5
 
 
-def test_invariant_torus_fraction_denominator_counts_unclassified_survivors():
+def test_invariant_torus_fraction_fails_closed_on_single_classifiable_seed():
     classifications = [
         SeedClassification(
             seed_index=0,
@@ -449,12 +561,63 @@ def test_invariant_torus_fraction_denominator_counts_unclassified_survivors():
 
     summary = summarize_seed_classifications(classifications)
 
+    # Only one seed is classifiable (the invariant torus); the other three
+    # survivors were not evaluated. The old policy counted those survivors in
+    # the denominator and reported a finite fraction (1/4 = 0.25). The corrected
+    # policy excludes them, leaving a single classifiable seed -- below the
+    # WBA_MIN_CLASSIFIABLE_SEEDS floor -- so the fraction fails closed (None)
+    # rather than certifying a champion on one seed.
     assert summary["wba_fraction_denominator_policy"] == WBA_FRACTION_DENOMINATOR_POLICY
-    assert summary["wba_fraction_denominator_seed_count"] == 4
+    assert summary["wba_fraction_denominator_seed_count"] == 1
     assert summary["wba_survived_seed_count"] == 4
     assert summary["wba_classified_seed_count"] == 1
+    assert summary["wba_not_evaluated_seed_count"] == 3
+    assert summary["invariant_torus_fraction"] is None
+    assert (
+        summary["wba_evaluation_state"]
+        == "not_evaluated_too_few_classifiable_seeds"
+    )
+    assert (
+        summary["wba_not_evaluated_reason"]
+        == "not_evaluated_too_few_classifiable_seeds"
+    )
+
+
+def test_invariant_torus_fraction_evaluates_two_classifiable_seeds():
+    # The boundary case: exactly WBA_MIN_CLASSIFIABLE_SEEDS classifiable seeds
+    # (one invariant, one chaotic) evaluates rather than failing closed, and the
+    # fraction is 1/2 over the classifiable denominator.
+    classifications = [
+        SeedClassification(
+            seed_index=0,
+            classification=KAM_CLASS_INVARIANT_TORUS,
+            return_count=512,
+            rotation_number=0.31,
+            matching_digits=9.0,
+            first_half_rotation_number=0.31,
+            second_half_rotation_number=0.31,
+            nearest_rational=None,
+            reason="weighted_birkhoff_average_converged",
+        ),
+        SeedClassification(
+            seed_index=1,
+            classification=KAM_CLASS_CHAOTIC,
+            return_count=512,
+            rotation_number=0.19,
+            matching_digits=1.0,
+            first_half_rotation_number=0.18,
+            second_half_rotation_number=0.20,
+            nearest_rational=None,
+            reason="weighted_birkhoff_average_not_converged",
+        ),
+    ]
+
+    summary = summarize_seed_classifications(classifications)
+
+    assert summary["wba_classified_seed_count"] == 2
+    assert summary["wba_not_evaluated_seed_count"] == 0
     assert summary["wba_evaluation_state"] == "evaluated"
-    assert summary["invariant_torus_fraction"] == 0.25
+    assert summary["invariant_torus_fraction"] == 0.5
 
 
 def test_invariant_torus_fraction_reports_not_evaluated_for_only_insufficient_returns():

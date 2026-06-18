@@ -26,8 +26,12 @@ from examples.single_stage_optimization.banana_opt.topology.fieldline_map import
     FieldlineIntegratorOptions,
 )
 from examples.single_stage_optimization.banana_opt.topology.iota_profile import (
+    DEFAULT_IOTA_MATCH_TOLERANCE,
     FREEZE_IN_DOMAIN,
     FREEZE_NO_CROSSING,
+    MATCH_TOLERANCE_REFERENCE_DENOMINATOR,
+    IotaProfile,
+    IotaProfileSample,
     freeze_probe_inputs,
     freeze_rational_targets,
     linear_radial_labels,
@@ -287,3 +291,134 @@ def test_sample_iota_profile_rejects_nonpositive_radial_label():
             toroidal_turns=_PROFILE_TURNS,
             integrator_options=_INTEGRATOR_OPTIONS,
         )
+
+
+def _profile_from_samples(
+    samples: tuple[tuple[float, float], ...],
+) -> IotaProfile:
+    """Build a profile directly from (radial_label, iota) pairs.
+
+    The synthetic analytic fields are monotonic in minor radius, so a
+    non-monotonic ι(r) — needed to exercise multiple crossings of one rational —
+    is constructed by handing the profile its samples directly. This tests the
+    profile's crossing-location knowledge, which is field-independent.
+    """
+
+    return IotaProfile(
+        axis_r=1.0,
+        axis_z=0.0,
+        samples=tuple(
+            IotaProfileSample(
+                radial_label=float(label),
+                iota=float(iota),
+                toroidal_turns=_PROFILE_TURNS,
+                min_bphi_over_b=0.5,
+                reason="",
+            )
+            for label, iota in samples
+        ),
+    )
+
+
+# A tent-shaped ι(r) that rises from 0.20 to a 0.40 apex and falls back to 0.18,
+# so the 3/10 = 0.30 resonance is realized twice: once on the rising flank
+# (positive shear) and once on the falling flank (negative shear). Both are real
+# island chains; the old first-bracket-only search saw only the inner one.
+_NON_MONOTONIC_TENT = (
+    (0.10, 0.20),
+    (0.20, 0.32),
+    (0.30, 0.40),
+    (0.40, 0.28),
+    (0.50, 0.18),
+)
+
+
+def test_all_rational_crossings_finds_both_sides_of_nonmonotonic_profile():
+    profile = _profile_from_samples(_NON_MONOTONIC_TENT)
+
+    crossings = profile.all_rational_crossings(3, 10)
+
+    # The old behaviour returned a single bracket; the falling-flank crossing was
+    # silently dropped. A non-monotonic ι(r) genuinely realizes 0.30 twice.
+    assert len(crossings) == 2
+    labels = [crossing.radial_label for crossing in crossings]
+    assert labels == sorted(labels)
+    rising, falling = crossings
+    assert rising.radial_label < 0.30 < falling.radial_label
+    assert rising.local_shear > 0.0
+    assert falling.local_shear < 0.0
+    for crossing in crossings:
+        assert crossing.iota == pytest.approx(0.30)
+        assert (
+            crossing.bracket_lower_label
+            <= crossing.radial_label
+            <= crossing.bracket_upper_label
+        )
+
+
+def test_locate_rational_returns_innermost_of_multiple_crossings():
+    profile = _profile_from_samples(_NON_MONOTONIC_TENT)
+
+    innermost = profile.locate_rational(3, 10)
+    all_crossings = profile.all_rational_crossings(3, 10)
+
+    assert innermost is not None
+    # locate_rational is a deliberate "innermost" narrowing of the full set, not
+    # an accident of which bracket was scanned first.
+    assert innermost.radial_label == min(
+        crossing.radial_label for crossing in all_crossings
+    )
+    assert innermost.local_shear > 0.0  # the inner crossing is on the rising flank
+
+
+def test_monotonic_profile_yields_single_crossing_per_rational():
+    # A strictly monotonic ι(r) crosses each rational once: all_rational_crossings
+    # must agree with the single locate_rational result (no spurious extras).
+    profile = _profile_from_samples(
+        ((0.10, 0.20), (0.20, 0.28), (0.30, 0.36), (0.40, 0.44))
+    )
+
+    crossings = profile.all_rational_crossings(3, 10)  # 0.30 crossed once
+
+    assert len(crossings) == 1
+    assert crossings[0].local_shear > 0.0
+    assert profile.locate_rational(3, 10).radial_label == pytest.approx(
+        crossings[0].radial_label
+    )
+
+
+def test_default_match_tolerance_is_below_worst_case_farey_gap():
+    # The tolerance must never confuse a sample sitting on its own rational with
+    # an adjacent reduced fraction. The worst case is two Farey neighbours with
+    # denominators ≤ Q, which are at least 1/(Q·(Q−1)) apart.
+    reference_denominator = MATCH_TOLERANCE_REFERENCE_DENOMINATOR
+    worst_case_gap = 1.0 / (
+        reference_denominator * (reference_denominator - 1)
+    )
+    assert DEFAULT_IOTA_MATCH_TOLERANCE < worst_case_gap
+    # And it is a strict fraction of that gap (a real safety margin, not equality).
+    assert DEFAULT_IOTA_MATCH_TOLERANCE == pytest.approx(worst_case_gap * 1.0e-3)
+
+
+def test_default_tolerance_does_not_conflate_adjacent_rationals():
+    # Two samples sitting essentially on neighbouring rationals 4/9 and 3/7
+    # (the closest reduced fractions below q=10) must each resolve to their own
+    # rational, never to the other, under the default tolerance.
+    four_ninths = 4.0 / 9.0
+    three_sevenths = 3.0 / 7.0
+    profile = _profile_from_samples(
+        (
+            (0.10, four_ninths),
+            (0.20, four_ninths + DEFAULT_IOTA_MATCH_TOLERANCE * 0.5),
+            (0.30, three_sevenths),
+        )
+    )
+
+    crossing_49 = profile.locate_rational(4, 9)
+    crossing_37 = profile.locate_rational(3, 7)
+    assert crossing_49 is not None
+    assert crossing_37 is not None
+    # Each rational is placed at its own samples, not the neighbour's.
+    assert crossing_49.radial_label <= 0.20
+    assert crossing_37.radial_label == pytest.approx(0.30)
+    assert crossing_49.radial_label < crossing_37.radial_label

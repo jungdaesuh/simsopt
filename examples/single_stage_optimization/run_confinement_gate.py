@@ -25,12 +25,8 @@ from pathlib import Path
 
 from banana_opt.confinement_gate import (
     ConfinementGateConfig,
-    evaluate_confinement_gate,
-    metrics_from_topology_verdict,
+    certify_confinement,
 )
-from banana_opt.topology_fidelity_ladder import DEFAULT_TOPOLOGY_TIER_SPECS
-
-STRICT_TIER = "strict"
 
 
 def _optional_float(value: str | None) -> float | None:
@@ -107,28 +103,9 @@ def resolve_beta(run_dir: Path, override: float | None) -> float:
     return 0.0
 
 
-def certify(run_dir: str, args: argparse.Namespace) -> dict:
-    # Import the strict-tier runner lazily: it transitively pulls in the heavy single-stage
-    # module (simsopt/jax), so deferring it keeps this driver module importable cheaply --
-    # e.g. to unit-test resolve_beta / parse_args without paying for the full toolchain.
-    from run_topology_fidelity_ladder import evaluate_case
-
-    run_path = Path(run_dir).resolve()
-    case = evaluate_case(run_path)
-    strict_record = case[STRICT_TIER]
-    strict_verdict = strict_record["topology_verdict"]
-    nfieldlines = DEFAULT_TOPOLOGY_TIER_SPECS[STRICT_TIER].nfieldlines
-
-    metrics = metrics_from_topology_verdict(
-        strict_verdict,
-        nfieldlines,
-        qa_nonqs_ratio=_optional_float(args.qa_nonqs),
-        magnetic_well=_optional_float(args.magnetic_well),
-        iota_shear=_optional_float(args.iota_shear),
-        beta=resolve_beta(run_path, args.beta),
-        mercier_dmerc_min=_optional_float(args.mercier_dmerc),
-    )
-    config = ConfinementGateConfig(
+def config_from_cli_args(args: argparse.Namespace) -> ConfinementGateConfig:
+    """Build the externally-owned gate config from parsed CLI flags (SSOT for the CLI)."""
+    return ConfinementGateConfig(
         min_survival_fraction=args.min_survival,
         require_islands=not args.advisory_islands,
         min_classifiable_fraction=args.min_classifiable,
@@ -139,16 +116,19 @@ def certify(run_dir: str, args: argparse.Namespace) -> dict:
         iota_shear_min=args.iota_shear_min,
         require_shear=args.require_shear,
     )
-    verdict = evaluate_confinement_gate(metrics, config)
-    payload = {
-        "run_dir": str(run_path),
-        "field_label": case.get("field_label"),
-        "strict_topology_passed": bool(strict_verdict.get("passed")),
-        "confinement_verdict": verdict.to_dict(),
-    }
-    out_path = run_path / "confinement_verdict.json"
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return payload
+
+
+def certify(run_dir: str, args: argparse.Namespace) -> dict:
+    run_path = Path(run_dir).resolve()
+    return certify_confinement(
+        run_path,
+        config=config_from_cli_args(args),
+        beta=resolve_beta(run_path, args.beta),
+        qa_nonqs_ratio=_optional_float(args.qa_nonqs),
+        magnetic_well=_optional_float(args.magnetic_well),
+        iota_shear=_optional_float(args.iota_shear),
+        mercier_dmerc_min=_optional_float(args.mercier_dmerc),
+    )
 
 
 def main() -> None:
