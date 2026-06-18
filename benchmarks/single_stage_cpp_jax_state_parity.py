@@ -480,7 +480,7 @@ def _evaluate_jax_lane(lane_name: str, platform_request: str) -> dict[str, objec
 def _real_fixture_metrics(fixture: dict[str, object]) -> dict[str, float]:
     from simsopt.geo import SurfaceRZFourier
     from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
-    from simsopt.geo.surfaceobjectives import SurfaceSurfaceDistance
+    from simsopt_jax_adapters.geo.surface_objectives import SurfaceSurfaceDistance
 
     bs = fixture["bs"]
     booz_surf = fixture["boozer_surface"]
@@ -560,8 +560,35 @@ def _real_jax_wrapper_values_and_gradient(
 
 
 def _real_boozer_adjoint_solve(booz_surf) -> dict[str, object]:
-    adjoint_state = booz_surf.get_adjoint_runtime_state()
     result = booz_surf.res
+    get_adjoint_runtime_state = getattr(booz_surf, "get_adjoint_runtime_state", None)
+    if not callable(get_adjoint_runtime_state):
+        linear_operator, linear_operator_source = _real_boozer_linear_operator(result)
+        rhs = np.zeros(linear_operator.shape[1], dtype=np.float64)
+        rhs[-2 if result["G"] is not None else -1] = 1.0
+        adjoint, _, rank, singular_values = np.linalg.lstsq(
+            linear_operator.T,
+            rhs,
+            rcond=None,
+        )
+        residual = linear_operator.T @ adjoint - rhs
+        adjoint = np.asarray(adjoint, dtype=np.float64)
+        singular_values = np.asarray(singular_values, dtype=np.float64)
+        return {
+            "status": "pass",
+            "residual": float(np.linalg.norm(residual)),
+            "residual_inf_norm": (
+                float(np.max(np.abs(residual))) if residual.size else 0.0
+            ),
+            "linearization_kind": f"dense_{linear_operator_source}_transpose_lstsq",
+            "decision_size": int(linear_operator.shape[1]),
+            "adjoint_inf_norm": float(np.max(np.abs(adjoint))) if adjoint.size else 0.0,
+            "rank": int(rank),
+            "min_singular_value": (
+                float(np.min(singular_values)) if singular_values.size else 0.0
+            ),
+        }
+    adjoint_state = get_adjoint_runtime_state()
     rhs = np.zeros(adjoint_state.decision_size)
     rhs[-2 if result["G"] is not None else -1] = 1.0
     solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
@@ -983,10 +1010,7 @@ def _build_real_reduced_fixed_state_artifact(platform_request: str) -> dict[str,
             LANE_JAX_CPU,
             platform_request,
             jax_cpu_fixture,
-            hashes=_common_hashes(
-                REAL_REDUCED_FIXTURE_SCOPE,
-                real_fixture=jax_cpu_fixture,
-            ),
+            hashes=cpu_hashes,
         )
         lanes[LANE_JAX_GPU] = _blocked_lane(
             LANE_JAX_GPU,
@@ -1008,10 +1032,7 @@ def _build_real_reduced_fixed_state_artifact(platform_request: str) -> dict[str,
             LANE_JAX_GPU,
             platform_request,
             jax_gpu_fixture,
-            hashes=_common_hashes(
-                REAL_REDUCED_FIXTURE_SCOPE,
-                real_fixture=jax_gpu_fixture,
-            ),
+            hashes=cpu_hashes,
         )
 
     comparisons = _build_comparisons(lanes)

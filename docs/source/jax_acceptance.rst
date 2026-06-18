@@ -306,7 +306,7 @@ Before switching a research workflow to the JAX backend, verify:
 
 .. code-block:: text
 
-   [ ] All M1–M4 unit tests pass (jax_smoke CI green)
+   [ ] All JAX backend unit tests pass (jax_smoke CI green)
    [ ] Stage 2 parity tests pass (integration/test_stage2_jax.py)
    [ ] Single-stage value sanity tests pass (small/finite/non-negative)
    [ ] Single-stage gradient FD validation passes (fixed-surface direct term)
