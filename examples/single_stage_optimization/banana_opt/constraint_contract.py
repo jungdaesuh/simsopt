@@ -236,12 +236,16 @@ def _validate_engineering_values(
     contract: dict[str, ConstraintValue],
     *,
     allow_offspec_current_contract: bool,
+    allow_offspec_winding_radius_contract: bool = False,
 ) -> None:
     _validate_tf_current_contract(
         contract[_KEY_TF_CURRENT_A],
         allow_offspec_current_contract=allow_offspec_current_contract,
     )
-    _hc.validate_banana_winding_surface_radius(contract[_KEY_BANANA_SURF_RADIUS])
+    _hc.validate_banana_winding_surface_radius(
+        contract[_KEY_BANANA_SURF_RADIUS],
+        accept_offspec=allow_offspec_winding_radius_contract,
+    )
     if contract[_KEY_BANANA_CURRENT_MAX_A] <= 0.0:
         raise ValueError(
             "BANANA_CURRENT_MAX_A must be positive; got "
@@ -283,6 +287,7 @@ def resolve_constraint_contract(
     allow_offspec_current_contract: bool = False,
     allow_offspec_length_contract: bool = False,
     allow_offspec_curvature_contract: bool = False,
+    allow_offspec_winding_radius_contract: bool = False,
 ) -> tuple[Mapping[str, ConstraintValue], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
@@ -317,6 +322,7 @@ def resolve_constraint_contract(
     _validate_engineering_values(
         contract,
         allow_offspec_current_contract=allow_offspec_current_contract,
+        allow_offspec_winding_radius_contract=allow_offspec_winding_radius_contract,
     )
     if (
         contract[_KEY_BANANA_CURRENT_MAX_A] > _hc.BANANA_CURRENT_HARD_LIMIT_A
@@ -355,6 +361,7 @@ def resolve_constraint_contract_from_wire_names(
     allow_offspec_current_contract: bool = False,
     allow_offspec_length_contract: bool = False,
     allow_offspec_curvature_contract: bool = False,
+    allow_offspec_winding_radius_contract: bool = False,
 ) -> tuple[Mapping[str, ConstraintValue], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
@@ -369,6 +376,7 @@ def resolve_constraint_contract_from_wire_names(
         allow_offspec_current_contract=allow_offspec_current_contract,
         allow_offspec_length_contract=allow_offspec_length_contract,
         allow_offspec_curvature_contract=allow_offspec_curvature_contract,
+        allow_offspec_winding_radius_contract=allow_offspec_winding_radius_contract,
     )
 
 

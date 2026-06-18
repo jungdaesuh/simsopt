@@ -35,10 +35,10 @@ class Stage2BananaRadiusContractTests(unittest.TestCase):
     def test_stage2_main_uses_shared_winding_radius_contract(self):
         source = inspect.getsource(stage2_solver.main)
 
-        self.assertIn(
-            "validate_banana_winding_surface_radius(args.banana_surf_radius)",
-            source,
-        )
+        self.assertIn("validate_banana_winding_surface_radius(", source)
+        self.assertIn("args.banana_surf_radius", source)
+        # the off-spec winding-radius override is routed through the shared validator
+        self.assertIn("args.accept_offspec_winding_radius", source)
         self.assertNotIn(
             "Stage 2 banana winding surface must remain concentric",
             source,
@@ -54,6 +54,43 @@ class Stage2BananaRadiusContractTests(unittest.TestCase):
 
         self.assertEqual(args.banana_surf_radius, 0.22)
         self.assertLess(args.banana_surf_radius, VACUUM_VESSEL_MINOR_RADIUS_M)
+
+    def test_offspec_winding_radius_requires_explicit_flag(self):
+        # Default contract: a winding radius at/beyond the vessel minor radius is rejected.
+        with self.assertRaises(ValueError):
+            stage2_solver.validate_banana_winding_surface_radius(
+                VACUUM_VESSEL_MINOR_RADIUS_M + 0.05
+            )
+        # With the explicit opt-in flag, an off-vessel exploratory radius is accepted
+        # (physics-only exploration; buildability is out of scope for this flag).
+        accepted = stage2_solver.validate_banana_winding_surface_radius(
+            VACUUM_VESSEL_MINOR_RADIUS_M + 0.05,
+            accept_offspec=True,
+        )
+        self.assertEqual(accepted, VACUUM_VESSEL_MINOR_RADIUS_M + 0.05)
+        # A non-positive radius is rejected even with the override.
+        with self.assertRaises(ValueError):
+            stage2_solver.validate_banana_winding_surface_radius(
+                0.0, accept_offspec=True
+            )
+        # The CLI exposes the opt-in flag, default False.
+        with mock.patch.object(
+            sys, "argv", ["banana_coil_solver.py", "--banana-surf-radius", "0.30"]
+        ):
+            args = stage2_solver.parse_args()
+        self.assertFalse(args.accept_offspec_winding_radius)
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--banana-surf-radius",
+                "0.30",
+                "--accept-offspec-winding-radius",
+            ],
+        ):
+            args = stage2_solver.parse_args()
+        self.assertTrue(args.accept_offspec_winding_radius)
 
     def test_offspec_major_radius_requires_explicit_replay_flag(self):
         source = inspect.getsource(stage2_solver.main)

@@ -263,9 +263,15 @@ def validate_coil_length_target(
     return length_target
 
 
-def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
+def validate_banana_winding_surface_radius(
+    banana_surf_radius: float,
+    *,
+    accept_offspec: bool = False,
+) -> float:
     radius = float(banana_surf_radius)
-    if not (0.0 < radius < VACUUM_VESSEL_MINOR_RADIUS_M):
+    if radius <= 0.0:
+        raise ValueError("Banana winding-surface radius must be positive.")
+    if radius >= VACUUM_VESSEL_MINOR_RADIUS_M and not accept_offspec:
         raise ValueError(
             "Banana winding-surface radius must stay strictly inside the vacuum vessel "
             f"minor radius {VACUUM_VESSEL_MINOR_RADIUS_M:.3f} m."

@@ -1244,6 +1244,11 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--accept-offspec-winding-radius",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--toroidal-flux",
         type=float,
         default=float(os.environ.get("TOROIDAL_FLUX", "0.24")),
@@ -2805,6 +2810,7 @@ def build_stage2_constraint_artifact_metadata(
         allow_offspec_current_contract=stage2_current_contract_allows_offspec(args),
         allow_offspec_length_contract=stage2_length_contract_allows_offspec(args),
         allow_offspec_curvature_contract=stage2_curvature_contract_allows_offspec(args),
+        allow_offspec_winding_radius_contract=args.accept_offspec_winding_radius,
     )
     resolved_override_reason = override_reason
     if (
@@ -3963,7 +3969,10 @@ def main(parsed_args=None):
     target_lcfs_minor_radius_m = validate_target_lcfs_minor_radius(
         args.target_lcfs_max_minor_radius_m
     )
-    banana_surf_radius = validate_banana_winding_surface_radius(args.banana_surf_radius)
+    banana_surf_radius = validate_banana_winding_surface_radius(
+        args.banana_surf_radius,
+        accept_offspec=args.accept_offspec_winding_radius,
+    )
 
     # Scale the plasma family from the LCFS target.  The vessel/winding R0 stays
     # at the hardware contract value and is not reused as a plasma radius.
