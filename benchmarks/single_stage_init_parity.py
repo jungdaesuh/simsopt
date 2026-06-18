@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 import contextlib
 from dataclasses import dataclass, field as dataclass_field
 import json
@@ -1394,6 +1394,32 @@ def _finite_seed_float(
     return observed
 
 
+def _resolve_warm_start_seed_contract_G(
+    args: argparse.Namespace,
+    warm_start_run_dir: Path,
+    results: Mapping[str, object],
+) -> object:
+    final_g = results.get("FINAL_G")
+    if final_g is not None:
+        return final_g
+
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    biot_savart_path = single_stage_example.resolve_single_stage_warm_start_biotsavart_path(
+        warm_start_run_dir
+    )
+    if biot_savart_path is None:
+        raise FileNotFoundError(
+            "Warm-start donor is missing biot_savart_opt.json, so FINAL_G cannot "
+            f"be derived for {warm_start_run_dir}."
+        )
+    donor_bs = single_stage_example.load(biot_savart_path)
+    tf_coils = donor_bs.coils[: int(getattr(args, "num_tf_coils", 20))]
+    return single_stage_example.resolve_single_stage_runtime_seed_G(None, tf_coils)
+
+
 def _append_seed_iota_quality_failures(
     failures: list[str],
     *,
@@ -1484,11 +1510,6 @@ def _validate_warm_start_seed_contract(
         field_name="FINAL_IOTA",
         failures=failures,
     )
-    _finite_seed_float(
-        results.get("FINAL_G"),
-        field_name="FINAL_G",
-        failures=failures,
-    )
     _append_seed_iota_quality_failures(
         failures,
         seed_iota=seed_iota,
@@ -1498,6 +1519,16 @@ def _validate_warm_start_seed_contract(
         failures.append("HARDWARE_CONSTRAINTS_OK is false")
     if results.get("SELF_INTERSECTING") is True:
         failures.append("SELF_INTERSECTING is true")
+    seed_g = results.get("FINAL_G")
+    if seed_g is None and not failures:
+        seed_g = _resolve_warm_start_seed_contract_G(
+            args, warm_start_run_dir, results
+        )
+    _finite_seed_float(
+        seed_g,
+        field_name="FINAL_G or derived runtime G",
+        failures=failures,
+    )
     if failures:
         raise ValueError(
             "single_stage_init_parity high-resolution warm-start seed contract "
