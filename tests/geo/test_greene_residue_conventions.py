@@ -64,6 +64,8 @@ from examples.single_stage_optimization.banana_opt.topology.residue_diagnostics 
 from examples.single_stage_optimization.banana_opt.topology.residue_objective import (
     DEFAULT_RESIDUE_OBJECTIVE_WEIGHT,
     DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
+    GREENE_RESIDUE_BRANCH_LOSS_RAISE,
+    GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED,
     GREENE_RESIDUE_OBJECTIVE_VALIDATION_EVIDENCE_KIND,
     BiotSavartGreeneResidueObjective,
     ResidueBranchSeed,
@@ -72,6 +74,10 @@ from examples.single_stage_optimization.banana_opt.topology.residue_objective im
     residue_branch_seed_from_payload,
     residue_objective_target_manifest_id,
     residue_target_from_payload,
+)
+from examples.single_stage_optimization.banana_opt.topology.residue_seed_builder import (
+    generate_residue_seed_files,
+    rank_island_candidates,
 )
 from examples.single_stage_optimization.banana_opt.topology.residue_sensitivity import (
     BIOT_SAVART_BRANCH_RESOLVED_FD_MODE,
@@ -2773,3 +2779,347 @@ def test_low_toroidal_field_ratio_is_loudly_rejected_before_division():
             field=LowToroidalRatioField(),
             min_bphi_over_b=1.0e-6,
         )
+
+
+def test_residue_objective_branch_loss_policy_treats_lost_island_as_satisfied():
+    field, _t, chart, integrator_options, _solver, _seed, validation_id, original_x, _d = (
+        _biot_savart_residue_objective_inputs()
+    )
+    # The p=0 orbit of this coil field closes near radial_label ~0.11; a target
+    # window of (0.30, 0.40) is therefore a "drifted/healed away" island that
+    # converges geometrically but is flagged OUTSIDE_RADIAL_WINDOW.
+    lost_target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=0.35,
+        radial_window=(0.30, 0.40),
+        branches=(GREENE_BRANCH_O,),
+        weight=1.7,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+    seed = ResidueBranchSeed(
+        target_id=lost_target.manifest_key(),
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        validation_id=validation_id,
+        optimizer_taylor_validated=True,
+        direct_proxy_consistency_validated=True,
+    )
+
+    def make_objective(on_branch_loss: str) -> BiotSavartGreeneResidueObjective:
+        return BiotSavartGreeneResidueObjective(
+            field,
+            targets=(lost_target,),
+            chart=chart,
+            branch_seeds=(seed,),
+            validation_id=validation_id,
+            objective_weight=0.75,
+            residue_scale=0.5,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+            r_satisfied=0.0,
+            on_branch_loss=on_branch_loss,
+        )
+
+    # Default policy keeps a lost island loud.
+    with pytest.raises(ValueError, match="branch solve requires"):
+        make_objective(GREENE_RESIDUE_BRANCH_LOSS_RAISE).J()
+
+    # treat_as_satisfied: zero J and dJ contribution, recorded + traceable.
+    satisfied = make_objective(GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED)
+    assert satisfied.J() == pytest.approx(0.0)
+    np.testing.assert_allclose(satisfied.dJ(), np.zeros_like(field.x))
+    branch_values = satisfied.branch_values()
+    assert len(branch_values) == 1
+    assert branch_values[0].status == BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW
+    assert branch_values[0].branch_objective == pytest.approx(0.0)
+    assert satisfied.gradient_diagnostics() == ()
+    payload = satisfied.to_json_dict()
+    assert payload["enabled"] is True
+    assert payload["on_branch_loss"] == GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED
+    assert payload["value"] == pytest.approx(0.0)
+    assert payload["branches"][0]["status"] == BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW
+    np.testing.assert_allclose(field.x, original_x)
+
+
+def test_residue_objective_branch_loss_policy_keeps_integrity_failure_loud():
+    field, _t, chart, integrator_options, _solver, _seed, validation_id, original_x, direction = (
+        _biot_savart_residue_objective_inputs()
+    )
+    # An in-window target that converges at full resolution but is forced to
+    # BRANCH_STATUS_BAD_DETERMINANT by an under-resolved RK4 tangent map. This
+    # is a numerical-integrity failure, not a healed island, so it must stay
+    # loud even under treat_as_satisfied.
+    integrity_target = RationalTarget(
+        p=0,
+        q=1,
+        radial_label=0.126,
+        radial_window=(0.10, 0.16),
+        branches=(GREENE_BRANCH_O,),
+        weight=1.7,
+    )
+    seed = ResidueBranchSeed(
+        target_id=integrity_target.manifest_key(),
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        validation_id=validation_id,
+        optimizer_taylor_validated=True,
+        direct_proxy_consistency_validated=True,
+    )
+    underresolved = FieldlineIntegratorOptions(
+        rtol=integrator_options.rtol,
+        atol=integrator_options.atol,
+        max_step=integrator_options.max_step,
+        samples_per_full_torus=96,
+        min_bphi_over_b=integrator_options.min_bphi_over_b,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-10,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+    field.x = original_x + 1.0e-3 * direction
+    try:
+        objective = BiotSavartGreeneResidueObjective(
+            field,
+            targets=(integrity_target,),
+            chart=chart,
+            branch_seeds=(seed,),
+            validation_id=validation_id,
+            objective_weight=0.75,
+            residue_scale=0.5,
+            integrator_options=underresolved,
+            solver_options=solver_options,
+            r_satisfied=0.0,
+            on_branch_loss=GREENE_RESIDUE_BRANCH_LOSS_TREAT_AS_SATISFIED,
+        )
+        with pytest.raises(ValueError, match="branch solve requires"):
+            objective.J()
+    finally:
+        field.x = original_x
+
+
+def test_residue_objective_rejects_unknown_branch_loss_policy():
+    field, target, chart, integrator_options, solver_options, _seed, _vid, _x, _d = (
+        _biot_savart_residue_objective_inputs()
+    )
+    with pytest.raises(ValueError, match="on_branch_loss"):
+        BiotSavartGreeneResidueObjective(
+            field,
+            targets=(target,),
+            chart=chart,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+            on_branch_loss="silently_ignore",
+        )
+
+
+def _driven_field_for_rotation(
+    chart: PoincareChart,
+    target: RationalTarget,
+    rotation_angle: float,
+) -> DrivenPeriodicOrbitField:
+    period = 2.0 * math.pi * float(target.q)
+    return DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=0.0,
+        tangent_generator=(float(rotation_angle) / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+    )
+
+
+def test_rank_island_candidates_scales_width_with_residue():
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.2,
+        radial_window=(0.18, 0.23),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+
+    wide = rank_island_candidates(
+        _driven_field_for_rotation(chart, target, 0.5 * math.pi),
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        phase_angles=(0.0,),
+    )
+    narrow = rank_island_candidates(
+        _driven_field_for_rotation(chart, target, 0.1 * math.pi),
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        phase_angles=(0.0,),
+    )
+
+    assert len(wide) == 1
+    assert len(narrow) == 1
+    # Greene residue of the linearized rotation generator is (1 - cos(angle))/2,
+    # so the island-width proxy is sqrt of that and grows with the rotation.
+    assert wide[0].island_width_proxy == pytest.approx(
+        math.sqrt((1.0 - math.cos(0.5 * math.pi)) / 2.0),
+        abs=1.0e-4,
+    )
+    assert wide[0].island_width_proxy > narrow[0].island_width_proxy
+    assert wide[0].residue_classification == GREENE_RESIDUE_ELLIPTIC_O
+    assert wide[0].branch == GREENE_BRANCH_O
+
+
+def test_residue_seed_builder_discovers_validates_and_round_trips(tmp_path):
+    field, target, chart, integrator_options, _solver, _seed, _vid, original_x, direction = (
+        _biot_savart_residue_objective_inputs()
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-10,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+    # A 1e-2 coil-DOF perturbation opens a p=0 island deep enough (|R| ~ 3e-4)
+    # that the auto-discovered fixed point clears the 1.95 Taylor-order gate. A
+    # 1e-3 ripple gives |R| ~ 3e-6, which the builder correctly rejects as below
+    # finite-difference resolution.
+    field.x = original_x + 1.0e-2 * direction
+    targets_path = tmp_path / "targets.json"
+    seeds_path = tmp_path / "seeds.json"
+    try:
+        # Full CLI core: discover + rank + validate + write, with no pinned seeds.
+        manifests = generate_residue_seed_files(
+            field,
+            targets=(target,),
+            chart=chart,
+            validation_artifact_id="auto-e2e",
+            targets_path=targets_path,
+            seeds_path=seeds_path,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+            phase_angles=(0.0, 0.25 * math.pi, 0.5 * math.pi),
+            direction=direction,
+            r_satisfied=0.0,
+        )
+
+        assert manifests.validated
+        assert manifests.validated[0].taylor_min_order > 1.95
+
+        # The emitted payloads must be accepted by the objective's own loaders,
+        # which re-run every anti-self-attestation gate.
+        loaded_targets = load_residue_objective_targets(targets_path)
+        manifest_id = residue_objective_target_manifest_id(loaded_targets)
+        assert manifest_id == manifests.seeds_payload["target_manifest_id"]
+        validation_id, seeds = load_residue_objective_seeds(
+            seeds_path,
+            target_manifest_id=manifest_id,
+        )
+        assert validation_id == "auto-e2e"
+        assert {seed.branch for seed in seeds} == {
+            validated.branch for validated in manifests.validated
+        }
+
+        objective = BiotSavartGreeneResidueObjective(
+            field,
+            targets=loaded_targets,
+            chart=chart,
+            branch_seeds=seeds,
+            validation_id=validation_id,
+            objective_weight=1.0,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+            r_satisfied=0.0,
+        )
+        assert objective.J() >= 0.0
+        assert objective.to_json_dict()["enabled"] is True
+    finally:
+        field.x = original_x
+
+
+def test_residue_objective_gradient_step_reduces_residue():
+    field, target, chart, integrator_options, _solver, _seed, validation_id, original_x, direction = (
+        _biot_savart_residue_objective_inputs()
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-10,
+        winding_tolerance=1.0e-4,
+        max_iterations=20,
+        max_step_norm=0.02,
+    )
+    base_x = original_x + 1.0e-2 * direction
+    target_manifest_id = residue_objective_target_manifest_id((target,))
+    field.x = base_x
+    try:
+        # Locate the p=0 island that the 1e-2 ripple opens; the converged fixed
+        # point is the validated objective seed.
+        located = solve_periodic_orbit(
+            field,
+            (1.11, -0.07),
+            target=target,
+            chart=chart,
+            branch=GREENE_BRANCH_O,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+        assert located.status == BRANCH_STATUS_CONVERGED
+        seed = ResidueBranchSeed(
+            target_id=target.manifest_key(),
+            branch=GREENE_BRANCH_O,
+            section_state=located.state,
+            validation_id=validation_id,
+            optimizer_taylor_validated=True,
+            direct_proxy_consistency_validated=True,
+        )
+
+        def objective_at(coil_dofs: np.ndarray) -> BiotSavartGreeneResidueObjective:
+            field.x = coil_dofs
+            return BiotSavartGreeneResidueObjective(
+                field,
+                targets=(target,),
+                chart=chart,
+                branch_seeds=(seed,),
+                validation_id=validation_id,
+                target_manifest_id=target_manifest_id,
+                objective_weight=1.0,
+                residue_scale=1.0,
+                integrator_options=integrator_options,
+                solver_options=solver_options,
+                r_satisfied=0.0,
+            )
+
+        base_objective = objective_at(base_x)
+        base_value = base_objective.J()
+        gradient = np.asarray(base_objective.dJ(), dtype=float)
+        gradient_norm = float(np.linalg.norm(gradient))
+        assert base_value > 0.0
+        assert gradient_norm > 0.0
+
+        # One small step along -grad J must reduce the residue^2 objective:
+        # concrete evidence the gradient is a usable island-suppression direction.
+        step = 1.0e-4 / gradient_norm
+        descended_value = objective_at(base_x - step * gradient).J()
+        assert descended_value < base_value
+    finally:
+        field.x = original_x
