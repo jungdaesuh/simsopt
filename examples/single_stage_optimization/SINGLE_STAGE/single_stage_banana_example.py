@@ -88,6 +88,7 @@ from banana_opt.topology.fieldline_map import FieldlineIntegratorOptions
 from banana_opt.topology.kam_birkhoff import KAM_FRACTION_SEMANTICS
 from banana_opt.topology.periodic_orbit import PeriodicOrbitSolverOptions
 from banana_opt.topology.poincare_chart import PoincareChart
+from banana_opt.topology.residue_diagnostics import uniform_branch_phase_angles
 from banana_opt.topology.residue_objective import (
     BiotSavartGreeneResidueObjective,
     DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
@@ -97,6 +98,10 @@ from banana_opt.topology.residue_objective import (
     load_residue_objective_seeds,
     load_residue_objective_targets,
     residue_objective_target_manifest_id,
+)
+from banana_opt.topology.residue_seed_builder import (
+    autogenerate_residue_manifests,
+    write_residue_manifests,
 )
 from workflow_helpers import (
     Stage2SeedSpec,
@@ -3440,6 +3445,54 @@ def parse_args():
         type=float,
         default=float(os.environ.get("RESIDUE_OBJECTIVE_MAX_NEWTON_STEP_NORM", "0.05")),
     )
+    parser.add_argument(
+        "--residue-objective-autogenerate-seeds",
+        action="store_true",
+        default=(
+            os.environ.get("RESIDUE_OBJECTIVE_AUTOGENERATE_SEEDS", "0")
+            not in ("", "0", "false", "False")
+        ),
+        help=(
+            "Auto-discover, rank by island width, and validate islands from the "
+            "current coil field, writing the validated targets+seeds JSON instead "
+            "of requiring a hand-built --residue-objective-seeds-json. "
+            "--residue-objective-targets-json then supplies candidate resonances."
+        ),
+    )
+    parser.add_argument(
+        "--residue-objective-autogenerate-validation-id",
+        default=os.environ.get("RESIDUE_OBJECTIVE_AUTOGENERATE_VALIDATION_ID", ""),
+        help=(
+            "validation_artifact_id stamped into auto-generated residue seeds "
+            "(required when --residue-objective-autogenerate-seeds is set)."
+        ),
+    )
+    parser.add_argument(
+        "--residue-objective-autogenerate-max-candidates",
+        type=int,
+        default=(
+            int(os.environ["RESIDUE_OBJECTIVE_AUTOGENERATE_MAX_CANDIDATES"])
+            if "RESIDUE_OBJECTIVE_AUTOGENERATE_MAX_CANDIDATES" in os.environ
+            else None
+        ),
+        help="Validate at most this many widest islands (default: all discovered).",
+    )
+    parser.add_argument(
+        "--residue-objective-autogenerate-min-island-width",
+        type=float,
+        default=float(
+            os.environ.get("RESIDUE_OBJECTIVE_AUTOGENERATE_MIN_ISLAND_WIDTH", "0.0")
+        ),
+        help="Skip discovered islands whose sqrt(|R|) width proxy is below this floor.",
+    )
+    parser.add_argument(
+        "--residue-objective-autogenerate-branch-phase-count",
+        type=int,
+        default=int(
+            os.environ.get("RESIDUE_OBJECTIVE_AUTOGENERATE_BRANCH_PHASE_COUNT", "8")
+        ),
+        help="Number of poloidal phase starts used for island discovery.",
+    )
     add_confinement_surrogate_args(parser)
     parser.add_argument(
         "--basin-hops",
@@ -5214,10 +5267,21 @@ def validate_residue_objective_args(args):
             "--residue-objective-targets-json is required when "
             "--residue-objective-weight is nonzero"
         )
-    if args.residue_objective_seeds_json is None:
+    autogenerate_seeds = bool(
+        getattr(args, "residue_objective_autogenerate_seeds", False)
+    )
+    if not autogenerate_seeds and args.residue_objective_seeds_json is None:
         raise ValueError(
             "--residue-objective-seeds-json is required when "
-            "--residue-objective-weight is nonzero"
+            "--residue-objective-weight is nonzero (or pass "
+            "--residue-objective-autogenerate-seeds to generate it from the field)"
+        )
+    if autogenerate_seeds and not str(
+        getattr(args, "residue_objective_autogenerate_validation_id", "")
+    ):
+        raise ValueError(
+            "--residue-objective-autogenerate-validation-id is required when "
+            "--residue-objective-autogenerate-seeds is set"
         )
     if args.residue_objective_axis_r is None:
         raise ValueError(
@@ -5234,12 +5298,6 @@ def build_residue_objective_from_args(args, biot_savart):
     residue_objective_weight = float(args.residue_objective_weight)
     if residue_objective_weight == 0.0:
         return None
-    targets = load_residue_objective_targets(args.residue_objective_targets_json)
-    target_manifest_id = residue_objective_target_manifest_id(targets)
-    validation_id, branch_seeds = load_residue_objective_seeds(
-        args.residue_objective_seeds_json,
-        target_manifest_id=target_manifest_id,
-    )
     chart = PoincareChart(
         axis_r=float(args.residue_objective_axis_r),
         axis_z=float(args.residue_objective_axis_z),
@@ -5260,6 +5318,23 @@ def build_residue_objective_from_args(args, biot_savart):
         max_iterations=int(args.residue_objective_max_newton_iterations),
         max_step_norm=float(args.residue_objective_max_newton_step_norm),
     )
+    if bool(getattr(args, "residue_objective_autogenerate_seeds", False)):
+        # Auto-discover/rank/validate islands from this field and re-point the
+        # targets/seeds JSON args at the generated, branch-limited manifests so
+        # the load+build path below re-runs every validation gate on them.
+        _autogenerate_residue_objective_seeds(
+            args,
+            biot_savart,
+            chart=chart,
+            integrator_options=integrator_options,
+            solver_options=solver_options,
+        )
+    targets = load_residue_objective_targets(args.residue_objective_targets_json)
+    target_manifest_id = residue_objective_target_manifest_id(targets)
+    validation_id, branch_seeds = load_residue_objective_seeds(
+        args.residue_objective_seeds_json,
+        target_manifest_id=target_manifest_id,
+    )
     return BiotSavartGreeneResidueObjective(
         biot_savart,
         targets=targets,
@@ -5274,6 +5349,54 @@ def build_residue_objective_from_args(args, biot_savart):
         r_satisfied=float(args.residue_objective_r_satisfied),
         local_difference_step=float(args.residue_objective_local_difference_step),
     )
+
+
+def _autogenerate_residue_objective_seeds(
+    args,
+    biot_savart,
+    *,
+    chart,
+    integrator_options,
+    solver_options,
+):
+    validation_id = str(args.residue_objective_autogenerate_validation_id)
+    if validation_id == "":
+        raise ValueError(
+            "--residue-objective-autogenerate-validation-id is required when "
+            "--residue-objective-autogenerate-seeds is set"
+        )
+    candidate_targets = load_residue_objective_targets(
+        args.residue_objective_targets_json
+    )
+    max_candidates = args.residue_objective_autogenerate_max_candidates
+    manifests = autogenerate_residue_manifests(
+        biot_savart,
+        targets=candidate_targets,
+        chart=chart,
+        validation_artifact_id=validation_id,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        phase_angles=uniform_branch_phase_angles(
+            int(args.residue_objective_autogenerate_branch_phase_count)
+        ),
+        min_island_width=float(args.residue_objective_autogenerate_min_island_width),
+        max_candidates=(None if max_candidates is None else int(max_candidates)),
+        r_satisfied=float(args.residue_objective_r_satisfied),
+        local_difference_step=float(args.residue_objective_local_difference_step),
+    )
+    candidate_path = Path(args.residue_objective_targets_json)
+    resolved_targets_path = candidate_path.parent / (
+        candidate_path.stem + ".autogen_targets.json"
+    )
+    seeds_path = candidate_path.parent / (candidate_path.stem + ".autogen_seeds.json")
+    write_residue_manifests(
+        manifests,
+        targets_path=resolved_targets_path,
+        seeds_path=seeds_path,
+    )
+    args.residue_objective_targets_json = str(resolved_targets_path)
+    args.residue_objective_seeds_json = str(seeds_path)
+    return manifests
 
 
 def residue_objective_replay_config(args, residue_objective=None):
