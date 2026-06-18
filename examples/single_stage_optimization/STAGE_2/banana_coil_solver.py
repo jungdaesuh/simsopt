@@ -4380,6 +4380,13 @@ def main(parsed_args=None):
         "fold_material_binormal_curvature_limit",
         None,
     )
+    # Default to the geodesic Type-KK fold limit as a conservative placeholder:
+    # geodesic and material-frame binormal curvature coincide only at alpha=0, so a
+    # distinct material-frame fold limit needs the pack-rotation buildability ruling
+    # (D-4/D-5). Override explicitly via --fold-material-binormal-curvature-limit.
+    # Sound as a default because the coupled / relaxed-cap path is default-off and
+    # non-promotable: the honest alpha=0-corner FINITEBUILD_CURVATURE_OK still
+    # governs promotion.
     FOLD_MATERIAL_BINORMAL_CURVATURE_LIMIT = (
         BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
         if raw_fold_material_binormal_limit is None
