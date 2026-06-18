@@ -603,6 +603,7 @@ def validate_stage2_buildability_objective_cli_args(args) -> None:
             BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
         )
     )
+    fold_material_limit = getattr(args, "fold_material_binormal_curvature_limit", None)
     fold_margin = float(
         getattr(
             args,
@@ -634,6 +635,12 @@ def validate_stage2_buildability_objective_cli_args(args) -> None:
         raise ValueError("--fold-weight must be finite and >= 0.")
     if not np.isfinite(fold_limit) or fold_limit <= 0.0:
         raise ValueError("--fold-geodesic-curvature-limit must be finite and > 0.")
+    if fold_material_limit is not None and (
+        not np.isfinite(float(fold_material_limit)) or float(fold_material_limit) <= 0.0
+    ):
+        raise ValueError(
+            "--fold-material-binormal-curvature-limit must be finite and > 0."
+        )
     if not np.isfinite(fold_margin) or not (0.0 <= fold_margin < 1.0):
         raise ValueError(
             "--fold-geodesic-curvature-margin-fraction must be finite and in [0, 1)."
@@ -1811,9 +1818,10 @@ def parse_args():
         type=float,
         default=float(os.environ.get("STAGE2_FOLD_WEIGHT", "1.0")),
         help=(
-            "Weight on the surface-geodesic fold-curvature hinge. The hinge "
-            "activates at limit * (1 - margin-fraction); the reported FOLD_OK "
-            "gate stays at the hard limit."
+            "Weight on the fold-curvature hinge. The legacy fold frame measures "
+            "surface geodesic curvature; --stage2-couple-pack-rotation-to-fold "
+            "measures material-frame binormal curvature. The hinge activates at "
+            "limit * (1 - margin-fraction); FOLD_OK stays at the hard limit."
         ),
     )
     parser.add_argument(
@@ -1826,6 +1834,20 @@ def parse_args():
             )
         ),
         help="Hard fold limit on abs(surface geodesic curvature), in m^-1.",
+    )
+    parser.add_argument(
+        "--fold-material-binormal-curvature-limit",
+        type=float,
+        default=(
+            None
+            if os.environ.get("STAGE2_FOLD_MATERIAL_BINORMAL_CURVATURE_LIMIT") is None
+            else float(os.environ["STAGE2_FOLD_MATERIAL_BINORMAL_CURVATURE_LIMIT"])
+        ),
+        help=(
+            "Hard fold limit on abs(material-frame binormal curvature), in m^-1, "
+            "used only with --stage2-couple-pack-rotation-to-fold. Defaults to "
+            "the Type-KK fold limit when unset."
+        ),
     )
     parser.add_argument(
         "--fold-geodesic-curvature-margin-fraction",
@@ -1985,10 +2007,11 @@ def parse_args():
         action="store_true",
         default=os.environ.get("STAGE2_COUPLE_PACK_ROTATION_TO_FOLD", "")
         not in ("", "0", "false", "False"),
-        help="T3.2/G2 (default off): build the fold/geodesic-curvature objective "
-        "from the SHARED finite-build pack frame so its live pack-rotation "
-        "alpha(theta) drives buildability, not only the magnetic field. Off = "
-        "byte-identical (fresh ZeroRotation fold frame). Requires --finite-build.",
+        help="T3.2/G2 (default off): build the fold-curvature objective from "
+        "the SHARED finite-build pack frame so its live pack-rotation "
+        "alpha(theta) drives material-frame binormal buildability, not only "
+        "the magnetic field. Off = byte-identical (fresh ZeroRotation fold "
+        "frame). Requires --finite-build.",
     )
     parser.add_argument(
         "--stage2-pack-twist-strain-weight",
@@ -2826,6 +2849,7 @@ def evaluate_stage2_hardware_constraints(
     self_envelope_min_distance=None,
     fold_geodesic_curvature_max=None,
     fold_geodesic_curvature_limit=None,
+    fold_curvature_mode="surface_geodesic",
     final_plasma_major_radius_m=None,
     final_plasma_minor_radius_m=None,
 ):
@@ -2842,6 +2866,7 @@ def evaluate_stage2_hardware_constraints(
         self_envelope_min_distance=self_envelope_min_distance,
         fold_geodesic_curvature_max=fold_geodesic_curvature_max,
         fold_geodesic_curvature_limit=fold_geodesic_curvature_limit,
+        fold_curvature_mode=fold_curvature_mode,
         final_plasma_major_radius_m=final_plasma_major_radius_m,
         final_plasma_minor_radius_m=final_plasma_minor_radius_m,
     )
@@ -2879,9 +2904,9 @@ def _finite_build_projected_bend_half_extent_m(finite_build, banana_curve):
     half_b_m = float(finite_build.pack_half_extent_b_m)
     if finite_build.frame != "surface_tangent":
         # centroid / frenet frames carry no winding-surface normal to project
-        # the pack onto, so the conservative (largest) half-extent is the
-        # correct buildability bound for those frames.
-        return np.full(kappa.shape, max(half_n_m, half_b_m), dtype=float)
+        # the pack onto, so use the worst corner reach as the conservative
+        # buildability bound for those frames.
+        return np.full(kappa.shape, np.hypot(half_n_m, half_b_m), dtype=float)
 
     gamma = np.asarray(banana_curve.gamma(), dtype=float)
     gammadash = np.asarray(banana_curve.gammadash(), dtype=float)
@@ -2934,6 +2959,7 @@ def _finite_build_artifact_metadata(
     fold_geodesic_curvature_max_inv_m=None,
     fold_geodesic_curvature_limit_inv_m=None,
     fold_geodesic_curvature_threshold_inv_m=None,
+    fold_curvature_mode="surface_geodesic",
     fold_penalty=None,
     curvature_margin_m=0.0,
     pack_framedcurve=None,
@@ -3062,22 +3088,38 @@ def _finite_build_artifact_metadata(
         fold_geodesic_curvature_max_inv_m is not None
         and fold_geodesic_curvature_limit_inv_m is not None
     ):
-        metadata["FOLD_GEODESIC_CURVATURE_MAX_INV_M"] = float(
-            fold_geodesic_curvature_max_inv_m
-        )
-        metadata["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"] = float(
-            fold_geodesic_curvature_limit_inv_m
-        )
-        if fold_geodesic_curvature_threshold_inv_m is not None:
-            metadata["FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"] = float(
-                fold_geodesic_curvature_threshold_inv_m
+        fold_max_inv_m = float(fold_geodesic_curvature_max_inv_m)
+        fold_limit_inv_m = float(fold_geodesic_curvature_limit_inv_m)
+        fold_mode = str(fold_curvature_mode)
+        metadata["FOLD_CURVATURE_MODE"] = fold_mode
+        metadata["FOLD_CURVATURE_MAX_INV_M"] = fold_max_inv_m
+        metadata["FOLD_CURVATURE_LIMIT_INV_M"] = fold_limit_inv_m
+        if fold_mode == "material_frame_binormal":
+            metadata["FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_MAX_INV_M"] = (
+                fold_max_inv_m
             )
+            metadata["FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_LIMIT_INV_M"] = (
+                fold_limit_inv_m
+            )
+        else:
+            metadata["FOLD_GEODESIC_CURVATURE_MAX_INV_M"] = fold_max_inv_m
+            metadata["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"] = fold_limit_inv_m
+        if fold_geodesic_curvature_threshold_inv_m is not None:
+            fold_threshold_inv_m = float(fold_geodesic_curvature_threshold_inv_m)
+            metadata["FOLD_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"] = (
+                fold_threshold_inv_m
+            )
+            if fold_mode == "material_frame_binormal":
+                metadata[
+                    "FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"
+                ] = fold_threshold_inv_m
+            else:
+                metadata["FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"] = (
+                    fold_threshold_inv_m
+                )
         if fold_penalty is not None:
             metadata["FOLD_PENALTY"] = float(fold_penalty)
-        metadata["FOLD_OK"] = bool(
-            float(fold_geodesic_curvature_max_inv_m)
-            <= float(fold_geodesic_curvature_limit_inv_m)
-        )
+        metadata["FOLD_OK"] = bool(fold_max_inv_m <= fold_limit_inv_m)
     if pack_framedcurve is not None and finite_build.frame == "surface_tangent":
         # T3.2/G1: realized rotation-aware curvature headroom. Diagnostic only —
         # the in-loop steering cap and FINITEBUILD_CURVATURE_OK gate are
@@ -3171,6 +3213,7 @@ def _capture_stage2_artifact_state(
     fold_geodesic_curvature_limit=None,
     fold_geodesic_curvature_threshold=None,
     fold_geodesic_curvature_margin_fraction=None,
+    fold_curvature_mode="surface_geodesic",
 ):
     candidate_x = np.asarray(dofs, dtype=float).copy()
     JF.x = candidate_x
@@ -3193,7 +3236,7 @@ def _capture_stage2_artifact_state(
     )
     fold_penalty = None if Jfold is None else float(Jfold.J())
     fold_geodesic_curvature_max = (
-        None if Jfold is None else float(Jfold.max_abs_geodesic_curvature())
+        None if Jfold is None else float(Jfold.max_abs_frame_binormal_curvature())
     )
     fold_ok = (
         None
@@ -3228,6 +3271,7 @@ def _capture_stage2_artifact_state(
         self_envelope_min_distance=self_envelope_min_distance,
         fold_geodesic_curvature_max=fold_geodesic_curvature_max,
         fold_geodesic_curvature_limit=fold_geodesic_curvature_limit,
+        fold_curvature_mode=fold_curvature_mode,
         banana_current_A=banana_current_A,
         banana_current_threshold=banana_current_max_A,
         tf_current_A=tf_current_A,
@@ -3281,11 +3325,23 @@ def _capture_stage2_artifact_state(
             else float(self_envelope_groc_radius_floor)
         ),
         "fold_penalty": fold_penalty,
+        "fold_curvature_mode": str(fold_curvature_mode),
+        "fold_curvature_max": fold_geodesic_curvature_max,
         "fold_geodesic_curvature_max": fold_geodesic_curvature_max,
+        "fold_curvature_limit": (
+            None
+            if fold_geodesic_curvature_limit is None
+            else float(fold_geodesic_curvature_limit)
+        ),
         "fold_geodesic_curvature_limit": (
             None
             if fold_geodesic_curvature_limit is None
             else float(fold_geodesic_curvature_limit)
+        ),
+        "fold_curvature_threshold": (
+            None
+            if fold_geodesic_curvature_threshold is None
+            else float(fold_geodesic_curvature_threshold)
         ),
         "fold_geodesic_curvature_threshold": (
             None
@@ -4319,16 +4375,22 @@ def main(parsed_args=None):
             BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
         )
     )
+    raw_fold_material_binormal_limit = getattr(
+        args,
+        "fold_material_binormal_curvature_limit",
+        None,
+    )
+    FOLD_MATERIAL_BINORMAL_CURVATURE_LIMIT = (
+        BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
+        if raw_fold_material_binormal_limit is None
+        else float(raw_fold_material_binormal_limit)
+    )
     FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION = float(
         getattr(
             args,
             "fold_geodesic_curvature_margin_fraction",
             BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION,
         )
-    )
-    FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD = (
-        FOLD_GEODESIC_CURVATURE_LIMIT
-        * (1.0 - FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION)
     )
     fold_winding_radii = realized_cws_winding_radii(new_banana_coils)
     fold_winding_r0 = (
@@ -4342,18 +4404,28 @@ def main(parsed_args=None):
     )
     if couple_pack_rotation_to_fold:
         # T3.2/G2: reuse the SHARED finite-build pack frame (SSOT — one frame for
-        # field and fold) so its live pack twist alpha(theta) drives the
-        # geodesic-curvature buildability penalty, not only the magnetic field.
-        # Off = a fresh ZeroRotation fold frame (byte-identical to legacy).
+        # field and fold) so its live pack twist alpha(theta) drives the material
+        # frame-binormal fold penalty, not only the magnetic field. Off = a fresh
+        # ZeroRotation fold frame (byte-identical to legacy).
         fold_framedcurve = new_banana_coils[0].curve.framedcurve
+        FOLD_CURVATURE_MODE = "material_frame_binormal"
+        FOLD_CURVATURE_LABEL = "material-frame binormal curvature"
+        FOLD_CURVATURE_LIMIT = FOLD_MATERIAL_BINORMAL_CURVATURE_LIMIT
     else:
         fold_framedcurve = FramedCurveSurfaceTangent(
             new_banana_curve, fold_winding_r0, 0.0
         )
+        FOLD_CURVATURE_MODE = "surface_geodesic"
+        FOLD_CURVATURE_LABEL = "surface geodesic curvature"
+        FOLD_CURVATURE_LIMIT = FOLD_GEODESIC_CURVATURE_LIMIT
+    FOLD_CURVATURE_OBJECTIVE_THRESHOLD = (
+        FOLD_CURVATURE_LIMIT
+        * (1.0 - FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION)
+    )
     Jfold = CurveSurfaceGeodesicCurvature(
         fold_framedcurve,
         p=2,
-        threshold=FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD,
+        threshold=FOLD_CURVATURE_OBJECTIVE_THRESHOLD,
     )
     PACK_TWIST_STRAIN_WEIGHT = float(
         getattr(args, "stage2_pack_twist_strain_weight", 0.0)
@@ -4559,10 +4631,10 @@ def main(parsed_args=None):
             f"arc_window={args.self_distance_window:.4f})"
         )
     print(
-        "Initial fold geodesic curvature: "
-        f"{Jfold.max_abs_geodesic_curvature():.4f} [m^-1] "
-        f"(objective={FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD:.4f}, "
-        f"hard={FOLD_GEODESIC_CURVATURE_LIMIT:.4f})"
+        f"Initial fold {FOLD_CURVATURE_LABEL}: "
+        f"{Jfold.max_abs_frame_binormal_curvature():.4f} [m^-1] "
+        f"(objective={FOLD_CURVATURE_OBJECTIVE_THRESHOLD:.4f}, "
+        f"hard={FOLD_CURVATURE_LIMIT:.4f})"
     )
     stage2_iota_runtime = build_stage2_iota_runtime_if_requested(
         args=args,
@@ -4803,9 +4875,10 @@ def main(parsed_args=None):
             self_envelope_groc_radius_floor=(
                 SELF_ENVELOPE_FLOOR if SELF_ENVELOPE_MODE == "groc" else None
             ),
-            fold_geodesic_curvature_limit=FOLD_GEODESIC_CURVATURE_LIMIT,
+            fold_geodesic_curvature_limit=FOLD_CURVATURE_LIMIT,
+            fold_curvature_mode=FOLD_CURVATURE_MODE,
             fold_geodesic_curvature_threshold=(
-                FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD
+                FOLD_CURVATURE_OBJECTIVE_THRESHOLD
             ),
             fold_geodesic_curvature_margin_fraction=(
                 FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION
@@ -5168,9 +5241,11 @@ def main(parsed_args=None):
         final_self_envelope_penalty = float(Jself_envelope.J())
         final_self_envelope_min_dist = float(Jself_envelope.shortest_self_distance())
         final_fold_penalty = float(Jfold.J())
-        final_fold_geodesic_curvature_max = float(Jfold.max_abs_geodesic_curvature())
+        final_fold_geodesic_curvature_max = float(
+            Jfold.max_abs_frame_binormal_curvature()
+        )
         final_fold_ok = bool(
-            final_fold_geodesic_curvature_max <= FOLD_GEODESIC_CURVATURE_LIMIT
+            final_fold_geodesic_curvature_max <= FOLD_CURVATURE_LIMIT
         )
         hardware_status = _evaluate_stage2_hardware_constraints(
             final_coil_length,
@@ -5192,6 +5267,9 @@ def main(parsed_args=None):
             self_intersect_threshold=0.0,
             shortest_self_distance=final_shortest_self_distance,
             self_intersect_min_distance=BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+            fold_geodesic_curvature_max=final_fold_geodesic_curvature_max,
+            fold_geodesic_curvature_limit=FOLD_CURVATURE_LIMIT,
+            fold_curvature_mode=FOLD_CURVATURE_MODE,
             banana_current_A=final_banana_current_A,
             banana_current_threshold=args.banana_current_max_A,
             tf_current_A=float(new_tf_coils[0].current.get_value()),
@@ -5243,10 +5321,10 @@ def main(parsed_args=None):
             f"arc_window={args.self_distance_window:.4f})"
         )
     print(
-        "Final fold geodesic curvature: "
+        f"Final fold {FOLD_CURVATURE_LABEL}: "
         f"{final_fold_geodesic_curvature_max:.4f} [m^-1] "
-        f"(objective={FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD:.4f}, "
-        f"hard={FOLD_GEODESIC_CURVATURE_LIMIT:.4f}, ok={final_fold_ok})"
+        f"(objective={FOLD_CURVATURE_OBJECTIVE_THRESHOLD:.4f}, "
+        f"hard={FOLD_CURVATURE_LIMIT:.4f}, ok={final_fold_ok})"
     )
     final_iota_feasible = (
         None
@@ -5467,9 +5545,10 @@ def main(parsed_args=None):
         ),
         final_fold_penalty=final_fold_penalty,
         final_fold_geodesic_curvature_max=final_fold_geodesic_curvature_max,
-        fold_geodesic_curvature_limit=FOLD_GEODESIC_CURVATURE_LIMIT,
+        fold_geodesic_curvature_limit=FOLD_CURVATURE_LIMIT,
+        fold_curvature_mode=FOLD_CURVATURE_MODE,
         fold_geodesic_curvature_threshold=(
-            FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD
+            FOLD_CURVATURE_OBJECTIVE_THRESHOLD
         ),
         fold_geodesic_curvature_margin_fraction=(
             FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION
@@ -5627,13 +5706,20 @@ def main(parsed_args=None):
                     "SELF_ENVELOPE_GROC_RADIUS_FLOOR_M"
                 ),
                 fold_geodesic_curvature_max_inv_m=results.get(
-                    "FOLD_GEODESIC_CURVATURE_MAX_INV_M"
+                    "FOLD_CURVATURE_MAX_INV_M",
+                    results.get("FOLD_GEODESIC_CURVATURE_MAX_INV_M"),
                 ),
                 fold_geodesic_curvature_limit_inv_m=results.get(
-                    "FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"
+                    "FOLD_CURVATURE_LIMIT_INV_M",
+                    results.get("FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"),
                 ),
                 fold_geodesic_curvature_threshold_inv_m=results.get(
-                    "FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"
+                    "FOLD_CURVATURE_OBJECTIVE_THRESHOLD_INV_M",
+                    results.get("FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"),
+                ),
+                fold_curvature_mode=results.get(
+                    "FOLD_CURVATURE_MODE",
+                    "surface_geodesic",
                 ),
                 fold_penalty=results.get("FOLD_PENALTY"),
                 # Shared finite-build pack frame carries the realized twist

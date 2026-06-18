@@ -964,6 +964,7 @@ def _build_stage2_artifact_hardware_snapshot(
     fold_geodesic_curvature_limit=None,
     fold_geodesic_curvature_threshold=None,
     fold_geodesic_curvature_margin_fraction=None,
+    fold_curvature_mode="surface_geodesic",
     fold_ok=None,
     length_min_target=None,
 ):
@@ -1039,15 +1040,19 @@ def _build_stage2_artifact_hardware_snapshot(
         )
     if final_fold_penalty is not None:
         snapshot["fold_penalty"] = float(final_fold_penalty)
+    snapshot["fold_curvature_mode"] = str(fold_curvature_mode)
     if final_fold_geodesic_curvature_max is not None:
+        snapshot["fold_curvature_max"] = float(final_fold_geodesic_curvature_max)
         snapshot["fold_geodesic_curvature_max"] = float(
             final_fold_geodesic_curvature_max
         )
     if fold_geodesic_curvature_limit is not None:
+        snapshot["fold_curvature_limit"] = float(fold_geodesic_curvature_limit)
         snapshot["fold_geodesic_curvature_limit"] = float(
             fold_geodesic_curvature_limit
         )
     if fold_geodesic_curvature_threshold is not None:
+        snapshot["fold_curvature_threshold"] = float(fold_geodesic_curvature_threshold)
         snapshot["fold_geodesic_curvature_threshold"] = float(
             fold_geodesic_curvature_threshold
         )
@@ -1386,6 +1391,7 @@ def build_stage2_results(
     fold_geodesic_curvature_limit=None,
     fold_geodesic_curvature_threshold=None,
     fold_geodesic_curvature_margin_fraction=None,
+    fold_curvature_mode="surface_geodesic",
     fold_ok=None,
     length_min_target=None,
     proxy_placement_mode="vmec_axis_zeroth_coefficients",
@@ -1440,6 +1446,7 @@ def build_stage2_results(
         fold_geodesic_curvature_margin_fraction=(
             fold_geodesic_curvature_margin_fraction
         ),
+        fold_curvature_mode=fold_curvature_mode,
         fold_ok=fold_ok,
         length_min_target=length_min_target,
     )
@@ -1848,21 +1855,48 @@ def build_stage2_results(
         "SELF_ENVELOPE_GROC_RADIUS_FLOOR_M": hardware_snapshot.get(
             "self_envelope_groc_radius_floor"
         ),
+        **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
         "FOLD_PENALTY": hardware_snapshot.get("fold_penalty"),
-        "FOLD_GEODESIC_CURVATURE_MAX_INV_M": hardware_snapshot.get(
-            "fold_geodesic_curvature_max"
+        "FOLD_CURVATURE_MODE": hardware_snapshot.get("fold_curvature_mode"),
+        "FOLD_CURVATURE_MAX_INV_M": hardware_snapshot.get("fold_curvature_max"),
+        "FOLD_CURVATURE_LIMIT_INV_M": hardware_snapshot.get("fold_curvature_limit"),
+        "FOLD_CURVATURE_OBJECTIVE_THRESHOLD_INV_M": hardware_snapshot.get(
+            "fold_curvature_threshold"
         ),
-        "FOLD_GEODESIC_CURVATURE_LIMIT_INV_M": hardware_snapshot.get(
-            "fold_geodesic_curvature_limit"
+        "FOLD_GEODESIC_CURVATURE_MAX_INV_M": (
+            hardware_snapshot.get("fold_geodesic_curvature_max")
+            if hardware_snapshot.get("fold_curvature_mode") == "surface_geodesic"
+            else None
         ),
-        "FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M": hardware_snapshot.get(
-            "fold_geodesic_curvature_threshold"
+        "FOLD_GEODESIC_CURVATURE_LIMIT_INV_M": (
+            hardware_snapshot.get("fold_geodesic_curvature_limit")
+            if hardware_snapshot.get("fold_curvature_mode") == "surface_geodesic"
+            else None
+        ),
+        "FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M": (
+            hardware_snapshot.get("fold_geodesic_curvature_threshold")
+            if hardware_snapshot.get("fold_curvature_mode") == "surface_geodesic"
+            else None
+        ),
+        "FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_MAX_INV_M": (
+            hardware_snapshot.get("fold_curvature_max")
+            if hardware_snapshot.get("fold_curvature_mode") == "material_frame_binormal"
+            else None
+        ),
+        "FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_LIMIT_INV_M": (
+            hardware_snapshot.get("fold_curvature_limit")
+            if hardware_snapshot.get("fold_curvature_mode") == "material_frame_binormal"
+            else None
+        ),
+        "FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_OBJECTIVE_THRESHOLD_INV_M": (
+            hardware_snapshot.get("fold_curvature_threshold")
+            if hardware_snapshot.get("fold_curvature_mode") == "material_frame_binormal"
+            else None
         ),
         "FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION": hardware_snapshot.get(
             "fold_geodesic_curvature_margin_fraction"
         ),
         "FOLD_OK": hardware_snapshot.get("fold_ok"),
-        **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
     }
 
 
@@ -1990,6 +2024,7 @@ def evaluate_stage2_hardware_constraints(
     self_envelope_min_distance=None,
     fold_geodesic_curvature_max=None,
     fold_geodesic_curvature_limit=None,
+    fold_curvature_mode="surface_geodesic",
     banana_current_A=None,
     banana_current_threshold=None,
     tf_current_A=None,
@@ -2036,6 +2071,54 @@ def evaluate_stage2_hardware_constraints(
         applies_to="artifact",
         threshold_overrides=artifact_threshold_overrides,
     )
+    fold_mode = str(fold_curvature_mode)
+    status["fold_curvature_mode"] = fold_mode
+    if fold_geodesic_curvature_max is not None:
+        status["fold_curvature_max"] = float(fold_geodesic_curvature_max)
+    if fold_geodesic_curvature_limit is not None:
+        status["fold_curvature_limit"] = float(fold_geodesic_curvature_limit)
+    if fold_mode == "material_frame_binormal":
+        if fold_geodesic_curvature_max is not None:
+            status["fold_material_frame_binormal_curvature_max"] = float(
+                fold_geodesic_curvature_max
+            )
+        if fold_geodesic_curvature_limit is not None:
+            status["fold_material_frame_binormal_curvature_limit"] = float(
+                fold_geodesic_curvature_limit
+            )
+        status["fold_geodesic_curvature_max"] = None
+        status["fold_geodesic_curvature_limit"] = None
+        status["violations"] = [
+            violation.replace(
+                "fold_geodesic_curvature_max",
+                "fold_material_frame_binormal_curvature_max",
+            )
+            for violation in status["violations"]
+        ]
+        allowed_status = status["allowed_traversal_status"]
+        allowed_status["violations"] = [
+            violation.replace(
+                "fold_geodesic_curvature_max",
+                "fold_material_frame_binormal_curvature_max",
+            )
+            for violation in allowed_status["violations"]
+        ]
+        fold_constraint = status["constraints"].pop(
+            "fold_geodesic_curvature_max",
+            None,
+        )
+        allowed_status["constraints"].pop("fold_geodesic_curvature_max", None)
+        if fold_constraint is not None:
+            material_constraint = {
+                **fold_constraint,
+                "name": "fold_material_frame_binormal_curvature_max",
+            }
+            status["constraints"][
+                "fold_material_frame_binormal_curvature_max"
+            ] = material_constraint
+            allowed_status["constraints"][
+                "fold_material_frame_binormal_curvature_max"
+            ] = material_constraint
     status.update(
         {
             "coil_length": float(coil_length),
@@ -2075,9 +2158,15 @@ def evaluate_stage2_hardware_constraints(
     if self_envelope_min_distance is not None:
         status["self_envelope_min_distance"] = float(self_envelope_min_distance)
     if fold_geodesic_curvature_max is not None:
-        status["fold_geodesic_curvature_max"] = float(fold_geodesic_curvature_max)
+        if fold_mode == "surface_geodesic":
+            status["fold_geodesic_curvature_max"] = float(
+                fold_geodesic_curvature_max
+            )
     if fold_geodesic_curvature_limit is not None:
-        status["fold_geodesic_curvature_limit"] = float(fold_geodesic_curvature_limit)
+        if fold_mode == "surface_geodesic":
+            status["fold_geodesic_curvature_limit"] = float(
+                fold_geodesic_curvature_limit
+            )
     if banana_current_A is not None and banana_current_threshold is not None:
         status["banana_current_A"] = float(banana_current_A)
         status["banana_current_threshold"] = float(banana_current_threshold)

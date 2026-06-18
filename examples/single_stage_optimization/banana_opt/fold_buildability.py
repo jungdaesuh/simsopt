@@ -18,7 +18,7 @@ def _lp_abs_hinge_pure(values, gammadash, p, threshold):
 
 
 class CurveSurfaceGeodesicCurvature(Optimizable):
-    r"""Fold objective for a curve constrained to a winding surface.
+    r"""Fold objective for a curve constrained to a winding surface frame.
 
     ``FramedCurveSurfaceTangent.frame_binormal_curvature()`` is
     :math:`\hat t'(s) \cdot \hat b`, where the unrotated surface-tangent
@@ -27,6 +27,10 @@ class CurveSurfaceGeodesicCurvature(Optimizable):
     respect to that surface frame. The objective penalizes
     ``max(abs(kappa_g) - threshold, 0)^p`` with the same arc-length weighting as
     ``LpCurveCurvature``.
+
+    If the supplied frame carries a nonzero material rotation, the same
+    ``frame_binormal_curvature`` component is a material-frame binormal
+    curvature, not the winding surface's geodesic curvature.
     """
 
     def __init__(self, framedcurve, p=2, threshold=0.0):
@@ -62,6 +66,12 @@ class CurveSurfaceGeodesicCurvature(Optimizable):
     def max_abs_geodesic_curvature(self):
         values = self.geodesic_curvature()
         return float(np.max(np.abs(values)))
+
+    def frame_binormal_curvature(self):
+        return self.geodesic_curvature()
+
+    def max_abs_frame_binormal_curvature(self):
+        return self.max_abs_geodesic_curvature()
 
     def J(self):
         return float(

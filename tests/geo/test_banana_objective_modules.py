@@ -4182,6 +4182,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             0.0230886,
         )
         self.assertAlmostEqual(result["FOLD_PENALTY"], 0.125)
+        self.assertEqual(result["FOLD_CURVATURE_MODE"], "surface_geodesic")
+        self.assertAlmostEqual(result["FOLD_CURVATURE_MAX_INV_M"], 42.0)
+        self.assertAlmostEqual(result["FOLD_CURVATURE_LIMIT_INV_M"], 43.3)
         self.assertAlmostEqual(result["FOLD_GEODESIC_CURVATURE_MAX_INV_M"], 42.0)
         self.assertAlmostEqual(result["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"], 43.3)
         self.assertAlmostEqual(
@@ -4210,6 +4213,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             result["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"],
             [0.0, 2.0, 0.0],
         )
+
         np.testing.assert_allclose(
             result["ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES"],
             [0.0, 0.02, 0.0],
@@ -4282,6 +4286,69 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(
             result["FINAL_LCFS_INBOARD_EDGE_MIN_M"],
             self.module.LCFS_INBOARD_RADIUS_MIN_M,
+        )
+
+    def test_build_stage2_results_reports_material_frame_binormal_fold_mode(self):
+        args = self._stage2_results_args()
+        alm_result = self._stage2_results_alm_result()
+        hardware_status = {"success": True, "violations": []}
+
+        result = self.module.build_stage2_results(
+            **self._stage2_results_kwargs(
+                args,
+                alm_result,
+                hardware_status,
+                fold_curvature_mode="material_frame_binormal",
+            )
+        )
+
+        self.assertEqual(result["FOLD_CURVATURE_MODE"], "material_frame_binormal")
+        self.assertAlmostEqual(result["FOLD_CURVATURE_MAX_INV_M"], 42.0)
+        self.assertAlmostEqual(
+            result["FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_MAX_INV_M"],
+            42.0,
+        )
+        self.assertAlmostEqual(
+            result["FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_LIMIT_INV_M"],
+            43.3,
+        )
+        self.assertIsNone(result["FOLD_GEODESIC_CURVATURE_MAX_INV_M"])
+        self.assertIsNone(result["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"])
+
+    def test_material_frame_binormal_fold_violation_is_not_reported_as_geodesic(self):
+        status = self.module.evaluate_stage2_hardware_constraints(
+            coil_length=1.95,
+            length_target=1.9,
+            curve_curve_min_dist=0.05,
+            cc_threshold=0.05,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+            fold_geodesic_curvature_max=44.0,
+            fold_geodesic_curvature_limit=43.0,
+            fold_curvature_mode="material_frame_binormal",
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(status["fold_curvature_mode"], "material_frame_binormal")
+        self.assertAlmostEqual(
+            status["fold_material_frame_binormal_curvature_max"], 44.0
+        )
+        self.assertIsNone(status["fold_geodesic_curvature_max"])
+        self.assertEqual(
+            status["violations"],
+            [
+                "fold_material_frame_binormal_curvature_max "
+                "44.000000 exceeds threshold 43.000000",
+            ],
+        )
+        self.assertIn(
+            "fold_material_frame_binormal_curvature_max",
+            status["constraints"],
+        )
+        self.assertNotIn("fold_geodesic_curvature_max", status["constraints"])
+        self.assertNotIn(
+            "fold_geodesic_curvature_max",
+            status["allowed_traversal_status"]["constraints"],
         )
 
     def test_build_stage2_results_records_realized_winding_radius(self):
@@ -5255,6 +5322,131 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(
             result["raw_surrogate_signed_constraint_values"],
             [0.02],
+        )
+
+    def _evaluate_alm_objective_capturing_surface_stack_constraint(
+        self,
+        *,
+        surface_stack_boozer_surfaces,
+    ):
+        """Run ``evaluate_alm_objective`` and capture the surface-stack dispatch.
+
+        Returns the keyword arguments the production dispatch handed to the
+        surface-stack ``constraint_fn``. The constraint itself is a real (non-mock)
+        spy so the assertion exercises the actual ``evaluate_alm_objective`` dispatch
+        path that production uses, not a stubbed substitute for it.
+        """
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        curves = (
+            _FakeCurve(gamma_points=[[0.0, 0.0, 0.0]]),
+            _FakeCurve(gamma_points=[[1.0, 0.0, 0.0]]),
+        )
+        outer_surface = _FakeSurfaceWithGradient(gamma_points=[[[0.5, 0.0, 0.0]]])
+        surface_a = _FakeSurfaceWithGradient(gamma_points=[[[0.0, 0.0, 0.0]]])
+        surface_b = _FakeSurfaceWithGradient(gamma_points=[[[0.04, 0.0, 0.0]]])
+        banana_curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0]], kappa_values=[5.0])
+
+        captured = {}
+
+        def spy_surface_stack_constraint(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return (0.02, np.array([0.4, 0.6]), 0.02)
+
+        self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.2]),
+            penalty=3.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=curves,
+            curve_curve_min_distance=0.05,
+            outer_surface=outer_surface,
+            curve_surface_min_distance=0.02,
+            banana_curve=banana_curve,
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("surface_surface_spacing",),
+            curve_curve_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.2,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                -0.3,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            surface_stack_surfaces=(surface_a, surface_b),
+            surface_stack_boozer_surfaces=surface_stack_boozer_surfaces,
+            surface_stack_min_distance=0.05,
+            surface_stack_constraint_fn=spy_surface_stack_constraint,
+            # No hard-signal fn and hard diagnostics off, so the single dispatch above
+            # is the only surface-stack constraint call -- the captured kwargs are it.
+            hard_surrogate_diagnostics=False,
+        )
+        return captured
+
+    def test_evaluate_alm_objective_forwards_surface_stack_boozer_surfaces(self):
+        """The example->objectives wiring delivers boozer_surfaces to the constraint.
+
+        Proves ITEM A end-to-end at the dispatch boundary: when the caller supplies
+        ``surface_stack_boozer_surfaces`` (as the single-stage example now does via
+        ``current_single_stage_alm_surface_stack_boozer_surfaces()``), the SAME object
+        reaches the surface-stack ``constraint_fn`` as its ``boozer_surfaces`` keyword.
+        That keyword is exactly what flips the constraint from the gradient-dead
+        fixed-surface path to the live Boozer-adjoint coil gradient, so this asserts
+        the production path is no longer inert. Identity (``is``) -- not a value
+        comparison -- rules out an accidental copy/rebuild severing the adjoint.
+        """
+        sentinel_boozer_surfaces = (object(), object())
+        captured = self._evaluate_alm_objective_capturing_surface_stack_constraint(
+            surface_stack_boozer_surfaces=sentinel_boozer_surfaces,
+        )
+        self.assertIn(
+            "boozer_surfaces",
+            captured["kwargs"],
+            "surface-stack constraint must receive a boozer_surfaces keyword",
+        )
+        self.assertIs(
+            captured["kwargs"]["boozer_surfaces"],
+            sentinel_boozer_surfaces,
+            "the exact BoozerSurfaces tuple must reach the constraint unchanged",
+        )
+
+    def test_evaluate_alm_objective_omits_boozer_surfaces_when_absent(self):
+        """The legacy (None) dispatch stays byte-identical: no boozer_surfaces kwarg.
+
+        Backward-compatibility guard for the wiring: when no BoozerSurfaces are
+        supplied (the default and every pre-existing caller), the surface-stack
+        constraint must be invoked exactly as before -- with NO ``boozer_surfaces``
+        keyword at all -- so legacy constraint callables that take only positional
+        args keep working and the legacy gradient-dead path is selected.
+        """
+        captured = self._evaluate_alm_objective_capturing_surface_stack_constraint(
+            surface_stack_boozer_surfaces=None,
+        )
+        self.assertNotIn(
+            "boozer_surfaces",
+            captured["kwargs"],
+            "absent BoozerSurfaces must not inject a boozer_surfaces keyword",
         )
 
     def test_evaluate_alm_objective_uses_hard_poloidal_feasibility_signal(self):

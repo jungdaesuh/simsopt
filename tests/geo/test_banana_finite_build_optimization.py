@@ -496,8 +496,8 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
-    def test_curvature_gate_uses_the_larger_half_build_for_non_surface_tangent(self):
-        # half_n = 0.5*(5-1)*0.02 = 0.04 (binding); half_b = 0.5*(3-1)*0.01 = 0.01.
+    def test_curvature_gate_uses_corner_reach_for_non_surface_tangent(self):
+        # half_n = 0.5*(5-1)*0.02 = 0.04; half_b = 0.5*(3-1)*0.01 = 0.01.
         settings = FiniteBuildSettings(
             numfilaments_n=5,
             numfilaments_b=3,
@@ -506,28 +506,30 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
             rotation_order=1,
             frame="centroid",
         )
-        # radius 0.02 m: above the binormal half-build (0.01) but BELOW the binding
-        # normal half-build (0.04) -> the old binormal-only gate would pass, the
-        # corrected max(half_n,half_b) gate must fail.
+        # A centroid/frenet frame has no surface normal for a bend-plane projection,
+        # so the conservative support bound is the rectangle corner reach.
         banana_curve = SimpleNamespace(kappa=lambda: np.array([50.0]))  # radius 0.02
         metadata = self.module._finite_build_artifact_metadata(
             settings, banana_curve, NET_BANANA_CURRENT_A
         )
-        self.assertAlmostEqual(metadata["FINITEBUILD_BINDING_HALF_BUILD_M"], 0.04)
-        self.assertAlmostEqual(metadata["FINITEBUILD_INNER_EDGE_RADIUS_M"], 0.02 - 0.04)
+        pack_reach = float(np.hypot(0.04, 0.01))
+        self.assertAlmostEqual(metadata["FINITEBUILD_BINDING_HALF_BUILD_M"], pack_reach)
+        self.assertAlmostEqual(
+            metadata["FINITEBUILD_INNER_EDGE_RADIUS_M"], 0.02 - pack_reach
+        )
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
     def test_curvature_margin_tightens_gate(self):
-        # radius 0.05 m, binding half-build 0.04 -> inner-wire radius 0.01 m.
-        banana_curve = SimpleNamespace(kappa=lambda: np.array([20.0]))
+        # radius 0.052 m, corner reach ~0.0412 -> inner-wire radius ~0.0108 m.
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0 / 0.052]))
         ok = self.module._finite_build_artifact_metadata(
             _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.0
         )
-        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])  # 0.01 >= 10 mm floor
+        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])  # ~0.0108 >= 10 mm floor
         tight = self.module._finite_build_artifact_metadata(
             _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.02
         )
-        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # 0.01 < 30 mm floor
+        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # ~0.0108 < 30 mm floor
 
     def test_surface_tangent_curvature_gate_projects_type_kk_pack_into_bend_plane(self):
         settings = FiniteBuildSettings(
@@ -651,6 +653,9 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertTrue(metadata["FINITEBUILD_SELF_ENVELOPE_OK"])
         self.assertAlmostEqual(metadata["FOLD_GEODESIC_CURVATURE_MAX_INV_M"], 42.0)
+        self.assertEqual(metadata["FOLD_CURVATURE_MODE"], "surface_geodesic")
+        self.assertAlmostEqual(metadata["FOLD_CURVATURE_MAX_INV_M"], 42.0)
+        self.assertAlmostEqual(metadata["FOLD_CURVATURE_LIMIT_INV_M"], 43.3)
         self.assertAlmostEqual(metadata["FOLD_GEODESIC_CURVATURE_LIMIT_INV_M"], 43.3)
         self.assertAlmostEqual(
             metadata["FOLD_GEODESIC_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"],
@@ -671,6 +676,35 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertFalse(failed["FINITEBUILD_SELF_ENVELOPE_OK"])
         self.assertFalse(failed["FOLD_OK"])
+
+    def test_metadata_reports_material_frame_binormal_fold_mode(self):
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0]))
+        metadata = self.module._finite_build_artifact_metadata(
+            _settings(),
+            banana_curve,
+            NET_BANANA_CURRENT_A,
+            fold_geodesic_curvature_max_inv_m=41.0,
+            fold_geodesic_curvature_limit_inv_m=42.0,
+            fold_geodesic_curvature_threshold_inv_m=37.8,
+            fold_curvature_mode="material_frame_binormal",
+        )
+
+        self.assertEqual(metadata["FOLD_CURVATURE_MODE"], "material_frame_binormal")
+        self.assertAlmostEqual(metadata["FOLD_CURVATURE_MAX_INV_M"], 41.0)
+        self.assertAlmostEqual(
+            metadata["FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_MAX_INV_M"], 41.0
+        )
+        self.assertAlmostEqual(
+            metadata["FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_LIMIT_INV_M"], 42.0
+        )
+        self.assertAlmostEqual(
+            metadata[
+                "FOLD_MATERIAL_FRAME_BINORMAL_CURVATURE_OBJECTIVE_THRESHOLD_INV_M"
+            ],
+            37.8,
+        )
+        self.assertNotIn("FOLD_GEODESIC_CURVATURE_MAX_INV_M", metadata)
+        self.assertTrue(metadata["FOLD_OK"])
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ def _finite_build_args(**overrides):
         finitebuild_pin_current=False,
         constraint_method="penalty",
         stage2_couple_pack_rotation_to_fold=False,
+        fold_material_binormal_curvature_limit=None,
         stage2_pack_twist_strain_weight=0.0,
         stage2_rotation_aware_curvature_cap=False,
     )
@@ -111,6 +112,13 @@ class ValidateCliArgsTest(unittest.TestCase):
             stage2_couple_pack_rotation_to_fold=True,
         )
         solver.validate_finite_build_cli_args(args)  # must not raise
+
+    def test_material_binormal_fold_limit_must_be_positive_when_set(self):
+        args = _finite_build_args(fold_material_binormal_curvature_limit=0.0)
+        with self.assertRaisesRegex(
+            ValueError, "--fold-material-binormal-curvature-limit"
+        ):
+            solver.validate_stage2_buildability_objective_cli_args(args)
 
     def test_all_levers_off_passes(self):
         solver.validate_finite_build_cli_args(_finite_build_args())  # must not raise
