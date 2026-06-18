@@ -56,6 +56,7 @@ import types
 import numpy as np
 import pytest
 
+import simsopt_jax.backend.runtime as runtime_module
 from simsopt_jax.backend.runtime import (
     BackendPolicy,
     _build_sharding_tuning,
@@ -67,6 +68,7 @@ from simsopt_jax.backend.runtime import (
     _parse_visible_cuda_device_index,
     _policy_from_config,
     _query_gpu_metric_mb_from_nvidia_smi,
+    get_runtime_jax_device,
 )
 
 # ---------------------------------------------------------------------------
@@ -558,3 +560,100 @@ def test_query_gpu_metric_mb_returns_none_on_empty_output(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run)
 
     assert _query_gpu_metric_mb_from_nvidia_smi("memory.total") is None
+
+
+def test_query_active_gpu_memory_uses_detected_cuda_selector_without_cuda_policy(
+    monkeypatch,
+):
+    """Memory snapshots follow the active JAX CUDA device, not only policy labels."""
+    metric_calls = []
+
+    monkeypatch.setattr(
+        runtime_module,
+        "get_backend_policy",
+        lambda mode=None: _policy_for_mode("native_cpu"),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_detect_active_jax_cuda_device_selector",
+        lambda: 0,
+    )
+
+    def _metric(metric_name, device_selector):
+        metric_calls.append((metric_name, device_selector))
+        return 4096.0
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_query_gpu_metric_mb_from_nvidia_smi",
+        _metric,
+    )
+
+    assert runtime_module.query_active_gpu_memory_mb() == pytest.approx(4096.0)
+    assert metric_calls == [("memory.used", 0)]
+
+
+def test_runtime_jax_device_uses_primary_jax_platforms_env_before_policy(
+    monkeypatch,
+):
+    """Startup placement can follow ``JAX_PLATFORMS`` before Simsopt policy exists."""
+    runtime_device = object()
+    backend_calls: list[str | None] = []
+
+    def _local_devices(*, backend=None):
+        backend_calls.append(backend)
+        return [runtime_device]
+
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.setattr(
+        runtime_module,
+        "get_backend_policy",
+        lambda mode=None: _policy_for_mode("native_cpu"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(local_devices=_local_devices),
+    )
+
+    assert get_runtime_jax_device() is runtime_device
+    assert backend_calls == ["gpu"]
+
+
+def test_runtime_jax_device_prefers_policy_over_jax_platforms_env(monkeypatch):
+    """Once policy is installed, the policy platform remains authoritative."""
+    runtime_device = object()
+    backend_calls: list[str | None] = []
+
+    def _local_devices(*, backend=None):
+        backend_calls.append(backend)
+        return [runtime_device]
+
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu,cuda")
+    monkeypatch.setattr(
+        runtime_module,
+        "get_backend_policy",
+        lambda mode=None: _policy_for_mode("jax_gpu_parity"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(local_devices=_local_devices),
+    )
+
+    assert get_runtime_jax_device() is runtime_device
+    assert backend_calls == ["gpu"]
+
+
+def test_runtime_jax_device_returns_none_without_policy_or_jax_platforms_env(
+    monkeypatch,
+):
+    """Native startup with no JAX platform request keeps the default placement path."""
+    monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+    monkeypatch.setattr(
+        runtime_module,
+        "get_backend_policy",
+        lambda mode=None: _policy_for_mode("native_cpu"),
+    )
+
+    assert get_runtime_jax_device() is None

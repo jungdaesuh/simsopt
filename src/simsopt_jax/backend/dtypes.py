@@ -9,6 +9,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from simsopt_jax.backend.runtime import (
     get_backend_policy,
+    get_runtime_jax_device,
     maybe_initialize_distributed_jax,
 )
 
@@ -222,7 +223,10 @@ def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Ar
         array = np.asarray(value, dtype=resolved_dtype)
     maybe_initialize_distributed_jax()
     if placement is None:
-        return jax.device_put(array)
+        runtime_device = get_runtime_jax_device()
+        if runtime_device is None:
+            return jax.device_put(array)
+        return jax.device_put(array, runtime_device)
     return jax.device_put(array, placement)
 
 

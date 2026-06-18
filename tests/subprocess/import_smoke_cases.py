@@ -621,7 +621,7 @@ def case_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root() -> None:
         )
 
         assert requested == "cuda"
-        assert os.environ["JAX_PLATFORMS"] == "cuda,cpu"
+        assert os.environ["JAX_PLATFORMS"] == "cuda"
         assert os.environ["SIMSOPT_JAX_PLATFORM"] == "cuda"
         assert os.environ["SIMSOPT_JAX_BACKEND"] == "cuda"
         assert os.environ["PATH"].split(os.pathsep)[0] == str(cuda_root / "bin")
@@ -676,7 +676,7 @@ def case_entrypoint_runtime_helper_detects_pip_cuda_nvcc_toolchain() -> None:
         )
 
         assert requested == "cuda"
-        assert os.environ["JAX_PLATFORMS"] == "cuda,cpu"
+        assert os.environ["JAX_PLATFORMS"] == "cuda"
         assert os.environ["PATH"].split(os.pathsep)[0] == str(cuda_nvcc_bin)
         assert str(default_cuda / "bin") not in os.environ["PATH"].split(os.pathsep)
         assert "LD_LIBRARY_PATH" not in os.environ

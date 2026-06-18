@@ -341,10 +341,15 @@ def preparse_entrypoint_jax_platform(
     return _normalize_entrypoint_platform_spec(default, allow_multiple=False)
 
 
-def apply_entrypoint_jax_runtime_env(platform: str | None) -> str | None:
+def apply_entrypoint_jax_runtime_env(
+    platform: str | None,
+    *,
+    include_cpu_callback_lane: bool = False,
+) -> str | None:
     """Synchronize platform/x64 env vars before any entrypoint imports ``jax``."""
     normalized = _normalize_entrypoint_platform_spec(platform, allow_multiple=True)
-    normalized = with_cpu_callback_lane(normalized)
+    if include_cpu_callback_lane:
+        normalized = with_cpu_callback_lane(normalized)
     os.environ.setdefault(_JAX_ENABLE_X64_ENV, "True")
     for name in _ENTRYPOINT_PLATFORM_ENV_VARS:
         os.environ.pop(name, None)
@@ -378,9 +383,13 @@ def configure_entrypoint_jax_runtime(
         default=default_platform,
         respect_existing_env=respect_existing_env,
     )
-    if _argv_requests_flag(resolved_argv, require_cpu_platform_when_flags):
-        requested_platform = with_cpu_callback_lane(requested_platform)
-    return apply_entrypoint_jax_runtime_env(requested_platform)
+    return apply_entrypoint_jax_runtime_env(
+        requested_platform,
+        include_cpu_callback_lane=_argv_requests_flag(
+            resolved_argv,
+            require_cpu_platform_when_flags,
+        ),
+    )
 
 
 def _install_bootstrap_version_stub(package_root: Path) -> None:

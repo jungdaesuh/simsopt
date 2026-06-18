@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -42,6 +43,7 @@ _OPTIMIZER_PRIVATE_DIR = (
     Path(_SRC_DIR) / "simsopt_jax" / "geo" / "optimizers" / "private"
 )
 _RUNTIME_BACKEND_PATH = Path(_SRC_DIR) / "simsopt_jax" / "backend" / "runtime.py"
+_LEGACY_GEO_JIT_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "jit.py"
 _CPU_RUN_CODE_BENCHMARK_PATH = (
     Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py"
 )
@@ -623,6 +625,66 @@ def test_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags(
         ),
         failure_message="entrypoint runtime helper should keep a CPU lane for explicit diagnostic callback runs",
     )
+
+
+def _execute_legacy_geo_jit_with_fake_jax(
+    monkeypatch, *, jax_platforms: str | None, jax_platform_name: str | None = None
+) -> list[tuple[str, object]]:
+    updates: list[tuple[str, object]] = []
+
+    class _FakeJaxConfig:
+        def update(self, name: str, value: object) -> None:
+            updates.append((name, value))
+
+    fake_jax = types.ModuleType("jax")
+    fake_jax.config = _FakeJaxConfig()
+    fake_jax.jit = lambda fun, **args: fun
+    fake_simsopt = types.ModuleType("simsopt")
+    fake_geo = types.ModuleType("simsopt.geo")
+    fake_geo.__path__ = []
+    fake_config = types.ModuleType("simsopt.geo.config")
+    fake_config.parameters = {"jit": False}
+
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+    monkeypatch.setitem(sys.modules, "simsopt", fake_simsopt)
+    monkeypatch.setitem(sys.modules, "simsopt.geo", fake_geo)
+    monkeypatch.setitem(sys.modules, "simsopt.geo.config", fake_config)
+    if jax_platforms is None:
+        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+    else:
+        monkeypatch.setenv("JAX_PLATFORMS", jax_platforms)
+    if jax_platform_name is None:
+        monkeypatch.delenv("JAX_PLATFORM_NAME", raising=False)
+    else:
+        monkeypatch.setenv("JAX_PLATFORM_NAME", jax_platform_name)
+
+    module_globals = {
+        "__file__": str(_LEGACY_GEO_JIT_PATH),
+        "__name__": "simsopt.geo.jit",
+        "__package__": "simsopt.geo",
+    }
+    source = _LEGACY_GEO_JIT_PATH.read_text(encoding="utf-8")
+    exec(compile(source, str(_LEGACY_GEO_JIT_PATH), "exec"), module_globals)
+    assert callable(module_globals["jit"])
+    return updates
+
+
+def test_legacy_geo_jit_respects_explicit_jax_platforms(monkeypatch):
+    updates = _execute_legacy_geo_jit_with_fake_jax(
+        monkeypatch,
+        jax_platforms="cuda",
+    )
+
+    assert ("jax_platform_name", "cpu") not in updates
+
+
+def test_legacy_geo_jit_preserves_cpu_default_without_platform_env(monkeypatch):
+    updates = _execute_legacy_geo_jit_with_fake_jax(
+        monkeypatch,
+        jax_platforms=None,
+    )
+
+    assert ("jax_platform_name", "cpu") in updates
 
 
 def test_run_code_benchmark_common_import_is_jax_cold():

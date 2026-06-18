@@ -62,6 +62,7 @@ __all__ = [
     "get_jax_platform",
     "get_pairwise_penalty_chunk_size",
     "get_point_chunk_size",
+    "get_runtime_jax_device",
     "get_sharding_strategy",
     "get_sharding_tuning",
     "get_provenance_label",
@@ -1004,15 +1005,19 @@ def _runtime_jax_platform_value(platform: str) -> str:
     return platform
 
 
-# Mirror of ``repo_bootstrap.with_cpu_callback_lane`` for the single-platform
-# config slot. Repeated here because ``repo_bootstrap`` is not importable from
-# the installed ``simsopt`` package; keep the value synchronized with that
-# helper so the entrypoint and runtime layers agree on JAX_PLATFORMS.
 _CUDA_WITH_CPU_FALLBACK_PLATFORMS = "cuda,cpu"
 
 
 def _runtime_jax_platforms_value(platform: str) -> str:
-    if platform == "cuda":
+    if platform != "cuda":
+        return _runtime_jax_platform_value(platform)
+    requested_platforms = _optional_env_value(_JAX_PLATFORMS_ENV)
+    requested_parts = (
+        ()
+        if requested_platforms is None
+        else tuple(part.strip().lower() for part in requested_platforms.split(","))
+    )
+    if "cuda" in requested_parts and "cpu" in requested_parts:
         return _CUDA_WITH_CPU_FALLBACK_PLATFORMS
     return _runtime_jax_platform_value(platform)
 
@@ -1021,6 +1026,19 @@ def _runtime_jax_backend_name(platform: str) -> str:
     if platform == "cuda":
         return "gpu"
     return _runtime_jax_platform_value(platform)
+
+
+def _primary_jax_platforms_env_platform() -> str | None:
+    platforms = _optional_env_value(_JAX_PLATFORMS_ENV)
+    if platforms is None:
+        return None
+    parts = tuple(
+        part.strip().lower() for part in platforms.split(",") if part.strip()
+    )
+    if not parts:
+        return None
+    primary_platform = parts[0]
+    return primary_platform if primary_platform in _VALID_PLATFORMS else None
 
 
 def _resolve_min_points_to_shard(policy: BackendPolicy) -> int:
@@ -1905,10 +1923,29 @@ def get_pairwise_penalty_chunk_size(mode: str | None = None) -> int:
     return get_chunk_tuning(mode).pairwise_penalty_chunk_size
 
 
+def get_runtime_jax_device(mode: str | None = None):
+    """Return the first local JAX device for the active runtime policy."""
+    policy = get_backend_policy(mode)
+    if policy.backend == "jax":
+        platform = policy.jax_platform
+    else:
+        platform = _primary_jax_platforms_env_platform()
+    if platform is None:
+        return None
+
+    import jax
+
+    backend_name = _runtime_jax_backend_name(platform)
+    return jax.local_devices(backend=backend_name)[0]
+
+
 def get_active_cuda_device_index(mode: str | None = None) -> int | None:
     """Return the active CUDA device index implied by env or JAX runtime state."""
     policy = get_backend_policy(mode)
-    if policy.jax_platform != "cuda":
+    if (
+        policy.jax_platform != "cuda"
+        and _detect_active_jax_cuda_device_selector() is None
+    ):
         return None
     return _detect_active_jax_cuda_device_index()
 
@@ -1916,9 +1953,9 @@ def get_active_cuda_device_index(mode: str | None = None) -> int | None:
 def query_active_gpu_memory_mb(mode: str | None = None) -> float | None:
     """Return coarse memory usage for the active CUDA device when available."""
     policy = get_backend_policy(mode)
-    if policy.jax_platform != "cuda":
-        return None
     device_selector = _detect_active_jax_cuda_device_selector()
+    if policy.jax_platform != "cuda" and device_selector is None:
+        return None
     return _query_gpu_metric_mb_from_nvidia_smi("memory.used", device_selector)
 
 

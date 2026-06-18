@@ -17,6 +17,7 @@ from unittest import mock
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from simsopt_jax.backend import dtypes
 
@@ -78,3 +79,65 @@ def test_reference_sharding_handles_tracer_leaf_in_sequence():
 
     assert captured["result"] is None
     assert captured["compat_calls"] == 0
+
+
+def test_runtime_device_put_uses_runtime_device_when_no_target(monkeypatch):
+    """Implicit placement follows the runtime policy device, not JAX defaults."""
+    runtime_device = object()
+    placements: list[object | None] = []
+
+    def _device_put(array, placement=None):
+        placements.append(placement)
+        return array, placement
+
+    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
+    monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: runtime_device)
+    monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
+
+    array, placement = dtypes.runtime_device_put([1, 2, 3])
+
+    assert isinstance(array, np.ndarray)
+    assert placement is runtime_device
+    assert placements == [runtime_device]
+
+
+def test_runtime_device_put_preserves_explicit_target(monkeypatch):
+    """Explicit target/sharding placement still takes precedence."""
+    explicit_target = object()
+    placements: list[object | None] = []
+
+    def _device_put(array, placement=None):
+        placements.append(placement)
+        return array, placement
+
+    def _unexpected_runtime_device():
+        raise AssertionError("explicit placement must not query runtime device")
+
+    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
+    monkeypatch.setattr(dtypes, "get_runtime_jax_device", _unexpected_runtime_device)
+    monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
+
+    array, placement = dtypes.runtime_device_put([1, 2, 3], target=explicit_target)
+
+    assert isinstance(array, np.ndarray)
+    assert placement is explicit_target
+    assert placements == [explicit_target]
+
+
+def test_runtime_device_put_keeps_default_placement_without_runtime_device(monkeypatch):
+    """Non-JAX policy remains on the unqualified JAX placement path."""
+    placements: list[object | None] = []
+
+    def _device_put(array, placement=None):
+        placements.append(placement)
+        return array, placement
+
+    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
+    monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: None)
+    monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
+
+    array, placement = dtypes.runtime_device_put([1, 2, 3])
+
+    assert isinstance(array, np.ndarray)
+    assert placement is None
+    assert placements == [None]
