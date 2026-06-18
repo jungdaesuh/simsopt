@@ -877,16 +877,17 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
         expected_case="compile-count",
     )
+    expected_compile_count = 2 if method == "lbfgs-ondevice" else 1
     assert payload == {
         "case": "compile-count",
         "method": method,
-        "compile_count": 0 if method == "lbfgs-ondevice" else 1,
+        "compile_count": expected_compile_count,
         "run_count": 3,
     }
 
 
 def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
-    """Repeated lbfgs-ondevice calls must not compile solver control kernels."""
+    """Repeated lbfgs-ondevice calls should reuse bounded step kernels."""
     _assert_ondevice_optimizer_reuses_compiled_solver("lbfgs-ondevice")
 
 
@@ -896,7 +897,7 @@ def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
 
 
 def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and_grad_calls():
-    """Target-lane lbfgs-ondevice must not compile solver control kernels."""
+    """Target-lane lbfgs-ondevice should reuse bounded step kernels."""
     payload = _run_python_script_json_payload(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("target-compile-count",),
@@ -910,7 +911,7 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
     assert payload == {
         "case": "target-compile-count",
         "method": "lbfgs-ondevice",
-        "compile_count": 0,
+        "compile_count": 2,
         "run_count": 3,
         "value_and_grad": True,
     }

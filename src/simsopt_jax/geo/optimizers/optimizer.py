@@ -69,7 +69,9 @@ LM family note:
 Target private methods (maintained for the pinned JAX 0.10.0 runtime after the
 initial port from the upstream JAX optimizer sources):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
-  - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
+  - ``method="lbfgs-ondevice"``: in-tree SciPy-compatible L-BFGS-B state
+    machine on the target lane. It uses stepwise compiled macro-step kernels
+    and preserves SciPy-style counters, statuses, and inverse-Hessian history.
 
 Target SciPy-control method:
   - ``method="lbfgs-scipy-jax"``: host SciPy L-BFGS-B control with JAX
@@ -82,7 +84,8 @@ Target public stochastic method:
     objectives on the target lane.
 
 Target public quasi-Newton methods:
-  - ``method="optax-lbfgs-ondevice"``: Optax L-BFGS on the target lane.
+  - ``method="optax-lbfgs-ondevice"``: Optax gradient-transformation L-BFGS on
+    the target lane. It is not a SciPy L-BFGS-B parity lane.
   - ``method="optimistix-lbfgs-ondevice"``: Optimistix L-BFGS on the target
     lane.
 

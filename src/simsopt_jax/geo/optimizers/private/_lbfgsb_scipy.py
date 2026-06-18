@@ -135,6 +135,11 @@ class LbfgsbState(NamedTuple):
     njev: jax.Array
 
 
+class LbfgsbMacroStepResult(NamedTuple):
+    state: LbfgsbState
+    accepted_new_x: jax.Array
+
+
 class LbfgsbDcstepResult(NamedTuple):
     stx: jax.Array
     fx: jax.Array
@@ -1644,6 +1649,82 @@ def _lbfgsb_stop_after_new_x_limits(
     return state._replace(workspace=workspace)
 
 
+def lbfgsb_transition(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    """Advance one SciPy reverse-communication transition.
+
+    The accepted flag is captured before post-NEW_X stop-limit conversion so
+    callbacks and host drivers see the same accepted-step event as SciPy.
+    """
+    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
+    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
+    next_state = lbfgsb_setulb(state)
+    next_state = jax.lax.cond(
+        next_state.workspace.task[0] == FG,
+        lambda state: _lbfgsb_evaluate_value_and_grad(value_and_grad, state),
+        lambda state: state,
+        next_state,
+    )
+    accepted_new_x = next_state.workspace.task[0] == NEW_X
+    if accepted_step_callback is not None:
+        next_state = jax.lax.cond(
+            accepted_new_x,
+            lambda state: _lbfgsb_emit_accepted_step(
+                state,
+                accepted_step_callback,
+            ),
+            lambda state: state,
+            next_state,
+        )
+    next_state = _lbfgsb_stop_after_new_x_limits(
+        next_state,
+        maxiter_array,
+        maxfun_array,
+    )
+    return LbfgsbMacroStepResult(
+        state=next_state,
+        accepted_new_x=accepted_new_x,
+    )
+
+
+def lbfgsb_advance_to_next_observable(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    """Advance to the next accepted NEW_X event or terminal task."""
+
+    def continue_condition(result: LbfgsbMacroStepResult) -> jax.Array:
+        return (~result.accepted_new_x) & (result.state.workspace.task[0] < CONVERGENCE)
+
+    def body(result: LbfgsbMacroStepResult) -> LbfgsbMacroStepResult:
+        return lbfgsb_transition(
+            value_and_grad,
+            result.state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=accepted_step_callback,
+        )
+
+    return jax.lax.while_loop(
+        continue_condition,
+        body,
+        LbfgsbMacroStepResult(
+            state=state,
+            accepted_new_x=jnp.asarray(False, dtype=jnp.bool_),
+        ),
+    )
+
+
 def lbfgsb_mainlb(
     value_and_grad,
     state: LbfgsbState,
@@ -1652,35 +1733,17 @@ def lbfgsb_mainlb(
     maxfun: int,
     accepted_step_callback=None,
 ) -> LbfgsbState:
-    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
-    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
-
     def continue_condition(state: LbfgsbState) -> jax.Array:
         return state.workspace.task[0] < CONVERGENCE
 
     def body(state: LbfgsbState) -> LbfgsbState:
-        next_state = lbfgsb_setulb(state)
-        next_state = jax.lax.cond(
-            next_state.workspace.task[0] == FG,
-            lambda state: _lbfgsb_evaluate_value_and_grad(value_and_grad, state),
-            lambda state: state,
-            next_state,
-        )
-        if accepted_step_callback is not None:
-            next_state = jax.lax.cond(
-                next_state.workspace.task[0] == NEW_X,
-                lambda state: _lbfgsb_emit_accepted_step(
-                    state,
-                    accepted_step_callback,
-                ),
-                lambda state: state,
-                next_state,
-            )
-        return _lbfgsb_stop_after_new_x_limits(
-            next_state,
-            maxiter_array,
-            maxfun_array,
-        )
+        return lbfgsb_transition(
+            value_and_grad,
+            state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=accepted_step_callback,
+        ).state
 
     return jax.lax.while_loop(continue_condition, body, state)
 

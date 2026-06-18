@@ -1,5 +1,6 @@
 """Private optimizer runtime tests for BoozerSurfaceJAX."""
 
+import inspect
 import types
 
 import jax
@@ -97,6 +98,36 @@ def test_private_lbfgs_history_size_preserves_maxcor_above_dimension():
     assert _private_lbfgs._resolve_lbfgs_history_size(200, maxiter_limit=1500) == 200
     assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=1500) == 8
     assert _private_lbfgs._resolve_lbfgs_history_size(8, maxiter_limit=3) == 3
+
+
+def test_private_lbfgs_workspace_bytes_reports_bounded_state_size():
+    n = 7
+    maxcor = 4
+    dtype = np.dtype(np.float64)
+    expected = (
+        (_private_lbfgs.lbfgsb.lbfgsb_workspace_size(n, maxcor) + 29)
+        * dtype.itemsize
+        + (_private_lbfgs.lbfgsb.lbfgsb_iwa_size(n) + 2 + 2 + 4 + 44)
+        * np.dtype(np.int32).itemsize
+    )
+
+    assert _private_lbfgs._lbfgsb_workspace_bytes(n, maxcor, dtype) == expected
+
+
+def test_lbfgs_stepwise_driver_host_reads_use_host_boundary_helpers():
+    source = "\n".join(
+        [
+            inspect.getsource(_private_lbfgs._lbfgsb_state_is_terminal),
+            inspect.getsource(_private_lbfgs._lbfgsb_stepwise_driver),
+            inspect.getsource(_private_lbfgs._lbfgsb_accepted_step_observer),
+        ]
+    )
+
+    assert "jax.device_get" not in source
+    assert "np.asarray(" not in source
+    assert "host_bool" in source
+    assert "host_array" in source
+    assert "host_int" in source
 
 
 def test_matrix_rhs_linear_operators_apply_columns():
@@ -1178,7 +1209,19 @@ class TestOptimizerAdapterPrivate:
             "lbfgs_effects_barrier_returned",
         ]
         assert diagnostic_events[0][1]["maxiter"] == 1
+        assert diagnostic_events[0][1]["n"] == 2
+        assert diagnostic_events[0][1]["workspace_bytes"] == (
+            _private_lbfgs._lbfgsb_workspace_bytes(
+                2,
+                1,
+                x0.dtype,
+                record_optimizer_state_trace=False,
+                maxiter_limit=1,
+            )
+        )
+        assert diagnostic_events[0][1]["run_mode"] == "stepwise"
         assert diagnostic_events[4][1]["accepted_step_callback"] is True
+        assert diagnostic_events[4][1]["run_mode"] == "stepwise"
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
@@ -1296,7 +1339,7 @@ class TestOptimizerAdapterPrivate:
             dtype=x0.dtype,
             shape=x0.shape,
         )
-        main_a = _private_lbfgs._lbfgsb_mainlb_kernel(
+        step_a = _private_lbfgs._lbfgsb_advance_to_next_observable_kernel(
             value_and_grad,
             cache_owner=cache_owner,
             cache_key_prefix=cache_key_prefix,
@@ -1304,7 +1347,7 @@ class TestOptimizerAdapterPrivate:
             maxfun=5,
             accepted_step_callback=None,
         )
-        main_b = _private_lbfgs._lbfgsb_mainlb_kernel(
+        step_b = _private_lbfgs._lbfgsb_advance_to_next_observable_kernel(
             value_and_grad,
             cache_owner=cache_owner,
             cache_key_prefix=cache_key_prefix,
@@ -1312,7 +1355,19 @@ class TestOptimizerAdapterPrivate:
             maxfun=5,
             accepted_step_callback=None,
         )
-        observed = _private_lbfgs._lbfgsb_mainlb_kernel(
+        result_payload_a = _private_lbfgs._lbfgsb_result_payload_kernel(
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            maxiter=5,
+            maxfun=5,
+        )
+        result_payload_b = _private_lbfgs._lbfgsb_result_payload_kernel(
+            cache_owner=cache_owner,
+            cache_key_prefix=cache_key_prefix,
+            maxiter=5,
+            maxfun=5,
+        )
+        observed = _private_lbfgs._lbfgsb_advance_to_next_observable_kernel(
             value_and_grad,
             cache_owner=cache_owner,
             cache_key_prefix=cache_key_prefix,
@@ -1320,8 +1375,9 @@ class TestOptimizerAdapterPrivate:
             maxfun=5,
             accepted_step_callback=lambda *_args: None,
         )
-        assert main_a is main_b
-        assert observed is not main_a
+        assert step_a is step_b
+        assert result_payload_a is result_payload_b
+        assert observed is not step_a
 
     def test_newton_linear_product_jit_helpers_cache_marked_callables(self):
         def quad(x):
@@ -1340,7 +1396,7 @@ class TestOptimizerAdapterPrivate:
             _opt._jacobian_vector_product_fn(cacheable_residual)
         )
 
-    def test_lbfgsb_main_loop_omits_partial_state_donation(self, monkeypatch):
+    def test_lbfgsb_step_kernel_omits_partial_state_donation(self, monkeypatch):
         observed = {}
 
         def fake_jit(fn, *jit_args, **jit_kwargs):
@@ -1350,7 +1406,7 @@ class TestOptimizerAdapterPrivate:
 
         monkeypatch.setattr(_private_lbfgs.jax, "jit", fake_jit)
 
-        kernel = _private_lbfgs._lbfgsb_mainlb_kernel(
+        kernel = _private_lbfgs._lbfgsb_advance_to_next_observable_kernel(
             lambda x: (jnp.asarray(0.0), jnp.zeros_like(x.x)),
             cache_owner=None,
             cache_key_prefix=(),
@@ -1742,6 +1798,32 @@ class TestLBFGSMethodPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_defaults_to_stepwise_driver(self, monkeypatch):
+        """Public lbfgs-ondevice must not use the legacy full-solve compile path."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def reject_legacy_mainlb(*_args, **_kwargs):
+            raise AssertionError("default lbfgs-ondevice called legacy mainlb kernel")
+
+        monkeypatch.setattr(
+            _private_lbfgs,
+            "_lbfgsb_mainlb_kernel",
+            reject_legacy_mainlb,
+        )
+
+        result = jax_minimize(
+            quad,
+            jnp.array([1.0, -2.0], dtype=jnp.float64),
+            method="lbfgs-ondevice",
+            maxiter=5,
+        )
+
+        assert result.success is True
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_rejects_nonpositive_maxls_like_scipy(self):
         """Public lbfgs-ondevice must preserve SciPy's maxls contract."""
 
@@ -1788,6 +1870,57 @@ class TestLBFGSMethodPrivate:
 
         np.testing.assert_allclose(np.asarray(result.x), scipy_result.x, atol=1e-12)
         np.testing.assert_allclose(np.asarray(result.jac), scipy_result.jac, atol=1e-12)
+        assert result.nit == scipy_result.nit
+        assert result.nfev == scipy_result.nfev
+        assert result.njev == scipy_result.njev
+        assert result.status == scipy_result.status
+        assert result.success is scipy_result.success
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_BUDGET_RUNTIME
+    def test_lbfgs_ondevice_maxfun_budget_matches_scipy_after_line_search(self):
+        """SciPy checks maxfun only after an accepted NEW_X step."""
+
+        def jax_rosenbrock(x):
+            return 100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2
+
+        def scipy_rosenbrock(x):
+            value = 100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2
+            grad = np.asarray(
+                [
+                    -400.0 * x[0] * (x[1] - x[0] ** 2) - 2.0 * (1.0 - x[0]),
+                    200.0 * (x[1] - x[0] ** 2),
+                ],
+                dtype=np.float64,
+            )
+            return np.float64(value), grad
+
+        x0 = np.asarray([-1.2, 1.0], dtype=np.float64)
+        options = {"maxiter": 20, "maxfun": 4, "maxcor": 4, "ftol": 0.0, "gtol": 1e-8}
+        scipy_result = optimize.minimize(
+            scipy_rosenbrock,
+            x0,
+            jac=True,
+            method="L-BFGS-B",
+            options=options,
+        )
+
+        result = jax_minimize(
+            jax_rosenbrock,
+            jnp.asarray(x0, dtype=jnp.float64),
+            method="lbfgs-ondevice",
+            tol=options["gtol"],
+            maxiter=options["maxiter"],
+            options={
+                "maxfun": options["maxfun"],
+                "maxcor": options["maxcor"],
+                "ftol": options["ftol"],
+            },
+        )
+
+        np.testing.assert_allclose(np.asarray(result.x), scipy_result.x, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(result.jac), scipy_result.jac, atol=1e-12)
+        assert result.fun == pytest.approx(float(scipy_result.fun), abs=1e-12)
         assert result.nit == scipy_result.nit
         assert result.nfev == scipy_result.nfev
         assert result.njev == scipy_result.njev
@@ -1944,6 +2077,94 @@ class TestLBFGSMethodPrivate:
         assert float(result.fun) < quad_value_and_grad(np.asarray(x0))[0]
         assert len(callback_calls) == result.nit
         assert len(progress_calls) == result.nit
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_gpu_closure_constants_run_under_strict_transfer_guard(
+        self,
+    ):
+        try:
+            device = jax.devices("gpu")[0]
+        except RuntimeError:
+            pytest.skip("CUDA device required for device-to-host transfer-guard proof.")
+        dtype = np.float64
+        x0 = jax.device_put(np.asarray([0.0, 0.0], dtype=dtype), device)
+        target = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype), device)
+        active = jax.device_put(np.asarray(True), device)
+        two = jax.device_put(np.asarray(2.0, dtype=dtype), device)
+
+        def value_and_grad(x):
+            residual = jnp.where(active, x - target, x)
+            return jnp.vdot(residual, residual), two * residual
+
+        with jax.transfer_guard("disallow"):
+            result = jax_minimize(
+                value_and_grad,
+                x0,
+                method="lbfgs-ondevice",
+                maxiter=1,
+                value_and_grad=True,
+            )
+
+        assert result.x.shape == (2,)
+        assert result.nit <= 1
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_callbacks_track_accepted_new_x_count_after_step_split(
+        self,
+    ):
+        """Callback/progress streams are accepted-step streams, not FG probes."""
+        half = _device_half()
+
+        def quad_value_and_grad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return half * jnp.dot(x, x), x
+
+        callback_calls = []
+        progress_calls = []
+        result = jax_minimize(
+            quad_value_and_grad,
+            jnp.array([1.0, -2.0], dtype=jnp.float64),
+            method="lbfgs-ondevice",
+            maxiter=1,
+            value_and_grad=True,
+            callback=_record_host_arrays(callback_calls, dtype=float),
+            progress_callback=_record_progress(progress_calls),
+        )
+
+        assert result.nit == 1
+        assert len(callback_calls) == result.nit
+        assert len(progress_calls) == result.nit
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_and_optax_lbfgs_are_distinct_contracts(self):
+        """Optax L-BFGS is not a SciPy L-BFGS-B parity oracle."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        scipy_style = jax_minimize(
+            quad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=2,
+            options={"maxcor": 3},
+        )
+        optax_style = jax_minimize(
+            quad,
+            x0,
+            method="optax-lbfgs-ondevice",
+            maxiter=2,
+            options={"maxcor": 3, "maxls": 5},
+        )
+
+        assert hasattr(scipy_style, "hess_inv")
+        assert not hasattr(optax_style, "hess_inv")
+        assert scipy_style.nfev == scipy_style.njev
+        assert optax_style.nfev == optax_style.njev
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME

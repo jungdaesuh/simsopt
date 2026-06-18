@@ -209,8 +209,14 @@ When `backend="jax"` is active, the implicit outer optimizer lane is
 `scipy-jax`: SciPy keeps host control of L-BFGS-B while the objective and inner
 Boozer solve run through the JAX target-lane value/grad path. Explicit
 `scipy-jax-fullgraph` is the full-graph stress/parity route. Explicit
-`ondevice` remains available for target-lane accelerator residency tests, but
-CPU `ondevice` is memory-intensive and emits a warning.
+`ondevice` selects the in-tree SciPy-compatible L-BFGS-B state machine on the
+target lane; it uses stepwise compiled macro-step kernels and keeps SciPy-style
+`maxcor`/`maxls`/`ftol`/`gtol`/`maxfun`, status, counters, and `hess_inv`
+semantics. `optax-lbfgs-ondevice` is a separate Optax gradient-transformation
+lane for accelerator-resident quasi-Newton experiments; it is not the SciPy
+L-BFGS-B parity oracle and does not expose the same reverse-communication or
+inverse-Hessian-history contract. CPU `ondevice` remains memory-intensive and
+emits a warning.
 
 Exact Boozer note:
 

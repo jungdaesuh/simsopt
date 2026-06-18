@@ -7,6 +7,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.runtime.host_boundary import (
+    host_array,
+    host_bool,
+    host_float,
+    host_int,
+)
 from .._shared import (
     _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     _prepare_optimizer_callable_inputs,
@@ -35,8 +41,12 @@ _SCIPY_LBFGSB_DEFAULT_MAXFUN = 15000
 _DEFAULT_OPTIMIZER_STATE_TRACE_MAX_BYTES = 64 * 1024 * 1024
 _TRACE_ARRAYS_PER_ENTRY = 2
 _TRACE_SCALARS_PER_ENTRY = 5
+_LBFGS_RUN_MODE_STEPWISE = "stepwise"
+_LBFGS_RUN_MODE_MONOLITHIC_DEBUG = "monolithic_debug"
 
 
+# `lbfgs-ondevice` keeps the SciPy-compatible L-BFGS-B contract; only its
+# execution boundary mirrors Optax-style init/update/state/result structure.
 def _record_diagnostic_event(callback, label, **fields):
     if callback is not None:
         callback(label, **fields)
@@ -151,6 +161,8 @@ def _lbfgsb_mainlb_kernel(
     maxfun: int,
     accepted_step_callback=None,
 ):
+    """Legacy full-solve compile wrapper kept only for explicit debug runs."""
+
     def run(state: lbfgsb.LbfgsbState):
         final_state = lbfgsb.lbfgsb_mainlb(
             value_and_grad,
@@ -171,6 +183,66 @@ def _lbfgsb_mainlb_kernel(
         cache_owner if accepted_step_callback is None else None,
         cache_key=(
             "lbfgsb-mainlb",
+            *cache_key_prefix,
+            int(maxiter),
+            int(maxfun),
+        ),
+        builder=lambda: jax.jit(run),
+    )
+
+
+def _lbfgsb_advance_to_next_observable_kernel(
+    value_and_grad,
+    *,
+    cache_owner=None,
+    cache_key_prefix=(),
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+):
+    def run(state: lbfgsb.LbfgsbState):
+        return lbfgsb.lbfgsb_advance_to_next_observable(
+            value_and_grad,
+            state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=accepted_step_callback,
+        )
+
+    run.__name__ = "lbfgs_private_macro_step_solver"
+    return _cached_private_solver(
+        cache_owner if accepted_step_callback is None else None,
+        cache_key=(
+            "lbfgsb-advance-to-next-observable",
+            *cache_key_prefix,
+            int(maxiter),
+            int(maxfun),
+        ),
+        builder=lambda: jax.jit(run),
+    )
+
+
+def _lbfgsb_result_payload_kernel(
+    *,
+    cache_owner=None,
+    cache_key_prefix=(),
+    maxiter: int,
+    maxfun: int,
+):
+    def run(state: lbfgsb.LbfgsbState):
+        history = lbfgsb.lbfgsb_inverse_hessian_history(state)
+        return _lbfgsb_state_to_lbfgs_results(
+            state,
+            history=history,
+            maxiter_limit=jnp.asarray(maxiter, dtype=jnp.int32),
+            maxfun_limit=jnp.asarray(maxfun, dtype=jnp.int32),
+        )
+
+    run.__name__ = "lbfgs_private_result_payload_solver"
+    return _cached_private_solver(
+        cache_owner,
+        cache_key=(
+            "lbfgsb-result-payload",
             *cache_key_prefix,
             int(maxiter),
             int(maxfun),
@@ -213,6 +285,41 @@ def _resolve_scipy_lbfgsb_limits(maxiter, maxfun):
         _SCIPY_LBFGSB_DEFAULT_MAXFUN if maxfun is None else maxfun
     )
     return maxiter_limit, maxfun_limit
+
+
+def _check_lbfgsb_run_mode(run_mode: str) -> str:
+    if run_mode not in {
+        _LBFGS_RUN_MODE_STEPWISE,
+        _LBFGS_RUN_MODE_MONOLITHIC_DEBUG,
+    }:
+        raise ValueError(
+            "lbfgs_run_mode must be 'stepwise' or 'monolithic_debug', "
+            f"got {run_mode!r}."
+        )
+    return run_mode
+
+
+def _lbfgsb_workspace_bytes(
+    n: int,
+    maxcor: int,
+    dtype,
+    *,
+    record_optimizer_state_trace: bool = False,
+    maxiter_limit=None,
+) -> int:
+    float_slots = lbfgsb.lbfgsb_workspace_size(int(n), int(maxcor)) + 29
+    int_slots = lbfgsb.lbfgsb_iwa_size(int(n)) + 2 + 2 + 4 + 44
+    workspace_bytes = (
+        float_slots * np.dtype(dtype).itemsize
+        + int_slots * np.dtype(np.int32).itemsize
+    )
+    if record_optimizer_state_trace:
+        iterations = max(1, int(maxiter_limit))
+        workspace_bytes += iterations * (
+            (_TRACE_ARRAYS_PER_ENTRY * int(n) + _TRACE_SCALARS_PER_ENTRY)
+            * np.dtype(np.float64).itemsize
+        )
+    return int(workspace_bytes)
 
 
 def _check_lbfgsb_trace_budget(
@@ -345,10 +452,12 @@ def _lbfgsb_accepted_step_observer(
         return None
 
     def observe(iteration, x, f, g, nfev, njev):
-        x_host = np.asarray(x, dtype=float)
-        g_host = np.asarray(g, dtype=float)
-        f_host = float(np.asarray(f).reshape(()).item())
-        iteration_host = int(np.asarray(iteration).reshape(()).item())
+        x_host = host_array(x, dtype=float)
+        g_host = host_array(g, dtype=float)
+        f_host = host_float(f)
+        iteration_host = host_int(iteration)
+        nfev_host = host_int(nfev)
+        njev_host = host_int(njev)
         if callback is not None:
             callback(x_host)
         if progress_callback is not None:
@@ -365,8 +474,8 @@ def _lbfgsb_accepted_step_observer(
                     "fun": f_host,
                     "jac": g_host,
                     "jac_inf_norm": float(np.linalg.norm(g_host, ord=np.inf)),
-                    "nfev": int(np.asarray(nfev).reshape(()).item()),
-                    "njev": int(np.asarray(njev).reshape(()).item()),
+                    "nfev": nfev_host,
+                    "njev": njev_host,
                 }
             )
 
@@ -410,6 +519,21 @@ def _lbfgsb_state_to_lbfgs_results(
     )
 
 
+def _lbfgsb_state_is_terminal(state: lbfgsb.LbfgsbState) -> bool:
+    return host_bool(state.workspace.task[0] >= lbfgsb.CONVERGENCE)
+
+
+def _lbfgsb_stepwise_driver(
+    state: lbfgsb.LbfgsbState,
+    advance_to_next_observable,
+    result_payload,
+) -> _LBFGSResults:
+    while not _lbfgsb_state_is_terminal(state):
+        step_result = advance_to_next_observable(state)
+        state = step_result.state
+    return result_payload(state)
+
+
 def _minimize_lbfgs_private_impl(
     value_and_grad_fun,
     x0,
@@ -428,7 +552,9 @@ def _minimize_lbfgs_private_impl(
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
     diagnostic_event_callback=None,
+    run_mode=_LBFGS_RUN_MODE_STEPWISE,
 ):
+    run_mode = _check_lbfgsb_run_mode(str(run_mode))
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
         x0,
@@ -443,6 +569,13 @@ def _minimize_lbfgs_private_impl(
     )
     history_size = _resolve_lbfgs_history_size(
         maxcor,
+        maxiter_limit=maxiter_limit_value,
+    )
+    workspace_bytes = _lbfgsb_workspace_bytes(
+        int(x0.size),
+        history_size,
+        dtype,
+        record_optimizer_state_trace=bool(record_optimizer_state_trace),
         maxiter_limit=maxiter_limit_value,
     )
     _check_lbfgsb_trace_budget(
@@ -475,6 +608,11 @@ def _minimize_lbfgs_private_impl(
         maxfun=int(maxfun_limit_value),
         maxcor=int(history_size),
         maxls=int(maxls),
+        n=int(x0.size),
+        workspace_bytes=workspace_bytes,
+        callback_enabled=callback is not None or progress_callback is not None,
+        record_optimizer_state_trace=bool(record_optimizer_state_trace),
+        run_mode=run_mode,
     )
     state = _lbfgsb_initial_state_kernel(
         cache_owner=solver_cache_owner,
@@ -516,15 +654,37 @@ def _minimize_lbfgs_private_impl(
         "lbfgs_main_kernel_started",
         accepted_step_callback=accepted_step_callback is not None,
         record_optimizer_state_trace=bool(record_optimizer_state_trace),
+        run_mode=run_mode,
     )
-    result = _lbfgsb_mainlb_kernel(
-        value_and_grad_kernel,
-        cache_owner=solver_cache_owner,
-        cache_key_prefix=solver_cache_key_prefix,
-        maxiter=int(maxiter_limit_value),
-        maxfun=int(maxfun_limit_value),
-        accepted_step_callback=accepted_step_callback,
-    )(state)
+    if run_mode == _LBFGS_RUN_MODE_MONOLITHIC_DEBUG:
+        result = _lbfgsb_mainlb_kernel(
+            value_and_grad_kernel,
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            maxiter=int(maxiter_limit_value),
+            maxfun=int(maxfun_limit_value),
+            accepted_step_callback=accepted_step_callback,
+        )(state)
+    else:
+        advance_to_next_observable = _lbfgsb_advance_to_next_observable_kernel(
+            value_and_grad_kernel,
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            maxiter=int(maxiter_limit_value),
+            maxfun=int(maxfun_limit_value),
+            accepted_step_callback=accepted_step_callback,
+        )
+        result_payload = _lbfgsb_result_payload_kernel(
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            maxiter=int(maxiter_limit_value),
+            maxfun=int(maxfun_limit_value),
+        )
+        result = _lbfgsb_stepwise_driver(
+            state,
+            advance_to_next_observable,
+            result_payload,
+        )
     _record_diagnostic_event(
         diagnostic_event_callback,
         "lbfgs_main_kernel_returned",
@@ -557,6 +717,7 @@ def _minimize_lbfgs_private(
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
     diagnostic_event_callback=None,
+    run_mode=_LBFGS_RUN_MODE_STEPWISE,
 ):
     return _minimize_lbfgs_private_impl(
         _scalar_value_and_grad(fun),
@@ -574,6 +735,7 @@ def _minimize_lbfgs_private(
         record_optimizer_state_trace=record_optimizer_state_trace,
         max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
         diagnostic_event_callback=diagnostic_event_callback,
+        run_mode=run_mode,
     )
 
 
@@ -593,6 +755,7 @@ def _minimize_lbfgs_private_value_and_grad(
     record_optimizer_state_trace=False,
     max_optimizer_state_trace_bytes=None,
     diagnostic_event_callback=None,
+    run_mode=_LBFGS_RUN_MODE_STEPWISE,
 ):
     return _minimize_lbfgs_private_impl(
         fun,
@@ -611,4 +774,5 @@ def _minimize_lbfgs_private_value_and_grad(
         record_optimizer_state_trace=record_optimizer_state_trace,
         max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
         diagnostic_event_callback=diagnostic_event_callback,
+        run_mode=run_mode,
     )
