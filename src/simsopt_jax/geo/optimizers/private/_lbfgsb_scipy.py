@@ -9,6 +9,8 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import numpy as np
 
+from simsopt_jax.runtime.host_boundary import host_array
+
 
 START = 0
 NO_MSG = 0
@@ -1788,7 +1790,7 @@ def lbfgsb_factr_from_ftol(ftol: float, *, dtype=np.float64) -> np.floating:
 
 
 def lbfgsb_task_message(task: np.ndarray | jax.Array) -> str:
-    task_host = np.asarray(jax.device_get(task), dtype=np.int32)
+    task_host = host_array(task, dtype=np.int32)
     return STATUS_MESSAGES[int(task_host[0])] + ": " + TASK_MESSAGES[int(task_host[1])]
 
 

@@ -9,6 +9,7 @@ import jax.numpy as jnp
 
 from simsopt_jax.runtime.host_boundary import (
     host_array,
+    host_bool,
     host_float,
     host_int,
 )
@@ -29,6 +30,7 @@ from ._common import (
 )
 from . import _lbfgsb_scipy as lbfgsb
 from ._types import (
+    LBFGS_STATUS_CALLBACK_STOP,
     LBFGS_STATUS_NONFINITE,
     _LBFGSInvalidStepLog,
     _LBFGSResults,
@@ -250,6 +252,24 @@ def _lbfgsb_result_payload_kernel(
     )
 
 
+def _lbfgsb_callback_stop_state_kernel(
+    *,
+    cache_owner=None,
+    cache_key_prefix=(),
+):
+    def stop_for_callback(state: lbfgsb.LbfgsbState):
+        workspace = state.workspace._replace(
+            task=lbfgsb._lbfgsb_task(lbfgsb.STOP, lbfgsb.STOP_CALLB)
+        )
+        return state._replace(workspace=workspace)
+
+    return _cached_private_solver(
+        cache_owner,
+        cache_key=("lbfgsb-callback-stop-state", *cache_key_prefix),
+        builder=lambda: jax.jit(stop_for_callback),
+    )
+
+
 def _lbfgsb_start_with_initial_value_and_grad_kernel(
     *,
     cache_owner=None,
@@ -354,18 +374,24 @@ def _resolve_lbfgs_history_size(maxcor, *, maxiter_limit) -> int:
 
 def _lbfgsb_public_status(state, *, maxiter_limit, maxfun_limit):
     task0 = state.workspace.task[0]
+    task1 = state.workspace.task[1]
+    callback_stop = (task0 == lbfgsb.STOP) & (task1 == lbfgsb.STOP_CALLB)
     limited = (state.nfev > maxfun_limit) | (state.n_iterations >= maxiter_limit)
     nonfinite = (~jnp.isfinite(state.f)) | jnp.any(~jnp.isfinite(state.g))
     nonfinite_status = jnp.asarray(LBFGS_STATUS_NONFINITE, dtype=task0.dtype)
+    callback_stop_status = jnp.asarray(
+        LBFGS_STATUS_CALLBACK_STOP, dtype=task0.dtype
+    )
     zero = jnp.zeros_like(task0)
     one = jnp.ones_like(task0)
     return jnp.select(
         [
+            callback_stop,
             (task0 == lbfgsb.ABNORMAL) & nonfinite,
             task0 == lbfgsb.CONVERGENCE,
             limited,
         ],
-        [nonfinite_status, zero, one],
+        [callback_stop_status, nonfinite_status, zero, one],
         default=one + one,
     )
 
@@ -527,10 +553,30 @@ def _lbfgsb_stepwise_driver(
     state: lbfgsb.LbfgsbState,
     advance_to_next_observable,
     result_payload,
+    *,
+    accepted_step_callback=None,
+    callback_stop_state=None,
 ) -> _LBFGSResults:
     while not _lbfgsb_state_is_terminal(state):
         step_result = advance_to_next_observable(state)
         state = step_result.state
+        if accepted_step_callback is not None and host_bool(
+            step_result.accepted_new_x
+        ):
+            try:
+                accepted_step_callback(
+                    state.n_iterations,
+                    state.x,
+                    state.f,
+                    state.g,
+                    state.nfev,
+                    state.njev,
+                )
+            except StopIteration:
+                if callback_stop_state is None:
+                    raise
+                state = callback_stop_state(state)
+                break
     return result_payload(state)
 
 
@@ -672,7 +718,7 @@ def _minimize_lbfgs_private_impl(
             cache_key_prefix=solver_cache_key_prefix,
             maxiter=int(maxiter_limit_value),
             maxfun=int(maxfun_limit_value),
-            accepted_step_callback=accepted_step_callback,
+            accepted_step_callback=None,
         )
         result_payload = _lbfgsb_result_payload_kernel(
             cache_owner=solver_cache_owner,
@@ -680,10 +726,18 @@ def _minimize_lbfgs_private_impl(
             maxiter=int(maxiter_limit_value),
             maxfun=int(maxfun_limit_value),
         )
+        callback_stop_state = None
+        if accepted_step_callback is not None:
+            callback_stop_state = _lbfgsb_callback_stop_state_kernel(
+                cache_owner=solver_cache_owner,
+                cache_key_prefix=solver_cache_key_prefix,
+            )
         result = _lbfgsb_stepwise_driver(
             state,
             advance_to_next_observable,
             result_payload,
+            accepted_step_callback=accepted_step_callback,
+            callback_stop_state=callback_stop_state,
         )
     _record_diagnostic_event(
         diagnostic_event_callback,

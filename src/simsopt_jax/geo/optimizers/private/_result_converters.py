@@ -15,7 +15,7 @@ from simsopt_jax.runtime.host_boundary import (
 )
 from simsopt_jax.geo.optimizer_host_lbfgs import line_search_failure_reason_from_code
 from . import _lbfgsb_scipy as lbfgsb
-from ._types import LBFGS_STATUS_NONFINITE
+from ._types import LBFGS_STATUS_CALLBACK_STOP, LBFGS_STATUS_NONFINITE
 
 
 def _is_invalid_state(f, g):
@@ -44,6 +44,7 @@ _LBFGS_STATUS_MESSAGES = {
     LBFGS_STATUS_NONFINITE: (
         "Non-finite objective, iterate, or gradient encountered during iteration."
     ),
+    LBFGS_STATUS_CALLBACK_STOP: "`callback` raised `StopIteration`.",
 }
 
 _LBFGS_SUCCESS_STATUSES = frozenset({0, 4})
@@ -87,7 +88,7 @@ def _lbfgs_success(status, invalid_state, state):
 
 
 def _lbfgs_message(status, invalid_state, state):
-    if status == LBFGS_STATUS_NONFINITE:
+    if status in {LBFGS_STATUS_NONFINITE, LBFGS_STATUS_CALLBACK_STOP}:
         return _status_message_lbfgs(status, False)
     task = getattr(state, "task", None)
     if task is not None:

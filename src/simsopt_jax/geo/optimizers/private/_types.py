@@ -12,6 +12,7 @@ import jax
 # re-evaluation. This is repo-local; SciPy's low-level L-BFGS-B warnflag
 # contract remains 0/1/2.
 LBFGS_STATUS_NONFINITE = 6
+LBFGS_STATUS_CALLBACK_STOP = 99
 
 
 class _BFGSResults(NamedTuple):

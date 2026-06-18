@@ -2140,6 +2140,65 @@ class TestLBFGSMethodPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_callback_stop_iteration_matches_scipy_status(
+        self,
+    ):
+        """StopIteration from an accepted-step callback must halt like SciPy."""
+        half = _device_half()
+        x0 = np.asarray([1.0, -2.0], dtype=np.float64)
+
+        def jax_value_and_grad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return half * jnp.dot(x, x), x
+
+        def scipy_value_and_grad(x):
+            return np.float64(0.5 * np.dot(x, x)), np.asarray(x, dtype=np.float64)
+
+        scipy_calls = []
+
+        def scipy_callback(intermediate_result=None):
+            scipy_calls.append(np.asarray(intermediate_result.x, dtype=float))
+            raise StopIteration
+
+        scipy_result = optimize.minimize(
+            scipy_value_and_grad,
+            x0,
+            jac=True,
+            method="L-BFGS-B",
+            callback=scipy_callback,
+            options={"maxiter": 5},
+        )
+
+        callback_calls = []
+        progress_calls = []
+
+        def callback(x):
+            callback_calls.append(np.asarray(x, dtype=float))
+            raise StopIteration
+
+        with jax.transfer_guard("disallow"):
+            result = jax_minimize(
+                jax_value_and_grad,
+                jnp.asarray(x0, dtype=jnp.float64),
+                method="lbfgs-ondevice",
+                maxiter=5,
+                value_and_grad=True,
+                callback=callback,
+                progress_callback=_record_progress(progress_calls),
+            )
+
+        assert result.success is scipy_result.success
+        assert result.status == scipy_result.status == 99
+        assert result.message == scipy_result.message
+        assert result.nit == scipy_result.nit == len(callback_calls)
+        assert result.nfev == scipy_result.nfev
+        assert result.njev == scipy_result.njev
+        assert len(scipy_calls) == len(callback_calls)
+        assert progress_calls == []
+        np.testing.assert_allclose(result.x, scipy_result.x, rtol=1e-12, atol=1e-12)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_and_optax_lbfgs_are_distinct_contracts(self):
         """Optax L-BFGS is not a SciPy L-BFGS-B parity oracle."""
 
