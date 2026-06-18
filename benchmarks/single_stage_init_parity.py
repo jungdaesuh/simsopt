@@ -1334,7 +1334,11 @@ def _should_compare_surface_geometry(
 def _needs_shared_init_seed(
     args: argparse.Namespace, *, reference_backend: str
 ) -> bool:
-    return bool(reference_backend == "cpu" and int(args.maxiter) > 0)
+    return bool(
+        reference_backend == "cpu"
+        and int(args.maxiter) > 0
+        and not _has_explicit_single_stage_seed(args)
+    )
 
 
 def _has_explicit_single_stage_seed(args: argparse.Namespace) -> bool:

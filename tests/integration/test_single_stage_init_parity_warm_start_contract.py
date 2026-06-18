@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 
 from benchmarks.single_stage_init_parity import (
+    _needs_shared_init_seed,
     _resolve_warm_start_seed_contract_G,
     _validate_warm_start_seed_contract,
 )
@@ -35,3 +36,25 @@ def test_warm_start_contract_accepts_runtime_g_derived_from_biotsavart(tmp_path)
 
     assert math.isfinite(float(derived_g))
     _validate_warm_start_seed_contract(args, seed_dir)
+
+
+def test_cpu_reference_outer_run_uses_explicit_warm_start_without_seed_child():
+    """Production donor runs should not re-solve an init-only shared seed."""
+    args = argparse.Namespace(
+        maxiter=1500,
+        warm_start_run_dir="/workspace/seeds/donor",
+        jax_runtime_seed_spec=None,
+    )
+
+    assert not _needs_shared_init_seed(args, reference_backend="cpu")
+
+
+def test_cpu_reference_outer_run_keeps_seed_child_without_explicit_seed():
+    """Cold outer runs still materialize a shared seed before comparing lanes."""
+    args = argparse.Namespace(
+        maxiter=1500,
+        warm_start_run_dir=None,
+        jax_runtime_seed_spec=None,
+    )
+
+    assert _needs_shared_init_seed(args, reference_backend="cpu")
