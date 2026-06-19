@@ -222,7 +222,12 @@ from banana_opt.stage2_geometry import (
     FiniteBuildSettings,
     configure_winding_surface_shape_dofs,
     finite_build_frame_aware_curvature_limit_inv_m,
+    rotation_aware_curvature_report,
+    rotation_aware_projected_half_extent_m,
 )
+from simsopt.geo.framedcurve import FrameRotation, FramedCurveSurfaceTangent
+from simsopt.geo.strain_optimization import LPTorsionalStrainPenalty
+from banana_opt.fold_buildability import CurveSurfaceGeodesicCurvature
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
@@ -2630,6 +2635,45 @@ def parse_args():
         dest="finitebuild_frame_aware_curvature_threshold",
         action="store_false",
         help="Keep the centerline curvature threshold in --finite-build mode.",
+    )
+    parser.add_argument(
+        "--single-stage-pack-rotation-fold-weight",
+        type=float,
+        default=float(
+            os.environ.get("SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", "0.0")
+        ),
+        help=(
+            "Opt-in weight (default 0 = off) for the live pack-rotation material-frame "
+            "binormal fold penalty. When > 0, builds a FramedCurveSurfaceTangent plus a "
+            "free FrameRotation alpha(theta) per banana coil so the optimizer can twist the "
+            "Type-KK pack thin-side-into-the-bend at the U-turns; alpha steers curvature "
+            "only (centerline field/confinement untouched). Weight 0 constructs no frame "
+            "and adds no DOFs (byte-identical)."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-pack-twist-strain-weight",
+        type=float,
+        default=float(
+            os.environ.get("SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", "0.0")
+        ),
+        help=(
+            "Opt-in weight (default 0 = off) for the LP torsional-strain windability "
+            "regularizer on the freed pack rotation alpha(theta). Requires "
+            "--single-stage-pack-rotation-fold-weight > 0."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-rotation-aware-curvature-cap",
+        dest="single_stage_rotation_aware_curvature_cap",
+        action="store_true",
+        help=(
+            "NON-PROMOTION-READY: relax the BANANA centerline curvature threshold from the "
+            "conservative worst-case corner cap to the realized rotation-aware cap "
+            "1/(floor + max reach(alpha)) (TF coils unchanged). The honest "
+            "FINITEBUILD_CURVATURE_OK gate stays at the conservative corner until the T3.1 "
+            "hardware curvature ruling. Default off."
+        ),
     )
     parser.add_argument(
         "--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100"))
