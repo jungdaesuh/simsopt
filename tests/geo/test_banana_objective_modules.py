@@ -6090,6 +6090,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         """
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
         noble = _FakeAlgebraicObjective(7.0, [9.0, 9.0, 9.0], [0.0, 0.0, 1.0, 2.0])
+        pin = _FakeAlgebraicObjective(3.0, [8.0, 8.0, 8.0], [0.0, 0.0, -2.0, 1.0])
 
         result = self.module.evaluate_base_objective(
             np.array([1.0]),
@@ -6105,10 +6106,13 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             objective_optimizable=objective,
             JNobleIotaPull=noble,
             NOBLE_IOTA_PULL_WEIGHT=2.0,
+            JIotaPin=pin,
+            IOTA_PIN_WEIGHT=0.5,
         )
 
-        # Base projects to [4.6, 2.8, 0, 0]; the weighted noble term adds 2 * [0, 0, 1, 2].
-        np.testing.assert_allclose(result["grad"], [4.6, 2.8, 2.0, 4.0])
+        # Base projects to [4.6, 2.8, 0, 0]; the weighted iota terms project onto
+        # the same shared 4-dof optimizer basis before summing.
+        np.testing.assert_allclose(result["grad"], [4.6, 2.8, 1.0, 4.5])
 
     def test_evaluate_base_objective_without_optimizable_rejects_divergent_iota_term(self):
         """With ``objective_optimizable`` dropped, each term falls back to its OWN leaf
@@ -8393,6 +8397,40 @@ class IotaShearShortfallTests(_ModuleTestCase):
         built = self.module.build_single_stage_noble_iota_pull_objective(edge)
         self.assertIsInstance(built, self.module.NobleIotaPull)
 
+    def test_iota_pin_value_and_gradient_inside_window(self):
+        edge = _LinearIotaLeaf(0.087, [2.0, -1.0])
+        term = self.module.IotaPinQuadratic(edge, target=0.086, window=0.003)
+
+        offset = 0.087 - 0.086
+        self.assertAlmostEqual(term.J(), 0.5 * offset**2)
+        np.testing.assert_allclose(term.dJ(), offset * np.array([2.0, -1.0]))
+
+    def test_iota_pin_zero_outside_window(self):
+        edge = _LinearIotaLeaf(0.091, [2.0, -1.0])
+        term = self.module.IotaPinQuadratic(edge, target=0.086, window=0.003)
+
+        self.assertEqual(term.J(), 0.0)
+        np.testing.assert_allclose(term.dJ(), [0.0, 0.0])
+
+    def test_iota_pin_rejects_invalid_target_and_window(self):
+        edge = _LinearIotaLeaf(0.086, [1.0])
+
+        for target in (float("nan"), float("inf")):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(ValueError, "finite target"):
+                    self.module.IotaPinQuadratic(edge, target=target)
+
+        for window in (0.0, -0.1, float("nan"), float("inf")):
+            with self.subTest(window=window):
+                with self.assertRaisesRegex(ValueError, "positive finite window"):
+                    self.module.IotaPinQuadratic(edge, window=window)
+
+    def test_iota_pin_builder_noops_without_iota_term(self):
+        self.assertIsNone(self.module.build_single_stage_iota_pin_objective(None))
+        edge = _LinearIotaLeaf(0.086, [1.0])
+        built = self.module.build_single_stage_iota_pin_objective(edge)
+        self.assertIsInstance(built, self.module.IotaPinQuadratic)
+
     @staticmethod
     def _base_total_objective_args():
         # The 15 positional build_total_objective args (JnonQSRatio, RES_WEIGHT,
@@ -8449,26 +8487,29 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertAlmostEqual(with_shear.J() - baseline.J(), 10.0 * shear.J())
         np.testing.assert_allclose(with_shear.dJ() - baseline.dJ(), 10.0 * shear.dJ())
 
-    def test_build_total_objective_adds_weighted_noble_and_qa_terms(self):
+    def test_build_total_objective_adds_weighted_noble_pin_and_qa_terms(self):
         baseline = self.module.build_total_objective(*self._base_total_objective_args())
         noble = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        pin = _FakeAlgebraicObjective(0.125, [0.3, -0.1])
         qa = _FakeAlgebraicObjective(0.25, [0.1, 0.2])
 
         with_terms = self.module.build_total_objective(
             *self._base_total_objective_args(),
             JNobleIotaPull=noble,
             NOBLE_IOTA_PULL_WEIGHT=4.0,
+            JIotaPin=pin,
+            IOTA_PIN_WEIGHT=5.0,
             JQAResidual=qa,
             QA_RESIDUAL_WEIGHT=6.0,
         )
 
         self.assertAlmostEqual(
             with_terms.J() - baseline.J(),
-            4.0 * noble.J() + 6.0 * qa.J(),
+            4.0 * noble.J() + 5.0 * pin.J() + 6.0 * qa.J(),
         )
         np.testing.assert_allclose(
             with_terms.dJ() - baseline.dJ(),
-            4.0 * noble.dJ() + 6.0 * qa.dJ(),
+            4.0 * noble.dJ() + 5.0 * pin.dJ() + 6.0 * qa.dJ(),
         )
 
     def test_evaluate_base_objective_adds_weighted_shear_term(self):
@@ -8566,9 +8607,10 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertAlmostEqual(off_diagnostics["J_shear"], 0.5)
         np.testing.assert_allclose(off_diagnostics["dJ_shear"], [0.25, -0.75])
 
-    def test_evaluate_base_objective_reports_noble_and_qa_terms(self):
+    def test_evaluate_base_objective_reports_noble_pin_and_qa_terms(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         noble = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
+        pin = _FakeAlgebraicObjective(0.125, [0.3, -0.1])
         qa = _FakeAlgebraicObjective(0.25, [0.1, 0.2])
 
         diagnostics = self.module.evaluate_base_objective(
@@ -8584,6 +8626,8 @@ class IotaShearShortfallTests(_ModuleTestCase):
             LENGTH_WEIGHT=0.0,
             JNobleIotaPull=noble,
             NOBLE_IOTA_PULL_WEIGHT=4.0,
+            JIotaPin=pin,
+            IOTA_PIN_WEIGHT=5.0,
             JQAResidual=qa,
             QA_RESIDUAL_WEIGHT=6.0,
         )
@@ -8592,6 +8636,10 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertAlmostEqual(diagnostics["noble_iota_pull_weight"], 4.0)
         self.assertAlmostEqual(diagnostics["J_noble_iota_pull"], 0.5)
         np.testing.assert_allclose(diagnostics["dJ_noble_iota_pull"], [0.25, -0.75])
+        self.assertTrue(diagnostics["iota_pin_objective_enabled"])
+        self.assertAlmostEqual(diagnostics["iota_pin_weight"], 5.0)
+        self.assertAlmostEqual(diagnostics["J_iota_pin"], 0.125)
+        np.testing.assert_allclose(diagnostics["dJ_iota_pin"], [0.3, -0.1])
         self.assertTrue(diagnostics["qa_residual_objective_enabled"])
         self.assertAlmostEqual(diagnostics["qa_residual_weight"], 6.0)
         self.assertAlmostEqual(diagnostics["J_qa_residual"], 0.25)

@@ -170,6 +170,8 @@ RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR = 13
 RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA = 0.012
 NOBLE_IOTA_PULL_DEFAULT_LO = 0.276
 NOBLE_IOTA_PULL_DEFAULT_HI = 0.281
+IOTA_PIN_DEFAULT_TARGET = 1.0 / (11.0 + 2.0 / (1.0 + math.sqrt(5.0)))
+IOTA_PIN_DEFAULT_WINDOW = 0.003
 
 
 def _low_order_rationals_in_window(center, half_window, max_denominator):
@@ -354,6 +356,60 @@ def build_single_stage_noble_iota_pull_objective(
     if outer_iota_term is None:
         return None
     return NobleIotaPull(outer_iota_term, lo=lo, hi=hi)
+
+
+class IotaPinQuadratic(Optimizable):
+    r"""Shallow in-window quadratic pin on the outer Boozer iota.
+
+    The wrapped ``iota_term`` is the outer-surface :class:`Iotas` objective used by
+    the regular iota target. The term is active only inside
+    ``target +/- window`` and exactly zero outside, so campaigns can opt in to a
+    local low-iota bias without pulling distant solutions across rational bands.
+    """
+
+    def __init__(
+        self,
+        iota_term,
+        *,
+        target=IOTA_PIN_DEFAULT_TARGET,
+        window=IOTA_PIN_DEFAULT_WINDOW,
+    ):
+        self.iota_term = iota_term
+        self.target = float(target)
+        self.window = float(window)
+        if not np.isfinite(self.target):
+            raise ValueError("iota pin requires finite target")
+        if not np.isfinite(self.window) or self.window <= 0.0:
+            raise ValueError("iota pin requires positive finite window")
+        Optimizable.__init__(self, x0=np.asarray([]), depends_on=[iota_term])
+
+    def _offset(self):
+        offset = float(self.iota_term.J()) - self.target
+        if abs(offset) <= self.window:
+            return offset
+        return 0.0
+
+    def J(self):
+        offset = self._offset()
+        return 0.5 * offset * offset
+
+    @derivative_dec
+    def dJ(self):
+        return self._offset() * self.iota_term.dJ(partials=True)
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+def build_single_stage_iota_pin_objective(
+    outer_iota_term,
+    *,
+    target=IOTA_PIN_DEFAULT_TARGET,
+    window=IOTA_PIN_DEFAULT_WINDOW,
+):
+    """Build the optional shallow in-window outer-iota pin objective."""
+    if outer_iota_term is None:
+        return None
+    return IotaPinQuadratic(outer_iota_term, target=target, window=window)
 
 
 class MagneticWellVolumeShortfall(Optimizable):
@@ -653,6 +709,8 @@ def build_total_objective(
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
     NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JIotaPin=None,
+    IOTA_PIN_WEIGHT=0.0,
     JQAResidual=None,
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
@@ -745,6 +803,8 @@ def build_total_objective(
         )
     if JNobleIotaPull is not None:
         objective = objective + NOBLE_IOTA_PULL_WEIGHT * JNobleIotaPull
+    if JIotaPin is not None:
+        objective = objective + IOTA_PIN_WEIGHT * JIotaPin
     if JQAResidual is not None:
         objective = objective + QA_RESIDUAL_WEIGHT * JQAResidual
     # B2 pack-rotation buildability terms (opt-in, default-None so the objective
@@ -1107,6 +1167,8 @@ def evaluate_total_objective(
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
     NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JIotaPin=None,
+    IOTA_PIN_WEIGHT=0.0,
     JQAResidual=None,
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
@@ -1182,6 +1244,8 @@ def evaluate_total_objective(
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
         NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JIotaPin=JIotaPin,
+        IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
         JQAResidual=JQAResidual,
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
@@ -1269,6 +1333,19 @@ def evaluate_total_objective(
     ) = _optional_weighted_objective_terms(
         JNobleIotaPull,
         NOBLE_IOTA_PULL_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        iota_pin_value,
+        iota_pin_grad,
+        iota_pin_weight,
+        iota_pin_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JIotaPin,
+        IOTA_PIN_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -1501,6 +1578,10 @@ def evaluate_total_objective(
             "dJ_noble_iota_pull": noble_iota_pull_grad,
             "noble_iota_pull_weight": noble_iota_pull_weight,
             "noble_iota_pull_objective_enabled": noble_iota_pull_objective_enabled,
+            "J_iota_pin": iota_pin_value,
+            "dJ_iota_pin": iota_pin_grad,
+            "iota_pin_weight": iota_pin_weight,
+            "iota_pin_objective_enabled": iota_pin_objective_enabled,
             "J_qa_residual": qa_residual_value,
             "dJ_qa_residual": qa_residual_grad,
             "qa_residual_weight": qa_residual_weight,
@@ -1564,6 +1645,8 @@ def evaluate_base_objective(
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
     NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JIotaPin=None,
+    IOTA_PIN_WEIGHT=0.0,
     JQAResidual=None,
     QA_RESIDUAL_WEIGHT=0.0,
     JCurveVesselEnvelopeKeepout=None,
@@ -1752,6 +1835,19 @@ def evaluate_base_objective(
         objective_optimizable,
     )
     (
+        iota_pin_value,
+        iota_pin_grad,
+        iota_pin_weight,
+        iota_pin_objective_enabled,
+        weighted_iota_pin_value,
+        weighted_iota_pin_grad,
+    ) = _optional_weighted_objective_terms(
+        JIotaPin,
+        IOTA_PIN_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    (
         qa_residual_value,
         qa_residual_grad,
         qa_residual_weight,
@@ -1770,6 +1866,7 @@ def evaluate_base_objective(
         + weighted_magnetic_well_value
         + weighted_rational_iota_avoidance_value
         + weighted_noble_iota_pull_value
+        + weighted_iota_pin_value
         + weighted_qa_residual_value
     )
     physics_grad = (
@@ -1778,6 +1875,7 @@ def evaluate_base_objective(
         + weighted_magnetic_well_grad
         + weighted_rational_iota_avoidance_grad
         + weighted_noble_iota_pull_grad
+        + weighted_iota_pin_grad
         + weighted_qa_residual_grad
     )
     residue_value, residue_grad = _optional_objective_value_and_gradient(
@@ -1792,6 +1890,7 @@ def evaluate_base_objective(
             + weighted_magnetic_well_value
             + weighted_rational_iota_avoidance_value
             + weighted_noble_iota_pull_value
+            + weighted_iota_pin_value
             + weighted_qa_residual_value
             + weighted_vessel_keepout_value
             + weighted_available_envelope_reward_value
@@ -1804,6 +1903,7 @@ def evaluate_base_objective(
             + weighted_magnetic_well_grad
             + weighted_rational_iota_avoidance_grad
             + weighted_noble_iota_pull_grad
+            + weighted_iota_pin_grad
             + weighted_qa_residual_grad
             + weighted_vessel_keepout_grad
             + weighted_available_envelope_reward_grad
@@ -1871,6 +1971,10 @@ def evaluate_base_objective(
             "dJ_noble_iota_pull": noble_iota_pull_grad,
             "noble_iota_pull_weight": noble_iota_pull_weight,
             "noble_iota_pull_objective_enabled": noble_iota_pull_objective_enabled,
+            "J_iota_pin": iota_pin_value,
+            "dJ_iota_pin": iota_pin_grad,
+            "iota_pin_weight": iota_pin_weight,
+            "iota_pin_objective_enabled": iota_pin_objective_enabled,
             "J_qa_residual": qa_residual_value,
             "dJ_qa_residual": qa_residual_grad,
             "qa_residual_weight": qa_residual_weight,
@@ -2182,6 +2286,8 @@ def evaluate_alm_objective(
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
     NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JIotaPin=None,
+    IOTA_PIN_WEIGHT=0.0,
     JQAResidual=None,
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
@@ -2223,6 +2329,8 @@ def evaluate_alm_objective(
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
         NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JIotaPin=JIotaPin,
+        IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
         JQAResidual=JQAResidual,
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,

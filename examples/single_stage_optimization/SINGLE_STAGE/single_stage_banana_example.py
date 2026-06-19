@@ -424,6 +424,7 @@ from banana_opt.single_stage_search_policy import (
 from banana_opt.single_stage_objectives import (
     ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     average_surface_objectives as _average_surface_objectives_impl,
+    build_single_stage_iota_pin_objective,
     build_single_stage_magnetic_well_objective,
     build_single_stage_noble_iota_pull_objective,
     build_single_stage_rational_iota_avoidance_objective,
@@ -433,6 +434,8 @@ from banana_opt.single_stage_objectives import (
     evaluate_total_objective as _evaluate_total_objective_impl,
     evaluate_alm_objective as _evaluate_alm_objective_impl,
     independent_banana_current_alm_constraint_name,
+    IOTA_PIN_DEFAULT_TARGET,
+    IOTA_PIN_DEFAULT_WINDOW,
     MinLGradBShortfall,
     NOBLE_IOTA_PULL_DEFAULT_HI,
     NOBLE_IOTA_PULL_DEFAULT_LO,
@@ -3333,6 +3336,44 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-iota-pin-weight",
+        type=float,
+        default=float(os.environ.get("SINGLE_STAGE_IOTA_PIN_WEIGHT", "0.0")),
+        help=(
+            "Opt-in shallow quadratic outer-iota pin weight (default 0 = off). "
+            "The term is active only inside target +/- window and shares the outer "
+            "Iotas Boozer-adjoint gradient with the iota target."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-iota-pin-target",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_IOTA_PIN_TARGET",
+                str(IOTA_PIN_DEFAULT_TARGET),
+            )
+        ),
+        help=(
+            "Outer-iota value for the opt-in shallow iota pin "
+            f"(default {IOTA_PIN_DEFAULT_TARGET})."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-iota-pin-window",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_IOTA_PIN_WINDOW",
+                str(IOTA_PIN_DEFAULT_WINDOW),
+            )
+        ),
+        help=(
+            "Half-width of the active shallow iota-pin window "
+            f"(default {IOTA_PIN_DEFAULT_WINDOW})."
+        ),
+    )
+    parser.add_argument(
         "--single-stage-qa-residual-weight",
         type=float,
         default=float(os.environ.get("SINGLE_STAGE_QA_RESIDUAL_WEIGHT", "0.0")),
@@ -4150,6 +4191,18 @@ def parse_args():
             "--single-stage-iota-noble-pull-lo < "
             "--single-stage-iota-noble-pull-hi."
         )
+    if (
+        not np.isfinite(args.single_stage_iota_pin_weight)
+        or args.single_stage_iota_pin_weight < 0.0
+    ):
+        parser.error("--single-stage-iota-pin-weight must be finite and non-negative.")
+    if not np.isfinite(args.single_stage_iota_pin_target):
+        parser.error("--single-stage-iota-pin-target must be finite.")
+    if (
+        not np.isfinite(args.single_stage_iota_pin_window)
+        or args.single_stage_iota_pin_window <= 0.0
+    ):
+        parser.error("--single-stage-iota-pin-window must be positive and finite.")
     if (
         not np.isfinite(args.single_stage_qa_residual_weight)
         or args.single_stage_qa_residual_weight < 0.0
@@ -6498,6 +6551,9 @@ class RunIdentityConfig:
     single_stage_iota_noble_pull_weight: float
     single_stage_iota_noble_pull_lo: float
     single_stage_iota_noble_pull_hi: float
+    single_stage_iota_pin_weight: float
+    single_stage_iota_pin_target: float
+    single_stage_iota_pin_window: float
     single_stage_qa_residual_weight: float
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
@@ -7212,6 +7268,23 @@ def make_run_identity_config(
                 NOBLE_IOTA_PULL_DEFAULT_HI,
             )
         ),
+        single_stage_iota_pin_weight=float(
+            getattr(args, "single_stage_iota_pin_weight", 0.0)
+        ),
+        single_stage_iota_pin_target=float(
+            getattr(
+                args,
+                "single_stage_iota_pin_target",
+                IOTA_PIN_DEFAULT_TARGET,
+            )
+        ),
+        single_stage_iota_pin_window=float(
+            getattr(
+                args,
+                "single_stage_iota_pin_window",
+                IOTA_PIN_DEFAULT_WINDOW,
+            )
+        ),
         single_stage_qa_residual_weight=float(
             getattr(args, "single_stage_qa_residual_weight", 0.0)
         ),
@@ -7492,6 +7565,20 @@ def build_run_identity_config(config):
                 "single_stage_iota_noble_pull_hi",
             }
             and float(config.single_stage_iota_noble_pull_weight) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_iota_pin_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name
+            in {
+                "single_stage_iota_pin_target",
+                "single_stage_iota_pin_window",
+            }
+            and float(config.single_stage_iota_pin_weight) == 0.0
         ):
             continue
         if (
@@ -8555,6 +8642,9 @@ def build_single_stage_objective_bundle(
     NOBLE_IOTA_PULL_WEIGHT=0.0,
     NOBLE_IOTA_PULL_LO=NOBLE_IOTA_PULL_DEFAULT_LO,
     NOBLE_IOTA_PULL_HI=NOBLE_IOTA_PULL_DEFAULT_HI,
+    IOTA_PIN_WEIGHT=0.0,
+    IOTA_PIN_TARGET=IOTA_PIN_DEFAULT_TARGET,
+    IOTA_PIN_WINDOW=IOTA_PIN_DEFAULT_WINDOW,
     QA_RESIDUAL_WEIGHT=0.0,
     LGRADB_WEIGHT=0.0,
     LGRADB_FLOOR=0.30,
@@ -8872,6 +8962,15 @@ def build_single_stage_objective_bundle(
         if NOBLE_IOTA_PULL_WEIGHT > 0.0
         else None
     )
+    JIotaPin = (
+        build_single_stage_iota_pin_objective(
+            surface_iota_terms[-1],
+            target=IOTA_PIN_TARGET,
+            window=IOTA_PIN_WINDOW,
+        )
+        if IOTA_PIN_WEIGHT > 0.0
+        else None
+    )
     # ``NonQuasiSymmetricRatio`` defaults to quasi_poloidal=False, the QA branch.
     # Keep the base QS objective intact and expose an independent default-off QA weight.
     JQAResidual = JnonQSRatio if QA_RESIDUAL_WEIGHT > 0.0 else None
@@ -8960,6 +9059,8 @@ def build_single_stage_objective_bundle(
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
         NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JIotaPin=JIotaPin,
+        IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
         JQAResidual=JQAResidual,
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JCurveVesselEnvelopeKeepout=JCurveVesselEnvelopeKeepout,
@@ -9033,6 +9134,7 @@ def build_single_stage_objective_bundle(
         "JMagneticWell": JMagneticWell,
         "JRationalIotaAvoidance": JRationalIotaAvoidance,
         "JNobleIotaPull": JNobleIotaPull,
+        "JIotaPin": JIotaPin,
         "JQAResidual": JQAResidual,
         "JMinLGradB": JMinLGradB,
         "JTFCurvature": JTFCurvature,
@@ -9090,6 +9192,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JMagneticWell
     global JRationalIotaAvoidance
     global JNobleIotaPull
+    global JIotaPin
     global JQAResidual
     global JMinLGradB
     global JPackRotationFold
@@ -9150,6 +9253,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JMagneticWell = objective_bundle["JMagneticWell"]
     JRationalIotaAvoidance = objective_bundle["JRationalIotaAvoidance"]
     JNobleIotaPull = objective_bundle["JNobleIotaPull"]
+    JIotaPin = objective_bundle["JIotaPin"]
     JQAResidual = objective_bundle["JQAResidual"]
     JMinLGradB = objective_bundle["JMinLGradB"]
     JPackRotationFold = objective_bundle["JPackRotationFold"]
@@ -9484,6 +9588,8 @@ def evaluate_total_objective(
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
     NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JIotaPin=None,
+    IOTA_PIN_WEIGHT=0.0,
     JQAResidual=None,
     QA_RESIDUAL_WEIGHT=0.0,
 ):
@@ -9568,6 +9674,8 @@ def evaluate_total_objective(
             RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
             JNobleIotaPull=JNobleIotaPull,
             NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+            JIotaPin=JIotaPin,
+            IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
             JQAResidual=JQAResidual,
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             JMinLGradB=globals().get("JMinLGradB"),
@@ -9632,6 +9740,8 @@ def evaluate_base_objective(
         ),
         JNobleIotaPull=globals().get("JNobleIotaPull"),
         NOBLE_IOTA_PULL_WEIGHT=globals().get("NOBLE_IOTA_PULL_WEIGHT", 0.0),
+        JIotaPin=globals().get("JIotaPin"),
+        IOTA_PIN_WEIGHT=globals().get("IOTA_PIN_WEIGHT", 0.0),
         JQAResidual=globals().get("JQAResidual"),
         QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         JMinLGradB=globals().get("JMinLGradB"),
@@ -9805,6 +9915,8 @@ def evaluate_alm_objective(
             ),
             JNobleIotaPull=globals().get("JNobleIotaPull"),
             NOBLE_IOTA_PULL_WEIGHT=globals().get("NOBLE_IOTA_PULL_WEIGHT", 0.0),
+            JIotaPin=globals().get("JIotaPin"),
+            IOTA_PIN_WEIGHT=globals().get("IOTA_PIN_WEIGHT", 0.0),
             JQAResidual=globals().get("JQAResidual"),
             QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
             JMinLGradB=globals().get("JMinLGradB"),
@@ -9913,6 +10025,8 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             ),
             JNobleIotaPull=globals().get("JNobleIotaPull"),
             NOBLE_IOTA_PULL_WEIGHT=globals().get("NOBLE_IOTA_PULL_WEIGHT", 0.0),
+            JIotaPin=globals().get("JIotaPin"),
+            IOTA_PIN_WEIGHT=globals().get("IOTA_PIN_WEIGHT", 0.0),
             JQAResidual=globals().get("JQAResidual"),
             QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         )
@@ -13234,6 +13348,8 @@ def build_total_objective(
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
     NOBLE_IOTA_PULL_WEIGHT=0.0,
+    JIotaPin=None,
+    IOTA_PIN_WEIGHT=0.0,
     JQAResidual=None,
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
@@ -13299,6 +13415,8 @@ def build_total_objective(
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
         NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
+        JIotaPin=JIotaPin,
+        IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
         JQAResidual=JQAResidual,
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
@@ -15740,6 +15858,9 @@ if __name__ == "__main__":
     NOBLE_IOTA_PULL_WEIGHT = float(args.single_stage_iota_noble_pull_weight)
     NOBLE_IOTA_PULL_LO = float(args.single_stage_iota_noble_pull_lo)
     NOBLE_IOTA_PULL_HI = float(args.single_stage_iota_noble_pull_hi)
+    IOTA_PIN_WEIGHT = float(args.single_stage_iota_pin_weight)
+    IOTA_PIN_TARGET = float(args.single_stage_iota_pin_target)
+    IOTA_PIN_WINDOW = float(args.single_stage_iota_pin_window)
     QA_RESIDUAL_WEIGHT = float(args.single_stage_qa_residual_weight)
     if (
         not np.isfinite(RATIONAL_IOTA_AVOIDANCE_WEIGHT)
@@ -15774,6 +15895,14 @@ if __name__ == "__main__":
             "--single-stage-iota-noble-pull-lo < "
             "--single-stage-iota-noble-pull-hi"
         )
+    if not np.isfinite(IOTA_PIN_WEIGHT) or IOTA_PIN_WEIGHT < 0.0:
+        raise ValueError(
+            "--single-stage-iota-pin-weight must be finite and non-negative"
+        )
+    if not np.isfinite(IOTA_PIN_TARGET):
+        raise ValueError("--single-stage-iota-pin-target must be finite")
+    if not np.isfinite(IOTA_PIN_WINDOW) or IOTA_PIN_WINDOW <= 0.0:
+        raise ValueError("--single-stage-iota-pin-window must be positive and finite")
     if not np.isfinite(QA_RESIDUAL_WEIGHT) or QA_RESIDUAL_WEIGHT < 0.0:
         raise ValueError("--single-stage-qa-residual-weight must be finite and non-negative")
     # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default weight 0 ->
@@ -15881,6 +16010,9 @@ if __name__ == "__main__":
             NOBLE_IOTA_PULL_WEIGHT=NOBLE_IOTA_PULL_WEIGHT,
             NOBLE_IOTA_PULL_LO=NOBLE_IOTA_PULL_LO,
             NOBLE_IOTA_PULL_HI=NOBLE_IOTA_PULL_HI,
+            IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
+            IOTA_PIN_TARGET=IOTA_PIN_TARGET,
+            IOTA_PIN_WINDOW=IOTA_PIN_WINDOW,
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             LGRADB_WEIGHT=LGRADB_WEIGHT,
             LGRADB_FLOOR=LGRADB_FLOOR,
@@ -18115,6 +18247,17 @@ if __name__ == "__main__":
         ),
     }
     results.update(best_feasible_results)
+    results.update(
+        {
+            "SINGLE_STAGE_IOTA_PIN_ACTIVE": JIotaPin is not None,
+            "SINGLE_STAGE_IOTA_PIN_WEIGHT": float(IOTA_PIN_WEIGHT),
+            "SINGLE_STAGE_IOTA_PIN_TARGET": float(IOTA_PIN_TARGET),
+            "SINGLE_STAGE_IOTA_PIN_WINDOW": float(IOTA_PIN_WINDOW),
+            "SINGLE_STAGE_IOTA_PIN_OBJECTIVE": (
+                None if JIotaPin is None else float(JIotaPin.J())
+            ),
+        }
+    )
     results.update(
         collect_surface_run_metadata(
             surface_data,

@@ -15269,6 +15269,9 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_iota_noble_pull_weight=0.0,
             single_stage_iota_noble_pull_lo=0.276,
             single_stage_iota_noble_pull_hi=0.281,
+            single_stage_iota_pin_weight=0.0,
+            single_stage_iota_pin_target=0.0860733168793427,
+            single_stage_iota_pin_window=0.003,
             single_stage_qa_residual_weight=0.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
@@ -15456,6 +15459,9 @@ class RunIdentityTests(unittest.TestCase):
                     "single_stage_iota_noble_pull_weight",
                     "single_stage_iota_noble_pull_lo",
                     "single_stage_iota_noble_pull_hi",
+                    "single_stage_iota_pin_weight",
+                    "single_stage_iota_pin_target",
+                    "single_stage_iota_pin_window",
                     "single_stage_qa_residual_weight",
                 }
                 or (
@@ -15759,6 +15765,19 @@ class RunIdentityTests(unittest.TestCase):
         weighted_args.single_stage_iota_noble_pull_weight = 2.5
         weighted_args.single_stage_iota_noble_pull_lo = 0.276
         weighted_args.single_stage_iota_noble_pull_hi = 0.281
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
+        )
+
+    def test_run_identity_changes_when_iota_pin_settings_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_iota_pin_weight = 1.25
+        weighted_args.single_stage_iota_pin_target = 0.086
+        weighted_args.single_stage_iota_pin_window = 0.002
 
         self.assertNotEqual(
             self._build_identity(module, base_args),
@@ -16595,6 +16614,12 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "0.276",
                 "--single-stage-iota-noble-pull-hi",
                 "0.281",
+                "--single-stage-iota-pin-weight",
+                "1.25",
+                "--single-stage-iota-pin-target",
+                "0.086",
+                "--single-stage-iota-pin-window",
+                "0.002",
                 "--single-stage-qa-residual-weight",
                 "3.5",
             ],
@@ -16610,6 +16635,9 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.single_stage_iota_noble_pull_weight, 2.5)
         self.assertEqual(args.single_stage_iota_noble_pull_lo, 0.276)
         self.assertEqual(args.single_stage_iota_noble_pull_hi, 0.281)
+        self.assertEqual(args.single_stage_iota_pin_weight, 1.25)
+        self.assertEqual(args.single_stage_iota_pin_target, 0.086)
+        self.assertEqual(args.single_stage_iota_pin_window, 0.002)
         self.assertEqual(args.single_stage_qa_residual_weight, 3.5)
 
     def test_single_stage_parse_args_accepts_hardware_sdf_reward_with_sdf_backend(
@@ -16761,6 +16789,11 @@ class CurrentBaselineContractTests(unittest.TestCase):
             ("--single-stage-rational-iota-avoidance-sigma", "inf"),
             ("--single-stage-iota-noble-pull-weight", "-0.1"),
             ("--single-stage-iota-noble-pull-weight", "nan"),
+            ("--single-stage-iota-pin-weight", "-0.1"),
+            ("--single-stage-iota-pin-weight", "nan"),
+            ("--single-stage-iota-pin-target", "inf"),
+            ("--single-stage-iota-pin-window", "0.0"),
+            ("--single-stage-iota-pin-window", "nan"),
             ("--single-stage-qa-residual-weight", "-0.1"),
             ("--single-stage-qa-residual-weight", "inf"),
         ]
