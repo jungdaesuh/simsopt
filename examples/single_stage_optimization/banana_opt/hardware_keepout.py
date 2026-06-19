@@ -1053,8 +1053,11 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
         ]
         self._groups = [
             {
+                "label": group.label,
                 "grid": jnp.asarray(group.grid),
+                "grid_np": np.asarray(group.grid, dtype=np.float64),
                 "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
+                "origin_np": np.asarray(group.origin_m, dtype=np.float64),
                 "spacing": float(group.spacing_m),
                 "effective_margin": float(group.effective_margin_m),
             }
@@ -1135,6 +1138,63 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
             for i in range(len(self.curves))
         )
 
+    def _interp_numpy(self, grid, origin, spacing, points, outside_value):
+        local = (points - origin) / spacing
+        shape = np.asarray(grid.shape, dtype=int)
+        valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
+        lower_f = np.floor(local)
+        lower = np.clip(lower_f.astype(int), 0, shape - 2)
+        frac = np.clip(local - lower_f, 0.0, 1.0)
+        i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
+        i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
+        tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
+        c000 = grid[i0, j0, k0]
+        c100 = grid[i1, j0, k0]
+        c010 = grid[i0, j1, k0]
+        c110 = grid[i1, j1, k0]
+        c001 = grid[i0, j0, k1]
+        c101 = grid[i1, j0, k1]
+        c011 = grid[i0, j1, k1]
+        c111 = grid[i1, j1, k1]
+        c00 = c000 * (1.0 - tx) + c100 * tx
+        c10 = c010 * (1.0 - tx) + c110 * tx
+        c01 = c001 * (1.0 - tx) + c101 * tx
+        c11 = c011 * (1.0 - tx) + c111 * tx
+        c0 = c00 * (1.0 - ty) + c10 * ty
+        c1 = c01 * (1.0 - ty) + c11 * ty
+        value = c0 * (1.0 - tz) + c1 * tz
+        return np.where(valid, value, outside_value)
+
+    def per_group_min_clearance(self):
+        """Minimum sampled swept-surface SDF value per represented group, m."""
+        best = {group["label"]: np.inf for group in self._groups}
+        winding_r0 = self.live_winding_r0()
+        for curve in self.curves:
+            surface_points = np.asarray(
+                swept_channel_surface_points(
+                    jnp.asarray(curve.gamma()),
+                    self.half_w,
+                    self.half_d,
+                    winding_r0,
+                ),
+                dtype=np.float64,
+            )
+            for group in self._groups:
+                values = self._interp_numpy(
+                    group["grid_np"],
+                    group["origin_np"],
+                    group["spacing"],
+                    surface_points,
+                    outside_value=group["effective_margin"],
+                )
+                best[group["label"]] = min(
+                    best[group["label"]], float(values.min())
+                )
+        return best
+
+    def shortest_clearance(self):
+        return min(self.per_group_min_clearance().values())
+
     return_fn_map = {'J': J, 'dJ': dJ}
 
 
@@ -1211,8 +1271,11 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
         ]
         self._groups = [
             {
+                "label": group.label,
                 "grid": jnp.asarray(group.grid),
+                "grid_np": np.asarray(group.grid, dtype=np.float64),
                 "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
+                "origin_np": np.asarray(group.origin_m, dtype=np.float64),
                 "spacing": float(group.spacing_m),
                 "effective_margin": float(group.effective_margin_m),
             }
@@ -1313,6 +1376,63 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
+
+    def _interp_numpy(self, grid, origin, spacing, points, outside_value):
+        local = (points - origin) / spacing
+        shape = np.asarray(grid.shape, dtype=int)
+        valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
+        lower_f = np.floor(local)
+        lower = np.clip(lower_f.astype(int), 0, shape - 2)
+        frac = np.clip(local - lower_f, 0.0, 1.0)
+        i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
+        i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
+        tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
+        c000 = grid[i0, j0, k0]
+        c100 = grid[i1, j0, k0]
+        c010 = grid[i0, j1, k0]
+        c110 = grid[i1, j1, k0]
+        c001 = grid[i0, j0, k1]
+        c101 = grid[i1, j0, k1]
+        c011 = grid[i0, j1, k1]
+        c111 = grid[i1, j1, k1]
+        c00 = c000 * (1.0 - tx) + c100 * tx
+        c10 = c010 * (1.0 - tx) + c110 * tx
+        c01 = c001 * (1.0 - tx) + c101 * tx
+        c11 = c011 * (1.0 - tx) + c111 * tx
+        c0 = c00 * (1.0 - ty) + c10 * ty
+        c1 = c01 * (1.0 - ty) + c11 * ty
+        value = c0 * (1.0 - tz) + c1 * tz
+        return np.where(valid, value, outside_value)
+
+    def per_group_min_clearance(self):
+        """Minimum sampled swept-surface SDF value per represented group, m."""
+        best = {group["label"]: np.inf for group in self._groups}
+        winding_r0 = self.live_winding_r0()
+        for curve in self.curves:
+            surface_points = np.asarray(
+                swept_channel_surface_points(
+                    jnp.asarray(curve.gamma()),
+                    self.half_w,
+                    self.half_d,
+                    winding_r0,
+                ),
+                dtype=np.float64,
+            )
+            for group in self._groups:
+                values = self._interp_numpy(
+                    group["grid_np"],
+                    group["origin_np"],
+                    group["spacing"],
+                    surface_points,
+                    outside_value=group["effective_margin"],
+                )
+                best[group["label"]] = min(
+                    best[group["label"]], float(values.min())
+                )
+        return best
+
+    def shortest_clearance(self):
+        return min(self.per_group_min_clearance().values())
 
     return_fn_map = {'J': J, 'dJ': dJ}
 

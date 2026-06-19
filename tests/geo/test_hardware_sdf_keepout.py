@@ -991,6 +991,15 @@ class ClearanceHingeTests(unittest.TestCase):
 
             min_clearance = min(diagnostic.per_group_min_clearance().values())
             expected = max(target - min_clearance, 0.0) ** 2
+            self.assertEqual(
+                objective.per_group_min_clearance(),
+                diagnostic.per_group_min_clearance(),
+            )
+            self.assertAlmostEqual(
+                objective.shortest_clearance(),
+                min_clearance,
+                places=12,
+            )
             self.assertGreaterEqual(objective.J(), expected)
             self.assertAlmostEqual(
                 objective.J(),

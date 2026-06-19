@@ -1719,6 +1719,45 @@ def single_stage_finite_build_metadata(
     }
 
 
+def load_clearance_hinge_margin_profile_json(raw_path):
+    """Load a 1-D positive target-clearance profile in metres from JSON."""
+    profile_path = Path(raw_path).expanduser()
+    profile = np.asarray(
+        json.loads(profile_path.read_text(encoding="utf-8")),
+        dtype=np.float64,
+    )
+    if profile.ndim != 1:
+        raise ValueError("must contain a 1-D JSON array")
+    if profile.size == 0:
+        raise ValueError("must contain at least one margin")
+    if not np.isfinite(profile).all() or np.any(profile <= 0.0):
+        raise ValueError("entries must be finite and positive metres")
+    return profile
+
+
+def clearance_hinge_target_margin_result_fields(
+    target_margin, *, profile_json, soft_min_temperature_m
+):
+    target = np.asarray(target_margin, dtype=np.float64)
+    values = target.reshape(-1)
+    kind = "profile" if profile_json else "scalar"
+    return {
+        "SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_KIND": kind,
+        "SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_COUNT": int(values.size),
+        "SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_MIN_M": float(values.min()),
+        "SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_MAX_M": float(values.max()),
+        "SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_PROFILE_JSON": profile_json,
+        "SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M": (
+            None
+            if soft_min_temperature_m is None
+            else float(soft_min_temperature_m)
+        ),
+        "SINGLE_STAGE_CLEARANCE_HINGE_REDUCTION": (
+            "soft_min" if soft_min_temperature_m is not None else "mean_square"
+        ),
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run single-stage Boozer/quasi-symmetry optimization from a Stage 2 seed.",
@@ -2937,6 +2976,29 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--clearance-hinge-margin-profile-json",
+        default=os.environ.get("CLEARANCE_HINGE_MARGIN_PROFILE_JSON"),
+        help=(
+            "Optional JSON array of positive target clearances in metres for the "
+            "SDF clearance hinge. Length must match the banana-curve quadpoint "
+            "count or the swept-surface sample count. When supplied, it overrides "
+            "--clearance-hinge-margin-m for the objective target but not the SDF "
+            "manifest error-budget/effective-margin contract."
+        ),
+    )
+    parser.add_argument(
+        "--clearance-hinge-soft-min-temperature-m",
+        type=float,
+        default=float(
+            os.environ.get("CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M", "0.0")
+        ),
+        help=(
+            "Optional positive soft-min temperature in metres for the SDF "
+            "clearance hinge. Default 0 disables soft-min and keeps the "
+            "mean-square sampled shortfall reduction."
+        ),
+    )
+    parser.add_argument(
         "--msc-weight",
         type=float,
         default=float(os.environ.get("MSC_WEIGHT", "0.0")),
@@ -3885,6 +3947,27 @@ def parse_args():
         parser.error(
             "--clearance-hinge-margin-m must be finite and positive."
         )
+    if (
+        not np.isfinite(args.clearance_hinge_soft_min_temperature_m)
+        or args.clearance_hinge_soft_min_temperature_m < 0.0
+    ):
+        parser.error(
+            "--clearance-hinge-soft-min-temperature-m must be finite and "
+            "non-negative."
+        )
+    args.clearance_hinge_target_margin_m = args.clearance_hinge_margin_m
+    if args.clearance_hinge_margin_profile_json:
+        try:
+            args.clearance_hinge_target_margin_m = (
+                load_clearance_hinge_margin_profile_json(
+                    args.clearance_hinge_margin_profile_json
+                )
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            parser.error(
+                "--clearance-hinge-margin-profile-json "
+                f"{args.clearance_hinge_margin_profile_json!r} {exc}"
+            )
     if (
         not np.isfinite(args.single_stage_rational_iota_avoidance_weight)
         or args.single_stage_rational_iota_avoidance_weight < 0.0
@@ -6259,6 +6342,8 @@ class RunIdentityConfig:
     single_stage_hardware_sdf_free_space_reward_weight: float
     single_stage_clearance_hinge_weight: float
     single_stage_clearance_hinge_margin_m: float
+    single_stage_clearance_hinge_margin_profile_json: str | None
+    single_stage_clearance_hinge_soft_min_temperature_m: float
     single_stage_rational_iota_avoidance_weight: float
     single_stage_rational_iota_avoidance_max_denominator: int
     single_stage_rational_iota_avoidance_sigma: float
@@ -6939,6 +7024,12 @@ def make_run_identity_config(
         ),
         single_stage_clearance_hinge_weight=args.clearance_hinge_weight,
         single_stage_clearance_hinge_margin_m=args.clearance_hinge_margin_m,
+        single_stage_clearance_hinge_margin_profile_json=getattr(
+            args, "clearance_hinge_margin_profile_json", None
+        ),
+        single_stage_clearance_hinge_soft_min_temperature_m=float(
+            getattr(args, "clearance_hinge_soft_min_temperature_m", 0.0)
+        ),
         single_stage_rational_iota_avoidance_weight=float(
             getattr(args, "single_stage_rational_iota_avoidance_weight", 0.0)
         ),
@@ -7204,7 +7295,27 @@ def build_run_identity_config(config):
             continue
         if (
             field.name == "single_stage_clearance_hinge_margin_m"
-            and float(config.single_stage_clearance_hinge_weight) == 0.0
+            and (
+                float(config.single_stage_clearance_hinge_weight) == 0.0
+                or config.single_stage_clearance_hinge_margin_profile_json
+                is not None
+            )
+        ):
+            continue
+        if (
+            field.name == "single_stage_clearance_hinge_margin_profile_json"
+            and (
+                float(config.single_stage_clearance_hinge_weight) == 0.0
+                or value is None
+            )
+        ):
+            continue
+        if (
+            field.name == "single_stage_clearance_hinge_soft_min_temperature_m"
+            and (
+                float(config.single_stage_clearance_hinge_weight) == 0.0
+                or float(value) == 0.0
+            )
         ):
             continue
         if (
@@ -8498,10 +8609,13 @@ def build_single_stage_objective_bundle(
         JCurveHardwareSdfClearanceHinge = CurveHardwareSdfClearanceHinge(
             banana_curves,
             hardware_sdf_data,
-            target_margin=SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M,
+            target_margin=SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN,
             winding_r0=keepout_winding_r0,
             clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
             clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+            soft_min_temperature=(
+                SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M
+            ),
         )
     if SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT > 0.0:
         if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
@@ -14399,6 +14513,9 @@ SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = 0.0
 SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT = 0.0
 SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_PROFILE_JSON = None
+SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
+SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M = None
 SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = 1.0
 SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = 1.0
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
@@ -15169,6 +15286,19 @@ if __name__ == "__main__":
     )
     SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT = float(args.clearance_hinge_weight)
     SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M = float(args.clearance_hinge_margin_m)
+    SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_PROFILE_JSON = (
+        args.clearance_hinge_margin_profile_json
+    )
+    SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN = getattr(
+        args,
+        "clearance_hinge_target_margin_m",
+        SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M,
+    )
+    SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M = (
+        None
+        if float(args.clearance_hinge_soft_min_temperature_m) == 0.0
+        else float(args.clearance_hinge_soft_min_temperature_m)
+    )
     SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = float(args.clearance_leg_weight)
     SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = float(args.clearance_uturn_weight)
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
@@ -16778,6 +16908,25 @@ if __name__ == "__main__":
             trace=single_stage_constraint_trace,
         )
     realized_winding_radii = realized_cws_winding_radii(banana_coils)
+    clearance_hinge_target_margin_fields = (
+        clearance_hinge_target_margin_result_fields(
+            SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN,
+            profile_json=SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_PROFILE_JSON,
+            soft_min_temperature_m=SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M,
+        )
+    )
+    clearance_hinge_per_group_min_clearance_m = None
+    clearance_hinge_min_clearance_m = None
+    if JCurveHardwareSdfClearanceHinge is not None:
+        clearance_hinge_per_group_min_clearance_m = {
+            str(label): float(value)
+            for label, value in (
+                JCurveHardwareSdfClearanceHinge.per_group_min_clearance().items()
+            )
+        }
+        clearance_hinge_min_clearance_m = min(
+            clearance_hinge_per_group_min_clearance_m.values()
+        )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -16973,6 +17122,7 @@ if __name__ == "__main__":
         "SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M": (
             SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M
         ),
+        **clearance_hinge_target_margin_fields,
         "SINGLE_STAGE_CLEARANCE_HINGE_ACTIVE": (
             JCurveHardwareSdfClearanceHinge is not None
         ),
@@ -16980,6 +17130,12 @@ if __name__ == "__main__":
             "search_eval",
             {},
         ).get("J_clearance_hinge"),
+        "SINGLE_STAGE_CLEARANCE_HINGE_PER_GROUP_MIN_CLEARANCE_M": (
+            clearance_hinge_per_group_min_clearance_m
+        ),
+        "SINGLE_STAGE_CLEARANCE_HINGE_MIN_CLEARANCE_M": (
+            clearance_hinge_min_clearance_m
+        ),
         "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
             SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
         ),
@@ -17587,12 +17743,26 @@ if __name__ == "__main__":
             ),
         )
     )
-    if JCurveHardwareKeepout is not None and HARDWARE_KEEPOUT_BACKEND == "sdf":
+    hardware_sdf_clearance_diagnostic = (
+        JCurveHardwareKeepout
+        if JCurveHardwareKeepout is not None and HARDWARE_KEEPOUT_BACKEND == "sdf"
+        else JCurveHardwareSdfClearanceHinge
+    )
+    if hardware_sdf_clearance_diagnostic is not None:
+        hardware_sdf_per_group_min_clearance_m = {
+            str(label): float(value)
+            for label, value in (
+                hardware_sdf_clearance_diagnostic.per_group_min_clearance().items()
+            )
+        }
         results.update(
             {
                 "HARDWARE_SDF_MIN_CLEARANCE_M": float(
-                    JCurveHardwareKeepout.shortest_clearance()
-                )
+                    min(hardware_sdf_per_group_min_clearance_m.values())
+                ),
+                "HARDWARE_SDF_PER_GROUP_MIN_CLEARANCE_M": (
+                    hardware_sdf_per_group_min_clearance_m
+                ),
             }
         )
     # Producer-side WOUT convention stamp. Mirrors the Stage 2 producer pattern in

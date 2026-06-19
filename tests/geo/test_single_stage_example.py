@@ -15261,6 +15261,8 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_hardware_sdf_free_space_reward_weight=0.0,
             clearance_hinge_weight=0.0,
             clearance_hinge_margin_m=0.005,
+            clearance_hinge_margin_profile_json=None,
+            clearance_hinge_soft_min_temperature_m=0.0,
             single_stage_rational_iota_avoidance_weight=0.0,
             single_stage_rational_iota_avoidance_max_denominator=10,
             single_stage_rational_iota_avoidance_sigma=0.012,
@@ -15446,6 +15448,8 @@ class RunIdentityTests(unittest.TestCase):
                     "single_stage_hardware_sdf_free_space_reward_weight",
                     "single_stage_clearance_hinge_weight",
                     "single_stage_clearance_hinge_margin_m",
+                    "single_stage_clearance_hinge_margin_profile_json",
+                    "single_stage_clearance_hinge_soft_min_temperature_m",
                     "single_stage_rational_iota_avoidance_weight",
                     "single_stage_rational_iota_avoidance_max_denominator",
                     "single_stage_rational_iota_avoidance_sigma",
@@ -15716,6 +15720,24 @@ class RunIdentityTests(unittest.TestCase):
             self._build_identity(module, base_args),
             self._build_identity(module, weighted_args),
         )
+
+    def test_run_identity_changes_when_clearance_hinge_profile_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        profiled_args = self._make_identity_args()
+        profiled_args.clearance_hinge_weight = 2.0
+        profiled_args.clearance_hinge_margin_profile_json = "profile.json"
+        profiled_args.clearance_hinge_soft_min_temperature_m = 0.002
+
+        profiled_config = self._make_identity_config(module, profiled_args)
+        profiled_identity = module.build_run_identity_config(profiled_config)
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            profiled_identity,
+        )
+        self.assertIn("profile.json", profiled_identity)
+        self.assertIn("0.002", profiled_identity)
 
     def test_run_identity_changes_when_iota_avoidance_settings_change(self):
         module = load_single_stage_example_module()
@@ -16613,6 +16635,98 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(
             args.single_stage_hardware_sdf_free_space_reward_weight,
             12.5,
+        )
+
+    def test_single_stage_parse_args_accepts_clearance_hinge_profile_and_softmin(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "clearance_profile.json"
+            profile_path.write_text("[0.003, 0.004, 0.005]", encoding="utf-8")
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "single_stage_banana_example.py",
+                    "--hardware-keepout-backend",
+                    "sdf",
+                    "--hardware-keepout-sdf-manifest",
+                    "/tmp/hardware_sdf.json",
+                    "--clearance-hinge-weight",
+                    "2.0",
+                    "--clearance-hinge-margin-profile-json",
+                    str(profile_path),
+                    "--clearance-hinge-soft-min-temperature-m",
+                    "0.001",
+                ],
+            ):
+                args = module.parse_args()
+
+        self.assertEqual(args.clearance_hinge_margin_profile_json, str(profile_path))
+        self.assertTrue(
+            np.allclose(
+                args.clearance_hinge_target_margin_m,
+                np.array([0.003, 0.004, 0.005]),
+            )
+        )
+        self.assertEqual(args.clearance_hinge_soft_min_temperature_m, 0.001)
+
+    def test_single_stage_parse_args_rejects_invalid_clearance_hinge_profile(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "clearance_profile.json"
+            profile_path.write_text("[0.003, -0.004]", encoding="utf-8")
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "single_stage_banana_example.py",
+                        "--clearance-hinge-margin-profile-json",
+                        str(profile_path),
+                    ],
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                module.parse_args()
+
+    def test_clearance_hinge_target_margin_result_fields(self):
+        module = load_single_stage_example_module()
+
+        fields = module.clearance_hinge_target_margin_result_fields(
+            np.array([0.003, 0.005]),
+            profile_json="profile.json",
+            soft_min_temperature_m=0.001,
+        )
+
+        self.assertEqual(
+            fields["SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_KIND"],
+            "profile",
+        )
+        self.assertEqual(
+            fields["SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_COUNT"],
+            2,
+        )
+        self.assertEqual(
+            fields["SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_MIN_M"],
+            0.003,
+        )
+        self.assertEqual(
+            fields["SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN_MAX_M"],
+            0.005,
+        )
+        self.assertEqual(
+            fields["SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M"],
+            0.001,
+        )
+        self.assertEqual(
+            fields["SINGLE_STAGE_CLEARANCE_HINGE_REDUCTION"],
+            "soft_min",
         )
 
     def test_single_stage_parse_args_rejects_negative_available_envelope_reward_weight(
