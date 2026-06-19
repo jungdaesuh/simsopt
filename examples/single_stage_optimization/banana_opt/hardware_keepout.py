@@ -427,9 +427,82 @@ def _sdf_trilinear(grid, origin_m, spacing_m, points, outside_value):
     return jnp.where(valid, value, outside_value)
 
 
+def curvature_arc_weight(kappa, leg_weight, uturn_weight):
+    """Per-station clearance weight that emphasizes high-curvature U-turn stations.
+
+    ``kappa`` is the curve curvature at each quadrature station (1/m, one value
+    per station). The lowest-curvature station (a straight inboard leg) maps to
+    ``leg_weight`` and the highest (a U-turn end-cap) to ``uturn_weight`` by
+    min-max normalization; intermediate stations interpolate linearly. The
+    result is a NumPy constant -- it selects WHERE along the arc clearance is
+    rewarded and is never itself differentiated. A (near-)constant curvature
+    profile yields a uniform ``leg_weight`` array.
+    """
+    kappa = np.asarray(kappa, dtype=np.float64)
+    lo = float(kappa.min())
+    hi = float(kappa.max())
+    leg = float(leg_weight)
+    span = hi - lo
+    # A (near-)constant curvature profile is treated as uniform: min-max
+    # normalization would otherwise amplify floating-point round-off into a
+    # full-range weight where there is no real U-turn to emphasize.
+    if span <= 1.0e-9 * max(hi, 1.0):
+        return np.full_like(kappa, leg)
+    frac = (kappa - lo) / span
+    return leg + (float(uturn_weight) - leg) * frac
+
+
+def resolve_clearance_arc_weight(leg_weight, uturn_weight):
+    """Normalize the (leg, U-turn) clearance-weight pair to an arc-weight config.
+
+    Returns ``None`` for the uniform default (both weights 1.0), which selects
+    the original unweighted-mean clearance objective byte-for-byte. Any other
+    pair returns ``(leg_weight, uturn_weight)`` to activate curvature-based arc
+    weighting. Both weights must be positive.
+    """
+    leg = float(leg_weight)
+    uturn = float(uturn_weight)
+    if leg <= 0.0 or uturn <= 0.0:
+        raise ValueError("clearance leg/U-turn weights must be positive")
+    if leg == 1.0 and uturn == 1.0:
+        return None
+    return (leg, uturn)
+
+
+def _station_arc_weights(curve, arc_weight):
+    """Per-station clearance weights for ``curve``, or None when uniform.
+
+    ``arc_weight`` is the resolved (leg, U-turn) pair or None. Evaluated once at
+    construction from the seed curvature and then held fixed: the profile selects
+    which arc stations the clearance term emphasizes and is never differentiated,
+    so the term's J and dJ stay mutually consistent under optimization (the
+    U-turn stations are a fixed property of the coil layout).
+    """
+    if arc_weight is None:
+        return None
+    leg, uturn = arc_weight
+    return curvature_arc_weight(curve.kappa(), leg, uturn)
+
+
+def _weighted_mean_square(values, weights):
+    """Mean of ``values**2`` over swept-surface samples, station-weighted.
+
+    ``weights`` is None (plain mean -- the byte-identical default path) or a
+    per-station weight vector of length ``len(values) / 26``; each station's 26
+    swept-surface samples share the station weight. The weighted form is the
+    arc-length-style average ``sum(w * v^2) / sum(w)``.
+    """
+    sq = values ** 2
+    if weights is None:
+        return jnp.mean(sq)
+    n_samp = _SWEPT_SURFACE_QUADRATURE.shape[0]
+    w_full = jnp.repeat(weights, n_samp)
+    return jnp.sum(w_full * sq) / jnp.sum(w_full)
+
+
 def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
                               effective_margin_m, half_w, half_d,
-                              winding_r0):
+                              winding_r0, weights=None):
     """SDF-backed keepout on sampled swept Type KK surface points."""
     surface_points = swept_channel_surface_points(
         gammac, half_w, half_d, winding_r0
@@ -443,12 +516,12 @@ def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
         outside_value=effective_margin_m,
     )
     violation = jnp.maximum(effective_margin_m - phi, 0.0) / scale
-    return jnp.mean(violation ** 2)
+    return _weighted_mean_square(violation, weights)
 
 
 def hardware_sdf_free_space_reward_pure(gammac, grid, origin_m, spacing_m,
                                         effective_margin_m, half_w, half_d,
-                                        winding_r0):
+                                        winding_r0, weights=None):
     """Bounded reward for sampled swept Type KK surface clearance in CAD SDF."""
     surface_points = swept_channel_surface_points(
         gammac, half_w, half_d, winding_r0
@@ -462,7 +535,7 @@ def hardware_sdf_free_space_reward_pure(gammac, grid, origin_m, spacing_m,
         outside_value=effective_margin_m,
     )
     clearance_fraction = jnp.clip(phi, 0.0, effective_margin_m) / scale
-    return -jnp.mean(clearance_fraction ** 2)
+    return -_weighted_mean_square(clearance_fraction, weights)
 
 
 class CurveHardwareKeepout(Optimizable):
@@ -645,7 +718,9 @@ class CurveHardwareSdfKeepout(Optimizable):
     def __init__(self, curves, sdf_data,
                  half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
                  half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
-                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M):
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+                 clearance_leg_weight=1.0,
+                 clearance_uturn_weight=1.0):
         if not isinstance(sdf_data, HardwareSdfData):
             raise TypeError("sdf_data must come from load_hardware_sdf(...)")
         if not sdf_data.groups:
@@ -654,6 +729,15 @@ class CurveHardwareSdfKeepout(Optimizable):
         self.sdf_data = sdf_data
         self.half_w = float(half_w)
         self.half_d = float(half_d)
+        # Curvature-based arc weighting (None = uniform, byte-identical default).
+        # Frozen here from the seed curvature so J and dJ stay mutually
+        # consistent (the weight profile is data, not an optimized quantity).
+        self._arc_weight = resolve_clearance_arc_weight(
+            clearance_leg_weight, clearance_uturn_weight
+        )
+        self._station_weights = [
+            _station_arc_weights(c, self._arc_weight) for c in curves
+        ]
         # Fallback winding radius for non-CWS lineages; the live value (read from
         # the curves' CWS surf each evaluation) is what the frame scores against.
         self._winding_r0_fallback = float(winding_r0)
@@ -673,7 +757,7 @@ class CurveHardwareSdfKeepout(Optimizable):
         # value-live; frame-orientation gradient deferred -- the curve VJP keeps
         # the centerline-translation gradient). It stays in the JAX-traced path.
         self.J_jax = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
             hardware_sdf_keepout_pure(
                 gammac,
                 grid,
@@ -683,12 +767,13 @@ class CurveHardwareSdfKeepout(Optimizable):
                 self.half_w,
                 self.half_d,
                 winding_r0_,
+                weights,
             )
         )
         self.dJ_dgamma = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
             grad(self.J_jax, argnums=0)(
-                gammac, grid, origin, spacing, effective_margin, winding_r0_
+                gammac, grid, origin, spacing, effective_margin, winding_r0_, weights
             )
         )
         super().__init__(depends_on=curves)
@@ -707,7 +792,7 @@ class CurveHardwareSdfKeepout(Optimizable):
     def group_labels(self):
         return self.sdf_data.group_labels
 
-    def _group_value(self, gammac, group, winding_r0):
+    def _group_value(self, gammac, group, winding_r0, weights):
         return float(
             self.J_jax(
                 gammac,
@@ -716,16 +801,18 @@ class CurveHardwareSdfKeepout(Optimizable):
                 group["spacing"],
                 group["effective_margin"],
                 winding_r0,
+                weights,
             )
         )
 
     def J(self):
         winding_r0 = self.live_winding_r0()
         total = 0.0
-        for curve in self.curves:
+        for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
+            weights = self._station_weights[curve_index]
             for group in self._groups:
-                total += self._group_value(gammac, group, winding_r0)
+                total += self._group_value(gammac, group, winding_r0, weights)
         return total
 
     @derivative_dec
@@ -734,6 +821,7 @@ class CurveHardwareSdfKeepout(Optimizable):
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
+            weights = self._station_weights[curve_index]
             for group in self._groups:
                 dgamma_vecs[curve_index] += np.asarray(
                     self.dJ_dgamma(
@@ -743,6 +831,7 @@ class CurveHardwareSdfKeepout(Optimizable):
                         group["spacing"],
                         group["effective_margin"],
                         winding_r0,
+                        weights,
                     )
                 )
         return sum(
@@ -835,7 +924,9 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
     def __init__(self, curves, sdf_data,
                  half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
                  half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
-                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M):
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+                 clearance_leg_weight=1.0,
+                 clearance_uturn_weight=1.0):
         if not isinstance(sdf_data, HardwareSdfData):
             raise TypeError("sdf_data must come from load_hardware_sdf(...)")
         if not sdf_data.groups:
@@ -845,6 +936,15 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
         self.half_w = float(half_w)
         self.half_d = float(half_d)
         self._winding_r0_fallback = float(winding_r0)
+        # Curvature-based arc weighting (None = uniform, byte-identical default).
+        # Frozen here from the seed curvature so J and dJ stay mutually
+        # consistent (the weight profile is data, not an optimized quantity).
+        self._arc_weight = resolve_clearance_arc_weight(
+            clearance_leg_weight, clearance_uturn_weight
+        )
+        self._station_weights = [
+            _station_arc_weights(c, self._arc_weight) for c in curves
+        ]
         self._groups = [
             {
                 "grid": jnp.asarray(group.grid),
@@ -855,7 +955,7 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
             for group in sdf_data.groups
         ]
         self.J_jax = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
             hardware_sdf_free_space_reward_pure(
                 gammac,
                 grid,
@@ -865,12 +965,13 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                 self.half_w,
                 self.half_d,
                 winding_r0_,
+                weights,
             )
         )
         self.dJ_dgamma = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_:
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
             grad(self.J_jax, argnums=0)(
-                gammac, grid, origin, spacing, effective_margin, winding_r0_
+                gammac, grid, origin, spacing, effective_margin, winding_r0_, weights
             )
         )
         super().__init__(depends_on=curves)
@@ -887,8 +988,9 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
     def J(self):
         winding_r0 = self.live_winding_r0()
         total = 0.0
-        for curve in self.curves:
+        for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
+            weights = self._station_weights[curve_index]
             for group in self._groups:
                 total += float(
                     self.J_jax(
@@ -898,6 +1000,7 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                         group["spacing"],
                         group["effective_margin"],
                         winding_r0,
+                        weights,
                     )
                 )
         return total
@@ -908,6 +1011,7 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
+            weights = self._station_weights[curve_index]
             for group in self._groups:
                 dgamma_vecs[curve_index] += np.asarray(
                     self.dJ_dgamma(
@@ -917,6 +1021,7 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                         group["spacing"],
                         group["effective_margin"],
                         winding_r0,
+                        weights,
                     )
                 )
         return sum(

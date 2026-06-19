@@ -24,8 +24,10 @@ from banana_opt.hardware_keepout import (  # noqa: E402
     CurveHardwareKeepout,
     CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
+    curvature_arc_weight,
     hardware_sdf_metadata,
     load_hardware_sdf,
+    resolve_clearance_arc_weight,
 )
 from simsopt.geo import CurveXYZFourier  # noqa: E402
 
@@ -670,6 +672,147 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
                     np.isfinite(value), msg=f"{name} is non-finite in {smoke}"
                 )
                 self.assertGreater(value, 0.0, msg=f"{name} inactive in {smoke}")
+
+
+def _wavy_curve(order=3, quadpoints=80):
+    """Closed curve whose curvature varies along the arc (unlike a circle).
+
+    The second-harmonic terms create distinct high- and low-curvature stations
+    so curvature-based arc weighting is non-uniform.
+    """
+    curve = CurveXYZFourier(quadpoints, order)
+    curve.x = np.zeros(curve.dof_size)
+    curve.set("xc(1)", 1.0)
+    curve.set("ys(1)", 1.0)
+    curve.set("xc(2)", 0.18)
+    curve.set("zs(2)", 0.05)
+    return curve
+
+
+class ClearanceArcWeightTests(unittest.TestCase):
+    """Curvature-based arc weighting on the SDF clearance terms."""
+
+    def _active_plane_sdf(self, root):
+        # A large effective margin keeps the clip band wide so the clearance
+        # fraction varies (rather than saturating) across the whole arc, which
+        # makes the arc-weighting effect observable. This is a math fixture, not
+        # a physical margin.
+        origin = np.array([-1.3, -1.3, -0.3], dtype=float)
+        spacing = 0.02
+        shape = (131, 131, 31)
+        plane_x = 1.21
+        margin = 0.4
+        grid = _plane_sdf_grid(origin, spacing, shape, plane_x)
+        manifest = _write_sdf_payload(
+            root,
+            grid=grid,
+            origin=origin,
+            spacing=spacing,
+            effective_margin=margin,
+            narrow_band=0.8,
+        )
+        return load_hardware_sdf(manifest)
+
+    def test_resolve_clearance_arc_weight_default_and_validation(self):
+        self.assertIsNone(resolve_clearance_arc_weight(1.0, 1.0))
+        self.assertEqual(resolve_clearance_arc_weight(0.2, 5.0), (0.2, 5.0))
+        for bad in [(0.0, 1.0), (1.0, -1.0)]:
+            with self.assertRaisesRegex(ValueError, "must be positive"):
+                resolve_clearance_arc_weight(*bad)
+
+    def test_curvature_arc_weight_maps_min_to_leg_max_to_uturn(self):
+        w = curvature_arc_weight(np.array([10.0, 20.0, 30.0]), 0.5, 2.0)
+        self.assertTrue(np.allclose(w, [0.5, 1.25, 2.0]))
+        flat = curvature_arc_weight(np.array([7.0, 7.0]), 0.5, 2.0)
+        self.assertTrue(np.allclose(flat, [0.5, 0.5]))
+
+    def test_uniform_weights_are_byte_identical_to_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdf = self._active_plane_sdf(Path(td))
+            curve = _wavy_curve()
+            for cls in (CurveHardwareSdfKeepout, CurveHardwareSdfFreeSpaceReward):
+                default = cls([curve], sdf, winding_r0=0.0)
+                uniform = cls(
+                    [curve], sdf, winding_r0=0.0,
+                    clearance_leg_weight=1.0, clearance_uturn_weight=1.0,
+                )
+                self.assertIsNone(default._arc_weight)
+                self.assertIsNone(default._station_weights[0])
+                self.assertEqual(
+                    default.J(), uniform.J(),
+                    msg=f"{cls.__name__}: 1.0/1.0 must equal the default",
+                )
+
+    def test_arc_weight_keys_off_curvature_not_applied_blindly(self):
+        # A circle has uniform curvature -> the arc weight collapses to a uniform
+        # array, so even uturn != leg leaves J unchanged. Proves the weighting is
+        # driven by curvature variation, not blindly multiplied in.
+        with tempfile.TemporaryDirectory() as td:
+            sdf = self._active_plane_sdf(Path(td))
+            circle = _circle_curve(radius=1.0)
+            uniform = CurveHardwareSdfFreeSpaceReward(
+                [circle], sdf, winding_r0=0.0
+            )
+            flared = CurveHardwareSdfFreeSpaceReward(
+                [circle], sdf, winding_r0=0.0,
+                clearance_leg_weight=0.2, clearance_uturn_weight=5.0,
+            )
+            w = flared._station_weights[0]
+            self.assertTrue(np.allclose(w, w[0]), "circle -> uniform weights")
+            self.assertAlmostEqual(uniform.J(), flared.J(), places=12)
+
+    def test_arc_weight_changes_objective_on_varying_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdf = self._active_plane_sdf(Path(td))
+            curve = _wavy_curve()
+            uniform = CurveHardwareSdfFreeSpaceReward([curve], sdf, winding_r0=0.0)
+            flared = CurveHardwareSdfFreeSpaceReward(
+                [curve], sdf, winding_r0=0.0,
+                clearance_leg_weight=0.2, clearance_uturn_weight=5.0,
+            )
+            # Frozen profile matches the documented curvature map.
+            expected = curvature_arc_weight(curve.kappa(), 0.2, 5.0)
+            self.assertTrue(np.allclose(flared._station_weights[0], expected))
+            self.assertGreater(
+                np.ptp(flared._station_weights[0]), 0.0,
+                "wavy curve must give a non-uniform weight profile",
+            )
+            self.assertNotAlmostEqual(
+                uniform.J(), flared.J(), places=6,
+                msg="arc weighting must change J on a varying clearance field",
+            )
+
+    def test_arc_weighted_gradient_matches_finite_difference(self):
+        # The decisive guard for the freeze-at-construction design: weights are
+        # held fixed, so the analytic dJ (which differentiates only the clearance)
+        # must match a finite difference of J. A live-recomputed weight would fail.
+        with tempfile.TemporaryDirectory() as td:
+            sdf = self._active_plane_sdf(Path(td))
+            curve = _wavy_curve()
+            rng = np.random.default_rng(7)
+            curve.x = curve.x + 1e-3 * rng.standard_normal(curve.dof_size)
+            obj = CurveHardwareSdfFreeSpaceReward(
+                [curve], sdf, winding_r0=0.0,
+                clearance_leg_weight=0.2, clearance_uturn_weight=5.0,
+            )
+            x0 = np.asarray(curve.x, dtype=float).copy()
+            direction = rng.standard_normal(x0.size)
+            direction /= np.linalg.norm(direction)
+            analytic = float(np.dot(obj.dJ(), direction))
+            self.assertNotEqual(analytic, 0.0)
+
+            eps = 1e-7
+            curve.x = x0 + eps * direction
+            j_plus = obj.J()
+            curve.x = x0 - eps * direction
+            j_minus = obj.J()
+            curve.x = x0
+            fd = (j_plus - j_minus) / (2.0 * eps)
+            self.assertAlmostEqual(
+                analytic, fd,
+                delta=2e-4 * max(1.0, abs(analytic)),
+                msg=f"arc-weighted gradient analytic {analytic} vs FD {fd}",
+            )
 
 
 if __name__ == "__main__":

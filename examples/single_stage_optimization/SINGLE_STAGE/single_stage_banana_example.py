@@ -2640,6 +2640,18 @@ def parse_args():
         default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")),
     )
     parser.add_argument(
+        "--curvature-p-norm",
+        type=int,
+        default=int(os.environ.get("CURVATURE_P_NORM", str(CURVATURE_P_NORM))),
+        help=(
+            "p exponent for the LpCurveCurvature banana/TF curvature penalty "
+            f"(default {CURVATURE_P_NORM}). Larger p approaches an L-infinity peak "
+            "limiter (penalizes the worst U-turn curvature, leaves sub-threshold "
+            "leg curvature alone) but stiffens the gradient; 4-6 is the useful "
+            "range (p>=15 is numerically catastrophic on these banana seeds)."
+        ),
+    )
+    parser.add_argument(
         "--length-weight",
         type=float,
         default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
@@ -2723,6 +2735,30 @@ def parse_args():
         help=(
             "Penalty/ALM weight for the hardware keep-out distance term "
             "(0 disables the term entirely; default is the Type KK production contract)."
+        ),
+    )
+    parser.add_argument(
+        "--clearance-leg-weight",
+        type=float,
+        default=float(os.environ.get("CLEARANCE_LEG_WEIGHT", "1.0")),
+        help=(
+            "Relative arc weight on the straight-leg stations of the SDF "
+            "clearance terms (default 1.0). With --clearance-uturn-weight, tilts "
+            "in-loop clearance toward the high-curvature U-turn end-caps: set "
+            "legs < U-turns to keep the inboard legs tight to the plasma (iota "
+            "drive) while flaring the U-turns off the vessel. 1.0/1.0 = uniform "
+            "clearance = byte-identical to prior runs. Active only with "
+            "--hardware-keepout-backend sdf and a positive SDF clearance weight."
+        ),
+    )
+    parser.add_argument(
+        "--clearance-uturn-weight",
+        type=float,
+        default=float(os.environ.get("CLEARANCE_UTURN_WEIGHT", "1.0")),
+        help=(
+            "Relative arc weight on the highest-curvature (U-turn end-cap) "
+            "stations of the SDF clearance terms (default 1.0). See "
+            "--clearance-leg-weight."
         ),
     )
     parser.add_argument(
@@ -8331,6 +8367,8 @@ def build_single_stage_objective_bundle(
                 banana_curves,
                 hardware_sdf_data,
                 winding_r0=keepout_winding_r0,
+                clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
+                clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
             )
         else:
             raise ValueError(
@@ -8341,6 +8379,8 @@ def build_single_stage_objective_bundle(
             banana_curves,
             hardware_sdf_data,
             winding_r0=keepout_winding_r0,
+            clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
+            clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
         )
     if SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT > 0.0:
         if SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE <= 0.0:
@@ -14201,6 +14241,8 @@ SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFA
 SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = 0.0
+SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = 1.0
+SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = 1.0
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
 HARDWARE_KEEPOUT_BACKEND = "point_cloud"
 HARDWARE_KEEPOUT_JSON_PATH = DEFAULT_HARDWARE_KEEPOUT_JSON_PATH
@@ -14967,6 +15009,8 @@ if __name__ == "__main__":
     SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = float(
         args.single_stage_hardware_sdf_free_space_reward_weight
     )
+    SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = float(args.clearance_leg_weight)
+    SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = float(args.clearance_uturn_weight)
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
         args.single_stage_vessel_keepout_clearance
     )
@@ -15004,6 +15048,9 @@ if __name__ == "__main__":
         raise ValueError(
             f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )
+    CURVATURE_P_NORM = int(args.curvature_p_norm)
+    if CURVATURE_P_NORM < 1:
+        raise ValueError("--curvature-p-norm must be >= 1.")
     # Opt-in SIMSOPT coil regularizer weights (default 0 -> term not constructed,
     # so the objective stays byte-identical with prior runs).
     MSC_WEIGHT = float(args.msc_weight)
