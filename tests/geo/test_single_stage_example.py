@@ -18586,15 +18586,14 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertTrue(applied)
         self.assertLess(threshold, args.curvature_threshold)
         self.assertAlmostEqual(threshold, pack_limit)
+        # Adopted self-intersection model: cap = 1/(inner-radius margin +
+        # outer-channel corner reach), independent of the conductor-pack grid.
+        hardware_contracts = load_hardware_contracts_module()
         expected_limit = 1.0 / (
-            module.TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            hardware_contracts.TYPE_KK_INNER_RADIUS_MARGIN_M
             + np.hypot(
-                0.5
-                * (module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N - 1)
-                * module.TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
-                0.5
-                * (module.TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B - 1)
-                * module.TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+                hardware_contracts.TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                hardware_contracts.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
             )
         )
         self.assertAlmostEqual(threshold, expected_limit)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import warnings
 from typing import Mapping
 
 import numpy as np
@@ -25,6 +27,17 @@ _DEFAULT_FRONTIER_SEARCH_CONTRACT_PENALTY_SCALE = 4.0
 DEFAULT_FRONTIER_INVARIANT_TORUS_MIN = 0.30
 FRONTIER_INVARIANT_TORUS_MIN_RATIONALE = (
     "conservative_nonzero_interim_floor_from_known_good_nested_donors"
+)
+# Emitted (loud, capturable) when an explicit/env-configured WBA floor is <= 0 or non-finite
+# and is therefore hard-clamped up to DEFAULT_FRONTIER_INVARIANT_TORUS_MIN. A configured 0.0
+# would otherwise re-vacuate the binding invariant-torus certification gate (the deficit is
+# max(min - fraction, 0), so a 0.0 floor certifies every nested-or-not config). This mirrors
+# the calibrator's own clamp (frontier_kam_calibration.calibration_summary: recommended_raw
+# <= 0 -> DEFAULT + VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING), keeping the two surfaces SSOT.
+CLAMPED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING = (
+    "configured frontier invariant-torus floor is <= 0 (vacuous); hard-clamping up to the "
+    f"default nonzero floor {DEFAULT_FRONTIER_INVARIANT_TORUS_MIN:g} so the binding "
+    "certification gate is not silently re-vacuated"
 )
 _DIAGNOSTIC_HARDWARE_RATIO_NAMES = frozenset(
     {
@@ -55,23 +68,53 @@ def default_frontier_invariant_torus_min() -> float:
     return DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
 
 
+def _clamp_configured_invariant_torus_min(value: object) -> float:
+    """Coerce an explicit/env-configured WBA floor, hard-clamping <=0 / non-finite up.
+
+    A configured floor of 0.0 (or negative / non-finite) re-vacuates the binding
+    invariant-torus certification gate, so it is clamped up to the default nonzero floor
+    with a loud warning -- mirroring the calibrator's recommended-floor clamp so the two
+    surfaces stay SSOT. A finite value in (0, inf) is returned verbatim (the calibrator's
+    own validation later rejects anything outside [0, 1]).
+    """
+
+    floor = float(value)
+    if not math.isfinite(floor) or floor <= 0.0:
+        warnings.warn(
+            CLAMPED_VACUOUS_FRONTIER_INVARIANT_TORUS_WARNING,
+            stacklevel=2,
+        )
+        return DEFAULT_FRONTIER_INVARIANT_TORUS_MIN
+    return floor
+
+
 def resolve_frontier_invariant_torus_min(
     frontier_invariant_torus_min: object | None,
     frontier_kam_min: object | None,
     *,
     environment: Mapping[str, str] | None = None,
 ) -> float:
-    """Resolve the canonical frontier WBA floor from explicit values, env, or default."""
+    """Resolve the canonical frontier WBA floor from explicit values, env, or default.
+
+    An explicit value (or its ``frontier_kam_min`` / env-var aliases) of <=0 or non-finite
+    is hard-clamped up to ``DEFAULT_FRONTIER_INVARIANT_TORUS_MIN`` with a loud warning (see
+    ``_clamp_configured_invariant_torus_min``); it never silently re-vacuates the binding
+    certification gate. The unconfigured path returns the nonzero default with no warning.
+    """
 
     if frontier_invariant_torus_min is not None:
-        return float(frontier_invariant_torus_min)
+        return _clamp_configured_invariant_torus_min(frontier_invariant_torus_min)
     if frontier_kam_min is not None:
-        return float(frontier_kam_min)
+        return _clamp_configured_invariant_torus_min(frontier_kam_min)
     if environment is not None:
         if "FRONTIER_INVARIANT_TORUS_MIN" in environment:
-            return float(environment["FRONTIER_INVARIANT_TORUS_MIN"])
+            return _clamp_configured_invariant_torus_min(
+                environment["FRONTIER_INVARIANT_TORUS_MIN"]
+            )
         if "FRONTIER_KAM_MIN" in environment:
-            return float(environment["FRONTIER_KAM_MIN"])
+            return _clamp_configured_invariant_torus_min(
+                environment["FRONTIER_KAM_MIN"]
+            )
     return default_frontier_invariant_torus_min()
 
 
@@ -310,6 +353,50 @@ def evaluate_frontier_kam_certification(
         invariant_torus_min=resolved_invariant_torus_min,
         invariant_torus_deficit=float(invariant_torus_deficit),
     )
+
+
+def target_kam_floor_satisfied(
+    topology_entry: Mapping[str, object] | None,
+    *,
+    floor: float | None,
+    current_geometry_key: object = None,
+) -> bool:
+    """Target-mode invariant-torus (KAM) floor for incumbent promotion.
+
+    floor: minimum required invariant-torus fraction in [0, 1]; None disables the
+    floor (always satisfied). current_geometry_key: a fingerprint of the geometry
+    under test; when given, the floor additionally fails closed unless the topology
+    entry's stored "geometry_key" equals it — so a config is never promoted on a
+    STALE entry left over from a different config (the in-loop scorer is not re-run
+    for every incumbent check and the entry is not carried through incumbent
+    restore). The key tracks the geometry itself, so it is correct regardless of any
+    iteration-counter timing. Pass None only when the caller guarantees the entry
+    matches the config under test (e.g. unit tests of the fraction logic).
+
+    Returns True only when the topology entry is current (if a key is given) and
+    reports an evaluated invariant-torus fraction >= floor. A missing entry, a stale
+    entry (different geometry), or an unevaluated fraction (None) returns False —
+    fail-closed: an unconfined config whose lines escape before classification, or
+    whose KAM was measured for a different config, can never slip through. A too-high
+    floor or under-resolved in-loop scorer therefore surfaces as an empty incumbent
+    set ("no confined config found"), never a silently promoted unconfined config.
+    KAM fraction is a discrete classifier output, so this is a promotion gate, not a
+    gradient objective.
+    """
+    if floor is None:
+        return True
+    resolved_floor = float(floor)
+    if not np.isfinite(resolved_floor) or not (0.0 <= resolved_floor <= 1.0):
+        raise ValueError("target KAM floor requires a fraction in [0, 1]")
+    if topology_entry is None:
+        return False
+    if current_geometry_key is not None:
+        if topology_entry.get("geometry_key") != current_geometry_key:
+            return False
+    fraction = _topology_entry_invariant_torus_fraction(topology_entry)
+    if fraction is None:
+        return False
+    return fraction >= resolved_floor
 
 
 def evaluate_frontier_trust_penalty(

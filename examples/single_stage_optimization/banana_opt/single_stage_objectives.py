@@ -657,6 +657,10 @@ def build_total_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JPackRotationFold=None,
+    PACK_ROTATION_FOLD_WEIGHT=0.0,
+    JPackTwistStrain=None,
+    PACK_TWIST_STRAIN_WEIGHT=0.0,
     JTFCurvature=None,
     JTFCurveLength=None,
 ):
@@ -743,6 +747,15 @@ def build_total_objective(
         objective = objective + NOBLE_IOTA_PULL_WEIGHT * JNobleIotaPull
     if JQAResidual is not None:
         objective = objective + QA_RESIDUAL_WEIGHT * JQAResidual
+    # B2 pack-rotation buildability terms (opt-in, default-None so the objective
+    # graph is byte-identical until the finite-build-field pack-rotation levers are
+    # set). The material-frame binormal fold penalty and the LP torsional-strain
+    # windability regularizer both ride the SHARED finite-build pack frame, so they
+    # steer the live pack twist alpha(theta) thin-side-into-the-bend.
+    if JPackRotationFold is not None:
+        objective = objective + PACK_ROTATION_FOLD_WEIGHT * JPackRotationFold
+    if JPackTwistStrain is not None:
+        objective = objective + PACK_TWIST_STRAIN_WEIGHT * JPackTwistStrain
     # TF-coil buildability terms (opt-in via --free-tf-geometry; both None unless
     # the TF curve geometry is unfrozen, so the objective graph is byte-identical
     # for the default frozen-TF run). They reuse the banana HW weights so the freed
@@ -1098,6 +1111,10 @@ def evaluate_total_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JPackRotationFold=None,
+    PACK_ROTATION_FOLD_WEIGHT=0.0,
+    JPackTwistStrain=None,
+    PACK_TWIST_STRAIN_WEIGHT=0.0,
 ):
     (
         raw_J_QS_obj,
@@ -1169,6 +1186,10 @@ def evaluate_total_objective(
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
+        JPackRotationFold=JPackRotationFold,
+        PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
+        JPackTwistStrain=JPackTwistStrain,
+        PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -1261,6 +1282,32 @@ def evaluate_total_objective(
     ) = _optional_weighted_objective_terms(
         JQAResidual,
         QA_RESIDUAL_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        pack_rotation_fold_value,
+        pack_rotation_fold_grad,
+        pack_rotation_fold_weight,
+        pack_rotation_fold_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JPackRotationFold,
+        PACK_ROTATION_FOLD_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        pack_twist_strain_value,
+        pack_twist_strain_grad,
+        pack_twist_strain_weight,
+        pack_twist_strain_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JPackTwistStrain,
+        PACK_TWIST_STRAIN_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -1424,6 +1471,18 @@ def evaluate_total_objective(
                 if JMinLGradB is None
                 else _objective_gradient(JMinLGradB, objective_optimizable)
             ),
+            "J_pack_rotation_fold": pack_rotation_fold_value,
+            "dJ_pack_rotation_fold": pack_rotation_fold_grad,
+            "pack_rotation_fold_weight": pack_rotation_fold_weight,
+            "pack_rotation_fold_objective_enabled": (
+                pack_rotation_fold_objective_enabled
+            ),
+            "J_pack_twist_strain": pack_twist_strain_value,
+            "dJ_pack_twist_strain": pack_twist_strain_grad,
+            "pack_twist_strain_weight": pack_twist_strain_weight,
+            "pack_twist_strain_objective_enabled": (
+                pack_twist_strain_objective_enabled
+            ),
             "J_shear": shear_value,
             "dJ_shear": shear_grad,
             "shear_weight": shear_weight,
@@ -1517,6 +1576,10 @@ def evaluate_base_objective(
     CLEARANCE_HINGE_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JPackRotationFold=None,
+    PACK_ROTATION_FOLD_WEIGHT=0.0,
+    JPackTwistStrain=None,
+    PACK_TWIST_STRAIN_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     if _surface_pair is not None:
@@ -1574,6 +1637,14 @@ def evaluate_base_objective(
         )
     # min(L_grad_B) realizability shortfall is gate-only until dJ exists.
     _reject_lgradb_descent_weight(JMinLGradB, LGRADB_WEIGHT)
+    # B2 pack-rotation buildability terms (opt-in; default-None so the ALM physics
+    # objective is byte-identical until the finite-build-field pack-rotation levers
+    # are set). Soft penalties on the freed pack twist alpha(theta), NOT hard ALM
+    # constraints.
+    if JPackRotationFold is not None:
+        base_objective = base_objective + PACK_ROTATION_FOLD_WEIGHT * JPackRotationFold
+    if JPackTwistStrain is not None:
+        base_objective = base_objective + PACK_TWIST_STRAIN_WEIGHT * JPackTwistStrain
     base_physics_terms_total = float(base_objective.J())
     base_physics_grad = _objective_gradient(base_objective, objective_optimizable)
     (

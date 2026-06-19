@@ -58,6 +58,15 @@ HARDWARE_KEEPOUT_MIN_DISTANCE_M = (
 PLASMA_VESSEL_MIN_DIST_M = 0.04
 MAX_CURVATURE_INV_M = 100.0
 TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M = 1.0 / MAX_CURVATURE_INV_M
+# Minimum allowed bend radius of the OUTER build envelope's inner surface
+# (meters). Adopted Type KK curvature model: the 1/8" FEP jacket protects the
+# conductor, so the binding bend constraint is geometric self-intersection of the
+# outer build channel at this small inner-surface margin -- NOT the conductor
+# wire bend radius. This margin REPLACES the single-filament wire floor
+# (TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M) inside the centerline curvature-cap
+# helpers; the wire floor is retained only for the topological self-intersection
+# guard (BANANA_SELF_INTERSECT_MIN_DISTANCE_M).
+TYPE_KK_INNER_RADIUS_MARGIN_M = 0.0015
 BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M = (
     1.0 / TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
 )

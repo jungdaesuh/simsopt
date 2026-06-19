@@ -26,6 +26,16 @@ EXAMPLES_ROOT_STR = str(EXAMPLES_ROOT)
 if EXAMPLES_ROOT_STR not in sys.path:
     sys.path.insert(0, EXAMPLES_ROOT_STR)
 from banana_opt import alm_adaptive_smoothing as _alm_adaptive_smoothing  # noqa: E402
+from banana_opt.hardware_contracts import (  # noqa: E402
+    TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
+    TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
+    TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
+)
+from banana_opt.single_stage_objectives import (  # noqa: E402
+    RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
+    RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
+)
 from banana_opt.wout_convention import wout_convention_artifact_fields  # noqa: E402
 
 
@@ -436,6 +446,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "experimental_multisurface",
                 "published_multisurface",
             ),
+            # Opt-in published-stack depth knobs referenced by the
+            # --published-surface-preset / --published-surface-fractions flag
+            # defaults (imported from banana_opt.surface_mode_contracts in the
+            # example module).
+            "PUBLISHED_PRESET_CHOICES": (
+                "default_v1",
+                "interior_covering",
+                "interior_covering_deep",
+            ),
+            "PUBLISHED_PRESET_DEFAULT_V1": "default_v1",
             "BANANA_CURRENT_HARD_LIMIT_A": 1.6e4,
             "BANANA_CURRENT_MODE_SHARED": "shared",
             "BANANA_CURRENT_MODE_INDEPENDENT": "independent",
@@ -451,6 +471,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_COIL_FORCE_CONDUCTOR_RADIUS_DEFAULT_M": 0.0033,
             "DEFAULT_HARDWARE_KEEPOUT_JSON_PATH": "/tmp/hardware_keepout.json",
+            "DEFAULT_HARDWARE_KEEPOUT_GLB_PATH": "/tmp/hbt_assembly.glb",
             "HARDWARE_KEEPOUT_SAFETY_MARGIN_M": 0.005,
             "LCFS_CONSTRAINT_MODES": ("centered", "edge_envelope"),
             "LCFS_CONSTRAINT_MODE_DEFAULT": "centered",
@@ -470,6 +491,26 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "DEFAULT_RESIDUE_OBJECTIVE_WEIGHT": 0.0,
             "DEFAULT_RESIDUE_SATISFIED_THRESHOLD": 1.0e-4,
             "DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS": 768,
+            # Rational-iota avoidance penalty defaults referenced by the opt-in
+            # --single-stage-rational-iota-avoidance-* flag defaults (imported from
+            # banana_opt.single_stage_objectives in the example module).
+            "RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR": (
+                RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+            ),
+            "RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA": (
+                RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA
+            ),
+            # Type-KK finite-build pack defaults referenced by the --finitebuild-*
+            # flag defaults (imported from banana_opt.hardware_contracts in the
+            # example module).
+            "TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N": (
+                TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N
+            ),
+            "TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B": (
+                TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B
+            ),
+            "TYPE_KK_FINITE_BUILD_GAPSIZE_N_M": TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
+            "TYPE_KK_FINITE_BUILD_GAPSIZE_B_M": TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
         }
         fns = extract_functions(
             SINGLE_STAGE_MODULE_PATH,

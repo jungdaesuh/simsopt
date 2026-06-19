@@ -62,6 +62,7 @@ from simsopt.geo.surfaceobjectives import (
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import (
     BiotSavart,
+    apply_symmetries_to_curves,
     coils_via_symmetries,
 )
 from simsopt.field.coil import Coil
@@ -220,16 +221,23 @@ from banana_opt.current_contracts import (
 )
 from banana_opt.stage2_geometry import (
     FiniteBuildSettings,
+    build_finite_build_banana_coils,
     configure_winding_surface_shape_dofs,
     finite_build_frame_aware_curvature_limit_inv_m,
     rotation_aware_curvature_report,
     rotation_aware_projected_half_extent_m,
 )
-from simsopt.geo.framedcurve import FrameRotation, FramedCurveSurfaceTangent
+from simsopt.geo.framedcurve import (
+    FrameRotation,
+    FramedCurveSurfaceTangent,
+    ZeroRotation,
+)
 from simsopt.geo.strain_optimization import LPTorsionalStrainPenalty
 from banana_opt.fold_buildability import CurveSurfaceGeodesicCurvature
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
+    BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION,
     BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
     BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR,
     BANANA_WIDTH_MAX_M,
@@ -268,7 +276,7 @@ from banana_opt.hardware_contracts import (
     TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
-    TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+    TYPE_KK_INNER_RADIUS_MARGIN_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
     is_major_radius_offspec,
@@ -1597,7 +1605,55 @@ def apply_default_stage2_seed_args(args):
     return args
 
 
+def validate_single_stage_pack_rotation_field_cli_args(args) -> None:
+    """Validate the B2 finite-build-field / pack-rotation lever dependency chain.
+
+    These levers couple the multi-filament pack twist alpha(theta) into the field
+    and/or the buildability objective. They form a strict dependency tower so an
+    operator cannot, e.g., ask for a freed-twist fold penalty without first turning
+    the pack into the actual field source. Checked unconditionally (the field flag
+    itself implies --finite-build) so a stray lever without --finite-build still
+    fails loudly. INDEPENDENT banana-current mode is incompatible because the pack
+    carries exactly one shared net current.
+    """
+    finite_build = bool(getattr(args, "finite_build", False))
+    finite_build_field = bool(getattr(args, "single_stage_finite_build_field", False))
+    fold_weight = float(getattr(args, "single_stage_pack_rotation_fold_weight", 0.0))
+    twist_weight = float(getattr(args, "single_stage_pack_twist_strain_weight", 0.0))
+    rotation_aware_cap = bool(
+        getattr(args, "single_stage_rotation_aware_curvature_cap", False)
+    )
+    if finite_build_field and not finite_build:
+        raise ValueError("--single-stage-finite-build-field requires --finite-build.")
+    if finite_build_field:
+        banana_current_mode = str(
+            getattr(args, "single_stage_banana_current_mode", "shared")
+        )
+        if banana_current_mode != "shared":
+            raise ValueError(
+                "--single-stage-finite-build-field requires "
+                "--single-stage-banana-current-mode shared (the pack carries one "
+                f"shared net current); got {banana_current_mode!r}."
+            )
+    if fold_weight > 0.0 and not finite_build_field:
+        raise ValueError(
+            "--single-stage-pack-rotation-fold-weight > 0 requires "
+            "--single-stage-finite-build-field."
+        )
+    if twist_weight > 0.0 and not fold_weight > 0.0:
+        raise ValueError(
+            "--single-stage-pack-twist-strain-weight > 0 requires "
+            "--single-stage-pack-rotation-fold-weight > 0."
+        )
+    if rotation_aware_cap and not fold_weight > 0.0:
+        raise ValueError(
+            "--single-stage-rotation-aware-curvature-cap requires "
+            "--single-stage-pack-rotation-fold-weight > 0."
+        )
+
+
 def validate_single_stage_finite_build_cli_args(args) -> None:
+    validate_single_stage_pack_rotation_field_cli_args(args)
     if not bool(getattr(args, "finite_build", False)):
         if getattr(args, "finitebuild_frame_aware_curvature_threshold", None) is True:
             raise ValueError(
@@ -1638,6 +1694,77 @@ def resolve_single_stage_finite_build_settings(
     )
 
 
+def swap_single_stage_finite_build_field(
+    biot_savart,
+    coil_partitions,
+    surf_coils,
+    *,
+    finite_build_settings: FiniteBuildSettings,
+    free_pack_alpha: bool,
+):
+    """Rebuild the banana field source as a multi-filament finite-build pack (B2).
+
+    Mirrors STAGE_2 ``banana_coil_solver`` (~3448-3489): builds the pack from the
+    MASTER ``CurveCWSFourierCPP`` centerline and the seed's NET banana current via
+    ``build_finite_build_banana_coils`` (one shared net ScaledCurrent; one shared
+    FrameRotation), then rebuilds ``BiotSavart(tf + pack + proxy + vf)`` so the
+    pack twist alpha(theta) enters the field. ``free_pack_alpha`` selects the pack
+    rotation: True keeps the configured ``rotation_order`` (free alpha DOFs in the
+    field/objective graph); False forces ``rotation_order=None`` (ZeroRotation, no
+    rotation DOFs) so the field still uses the pack at alpha=0 without leaving
+    free-but-unsteered rotation DOFs (R2). Returns ``(biot_savart, partitions,
+    master_banana_curve, net_banana_current)``: the partitions carry the
+    symmetry-expanded pack as ``banana_coils``, and ``net_banana_current`` is the
+    single shared net-current optimizable the SHARED banana-current state is then
+    built from downstream (so the recorded current and hardware bound are the NET,
+    not the per-filament scale).
+    """
+    banana_coils = list(coil_partitions.banana_coils)
+    master_banana_curve = next(
+        (
+            coil.curve
+            for coil in banana_coils
+            if isinstance(coil.curve, CurveCWSFourierCPP)
+        ),
+        None,
+    )
+    if master_banana_curve is None:
+        raise ValueError(
+            "--single-stage-finite-build-field requires a CurveCWSFourierCPP master "
+            "banana curve (materialized CWS geometry); none found in the loaded "
+            "banana coils."
+        )
+    net_banana_current_A = float(banana_coils[0].current.get_value())
+    pack_settings = (
+        finite_build_settings
+        if free_pack_alpha
+        else replace(finite_build_settings, rotation_order=None)
+    )
+    pack_coils = list(
+        build_finite_build_banana_coils(
+            master_banana_curve,
+            net_banana_current_A,
+            pack_settings,
+            surf_coils,
+        )
+    )
+    tf_coils = list(coil_partitions.tf_coils)
+    proxy_coils = list(coil_partitions.proxy_coils)
+    vf_coils = list(coil_partitions.vf_coils)
+    rebuilt_biot_savart = BiotSavart(tf_coils + pack_coils + proxy_coils + vf_coils)
+    rebuilt_partitions = replace(
+        coil_partitions,
+        banana_coils=tuple(pack_coils),
+        num_banana_coils=len(pack_coils),
+    )
+    # The shared NET banana current optimizable (one ScaledCurrent driving the whole
+    # pack); every filament scales it by 1/nfilaments. Recovered exactly as in
+    # STAGE_2 (~4188) so the single-stage banana-current state, its hardware bound,
+    # and the recorded net current are all the NET (not the filament scale).
+    net_banana_current = pack_coils[0].current.current_to_scale
+    return rebuilt_biot_savart, rebuilt_partitions, master_banana_curve, net_banana_current
+
+
 def single_stage_frame_aware_curvature_threshold_enabled(args) -> bool:
     raw_value = getattr(args, "finitebuild_frame_aware_curvature_threshold", None)
     if raw_value is None:
@@ -1659,7 +1786,7 @@ def single_stage_frame_aware_curvature_tightening(
         )
     pack_limit_inv_m = finite_build_frame_aware_curvature_limit_inv_m(
         finite_build_settings,
-        TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+        TYPE_KK_INNER_RADIUS_MARGIN_M,
     )
     if pack_limit_inv_m < float(curvature_threshold_inv_m):
         return pack_limit_inv_m, pack_limit_inv_m, True
@@ -1703,8 +1830,12 @@ def single_stage_finite_build_metadata(
             finite_build_settings.pack_half_extent_b_m
         ),
         "FINITEBUILD_PACK_REACH_M": float(finite_build_settings.pack_reach_m),
+        # Legacy results.json key; value is now the outer-channel inner-radius
+        # margin used as the curvature-cap floor (jacket-protected
+        # self-intersection model), not the retired single-filament wire bend
+        # radius.
         "FINITEBUILD_SINGLE_FILAMENT_MIN_BEND_RADIUS_M": float(
-            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            TYPE_KK_INNER_RADIUS_MARGIN_M
         ),
         "FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_ENABLED": bool(
             threshold_enabled
@@ -2713,6 +2844,23 @@ def parse_args():
             "1/(floor + max reach(alpha)) (TF coils unchanged). The honest "
             "FINITEBUILD_CURVATURE_OK gate stays at the conservative corner until the T3.1 "
             "hardware curvature ruling. Default off."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-finite-build-field",
+        dest="single_stage_finite_build_field",
+        action="store_true",
+        default=False,
+        help=(
+            "Build the BANANA Biot-Savart source from the multi-filament finite-build pack "
+            "(true Stage-2 field parity) instead of the thin centerline. Requires "
+            "--finite-build and --single-stage-banana-current-mode shared (the pack carries one "
+            "shared net current). When off (default) the field stays the thin centerline and the "
+            "objective graph is byte-identical to today's runs. The pack rides one shared "
+            "FrameRotation alpha(theta); alpha is freed only when an alpha consumer is active "
+            "(--single-stage-pack-rotation-fold-weight > 0, --single-stage-pack-twist-strain-weight "
+            "> 0, or --single-stage-rotation-aware-curvature-cap), otherwise the pack is built at "
+            "alpha=0 (ZeroRotation) with no dangling rotation DOFs."
         ),
     )
     parser.add_argument(
@@ -8415,6 +8563,11 @@ def build_single_stage_objective_bundle(
     tf_curves=None,
     tf_length_target=0.0,
     banana_coils=(),
+    force_coils=None,
+    JPackRotationFold=None,
+    PACK_ROTATION_FOLD_WEIGHT=0.0,
+    JPackTwistStrain=None,
+    PACK_TWIST_STRAIN_WEIGHT=0.0,
 ):
     global HARDWARE_KEEPOUT_GROUP_LABELS
     global HARDWARE_KEEPOUT_METADATA
@@ -8660,8 +8813,17 @@ def build_single_stage_objective_bundle(
     JLinkingNumber = LinkingNumber(curves) if LINKING_WEIGHT > 0.0 else None
     JCoilForce = None
     if FORCE_WEIGHT > 0.0:
+        # The Lorentz-force regularizer acts on each buildable coil in the field of
+        # the full coil set ``coils``. Default-None keeps the legacy behavior (act on
+        # every coil in ``coils``, byte-identical). Under the finite-build field swap
+        # the acted-on coils are passed explicitly as the master banana centerlines +
+        # TF coils: pack FILAMENTS (CurveFilament) implement no gammadashdash, so the
+        # force self-term cannot evaluate on them; the buildability-relevant unit is
+        # the master centerline carrying the pack net current.
+        coil_force_targets = coils if force_coils is None else tuple(force_coils)
         force_terms = [
-            MeanSquaredForce(coil, coils, coil_force_regularization) for coil in coils
+            MeanSquaredForce(coil, coils, coil_force_regularization)
+            for coil in coil_force_targets
         ]
         JCoilForce = sum(force_terms[1:], force_terms[0])
     # Magnetic-shear shortfall (opt-in, default-OFF): None in single-surface mode
@@ -8814,6 +8976,10 @@ def build_single_stage_objective_bundle(
         CLEARANCE_HINGE_WEIGHT=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=0.0,
+        JPackRotationFold=JPackRotationFold,
+        PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
+        JPackTwistStrain=JPackTwistStrain,
+        PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -8862,6 +9028,7 @@ def build_single_stage_objective_bundle(
         "JArclengthVariation": JArclengthVariation,
         "JLinkingNumber": JLinkingNumber,
         "JCoilForce": JCoilForce,
+        "coil_force_target_count": 0 if JCoilForce is None else len(coil_force_targets),
         "JShear": JShear,
         "JMagneticWell": JMagneticWell,
         "JRationalIotaAvoidance": JRationalIotaAvoidance,
@@ -8870,6 +9037,8 @@ def build_single_stage_objective_bundle(
         "JMinLGradB": JMinLGradB,
         "JTFCurvature": JTFCurvature,
         "JTFCurveLength": JTFCurveLength,
+        "JPackRotationFold": JPackRotationFold,
+        "JPackTwistStrain": JPackTwistStrain,
         "JF": JF,
     }
 
@@ -8923,6 +9092,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JNobleIotaPull
     global JQAResidual
     global JMinLGradB
+    global JPackRotationFold
+    global JPackTwistStrain
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -8981,6 +9152,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JNobleIotaPull = objective_bundle["JNobleIotaPull"]
     JQAResidual = objective_bundle["JQAResidual"]
     JMinLGradB = objective_bundle["JMinLGradB"]
+    JPackRotationFold = objective_bundle["JPackRotationFold"]
+    JPackTwistStrain = objective_bundle["JPackTwistStrain"]
     JF = objective_bundle["JF"]
 
 
@@ -9399,6 +9572,14 @@ def evaluate_total_objective(
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             JMinLGradB=globals().get("JMinLGradB"),
             LGRADB_WEIGHT=0.0,
+            JPackRotationFold=globals().get("JPackRotationFold"),
+            PACK_ROTATION_FOLD_WEIGHT=globals().get(
+                "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", 0.0
+            ),
+            JPackTwistStrain=globals().get("JPackTwistStrain"),
+            PACK_TWIST_STRAIN_WEIGHT=globals().get(
+                "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", 0.0
+            ),
         ),
         alm_formulation="weighted_sum",
     )
@@ -9455,6 +9636,14 @@ def evaluate_base_objective(
         QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         JMinLGradB=globals().get("JMinLGradB"),
         LGRADB_WEIGHT=0.0,
+        JPackRotationFold=globals().get("JPackRotationFold"),
+        PACK_ROTATION_FOLD_WEIGHT=globals().get(
+            "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", 0.0
+        ),
+        JPackTwistStrain=globals().get("JPackTwistStrain"),
+        PACK_TWIST_STRAIN_WEIGHT=globals().get(
+            "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", 0.0
+        ),
         include_diagnostics=include_diagnostics,
     )
 
@@ -9620,6 +9809,14 @@ def evaluate_alm_objective(
             QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
             JMinLGradB=globals().get("JMinLGradB"),
             LGRADB_WEIGHT=0.0,
+            JPackRotationFold=globals().get("JPackRotationFold"),
+            PACK_ROTATION_FOLD_WEIGHT=globals().get(
+                "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", 0.0
+            ),
+            JPackTwistStrain=globals().get("JPackTwistStrain"),
+            PACK_TWIST_STRAIN_WEIGHT=globals().get(
+                "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", 0.0
+            ),
             include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,
@@ -13041,6 +13238,10 @@ def build_total_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JPackRotationFold=None,
+    PACK_ROTATION_FOLD_WEIGHT=0.0,
+    JPackTwistStrain=None,
+    PACK_TWIST_STRAIN_WEIGHT=0.0,
     JTFCurvature=None,
     JTFCurveLength=None,
 ):
@@ -13102,6 +13303,10 @@ def build_total_objective(
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
+        JPackRotationFold=JPackRotationFold,
+        PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
+        JPackTwistStrain=JPackTwistStrain,
+        PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -15045,14 +15250,84 @@ if __name__ == "__main__":
             mode=args.single_stage_banana_geometry_mode,
         )
     )
-    bs, coil_partitions, banana_current_state = (
-        resolve_single_stage_banana_current_state(
+    # B2 finite-build FIELD swap (default-off): replace the thin banana centerline
+    # field source with the multi-filament pack so the pack twist enters the
+    # BiotSavart field (true Stage-2 parity). Mirrors STAGE_2 banana_coil_solver
+    # (~3448-3489). Runs BEFORE resolve_single_stage_banana_current_state so the
+    # SHARED current state is rebuilt from the NEW pack coils: the pack carries one
+    # shared net ScaledCurrent, so every filament exposes the same current DOF and
+    # num_control_currents() stays 1 (R1). The pack rides one shared FrameRotation
+    # alpha(theta); alpha is freed (rotation_order from --finitebuild-rotation-order)
+    # only when an alpha consumer is active (fold / twist / rotation-aware cap),
+    # else the pack is built at alpha=0 via ZeroRotation (rotation_order=None) with
+    # no dangling rotation DOFs (R2).
+    SINGLE_STAGE_FINITE_BUILD_FIELD_ACTIVE = (
+        bool(getattr(args, "single_stage_finite_build_field", False))
+        and SINGLE_STAGE_FINITE_BUILD_SETTINGS is not None
+    )
+    SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT = float(
+        getattr(args, "single_stage_pack_rotation_fold_weight", 0.0)
+    )
+    SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT = float(
+        getattr(args, "single_stage_pack_twist_strain_weight", 0.0)
+    )
+    SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_REQUESTED = bool(
+        getattr(args, "single_stage_rotation_aware_curvature_cap", False)
+    )
+    single_stage_pack_alpha_consumer_active = (
+        SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT > 0.0
+        or SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT > 0.0
+        or SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_REQUESTED
+    )
+    if SINGLE_STAGE_FINITE_BUILD_FIELD_ACTIVE:
+        (
             bs,
             coil_partitions,
-            mode=args.single_stage_banana_current_mode,
-            coordinate_scaling=args.single_stage_banana_current_coordinate_scaling,
+            single_stage_pack_master_curve,
+            single_stage_pack_net_current,
+        ) = swap_single_stage_finite_build_field(
+            bs,
+            coil_partitions,
+            surf_coils,
+            finite_build_settings=SINGLE_STAGE_FINITE_BUILD_SETTINGS,
+            free_pack_alpha=single_stage_pack_alpha_consumer_active,
         )
-    )
+        # Build the SHARED banana-current state on the single shared NET current (not
+        # the per-filament ScaledCurrent), mirroring STAGE_2 (~4188): the recorded
+        # banana current and the hardware-bound coordinate are the NET. The net's
+        # base Current DOF is referenced by every filament in bs, so the name-based
+        # coordinate spec still resolves against JF. The field is INDEPENDENT-mode
+        # incompatible (validated above), so the pack is always one shared net.
+        banana_current_state = build_single_stage_banana_current_state(
+            [Coil(single_stage_pack_master_curve, single_stage_pack_net_current)],
+            mode=BANANA_CURRENT_MODE_SHARED,
+        )
+        # The coil-force regularizer acts on buildable coils; the pack FILAMENTS
+        # carry no second derivative, so under the field swap it acts on the master
+        # banana centerlines (rebuilt from the master + net current) plus the TF
+        # coils, in the field of the full pack ``bs``. Mirrors the legacy term, which
+        # acted on every coil (TF + banana) when field-off.
+        single_stage_force_target_coils = [
+            *coil_partitions.tf_coils,
+            *coils_via_symmetries(
+                [single_stage_pack_master_curve],
+                [single_stage_pack_net_current],
+                surf_coils.nfp,
+                surf_coils.stellsym,
+            ),
+        ]
+    else:
+        bs, coil_partitions, banana_current_state = (
+            resolve_single_stage_banana_current_state(
+                bs,
+                coil_partitions,
+                mode=args.single_stage_banana_current_mode,
+                coordinate_scaling=args.single_stage_banana_current_coordinate_scaling,
+            )
+        )
+        # Field-off: let the bundle act the force term on the full ``coils`` set
+        # (TF + thin banana), byte-identical to the legacy default.
+        single_stage_force_target_coils = None
     timeout_replay_cws_radii = (
         _surface_winding_radii(surf_coils)
         if winding_surface_optimization_requested
@@ -15082,8 +15357,26 @@ if __name__ == "__main__":
     curves = [c.curve for c in coils]
     tf_coils = list(coil_partitions.tf_coils)
     banana_coils = list(coil_partitions.banana_coils)
-    banana_curves = [c.curve for c in banana_coils]
-    banana_curve = banana_curves[0]
+    if SINGLE_STAGE_FINITE_BUILD_FIELD_ACTIVE:
+        # Under the finite-build field swap, ``banana_coils`` are the pack FILAMENTS
+        # (each ``coil.curve`` is a CurveFilament wrapping the shared master CWS
+        # centerline). The per-banana geometry objectives (curvature, poloidal
+        # extent, width, self-intersect, fold) act on the MASTER symmetry images
+        # (the pack centers), exactly as STAGE_2 does (~4180-4194), so their count
+        # and meaning match the thin-centerline run -- intra-pack filament gaps
+        # never pollute the penalties. The master curve is the one the swap built
+        # the pack from.
+        banana_curve = single_stage_pack_master_curve
+        banana_curves = list(
+            apply_symmetries_to_curves(
+                [banana_curve],
+                surf_coils.nfp,
+                surf_coils.stellsym,
+            )
+        )
+    else:
+        banana_curves = [c.curve for c in banana_coils]
+        banana_curve = banana_curves[0]
     order = banana_curve_order(banana_curve)
     tf_curves = [c.curve for c in tf_coils]
     # --free-tf-geometry unfreezes the TF curve geometry so the optimizer can shape
@@ -15341,6 +15634,85 @@ if __name__ == "__main__":
     CURVATURE_P_NORM = int(args.curvature_p_norm)
     if CURVATURE_P_NORM < 1:
         raise ValueError("--curvature-p-norm must be >= 1.")
+    # B2 pack-rotation buildability terms (default-off; mirror STAGE_2 ~4391-4471).
+    # All three levers require the finite-build FIELD swap so the SHARED pack frame
+    # (one FrameRotation for field AND fold) is what alpha(theta) rides. With the
+    # field off (or the weights 0) the terms stay None / the cap unrelaxed, so the
+    # objective graph and the in-loop curvature target are byte-identical to today.
+    SINGLE_STAGE_PACK_FRAMEDCURVE = (
+        banana_coils[0].curve.framedcurve
+        if SINGLE_STAGE_FINITE_BUILD_FIELD_ACTIVE
+        else None
+    )
+    Jfold = None
+    if (
+        SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT > 0.0
+        and SINGLE_STAGE_PACK_FRAMEDCURVE is not None
+    ):
+        # Material-frame binormal fold penalty on the SHARED pack frame, so the live
+        # pack twist alpha(theta) drives it (not just the field). Threshold is the
+        # Type-KK geodesic fold limit with the standard steering margin, matching the
+        # STAGE_2 fold objective threshold.
+        single_stage_fold_objective_threshold = (
+            BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
+            * (1.0 - BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION)
+        )
+        Jfold = CurveSurfaceGeodesicCurvature(
+            SINGLE_STAGE_PACK_FRAMEDCURVE,
+            p=2,
+            threshold=single_stage_fold_objective_threshold,
+        )
+    Jtwist = None
+    if (
+        SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT > 0.0
+        and SINGLE_STAGE_PACK_FRAMEDCURVE is not None
+    ):
+        # LP torsional-strain windability regularizer on the freed alpha(theta)
+        # (epsilon = tau^2 w^2 / 12, Paz-Soldan 2020). width = full pack corner span
+        # (2 * corner reach), the worst-case transverse extent. Mirrors STAGE_2.
+        Jtwist = LPTorsionalStrainPenalty(
+            SINGLE_STAGE_PACK_FRAMEDCURVE,
+            width=2.0 * SINGLE_STAGE_FINITE_BUILD_SETTINGS.pack_reach_m,
+            p=2,
+        )
+    # Rotation-aware curvature cap relax (NON-PROMOTION-READY; mirror STAGE_2
+    # ~4306-4337). Relaxes ONLY the in-loop LpCurveCurvature steering target
+    # CURVATURE_THRESHOLD up to the realized rotation-aware cap
+    # 1/(margin + max reach(alpha)) derived from the seed pack twist; as the coupled
+    # optimizer improves alpha the true cap only rises, so this is conservative. The
+    # honest gate (SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M ~38.5, feeding
+    # FINITEBUILD_CURVATURE_OK) is left UNTOUCHED, so a design that only builds under
+    # a favorable twist stays non-promotable.
+    SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED = False
+    SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M = None
+    if (
+        SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_REQUESTED
+        and SINGLE_STAGE_PACK_FRAMEDCURVE is not None
+    ):
+        single_stage_realized_reach_m = rotation_aware_projected_half_extent_m(
+            SINGLE_STAGE_FINITE_BUILD_SETTINGS,
+            banana_curve,
+            SINGLE_STAGE_PACK_FRAMEDCURVE,
+        )
+        SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M = 1.0 / (
+            TYPE_KK_INNER_RADIUS_MARGIN_M
+            + float(np.max(single_stage_realized_reach_m))
+        )
+        if SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M > CURVATURE_THRESHOLD:
+            print(
+                "Rotation-aware curvature cap (non-promotion-ready): "
+                f"{CURVATURE_THRESHOLD:.4f} -> "
+                f"{SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M:.4f} m^-1 "
+                "(realized seed twist; FINITEBUILD_CURVATURE_OK unchanged)"
+            )
+            CURVATURE_THRESHOLD = SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M
+            SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED = True
+    SINGLE_STAGE_PACK_ROTATION_FOLD_PENALTY = (
+        None if Jfold is None else float(Jfold.J())
+    )
+    SINGLE_STAGE_PACK_TWIST_STRAIN_PENALTY = (
+        None if Jtwist is None else float(Jtwist.J())
+    )
     # Opt-in SIMSOPT coil regularizer weights (default 0 -> term not constructed,
     # so the objective stays byte-identical with prior runs).
     MSC_WEIGHT = float(args.msc_weight)
@@ -15517,6 +15889,11 @@ if __name__ == "__main__":
             tf_curves=tf_curves if free_tf_geometry else None,
             tf_length_target=tf_length_ceiling_m,
             banana_coils=banana_coils,
+            force_coils=single_stage_force_target_coils,
+            JPackRotationFold=Jfold,
+            PACK_ROTATION_FOLD_WEIGHT=SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT,
+            JPackTwistStrain=Jtwist,
+            PACK_TWIST_STRAIN_WEIGHT=SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle
@@ -17155,6 +17532,34 @@ if __name__ == "__main__":
             threshold_applied=SINGLE_STAGE_FINITEBUILD_THRESHOLD_APPLIED,
             pack_limit_inv_m=SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M,
             final_max_curvature=final_max_curvature,
+        ),
+        # B2 finite-build-field / pack-rotation provenance (levers default off).
+        # Records which levers were active for the A/B that quantifies the twist
+        # geometry gain. The penalties are evaluated on the FINAL selected geometry.
+        # SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED=True marks a
+        # NON-PROMOTION-READY relaxed run (FINITEBUILD_CURVATURE_OK stays honest).
+        "SINGLE_STAGE_FINITE_BUILD_FIELD_ACTIVE": (
+            SINGLE_STAGE_FINITE_BUILD_FIELD_ACTIVE
+        ),
+        "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT": (
+            SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT
+        ),
+        "SINGLE_STAGE_PACK_ROTATION_FOLD_PENALTY": (
+            None if Jfold is None else float(Jfold.J())
+        ),
+        "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT": (
+            SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT
+        ),
+        "SINGLE_STAGE_PACK_TWIST_STRAIN_PENALTY": (
+            None if Jtwist is None else float(Jtwist.J())
+        ),
+        "SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED": (
+            SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED
+        ),
+        "SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M": (
+            None
+            if SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M is None
+            else float(SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M)
         ),
         "MSC_WEIGHT": MSC_WEIGHT,
         "ARCLEN_WEIGHT": ARCLEN_WEIGHT,

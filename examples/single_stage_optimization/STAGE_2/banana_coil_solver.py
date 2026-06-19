@@ -135,7 +135,9 @@ from banana_opt.hardware_contracts import (
     TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
-    TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+    TYPE_KK_INNER_RADIUS_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     required_banana_cc_centerline_m,
     validate_banana_winding_surface_radius,
@@ -693,7 +695,7 @@ def stage2_frame_aware_curvature_tightening(
         )
     pack_limit_inv_m = finite_build_frame_aware_curvature_limit_inv_m(
         finite_build_settings,
-        TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+        TYPE_KK_INNER_RADIUS_MARGIN_M,
     )
     if pack_limit_inv_m < float(curvature_threshold_inv_m):
         return pack_limit_inv_m, pack_limit_inv_m, True
@@ -2905,12 +2907,17 @@ def _normalize_rows(values):
 
 
 def _finite_build_projected_bend_half_extent_m(finite_build, banana_curve):
+    # Adopted self-intersection model: the binding bend constraint is the OUTER
+    # build channel's inner-surface, so the projected half-extent uses the fixed
+    # Type-KK outer-channel half-extents (depth=normal, width=binormal), not the
+    # conductor-pack grid. ``finite_build.frame`` still selects whether a
+    # winding-surface normal exists to project the channel onto.
     kappa = np.asarray(banana_curve.kappa(), dtype=float)
-    half_n_m = float(finite_build.pack_half_extent_n_m)
-    half_b_m = float(finite_build.pack_half_extent_b_m)
+    half_n_m = float(TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M)
+    half_b_m = float(TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M)
     if finite_build.frame != "surface_tangent":
         # centroid / frenet frames carry no winding-surface normal to project
-        # the pack onto, so use the worst corner reach as the conservative
+        # the channel onto, so use the worst corner reach as the conservative
         # buildability bound for those frames.
         return np.full(kappa.shape, np.hypot(half_n_m, half_b_m), dtype=float)
 
@@ -2997,10 +3004,12 @@ def _finite_build_artifact_metadata(
     )
     binding_half_build_m = float(np.max(projected_half_extent_m))
     inner_edge_radius_m = float(np.min(curvature_radius_m - projected_half_extent_m))
-    single_filament_floor_m = (
-        TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M + float(curvature_margin_m)
-    )
-    required_centerline_radius_m = projected_half_extent_m + single_filament_floor_m
+    # Adopted self-intersection model: the curvature-cap floor is the outer
+    # build channel's inner-radius margin (jacket-protected), not the conductor
+    # wire bend radius. ``curvature_margin_m`` is the optional steering safety
+    # margin layered on top.
+    inner_radius_margin_m = TYPE_KK_INNER_RADIUS_MARGIN_M + float(curvature_margin_m)
+    required_centerline_radius_m = projected_half_extent_m + inner_radius_margin_m
     min_radius_margin_m = float(
         np.min(curvature_radius_m - required_centerline_radius_m)
     )
@@ -3034,8 +3043,11 @@ def _finite_build_artifact_metadata(
         "FINITEBUILD_CS_REACH_M": cs_reach_m,
         "FINITEBUILD_MIN_CURVATURE_RADIUS_M": min_curv_radius_m,
         "FINITEBUILD_INNER_EDGE_RADIUS_M": inner_edge_radius_m,
+        # Legacy results.json key; value is now the outer-channel inner-radius
+        # margin (+ steering margin) used as the curvature-cap floor, not the
+        # retired single-filament wire bend radius.
         "FINITEBUILD_SINGLE_FILAMENT_MIN_BEND_RADIUS_M": float(
-            single_filament_floor_m
+            inner_radius_margin_m
         ),
         "FINITEBUILD_FRAME_AWARE_MAX_PROJECTED_HALF_EXTENT_M": binding_half_build_m,
         "FINITEBUILD_FRAME_AWARE_MIN_REQUIRED_CENTERLINE_RADIUS_M": (
@@ -3136,7 +3148,7 @@ def _finite_build_artifact_metadata(
                 finite_build,
                 banana_curve,
                 pack_framedcurve,
-                single_filament_floor_m,
+                inner_radius_margin_m,
             )
         )
     return metadata
@@ -4289,7 +4301,7 @@ def main(parsed_args=None):
             "Frame-aware curvature threshold: "
             f"{pre_tightening_curvature_threshold:.4f} -> "
             f"{CURVATURE_THRESHOLD:.4f} m^-1 "
-            "(single-filament bend floor + pack corner reach)"
+            "(inner-radius margin + outer-channel corner reach)"
         )
     rotation_aware_curvature_cap_applied = False
     rotation_aware_curvature_cap_inv_m = None
@@ -4299,7 +4311,7 @@ def main(parsed_args=None):
     ):
         # T3.2/G3 (NON-PROMOTION-READY): relax the in-run curvature threshold from
         # the conservative worst-case corner cap up to the realized rotation-aware
-        # cap, scalarized to the TIGHTEST realized point (1/(floor + max reach)).
+        # cap, scalarized to the TIGHTEST realized point (1/(margin + max reach)).
         # Derived from the seed pack twist alpha(theta); as the coupled optimizer
         # improves alpha the true cap only rises, so this is a conservative
         # construction-time relaxation. The honest FINITEBUILD_CURVATURE_OK gate
@@ -4311,7 +4323,7 @@ def main(parsed_args=None):
             new_banana_coils[0].curve.framedcurve,
         )
         rotation_aware_curvature_cap_inv_m = 1.0 / (
-            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            TYPE_KK_INNER_RADIUS_MARGIN_M
             + float(np.max(realized_reach_m))
         )
         if rotation_aware_curvature_cap_inv_m > CURVATURE_THRESHOLD:

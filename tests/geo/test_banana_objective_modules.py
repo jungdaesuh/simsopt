@@ -4936,6 +4936,45 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["grad"], [0.4, -0.2])
         np.testing.assert_allclose(result["dJ_residue_objective"], [0.4, -0.2])
 
+    def test_evaluate_total_objective_adds_pack_terms_with_clearance_hinge(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        clearance_hinge = _FakeAlgebraicObjective(0.3, [0.1, 0.2])
+        pack_fold = _FakeAlgebraicObjective(0.5, [0.2, -0.1])
+        pack_twist = _FakeAlgebraicObjective(0.25, [-0.3, 0.4])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=0.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=0.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=0.0,
+            JCurveHardwareSdfClearanceHinge=clearance_hinge,
+            CLEARANCE_HINGE_WEIGHT=7.0,
+            JPackRotationFold=pack_fold,
+            PACK_ROTATION_FOLD_WEIGHT=11.0,
+            JPackTwistStrain=pack_twist,
+            PACK_TWIST_STRAIN_WEIGHT=13.0,
+        )
+
+        self.assertAlmostEqual(result["total"], 10.85)
+        np.testing.assert_allclose(result["grad"], [-1.0, 5.5])
+        self.assertAlmostEqual(result["J_clearance_hinge"], 0.3)
+        self.assertAlmostEqual(result["J_pack_rotation_fold"], 0.5)
+        self.assertAlmostEqual(result["pack_rotation_fold_weight"], 11.0)
+        self.assertTrue(result["pack_rotation_fold_objective_enabled"])
+        self.assertAlmostEqual(result["J_pack_twist_strain"], 0.25)
+        self.assertAlmostEqual(result["pack_twist_strain_weight"], 13.0)
+        self.assertTrue(result["pack_twist_strain_objective_enabled"])
+
     def test_evaluate_alm_objective_includes_width_and_self_intersect_constraints(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         coil_width = _FakeAlgebraicObjective(0.12, [0.2, 0.0])
