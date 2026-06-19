@@ -6184,11 +6184,17 @@ def resolve_single_stage_final_penalty_metrics(
         boozer_surface.surface,
         bs,
     )
+    final_G = host_float(boozer_surface.res["G"])
+    final_volume = host_float(boozer_surface.surface.volume())
+    final_iota = host_float(boozer_surface.res["iota"])
+    failed_final_candidate = (
+        run_dict is not None and run_dict.get("last_candidate_failure") is not None
+    )
     solved_state_metrics_available = not (
-        _boozer_surface_requires_jax_supported_self_intersection(boozer_surface)
-        and (
-            (run_dict is not None and run_dict.get("last_candidate_failure") is not None)
-            or not host_bool(boozer_surface.res.get("success", False))
+        failed_final_candidate
+        or (
+            _boozer_surface_requires_jax_supported_self_intersection(boozer_surface)
+            and not host_bool(boozer_surface.res.get("success", False))
         )
     )
     if solved_state_metrics_available:
@@ -6208,7 +6214,7 @@ def resolve_single_stage_final_penalty_metrics(
             "solved_state_metrics_unavailable_reason": "failed_boozer_solved_state",
         }
     return {
-        "final_G": host_float(boozer_surface.res["G"]),
+        "final_G": final_G,
         **solved_state_metrics,
         "final_length_penalty": host_float(j_curve_length.J()),
         "final_curve_curve_penalty": host_float(j_curve_curve.J()),
@@ -6218,8 +6224,8 @@ def resolve_single_stage_final_penalty_metrics(
         "coil_length": host_float(curvelength.J()),
         "max_curvature": max_curvature,
         "field_error": host_float(field_error),
-        "final_volume": host_float(boozer_surface.surface.volume()),
-        "final_iota": host_float(boozer_surface.res["iota"]),
+        "final_volume": final_volume,
+        "final_iota": final_iota,
         "curve_curve_min_dist": final_curve_curve_min_dist,
         "curve_surface_min_dist": final_curve_surface_min_dist,
         "surface_vessel_min_dist": final_surface_vessel_min_dist,
@@ -14960,9 +14966,15 @@ if __name__ == "__main__":
             diagnostics=diagnostics_refs,
         )
     )
+    initial_hardware_elapsed_s = _record_timing(
+        timings,
+        "initial_hardware_status_s",
+        initial_hardware_start_s,
+        _perf_counter_s(),
+    )
     record_outer_optimizer_event(
         "initial_hardware_status_returned",
-        elapsed_s=float(_perf_counter_s() - initial_hardware_start_s),
+        elapsed_s=initial_hardware_elapsed_s,
         success=run_dict["hardware_constraint_status"].get("success"),
         skipped=bool(use_target_lane and args.benchmark_mode),
     )
@@ -17166,9 +17178,15 @@ if __name__ == "__main__":
         termination_message=termination_message,
         optimizer_success=optimizer_success,
     )
+    final_penalty_metrics_elapsed_s = _record_timing(
+        timings,
+        "final_penalty_metrics_s",
+        final_penalty_metrics_start_s,
+        _perf_counter_s(),
+    )
     record_outer_optimizer_event(
         "final_penalty_metrics_returned",
-        elapsed_s=float(_perf_counter_s() - final_penalty_metrics_start_s),
+        elapsed_s=final_penalty_metrics_elapsed_s,
     )
     final_volume = float(final_penalty_metrics["final_volume"])
     final_iota = float(final_penalty_metrics["final_iota"])

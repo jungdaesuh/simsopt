@@ -335,6 +335,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reference-case-artifacts-dir",
+        default=None,
+        help=(
+            "Existing native CPU/C++ single-stage output root to use as the "
+            "reference lane instead of running a new CPU reference child. This "
+            "preserves the same parity JSON contract while allowing GPU pods to "
+            "run only the JAX target lane after CPU-pod reference artifacts have "
+            "been produced."
+        ),
+    )
+    parser.add_argument(
         "--plasma-surf-filename",
         default=DEFAULT_PLASMA_SURF_FILENAME,
         help="VMEC equilibrium filename for the real single-stage fixture.",
@@ -730,6 +741,210 @@ def _prefix_phase_timings(prefix: str, timings: dict[str, float]) -> dict[str, f
     return {f"{prefix}_{key}": float(value) for key, value in timings.items()}
 
 
+_PROGRESS_EVENT_TIMING_KEYS = {
+    "initial_hardware_status_returned": "initial_hardware_status_s",
+    "phase1_returned": "outer_optimizer_initial_phase_s",
+    "phase2_returned": "outer_optimizer_main_s",
+    "final_penalty_metrics_returned": "final_penalty_metrics_s",
+    "final_hardware_metrics_returned": "final_hardware_metrics_s",
+    "final_reporting_returned": "final_reporting_s",
+}
+_CORE_OPTIMIZER_TIMING_KEYS = (
+    "outer_optimizer_initial_phase_s",
+    "outer_optimizer_main_s",
+)
+_STATUS_PREREPORTING_TIMING_KEYS = (
+    "initial_hardware_status_s",
+    "target_lane_init_reporting_snapshot_s",
+)
+_FINAL_REPORTING_COMPONENT_TIMING_KEYS = (
+    "target_lane_deferred_reporting_snapshot_s",
+    "final_penalty_metrics_s",
+    "final_hardware_metrics_s",
+    "final_host_diagnostics_s",
+    "final_artifacts_s",
+)
+_CASE_ARTIFACT_SOURCE_GENERATED = "generated_current_run"
+_CASE_ARTIFACT_SOURCE_EXTERNAL_REFERENCE = "external_reference_artifact"
+
+
+def _load_progress_event_timings(progress_path: Path) -> dict[str, float]:
+    if not progress_path.exists():
+        return {}
+    payload = load_json(progress_path)
+    timings: dict[str, float] = {}
+    for event in payload.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        key = _PROGRESS_EVENT_TIMING_KEYS.get(str(event.get("label")))
+        elapsed_s = event.get("elapsed_s")
+        if key is not None and isinstance(
+            elapsed_s, (int, float, np.integer, np.floating)
+        ):
+            timings[key] = float(elapsed_s)
+    return timings
+
+
+def _load_progress_elapsed_s(progress_path: Path) -> float | None:
+    if not progress_path.exists():
+        return None
+    payload = load_json(progress_path)
+    event_elapsed_values = [
+        float(event["event_elapsed_s"])
+        for event in payload.get("events", [])
+        if isinstance(event, dict)
+        and isinstance(
+            event.get("event_elapsed_s"), (int, float, np.integer, np.floating)
+        )
+    ]
+    if not event_elapsed_values:
+        return None
+    return float(max(event_elapsed_values))
+
+
+def _sum_timing_keys(
+    timings: Mapping[str, float],
+    keys: tuple[str, ...],
+) -> float | None:
+    values = [float(timings[key]) for key in keys if key in timings]
+    if not values:
+        return None
+    return float(sum(values))
+
+
+def _elapsed_remainder_s(elapsed_s: float, subtotal_s: float | None) -> float | None:
+    if subtotal_s is None:
+        return None
+    return max(float(elapsed_s) - float(subtotal_s), 0.0)
+
+
+def _case_timing_breakdown(case: dict[str, Any]) -> dict[str, Any]:
+    progress_path = Path(case["outer_optimizer_progress_json"])
+    progress_timings = _load_progress_event_timings(progress_path)
+    phase_timings = dict(case["phase_timings"])
+    combined_timings = {**progress_timings, **phase_timings}
+    elapsed_s = case.get("elapsed_s")
+    elapsed_source = case.get("elapsed_source")
+    if elapsed_s is None:
+        elapsed_s = _load_progress_elapsed_s(progress_path)
+        if elapsed_s is not None:
+            elapsed_source = "outer_optimizer_progress_event_elapsed_s"
+    elapsed_s = None if elapsed_s is None else float(elapsed_s)
+    core_optimizer_s = _sum_timing_keys(
+        combined_timings,
+        _CORE_OPTIMIZER_TIMING_KEYS,
+    )
+    status_prereporting_s = _sum_timing_keys(
+        combined_timings,
+        _STATUS_PREREPORTING_TIMING_KEYS,
+    )
+    final_reporting_s = combined_timings.get("final_reporting_s")
+    if final_reporting_s is None:
+        final_reporting_s = _sum_timing_keys(
+            combined_timings,
+            _FINAL_REPORTING_COMPONENT_TIMING_KEYS,
+        )
+    status_reporting_parts = [
+        value
+        for value in (status_prereporting_s, final_reporting_s)
+        if value is not None
+    ]
+    status_reporting_s = (
+        None if not status_reporting_parts else float(sum(status_reporting_parts))
+    )
+    return {
+        "elapsed_s": elapsed_s,
+        "elapsed_source": elapsed_source,
+        "core_optimizer_s": core_optimizer_s,
+        "status_reporting_s": status_reporting_s,
+        "status_prereporting_s": status_prereporting_s,
+        "non_core_s": None
+        if elapsed_s is None
+        else _elapsed_remainder_s(elapsed_s, core_optimizer_s),
+        "initial_hardware_status_s": combined_timings.get(
+            "initial_hardware_status_s"
+        ),
+        "final_penalty_metrics_s": combined_timings.get("final_penalty_metrics_s"),
+        "final_hardware_metrics_s": combined_timings.get("final_hardware_metrics_s"),
+        "final_reporting_s": final_reporting_s,
+        "outer_optimizer_main_s": combined_timings.get("outer_optimizer_main_s"),
+        "outer_optimizer_initial_phase_s": combined_timings.get(
+            "outer_optimizer_initial_phase_s"
+        ),
+        "timing_sources": {
+            "phase_keys": sorted(phase_timings),
+            "progress_event_keys": sorted(progress_timings),
+        },
+    }
+
+
+def _timing_ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or denominator <= 0.0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _single_stage_pair_timing_breakdown(
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+) -> dict[str, Any]:
+    cpu_breakdown = _case_timing_breakdown(cpu_case)
+    jax_breakdown = _case_timing_breakdown(jax_case)
+    cpu_core_s = cpu_breakdown["core_optimizer_s"]
+    jax_core_s = jax_breakdown["core_optimizer_s"]
+    cpu_status_reporting_s = cpu_breakdown["status_reporting_s"]
+    jax_status_reporting_s = jax_breakdown["status_reporting_s"]
+    return {
+        "cpu": cpu_breakdown,
+        "jax": jax_breakdown,
+        "jax_wall_vs_cpu_wall_ratio": _timing_ratio(
+            jax_breakdown["elapsed_s"],
+            cpu_breakdown["elapsed_s"],
+        ),
+        "jax_core_vs_cpu_core_ratio": _timing_ratio(jax_core_s, cpu_core_s),
+        "jax_status_reporting_minus_cpu_s": (
+            None
+            if cpu_status_reporting_s is None or jax_status_reporting_s is None
+            else float(jax_status_reporting_s) - float(cpu_status_reporting_s)
+        ),
+    }
+
+
+def _single_stage_elapsed_s_and_source_from_results(
+    results: dict[str, Any],
+) -> tuple[float | None, str | None]:
+    elapsed_s = results.get("ELAPSED_SECONDS")
+    if isinstance(elapsed_s, (int, float, np.integer, np.floating)):
+        return float(elapsed_s), "results_ELAPSED_SECONDS"
+    timings = _extract_phase_timings(results)
+    script_total_s = timings.get("script_total_s")
+    if script_total_s is None:
+        return None, None
+    return float(script_total_s), "results_TIMINGS_script_total_s"
+
+
+def _single_stage_elapsed_s_from_results(results: dict[str, Any]) -> float | None:
+    elapsed_s, _elapsed_source = _single_stage_elapsed_s_and_source_from_results(
+        results
+    )
+    return elapsed_s
+
+
+def _require_loaded_single_stage_case_backend(
+    results: dict[str, Any],
+    *,
+    expected_backend: str,
+    output_root: Path,
+) -> None:
+    artifact_backend = results.get("backend")
+    if artifact_backend != expected_backend:
+        raise ValueError(
+            "Loaded single-stage reference artifact backend mismatch: "
+            f"expected results['backend']={expected_backend!r} under {output_root}, "
+            f"found {artifact_backend!r}."
+        )
+
+
 def _target_lane_label(args: argparse.Namespace, case: dict[str, Any]) -> str:
     provenance = dict(case["results"]).get("provenance", {})
     backend = str(provenance.get("backend", args.platform)).lower()
@@ -786,6 +1001,16 @@ def _single_stage_full_run_lane_contract(
     provenance = results.get("provenance", {})
     final_artifact_json = str(case["final_artifact_json"])
     final_artifact_accepted = bool(case["final_artifact_accepted"])
+    artifact_source = str(
+        case.get("artifact_source", _CASE_ARTIFACT_SOURCE_GENERATED)
+    )
+    loaded_external_reference = (
+        artifact_source == _CASE_ARTIFACT_SOURCE_EXTERNAL_REFERENCE
+    )
+    verified_runtime_seed_spec_hash = (
+        None if loaded_external_reference else runtime_seed_spec_hash
+    )
+    verified_run_family_id = None if loaded_external_reference else run_family_id
     return {
         "run_dir": str(run_dir),
         "results_json": str(run_dir / "results.json")
@@ -794,10 +1019,19 @@ def _single_stage_full_run_lane_contract(
         "final_artifact_json": final_artifact_json,
         "final_artifact_accepted": final_artifact_accepted,
         "progress_json": str(case["outer_optimizer_progress_json"]),
-        "runtime_seed_spec_hash": runtime_seed_spec_hash,
+        "artifact_source": artifact_source,
+        "loaded_external_reference": bool(loaded_external_reference),
+        "artifact_source_root": case.get("artifact_source_root"),
+        "runtime_seed_spec_hash": verified_runtime_seed_spec_hash,
+        "runtime_seed_spec_hash_verified": bool(
+            verified_runtime_seed_spec_hash is not None
+        ),
+        "current_run_runtime_seed_spec_hash": runtime_seed_spec_hash,
         "objective_configuration_hash": objective_hash,
         "missing_objective_config_keys": missing_objective_keys,
-        "run_family_id": run_family_id,
+        "run_family_id": verified_run_family_id,
+        "run_family_id_verified": bool(verified_run_family_id is not None),
+        "current_run_family_id": run_family_id,
         "init_only": results.get("init_only"),
         "generated_at_utc": provenance.get("generated_at_utc"),
         "repo_sha": provenance.get("repo_sha"),
@@ -987,6 +1221,62 @@ def _resolved_single_stage_output_root(
 def _load_single_stage_final_payload(output_root: Path) -> tuple[dict[str, Any], Path]:
     """Load the final run payload from the single-stage artifact contract."""
     return load_single_stage_final_payload_from_artifact_contract(output_root)
+
+
+def _load_single_stage_case_from_output_root(
+    output_root: Path,
+    args: argparse.Namespace,
+    *,
+    backend: str,
+    load_surface_gamma: bool,
+) -> dict[str, Any]:
+    results, final_artifact_json = _load_single_stage_final_payload(output_root)
+    _require_loaded_single_stage_case_backend(
+        results,
+        expected_backend=backend,
+        output_root=output_root,
+    )
+    run_dir = final_artifact_json.parent
+    progress_path = run_dir / "outer_optimizer_progress.json"
+    if not progress_path.is_file():
+        raise FileNotFoundError(
+            "Loaded single-stage reference artifact is missing required "
+            f"outer_optimizer_progress.json: {progress_path}"
+        )
+    elapsed_s, elapsed_source = _single_stage_elapsed_s_and_source_from_results(
+        results
+    )
+    if elapsed_s is None:
+        elapsed_s = _load_progress_elapsed_s(progress_path)
+        if elapsed_s is not None:
+            elapsed_source = "outer_optimizer_progress_event_elapsed_s"
+    payload = {
+        "results": results,
+        "surface_gamma": None,
+        "elapsed_s": elapsed_s,
+        "elapsed_source": elapsed_source,
+        "phase_timings": _extract_phase_timings(results),
+        "run_dir": str(run_dir),
+        "final_artifact_json": str(final_artifact_json),
+        "final_artifact_accepted": final_artifact_json.name == "results.json",
+        "outer_optimizer_progress_json": str(progress_path),
+        "artifact_source": _CASE_ARTIFACT_SOURCE_EXTERNAL_REFERENCE,
+        "artifact_source_root": str(output_root),
+    }
+    if load_surface_gamma:
+        if backend == "jax":
+            runtime_spec_json = find_single_file(
+                output_root,
+                "single_stage_jax_runtime_spec.json",
+            )
+            payload["surface_gamma"] = _load_surface_gamma_runtime_spec(
+                str(runtime_spec_json),
+                args,
+            )
+        else:
+            surf_json = find_single_file(output_root, "surf_init.json")
+            payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
+    return payload
 
 
 def _resolve_single_stage_child_platform(
@@ -1215,6 +1505,7 @@ def _run_single_stage_case(
             "results": results,
             "surface_gamma": None,
             "elapsed_s": float(elapsed_s),
+            "elapsed_source": "measured_subprocess_wall_s",
             "phase_timings": _extract_phase_timings(results),
             "run_dir": str(run_dir),
             "final_artifact_json": str(final_artifact_json),
@@ -1222,6 +1513,8 @@ def _run_single_stage_case(
             "outer_optimizer_progress_json": str(
                 run_dir / "outer_optimizer_progress.json"
             ),
+            "artifact_source": _CASE_ARTIFACT_SOURCE_GENERATED,
+            "artifact_source_root": str(resolved_root),
         }
         if load_surface_gamma:
             if backend == "jax":
@@ -1700,10 +1993,33 @@ def _run_single_stage_case_pair(
         args,
         benchmark_mode=benchmark_mode,
     )
+    reference_case_artifacts_dir = getattr(args, "reference_case_artifacts_dir", None)
     seed_case = None
     same_candidate_replay_case = None
     target_args = args
-    if reference_backend == "jax":
+    if reference_case_artifacts_dir is not None:
+        if reference_backend != "cpu":
+            raise ValueError(
+                "--reference-case-artifacts-dir is only valid with "
+                "--reference-backend cpu."
+            )
+        if not _has_explicit_single_stage_seed(args):
+            raise ValueError(
+                "--reference-case-artifacts-dir requires --warm-start-run-dir or "
+                "--jax-runtime-seed-spec so the JAX target seed is independent of "
+                "the loaded CPU reference artifact."
+            )
+        cpu_case = _load_single_stage_case_from_output_root(
+            Path(reference_case_artifacts_dir),
+            args,
+            backend="cpu",
+            load_surface_gamma=compare_surface_geometry,
+        )
+        jax_seed_spec = _resolve_target_jax_runtime_seed_spec(
+            args,
+            case_root=case_root,
+        )
+    elif reference_backend == "jax":
         jax_seed_spec = _resolve_target_jax_runtime_seed_spec(
             args,
             case_root=case_root,
@@ -1749,10 +2065,9 @@ def _run_single_stage_case_pair(
             output_root=case_root / "cpu_outputs",
         )
         if seed_case is None:
-            jax_seed_spec = _compile_jax_runtime_seed_spec_from_run_dir(
-                Path(cpu_case["run_dir"]),
-                case_root / "single_stage_jax_runtime_seed_spec.json",
+            jax_seed_spec = _resolve_target_jax_runtime_seed_spec(
                 args,
+                case_root=case_root,
             )
     if _should_run_exact_same_candidate_replay(args):
         same_candidate_replay_case = _run_single_stage_case(
@@ -3806,6 +4121,7 @@ def _initial_metric_parity_failures(comparison: dict[str, Any]) -> list[str]:
 # end-state-parity gate's active path (require_final_metric_parity, i.e. the
 # scipy-jax / scipy-jax-fullgraph production lanes) runs scipy L-BFGS-B.
 _ABNORMAL_OPTIMIZER_STATUS = 2
+_STATIONARY_NO_STEP_JAC_INF_NORM_TOL = 1.0e-12
 
 
 def _optimizer_aborted_abnormally(results: dict[str, Any]) -> bool:
@@ -3816,6 +4132,24 @@ def _optimizer_aborted_abnormally(results: dict[str, Any]) -> bool:
     """
     status = results.get("OPTIMIZER_STATUS")
     return status is None or int(status) == _ABNORMAL_OPTIMIZER_STATUS
+
+
+def _optimizer_stationary_without_accepted_step(
+    results: dict[str, Any],
+    *,
+    iterations: int,
+) -> bool:
+    status = results.get("OPTIMIZER_STATUS")
+    if iterations != 0 or status is None or int(status) != 0:
+        return False
+    jac_inf_norm = results.get("OPTIMIZER_JAC_INF_NORM")
+    if jac_inf_norm is None:
+        return False
+    jac_inf_norm = float(jac_inf_norm)
+    return bool(
+        np.isfinite(jac_inf_norm)
+        and jac_inf_norm <= _STATIONARY_NO_STEP_JAC_INF_NORM_TOL
+    )
 
 
 def _optimizer_control_split_accepts_final_metric_drift(
@@ -3910,6 +4244,18 @@ def evaluate_single_stage_init_parity(
         comparison["jax_optimizer_status"] = jax_results.get("OPTIMIZER_STATUS")
         comparison["cpu_optimizer_success"] = bool(cpu_results.get("OPTIMIZER_SUCCESS"))
         comparison["jax_optimizer_success"] = bool(jax_results.get("OPTIMIZER_SUCCESS"))
+        comparison["cpu_stationary_no_step"] = (
+            _optimizer_stationary_without_accepted_step(
+                cpu_results,
+                iterations=comparison["cpu_iterations"],
+            )
+        )
+        comparison["jax_stationary_no_step"] = (
+            _optimizer_stationary_without_accepted_step(
+                jax_results,
+                iterations=comparison["jax_iterations"],
+            )
+        )
         skip_for_reference_nonconvergence = _optimizer_aborted_abnormally(
             cpu_results
         ) and not _optimizer_aborted_abnormally(jax_results)
@@ -3943,11 +4289,17 @@ def evaluate_single_stage_init_parity(
     if comparison["jax_self_intersecting"]:
         failures.append("JAX single-stage init produced a self-intersecting surface.")
     if maxiter > 0:
-        if comparison["cpu_iterations"] < 1:
+        if (
+            comparison["cpu_iterations"] < 1
+            and not comparison.get("cpu_stationary_no_step", False)
+        ):
             failures.append(
                 "CPU single-stage outer-loop probe did not accept an optimizer step."
             )
-        if comparison["jax_iterations"] < 1:
+        if (
+            comparison["jax_iterations"] < 1
+            and not comparison.get("jax_stationary_no_step", False)
+        ):
             failures.append(
                 "JAX single-stage outer-loop probe did not accept an optimizer step."
             )
@@ -4010,6 +4362,9 @@ def main() -> None:
             "command_argv": [sys.executable, *sys.argv],
             "benchmark_mode": benchmark_mode,
             "reference_backend": reference_backend,
+            "reference_case_artifacts_dir": None
+            if args.reference_case_artifacts_dir is None
+            else _display_path(Path(args.reference_case_artifacts_dir)),
             "reference_platform": "cpu",
             "target_backend": "jax",
             "target_platform": args.platform,
@@ -4111,6 +4466,10 @@ def main() -> None:
                 ],
                 "jax_runtime_seed_spec": str(jax_seed_spec),
             }
+            if args.reference_case_artifacts_dir is not None:
+                case_artifacts["reference_case_artifacts_dir"] = str(
+                    Path(args.reference_case_artifacts_dir)
+                )
             if same_candidate_replay_case is not None:
                 case_artifacts["target_same_candidate_replay_run_dir"] = str(
                     same_candidate_replay_case["run_dir"]
@@ -4248,8 +4607,31 @@ def main() -> None:
         "value_rel_diff": float(comparison["field_error_rel_diff"]),
         "oracle_role": "cpu_reference",
     }
+    reference_lane_contract = full_run_artifact_contract["lanes"][
+        _reference_lane_label(reference_backend)
+    ]
+    reference_artifact_contract_verified = not bool(
+        reference_lane_contract.get("loaded_external_reference", False)
+    ) or bool(
+        reference_lane_contract.get("runtime_seed_spec_hash_verified", False)
+        and reference_lane_contract.get("run_family_id_verified", False)
+    )
+    proof_parity["reference_artifact_source"] = reference_lane_contract.get(
+        "artifact_source"
+    )
+    proof_parity["reference_artifact_contract_verified"] = bool(
+        reference_artifact_contract_verified
+    )
     active_proof_parity = proof_parity
     warnings: list[str] = []
+    if not reference_artifact_contract_verified:
+        warnings.append(
+            "CPU reference artifact was loaded from an external output root; "
+            "full_run_artifact_contract marks runtime_seed_spec_hash and "
+            "run_family_id as unverified for that lane. This is a target-only "
+            "replay against a loaded reference, not a self-contained full-run "
+            "artifact contract proof."
+        )
     if not comparison["cpu_self_intersection_check_available"]:
         warnings.append(
             "CPU self-intersection parity check was skipped because the optional "
@@ -4319,12 +4701,17 @@ def main() -> None:
         lane: contract["run_dir"]
         for lane, contract in full_run_artifact_contract["lanes"].items()
     }
+    cpu_elapsed_s = cpu_case["elapsed_s"]
+    jax_elapsed_s = jax_case["elapsed_s"]
     timings = {
-        "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
-        "jax_elapsed_s": float(jax_case["elapsed_s"]),
+        "cpu_elapsed_s": None if cpu_elapsed_s is None else float(cpu_elapsed_s),
+        "jax_elapsed_s": None if jax_elapsed_s is None else float(jax_elapsed_s),
+        "cpu_elapsed_source": cpu_case.get("elapsed_source"),
+        "jax_elapsed_source": jax_case.get("elapsed_source"),
         **_prefix_phase_timings("cpu", cpu_case["phase_timings"]),
         **_prefix_phase_timings("jax", jax_case["phase_timings"]),
     }
+    timing_breakdown = _single_stage_pair_timing_breakdown(cpu_case, jax_case)
 
     payload = {
         "provenance": provenance,
@@ -4337,6 +4724,7 @@ def main() -> None:
         "full_run_artifact_contract": full_run_artifact_contract,
         "lanes": lanes,
         "timings": timings,
+        "timing_breakdown": timing_breakdown,
         "warnings": warnings,
         "failures": failures,
         "passed": not failures,

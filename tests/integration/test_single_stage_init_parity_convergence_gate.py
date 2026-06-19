@@ -28,7 +28,13 @@ _HIT_MAXITER = 1
 _ABNORMAL = 2
 
 
-def _result(*, iota: float, status: int) -> dict[str, object]:
+def _result(
+    *,
+    iota: float,
+    status: int,
+    iterations: int = 5,
+    jac_inf_norm: float = 1.0,
+) -> dict[str, object]:
     """A complete, finite single-stage lane result with the given L-BFGS-B status."""
     result: dict[str, object] = {key: 1.0 for key in _OUTER_LOOP_REQUIRED_RESULT_KEYS}
     result.update(
@@ -39,10 +45,11 @@ def _result(*, iota: float, status: int) -> dict[str, object]:
             "MAX_CURVATURE": 1.0,
             "SELF_INTERSECTING": False,
             "SELF_INTERSECTION_CHECK_AVAILABLE": True,
-            "iterations": 5,
+            "iterations": iterations,
             "outer_optimizer_method": _TARGET_OUTER_OPTIMIZER_METHOD,
             "OPTIMIZER_SUCCESS": status == _CONVERGED,
             "OPTIMIZER_STATUS": status,
+            "OPTIMIZER_JAC_INF_NORM": jac_inf_norm,
             # Identical seed metrics on both lanes -> the seed-state backstop
             # passes, isolating these tests to the final-state gate under test.
             "INITIAL_IOTA": 0.0,
@@ -69,6 +76,10 @@ def _has_iota_failure(failures) -> bool:
     return any("Final iota disagreement" in f for f in failures)
 
 
+def _has_no_step_failure(failures) -> bool:
+    return any("did not accept an optimizer step" in f for f in failures)
+
+
 def test_end_state_drift_fails_when_both_lanes_converged():
     comparison, failures = _evaluate(
         _result(iota=0.10, status=_CONVERGED),
@@ -76,6 +87,28 @@ def test_end_state_drift_fails_when_both_lanes_converged():
     )
     assert _has_iota_failure(failures), failures
     assert not comparison.get("final_metric_parity_skipped_for_nonconvergence")
+
+
+def test_no_step_stationary_convergence_satisfies_outer_loop_probe():
+    comparison, failures = _evaluate(
+        _result(iota=0.10, status=_CONVERGED, iterations=0, jac_inf_norm=0.0),
+        _result(iota=0.10, status=_CONVERGED, iterations=0, jac_inf_norm=0.0),
+    )
+
+    assert not _has_no_step_failure(failures), failures
+    assert comparison["cpu_stationary_no_step"] is True
+    assert comparison["jax_stationary_no_step"] is True
+
+
+def test_no_step_nonstationary_convergence_fails_outer_loop_probe():
+    comparison, failures = _evaluate(
+        _result(iota=0.10, status=_CONVERGED, iterations=0, jac_inf_norm=1.0e-3),
+        _result(iota=0.10, status=_CONVERGED, iterations=0, jac_inf_norm=1.0e-3),
+    )
+
+    assert _has_no_step_failure(failures), failures
+    assert comparison["cpu_stationary_no_step"] is False
+    assert comparison["jax_stationary_no_step"] is False
 
 
 def test_end_state_drift_skipped_when_reference_aborts_abnormally():
