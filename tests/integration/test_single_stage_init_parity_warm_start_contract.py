@@ -243,6 +243,12 @@ def test_timing_breakdown_uses_progress_events_for_legacy_artifacts(tmp_path):
     assert breakdown["final_penalty_metrics_s"] == pytest.approx(54.90)
     assert breakdown["final_reporting_s"] == pytest.approx(55.03)
     assert breakdown["status_reporting_s"] == pytest.approx(50.24 + 55.03)
+    assert breakdown["optimizer_wall_excluding_status_reporting_s"] == pytest.approx(
+        208.87 - 50.24 - 55.03
+    )
+    assert breakdown["status_reporting_fraction_of_elapsed"] == pytest.approx(
+        (50.24 + 55.03) / 208.87
+    )
     assert breakdown["non_core_s"] == pytest.approx(208.87 - 86.98)
 
 
@@ -280,6 +286,12 @@ def test_timing_breakdown_prefers_explicit_phase_timings(tmp_path):
     assert breakdown["core_optimizer_s"] == pytest.approx(4.0)
     assert breakdown["final_reporting_s"] == pytest.approx(2.0)
     assert breakdown["status_reporting_s"] == pytest.approx(3.5)
+    assert breakdown["optimizer_wall_excluding_status_reporting_s"] == pytest.approx(
+        6.5
+    )
+    assert breakdown[
+        "optimizer_wall_excluding_status_reporting_fraction_of_elapsed"
+    ] == pytest.approx(0.65)
 
 
 def test_pair_timing_breakdown_reports_core_and_overhead_ratios(tmp_path):
@@ -344,6 +356,9 @@ def test_pair_timing_breakdown_reports_core_and_overhead_ratios(tmp_path):
     assert breakdown["jax_wall_vs_cpu_wall_ratio"] == pytest.approx(
         208.87 / 131.44
     )
+    assert breakdown[
+        "jax_optimizer_wall_excluding_status_reporting_vs_cpu_ratio"
+    ] == pytest.approx((208.87 - 50.24 - 55.03) / (131.44 - 0.22 - 3.16))
     assert breakdown["cpu"]["elapsed_source"] == "results_TIMINGS_script_total_s"
     assert breakdown["jax"]["elapsed_source"] == "measured_subprocess_wall_s"
     assert breakdown["jax_status_reporting_minus_cpu_s"] == pytest.approx(

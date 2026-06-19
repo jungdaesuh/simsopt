@@ -852,15 +852,34 @@ def _case_timing_breakdown(case: dict[str, Any]) -> dict[str, Any]:
     status_reporting_s = (
         None if not status_reporting_parts else float(sum(status_reporting_parts))
     )
+    optimizer_wall_excluding_status_reporting_s = (
+        None
+        if elapsed_s is None
+        else _elapsed_remainder_s(elapsed_s, status_reporting_s)
+    )
     return {
         "elapsed_s": elapsed_s,
         "elapsed_source": elapsed_source,
         "core_optimizer_s": core_optimizer_s,
+        "optimizer_wall_excluding_status_reporting_s": (
+            optimizer_wall_excluding_status_reporting_s
+        ),
         "status_reporting_s": status_reporting_s,
         "status_prereporting_s": status_prereporting_s,
         "non_core_s": None
         if elapsed_s is None
         else _elapsed_remainder_s(elapsed_s, core_optimizer_s),
+        "core_optimizer_fraction_of_elapsed": _timing_ratio(
+            core_optimizer_s,
+            elapsed_s,
+        ),
+        "status_reporting_fraction_of_elapsed": _timing_ratio(
+            status_reporting_s,
+            elapsed_s,
+        ),
+        "optimizer_wall_excluding_status_reporting_fraction_of_elapsed": (
+            _timing_ratio(optimizer_wall_excluding_status_reporting_s, elapsed_s)
+        ),
         "initial_hardware_status_s": combined_timings.get(
             "initial_hardware_status_s"
         ),
@@ -894,12 +913,24 @@ def _single_stage_pair_timing_breakdown(
     jax_core_s = jax_breakdown["core_optimizer_s"]
     cpu_status_reporting_s = cpu_breakdown["status_reporting_s"]
     jax_status_reporting_s = jax_breakdown["status_reporting_s"]
+    cpu_optimizer_wall_excluding_status_reporting_s = cpu_breakdown[
+        "optimizer_wall_excluding_status_reporting_s"
+    ]
+    jax_optimizer_wall_excluding_status_reporting_s = jax_breakdown[
+        "optimizer_wall_excluding_status_reporting_s"
+    ]
     return {
         "cpu": cpu_breakdown,
         "jax": jax_breakdown,
         "jax_wall_vs_cpu_wall_ratio": _timing_ratio(
             jax_breakdown["elapsed_s"],
             cpu_breakdown["elapsed_s"],
+        ),
+        "jax_optimizer_wall_excluding_status_reporting_vs_cpu_ratio": (
+            _timing_ratio(
+                jax_optimizer_wall_excluding_status_reporting_s,
+                cpu_optimizer_wall_excluding_status_reporting_s,
+            )
         ),
         "jax_core_vs_cpu_core_ratio": _timing_ratio(jax_core_s, cpu_core_s),
         "jax_status_reporting_minus_cpu_s": (
@@ -4703,15 +4734,24 @@ def main() -> None:
     }
     cpu_elapsed_s = cpu_case["elapsed_s"]
     jax_elapsed_s = jax_case["elapsed_s"]
+    timing_breakdown = _single_stage_pair_timing_breakdown(cpu_case, jax_case)
     timings = {
         "cpu_elapsed_s": None if cpu_elapsed_s is None else float(cpu_elapsed_s),
         "jax_elapsed_s": None if jax_elapsed_s is None else float(jax_elapsed_s),
         "cpu_elapsed_source": cpu_case.get("elapsed_source"),
         "jax_elapsed_source": jax_case.get("elapsed_source"),
+        "cpu_optimizer_wall_excluding_status_reporting_s": timing_breakdown["cpu"][
+            "optimizer_wall_excluding_status_reporting_s"
+        ],
+        "jax_optimizer_wall_excluding_status_reporting_s": timing_breakdown["jax"][
+            "optimizer_wall_excluding_status_reporting_s"
+        ],
+        "jax_optimizer_wall_excluding_status_reporting_vs_cpu_ratio": timing_breakdown[
+            "jax_optimizer_wall_excluding_status_reporting_vs_cpu_ratio"
+        ],
         **_prefix_phase_timings("cpu", cpu_case["phase_timings"]),
         **_prefix_phase_timings("jax", jax_case["phase_timings"]),
     }
-    timing_breakdown = _single_stage_pair_timing_breakdown(cpu_case, jax_case)
 
     payload = {
         "provenance": provenance,
