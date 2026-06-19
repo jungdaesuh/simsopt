@@ -8993,6 +8993,23 @@ class MinLGradBShortfallTests(_ModuleTestCase):
         expected = max(0.0, self._FLOOR_ABOVE - self._DEFAULT_LGRADБ)
         self.assertAlmostEqual(term.J(), expected, places=10)
 
+    def test_gate_status_reports_metric_floor_and_shortfall(self):
+        term = self._make_term(self._FLOOR_ABOVE)
+        status = term.gate_status()
+        expected = max(0.0, self._FLOOR_ABOVE - self._DEFAULT_LGRADБ)
+
+        self.assertEqual(status["kind"], "gate")
+        self.assertEqual(status["metric"], "min_lgradB")
+        self.assertAlmostEqual(status["floor_m"], self._FLOOR_ABOVE)
+        self.assertAlmostEqual(status["min_lgradB_m"], self._DEFAULT_LGRADБ)
+        self.assertAlmostEqual(status["shortfall_m"], expected)
+        self.assertFalse(status["ok"])
+
+        passing = self._make_term(self._FLOOR_BELOW)
+        passing_status = passing.gate_status()
+        self.assertEqual(passing_status["shortfall_m"], 0.0)
+        self.assertTrue(passing_status["ok"])
+
     def test_shortfall_zero_when_floor_equals_lgradB(self):
         # Exactly at the floor the shortfall is 0.
         term = self._make_term(self._DEFAULT_LGRADБ)
@@ -9046,18 +9063,78 @@ class MinLGradBShortfallTests(_ModuleTestCase):
         self.assertEqual(baseline.J(), weighted_none.J())
         np.testing.assert_array_equal(baseline.dJ(), weighted_none.dJ())
 
-    def test_build_total_objective_lgradb_term_changes_objective(self):
-        # A non-None term with weight > 0 must change the objective value.
+    def test_build_total_objective_lgradb_gate_term_never_enters_descent(self):
         term = _FakeAlgebraicObjective(0.5, [0.25, -0.75])
         baseline = self.module.build_total_objective(
             *IotaShearShortfallTests._base_total_objective_args()
         )
-        with_lgradb = self.module.build_total_objective(
+        with_gate = self.module.build_total_objective(
             *IotaShearShortfallTests._base_total_objective_args(),
             JMinLGradB=term,
-            LGRADB_WEIGHT=10.0,
+            LGRADB_WEIGHT=0.0,
         )
-        self.assertAlmostEqual(with_lgradb.J() - baseline.J(), 10.0 * term.J())
-        np.testing.assert_allclose(
-            with_lgradb.dJ() - baseline.dJ(), 10.0 * term.dJ()
+        self.assertEqual(with_gate.J(), baseline.J())
+        np.testing.assert_array_equal(with_gate.dJ(), baseline.dJ())
+
+        with self.assertRaisesRegex(ValueError, "gate-only"):
+            self.module.build_total_objective(
+                *IotaShearShortfallTests._base_total_objective_args(),
+                JMinLGradB=term,
+                LGRADB_WEIGHT=10.0,
+            )
+
+    def test_evaluate_base_objective_reports_lgradb_gate_without_descent(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        class _FakeGateObjective(_FakeAlgebraicObjective):
+            def gate_status(self):
+                return {
+                    "kind": "gate",
+                    "metric": "min_lgradB",
+                    "floor_m": 0.3,
+                    "min_lgradB_m": 0.25,
+                    "shortfall_m": 0.05,
+                    "ok": False,
+                }
+
+        gate = _FakeGateObjective(0.05, [0.25, -0.75])
+
+        diagnostics = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JMinLGradB=gate,
+            LGRADB_WEIGHT=0.0,
         )
+
+        self.assertAlmostEqual(diagnostics["J_lgradb"], 0.05)
+        self.assertEqual(
+            diagnostics["lgradb_gate_status"],
+            gate.gate_status(),
+        )
+        np.testing.assert_allclose(diagnostics["dJ_lgradb"], [0.25, -0.75])
+        self.assertAlmostEqual(diagnostics["total"], 0.0)
+        np.testing.assert_allclose(diagnostics["grad"], [0.0, 0.0])
+
+        with self.assertRaisesRegex(ValueError, "gate-only"):
+            self.module.evaluate_base_objective(
+                np.array([1.0]),
+                [zero],
+                [zero],
+                RES_WEIGHT=0.0,
+                Jiota=zero,
+                IOTAS_WEIGHT=0.0,
+                JVolume=None,
+                VOLUME_WEIGHT=0.0,
+                JCurveLength=zero,
+                LENGTH_WEIGHT=0.0,
+                JMinLGradB=gate,
+                LGRADB_WEIGHT=1.0,
+            )

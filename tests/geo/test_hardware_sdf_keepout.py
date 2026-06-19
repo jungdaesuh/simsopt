@@ -26,6 +26,7 @@ from banana_opt.hardware_keepout import (  # noqa: E402
     CurveHardwareSdfClearanceHinge,
     CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
+    _weighted_soft_min,
     curvature_arc_weight,
     hardware_sdf_metadata,
     load_hardware_sdf,
@@ -910,6 +911,102 @@ class ClearanceHingeTests(unittest.TestCase):
             # Uniform phi == 0.001, target 0.005 -> shortfall 0.004 everywhere.
             self.assertAlmostEqual(close_obj.J(), (target - 0.001) ** 2, places=12)
 
+    def test_accepts_per_quadpoint_target_margin_vector(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            margin = 0.02
+            clearance = 0.001
+            curve = _circle_curve(radius=0.02, quadpoints=8)
+            sdf = self._uniform_sdf(root, clearance=clearance, margin=margin)
+            target = np.linspace(0.003, 0.006, curve.gamma().shape[0])
+
+            objective = CurveHardwareSdfClearanceHinge(
+                [curve], sdf, target_margin=target, winding_r0=0.0
+            )
+
+            expected = float(np.mean((target - clearance) ** 2))
+            self.assertAlmostEqual(objective.J(), expected, places=12)
+
+    def test_uniform_target_margin_vector_matches_scalar_value_and_gradient(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            origin = np.array([-1.2, -1.2, -0.1], dtype=float)
+            spacing = 0.02
+            shape = (121, 121, 11)
+            plane_x = 1.012
+            margin = 0.005
+            target = 0.05
+            grid = _plane_sdf_grid(origin, spacing, shape, plane_x)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=origin,
+                spacing=spacing,
+                effective_margin=margin,
+                narrow_band=0.2,
+            )
+            sdf = load_hardware_sdf(manifest)
+            curve = _circle_curve(seed=33)
+            scalar = CurveHardwareSdfClearanceHinge(
+                [curve], sdf, target_margin=target, winding_r0=0.0
+            )
+            vector = CurveHardwareSdfClearanceHinge(
+                [curve],
+                sdf,
+                target_margin=np.full(curve.gamma().shape[0], target),
+                winding_r0=0.0,
+            )
+
+            self.assertAlmostEqual(vector.J(), scalar.J(), places=12)
+            self.assertTrue(np.allclose(vector.dJ(), scalar.dJ(), atol=1e-12))
+
+    def test_softmin_hinge_tracks_per_group_min_clearance(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            origin = np.array([-1.2, -1.2, -0.1], dtype=float)
+            spacing = 0.02
+            shape = (121, 121, 11)
+            plane_x = 1.02
+            margin = 0.005
+            target = 0.05
+            grid = _plane_sdf_grid(origin, spacing, shape, plane_x)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=origin,
+                spacing=spacing,
+                effective_margin=margin,
+                narrow_band=0.2,
+            )
+            sdf = load_hardware_sdf(manifest)
+            curve = _circle_curve(radius=1.0)
+            diagnostic = CurveHardwareSdfKeepout([curve], sdf, winding_r0=0.0)
+            objective = CurveHardwareSdfClearanceHinge(
+                [curve],
+                sdf,
+                target_margin=target,
+                winding_r0=0.0,
+                soft_min_temperature=1.0e-6,
+            )
+
+            min_clearance = min(diagnostic.per_group_min_clearance().values())
+            expected = max(target - min_clearance, 0.0) ** 2
+            self.assertGreaterEqual(objective.J(), expected)
+            self.assertAlmostEqual(
+                objective.J(),
+                expected,
+                delta=5.0e-4 * max(1.0e-12, expected),
+            )
+
+    def test_softmin_lower_bound_keeps_isolated_violation_active(self):
+        values = np.full(64 * 26, 0.01, dtype=float)
+        values[0] = -0.001
+
+        soft_min = float(_weighted_soft_min(values, None, 0.001))
+
+        self.assertLessEqual(soft_min, values.min())
+        self.assertGreater(max(-soft_min, 0.0) ** 2, 0.0)
+
     def test_decreases_as_coil_pushed_into_clearance(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -1008,6 +1105,36 @@ class ClearanceHingeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "target_margin"):
                     CurveHardwareSdfClearanceHinge(
                         [curve], sdf, target_margin=bad, winding_r0=0.0
+                    )
+
+    def test_rejects_invalid_vector_margin_and_softmin_temperature(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sdf = self._uniform_sdf(root, clearance=0.01, margin=0.02)
+            curve = _circle_curve(radius=0.02, quadpoints=8)
+
+            with self.assertRaisesRegex(ValueError, "target_margin vector length"):
+                CurveHardwareSdfClearanceHinge(
+                    [curve],
+                    sdf,
+                    target_margin=np.full(curve.gamma().shape[0] - 1, 0.005),
+                    winding_r0=0.0,
+                )
+            with self.assertRaisesRegex(ValueError, "target_margin vector entries"):
+                CurveHardwareSdfClearanceHinge(
+                    [curve],
+                    sdf,
+                    target_margin=np.full(curve.gamma().shape[0], np.nan),
+                    winding_r0=0.0,
+                )
+            for bad in (0.0, -1.0e-3, float("nan"), float("inf")):
+                with self.assertRaisesRegex(ValueError, "soft_min_temperature"):
+                    CurveHardwareSdfClearanceHinge(
+                        [curve],
+                        sdf,
+                        target_margin=0.005,
+                        winding_r0=0.0,
+                        soft_min_temperature=bad,
                     )
 
     def test_build_total_objective_default_off_leaves_graph_unchanged(self):

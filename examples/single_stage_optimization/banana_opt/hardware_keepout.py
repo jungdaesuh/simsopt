@@ -500,6 +500,53 @@ def _weighted_mean_square(values, weights):
     return jnp.sum(w_full * sq) / jnp.sum(w_full)
 
 
+def _weighted_soft_min(values, weights, temperature_m):
+    """Conservative smooth lower bound on the swept-surface sample minimum."""
+    tau = jnp.asarray(temperature_m, dtype=values.dtype)
+    lo = jnp.min(values)
+    shifted = jnp.exp(-(values - lo) / tau)
+    if weights is None:
+        weighted_shifted = shifted
+    else:
+        n_samp = _SWEPT_SURFACE_QUADRATURE.shape[0]
+        w_full = jnp.repeat(weights, n_samp)
+        w_min = jnp.maximum(jnp.min(w_full), 1.0e-300)
+        weighted_shifted = (w_full / w_min) * shifted
+    return lo - tau * jnp.log(jnp.maximum(jnp.sum(weighted_shifted), 1.0e-300))
+
+
+def _normalize_clearance_target_margin(target_margin, curves):
+    """Return scalar or swept-sample target margins validated against curves."""
+    target = np.asarray(target_margin, dtype=np.float64)
+    if target.ndim == 0:
+        value = float(target)
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(
+                f"target_margin {value} m must be finite and positive")
+        return value
+    if target.ndim != 1:
+        raise ValueError("target_margin must be a scalar or 1-D margin vector")
+    if target.size == 0:
+        raise ValueError("target_margin vector must be non-empty")
+    if not np.isfinite(target).all() or np.any(target <= 0.0):
+        raise ValueError("target_margin vector entries must be finite and positive")
+    n_quadpoints = {np.asarray(curve.gamma()).shape[0] for curve in curves}
+    if len(n_quadpoints) != 1:
+        raise ValueError(
+            "vector target_margin requires all curves to have the same "
+            "quadpoint count")
+    n_quad = next(iter(n_quadpoints))
+    n_samp = _SWEPT_SURFACE_QUADRATURE.shape[0]
+    if target.size == n_quad:
+        return np.repeat(target, n_samp)
+    if target.size == n_quad * n_samp:
+        return target.copy()
+    raise ValueError(
+        "target_margin vector length must equal the curve quadpoint count "
+        f"({n_quad}) or swept-surface sample count ({n_quad * n_samp}); "
+        f"got {target.size}")
+
+
 def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
                               effective_margin_m, half_w, half_d,
                               winding_r0, weights=None):
@@ -561,8 +608,40 @@ def hardware_sdf_clearance_hinge_pure(gammac, grid, origin_m, spacing_m,
         surface_points,
         outside_value=effective_margin_m,
     )
-    violation = jnp.maximum(target_margin_m - phi, 0.0)
+    violation = jnp.maximum(jnp.asarray(target_margin_m) - phi, 0.0)
     return _weighted_mean_square(violation, weights)
+
+
+def hardware_sdf_clearance_softmin_hinge_pure(
+    gammac,
+    grid,
+    origin_m,
+    spacing_m,
+    effective_margin_m,
+    target_margin_m,
+    soft_min_temperature_m,
+    half_w,
+    half_d,
+    winding_r0,
+    weights=None,
+):
+    """One-sided hinge on a smooth approximation to the worst SDF clearance."""
+    surface_points = swept_channel_surface_points(
+        gammac, half_w, half_d, winding_r0
+    )
+    phi = _sdf_trilinear(
+        grid,
+        origin_m,
+        spacing_m,
+        surface_points,
+        outside_value=effective_margin_m,
+    )
+    clearance_excess = phi - jnp.asarray(target_margin_m)
+    soft_min_excess = _weighted_soft_min(
+        clearance_excess, weights, soft_min_temperature_m
+    )
+    violation = jnp.maximum(-soft_min_excess, 0.0)
+    return violation ** 2
 
 
 class CurveHardwareKeepout(Optimizable):
@@ -1081,9 +1160,16 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
     clearance_uturn_weight
         Same swept-surface frame and arc-weight plumbing as
         :class:`CurveHardwareSdfFreeSpaceReward`.
-    target_margin : float
+    target_margin : float or 1-D array
         Positive clearance the hinge drives toward, m (the per-station
-        shortfall below this is penalized). Must be finite and > 0.
+        shortfall below this is penalized). A vector may provide one target per
+        curve quadpoint or one target per swept-surface sample. Must be finite
+        and > 0.
+    soft_min_temperature : float, optional
+        If set, replace the per-group mean-square shortfall with a smooth
+        one-sided hinge on the soft minimum of ``phi - target_margin``. This
+        focuses descent on the worst represented group/curve clearance while
+        keeping the gradient smooth.
     """
 
     def __init__(self, curves, sdf_data,
@@ -1092,18 +1178,25 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                  half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
                  winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
                  clearance_leg_weight=1.0,
-                 clearance_uturn_weight=1.0):
+                 clearance_uturn_weight=1.0,
+                 soft_min_temperature=None):
         if not isinstance(sdf_data, HardwareSdfData):
             raise TypeError("sdf_data must come from load_hardware_sdf(...)")
         if not sdf_data.groups:
             raise ValueError("hardware SDF payload must contain at least one group")
-        target_margin = float(target_margin)
-        if not np.isfinite(target_margin) or target_margin <= 0.0:
-            raise ValueError(
-                f"target_margin {target_margin} m must be finite and positive")
+        target_margin = _normalize_clearance_target_margin(target_margin, curves)
+        if soft_min_temperature is not None:
+            soft_min_temperature = float(soft_min_temperature)
+            if (
+                not np.isfinite(soft_min_temperature)
+                or soft_min_temperature <= 0.0
+            ):
+                raise ValueError(
+                    "soft_min_temperature must be finite and positive")
         self.curves = curves
         self.sdf_data = sdf_data
         self.target_margin = target_margin
+        self.soft_min_temperature = soft_min_temperature
         self.half_w = float(half_w)
         self.half_d = float(half_d)
         self._winding_r0_fallback = float(winding_r0)
@@ -1125,21 +1218,41 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
             }
             for group in sdf_data.groups
         ]
-        self.J_jax = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
-            hardware_sdf_clearance_hinge_pure(
-                gammac,
-                grid,
-                origin,
-                spacing,
-                effective_margin,
-                self.target_margin,
-                self.half_w,
-                self.half_d,
-                winding_r0_,
-                weights,
+        if self.soft_min_temperature is None:
+            self.J_jax = jit(
+                lambda gammac, grid, origin, spacing, effective_margin,
+                winding_r0_, weights:
+                hardware_sdf_clearance_hinge_pure(
+                    gammac,
+                    grid,
+                    origin,
+                    spacing,
+                    effective_margin,
+                    self.target_margin,
+                    self.half_w,
+                    self.half_d,
+                    winding_r0_,
+                    weights,
+                )
             )
-        )
+        else:
+            self.J_jax = jit(
+                lambda gammac, grid, origin, spacing, effective_margin,
+                winding_r0_, weights:
+                hardware_sdf_clearance_softmin_hinge_pure(
+                    gammac,
+                    grid,
+                    origin,
+                    spacing,
+                    effective_margin,
+                    self.target_margin,
+                    self.soft_min_temperature,
+                    self.half_w,
+                    self.half_d,
+                    winding_r0_,
+                    weights,
+                )
+            )
         self.dJ_dgamma = jit(
             lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
             grad(self.J_jax, argnums=0)(

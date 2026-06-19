@@ -3138,10 +3138,12 @@ def parse_args():
         type=float,
         default=float(os.environ.get("LGRADB_WEIGHT", "0.0")),
         help=(
-            "Opt-in weight for the min(L_grad_B) Kappel coil-realizability shortfall "
-            "term (default 0 = off, uncalibrated). Larger L_grad_B means a gentler "
-            "field gradient and more coil-realizable boundary. Calibration range: "
-            "good ~0.34 m / bad ~0.13 m at HBT-EP scale. Requires --lgradb-floor."
+            "Opt-in gate/report switch for the min(L_grad_B) Kappel "
+            "coil-realizability shortfall (default 0 = off, uncalibrated). "
+            "Until MinLGradBShortfall.dJ() is implemented this is not added "
+            "to the descent objective; larger L_grad_B means a gentler field "
+            "gradient and more coil-realizable boundary. Calibration range: "
+            "good ~0.34 m / bad ~0.13 m at HBT-EP scale."
         ),
     )
     parser.add_argument(
@@ -3151,7 +3153,7 @@ def parse_args():
         help=(
             "One-sided shortfall floor for the min(L_grad_B) term (m). The objective "
             "is zero when min(L_grad_B) >= floor. Default 0.30 m (near the good regime "
-            "at HBT-EP scale; uncalibrated). Only effective when --lgradb-weight > 0."
+            "at HBT-EP scale; uncalibrated). Only reported when --lgradb-weight > 0."
         ),
     )
     parser.add_argument(
@@ -8597,14 +8599,12 @@ def build_single_stage_objective_bundle(
     # ``NonQuasiSymmetricRatio`` defaults to quasi_poloidal=False, the QA branch.
     # Keep the base QS objective intact and expose an independent default-off QA weight.
     JQAResidual = JnonQSRatio if QA_RESIDUAL_WEIGHT > 0.0 else None
-    # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default-OFF):
-    # None when LGRADB_WEIGHT is 0, so default runs add nothing to the objective
-    # graph and stay byte-identical. When enabled, evaluates L_grad_B on a
-    # theta x phi grid over the outer Boozer surface using the BiotSavart field
-    # and penalises the shortfall below LGRADB_FLOOR. Calibration range:
-    # good ~0.34 m / bad ~0.13 m at HBT-EP scale (uncalibrated). Gradient
-    # w.r.t. coil DOFs is finite-difference (no analytic adjoint); use a
-    # Taylor-test or FD check before trusting gradient-based runs with this term.
+    # min(L_grad_B) Kappel coil-realizability gate/report metric (opt-in,
+    # default-OFF): None when LGRADB_WEIGHT is 0, so default runs add nothing and
+    # stay byte-identical. When enabled, evaluates L_grad_B on a theta x phi grid
+    # over the outer Boozer surface using the BiotSavart field and reports the
+    # shortfall below LGRADB_FLOOR. It is not added to descent until a real dJ is
+    # implemented and Taylor-tested.
     if LGRADB_WEIGHT > 0.0:
         # Sample the outer Boozer surface on a regular theta x phi grid at its
         # current quadrature resolution, then sub-sample to the requested grid.
@@ -8699,7 +8699,7 @@ def build_single_stage_objective_bundle(
         JCurveHardwareSdfClearanceHinge=JCurveHardwareSdfClearanceHinge,
         CLEARANCE_HINGE_WEIGHT=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
         JMinLGradB=JMinLGradB,
-        LGRADB_WEIGHT=LGRADB_WEIGHT,
+        LGRADB_WEIGHT=0.0,
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -9284,7 +9284,7 @@ def evaluate_total_objective(
             JQAResidual=JQAResidual,
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             JMinLGradB=globals().get("JMinLGradB"),
-            LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
+            LGRADB_WEIGHT=0.0,
         ),
         alm_formulation="weighted_sum",
     )
@@ -9340,7 +9340,7 @@ def evaluate_base_objective(
         JQAResidual=globals().get("JQAResidual"),
         QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         JMinLGradB=globals().get("JMinLGradB"),
-        LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
+        LGRADB_WEIGHT=0.0,
         include_diagnostics=include_diagnostics,
     )
 
@@ -9505,7 +9505,7 @@ def evaluate_alm_objective(
             JQAResidual=globals().get("JQAResidual"),
             QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
             JMinLGradB=globals().get("JMinLGradB"),
-            LGRADB_WEIGHT=globals().get("LGRADB_WEIGHT", 0.0),
+            LGRADB_WEIGHT=0.0,
             include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,

@@ -509,13 +509,11 @@ class MinLGradBShortfall(Optimizable):
     uncalibrated — do NOT enable by default).
 
     Notes:
-        Gradient w.r.t. coil DOFs flows through the ``biot_savart`` dependency
-        graph. Because the gradient requires ``d²B/dXdcoil`` (the Jacobian of
-        the field Jacobian w.r.t. coil Fourier dofs), which is expensive to
-        compute analytically, finite-difference gradient validation is
-        recommended before trusting analytic-adjoint-based gradient behaviour.
-        In practice this term is ON only when ``--lgradb-weight > 0``
-        (default 0 = off), so it never appears in default objective graphs.
+        This is a gate/report metric, not a descent objective. The gradient
+        requires ``d²B/dXdcoil`` (the Jacobian of the field Jacobian w.r.t.
+        coil Fourier dofs), which is not implemented here. Objective assembly
+        therefore rejects nonzero descent weight until a real ``dJ`` exists and
+        is Taylor-tested.
 
     Args:
         biot_savart: A simsopt ``BiotSavart`` field whose coils are the
@@ -554,23 +552,53 @@ class MinLGradBShortfall(Optimizable):
         lgradB = _MATH_SQRT2 * abs_B / np.sqrt(safe_frobenius_sq)  # (N,)
         return float(np.min(lgradB))
 
+    @property
+    def floor(self):
+        """Gate floor for min(L_grad_B), m."""
+        return self._floor
+
+    def min_lgradB(self):
+        """Minimum L_grad_B over the configured surface samples, m."""
+        return self._compute_min_lgradB()
+
+    def gate_status(self):
+        """Single-surface buildability gate payload for reporting."""
+        min_lgradb = self._compute_min_lgradB()
+        shortfall = max(0.0, self._floor - min_lgradb)
+        return {
+            "kind": "gate",
+            "metric": "min_lgradB",
+            "floor_m": self._floor,
+            "min_lgradB_m": min_lgradb,
+            "shortfall_m": shortfall,
+            "ok": shortfall == 0.0,
+        }
+
     def J(self):
         return max(0.0, self._floor - self._compute_min_lgradB())
 
     @derivative_dec
     def dJ(self):
-        # The gradient of max(0, floor - min(L_grad_B)) w.r.t. coil DOFs is
-        # zero when the shortfall is inactive (min L_grad_B >= floor).  When
-        # active the chain rule requires d(min L_grad_B)/d(coils), which in
-        # turn depends on d²B/dXdcoil (the Jacobian of dB/dX w.r.t. coil
-        # Fourier dofs) — expensive to compute analytically.  For the intended
-        # use case (OFF by default, swept at weight > 0 to gauge realizability)
-        # the derivative_dec zero derivative is sufficient; if a gradient-based
-        # run is needed, validate the gradient with a finite-difference check
-        # (Taylor-test recommended) before trusting analytic adjoint path.
+        # Gate-only: objective assembly rejects nonzero descent weight until a
+        # real derivative is implemented and Taylor-tested.
         return Derivative({})
 
     return_fn_map = {"J": J, "dJ": dJ}
+
+
+def _reject_lgradb_descent_weight(JMinLGradB, LGRADB_WEIGHT):
+    if JMinLGradB is not None and float(LGRADB_WEIGHT) != 0.0:
+        raise ValueError(
+            "MinLGradBShortfall is gate-only until dJ() is implemented; "
+            "use LGRADB_WEIGHT=0.0 for objective assembly and read J_lgradb "
+            "or gate_status() as the single-surface buildability gate."
+        )
+
+
+def _lgradb_gate_status(JMinLGradB):
+    if JMinLGradB is None or not hasattr(JMinLGradB, "gate_status"):
+        return None
+    return JMinLGradB.gate_status()
 
 
 def build_total_objective(
@@ -689,12 +717,10 @@ def build_total_objective(
         objective = objective + LINKING_WEIGHT * JLinkingNumber
     if JCoilForce is not None:
         objective = objective + FORCE_WEIGHT * JCoilForce
-    # min(L_grad_B) Kappel realizability shortfall (opt-in; default weight 0 and
-    # a None term, so the objective graph is byte-identical until
-    # --lgradb-weight > 0 is set. Calibration: good ~0.34 m / bad ~0.13 m at
-    # HBT-EP scale — sweep range only, do NOT enable by default).
-    if JMinLGradB is not None:
-        objective = objective + LGRADB_WEIGHT * JMinLGradB
+    # min(L_grad_B) Kappel realizability shortfall is gate-only until dJ exists.
+    # Keep it available in diagnostics, but never add its zero-derivative shell to
+    # the optimizer descent graph.
+    _reject_lgradb_descent_weight(JMinLGradB, LGRADB_WEIGHT)
     # Magnetic-shear shortfall (opt-in; default weight 0 and a None term in
     # single-surface mode, so the objective graph is byte-identical until a
     # shear weight is set on a multisurface build). Rewards a larger
@@ -1392,6 +1418,7 @@ def evaluate_total_objective(
             # min(L_grad_B) realizability shortfall diagnostic (0.0/zeros when
             # term is None — weight-0 default runs are byte-identical).
             "J_lgradb": (0.0 if JMinLGradB is None else float(JMinLGradB.J())),
+            "lgradb_gate_status": _lgradb_gate_status(JMinLGradB),
             "dJ_lgradb": (
                 np.zeros_like(total_grad)
                 if JMinLGradB is None
@@ -1545,10 +1572,8 @@ def evaluate_base_objective(
             + CLEARANCE_HINGE_WEIGHT
             * JCurveHardwareSdfClearanceHinge
         )
-    # min(L_grad_B) realizability shortfall (opt-in; default-None so the ALM
-    # physics objective is byte-identical until --lgradb-weight > 0 is set).
-    if JMinLGradB is not None:
-        base_objective = base_objective + LGRADB_WEIGHT * JMinLGradB
+    # min(L_grad_B) realizability shortfall is gate-only until dJ exists.
+    _reject_lgradb_descent_weight(JMinLGradB, LGRADB_WEIGHT)
     base_physics_terms_total = float(base_objective.J())
     base_physics_grad = _objective_gradient(base_objective, objective_optimizable)
     (
@@ -1806,6 +1831,13 @@ def evaluate_base_objective(
             "clearance_hinge_weight": clearance_hinge_weight,
             "clearance_hinge_objective_enabled": (
                 clearance_hinge_objective_enabled
+            ),
+            "J_lgradb": (0.0 if JMinLGradB is None else float(JMinLGradB.J())),
+            "lgradb_gate_status": _lgradb_gate_status(JMinLGradB),
+            "dJ_lgradb": (
+                np.zeros_like(base_physics_grad)
+                if JMinLGradB is None
+                else _objective_gradient(JMinLGradB, objective_optimizable)
             ),
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
