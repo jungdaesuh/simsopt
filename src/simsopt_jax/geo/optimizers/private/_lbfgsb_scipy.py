@@ -1627,6 +1627,15 @@ def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> Lbfgs
     )
 
 
+def _lbfgsb_evaluate_if_requested(value_and_grad, state: LbfgsbState) -> LbfgsbState:
+    return jax.lax.cond(
+        state.workspace.task[0] == FG,
+        lambda state: _lbfgsb_evaluate_value_and_grad(value_and_grad, state),
+        lambda state: state,
+        state,
+    )
+
+
 def _lbfgsb_stop_after_new_x_limits(
     state: LbfgsbState,
     maxiter: jax.Array,
@@ -1651,6 +1660,166 @@ def _lbfgsb_stop_after_new_x_limits(
     return state._replace(workspace=workspace)
 
 
+def _lbfgsb_finish_transition(
+    state: LbfgsbState,
+    *,
+    maxiter_array,
+    maxfun_array,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    accepted_new_x = state.workspace.task[0] == NEW_X
+    if accepted_step_callback is not None:
+        state = jax.lax.cond(
+            accepted_new_x,
+            lambda state: _lbfgsb_emit_accepted_step(
+                state,
+                accepted_step_callback,
+            ),
+            lambda state: state,
+            state,
+        )
+    state = _lbfgsb_stop_after_new_x_limits(
+        state,
+        maxiter_array,
+        maxfun_array,
+    )
+    return LbfgsbMacroStepResult(
+        state=state,
+        accepted_new_x=accepted_new_x,
+    )
+
+
+def _lbfgsb_search_transition(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter_array,
+    maxfun_array,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    original_f = state.f
+    sbgnrm = lbfgsb_projected_gradient_norm(
+        state.l,
+        state.u,
+        state.nbd,
+        state.x,
+        state.g,
+    )
+    task0 = state.workspace.task[0]
+    task1 = state.workspace.task[1]
+
+    def restart_branch(state):
+        next_state = _lbfgsb_setulb_fg_start_line_search(state, sbgnrm)
+        return next_state._replace(f=original_f)
+
+    def non_restart_branch(state):
+        return jax.lax.cond(
+            (task0 == FG) & (task1 == FG_LNSRCH),
+            _lbfgsb_setulb_line_search_continue,
+            lambda state: _lbfgsb_setulb_fg_start_reentry(state, sbgnrm),
+            state,
+        )
+
+    next_state = jax.lax.cond(
+        task0 == RESTART,
+        restart_branch,
+        non_restart_branch,
+        state,
+    )
+    next_state = _lbfgsb_evaluate_if_requested(value_and_grad, next_state)
+    return _lbfgsb_finish_transition(
+        next_state,
+        maxiter_array=maxiter_array,
+        maxfun_array=maxfun_array,
+        accepted_step_callback=accepted_step_callback,
+    )
+
+
+def _lbfgsb_advance_loop(
+    transition,
+    state: LbfgsbState,
+) -> LbfgsbMacroStepResult:
+    def continue_condition(result: LbfgsbMacroStepResult) -> jax.Array:
+        return (~result.accepted_new_x) & (result.state.workspace.task[0] < CONVERGENCE)
+
+    return jax.lax.while_loop(
+        continue_condition,
+        transition,
+        LbfgsbMacroStepResult(
+            state=state,
+            accepted_new_x=jnp.asarray(False, dtype=jnp.bool_),
+        ),
+    )
+
+
+def lbfgsb_advance_from_start_to_next_observable(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
+    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
+    started = _lbfgsb_setulb_start(state)
+    started = _lbfgsb_evaluate_if_requested(value_and_grad, started)
+
+    return _lbfgsb_advance_loop(
+        lambda result: _lbfgsb_search_transition(
+            value_and_grad,
+            result.state,
+            maxiter_array=maxiter_array,
+            maxfun_array=maxfun_array,
+            accepted_step_callback=accepted_step_callback,
+        ),
+        started,
+    )
+
+
+def lbfgsb_advance_from_search_to_next_observable(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
+    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
+
+    return _lbfgsb_advance_loop(
+        lambda result: _lbfgsb_search_transition(
+            value_and_grad,
+            result.state,
+            maxiter_array=maxiter_array,
+            maxfun_array=maxfun_array,
+            accepted_step_callback=accepted_step_callback,
+        ),
+        state,
+    )
+
+
+def lbfgsb_reenter_new_x(
+    value_and_grad,
+    state: LbfgsbState,
+    *,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback=None,
+) -> LbfgsbMacroStepResult:
+    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
+    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
+    next_state = _lbfgsb_setulb_new_x_reentry(state)
+    next_state = _lbfgsb_evaluate_if_requested(value_and_grad, next_state)
+    return _lbfgsb_finish_transition(
+        next_state,
+        maxiter_array=maxiter_array,
+        maxfun_array=maxfun_array,
+        accepted_step_callback=accepted_step_callback,
+    )
+
+
 def lbfgsb_transition(
     value_and_grad,
     state: LbfgsbState,
@@ -1667,31 +1836,12 @@ def lbfgsb_transition(
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
     maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
     next_state = lbfgsb_setulb(state)
-    next_state = jax.lax.cond(
-        next_state.workspace.task[0] == FG,
-        lambda state: _lbfgsb_evaluate_value_and_grad(value_and_grad, state),
-        lambda state: state,
+    next_state = _lbfgsb_evaluate_if_requested(value_and_grad, next_state)
+    return _lbfgsb_finish_transition(
         next_state,
-    )
-    accepted_new_x = next_state.workspace.task[0] == NEW_X
-    if accepted_step_callback is not None:
-        next_state = jax.lax.cond(
-            accepted_new_x,
-            lambda state: _lbfgsb_emit_accepted_step(
-                state,
-                accepted_step_callback,
-            ),
-            lambda state: state,
-            next_state,
-        )
-    next_state = _lbfgsb_stop_after_new_x_limits(
-        next_state,
-        maxiter_array,
-        maxfun_array,
-    )
-    return LbfgsbMacroStepResult(
-        state=next_state,
-        accepted_new_x=accepted_new_x,
+        maxiter_array=maxiter_array,
+        maxfun_array=maxfun_array,
+        accepted_step_callback=accepted_step_callback,
     )
 
 

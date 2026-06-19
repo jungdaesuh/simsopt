@@ -96,6 +96,40 @@ def _build_summaries(
             accepted_step_callback=None,
         )
 
+    def step_from_start_kernel(state):
+        return lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+            _quadratic_value_and_grad,
+            state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=None,
+        )
+
+    state_search = lbfgsb._lbfgsb_evaluate_value_and_grad(
+        _quadratic_value_and_grad,
+        lbfgsb._lbfgsb_setulb_start(state0),
+    )
+
+    def step_from_search_kernel(state):
+        return lbfgsb.lbfgsb_advance_from_search_to_next_observable(
+            _quadratic_value_and_grad,
+            state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=None,
+        )
+
+    state_new_x = step_from_start_kernel(state0).state
+
+    def reenter_from_new_x_kernel(state):
+        return lbfgsb.lbfgsb_reenter_new_x(
+            _quadratic_value_and_grad,
+            state,
+            maxiter=maxiter,
+            maxfun=maxfun,
+            accepted_step_callback=None,
+        )
+
     def result_kernel(state):
         return _result_payload(state, maxiter=maxiter, maxfun=maxfun)
 
@@ -111,7 +145,18 @@ def _build_summaries(
 
     return [
         _lower_summary("init_state", init_state, x0),
-        _lower_summary("step_to_next_observable", step_kernel, state0),
+        _lower_summary("old_generic_step_to_next_observable", step_kernel, state0),
+        _lower_summary("step_from_start_to_next_observable", step_from_start_kernel, state0),
+        _lower_summary(
+            "step_from_search_to_next_observable",
+            step_from_search_kernel,
+            state_search,
+        ),
+        _lower_summary(
+            "reenter_from_new_x",
+            reenter_from_new_x_kernel,
+            state_new_x,
+        ),
         _lower_summary("result_payload", result_kernel, state0),
         _lower_summary("old_monolithic_full_solve", monolithic_kernel, state0),
     ]
@@ -120,16 +165,31 @@ def _build_summaries(
 def _comparison(summaries: list[dict[str, int | float | str | None]]) -> dict[str, int]:
     by_label = {str(row["label"]): row for row in summaries}
     monolithic = by_label["old_monolithic_full_solve"]
-    step = by_label["step_to_next_observable"]
+    old_generic_step = by_label["old_generic_step_to_next_observable"]
+    specialized_steps = [
+        by_label["step_from_start_to_next_observable"],
+        by_label["step_from_search_to_next_observable"],
+        by_label["reenter_from_new_x"],
+    ]
+    largest_specialized_step = max(
+        int(row["text_bytes"]) for row in specialized_steps
+    )
+    largest_specialized_step_jaxpr = max(
+        int(row["jaxpr_text_bytes"]) for row in specialized_steps
+    )
     result = by_label["result_payload"]
     return {
         "old_monolithic_text_bytes": int(monolithic["text_bytes"]),
-        "step_text_bytes": int(step["text_bytes"]),
+        "old_generic_step_text_bytes": int(old_generic_step["text_bytes"]),
+        "largest_specialized_step_text_bytes": largest_specialized_step,
         "result_payload_text_bytes": int(result["text_bytes"]),
-        "step_plus_result_text_bytes": int(step["text_bytes"])
+        "largest_specialized_step_plus_result_text_bytes": largest_specialized_step
         + int(result["text_bytes"]),
         "old_monolithic_jaxpr_text_bytes": int(monolithic["jaxpr_text_bytes"]),
-        "step_jaxpr_text_bytes": int(step["jaxpr_text_bytes"]),
+        "old_generic_step_jaxpr_text_bytes": int(
+            old_generic_step["jaxpr_text_bytes"]
+        ),
+        "largest_specialized_step_jaxpr_text_bytes": largest_specialized_step_jaxpr,
         "result_payload_jaxpr_text_bytes": int(result["jaxpr_text_bytes"]),
     }
 

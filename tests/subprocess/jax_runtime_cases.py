@@ -228,14 +228,14 @@ def _assert_run_solver_compiles_once(run_once) -> int:
     )
 
 
-def _assert_lbfgs_private_step_kernels_compile_once(run_once) -> int:
+def _assert_lbfgs_private_step_kernels_compile_once_each(run_once) -> int:
     return _assert_solver_compile_count(
         run_once,
         fragments=(
             "lbfgs_private_macro_step_solver)",
             "lbfgs_private_result_payload_solver)",
         ),
-        expected_compile_count=2,
+        expected_compile_count=4,
     )
 
 
@@ -263,7 +263,7 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
         assert result.success is True
 
     if method == "lbfgs-ondevice":
-        compile_count = _assert_lbfgs_private_step_kernels_compile_once(run_once)
+        compile_count = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
     else:
         compile_count = _assert_run_solver_compiles_once(run_once)
     print(
@@ -326,7 +326,7 @@ def _run_target_compile_count_case() -> None:
         )
         assert result.success is True
 
-    compile_count = _assert_lbfgs_private_step_kernels_compile_once(run_once)
+    compile_count = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
     print(
         json.dumps(
             {

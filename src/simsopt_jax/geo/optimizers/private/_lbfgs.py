@@ -44,6 +44,9 @@ _TRACE_ARRAYS_PER_ENTRY = 2
 _TRACE_SCALARS_PER_ENTRY = 5
 _LBFGS_RUN_MODE_STEPWISE = "stepwise"
 _LBFGS_RUN_MODE_MONOLITHIC_DEBUG = "monolithic_debug"
+_LBFGS_STEP_ENTRY_START = "start"
+_LBFGS_STEP_ENTRY_SEARCH = "search"
+_LBFGS_STEP_ENTRY_NEW_X_REENTRY = "new_x_reentry"
 
 
 # `lbfgs-ondevice` keeps the SciPy-compatible L-BFGS-B contract; only its
@@ -200,9 +203,26 @@ def _lbfgsb_advance_to_next_observable_kernel(
     maxiter: int,
     maxfun: int,
     accepted_step_callback=None,
+    entry_kind: str = _LBFGS_STEP_ENTRY_SEARCH,
 ):
     def run(state: lbfgsb.LbfgsbState):
-        return lbfgsb.lbfgsb_advance_to_next_observable(
+        if entry_kind == _LBFGS_STEP_ENTRY_START:
+            return lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+                value_and_grad,
+                state,
+                maxiter=maxiter,
+                maxfun=maxfun,
+                accepted_step_callback=accepted_step_callback,
+            )
+        if entry_kind == _LBFGS_STEP_ENTRY_NEW_X_REENTRY:
+            return lbfgsb.lbfgsb_reenter_new_x(
+                value_and_grad,
+                state,
+                maxiter=maxiter,
+                maxfun=maxfun,
+                accepted_step_callback=accepted_step_callback,
+            )
+        return lbfgsb.lbfgsb_advance_from_search_to_next_observable(
             value_and_grad,
             state,
             maxiter=maxiter,
@@ -216,6 +236,7 @@ def _lbfgsb_advance_to_next_observable_kernel(
         cache_key=(
             "lbfgsb-advance-to-next-observable",
             *cache_key_prefix,
+            entry_kind,
             int(maxiter),
             int(maxfun),
         ),
@@ -551,14 +572,22 @@ def _lbfgsb_state_is_terminal(state: lbfgsb.LbfgsbState) -> bool:
 
 def _lbfgsb_stepwise_driver(
     state: lbfgsb.LbfgsbState,
-    advance_to_next_observable,
+    advance_from_start,
+    advance_from_search,
+    reenter_new_x,
     result_payload,
     *,
     accepted_step_callback=None,
     callback_stop_state=None,
 ) -> _LBFGSResults:
     while not _lbfgsb_state_is_terminal(state):
-        step_result = advance_to_next_observable(state)
+        task = host_array(state.workspace.task, dtype=np.int32)
+        if int(task[0]) == lbfgsb.START:
+            step_result = advance_from_start(state)
+        elif int(task[0]) == lbfgsb.NEW_X:
+            step_result = reenter_new_x(state)
+        else:
+            step_result = advance_from_search(state)
         state = step_result.state
         if accepted_step_callback is not None and host_bool(
             step_result.accepted_new_x
@@ -712,13 +741,32 @@ def _minimize_lbfgs_private_impl(
             accepted_step_callback=accepted_step_callback,
         )(state)
     else:
-        advance_to_next_observable = _lbfgsb_advance_to_next_observable_kernel(
+        advance_from_start = _lbfgsb_advance_to_next_observable_kernel(
             value_and_grad_kernel,
             cache_owner=solver_cache_owner,
             cache_key_prefix=solver_cache_key_prefix,
             maxiter=int(maxiter_limit_value),
             maxfun=int(maxfun_limit_value),
             accepted_step_callback=None,
+            entry_kind=_LBFGS_STEP_ENTRY_START,
+        )
+        advance_from_search = _lbfgsb_advance_to_next_observable_kernel(
+            value_and_grad_kernel,
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            maxiter=int(maxiter_limit_value),
+            maxfun=int(maxfun_limit_value),
+            accepted_step_callback=None,
+            entry_kind=_LBFGS_STEP_ENTRY_SEARCH,
+        )
+        reenter_new_x = _lbfgsb_advance_to_next_observable_kernel(
+            value_and_grad_kernel,
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            maxiter=int(maxiter_limit_value),
+            maxfun=int(maxfun_limit_value),
+            accepted_step_callback=None,
+            entry_kind=_LBFGS_STEP_ENTRY_NEW_X_REENTRY,
         )
         result_payload = _lbfgsb_result_payload_kernel(
             cache_owner=solver_cache_owner,
@@ -734,7 +782,9 @@ def _minimize_lbfgs_private_impl(
             )
         result = _lbfgsb_stepwise_driver(
             state,
-            advance_to_next_observable,
+            advance_from_start,
+            advance_from_search,
+            reenter_new_x,
             result_payload,
             accepted_step_callback=accepted_step_callback,
             callback_stop_state=callback_stop_state,

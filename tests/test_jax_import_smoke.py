@@ -877,7 +877,7 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
         expected_case="compile-count",
     )
-    expected_compile_count = 2 if method == "lbfgs-ondevice" else 1
+    expected_compile_count = 4 if method == "lbfgs-ondevice" else 1
     assert payload == {
         "case": "compile-count",
         "method": method,
@@ -911,7 +911,7 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
     assert payload == {
         "case": "target-compile-count",
         "method": "lbfgs-ondevice",
-        "compile_count": 2,
+        "compile_count": 4,
         "run_count": 3,
         "value_and_grad": True,
     }
