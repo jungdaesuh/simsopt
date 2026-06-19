@@ -184,6 +184,7 @@ def _lbfgsb_mainlb_kernel(
             maxfun_limit=jnp.asarray(maxfun, dtype=jnp.int32),
         )
 
+    run.__name__ = "lbfgs_private_monolithic_mainlb_solver"
     return _cached_private_solver(
         cache_owner if accepted_step_callback is None else None,
         cache_key=(

@@ -35,6 +35,21 @@ from simsopt_jax.geo.optimizers.private import _lbfgsb_scipy as lbfgsb
 from simsopt_jax.geo.optimizers.optimizer import _mark_cacheable_jit_value_and_grad
 
 
+_LBFGS_STEPWISE_COMPILE_FRAGMENTS = (
+    "lbfgs_private_value_and_grad)",
+    "lbfgs_private_initial_state_solver)",
+    "lbfgs_private_macro_step_solver)",
+    "lbfgs_private_result_payload_solver)",
+)
+_LBFGS_MONOLITHIC_COMPILE_FRAGMENTS = (
+    "lbfgs_private_monolithic_mainlb_solver)",
+)
+_LBFGS_PRIVATE_COMPILE_FRAGMENTS = (
+    *_LBFGS_STEPWISE_COMPILE_FRAGMENTS,
+    *_LBFGS_MONOLITHIC_COMPILE_FRAGMENTS,
+)
+
+
 @dataclass(frozen=True)
 class _KernelCase:
     label: str
@@ -47,13 +62,24 @@ class _CompileCounter(logging.Handler):
         super().__init__()
         self.fragments = fragments
         self.count = 0
+        self.counts_by_fragment = {fragment: 0 for fragment in fragments}
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if "Compiling jit(" in message and any(
-            fragment in message for fragment in self.fragments
-        ):
-            self.count += 1
+        if "Compiling jit(" not in message:
+            return
+        for fragment in self.fragments:
+            if fragment in message:
+                self.count += 1
+                self.counts_by_fragment[fragment] += 1
+                return
+
+
+def _sum_fragment_counts(
+    counts_by_fragment: dict[str, int],
+    fragments: tuple[str, ...],
+) -> int:
+    return sum(int(counts_by_fragment[fragment]) for fragment in fragments)
 
 
 def _git_text(*args: str) -> str:
@@ -261,7 +287,7 @@ def _repeated_call_compile_summary(
     maxls: int,
     ftol: float,
     gtol: float,
-) -> dict[str, bool | float | int | str]:
+) -> dict[str, bool | float | int | str | dict[str, int]]:
     x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
 
     def value_and_grad(x):
@@ -285,14 +311,7 @@ def _repeated_call_compile_summary(
 
     logger = logging.getLogger("jax")
     old_level = logger.level
-    handler = _CompileCounter(
-        (
-            "lbfgs_private_value_and_grad)",
-            "lbfgs_private_initial_state_solver)",
-            "lbfgs_private_macro_step_solver)",
-            "lbfgs_private_result_payload_solver)",
-        )
-    )
+    handler = _CompileCounter(_LBFGS_PRIVATE_COMPILE_FRAGMENTS)
     rss_before_bytes = _maxrss_bytes()
     started_at = time.perf_counter()
     logger.addHandler(handler)
@@ -308,13 +327,135 @@ def _repeated_call_compile_summary(
     elapsed_s = time.perf_counter() - started_at
     rss_after_bytes = _maxrss_bytes()
     expected_compile_count = 5
+    stepwise_compile_count = _sum_fragment_counts(
+        handler.counts_by_fragment,
+        _LBFGS_STEPWISE_COMPILE_FRAGMENTS,
+    )
+    monolithic_compile_count = _sum_fragment_counts(
+        handler.counts_by_fragment,
+        _LBFGS_MONOLITHIC_COMPILE_FRAGMENTS,
+    )
     return {
         "case": "private-lbfgs-repeated-call-compile-count",
         "run_count": 3,
         "compile_log_count": int(handler.count),
+        "counts_by_fragment": dict(handler.counts_by_fragment),
+        "stepwise_compile_log_count": int(stepwise_compile_count),
+        "monolithic_compile_log_count": int(monolithic_compile_count),
         "expected_compile_log_count": expected_compile_count,
         "compiled_executable_count": int(handler.count),
         "recompiled_on_repeated_calls": handler.count > expected_compile_count,
+        "optimizer_control_monolithic_full_run_compile": monolithic_compile_count > 0,
+        "wall_s": elapsed_s,
+        "peak_host_rss_bytes": rss_after_bytes,
+        "peak_host_rss_delta_bytes": max(0, rss_after_bytes - rss_before_bytes),
+    }
+
+
+def _boozer_limited_memory_compile_summary(
+    *,
+    maxiter: int,
+    maxcor: int,
+    maxfun: int,
+    maxls: int,
+    ftol: float,
+    gtol: float,
+) -> dict[str, bool | float | int | str | dict[str, int]]:
+    from repo_bootstrap import bootstrap_local_simsopt
+
+    bootstrap_local_simsopt(SRC_ROOT)
+
+    from benchmarks.benchmark_problem import build_ls_parity_problem, clone_tensor_surface
+    from simsopt.geo.surfaceobjectives import Volume
+    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+    from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+
+    problem = build_ls_parity_problem(
+        ncoils=2,
+        nfp=1,
+        mpol=1,
+        ntor=1,
+        nphi=3,
+        ntheta=3,
+    )
+    surface = clone_tensor_surface(problem.surface)
+    volume = Volume(surface)
+    biot_savart = BiotSavartJAX(problem.coils)
+    booz = BoozerSurfaceJAX(
+        biot_savart,
+        surface,
+        volume,
+        problem.vol_target,
+        constraint_weight=1.0,
+        options={
+            "optimizer_backend": "ondevice",
+            "limited_memory": True,
+            "verbose": False,
+            "bfgs_maxiter": maxiter,
+            "bfgs_tol": gtol,
+            "maxcor": maxcor,
+            "maxfun": maxfun,
+            "maxls": maxls,
+            "ftol": ftol,
+            "newton_maxiter": 0,
+        },
+    )
+    decision_vector_size = int(
+        np.asarray(booz._pack_decision_vector(problem.iota0, problem.G0)).size
+    )
+
+    logger = logging.getLogger("jax")
+    old_level = logger.level
+    handler = _CompileCounter(_LBFGS_PRIVATE_COMPILE_FRAGMENTS)
+    rss_before_bytes = _maxrss_bytes()
+    started_at = time.perf_counter()
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        jax.clear_caches()
+        with jax.log_compiles(True):
+            result = booz.minimize_boozer_penalty_constraints_LBFGS(
+                constraint_weight=1.0,
+                iota=problem.iota0,
+                G=problem.G0,
+                tol=gtol,
+                maxiter=maxiter,
+                verbose=False,
+                limited_memory=True,
+                weight_inv_modB=True,
+            )
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+    elapsed_s = time.perf_counter() - started_at
+    rss_after_bytes = _maxrss_bytes()
+    stepwise_compile_count = _sum_fragment_counts(
+        handler.counts_by_fragment,
+        _LBFGS_STEPWISE_COMPILE_FRAGMENTS,
+    )
+    monolithic_compile_count = _sum_fragment_counts(
+        handler.counts_by_fragment,
+        _LBFGS_MONOLITHIC_COMPILE_FRAGMENTS,
+    )
+    return {
+        "case": "boozer-limited-memory-lbfgs-compile-log",
+        "run_count": 1,
+        "method": "lbfgs-ondevice",
+        "optimizer_backend": "ondevice",
+        "limited_memory": True,
+        "decision_vector_size": decision_vector_size,
+        "maxiter": int(maxiter),
+        "maxcor": int(maxcor),
+        "maxfun": int(maxfun),
+        "maxls": int(maxls),
+        "compile_log_count": int(handler.count),
+        "counts_by_fragment": dict(handler.counts_by_fragment),
+        "stepwise_compile_log_count": int(stepwise_compile_count),
+        "expected_stepwise_compile_log_count": 5,
+        "monolithic_compile_log_count": int(monolithic_compile_count),
+        "optimizer_control_monolithic_full_run_compile": monolithic_compile_count > 0,
+        "success": bool(result["success"]),
+        "iterations": int(result["iter"]),
         "wall_s": elapsed_s,
         "peak_host_rss_bytes": rss_after_bytes,
         "peak_host_rss_delta_bytes": max(0, rss_after_bytes - rss_before_bytes),
@@ -379,6 +520,26 @@ def main() -> None:
         action="store_true",
         help="Only emit lowering/JAXPR shape summaries; skip executable compile/RSS probes.",
     )
+    parser.add_argument(
+        "--include-boozer-compile-log",
+        action="store_true",
+        help=(
+            "Run a small Boozer limited-memory L-BFGS-B case under JAX compile "
+            "logging to classify stepwise vs monolithic optimizer-control compiles."
+        ),
+    )
+    parser.add_argument(
+        "--boozer-maxiter",
+        type=int,
+        default=10,
+        help="Iteration limit for the optional Boozer compile-log diagnostic.",
+    )
+    parser.add_argument(
+        "--boozer-maxcor",
+        type=int,
+        default=10,
+        help="History size for the optional Boozer compile-log diagnostic.",
+    )
     args = parser.parse_args()
 
     kernel_cases = _build_kernel_cases(
@@ -393,6 +554,7 @@ def main() -> None:
     summaries = _build_summaries(kernel_cases)
     runtime_compile = None
     repeated_call_compile = None
+    boozer_limited_memory_compile = None
     if not args.skip_runtime_compile:
         runtime_compile_summaries = _compile_measurements(kernel_cases)
         runtime_compile = {
@@ -412,8 +574,17 @@ def main() -> None:
             ftol=args.ftol,
             gtol=args.gtol,
         )
+        if args.include_boozer_compile_log:
+            boozer_limited_memory_compile = _boozer_limited_memory_compile_summary(
+                maxiter=args.boozer_maxiter,
+                maxcor=args.boozer_maxcor,
+                maxfun=args.maxfun,
+                maxls=args.maxls,
+                ftol=args.ftol,
+                gtol=args.gtol,
+            )
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_git_head": _git_text("rev-parse", "HEAD"),
         "source_git_status_short": _git_text("status", "--short"),
@@ -437,6 +608,7 @@ def main() -> None:
         "comparison": _comparison(summaries),
         "runtime_compile": runtime_compile,
         "repeated_call_compile": repeated_call_compile,
+        "boozer_limited_memory_compile": boozer_limited_memory_compile,
     }
     output_path = Path(args.output_json)
     _write_json(output_path, payload)
