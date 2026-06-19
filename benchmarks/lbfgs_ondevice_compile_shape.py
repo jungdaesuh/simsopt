@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
+import platform
 from pathlib import Path
+import resource
 import sys
+import time
 
 import jax
 import jax.numpy as jnp
@@ -25,11 +31,51 @@ from benchmarks.traceable_compile_shape import (
 )
 from simsopt_jax.geo.optimizers.private import _lbfgs as private_lbfgs
 from simsopt_jax.geo.optimizers.private import _lbfgsb_scipy as lbfgsb
+from simsopt_jax.geo.optimizers.optimizer import _mark_cacheable_jit_value_and_grad
+
+
+@dataclass(frozen=True)
+class _KernelCase:
+    label: str
+    fn: Callable[..., object]
+    args: tuple[object, ...]
+
+
+class _CompileCounter(logging.Handler):
+    def __init__(self, fragments: tuple[str, ...]) -> None:
+        super().__init__()
+        self.fragments = fragments
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "Compiling jit(" in message and any(
+            fragment in message for fragment in self.fragments
+        ):
+            self.count += 1
 
 
 def _quadratic_value_and_grad(x):
     vector = jnp.asarray(x, dtype=jnp.float64)
     return 0.5 * jnp.dot(vector, vector), vector
+
+
+def _maxrss_bytes() -> int:
+    maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if platform.system() == "Darwin":
+        return int(maxrss)
+    return int(maxrss) * 1024
+
+
+def _device_summary() -> list[dict[str, int | str]]:
+    return [
+        {
+            "id": int(device.id),
+            "platform": str(device.platform),
+            "device_kind": str(device.device_kind),
+        }
+        for device in jax.devices()
+    ]
 
 
 def _jaxpr_summary(fn, *args) -> dict[str, int]:
@@ -63,7 +109,7 @@ def _result_payload(state, *, maxiter: int, maxfun: int):
     )
 
 
-def _build_summaries(
+def _build_kernel_cases(
     *,
     dimension: int,
     maxcor: int,
@@ -144,22 +190,124 @@ def _build_summaries(
         return _result_payload(final_state, maxiter=maxiter, maxfun=maxfun)
 
     return [
-        _lower_summary("init_state", init_state, x0),
-        _lower_summary("old_generic_step_to_next_observable", step_kernel, state0),
-        _lower_summary("step_from_start_to_next_observable", step_from_start_kernel, state0),
-        _lower_summary(
+        _KernelCase("init_state", init_state, (x0,)),
+        _KernelCase("old_generic_step_to_next_observable", step_kernel, (state0,)),
+        _KernelCase(
+            "step_from_start_to_next_observable",
+            step_from_start_kernel,
+            (state0,),
+        ),
+        _KernelCase(
             "step_from_search_to_next_observable",
             step_from_search_kernel,
-            state_search,
+            (state_search,),
         ),
-        _lower_summary(
+        _KernelCase(
             "reenter_from_new_x",
             reenter_from_new_x_kernel,
-            state_new_x,
+            (state_new_x,),
         ),
-        _lower_summary("result_payload", result_kernel, state0),
-        _lower_summary("old_monolithic_full_solve", monolithic_kernel, state0),
+        _KernelCase("result_payload", result_kernel, (state0,)),
+        _KernelCase("old_monolithic_full_solve", monolithic_kernel, (state0,)),
     ]
+
+
+def _build_summaries(
+    kernel_cases: list[_KernelCase],
+) -> list[dict[str, int | float | str | None]]:
+    return [
+        _lower_summary(kernel_case.label, kernel_case.fn, *kernel_case.args)
+        for kernel_case in kernel_cases
+    ]
+
+
+def _compile_measurement(
+    kernel_case: _KernelCase,
+) -> dict[str, int | float | str]:
+    rss_before_bytes = _maxrss_bytes()
+    started_at = time.perf_counter()
+    compiled = jax.jit(kernel_case.fn).lower(*kernel_case.args).compile()
+    compile_s = time.perf_counter() - started_at
+    del compiled
+    rss_after_bytes = _maxrss_bytes()
+    return {
+        "label": kernel_case.label,
+        "compile_s": compile_s,
+        "compiled_executable_count": 1,
+        "peak_host_rss_bytes": rss_after_bytes,
+        "peak_host_rss_delta_bytes": max(0, rss_after_bytes - rss_before_bytes),
+    }
+
+
+def _compile_measurements(
+    kernel_cases: list[_KernelCase],
+) -> list[dict[str, int | float | str]]:
+    return [_compile_measurement(kernel_case) for kernel_case in kernel_cases]
+
+
+def _repeated_call_compile_summary(
+    *,
+    maxiter: int,
+    maxcor: int,
+    maxls: int,
+    ftol: float,
+    gtol: float,
+) -> dict[str, bool | float | int | str]:
+    x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
+
+    def value_and_grad(x):
+        vector = jnp.asarray(x, dtype=jnp.float64)
+        return 0.5 * jnp.dot(vector, vector), vector
+
+    cacheable_value_and_grad = _mark_cacheable_jit_value_and_grad(value_and_grad)
+
+    def run_once() -> None:
+        result = private_lbfgs._minimize_lbfgs_private_value_and_grad(
+            cacheable_value_and_grad,
+            x0,
+            maxiter=maxiter,
+            maxcor=maxcor,
+            maxls=maxls,
+            ftol=ftol,
+            gtol=gtol,
+        )
+        if bool(result.converged) is not True:
+            raise AssertionError("lbfgs-ondevice repeated compile probe did not converge")
+
+    logger = logging.getLogger("jax")
+    old_level = logger.level
+    handler = _CompileCounter(
+        (
+            "lbfgs_private_macro_step_solver)",
+            "lbfgs_private_result_payload_solver)",
+        )
+    )
+    rss_before_bytes = _maxrss_bytes()
+    started_at = time.perf_counter()
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        jax.clear_caches()
+        with jax.log_compiles(True):
+            for _ in range(3):
+                run_once()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+    elapsed_s = time.perf_counter() - started_at
+    rss_after_bytes = _maxrss_bytes()
+    expected_compile_count = 4
+    return {
+        "case": "private-lbfgs-repeated-call-compile-count",
+        "run_count": 3,
+        "compile_log_count": int(handler.count),
+        "expected_compile_log_count": expected_compile_count,
+        "compiled_executable_count": int(handler.count),
+        "recompiled_on_repeated_calls": handler.count > expected_compile_count,
+        "wall_s": elapsed_s,
+        "peak_host_rss_bytes": rss_after_bytes,
+        "peak_host_rss_delta_bytes": max(0, rss_after_bytes - rss_before_bytes),
+    }
 
 
 def _comparison(summaries: list[dict[str, int | float | str | None]]) -> dict[str, int]:
@@ -215,9 +363,14 @@ def main() -> None:
     parser.add_argument("--maxls", type=int, default=20)
     parser.add_argument("--ftol", type=float, default=0.0)
     parser.add_argument("--gtol", type=float, default=1e-8)
+    parser.add_argument(
+        "--skip-runtime-compile",
+        action="store_true",
+        help="Only emit lowering/JAXPR shape summaries; skip executable compile/RSS probes.",
+    )
     args = parser.parse_args()
 
-    summaries = _build_summaries(
+    kernel_cases = _build_kernel_cases(
         dimension=args.dimension,
         maxcor=args.maxcor,
         maxiter=args.maxiter,
@@ -226,11 +379,35 @@ def main() -> None:
         ftol=args.ftol,
         gtol=args.gtol,
     )
+    summaries = _build_summaries(kernel_cases)
+    runtime_compile = None
+    repeated_call_compile = None
+    if not args.skip_runtime_compile:
+        runtime_compile_summaries = _compile_measurements(kernel_cases)
+        runtime_compile = {
+            "summaries": runtime_compile_summaries,
+            "compiled_executable_count": sum(
+                int(row["compiled_executable_count"])
+                for row in runtime_compile_summaries
+            ),
+            "peak_host_rss_bytes": max(
+                int(row["peak_host_rss_bytes"]) for row in runtime_compile_summaries
+            ),
+        }
+        repeated_call_compile = _repeated_call_compile_summary(
+            maxiter=args.maxiter,
+            maxcor=args.maxcor,
+            maxls=args.maxls,
+            ftol=args.ftol,
+            gtol=args.gtol,
+        )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "jax_version": jax.__version__,
         "jax_backend": jax.default_backend(),
+        "platform": platform.platform(),
+        "devices": _device_summary(),
         "case": {
             "objective": "deterministic_quadratic",
             "dimension": int(args.dimension),
@@ -244,6 +421,8 @@ def main() -> None:
         },
         "summaries": summaries,
         "comparison": _comparison(summaries),
+        "runtime_compile": runtime_compile,
+        "repeated_call_compile": repeated_call_compile,
     }
     output_path = Path(args.output_json)
     _write_json(output_path, payload)

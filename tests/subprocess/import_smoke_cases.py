@@ -974,11 +974,11 @@ def case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes() -> Non
         x = jnp.asarray(x, dtype=jnp.float64)
         return half * jnp.dot(x, x), x
 
-    def run_lbfgs(value_and_grad_fun):
+    def run_lbfgs(value_and_grad_fun, x0_device):
         callback_points = []
         result = minimize(
             value_and_grad_fun,
-            x0,
+            x0_device,
             driver=Driver.SIMSOPT_LBFGSB,
             options=SimsoptLBFGSBOptions(maxiter=5),
             callback=lambda event: callback_points.append(
@@ -987,15 +987,26 @@ def case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes() -> Non
         )
         return result, callback_points
 
-    x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
-    result, callback_points = run_lbfgs(jax.value_and_grad(quad))
-    result_vg, callback_points_vg = run_lbfgs(quad_value_and_grad)
+    x0_numpy = np.array([1.0, -2.0], dtype=np.float64)
+    with jax.transfer_guard_host_to_device("allow"):
+        x0 = jnp.asarray(x0_numpy)
+    result, callback_points = run_lbfgs(jax.value_and_grad(quad), x0)
+    with jax.transfer_guard_host_to_device("allow"):
+        x0_from_numpy = jnp.asarray(x0_numpy)
+    result_numpy, callback_points_numpy = run_lbfgs(
+        jax.value_and_grad(quad),
+        x0_from_numpy,
+    )
+    result_vg, callback_points_vg = run_lbfgs(quad_value_and_grad, x0)
 
     assert result.success is True
+    assert result_numpy.success is True
     assert result_vg.success is True
     assert callback_points
+    assert callback_points_numpy
     assert callback_points_vg
     assert float(result.fun) < float(quad(x0))
+    assert float(result_numpy.fun) < float(quad(x0))
     assert float(result_vg.fun) < float(quad(x0))
 
 
