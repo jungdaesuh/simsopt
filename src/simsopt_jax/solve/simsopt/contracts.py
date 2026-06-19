@@ -13,7 +13,7 @@ class SimsoptLBFGSBOptions(OptionsBase):
     maxfun: int = 15000
     gtol: float = 1e-10
     ftol: float = 1e-10
-    maxcor: int = 200
+    maxcor: int = 10
     maxls: int = 20
 
 

@@ -3585,6 +3585,8 @@ _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
 
 # Options shared by the public SciPy L-BFGS lane and the private L-BFGS lanes.
 _LBFGS_TUNING_OPTIONS = frozenset({"maxcor", "ftol", "maxfun", "maxls"})
+_REFERENCE_LBFGS_DEFAULT_MAXCOR = 200
+_ONDEVICE_LBFGS_DEFAULT_MAXCOR = 10
 _LM_TUNING_OPTION_KEYS = ("ftol", "xtol", "gtol")
 _LM_TUNING_OPTIONS = frozenset(_LM_TUNING_OPTION_KEYS)
 _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
@@ -3602,6 +3604,13 @@ _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
 )
 _TYPED_LS_OPTION_KEYS = frozenset({"inner_driver"})
+
+
+def _default_lbfgs_maxcor_for_method(method: str) -> int:
+    if method == "lbfgs-ondevice":
+        return _ONDEVICE_LBFGS_DEFAULT_MAXCOR
+    return _REFERENCE_LBFGS_DEFAULT_MAXCOR
+
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
@@ -5798,7 +5807,11 @@ class BoozerSurfaceJAX(Optimizable):
                     x0,
                     maxiter=self.options["bfgs_maxiter"],
                     gtol=self.options["bfgs_tol"],
-                    maxcor=int(optimizer_options.get("maxcor", 200)),
+                    maxcor=int(
+                        optimizer_options.get(
+                            "maxcor", _default_lbfgs_maxcor_for_method(method)
+                        )
+                    ),
                     ftol=float(optimizer_options.get("ftol", 0.0)),
                     maxfun=optimizer_options.get("maxfun"),
                     maxls=int(optimizer_options.get("maxls", 20)),
@@ -6058,7 +6071,7 @@ class BoozerSurfaceJAX(Optimizable):
             if k in self.options
         }
         if method in {"lbfgs", "lbfgs-ondevice"} and "maxcor" not in optimizer_options:
-            optimizer_options["maxcor"] = 200
+            optimizer_options["maxcor"] = _default_lbfgs_maxcor_for_method(method)
         if method not in _ONDEVICE_OPTIMIZER_METHODS:
             optimizer_options.update(
                 {k: self.options[k] for k in _SCIPY_TRACE_OPTIONS if k in self.options}

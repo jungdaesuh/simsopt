@@ -5095,7 +5095,7 @@ class TestBoozerSurfaceJAXClass:
         assert result["optimizer_method"] == "lbfgs-ondevice"
 
     def test_ondevice_limited_memory_ls_uses_boozer_maxcor_default(self, monkeypatch):
-        """BoozerSurfaceJAX L-BFGS keeps the CPU Boozer history-size contract."""
+        """BoozerSurfaceJAX L-BFGS uses the bounded on-device history default."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
@@ -5129,7 +5129,7 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert captured["method"] == "lbfgs-ondevice"
-        assert captured["options"]["maxcor"] == 200
+        assert captured["options"]["maxcor"] == 10
         assert captured["value_and_grad"] is False
         assert result["optimizer_method"] == "lbfgs-ondevice"
 

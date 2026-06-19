@@ -142,6 +142,7 @@ def _lbfgsb_initial_state_kernel(
             maxls=maxls,
         )
 
+    build.__name__ = "lbfgs_private_initial_state_solver"
     return _cached_private_solver(
         cache_owner,
         cache_key=(

@@ -11,6 +11,7 @@ import logging
 import platform
 from pathlib import Path
 import resource
+import subprocess
 import sys
 import time
 
@@ -53,6 +54,14 @@ class _CompileCounter(logging.Handler):
             fragment in message for fragment in self.fragments
         ):
             self.count += 1
+
+
+def _git_text(*args: str) -> str:
+    return subprocess.check_output(
+        ("git", *args),
+        cwd=REPO_ROOT,
+        text=True,
+    ).strip()
 
 
 def _quadratic_value_and_grad(x):
@@ -278,6 +287,8 @@ def _repeated_call_compile_summary(
     old_level = logger.level
     handler = _CompileCounter(
         (
+            "lbfgs_private_value_and_grad)",
+            "lbfgs_private_initial_state_solver)",
             "lbfgs_private_macro_step_solver)",
             "lbfgs_private_result_payload_solver)",
         )
@@ -296,7 +307,7 @@ def _repeated_call_compile_summary(
         logger.setLevel(old_level)
     elapsed_s = time.perf_counter() - started_at
     rss_after_bytes = _maxrss_bytes()
-    expected_compile_count = 4
+    expected_compile_count = 5
     return {
         "case": "private-lbfgs-repeated-call-compile-count",
         "run_count": 3,
@@ -404,6 +415,9 @@ def main() -> None:
     payload = {
         "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_git_head": _git_text("rev-parse", "HEAD"),
+        "source_git_status_short": _git_text("status", "--short"),
+        "command": [sys.executable, *sys.argv],
         "jax_version": jax.__version__,
         "jax_backend": jax.default_backend(),
         "platform": platform.platform(),

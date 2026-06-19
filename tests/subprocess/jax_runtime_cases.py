@@ -232,10 +232,12 @@ def _assert_lbfgs_private_step_kernels_compile_once_each(run_once) -> int:
     return _assert_solver_compile_count(
         run_once,
         fragments=(
+            "lbfgs_private_value_and_grad)",
+            "lbfgs_private_initial_state_solver)",
             "lbfgs_private_macro_step_solver)",
             "lbfgs_private_result_payload_solver)",
         ),
-        expected_compile_count=4,
+        expected_compile_count=5,
     )
 
 

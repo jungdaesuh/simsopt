@@ -8,6 +8,7 @@ from simsopt_jax.solve import (
     Driver,
     SimsoptBFGSCallbackEvent,
     SimsoptBFGSOptions,
+    SimsoptLBFGSBOptions,
     SimsoptLMGMRESCallbackEvent,
     SimsoptLMGMRESOptions,
 )
@@ -195,6 +196,22 @@ def test_legacy_dispatch_uses_driver_method_ssot(monkeypatch):
         ("reference_least_squares", "ssot-reference-ls:simsopt_lm_gmres_host"),
         ("target_least_squares", "ssot-target-ls:simsopt_lm_qr"),
     ]
+
+
+def test_simsopt_lbfgsb_default_maxcor_matches_ondevice_history_default(monkeypatch):
+    captured = {}
+
+    def target_minimize(*_args, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+
+    minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_LBFGSB)
+
+    assert SimsoptLBFGSBOptions().maxcor == 10
+    assert captured["method"] == "lbfgs-ondevice"
+    assert captured["options"]["maxcor"] == 10
 
 
 def test_simsopt_minimize_callback_adapter_emits_typed_event(monkeypatch):
