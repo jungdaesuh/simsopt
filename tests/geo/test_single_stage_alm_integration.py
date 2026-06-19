@@ -27,14 +27,22 @@ if EXAMPLES_ROOT_STR not in sys.path:
     sys.path.insert(0, EXAMPLES_ROOT_STR)
 from banana_opt import alm_adaptive_smoothing as _alm_adaptive_smoothing  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
+    BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
+    BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION,
     TYPE_KK_FINITE_BUILD_GAPSIZE_B_M,
     TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
 )
 from banana_opt.single_stage_objectives import (  # noqa: E402
+    IOTA_PIN_DEFAULT_TARGET,
+    IOTA_PIN_DEFAULT_WINDOW,
+    NOBLE_IOTA_PULL_DEFAULT_HI,
+    NOBLE_IOTA_PULL_DEFAULT_LO,
     RATIONAL_IOTA_AVOIDANCE_DEFAULT_SIGMA,
     RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR,
+    _hard_max_curvature_signed_constraint,
+    _single_stage_alm_constraint_metadata,
 )
 from banana_opt.wout_convention import wout_convention_artifact_fields  # noqa: E402
 
@@ -165,6 +173,30 @@ def extract_functions(
     namespace = dict(global_bindings)
     exec(compile(module, str(module_path), "exec"), namespace)
     return {name: namespace[name] for name in function_names}
+
+
+def extract_assigned_constants(
+    module_path: Path, constant_names: list[str], global_bindings: dict
+):
+    tree = ast.parse(module_path.read_text(), filename=str(module_path))
+    constant_name_set = set(constant_names)
+    selected_nodes = []
+    for node in tree.body:
+        assigned_names = set()
+        if isinstance(node, ast.Assign):
+            assigned_names = {
+                target.id
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            assigned_names = {node.target.id}
+        if assigned_names & constant_name_set:
+            selected_nodes.append(node)
+    module = ast.Module(body=selected_nodes, type_ignores=[])
+    namespace = dict(global_bindings)
+    exec(compile(module, str(module_path), "exec"), namespace)
+    return {name: namespace[name] for name in constant_names}
 
 
 def extracted_softmin_selection_window():
@@ -398,9 +430,27 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         import argparse as _argparse
         import os as _os
 
+        source_defaults = extract_assigned_constants(
+            SINGLE_STAGE_MODULE_PATH,
+            [
+                "CURVATURE_P_NORM",
+                "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT",
+                "SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT",
+                "SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT",
+            ],
+            {
+                "BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M": (
+                    BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
+                ),
+                "BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION": (
+                    BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION
+                ),
+            },
+        )
         globals_for_extract = {
             "argparse": _argparse,
             "os": _os,
+            "np": np,
             "COIL_COIL_MIN_DIST_M": 0.0462,
             "COIL_LENGTH_HARD_LIMIT_M": 2.0,
             "COIL_LENGTH_TARGET_M": 1.9,
@@ -462,6 +512,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "BANANA_CURRENT_COORDINATE_SCALING_NONE": "none",
             "BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE": "seed-relative",
             "MAX_CURVATURE_INV_M": 100.0,
+            **source_defaults,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
             "SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT": 1.0,
@@ -488,6 +539,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "recent_stage1_candidate",
                 "legacy_control",
             ),
+            "NOBLE_IOTA_PULL_DEFAULT_LO": NOBLE_IOTA_PULL_DEFAULT_LO,
+            "NOBLE_IOTA_PULL_DEFAULT_HI": NOBLE_IOTA_PULL_DEFAULT_HI,
+            "IOTA_PIN_DEFAULT_TARGET": IOTA_PIN_DEFAULT_TARGET,
+            "IOTA_PIN_DEFAULT_WINDOW": IOTA_PIN_DEFAULT_WINDOW,
             "DEFAULT_RESIDUE_OBJECTIVE_WEIGHT": 0.0,
             "DEFAULT_RESIDUE_SATISFIED_THRESHOLD": 1.0e-4,
             "DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS": 768,
@@ -1382,6 +1437,116 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("coil_length_min", stacked_constraint_names)
         self.assertNotIn("coil_length_upper_bound", stacked_constraint_names)
         self.assertIn("length_penalty", stacked_constraint_names)
+
+    def test_single_stage_max_curvature_metadata_uses_hard_signal_when_requested(self):
+        metadata_by_name = _single_stage_alm_constraint_metadata(
+            ["max_curvature"],
+            threshold_overrides={"max_curvature": 100.0},
+            activity_tolerance_by_name={},
+            use_hard_geometry_signals=True,
+            qs_threshold=3.0e-3,
+            boozer_threshold=1.0e-4,
+            iota_penalty_threshold=1.0e-4,
+            length_penalty_threshold=1.0e-4,
+        )
+
+        metadata = metadata_by_name["max_curvature"]
+        self.assertEqual(metadata.block, "geometry")
+        self.assertEqual(metadata.objective_value_kind, "surrogate")
+        self.assertEqual(metadata.gradient_value_kind, "surrogate")
+        self.assertEqual(metadata.dual_update_value_kind, "hard")
+        self.assertEqual(metadata.feasibility_value_kind, "hard")
+        self.assertEqual(metadata.certification_value_kind, "hard")
+        self.assertEqual(metadata.raw_threshold, 100.0)
+
+    def test_hard_max_curvature_signed_constraint_is_positive_only_above_threshold(
+        self,
+    ):
+        below_threshold_curve = SimpleNamespace(
+            kappa=lambda: np.asarray([88.0, 96.5, 99.25])
+        )
+        at_threshold_curve = SimpleNamespace(kappa=lambda: np.asarray([72.0, 100.0]))
+        above_threshold_curve = SimpleNamespace(
+            kappa=lambda: np.asarray([91.0, 100.25, 97.5])
+        )
+
+        signed_value, violation = _hard_max_curvature_signed_constraint(
+            below_threshold_curve, 100.0
+        )
+        self.assertLess(signed_value, 0.0)
+        self.assertEqual(violation, 0.0)
+
+        signed_value, violation = _hard_max_curvature_signed_constraint(
+            at_threshold_curve, 100.0
+        )
+        self.assertEqual(signed_value, 0.0)
+        self.assertEqual(violation, 0.0)
+
+        signed_value, violation = _hard_max_curvature_signed_constraint(
+            above_threshold_curve, 100.0
+        )
+        self.assertGreater(signed_value, 0.0)
+        self.assertAlmostEqual(signed_value, 0.25)
+        self.assertAlmostEqual(violation, 0.25)
+
+    def test_results_metadata_uses_finitebuild_pack_limit_for_curvature_gate(self):
+        tree = ast.parse(
+            SINGLE_STAGE_MODULE_PATH.read_text(),
+            filename=str(SINGLE_STAGE_MODULE_PATH),
+        )
+        metadata_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "single_stage_finite_build_metadata"
+        ]
+        self.assertEqual(len(metadata_calls), 1)
+
+        keywords_by_name = {
+            keyword.arg: keyword.value for keyword in metadata_calls[0].keywords
+        }
+        self.assertIsInstance(keywords_by_name["pack_limit_inv_m"], ast.Name)
+        self.assertEqual(
+            keywords_by_name["pack_limit_inv_m"].id,
+            "SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M",
+        )
+        self.assertNotEqual(
+            keywords_by_name["pack_limit_inv_m"].id,
+            "CURVATURE_THRESHOLD",
+        )
+
+    def test_finitebuild_curvature_ok_uses_pack_limit_not_relaxed_loop_threshold(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["single_stage_finite_build_metadata"],
+            {"TYPE_KK_INNER_RADIUS_MARGIN_M": 0.025},
+        )
+        finite_build_settings = SimpleNamespace(
+            numfilaments_n=2,
+            numfilaments_b=4,
+            gapsize_n=0.001,
+            gapsize_b=0.002,
+            rotation_order="frame",
+            frame="frenet",
+            nfilaments=8,
+            pack_half_extent_n_m=0.012,
+            pack_half_extent_b_m=0.018,
+            pack_reach_m=0.022,
+        )
+
+        metadata = functions["single_stage_finite_build_metadata"](
+            finite_build_settings,
+            threshold_enabled=True,
+            threshold_applied=True,
+            pack_limit_inv_m=40.0,
+            final_max_curvature=45.0,
+        )
+
+        self.assertTrue(
+            metadata["FINITEBUILD_FRAME_AWARE_CURVATURE_THRESHOLD_APPLIED"]
+        )
+        self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
     def test_stage2_alm_constraint_names_follow_shared_schema(self):
         schema_module = load_hardware_constraint_schema_module()
