@@ -66,10 +66,14 @@ and memory stability before rerunning the six-seed production matrix.
   compatible compiled programs. JAX GPU dispatch is asynchronous, so benchmark
   timings must use completed subprocess boundaries or explicit synchronization
   rather than raw dispatch timestamps.
-- The current SIMSOPT `lbfgs-ondevice` stepwise kernel is still named
-  `lbfgs_private_macro_step_solver` and is compiled as `jax.jit(run)` in
-  `src/simsopt_jax/geo/optimizers/private/_lbfgs.py:262` and
-  `src/simsopt_jax/geo/optimizers/private/_lbfgs.py:297`.
+- The current SIMSOPT `lbfgs-ondevice` stepwise macro-step body is `def run`
+  (assigned `run.__name__ = "lbfgs_private_macro_step_solver"`) in
+  `src/simsopt_jax/geo/optimizers/private/_lbfgs.py` (body near `:262`, name near
+  `:297`), wrapped by `jax.jit(run)` inside
+  `_lbfgsb_advance_to_next_observable_kernel` (the literal `jax.jit(run)` is near
+  `:308`, not `:297`). Verified premise: the single-stage objective is
+  closure-converted to a jaxpr and inlined into the jitted macro-step, so the
+  compiled macro-step graph encloses the full value/gradient pipeline.
 - That macro-step calls a value/gradient callable; for single-stage traceable
   objectives, the value/gradient path includes `_value_and_grad_for`, which runs
   the forward solve and then the total-gradient kernel in
@@ -84,6 +88,18 @@ and memory stability before rerunning the six-seed production matrix.
   That is groundwork, not a complete production kernel bundle: failure guards,
   static signature ownership, residual/Jacobian/factor kernel splitting, and a
   current six-seed A100 production matrix are still missing.
+- The optimizer control-flow half is already landed (see
+  `docs/lbfgs_ondevice_optax_style_overhaul_implementation_plan_2026-06-18.md`
+  and `docs/lbfgs_ondevice_optax_design_adoption_implementation_plan.md`): the
+  stepwise host driver, the explicit macro-step observable, and the unconstrained
+  two-loop fast path. This plan is the complementary objective half; it must not
+  re-open the L-BFGS-B control-flow boundary those docs already closed.
+- The compile-time twin of this blowup — the ~50-min host-side `O(jaxpr²)`
+  construction wall in the `_value_and_grad_for` build — was already root-caused
+  and fixed in commit `23464a0da` (`src/simsopt_jax/backend/dtypes.py`). This
+  plan therefore targets the remaining graph-breadth / per-eval re-solve cost
+  (and the line-search-failure breadth in the 2026-06-19 A100 artifact), not the
+  construction wall; do not re-scope the already-fixed construction wall here.
 - The latest synced A100 `lbfgs-ondevice` production failure evidence is
   `.artifacts/runpod_lbfgsondevice_prod1500_50_a100_failure_20260619T2235Z`,
   with the writeup in
@@ -91,6 +107,12 @@ and memory stability before rerunning the six-seed production matrix.
   1-3 all exited 124 with no result JSON; seeds 2 and 3 reported
   `line_search_failed`, `ls_status=-9`, zero accepted iterations, and peak
   sampled GPU memory around 20 GiB, so the immediate failure is not A100 VRAM.
+  By contrast, the prior production 1500/50 `host-jax`/scipy-host matrix passed
+  all six seeds at machine precision (`.artifacts/lbfgsondevice_prod1500_50_failure_deepdive_20260619.md:107`,
+  which calls the `lbfgs-ondevice` result "strictly worse than the prior
+  host-jax/scipy-host production" matrix). So the host-controlled direction is
+  already de-risked on this exact workload — the remaining work is promotion and
+  gating, not invention.
 
 ## Rationale
 
@@ -126,7 +148,11 @@ production evidence.
   captured as cache-busting closure state.
 - Existing host-driven `scipy-jax` parity machinery can be reused for benchmark
   comparison, but may need a new target lane label for the kernelized path.
-- The next production validation target is A100 80 GB, not H100.
+- A100 80 GB is the target for the production parity/walltime GPU matrix (the
+  prior passing six-seed matrix ran on A100). "A100, not H100" applies only to
+  that production GPU gate — H100 remains in active use for unit/selector
+  validation in the sibling optax docs, so do not read this as banning H100 for
+  all validation.
 
 ## Implementation Plan
 
@@ -230,7 +256,7 @@ production evidence.
 ## Validation Plan
 
 - [ ] `python -m py_compile src/simsopt_jax_adapters/geo/surface_objectives_traceable.py src/simsopt_jax_adapters/geo/boozer_surface.py src/simsopt_jax/geo/optimizers/optimizer.py`
-- [ ] `python -m pytest tests/geo/test_boozersurface_jax.py -k "host_jax_kernel_bundle_reuses_compiled_kernels_same_shape or solved_state"`
+- [ ] `python -m pytest tests/geo/test_boozersurface_jax.py -k "host_jax_kernel_bundle_reuses_compiled_kernels_same_shape"` (the `solved_state` selector clause was dropped: it matches zero test node-ids in this file; the solved-state behavioral tests live in `test_single_stage_physics_parity.py`, covered by the next line)
 - [ ] `python -m pytest tests/integration/test_single_stage_physics_parity.py -k "host_jax_compile_gate or host_jax_memory_gate or host_jax_adapter_uses_solved_state_kernel_without_legacy_objective or host_jax_adapter_builds_solved_state_kernel_after_boozer_solve"`
 - [ ] `python -m pytest tests/test_gpu_transfer_guard_harness.py -q`
 - [ ] `python -m pytest tests/test_lbfgs_ondevice_compile_shape.py tests/geo/test_boozersurface_jax_private.py -k "lbfgs_ondevice or macro_step"`
@@ -285,8 +311,12 @@ production evidence.
 
 ## Open Questions
 
-- Should the production backend name stay `host-jax`, or should this become a
-  distinct `kernelized-jax` lane until promotion?
+- Should the production backend name stay `host-jax` (the existing backend
+  literal `HOST_JAX_OUTER_OPTIMIZER_BACKEND = "host-jax"` in
+  `src/simsopt_jax/geo/_optimizer_backend_choices.py`), or introduce a new
+  `kernelized-jax` lane? Note: `kernelized-jax` does not exist in the repo today
+  ("kernelized" appears only as prose in a `single_stage_routing.py` routing
+  message), so adopting it would mean adding a new backend name, not reusing one.
 - Which static signature fields are required for the first production seed set,
   and which can be postponed without risking hidden recompiles?
 - Should `lbfgs-ondevice` be hard-blocked for production single-stage runs, or
