@@ -318,6 +318,7 @@ from banana_opt.poloidal_extent import (
     smooth_max_poloidal_extent_signed_constraint_with_hard_signal,
 )
 from banana_opt.hardware_keepout import (
+    CLEARANCE_ARC_WEIGHT_PROFILES,
     CurveHardwareKeepout,
     CurveHardwareSdfClearanceHinge,
     CurveHardwareSdfFreeSpaceReward,
@@ -3066,6 +3067,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--clearance-arc-weight-profile",
+        choices=CLEARANCE_ARC_WEIGHT_PROFILES,
+        default=os.environ.get("CLEARANCE_ARC_WEIGHT_PROFILE", "curvature"),
+        help=(
+            "Station-weight profile for non-uniform SDF clearance reductions. "
+            "'curvature' preserves the existing min/max curvature map; "
+            "'smooth_toroidal_rate' uses a raised-cosine map of toroidal angle "
+            "advance to avoid curvature-spike anchoring. Active only when "
+            "--clearance-leg-weight/--clearance-uturn-weight are non-uniform and "
+            "an SDF clearance objective is active."
+        ),
+    )
+    parser.add_argument(
         "--hardware-keepout-backend",
         choices=("point_cloud", "sdf"),
         default=os.environ.get("HARDWARE_KEEPOUT_BACKEND", "point_cloud"),
@@ -4195,6 +4209,18 @@ def parse_args():
         parser.error(
             "--single-stage-hardware-sdf-free-space-reward-weight must be "
             "non-negative."
+        )
+    for attr_name, flag in (
+        ("clearance_leg_weight", "--clearance-leg-weight"),
+        ("clearance_uturn_weight", "--clearance-uturn-weight"),
+    ):
+        value = float(getattr(args, attr_name))
+        if not np.isfinite(value) or value <= 0.0:
+            parser.error(f"{flag} must be finite and positive.")
+    if args.clearance_arc_weight_profile not in CLEARANCE_ARC_WEIGHT_PROFILES:
+        parser.error(
+            "--clearance-arc-weight-profile must be one of "
+            f"{', '.join(CLEARANCE_ARC_WEIGHT_PROFILES)}."
         )
     if args.clearance_hinge_weight < 0.0:
         parser.error("--clearance-hinge-weight must be non-negative.")
@@ -8978,6 +9004,9 @@ def build_single_stage_objective_bundle(
                 winding_r0=keepout_winding_r0,
                 clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
                 clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+                clearance_arc_weight_profile=(
+                    SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE
+                ),
             )
         else:
             raise ValueError(
@@ -8990,6 +9019,7 @@ def build_single_stage_objective_bundle(
             winding_r0=keepout_winding_r0,
             clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
             clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+            clearance_arc_weight_profile=SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE,
         )
     if SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT > 0.0:
         JCurveHardwareSdfClearanceHinge = CurveHardwareSdfClearanceHinge(
@@ -8999,6 +9029,7 @@ def build_single_stage_objective_bundle(
             winding_r0=keepout_winding_r0,
             clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
             clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+            clearance_arc_weight_profile=SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE,
             soft_min_temperature=(
                 SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M
             ),
@@ -15060,6 +15091,7 @@ SINGLE_STAGE_CLEARANCE_HINGE_TARGET_MARGIN = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
 SINGLE_STAGE_CLEARANCE_HINGE_SOFT_MIN_TEMPERATURE_M = None
 SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = 1.0
 SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = 1.0
+SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE = "curvature"
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
 HARDWARE_KEEPOUT_BACKEND = "point_cloud"
 HARDWARE_KEEPOUT_JSON_PATH = DEFAULT_HARDWARE_KEEPOUT_JSON_PATH
@@ -16060,6 +16092,7 @@ if __name__ == "__main__":
     )
     SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = float(args.clearance_leg_weight)
     SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = float(args.clearance_uturn_weight)
+    SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE = args.clearance_arc_weight_profile
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
         args.single_stage_vessel_keepout_clearance
     )
@@ -17862,6 +17895,14 @@ if __name__ == "__main__":
         clearance_hinge_min_clearance_m = min(
             clearance_hinge_per_group_min_clearance_m.values()
         )
+    clearance_arc_weight_active = any(
+        getattr(obj, "_arc_weight", None) is not None
+        for obj in (
+            JCurveHardwareKeepout,
+            JCurveHardwareSdfFreeSpaceReward,
+            JCurveHardwareSdfClearanceHinge,
+        )
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -18080,6 +18121,15 @@ if __name__ == "__main__":
         ),
         "SINGLE_STAGE_CLEARANCE_HINGE_MIN_CLEARANCE_M": (
             clearance_hinge_min_clearance_m
+        ),
+        "SINGLE_STAGE_CLEARANCE_LEG_WEIGHT": SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
+        "SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT": SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE": (
+            SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE
+        ),
+        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_ACTIVE": clearance_arc_weight_active,
+        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_BACKEND_SCOPE": (
+            "sdf_station_reductions" if clearance_arc_weight_active else None
         ),
         "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
             SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
@@ -18834,53 +18884,3 @@ if __name__ == "__main__":
             os.path.join(OUT_DIR_ITER, "seed_manifest.json"),
             strict_vacuum_seed_manifest,
         )
-    CLEARANCE_ARC_WEIGHT_PROFILES,
-    parser.add_argument(
-        "--clearance-arc-weight-profile",
-        choices=CLEARANCE_ARC_WEIGHT_PROFILES,
-        default=os.environ.get("CLEARANCE_ARC_WEIGHT_PROFILE", "curvature"),
-        help=(
-            "Station-weight profile for non-uniform SDF clearance reductions. "
-            "'curvature' preserves the existing min/max curvature map; "
-            "'smooth_toroidal_rate' uses a raised-cosine map of toroidal angle "
-            "advance to avoid curvature-spike anchoring. Active only when "
-            "--clearance-leg-weight/--clearance-uturn-weight are non-uniform and "
-            "an SDF clearance objective is active."
-        ),
-    )
-    for attr_name, flag in (
-        ("clearance_leg_weight", "--clearance-leg-weight"),
-        ("clearance_uturn_weight", "--clearance-uturn-weight"),
-    ):
-        value = float(getattr(args, attr_name))
-        if not np.isfinite(value) or value <= 0.0:
-            parser.error(f"{flag} must be finite and positive.")
-    if args.clearance_arc_weight_profile not in CLEARANCE_ARC_WEIGHT_PROFILES:
-        parser.error(
-            "--clearance-arc-weight-profile must be one of "
-            f"{', '.join(CLEARANCE_ARC_WEIGHT_PROFILES)}."
-        )
-                clearance_arc_weight_profile=(
-                    SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE
-                ),
-            clearance_arc_weight_profile=SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE,
-            clearance_arc_weight_profile=SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE,
-SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE = "curvature"
-    SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE = args.clearance_arc_weight_profile
-    clearance_arc_weight_active = any(
-        getattr(obj, "_arc_weight", None) is not None
-        for obj in (
-            JCurveHardwareKeepout,
-            JCurveHardwareSdfFreeSpaceReward,
-            JCurveHardwareSdfClearanceHinge,
-        )
-    )
-        "SINGLE_STAGE_CLEARANCE_LEG_WEIGHT": SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
-        "SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT": SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
-        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE": (
-            SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE
-        ),
-        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_ACTIVE": clearance_arc_weight_active,
-        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_BACKEND_SCOPE": (
-            "sdf_station_reductions" if clearance_arc_weight_active else None
-        ),
