@@ -233,7 +233,10 @@ from simsopt.geo.framedcurve import (
     ZeroRotation,
 )
 from simsopt.geo.strain_optimization import LPTorsionalStrainPenalty
-from banana_opt.fold_buildability import CurveSurfaceGeodesicCurvature
+from banana_opt.fold_buildability import (
+    CurveSurfaceGeodesicCurvature,
+    NormalizedCurveCurvatureHinge,
+)
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M,
@@ -507,6 +510,9 @@ DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
 SEED_ARTIFACT_ROLE_STAGE2 = "stage2"
 SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME = "single_stage_resume"
 CURVATURE_P_NORM = 4
+CURVATURE_HINGE_NORMALIZATION_DEFAULT = "raw"
+CURVATURE_P_CONTINUATION_DEFAULT = ""
+CURVATURE_P_CONTINUATION_STAGE_ORDER = ("initial", "final")
 SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT = 0.0
 SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT = (
     BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
@@ -530,6 +536,40 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
     "iota_penalty",
     "length_penalty",
 )
+
+
+def parse_curvature_p_continuation_schedule(raw_schedule, fallback_p):
+    fallback_value = int(fallback_p)
+    if fallback_value < 1:
+        raise ValueError("--curvature-p-norm must be >= 1.")
+    schedule_text = str(raw_schedule or "").strip()
+    if schedule_text == "":
+        return (fallback_value,)
+    schedule = []
+    for chunk in schedule_text.split(","):
+        token = chunk.strip()
+        if not token.isdecimal():
+            raise ValueError(
+                "--curvature-p-continuation must be a comma-separated list of "
+                "positive integers."
+            )
+        value = int(token)
+        if value < 1:
+            raise ValueError("--curvature-p-continuation values must be >= 1.")
+        schedule.append(value)
+    return tuple(schedule)
+
+
+def curvature_p_for_stage(stage_name, schedule):
+    if len(schedule) == 1:
+        return int(schedule[0])
+    normalized_stage = str(stage_name).strip()
+    if normalized_stage == CURVATURE_P_CONTINUATION_STAGE_ORDER[-1]:
+        return int(schedule[-1])
+    if normalized_stage in CURVATURE_P_CONTINUATION_STAGE_ORDER:
+        stage_index = CURVATURE_P_CONTINUATION_STAGE_ORDER.index(normalized_stage)
+        return int(schedule[min(stage_index, len(schedule) - 1)])
+    return int(schedule[-1])
 
 
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
@@ -2910,6 +2950,32 @@ def parse_args():
             "limiter (penalizes the worst U-turn curvature, leaves sub-threshold "
             "leg curvature alone) but stiffens the gradient; 4-6 is the useful "
             "range (p>=15 is numerically catastrophic on these banana seeds)."
+        ),
+    )
+    parser.add_argument(
+        "--curvature-hinge-normalization",
+        choices=("raw", "threshold"),
+        default=os.environ.get(
+            "CURVATURE_HINGE_NORMALIZATION",
+            CURVATURE_HINGE_NORMALIZATION_DEFAULT,
+        ),
+        help=(
+            "Scalar curvature steering hinge normalization. 'raw' keeps the "
+            "historical LpCurveCurvature units; 'threshold' uses a dimensionless "
+            "relu(|kappa|/threshold - 1)^p hinge for p-continuation experiments."
+        ),
+    )
+    parser.add_argument(
+        "--curvature-p-continuation",
+        default=os.environ.get(
+            "CURVATURE_P_CONTINUATION",
+            CURVATURE_P_CONTINUATION_DEFAULT,
+        ),
+        help=(
+            "Optional comma-separated positive-integer p schedule for scalar "
+            "curvature steering across Boozer stages. The first value is used "
+            "for initial-stage objectives and the final value for final-stage "
+            "objectives. Empty keeps --curvature-p-norm for every stage."
         ),
     )
     parser.add_argument(
@@ -8767,6 +8833,8 @@ def build_single_stage_objective_bundle(
     CS_DIST,
     CURVATURE_WEIGHT,
     CURVATURE_THRESHOLD,
+    CURVATURE_P=CURVATURE_P_NORM,
+    CURVATURE_HINGE_NORMALIZATION=CURVATURE_HINGE_NORMALIZATION_DEFAULT,
     length_target=None,
     banana_surf_radius=BANANA_WINDING_MINOR_RADIUS_M,
     banana_surf_major_radius=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
@@ -8869,10 +8937,22 @@ def build_single_stage_objective_bundle(
     )
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
     JCurveSurface = CurveSurfaceDistance(curves, outer_surface, CS_DIST)
-    JCurvatureTerms = [
-        LpCurveCurvature(curve, CURVATURE_P_NORM, CURVATURE_THRESHOLD)
-        for curve in banana_curves
-    ]
+    if CURVATURE_HINGE_NORMALIZATION == "raw":
+        JCurvatureTerms = [
+            LpCurveCurvature(curve, CURVATURE_P, CURVATURE_THRESHOLD)
+            for curve in banana_curves
+        ]
+    elif CURVATURE_HINGE_NORMALIZATION == "threshold":
+        JCurvatureTerms = [
+            NormalizedCurveCurvatureHinge(
+                curve, CURVATURE_P, CURVATURE_THRESHOLD
+            )
+            for curve in banana_curves
+        ]
+    else:
+        raise ValueError(
+            "CURVATURE_HINGE_NORMALIZATION must be 'raw' or 'threshold'"
+        )
     JCurvature = average_surface_objectives(JCurvatureTerms)
     JGeodesicCurvatureTerms = (
         [
@@ -9183,7 +9263,7 @@ def build_single_stage_objective_bundle(
     # TF curves are included in the ``curves`` list feeding JCurveCurve/JCurveSurface.
     if tf_curves:
         tf_curvature_terms = [
-            LpCurveCurvature(tf_curve, CURVATURE_P_NORM, CURVATURE_THRESHOLD)
+            LpCurveCurvature(tf_curve, CURVATURE_P, CURVATURE_THRESHOLD)
             for tf_curve in tf_curves
         ]
         JTFCurvature = sum(tf_curvature_terms[1:], tf_curvature_terms[0])
@@ -9283,6 +9363,7 @@ def build_single_stage_objective_bundle(
         "JCurveLengthMin": JCurveLengthMin,
         "JCurveCurve": JCurveCurve,
         "JCurveSurface": JCurveSurface,
+        "CURVATURE_P": int(CURVATURE_P),
         "JCurvature": JCurvature,
         "JCurvatureTerms": JCurvatureTerms,
         "JGeodesicCurvature": JGeodesicCurvature,
@@ -16133,6 +16214,14 @@ if __name__ == "__main__":
     CURVATURE_P_NORM = int(args.curvature_p_norm)
     if CURVATURE_P_NORM < 1:
         raise ValueError("--curvature-p-norm must be >= 1.")
+    CURVATURE_HINGE_NORMALIZATION = args.curvature_hinge_normalization
+    if CURVATURE_HINGE_NORMALIZATION not in {"raw", "threshold"}:
+        raise ValueError("--curvature-hinge-normalization must be raw or threshold.")
+    CURVATURE_P_CONTINUATION = args.curvature_p_continuation
+    CURVATURE_P_CONTINUATION_SCHEDULE = parse_curvature_p_continuation_schedule(
+        CURVATURE_P_CONTINUATION,
+        CURVATURE_P_NORM,
+    )
     SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT = float(
         args.single_stage_geodesic_curvature_weight
     )
@@ -16369,6 +16458,10 @@ if __name__ == "__main__":
         print(frontier_goal_mode_warning_message(frontier_goal_config))
 
     def rebuild_stage_objective_bundle(stage_name):
+        active_curvature_p = curvature_p_for_stage(
+            stage_name,
+            CURVATURE_P_CONTINUATION_SCHEDULE,
+        )
         objective_bundle = build_single_stage_objective_bundle(
             stage_name,
             surface_data,
@@ -16385,6 +16478,8 @@ if __name__ == "__main__":
             CS_DIST,
             CURVATURE_WEIGHT,
             CURVATURE_THRESHOLD,
+            CURVATURE_P=active_curvature_p,
+            CURVATURE_HINGE_NORMALIZATION=CURVATURE_HINGE_NORMALIZATION,
             length_target=length_target,
             banana_surf_radius=banana_surf_radius,
             banana_surf_major_radius=args.banana_surf_major_radius,
@@ -16436,6 +16531,7 @@ if __name__ == "__main__":
             JPackTwistStrain=Jtwist,
             PACK_TWIST_STRAIN_WEIGHT=SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT,
         )
+        objective_bundle["CURVATURE_P_CONTINUATION_ACTIVE_P"] = active_curvature_p
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle
 
@@ -18144,6 +18240,21 @@ if __name__ == "__main__":
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "REQUESTED_CURVATURE_THRESHOLD": SINGLE_STAGE_REQUESTED_CURVATURE_THRESHOLD,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
+        "CURVATURE_P_NORM": int(CURVATURE_P_NORM),
+        "CURVATURE_HINGE_NORMALIZATION": CURVATURE_HINGE_NORMALIZATION,
+        "CURVATURE_P_CONTINUATION": CURVATURE_P_CONTINUATION,
+        "CURVATURE_P_CONTINUATION_ACTIVE": bool(
+            str(CURVATURE_P_CONTINUATION).strip()
+        ),
+        "CURVATURE_P_CONTINUATION_SCHEDULE": [
+            int(value) for value in CURVATURE_P_CONTINUATION_SCHEDULE
+        ],
+        "CURVATURE_P_CONTINUATION_STAGE_ORDER": list(
+            CURVATURE_P_CONTINUATION_STAGE_ORDER
+        ),
+        "CURVATURE_P_EFFECTIVE_FINAL_STAGE": int(
+            curvature_p_for_stage(final_source_stage, CURVATURE_P_CONTINUATION_SCHEDULE)
+        ),
         **single_stage_finite_build_metadata(
             SINGLE_STAGE_FINITE_BUILD_SETTINGS,
             threshold_enabled=SINGLE_STAGE_FINITEBUILD_FRAME_AWARE_THRESHOLD_ENABLED,

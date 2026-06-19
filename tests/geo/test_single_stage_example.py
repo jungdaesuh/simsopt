@@ -18907,13 +18907,32 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(module.CURVATURE_P_NORM, 4)
         self.assertIn(
-            "LpCurveCurvature(curve, CURVATURE_P_NORM, CURVATURE_THRESHOLD)",
+            "LpCurveCurvature(curve, CURVATURE_P, CURVATURE_THRESHOLD)",
             source,
         )
         self.assertIn("for curve in banana_curves", source)
         self.assertIn("CURVATURE_P_NORM", source)
         self.assertIn("COIL_LENGTH_MIN_FRACTION * length_target", source)
         self.assertIn("JCurveLengthMin = average_surface_objectives(", source)
+
+    def test_single_stage_curvature_p_continuation_schedule(self):
+        module = load_single_stage_example_module()
+
+        self.assertEqual(
+            module.parse_curvature_p_continuation_schedule("", 4),
+            (4,),
+        )
+        self.assertEqual(
+            module.parse_curvature_p_continuation_schedule("2, 4,6", 4),
+            (2, 4, 6),
+        )
+        self.assertEqual(module.curvature_p_for_stage("initial", (2, 6)), 2)
+        self.assertEqual(module.curvature_p_for_stage("final", (2, 6)), 6)
+
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            module.parse_curvature_p_continuation_schedule("2,bad", 4)
+        with self.assertRaisesRegex(ValueError, "values must be >= 1"):
+            module.parse_curvature_p_continuation_schedule("2,0", 4)
 
     def test_single_stage_scalar_hardware_helpers_use_worst_banana_curve(self):
         module = load_single_stage_example_module()
