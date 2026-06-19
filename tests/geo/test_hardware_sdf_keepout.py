@@ -18,10 +18,12 @@ if EXAMPLES_ROOT_STR not in sys.path:
 
 from banana_opt.hardware_contracts import (  # noqa: E402
     HARDWARE_KEEPOUT_MIN_DISTANCE_M,
+    HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
     TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
 )
 from banana_opt.hardware_keepout import (  # noqa: E402
     CurveHardwareKeepout,
+    CurveHardwareSdfClearanceHinge,
     CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
     curvature_arc_weight,
@@ -29,6 +31,7 @@ from banana_opt.hardware_keepout import (  # noqa: E402
     load_hardware_sdf,
     resolve_clearance_arc_weight,
 )
+from banana_opt.single_stage_objectives import build_total_objective  # noqa: E402
 from simsopt.geo import CurveXYZFourier  # noqa: E402
 
 SIGNED_TEST_METHOD = "watertight_contains_trimesh_nearest"
@@ -813,6 +816,217 @@ class ClearanceArcWeightTests(unittest.TestCase):
                 delta=2e-4 * max(1.0, abs(analytic)),
                 msg=f"arc-weighted gradient analytic {analytic} vs FD {fd}",
             )
+
+
+class _FakeScalarObjective:
+    """Minimal +/* /.J() stand-in for the default-off graph-equivalence test."""
+
+    def __init__(self, value):
+        self._value = float(value)
+
+    def J(self):
+        return self._value
+
+    def __add__(self, other):
+        if other == 0:
+            return self
+        return _FakeScalarObjective(self._value + other._value)
+
+    __radd__ = __add__
+
+    def __mul__(self, scalar):
+        return _FakeScalarObjective(self._value * float(scalar))
+
+    __rmul__ = __mul__
+
+
+def _base_total_objective_args():
+    """Positional build_total_objective args from neutral fake physics terms."""
+    zero = _FakeScalarObjective(0.0)
+    return (
+        zero,  # JnonQSRatio
+        0.0,  # RES_WEIGHT
+        zero,  # JBoozerResidual
+        0.0,  # IOTAS_WEIGHT
+        zero,  # Jiota
+        0.0,  # VOLUME_WEIGHT
+        None,  # JVolume
+        0.0,  # LENGTH_WEIGHT
+        zero,  # JCurveLength
+        0.0,  # CC_WEIGHT
+        zero,  # JCurveCurve
+        0.0,  # CS_WEIGHT
+        zero,  # JCurveSurface
+        0.0,  # CURVATURE_WEIGHT
+        zero,  # JCurvature
+    )
+
+
+class ClearanceHingeTests(unittest.TestCase):
+    """One-sided hinge closing the worst sampled swept Type KK SDF clearance."""
+
+    def _uniform_sdf(self, root, *, clearance, margin):
+        # A constant SDF grid sets phi == clearance at every sampled surface
+        # point, so the hinge value is fully determined by clearance vs target.
+        manifest = _write_sdf_payload(
+            root,
+            grid=np.full((5, 5, 5), float(clearance), dtype=float),
+            origin=(-0.1, -0.1, -0.1),
+            spacing=0.05,
+            effective_margin=margin,
+        )
+        return load_hardware_sdf(manifest)
+
+    def test_zero_when_clear_and_positive_when_close(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            margin = 0.02
+            target = 0.005
+            curve = _circle_curve(radius=0.02)
+
+            clear_root = root / "clear"
+            close_root = root / "close"
+            clear_root.mkdir()
+            close_root.mkdir()
+
+            # Clearance above target everywhere -> no shortfall -> J == 0.
+            clear = self._uniform_sdf(
+                clear_root, clearance=0.01, margin=margin
+            )
+            # Clearance below target everywhere -> uniform shortfall -> J > 0.
+            close = self._uniform_sdf(
+                close_root, clearance=0.001, margin=margin
+            )
+
+            clear_obj = CurveHardwareSdfClearanceHinge(
+                [curve], clear, target_margin=target, winding_r0=0.0
+            )
+            close_obj = CurveHardwareSdfClearanceHinge(
+                [curve], close, target_margin=target, winding_r0=0.0
+            )
+
+            self.assertEqual(clear_obj.J(), 0.0)
+            self.assertGreater(close_obj.J(), 0.0)
+            # Uniform phi == 0.001, target 0.005 -> shortfall 0.004 everywhere.
+            self.assertAlmostEqual(close_obj.J(), (target - 0.001) ** 2, places=12)
+
+    def test_decreases_as_coil_pushed_into_clearance(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            origin = np.array([-1.2, -1.2, -0.1], dtype=float)
+            spacing = 0.02
+            shape = (121, 121, 11)
+            # Plane SDF: phi = plane_x - x, so clearance shrinks toward +x. With
+            # the plane just outboard of the unit circle, the worst (+x) station
+            # sits inside the target band and the hinge is active.
+            plane_x = 1.02
+            margin = 0.005
+            target = 0.05
+            grid = _plane_sdf_grid(origin, spacing, shape, plane_x)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=origin,
+                spacing=spacing,
+                effective_margin=margin,
+                narrow_band=0.2,
+            )
+            sdf = load_hardware_sdf(manifest)
+            curve = _circle_curve(radius=1.0)
+            objective = CurveHardwareSdfClearanceHinge(
+                [curve], sdf, target_margin=target, winding_r0=0.0
+            )
+            j_start = objective.J()
+            self.assertGreater(j_start, 0.0)
+
+            # Shrink the circle radius (xc(1)) -> the +x station retreats from the
+            # plane -> clearance grows -> the hinge shortfall drops.
+            x0 = np.asarray(curve.x, dtype=float).copy()
+            xc1_index = list(curve.local_dof_names).index("xc(1)")
+            moved = x0.copy()
+            moved[xc1_index] -= 0.02
+            curve.x = moved
+            j_pushed = objective.J()
+            curve.x = x0
+
+            self.assertLess(j_pushed, j_start)
+
+    def test_gradient_matches_finite_difference(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            origin = np.array([-1.2, -1.2, -0.1], dtype=float)
+            spacing = 0.02
+            shape = (121, 121, 11)
+            plane_x = 1.012
+            margin = 0.005
+            # A wide target keeps the hinge active across the sampled stations so
+            # the analytic gradient (differentiating only the clearance) is
+            # exercised; this is the decisive contrast vs a gradient-dead hard min.
+            target = 0.05
+            grid = _plane_sdf_grid(origin, spacing, shape, plane_x)
+            manifest = _write_sdf_payload(
+                root,
+                grid=grid,
+                origin=origin,
+                spacing=spacing,
+                effective_margin=margin,
+                narrow_band=0.2,
+            )
+            curve = _circle_curve(seed=33)
+            objective = CurveHardwareSdfClearanceHinge(
+                [curve], load_hardware_sdf(manifest),
+                target_margin=target, winding_r0=0.0,
+            )
+            x0 = np.asarray(curve.x, dtype=float).copy()
+            rng = np.random.default_rng(34)
+            direction = rng.standard_normal(x0.size)
+            direction /= np.linalg.norm(direction)
+            analytic = float(np.dot(objective.dJ(), direction))
+            self.assertNotEqual(analytic, 0.0)
+
+            eps = 1e-7
+            curve.x = x0 + eps * direction
+            j_plus = objective.J()
+            curve.x = x0 - eps * direction
+            j_minus = objective.J()
+            curve.x = x0
+            fd = (j_plus - j_minus) / (2.0 * eps)
+
+            self.assertAlmostEqual(
+                analytic,
+                fd,
+                delta=2e-4 * max(1.0, abs(analytic)),
+                msg=f"hinge gradient analytic {analytic} vs finite-difference {fd}",
+            )
+
+    def test_rejects_non_positive_target_margin(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sdf = self._uniform_sdf(root, clearance=0.01, margin=0.02)
+            curve = _circle_curve(radius=0.02)
+            for bad in (0.0, -0.005, float("nan"), float("inf")):
+                with self.assertRaisesRegex(ValueError, "target_margin"):
+                    CurveHardwareSdfClearanceHinge(
+                        [curve], sdf, target_margin=bad, winding_r0=0.0
+                    )
+
+    def test_build_total_objective_default_off_leaves_graph_unchanged(self):
+        reward = _FakeScalarObjective(-0.25)
+        baseline = build_total_objective(*_base_total_objective_args())
+        default_off = build_total_objective(
+            *_base_total_objective_args(),
+            JCurveHardwareSdfClearanceHinge=None,
+            CLEARANCE_HINGE_WEIGHT=7.0,
+        )
+        self.assertEqual(default_off.J(), baseline.J())
+
+        # A non-None term with weight does move the objective (guards the wiring).
+        active = build_total_objective(
+            *_base_total_objective_args(),
+            JCurveHardwareSdfClearanceHinge=reward,
+            CLEARANCE_HINGE_WEIGHT=7.0,
+        )
+        self.assertAlmostEqual(active.J() - baseline.J(), 7.0 * reward.J())
 
 
 if __name__ == "__main__":

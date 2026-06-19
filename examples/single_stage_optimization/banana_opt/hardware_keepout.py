@@ -538,6 +538,33 @@ def hardware_sdf_free_space_reward_pure(gammac, grid, origin_m, spacing_m,
     return -_weighted_mean_square(clearance_fraction, weights)
 
 
+def hardware_sdf_clearance_hinge_pure(gammac, grid, origin_m, spacing_m,
+                                      effective_margin_m, target_margin_m,
+                                      half_w, half_d, winding_r0, weights=None):
+    """One-sided hinge driving sampled swept Type KK SDF clearance up to target.
+
+    The hinge penalizes only the shortfall ``target_margin_m - phi`` below the
+    positive target clearance (zero once a sample clears it), so the optimizer
+    steers the worst sampled clearance toward ``target_margin_m`` -- the same
+    metre-frame metric the posthoc swept-solid CAD oracle scores. Unlike the
+    NumPy hard-min diagnostics, this is built on the differentiable ``phi``
+    array and is gradient-live. Steering proxy only; ``audit_hardware_contacts``
+    stays the promotion gate.
+    """
+    surface_points = swept_channel_surface_points(
+        gammac, half_w, half_d, winding_r0
+    )
+    phi = _sdf_trilinear(
+        grid,
+        origin_m,
+        spacing_m,
+        surface_points,
+        outside_value=effective_margin_m,
+    )
+    violation = jnp.maximum(target_margin_m - phi, 0.0)
+    return _weighted_mean_square(violation, weights)
+
+
 class CurveHardwareKeepout(Optimizable):
     r"""
     Penalty steering the banana coils away from fixed in-vessel hardware
@@ -962,6 +989,151 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                 origin,
                 spacing,
                 effective_margin,
+                self.half_w,
+                self.half_d,
+                winding_r0_,
+                weights,
+            )
+        )
+        self.dJ_dgamma = jit(
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            grad(self.J_jax, argnums=0)(
+                gammac, grid, origin, spacing, effective_margin, winding_r0_, weights
+            )
+        )
+        super().__init__(depends_on=curves)
+
+    @property
+    def winding_r0(self):
+        """Fallback winding major radius (constructor value), m."""
+        return self._winding_r0_fallback
+
+    def live_winding_r0(self):
+        """Live winding major radius the frame is currently measured about, m."""
+        return live_winding_r0(self.curves, self._winding_r0_fallback)
+
+    def J(self):
+        winding_r0 = self.live_winding_r0()
+        total = 0.0
+        for curve_index, curve in enumerate(self.curves):
+            gammac = curve.gamma()
+            weights = self._station_weights[curve_index]
+            for group in self._groups:
+                total += float(
+                    self.J_jax(
+                        gammac,
+                        group["grid"],
+                        group["origin"],
+                        group["spacing"],
+                        group["effective_margin"],
+                        winding_r0,
+                        weights,
+                    )
+                )
+        return total
+
+    @derivative_dec
+    def dJ(self):
+        winding_r0 = self.live_winding_r0()
+        dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        for curve_index, curve in enumerate(self.curves):
+            gammac = curve.gamma()
+            weights = self._station_weights[curve_index]
+            for group in self._groups:
+                dgamma_vecs[curve_index] += np.asarray(
+                    self.dJ_dgamma(
+                        gammac,
+                        group["grid"],
+                        group["origin"],
+                        group["spacing"],
+                        group["effective_margin"],
+                        winding_r0,
+                        weights,
+                    )
+                )
+        return sum(
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
+            for i in range(len(self.curves))
+        )
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class CurveHardwareSdfClearanceHinge(Optimizable):
+    r"""
+    Optimizer-visible one-sided hinge closing the worst sampled swept Type KK
+    SDF clearance up to a positive target margin.
+
+    The objective samples the same viewer-matched Type KK swept U-channel
+    surface as :class:`CurveHardwareSdfFreeSpaceReward`.  For each manifest
+    hardware group it penalizes the squared shortfall
+    ``max(target_margin - phi, 0)`` of the differentiable signed clearance
+    ``phi`` below ``target_margin``; the penalty is zero once a sample clears
+    the target and grows as the swept surface approaches (or enters) hardware.
+    It drives the metre-frame clearance the parry3d swept oracle scores, decoupled
+    from the wider free-space steering margin.  The value is non-negative and
+    remains a steering term only; ``hardware_contact_report`` stays the
+    promotion oracle.
+
+    Parameters
+    ----------
+    curves, sdf_data, half_w, half_d, winding_r0, clearance_leg_weight,
+    clearance_uturn_weight
+        Same swept-surface frame and arc-weight plumbing as
+        :class:`CurveHardwareSdfFreeSpaceReward`.
+    target_margin : float
+        Positive clearance the hinge drives toward, m (the per-station
+        shortfall below this is penalized). Must be finite and > 0.
+    """
+
+    def __init__(self, curves, sdf_data,
+                 target_margin=HARDWARE_KEEPOUT_SAFETY_MARGIN_M,
+                 half_w=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+                 half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                 winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+                 clearance_leg_weight=1.0,
+                 clearance_uturn_weight=1.0):
+        if not isinstance(sdf_data, HardwareSdfData):
+            raise TypeError("sdf_data must come from load_hardware_sdf(...)")
+        if not sdf_data.groups:
+            raise ValueError("hardware SDF payload must contain at least one group")
+        target_margin = float(target_margin)
+        if not np.isfinite(target_margin) or target_margin <= 0.0:
+            raise ValueError(
+                f"target_margin {target_margin} m must be finite and positive")
+        self.curves = curves
+        self.sdf_data = sdf_data
+        self.target_margin = target_margin
+        self.half_w = float(half_w)
+        self.half_d = float(half_d)
+        self._winding_r0_fallback = float(winding_r0)
+        # Curvature-based arc weighting (None = uniform, byte-identical default).
+        # Frozen here from the seed curvature so J and dJ stay mutually
+        # consistent (the weight profile is data, not an optimized quantity).
+        self._arc_weight = resolve_clearance_arc_weight(
+            clearance_leg_weight, clearance_uturn_weight
+        )
+        self._station_weights = [
+            _station_arc_weights(c, self._arc_weight) for c in curves
+        ]
+        self._groups = [
+            {
+                "grid": jnp.asarray(group.grid),
+                "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
+                "spacing": float(group.spacing_m),
+                "effective_margin": float(group.effective_margin_m),
+            }
+            for group in sdf_data.groups
+        ]
+        self.J_jax = jit(
+            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            hardware_sdf_clearance_hinge_pure(
+                gammac,
+                grid,
+                origin,
+                spacing,
+                effective_margin,
+                self.target_margin,
                 self.half_w,
                 self.half_d,
                 winding_r0_,

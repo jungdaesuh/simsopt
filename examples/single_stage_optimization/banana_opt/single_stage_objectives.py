@@ -151,12 +151,16 @@ def build_single_stage_shear_objective(surface_iota_terms, shear_target):
     )
 
 
-# Default low-order-rational cutoff for the rational-iota avoidance penalty. q<=10
+# Default low-order-rational cutoff for the rational-iota avoidance penalty. q<=13
 # spans the operationally dangerous low-order resonances: for a fixed perturbation
 # spectrum the island half-width scales like 1/q (Chirikov), and the natural
-# resonant-harmonic amplitude itself decays with mode number, so q>10 islands are
-# both thinner and weaker. q=10 also brackets the frontier iota target 3/10=0.30.
-RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR = 10
+# resonant-harmonic amplitude itself decays with mode number, so q>13 islands are
+# both thinner and weaker. q=13 reaches the low-iota buildable window [0.08,0.09]
+# (1/13=0.0769, 1/12=0.0833, 1/11=0.0909 all have q>10, so q<=10 left that band a
+# no-op) while still covering the frontier iota target 3/10=0.30 (q=3). The sigma0
+# below keeps the wells isolated; the noble 1/(11+1/phi)=0.086073 sits in a real
+# trough between 1/12 and 1/11.
+RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR = 13
 # Default avoidance band scale (in iota units). Each rational p/q gets a Gaussian
 # well of width sigma_q = sigma0/q, narrower for the thinner high-q islands. sigma0
 # = 0.012 keeps the wells isolated (a >500x peak-to-midpoint contrast at q<=10) while
@@ -602,6 +606,8 @@ def build_total_objective(
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JCurveHardwareSdfFreeSpaceReward=None,
     HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfClearanceHinge=None,
+    CLEARANCE_HINGE_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -664,6 +670,12 @@ def build_total_objective(
             objective
             + HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
             * JCurveHardwareSdfFreeSpaceReward
+        )
+    if JCurveHardwareSdfClearanceHinge is not None:
+        objective = (
+            objective
+            + CLEARANCE_HINGE_WEIGHT
+            * JCurveHardwareSdfClearanceHinge
         )
     if JResidueObjective is not None:
         objective = objective + JResidueObjective
@@ -1037,6 +1049,8 @@ def evaluate_total_objective(
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JCurveHardwareSdfFreeSpaceReward=None,
     HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfClearanceHinge=None,
+    CLEARANCE_HINGE_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -1106,6 +1120,8 @@ def evaluate_total_objective(
         HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
             HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
         ),
+        JCurveHardwareSdfClearanceHinge=JCurveHardwareSdfClearanceHinge,
+        CLEARANCE_HINGE_WEIGHT=CLEARANCE_HINGE_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -1330,6 +1346,19 @@ def evaluate_total_objective(
                     objective_optimizable,
                 )
             ),
+            "J_clearance_hinge": (
+                0.0
+                if JCurveHardwareSdfClearanceHinge is None
+                else float(JCurveHardwareSdfClearanceHinge.J())
+            ),
+            "dJ_clearance_hinge": (
+                np.zeros_like(total_grad)
+                if JCurveHardwareSdfClearanceHinge is None
+                else _objective_gradient(
+                    JCurveHardwareSdfClearanceHinge,
+                    objective_optimizable,
+                )
+            ),
             "J_msc": (
                 0.0
                 if JMeanSquaredCurvature is None
@@ -1457,6 +1486,8 @@ def evaluate_base_objective(
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JCurveHardwareSdfFreeSpaceReward=None,
     HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfClearanceHinge=None,
+    CLEARANCE_HINGE_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
     include_diagnostics=True,
@@ -1508,6 +1539,12 @@ def evaluate_base_objective(
             + HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
             * JCurveHardwareSdfFreeSpaceReward
         )
+    if JCurveHardwareSdfClearanceHinge is not None:
+        base_objective = (
+            base_objective
+            + CLEARANCE_HINGE_WEIGHT
+            * JCurveHardwareSdfClearanceHinge
+        )
     # min(L_grad_B) realizability shortfall (opt-in; default-None so the ALM
     # physics objective is byte-identical until --lgradb-weight > 0 is set).
     if JMinLGradB is not None:
@@ -1550,6 +1587,19 @@ def evaluate_base_objective(
     ) = _optional_weighted_objective_terms(
         JCurveHardwareSdfFreeSpaceReward,
         HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    (
+        clearance_hinge_value,
+        clearance_hinge_grad,
+        clearance_hinge_weight,
+        clearance_hinge_objective_enabled,
+        weighted_clearance_hinge_value,
+        weighted_clearance_hinge_grad,
+    ) = _optional_weighted_objective_terms(
+        JCurveHardwareSdfClearanceHinge,
+        CLEARANCE_HINGE_WEIGHT,
         base_physics_grad,
         objective_optimizable,
     )
@@ -1650,6 +1700,7 @@ def evaluate_base_objective(
             + weighted_vessel_keepout_value
             + weighted_available_envelope_reward_value
             + weighted_hardware_sdf_free_space_reward_value
+            + weighted_clearance_hinge_value
         )
         grad = (
             residue_grad
@@ -1661,6 +1712,7 @@ def evaluate_base_objective(
             + weighted_vessel_keepout_grad
             + weighted_available_envelope_reward_grad
             + weighted_hardware_sdf_free_space_reward_grad
+            + weighted_clearance_hinge_grad
         )
     elif alm_formulation == "weighted_sum":
         total = physics_terms_total + residue_value
@@ -1748,6 +1800,12 @@ def evaluate_base_objective(
             ),
             "hardware_sdf_free_space_reward_objective_enabled": (
                 hardware_sdf_free_space_reward_objective_enabled
+            ),
+            "J_clearance_hinge": clearance_hinge_value,
+            "dJ_clearance_hinge": clearance_hinge_grad,
+            "clearance_hinge_weight": clearance_hinge_weight,
+            "clearance_hinge_objective_enabled": (
+                clearance_hinge_objective_enabled
             ),
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
@@ -1992,6 +2050,8 @@ def evaluate_alm_objective(
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JCurveHardwareSdfFreeSpaceReward=None,
     HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfClearanceHinge=None,
+    CLEARANCE_HINGE_WEIGHT=0.0,
     lcfs_surface=None,
     JLCFSMajorRadius=None,
     JLCFSMinorRadius=None,
@@ -2070,6 +2130,8 @@ def evaluate_alm_objective(
         HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
             HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
         ),
+        JCurveHardwareSdfClearanceHinge=JCurveHardwareSdfClearanceHinge,
+        CLEARANCE_HINGE_WEIGHT=CLEARANCE_HINGE_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         include_diagnostics=include_diagnostics,

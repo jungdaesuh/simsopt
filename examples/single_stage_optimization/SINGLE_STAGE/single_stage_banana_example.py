@@ -311,6 +311,7 @@ from banana_opt.poloidal_extent import (
 )
 from banana_opt.hardware_keepout import (
     CurveHardwareKeepout,
+    CurveHardwareSdfClearanceHinge,
     CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
     CurveVesselAvailableEnvelopeReward,
@@ -2908,6 +2909,34 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--clearance-hinge-weight",
+        type=float,
+        default=float(os.environ.get("CLEARANCE_HINGE_WEIGHT", "0.0")),
+        help=(
+            "Default-off one-sided hinge driving the worst sampled swept Type "
+            "KK SDF clearance up to --clearance-hinge-margin-m (the gap-closer "
+            "on the metre-frame metric the parry3d swept oracle scores). "
+            "Requires --hardware-keepout-backend=sdf and "
+            "--hardware-keepout-sdf-manifest; this steering term does not "
+            "replace the posthoc swept-solid CAD contact oracle."
+        ),
+    )
+    parser.add_argument(
+        "--clearance-hinge-margin-m",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CLEARANCE_HINGE_MARGIN_M",
+                str(HARDWARE_KEEPOUT_SAFETY_MARGIN_M),
+            )
+        ),
+        help=(
+            "Positive target clearance the clearance hinge drives toward, m "
+            "(default = HARDWARE_KEEPOUT_SAFETY_MARGIN_M, a few mm above the "
+            "0 mm oracle-hit). Must be finite and > 0."
+        ),
+    )
+    parser.add_argument(
         "--msc-weight",
         type=float,
         default=float(os.environ.get("MSC_WEIGHT", "0.0")),
@@ -3845,6 +3874,15 @@ def parse_args():
             "--single-stage-hardware-sdf-free-space-reward-weight must be "
             "non-negative."
         )
+    if args.clearance_hinge_weight < 0.0:
+        parser.error("--clearance-hinge-weight must be non-negative.")
+    if (
+        not np.isfinite(args.clearance_hinge_margin_m)
+        or args.clearance_hinge_margin_m <= 0.0
+    ):
+        parser.error(
+            "--clearance-hinge-margin-m must be finite and positive."
+        )
     if (
         not np.isfinite(args.single_stage_rational_iota_avoidance_weight)
         or args.single_stage_rational_iota_avoidance_weight < 0.0
@@ -3893,6 +3931,17 @@ def parse_args():
         if not args.hardware_keepout_sdf_manifest:
             parser.error(
                 "--single-stage-hardware-sdf-free-space-reward-weight requires "
+                "--hardware-keepout-sdf-manifest."
+            )
+    if args.clearance_hinge_weight > 0.0:
+        if args.hardware_keepout_backend != "sdf":
+            parser.error(
+                "--clearance-hinge-weight requires "
+                "--hardware-keepout-backend=sdf."
+            )
+        if not args.hardware_keepout_sdf_manifest:
+            parser.error(
+                "--clearance-hinge-weight requires "
                 "--hardware-keepout-sdf-manifest."
             )
     return args
@@ -6206,6 +6255,8 @@ class RunIdentityConfig:
     single_stage_vessel_keepout_clearance: float
     single_stage_available_envelope_reward_weight: float
     single_stage_hardware_sdf_free_space_reward_weight: float
+    single_stage_clearance_hinge_weight: float
+    single_stage_clearance_hinge_margin_m: float
     single_stage_rational_iota_avoidance_weight: float
     single_stage_rational_iota_avoidance_max_denominator: int
     single_stage_rational_iota_avoidance_sigma: float
@@ -6884,6 +6935,8 @@ def make_run_identity_config(
         single_stage_hardware_sdf_free_space_reward_weight=(
             args.single_stage_hardware_sdf_free_space_reward_weight
         ),
+        single_stage_clearance_hinge_weight=args.clearance_hinge_weight,
+        single_stage_clearance_hinge_margin_m=args.clearance_hinge_margin_m,
         single_stage_rational_iota_avoidance_weight=float(
             getattr(args, "single_stage_rational_iota_avoidance_weight", 0.0)
         ),
@@ -7140,6 +7193,16 @@ def build_run_identity_config(config):
         if (
             field.name == "single_stage_hardware_sdf_free_space_reward_weight"
             and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_clearance_hinge_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_clearance_hinge_margin_m"
+            and float(config.single_stage_clearance_hinge_weight) == 0.0
         ):
             continue
         if (
@@ -7826,6 +7889,7 @@ def apply_frontier_scalarization_override(
         hardware_sdf_free_space_reward_weight=(
             SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
         ),
+        clearance_hinge_weight=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
         msc_weight=globals().get("MSC_WEIGHT", 0.0),
         arclen_weight=globals().get("ARCLEN_WEIGHT", 0.0),
         link_weight=globals().get("LINKING_WEIGHT", 0.0),
@@ -8344,6 +8408,7 @@ def build_single_stage_objective_bundle(
     # while the true-frame J was 0.04-0.057 (2026-06-10 laneLOW xval).
     JCurveHardwareKeepout = None
     JCurveHardwareSdfFreeSpaceReward = None
+    JCurveHardwareSdfClearanceHinge = None
     JCurveVesselEnvelopeKeepout = None
     JCurveAvailableEnvelopeReward = None
     HARDWARE_KEEPOUT_GROUP_LABELS = []
@@ -8353,6 +8418,7 @@ def build_single_stage_objective_bundle(
     if HARDWARE_KEEPOUT_BACKEND == "sdf" and (
         SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT > 0.0
         or SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT > 0.0
+        or SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT > 0.0
     ):
         if not HARDWARE_KEEPOUT_SDF_MANIFEST_PATH:
             raise ValueError(
@@ -8422,6 +8488,15 @@ def build_single_stage_objective_bundle(
         JCurveHardwareSdfFreeSpaceReward = CurveHardwareSdfFreeSpaceReward(
             banana_curves,
             hardware_sdf_data,
+            winding_r0=keepout_winding_r0,
+            clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
+            clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+        )
+    if SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT > 0.0:
+        JCurveHardwareSdfClearanceHinge = CurveHardwareSdfClearanceHinge(
+            banana_curves,
+            hardware_sdf_data,
+            target_margin=SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M,
             winding_r0=keepout_winding_r0,
             clearance_leg_weight=SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
             clearance_uturn_weight=SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
@@ -8621,6 +8696,8 @@ def build_single_stage_objective_bundle(
         HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
             SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
         ),
+        JCurveHardwareSdfClearanceHinge=JCurveHardwareSdfClearanceHinge,
+        CLEARANCE_HINGE_WEIGHT=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         JTFCurvature=JTFCurvature,
@@ -8663,6 +8740,7 @@ def build_single_stage_objective_bundle(
         "JCurveVesselEnvelopeKeepout": JCurveVesselEnvelopeKeepout,
         "JCurveAvailableEnvelopeReward": JCurveAvailableEnvelopeReward,
         "JCurveHardwareSdfFreeSpaceReward": JCurveHardwareSdfFreeSpaceReward,
+        "JCurveHardwareSdfClearanceHinge": JCurveHardwareSdfClearanceHinge,
         "JLCFSMajorRadius": JLCFSMajorRadius,
         "JLCFSMinorRadius": JLCFSMinorRadius,
         "JResidueObjective": JResidueObjective,
@@ -8713,6 +8791,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCurveSelfIntersectTerms
     global JCurveHardwareKeepout
     global JCurveHardwareSdfFreeSpaceReward
+    global JCurveHardwareSdfClearanceHinge
     global HARDWARE_KEEPOUT_GROUP_LABELS
     global HARDWARE_KEEPOUT_METADATA
     global JCurveVesselEnvelopeKeepout
@@ -8763,6 +8842,9 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCurveHardwareKeepout = objective_bundle["JCurveHardwareKeepout"]
     JCurveHardwareSdfFreeSpaceReward = objective_bundle[
         "JCurveHardwareSdfFreeSpaceReward"
+    ]
+    JCurveHardwareSdfClearanceHinge = objective_bundle[
+        "JCurveHardwareSdfClearanceHinge"
     ]
     HARDWARE_KEEPOUT_GROUP_LABELS = list(
         objective_bundle["HARDWARE_KEEPOUT_GROUP_LABELS"]
@@ -9105,6 +9187,8 @@ def evaluate_total_objective(
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JCurveHardwareSdfFreeSpaceReward=None,
     HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfClearanceHinge=None,
+    CLEARANCE_HINGE_WEIGHT=0.0,
     JShear=None,
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
@@ -9176,6 +9260,10 @@ def evaluate_total_objective(
             HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
                 HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
             ),
+            JCurveHardwareSdfClearanceHinge=(
+                JCurveHardwareSdfClearanceHinge
+            ),
+            CLEARANCE_HINGE_WEIGHT=CLEARANCE_HINGE_WEIGHT,
             JResidueObjective=globals().get("JResidueObjective"),
             JMeanSquaredCurvature=globals().get("JMeanSquaredCurvature"),
             MSC_WEIGHT=globals().get("MSC_WEIGHT", 0.0),
@@ -9226,6 +9314,13 @@ def evaluate_base_objective(
         objective_terms["effective_volume_weight"],
         JCurveLength,
         LENGTH_WEIGHT,
+        # Project every term's gradient onto the single optimizer dof vector (JF), the
+        # same basis the in-loop assembly uses (_evaluate_total_objective_impl /
+        # evaluate_alm_objective both pass it). Without it each optional term falls back
+        # to its OWN leaf graph, so a dof-expanding lever (winding-surface-free /
+        # seed-order-upgrade) that grows base_objective's graph past the iota terms'
+        # Boozer-adjoint reach makes the gradient sum a shape mismatch.
+        objective_optimizable=globals().get("JF"),
         alm_formulation=(
             ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else "weighted_sum"
         ),
@@ -9274,6 +9369,7 @@ def evaluate_alm_objective(
     JCurveVesselEnvelopeKeepout=None,
     JCurveAvailableEnvelopeReward=None,
     JCurveHardwareSdfFreeSpaceReward=None,
+    JCurveHardwareSdfClearanceHinge=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -9373,6 +9469,10 @@ def evaluate_alm_objective(
             HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
                 SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
             ),
+            JCurveHardwareSdfClearanceHinge=(
+                JCurveHardwareSdfClearanceHinge
+            ),
+            CLEARANCE_HINGE_WEIGHT=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
             lcfs_surface=outer_surface_data["boozer_surface"].surface,
             JLCFSMajorRadius=globals().get("JLCFSMajorRadius"),
             JLCFSMinorRadius=globals().get("JLCFSMinorRadius"),
@@ -9443,6 +9543,9 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JCurveHardwareSdfFreeSpaceReward=(
                     JCurveHardwareSdfFreeSpaceReward
                 ),
+                JCurveHardwareSdfClearanceHinge=(
+                    JCurveHardwareSdfClearanceHinge
+                ),
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -9485,6 +9588,10 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
                 SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
             ),
+            JCurveHardwareSdfClearanceHinge=(
+                JCurveHardwareSdfClearanceHinge
+            ),
+            CLEARANCE_HINGE_WEIGHT=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
             JShear=globals().get("JShear"),
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             JMagneticWell=globals().get("JMagneticWell"),
@@ -12797,6 +12904,8 @@ def build_total_objective(
     AVAILABLE_ENVELOPE_REWARD_WEIGHT=0.0,
     JCurveHardwareSdfFreeSpaceReward=None,
     HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=0.0,
+    JCurveHardwareSdfClearanceHinge=None,
+    CLEARANCE_HINGE_WEIGHT=0.0,
     JResidueObjective=None,
     JMeanSquaredCurvature=None,
     MSC_WEIGHT=0.0,
@@ -12856,6 +12965,8 @@ def build_total_objective(
         HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT=(
             HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT
         ),
+        JCurveHardwareSdfClearanceHinge=JCurveHardwareSdfClearanceHinge,
+        CLEARANCE_HINGE_WEIGHT=CLEARANCE_HINGE_WEIGHT,
         JResidueObjective=JResidueObjective,
         JMeanSquaredCurvature=JMeanSquaredCurvature,
         MSC_WEIGHT=MSC_WEIGHT,
@@ -14273,6 +14384,7 @@ JCoilWidth = None
 JCurveSelfIntersect = None
 JCurveHardwareKeepout = None
 JCurveHardwareSdfFreeSpaceReward = None
+JCurveHardwareSdfClearanceHinge = None
 JCurveVesselEnvelopeKeepout = None
 JCurveAvailableEnvelopeReward = None
 JLCFSMajorRadius = None
@@ -14285,6 +14397,8 @@ SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFA
 SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT = SINGLE_STAGE_VESSEL_KEEPOUT_WEIGHT_DEFAULT
 SINGLE_STAGE_AVAILABLE_ENVELOPE_REWARD_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = 0.0
+SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT = 0.0
+SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
 SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = 1.0
 SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = 1.0
 SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = HARDWARE_KEEPOUT_SAFETY_MARGIN_M
@@ -15053,6 +15167,8 @@ if __name__ == "__main__":
     SINGLE_STAGE_HARDWARE_SDF_FREE_SPACE_REWARD_WEIGHT = float(
         args.single_stage_hardware_sdf_free_space_reward_weight
     )
+    SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT = float(args.clearance_hinge_weight)
+    SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M = float(args.clearance_hinge_margin_m)
     SINGLE_STAGE_CLEARANCE_LEG_WEIGHT = float(args.clearance_leg_weight)
     SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT = float(args.clearance_uturn_weight)
     SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE = float(
@@ -16851,6 +16967,19 @@ if __name__ == "__main__":
             "search_eval",
             {},
         ).get("J_hardware_sdf_free_space_reward"),
+        "SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT": (
+            SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT
+        ),
+        "SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M": (
+            SINGLE_STAGE_CLEARANCE_HINGE_MARGIN_M
+        ),
+        "SINGLE_STAGE_CLEARANCE_HINGE_ACTIVE": (
+            JCurveHardwareSdfClearanceHinge is not None
+        ),
+        "SINGLE_STAGE_CLEARANCE_HINGE": run_dict.get(
+            "search_eval",
+            {},
+        ).get("J_clearance_hinge"),
         "SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE": (
             SINGLE_STAGE_VESSEL_KEEPOUT_CLEARANCE
         ),
@@ -17442,6 +17571,7 @@ if __name__ == "__main__":
                 if (
                     JCurveHardwareKeepout is not None
                     or JCurveHardwareSdfFreeSpaceReward is not None
+                    or JCurveHardwareSdfClearanceHinge is not None
                 )
                 else ()
             ),
@@ -17451,6 +17581,7 @@ if __name__ == "__main__":
                 if (
                     JCurveHardwareKeepout is not None
                     or JCurveHardwareSdfFreeSpaceReward is not None
+                    or JCurveHardwareSdfClearanceHinge is not None
                 )
                 else None
             ),

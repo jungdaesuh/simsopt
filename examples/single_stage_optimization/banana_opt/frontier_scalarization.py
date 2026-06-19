@@ -224,6 +224,7 @@ def apply_frontier_scalarization_override(
     vessel_keepout_weight=0.0,
     available_envelope_reward_weight=0.0,
     hardware_sdf_free_space_reward_weight=0.0,
+    clearance_hinge_weight=0.0,
     msc_weight=0.0,
     arclen_weight=0.0,
     link_weight=0.0,
@@ -314,6 +315,7 @@ def apply_frontier_scalarization_override(
             hardware_sdf_free_space_reward_weight=(
                 hardware_sdf_free_space_reward_weight
             ),
+            clearance_hinge_weight=clearance_hinge_weight,
             msc_weight=msc_weight,
             arclen_weight=arclen_weight,
             link_weight=link_weight,
@@ -383,6 +385,7 @@ def _frontier_penalty_geometry_total_grad(
     vessel_keepout_weight=0.0,
     available_envelope_reward_weight=0.0,
     hardware_sdf_free_space_reward_weight=0.0,
+    clearance_hinge_weight=0.0,
     msc_weight=0.0,
     arclen_weight=0.0,
     link_weight=0.0,
@@ -447,6 +450,14 @@ def _frontier_penalty_geometry_total_grad(
         )
         grad = grad + float(hardware_sdf_free_space_reward_weight) * np.asarray(
             objective_eval["dJ_hardware_sdf_free_space_reward"],
+            dtype=float,
+        )
+    if float(clearance_hinge_weight) != 0.0:
+        total += float(clearance_hinge_weight) * float(
+            objective_eval["J_clearance_hinge"]
+        )
+        grad = grad + float(clearance_hinge_weight) * np.asarray(
+            objective_eval["dJ_clearance_hinge"],
             dtype=float,
         )
     # Opt-in SIMSOPT coil regularizers (guarded by weight so default runs read no

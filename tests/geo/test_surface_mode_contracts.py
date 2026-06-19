@@ -322,6 +322,8 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             single_stage_vessel_keepout_clearance=0.0,
             single_stage_available_envelope_reward_weight=0.0,
             single_stage_hardware_sdf_free_space_reward_weight=0.0,
+            clearance_hinge_weight=0.0,
+            clearance_hinge_margin_m=0.005,
             single_stage_poloidal_threshold_rad=1.0,
             single_stage_width_min_threshold=0.01,
             single_stage_width_max_threshold=0.06,

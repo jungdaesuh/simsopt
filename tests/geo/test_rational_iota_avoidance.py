@@ -298,5 +298,72 @@ class RationalIotaAvoidanceDefaultOffLockTests(unittest.TestCase):
         self.assertGreater(np.linalg.norm(enabled_grad_on_iota), 0.0)
 
 
+# Noble target in the low-iota buildable window: 1/(11 + 1/phi), phi the golden ratio.
+_NOBLE_LOW_IOTA = 1.0 / (11.0 + 1.0 / ((1.0 + 5.0 ** 0.5) / 2.0))  # ~0.086073
+
+
+class RationalIotaAvoidanceLowIotaWindowTests(unittest.TestCase):
+    """At the module-default Q the penalty is LIVE across [0.08, 0.09] (banana P4).
+
+    The previous default Q=10 had no reduced p/q in [0.08, 0.09] (1/11, 1/12, 1/13
+    all have q > 10), so the term was a structural no-op across the low-iota
+    buildable band. Behavior is asserted at the imported module default, so a future
+    retune that still covers the window keeps these green, but a regression to a Q
+    with no well in [0.08, 0.09] fails them.
+    """
+
+    def test_q10_was_inert_in_window(self):
+        """Regression anchor: q<=10 makes 1/12 (inside the band) effectively a no-op.
+
+        There is no reduced p/q with q<=10 in [0.08, 0.09]; the nearest (1/10, 1/9) sit
+        >10 sigma_q from 1/12, so the penalty there is ~1e-44 (no usable gradient),
+        whereas the new default Q places a real well on 1/12 (see
+        test_default_q_is_live_on_1_12_and_1_11).
+        """
+        _term, penalty = _make_penalty(1.0 / 12.0, max_denom=10)
+        self.assertLess(penalty.J(), 1e-20)
+
+    def test_default_q_is_live_on_1_12_and_1_11(self):
+        """At the module default Q, J peaks to O(1/q^2) on the band-bounding rationals.
+
+        Asserting against ~1/q^2 (not > 0) is what makes this fail on a Q->10
+        regression: at Q=10 those centers are Gaussian-tail dead (J(1/12)~1e-44,
+        J(1/11)~3e-15), far below the 0.5/q^2 floor the live wells clear.
+        """
+        for p, q in ((1, 12), (1, 11)):
+            _term, penalty = _make_penalty(
+                p / q, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+            )
+            self.assertGreater(penalty.J(), 0.5 / q ** 2)
+
+    def test_noble_sits_in_a_trough_between_1_12_and_1_11(self):
+        """J dips at the noble 0.086073 to << its neighbouring 1/12 and 1/11 peaks."""
+        _t12, peak_12 = _make_penalty(
+            1.0 / 12.0, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+        )
+        _t11, peak_11 = _make_penalty(
+            1.0 / 11.0, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+        )
+        _tn, trough = _make_penalty(
+            _NOBLE_LOW_IOTA, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+        )
+        self.assertLess(trough.J(), 0.1 * peak_12.J())
+        self.assertLess(trough.J(), 0.1 * peak_11.J())
+
+    def test_frontier_3_10_well_survives_at_default_q(self):
+        """Raising the default Q must not move the frontier 3/10 well: 0.30 stays a peak."""
+        _t, peak = _make_penalty(
+            0.30, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+        )
+        _tl, left = _make_penalty(
+            0.30 - 1e-3, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+        )
+        _tr, right = _make_penalty(
+            0.30 + 1e-3, max_denom=RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
+        )
+        self.assertGreater(peak.J(), left.J())
+        self.assertGreater(peak.J(), right.J())
+
+
 if __name__ == "__main__":
     unittest.main()
