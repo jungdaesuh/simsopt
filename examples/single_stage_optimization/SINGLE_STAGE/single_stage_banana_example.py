@@ -504,6 +504,12 @@ DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
 SEED_ARTIFACT_ROLE_STAGE2 = "stage2"
 SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME = "single_stage_resume"
 CURVATURE_P_NORM = 4
+SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT = 0.0
+SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT = (
+    BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
+    * (1.0 - BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION)
+)
+SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT = 2
 DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
 DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-4
 DEFAULT_ALM_IOTA_PENALTY_THRESHOLD = 1.0e-4
@@ -2887,6 +2893,50 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-geodesic-curvature-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT",
+                str(SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT),
+            )
+        ),
+        help=(
+            "Opt-in weight (default 0 = off) for pure winding-surface geodesic "
+            "curvature fold steering on zero-rotation surface-tangent banana "
+            "frames. This is separate from the material-frame pack-rotation fold "
+            "term."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-geodesic-curvature-threshold",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD",
+                str(SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT),
+            )
+        ),
+        help=(
+            "Threshold in m^-1 for --single-stage-geodesic-curvature-weight "
+            f"(default {SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-geodesic-curvature-p",
+        type=int,
+        default=int(
+            os.environ.get(
+                "SINGLE_STAGE_GEODESIC_CURVATURE_P",
+                str(SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT),
+            )
+        ),
+        help=(
+            "p exponent for the pure surface-geodesic curvature fold term "
+            f"(default {SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
         "--length-weight",
         type=float,
         default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
@@ -4203,6 +4253,22 @@ def parse_args():
         or args.single_stage_iota_pin_window <= 0.0
     ):
         parser.error("--single-stage-iota-pin-window must be positive and finite.")
+    if (
+        not np.isfinite(args.single_stage_geodesic_curvature_weight)
+        or args.single_stage_geodesic_curvature_weight < 0.0
+    ):
+        parser.error(
+            "--single-stage-geodesic-curvature-weight must be finite and non-negative."
+        )
+    if (
+        not np.isfinite(args.single_stage_geodesic_curvature_threshold)
+        or args.single_stage_geodesic_curvature_threshold <= 0.0
+    ):
+        parser.error(
+            "--single-stage-geodesic-curvature-threshold must be positive and finite."
+        )
+    if args.single_stage_geodesic_curvature_p < 1:
+        parser.error("--single-stage-geodesic-curvature-p must be >= 1.")
     if (
         not np.isfinite(args.single_stage_qa_residual_weight)
         or args.single_stage_qa_residual_weight < 0.0
@@ -6554,6 +6620,9 @@ class RunIdentityConfig:
     single_stage_iota_pin_weight: float
     single_stage_iota_pin_target: float
     single_stage_iota_pin_window: float
+    single_stage_geodesic_curvature_weight: float
+    single_stage_geodesic_curvature_threshold: float
+    single_stage_geodesic_curvature_p: int
     single_stage_qa_residual_weight: float
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
@@ -7285,6 +7354,27 @@ def make_run_identity_config(
                 IOTA_PIN_DEFAULT_WINDOW,
             )
         ),
+        single_stage_geodesic_curvature_weight=float(
+            getattr(
+                args,
+                "single_stage_geodesic_curvature_weight",
+                SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT,
+            )
+        ),
+        single_stage_geodesic_curvature_threshold=float(
+            getattr(
+                args,
+                "single_stage_geodesic_curvature_threshold",
+                SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT,
+            )
+        ),
+        single_stage_geodesic_curvature_p=int(
+            getattr(
+                args,
+                "single_stage_geodesic_curvature_p",
+                SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT,
+            )
+        ),
         single_stage_qa_residual_weight=float(
             getattr(args, "single_stage_qa_residual_weight", 0.0)
         ),
@@ -7579,6 +7669,20 @@ def build_run_identity_config(config):
                 "single_stage_iota_pin_window",
             }
             and float(config.single_stage_iota_pin_weight) == 0.0
+        ):
+            continue
+        if (
+            field.name == "single_stage_geodesic_curvature_weight"
+            and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name
+            in {
+                "single_stage_geodesic_curvature_threshold",
+                "single_stage_geodesic_curvature_p",
+            }
+            and float(config.single_stage_geodesic_curvature_weight) == 0.0
         ):
             continue
         if (
@@ -8645,6 +8749,9 @@ def build_single_stage_objective_bundle(
     IOTA_PIN_WEIGHT=0.0,
     IOTA_PIN_TARGET=IOTA_PIN_DEFAULT_TARGET,
     IOTA_PIN_WINDOW=IOTA_PIN_DEFAULT_WINDOW,
+    GEODESIC_CURVATURE_WEIGHT=SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT,
+    GEODESIC_CURVATURE_THRESHOLD=SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT,
+    GEODESIC_CURVATURE_P=SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT,
     QA_RESIDUAL_WEIGHT=0.0,
     LGRADB_WEIGHT=0.0,
     LGRADB_FLOOR=0.30,
@@ -8722,6 +8829,23 @@ def build_single_stage_objective_bundle(
         for curve in banana_curves
     ]
     JCurvature = average_surface_objectives(JCurvatureTerms)
+    JGeodesicCurvatureTerms = (
+        [
+            CurveSurfaceGeodesicCurvature(
+                FramedCurveSurfaceTangent(curve, banana_surf_major_radius, 0.0),
+                p=GEODESIC_CURVATURE_P,
+                threshold=GEODESIC_CURVATURE_THRESHOLD,
+            )
+            for curve in banana_curves
+        ]
+        if GEODESIC_CURVATURE_WEIGHT > 0.0
+        else []
+    )
+    JGeodesicCurvature = (
+        average_surface_objectives(JGeodesicCurvatureTerms)
+        if JGeodesicCurvatureTerms
+        else None
+    )
     JPoloidalExtentTerms = [
         PoloidalExtent(
             curve,
@@ -9077,6 +9201,8 @@ def build_single_stage_objective_bundle(
         CLEARANCE_HINGE_WEIGHT=SINGLE_STAGE_CLEARANCE_HINGE_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=0.0,
+        JGeodesicCurvature=JGeodesicCurvature,
+        GEODESIC_CURVATURE_WEIGHT=GEODESIC_CURVATURE_WEIGHT,
         JPackRotationFold=JPackRotationFold,
         PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
         JPackTwistStrain=JPackTwistStrain,
@@ -9109,6 +9235,8 @@ def build_single_stage_objective_bundle(
         "JCurveSurface": JCurveSurface,
         "JCurvature": JCurvature,
         "JCurvatureTerms": JCurvatureTerms,
+        "JGeodesicCurvature": JGeodesicCurvature,
+        "JGeodesicCurvatureTerms": JGeodesicCurvatureTerms,
         "JPoloidalExtent": JPoloidalExtent,
         "JPoloidalExtentTerms": JPoloidalExtentTerms,
         "JCoilWidth": JCoilWidth,
@@ -9168,6 +9296,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCurveSurface
     global JCurvature
     global JCurvatureTerms
+    global JGeodesicCurvature
+    global JGeodesicCurvatureTerms
     global JPoloidalExtent
     global JPoloidalExtentTerms
     global JCoilWidth
@@ -9221,6 +9351,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCurveSurface = objective_bundle["JCurveSurface"]
     JCurvature = objective_bundle["JCurvature"]
     JCurvatureTerms = objective_bundle["JCurvatureTerms"]
+    JGeodesicCurvature = objective_bundle["JGeodesicCurvature"]
+    JGeodesicCurvatureTerms = objective_bundle["JGeodesicCurvatureTerms"]
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JPoloidalExtentTerms = objective_bundle["JPoloidalExtentTerms"]
     JCoilWidth = objective_bundle["JCoilWidth"]
@@ -9680,6 +9812,10 @@ def evaluate_total_objective(
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             JMinLGradB=globals().get("JMinLGradB"),
             LGRADB_WEIGHT=0.0,
+            JGeodesicCurvature=globals().get("JGeodesicCurvature"),
+            GEODESIC_CURVATURE_WEIGHT=globals().get(
+                "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT", 0.0
+            ),
             JPackRotationFold=globals().get("JPackRotationFold"),
             PACK_ROTATION_FOLD_WEIGHT=globals().get(
                 "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", 0.0
@@ -9746,6 +9882,10 @@ def evaluate_base_objective(
         QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
         JMinLGradB=globals().get("JMinLGradB"),
         LGRADB_WEIGHT=0.0,
+        JGeodesicCurvature=globals().get("JGeodesicCurvature"),
+        GEODESIC_CURVATURE_WEIGHT=globals().get(
+            "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT", 0.0
+        ),
         JPackRotationFold=globals().get("JPackRotationFold"),
         PACK_ROTATION_FOLD_WEIGHT=globals().get(
             "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", 0.0
@@ -9921,6 +10061,10 @@ def evaluate_alm_objective(
             QA_RESIDUAL_WEIGHT=globals().get("QA_RESIDUAL_WEIGHT", 0.0),
             JMinLGradB=globals().get("JMinLGradB"),
             LGRADB_WEIGHT=0.0,
+            JGeodesicCurvature=globals().get("JGeodesicCurvature"),
+            GEODESIC_CURVATURE_WEIGHT=globals().get(
+                "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT", 0.0
+            ),
             JPackRotationFold=globals().get("JPackRotationFold"),
             PACK_ROTATION_FOLD_WEIGHT=globals().get(
                 "SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT", 0.0
@@ -13354,6 +13498,8 @@ def build_total_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JGeodesicCurvature=None,
+    GEODESIC_CURVATURE_WEIGHT=0.0,
     JPackRotationFold=None,
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
@@ -13421,6 +13567,8 @@ def build_total_objective(
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
+        JGeodesicCurvature=JGeodesicCurvature,
+        GEODESIC_CURVATURE_WEIGHT=GEODESIC_CURVATURE_WEIGHT,
         JPackRotationFold=JPackRotationFold,
         PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
         JPackTwistStrain=JPackTwistStrain,
@@ -15752,6 +15900,29 @@ if __name__ == "__main__":
     CURVATURE_P_NORM = int(args.curvature_p_norm)
     if CURVATURE_P_NORM < 1:
         raise ValueError("--curvature-p-norm must be >= 1.")
+    SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT = float(
+        args.single_stage_geodesic_curvature_weight
+    )
+    SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD = float(
+        args.single_stage_geodesic_curvature_threshold
+    )
+    SINGLE_STAGE_GEODESIC_CURVATURE_P = int(args.single_stage_geodesic_curvature_p)
+    if (
+        not np.isfinite(SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT)
+        or SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT < 0.0
+    ):
+        raise ValueError(
+            "--single-stage-geodesic-curvature-weight must be finite and non-negative"
+        )
+    if (
+        not np.isfinite(SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD)
+        or SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD <= 0.0
+    ):
+        raise ValueError(
+            "--single-stage-geodesic-curvature-threshold must be positive and finite"
+        )
+    if SINGLE_STAGE_GEODESIC_CURVATURE_P < 1:
+        raise ValueError("--single-stage-geodesic-curvature-p must be >= 1")
     # B2 pack-rotation buildability terms (default-off; mirror STAGE_2 ~4391-4471).
     # All three levers require the finite-build FIELD swap so the SHARED pack frame
     # (one FrameRotation for field AND fold) is what alpha(theta) rides. With the
@@ -16013,6 +16184,11 @@ if __name__ == "__main__":
             IOTA_PIN_WEIGHT=IOTA_PIN_WEIGHT,
             IOTA_PIN_TARGET=IOTA_PIN_TARGET,
             IOTA_PIN_WINDOW=IOTA_PIN_WINDOW,
+            GEODESIC_CURVATURE_WEIGHT=SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT,
+            GEODESIC_CURVATURE_THRESHOLD=(
+                SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD
+            ),
+            GEODESIC_CURVATURE_P=SINGLE_STAGE_GEODESIC_CURVATURE_P,
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
             LGRADB_WEIGHT=LGRADB_WEIGHT,
             LGRADB_FLOOR=LGRADB_FLOOR,
@@ -18247,6 +18423,14 @@ if __name__ == "__main__":
         ),
     }
     results.update(best_feasible_results)
+    single_stage_geodesic_curvature_max_abs = (
+        None
+        if not JGeodesicCurvatureTerms
+        else max(
+            float(term.max_abs_geodesic_curvature())
+            for term in JGeodesicCurvatureTerms
+        )
+    )
     results.update(
         {
             "SINGLE_STAGE_IOTA_PIN_ACTIVE": JIotaPin is not None,
@@ -18255,6 +18439,29 @@ if __name__ == "__main__":
             "SINGLE_STAGE_IOTA_PIN_WINDOW": float(IOTA_PIN_WINDOW),
             "SINGLE_STAGE_IOTA_PIN_OBJECTIVE": (
                 None if JIotaPin is None else float(JIotaPin.J())
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_ACTIVE": (
+                JGeodesicCurvature is not None
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT": float(
+                SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD": float(
+                SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_P": int(
+                SINGLE_STAGE_GEODESIC_CURVATURE_P
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_OBJECTIVE": (
+                None
+                if JGeodesicCurvature is None
+                else float(JGeodesicCurvature.J())
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_MAX_ABS": (
+                single_stage_geodesic_curvature_max_abs
+            ),
+            "SINGLE_STAGE_GEODESIC_CURVATURE_FRAME": (
+                "surface_tangent_zero_rotation"
             ),
         }
     )

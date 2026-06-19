@@ -715,6 +715,8 @@ def build_total_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JGeodesicCurvature=None,
+    GEODESIC_CURVATURE_WEIGHT=0.0,
     JPackRotationFold=None,
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
@@ -783,6 +785,11 @@ def build_total_objective(
     # Keep it available in diagnostics, but never add its zero-derivative shell to
     # the optimizer descent graph.
     _reject_lgradb_descent_weight(JMinLGradB, LGRADB_WEIGHT)
+    # Pure winding-surface geodesic curvature fold term (opt-in, default-None).
+    # This uses zero-rotation surface-tangent frames and is separate from the
+    # material-frame pack-rotation fold term below.
+    if JGeodesicCurvature is not None:
+        objective = objective + GEODESIC_CURVATURE_WEIGHT * JGeodesicCurvature
     # Magnetic-shear shortfall (opt-in; default weight 0 and a None term in
     # single-surface mode, so the objective graph is byte-identical until a
     # shear weight is set on a multisurface build). Rewards a larger
@@ -1173,6 +1180,8 @@ def evaluate_total_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JGeodesicCurvature=None,
+    GEODESIC_CURVATURE_WEIGHT=0.0,
     JPackRotationFold=None,
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
@@ -1250,6 +1259,8 @@ def evaluate_total_objective(
         QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
+        JGeodesicCurvature=JGeodesicCurvature,
+        GEODESIC_CURVATURE_WEIGHT=GEODESIC_CURVATURE_WEIGHT,
         JPackRotationFold=JPackRotationFold,
         PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
         JPackTwistStrain=JPackTwistStrain,
@@ -1359,6 +1370,19 @@ def evaluate_total_objective(
     ) = _optional_weighted_objective_terms(
         JQAResidual,
         QA_RESIDUAL_WEIGHT,
+        total_grad,
+        objective_optimizable,
+    )
+    (
+        geodesic_curvature_value,
+        geodesic_curvature_grad,
+        geodesic_curvature_weight,
+        geodesic_curvature_objective_enabled,
+        _,
+        _,
+    ) = _optional_weighted_objective_terms(
+        JGeodesicCurvature,
+        GEODESIC_CURVATURE_WEIGHT,
         total_grad,
         objective_optimizable,
     )
@@ -1548,6 +1572,12 @@ def evaluate_total_objective(
                 if JMinLGradB is None
                 else _objective_gradient(JMinLGradB, objective_optimizable)
             ),
+            "J_geodesic_curvature": geodesic_curvature_value,
+            "dJ_geodesic_curvature": geodesic_curvature_grad,
+            "geodesic_curvature_weight": geodesic_curvature_weight,
+            "geodesic_curvature_objective_enabled": (
+                geodesic_curvature_objective_enabled
+            ),
             "J_pack_rotation_fold": pack_rotation_fold_value,
             "dJ_pack_rotation_fold": pack_rotation_fold_grad,
             "pack_rotation_fold_weight": pack_rotation_fold_weight,
@@ -1659,6 +1689,8 @@ def evaluate_base_objective(
     CLEARANCE_HINGE_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JGeodesicCurvature=None,
+    GEODESIC_CURVATURE_WEIGHT=0.0,
     JPackRotationFold=None,
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
@@ -1720,6 +1752,10 @@ def evaluate_base_objective(
         )
     # min(L_grad_B) realizability shortfall is gate-only until dJ exists.
     _reject_lgradb_descent_weight(JMinLGradB, LGRADB_WEIGHT)
+    if JGeodesicCurvature is not None:
+        base_objective = (
+            base_objective + GEODESIC_CURVATURE_WEIGHT * JGeodesicCurvature
+        )
     # B2 pack-rotation buildability terms (opt-in; default-None so the ALM physics
     # objective is byte-identical until the finite-build-field pack-rotation levers
     # are set). Soft penalties on the freed pack twist alpha(theta), NOT hard ALM
@@ -1860,6 +1896,19 @@ def evaluate_base_objective(
         base_physics_grad,
         objective_optimizable,
     )
+    (
+        geodesic_curvature_value,
+        geodesic_curvature_grad,
+        geodesic_curvature_weight,
+        geodesic_curvature_objective_enabled,
+        weighted_geodesic_curvature_value,
+        weighted_geodesic_curvature_grad,
+    ) = _optional_weighted_objective_terms(
+        JGeodesicCurvature,
+        GEODESIC_CURVATURE_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
     physics_terms_total = (
         base_physics_terms_total
         + weighted_shear_value
@@ -1892,6 +1941,7 @@ def evaluate_base_objective(
             + weighted_noble_iota_pull_value
             + weighted_iota_pin_value
             + weighted_qa_residual_value
+            + weighted_geodesic_curvature_value
             + weighted_vessel_keepout_value
             + weighted_available_envelope_reward_value
             + weighted_hardware_sdf_free_space_reward_value
@@ -1905,6 +1955,7 @@ def evaluate_base_objective(
             + weighted_noble_iota_pull_grad
             + weighted_iota_pin_grad
             + weighted_qa_residual_grad
+            + weighted_geodesic_curvature_grad
             + weighted_vessel_keepout_grad
             + weighted_available_envelope_reward_grad
             + weighted_hardware_sdf_free_space_reward_grad
@@ -2013,6 +2064,12 @@ def evaluate_base_objective(
                 np.zeros_like(base_physics_grad)
                 if JMinLGradB is None
                 else _objective_gradient(JMinLGradB, objective_optimizable)
+            ),
+            "J_geodesic_curvature": geodesic_curvature_value,
+            "dJ_geodesic_curvature": geodesic_curvature_grad,
+            "geodesic_curvature_weight": geodesic_curvature_weight,
+            "geodesic_curvature_objective_enabled": (
+                geodesic_curvature_objective_enabled
             ),
             "J_residue_objective": residue_value,
             "dJ_residue_objective": residue_grad,
@@ -2292,6 +2349,8 @@ def evaluate_alm_objective(
     QA_RESIDUAL_WEIGHT=0.0,
     JMinLGradB=None,
     LGRADB_WEIGHT=0.0,
+    JGeodesicCurvature=None,
+    GEODESIC_CURVATURE_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
@@ -2345,6 +2404,8 @@ def evaluate_alm_objective(
         CLEARANCE_HINGE_WEIGHT=CLEARANCE_HINGE_WEIGHT,
         JMinLGradB=JMinLGradB,
         LGRADB_WEIGHT=LGRADB_WEIGHT,
+        JGeodesicCurvature=JGeodesicCurvature,
+        GEODESIC_CURVATURE_WEIGHT=GEODESIC_CURVATURE_WEIGHT,
         include_diagnostics=include_diagnostics,
     )
 

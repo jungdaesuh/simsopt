@@ -13110,6 +13110,8 @@ class HardwareConstraintTests(unittest.TestCase):
         vessel_keepout_objective = object()
         available_envelope_reward_objective = object()
         coil_force_objective = object()
+        geodesic_objective = object()
+        geodesic_framed_curve = object()
         recorded_self_intersect_call = {}
         recorded_hardware_keepout_call = {}
         recorded_vessel_keepout_call = {}
@@ -13117,6 +13119,8 @@ class HardwareConstraintTests(unittest.TestCase):
         recorded_coil_force_call = {}
         recorded_poloidal_extent_call = {}
         recorded_width_call = {}
+        recorded_geodesic_frame_call = {}
+        recorded_geodesic_call = {}
         recorded_loader_call = {}
 
         def fake_curve_self_intersect(curve, minimum_distance, *, neighbor_skip):
@@ -13197,12 +13201,34 @@ class HardwareConstraintTests(unittest.TestCase):
             )
             return object()
 
+        def fake_surface_tangent_frame(curve, major_radius, rotation):
+            recorded_geodesic_frame_call.update(
+                {
+                    "curve": curve,
+                    "major_radius": major_radius,
+                    "rotation": rotation,
+                }
+            )
+            return geodesic_framed_curve
+
+        def fake_geodesic_curvature(framedcurve, *, p, threshold):
+            recorded_geodesic_call.update(
+                {
+                    "framedcurve": framedcurve,
+                    "p": p,
+                    "threshold": threshold,
+                }
+            )
+            return geodesic_objective
+
         def fake_average_surface_objectives(terms):
             terms = list(terms)
             if terms == [self_objective]:
                 return self_objective
             if terms == [hardware_keepout_objective]:
                 return hardware_keepout_objective
+            if terms == [geodesic_objective]:
+                return geodesic_objective
             return object()
 
         with ExitStack() as stack:
@@ -13242,6 +13268,20 @@ class HardwareConstraintTests(unittest.TestCase):
                 patch.object(module, "PoloidalExtent", fake_poloidal_extent)
             )
             stack.enter_context(patch.object(module, "EllipseWidth", fake_ellipse_width))
+            stack.enter_context(
+                patch.object(
+                    module,
+                    "FramedCurveSurfaceTangent",
+                    fake_surface_tangent_frame,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    module,
+                    "CurveSurfaceGeodesicCurvature",
+                    fake_geodesic_curvature,
+                )
+            )
             stack.enter_context(
                 patch.object(
                     module,
@@ -13334,6 +13374,9 @@ class HardwareConstraintTests(unittest.TestCase):
                 CURVATURE_THRESHOLD=20.0,
                 banana_surf_radius=0.21,
                 banana_surf_major_radius=0.904,
+                GEODESIC_CURVATURE_WEIGHT=2.0,
+                GEODESIC_CURVATURE_THRESHOLD=31.0,
+                GEODESIC_CURVATURE_P=4,
                 FORCE_WEIGHT=3.0,
                 coil_force_regularization=0.123,
             )
@@ -13344,6 +13387,12 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(recorded_width_call["curve"], banana_curve)
         self.assertAlmostEqual(recorded_width_call["major_radius"], 0.904)
         self.assertAlmostEqual(recorded_width_call["minor_radius"], 0.21)
+        self.assertIs(recorded_geodesic_frame_call["curve"], banana_curve)
+        self.assertAlmostEqual(recorded_geodesic_frame_call["major_radius"], 0.904)
+        self.assertEqual(recorded_geodesic_frame_call["rotation"], 0.0)
+        self.assertIs(recorded_geodesic_call["framedcurve"], geodesic_framed_curve)
+        self.assertEqual(recorded_geodesic_call["p"], 4)
+        self.assertAlmostEqual(recorded_geodesic_call["threshold"], 31.0)
         self.assertAlmostEqual(
             recorded_self_intersect_call["minimum_distance"],
             module.BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
@@ -13427,6 +13476,16 @@ class HardwareConstraintTests(unittest.TestCase):
             coil_force_objective,
         )
         self.assertEqual(build_total_mock.call_args.kwargs["FORCE_WEIGHT"], 3.0)
+        self.assertIs(bundle["JGeodesicCurvature"], geodesic_objective)
+        self.assertEqual(bundle["JGeodesicCurvatureTerms"], [geodesic_objective])
+        self.assertIs(
+            build_total_mock.call_args.kwargs["JGeodesicCurvature"],
+            geodesic_objective,
+        )
+        self.assertEqual(
+            build_total_mock.call_args.kwargs["GEODESIC_CURVATURE_WEIGHT"],
+            2.0,
+        )
 
     def test_banana_curve_order_unwraps_rotated_curve(self):
         module = self.load_module()
@@ -15272,6 +15331,9 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_iota_pin_weight=0.0,
             single_stage_iota_pin_target=0.0860733168793427,
             single_stage_iota_pin_window=0.003,
+            single_stage_geodesic_curvature_weight=0.0,
+            single_stage_geodesic_curvature_threshold=39.0,
+            single_stage_geodesic_curvature_p=2,
             single_stage_qa_residual_weight=0.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
@@ -15462,6 +15524,9 @@ class RunIdentityTests(unittest.TestCase):
                     "single_stage_iota_pin_weight",
                     "single_stage_iota_pin_target",
                     "single_stage_iota_pin_window",
+                    "single_stage_geodesic_curvature_weight",
+                    "single_stage_geodesic_curvature_threshold",
+                    "single_stage_geodesic_curvature_p",
                     "single_stage_qa_residual_weight",
                 }
                 or (
@@ -15778,6 +15843,19 @@ class RunIdentityTests(unittest.TestCase):
         weighted_args.single_stage_iota_pin_weight = 1.25
         weighted_args.single_stage_iota_pin_target = 0.086
         weighted_args.single_stage_iota_pin_window = 0.002
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, weighted_args),
+        )
+
+    def test_run_identity_changes_when_geodesic_curvature_settings_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.single_stage_geodesic_curvature_weight = 1.75
+        weighted_args.single_stage_geodesic_curvature_threshold = 31.0
+        weighted_args.single_stage_geodesic_curvature_p = 4
 
         self.assertNotEqual(
             self._build_identity(module, base_args),
@@ -16620,6 +16698,12 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "0.086",
                 "--single-stage-iota-pin-window",
                 "0.002",
+                "--single-stage-geodesic-curvature-weight",
+                "1.75",
+                "--single-stage-geodesic-curvature-threshold",
+                "31.0",
+                "--single-stage-geodesic-curvature-p",
+                "4",
                 "--single-stage-qa-residual-weight",
                 "3.5",
             ],
@@ -16638,6 +16722,9 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.single_stage_iota_pin_weight, 1.25)
         self.assertEqual(args.single_stage_iota_pin_target, 0.086)
         self.assertEqual(args.single_stage_iota_pin_window, 0.002)
+        self.assertEqual(args.single_stage_geodesic_curvature_weight, 1.75)
+        self.assertEqual(args.single_stage_geodesic_curvature_threshold, 31.0)
+        self.assertEqual(args.single_stage_geodesic_curvature_p, 4)
         self.assertEqual(args.single_stage_qa_residual_weight, 3.5)
 
     def test_single_stage_parse_args_accepts_hardware_sdf_reward_with_sdf_backend(
@@ -16794,6 +16881,11 @@ class CurrentBaselineContractTests(unittest.TestCase):
             ("--single-stage-iota-pin-target", "inf"),
             ("--single-stage-iota-pin-window", "0.0"),
             ("--single-stage-iota-pin-window", "nan"),
+            ("--single-stage-geodesic-curvature-weight", "-0.1"),
+            ("--single-stage-geodesic-curvature-weight", "nan"),
+            ("--single-stage-geodesic-curvature-threshold", "0.0"),
+            ("--single-stage-geodesic-curvature-threshold", "inf"),
+            ("--single-stage-geodesic-curvature-p", "0"),
             ("--single-stage-qa-residual-weight", "-0.1"),
             ("--single-stage-qa-residual-weight", "inf"),
         ]

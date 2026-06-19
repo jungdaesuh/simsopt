@@ -4975,6 +4975,39 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["pack_twist_strain_weight"], 13.0)
         self.assertTrue(result["pack_twist_strain_objective_enabled"])
 
+    def test_evaluate_total_objective_adds_geodesic_curvature_term(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        geodesic = _FakeAlgebraicObjective(0.4, [0.6, -0.5])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=0.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=0.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=0.0,
+            JGeodesicCurvature=geodesic,
+            GEODESIC_CURVATURE_WEIGHT=17.0,
+        )
+
+        self.assertAlmostEqual(result["total"], 6.8)
+        np.testing.assert_allclose(result["grad"], [10.2, -8.5])
+        self.assertAlmostEqual(result["J_geodesic_curvature"], 0.4)
+        self.assertAlmostEqual(result["geodesic_curvature_weight"], 17.0)
+        self.assertTrue(result["geodesic_curvature_objective_enabled"])
+        np.testing.assert_allclose(
+            result["dJ_geodesic_curvature"],
+            [0.6, -0.5],
+        )
+
     def test_evaluate_alm_objective_includes_width_and_self_intersect_constraints(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
         coil_width = _FakeAlgebraicObjective(0.12, [0.2, 0.0])
@@ -8486,6 +8519,75 @@ class IotaShearShortfallTests(_ModuleTestCase):
         )
         self.assertAlmostEqual(with_shear.J() - baseline.J(), 10.0 * shear.J())
         np.testing.assert_allclose(with_shear.dJ() - baseline.dJ(), 10.0 * shear.dJ())
+
+    def test_build_total_objective_geodesic_curvature_default_off_is_identical(self):
+        baseline = self.module.build_total_objective(*self._base_total_objective_args())
+        default_off = self.module.build_total_objective(
+            *self._base_total_objective_args(),
+            JGeodesicCurvature=None,
+            GEODESIC_CURVATURE_WEIGHT=0.0,
+        )
+        self.assertEqual(baseline.J(), default_off.J())
+        np.testing.assert_array_equal(baseline.dJ(), default_off.dJ())
+
+        weighted_none = self.module.build_total_objective(
+            *self._base_total_objective_args(),
+            JGeodesicCurvature=None,
+            GEODESIC_CURVATURE_WEIGHT=123.0,
+        )
+        self.assertEqual(baseline.J(), weighted_none.J())
+        np.testing.assert_array_equal(baseline.dJ(), weighted_none.dJ())
+
+    def test_build_total_objective_adds_weighted_geodesic_curvature_term(self):
+        baseline = self.module.build_total_objective(*self._base_total_objective_args())
+        geodesic = _FakeAlgebraicObjective(0.4, [0.6, -0.5])
+
+        with_geodesic = self.module.build_total_objective(
+            *self._base_total_objective_args(),
+            JGeodesicCurvature=geodesic,
+            GEODESIC_CURVATURE_WEIGHT=17.0,
+        )
+
+        self.assertAlmostEqual(
+            with_geodesic.J() - baseline.J(),
+            17.0 * geodesic.J(),
+        )
+        np.testing.assert_allclose(
+            with_geodesic.dJ() - baseline.dJ(),
+            17.0 * geodesic.dJ(),
+        )
+
+    def test_evaluate_base_objective_reports_weighted_geodesic_curvature_term(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        geodesic = _FakeAlgebraicObjective(0.4, [0.6, -0.5])
+
+        for formulation in ("weighted_sum", "thresholded_physics"):
+            with self.subTest(formulation=formulation):
+                result = self.module.evaluate_base_objective(
+                    np.array([1.0]),
+                    [zero],
+                    [zero],
+                    RES_WEIGHT=0.0,
+                    Jiota=zero,
+                    IOTAS_WEIGHT=0.0,
+                    JVolume=None,
+                    VOLUME_WEIGHT=0.0,
+                    JCurveLength=zero,
+                    LENGTH_WEIGHT=0.0,
+                    alm_formulation=formulation,
+                    JGeodesicCurvature=geodesic,
+                    GEODESIC_CURVATURE_WEIGHT=17.0,
+                )
+
+                self.assertAlmostEqual(result["total"], 6.8)
+                np.testing.assert_allclose(result["grad"], [10.2, -8.5])
+                self.assertTrue(result["geodesic_curvature_objective_enabled"])
+                self.assertAlmostEqual(result["geodesic_curvature_weight"], 17.0)
+                self.assertAlmostEqual(result["J_geodesic_curvature"], 0.4)
+                np.testing.assert_allclose(
+                    result["dJ_geodesic_curvature"],
+                    [0.6, -0.5],
+                )
 
     def test_build_total_objective_adds_weighted_noble_pin_and_qa_terms(self):
         baseline = self.module.build_total_objective(*self._base_total_objective_args())
