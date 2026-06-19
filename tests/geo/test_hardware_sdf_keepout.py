@@ -76,9 +76,30 @@ def _write_sdf_payload(
     narrow_band=0.02,
     group_narrow_band=None,
     glb_path=None,
+    patches=None,
 ):
     data_path = root / "hardware_sdf.npz"
-    np.savez(data_path, sensors=grid)
+    payload = {"sensors": grid}
+    patch_specs = []
+    for index, patch in enumerate(() if patches is None else patches):
+        patch_label = str(patch.get("label", f"patch_{index}"))
+        field_key = str(patch.get("field_key", patch_label))
+        payload[field_key] = np.asarray(patch["grid"], dtype=float)
+        patch_spec = {
+            "label": patch_label,
+            "field_key": field_key,
+            "origin_m": list(patch["origin"]),
+            "spacing_m": patch["spacing"],
+            "shape": list(np.asarray(patch["grid"]).shape),
+        }
+        if "sign_method" in patch:
+            patch_spec["sign_method"] = patch["sign_method"]
+        if "effective_margin" in patch:
+            patch_spec["effective_margin_m"] = patch["effective_margin"]
+        if "narrow_band" in patch:
+            patch_spec["narrow_band_m"] = patch["narrow_band"]
+        patch_specs.append(patch_spec)
+    np.savez(data_path, **payload)
     data_sha = hashlib.sha256(data_path.read_bytes()).hexdigest()
     if documented_gate_only is None:
         documented_gate_only = {
@@ -112,6 +133,17 @@ def _write_sdf_payload(
         }
     if group_effective_margin is None:
         group_effective_margin = effective_margin
+    group_spec = {
+        "label": "sensors",
+        "field_key": "sensors",
+        "origin_m": list(origin),
+        "spacing_m": spacing,
+        "shape": list(grid.shape),
+        "sign_method": sign_method,
+        "effective_margin_m": group_effective_margin,
+    }
+    if patch_specs:
+        group_spec["patches"] = patch_specs
     manifest = {
         "schema_version": 1,
         "kind": "hardware_sdf",
@@ -122,17 +154,7 @@ def _write_sdf_payload(
         "safety_margin_m": safety_margin,
         "error_budget_m": error_budget,
         "effective_margin_m": effective_margin,
-        "groups": [
-            {
-                "label": "sensors",
-                "field_key": "sensors",
-                "origin_m": list(origin),
-                "spacing_m": spacing,
-                "shape": list(grid.shape),
-                "sign_method": sign_method,
-                "effective_margin_m": group_effective_margin,
-            }
-        ],
+        "groups": [group_spec],
         "documented_gate_only": documented_gate_only,
         "provenance": provenance,
     }
@@ -535,6 +557,134 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
                 metadata["HARDWARE_SDF_OTHER_IN_LOOP_GROUPS"],
                 ["vessel"],
             )
+
+    def test_loader_records_patch_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sdf_payload(
+                root,
+                grid=np.full((5, 5, 5), 0.02, dtype=float),
+                origin=(-2.0, -2.0, -1.0),
+                spacing=1.0,
+                effective_margin=0.02,
+                narrow_band=0.2,
+                patches=[
+                    {
+                        "label": "near_contact",
+                        "grid": np.full((21, 41, 21), -0.002, dtype=float),
+                        "origin": (0.9, -0.2, -0.1),
+                        "spacing": 0.01,
+                        "effective_margin": 0.02,
+                        "narrow_band": 0.2,
+                    }
+                ],
+            )
+
+            metadata = hardware_sdf_metadata(manifest)
+            sdf_data = load_hardware_sdf(manifest)
+
+            self.assertEqual(metadata["HARDWARE_SDF_PATCH_COUNT"], 1)
+            self.assertEqual(
+                metadata["HARDWARE_SDF_PATCH_LABELS"],
+                {"sensors": ["near_contact"]},
+            )
+            self.assertEqual(
+                metadata["HARDWARE_SDF_PATCH_SPACING_M"],
+                {"sensors": {"near_contact": 0.01}},
+            )
+            self.assertEqual(sdf_data.groups[0].patches[0].label, "near_contact")
+
+    def test_patch_grid_overrides_base_grid_for_covering_samples(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sdf_payload(
+                root,
+                grid=np.full((5, 5, 5), 0.02, dtype=float),
+                origin=(-2.0, -2.0, -1.0),
+                spacing=1.0,
+                effective_margin=0.02,
+                narrow_band=0.2,
+                patches=[
+                    {
+                        "label": "near_contact",
+                        "grid": np.full((21, 41, 21), -0.002, dtype=float),
+                        "origin": (0.9, -0.2, -0.1),
+                        "spacing": 0.01,
+                        "effective_margin": 0.02,
+                        "narrow_band": 0.2,
+                    }
+                ],
+            )
+            sdf_data = load_hardware_sdf(manifest)
+            curve = _circle_curve(radius=1.0)
+            objective = CurveHardwareSdfKeepout(
+                [curve], sdf_data, winding_r0=0.0
+            )
+
+            self.assertAlmostEqual(objective.shortest_clearance(), -0.002)
+            self.assertGreater(objective.J(), 0.0)
+
+    def test_finest_covering_patch_wins(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sdf_payload(
+                root,
+                grid=np.full((5, 5, 5), 0.02, dtype=float),
+                origin=(-2.0, -2.0, -1.0),
+                spacing=1.0,
+                effective_margin=0.02,
+                narrow_band=0.2,
+                patches=[
+                    {
+                        "label": "coarse_near_contact",
+                        "grid": np.full((11, 21, 11), 0.004, dtype=float),
+                        "origin": (0.9, -0.2, -0.1),
+                        "spacing": 0.02,
+                        "effective_margin": 0.02,
+                        "narrow_band": 0.2,
+                    },
+                    {
+                        "label": "fine_near_contact",
+                        "grid": np.full((21, 41, 21), -0.003, dtype=float),
+                        "origin": (0.9, -0.2, -0.1),
+                        "spacing": 0.01,
+                        "effective_margin": 0.02,
+                        "narrow_band": 0.2,
+                    },
+                ],
+            )
+            sdf_data = load_hardware_sdf(manifest)
+            curve = _circle_curve(radius=1.0)
+            objective = CurveHardwareSdfKeepout(
+                [curve], sdf_data, winding_r0=0.0
+            )
+
+            self.assertAlmostEqual(objective.shortest_clearance(), -0.003)
+
+    def test_loader_rejects_patch_that_is_not_finer_than_base_grid(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sdf_payload(
+                root,
+                grid=np.full((5, 5, 5), 0.02, dtype=float),
+                origin=(-2.0, -2.0, -1.0),
+                spacing=1.0,
+                effective_margin=0.02,
+                narrow_band=0.2,
+                patches=[
+                    {
+                        "label": "not_finer",
+                        "grid": np.full((3, 3, 3), 0.01, dtype=float),
+                        "origin": (-1.0, -1.0, -1.0),
+                        "spacing": 1.0,
+                        "effective_margin": 0.02,
+                        "narrow_band": 0.2,
+                    }
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "must be finer"):
+                load_hardware_sdf(manifest)
 
     def test_plane_sdf_objective_inactive_active_and_outside_grid(self):
         with tempfile.TemporaryDirectory() as td:

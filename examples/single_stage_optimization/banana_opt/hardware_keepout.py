@@ -188,8 +188,8 @@ _SWEPT_SURFACE_QUADRATURE = np.array(
 
 
 @dataclass(frozen=True)
-class HardwareSdfGroup:
-    """One CAD-derived distance grid in the machine metre frame."""
+class HardwareSdfPatch:
+    """High-resolution sub-grid for one CAD-derived SDF group."""
 
     label: str
     grid: np.ndarray
@@ -198,6 +198,20 @@ class HardwareSdfGroup:
     narrow_band_m: float
     effective_margin_m: float
     sign_method: str
+
+
+@dataclass(frozen=True)
+class HardwareSdfGroup:
+    """One CAD-derived base distance grid plus optional finer patches."""
+
+    label: str
+    grid: np.ndarray
+    origin_m: np.ndarray
+    spacing_m: float
+    narrow_band_m: float
+    effective_margin_m: float
+    sign_method: str
+    patches: tuple[HardwareSdfPatch, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,7 +239,33 @@ class HardwareSdfData:
 
     @property
     def effective_margin_m(self) -> float:
-        return max(group.effective_margin_m for group in self.groups)
+        margins = []
+        for group in self.groups:
+            margins.append(group.effective_margin_m)
+            margins.extend(patch.effective_margin_m for patch in group.patches)
+        return max(margins)
+
+    @property
+    def patch_count(self) -> int:
+        return sum(len(group.patches) for group in self.groups)
+
+    @property
+    def patch_labels(self) -> dict[str, list[str]]:
+        return {
+            group.label: [patch.label for patch in group.patches]
+            for group in self.groups
+            if group.patches
+        }
+
+    @property
+    def patch_spacing_m(self) -> dict[str, dict[str, float]]:
+        return {
+            group.label: {
+                patch.label: patch.spacing_m for patch in group.patches
+            }
+            for group in self.groups
+            if group.patches
+        }
 
 
 def _normalize(v):
@@ -427,6 +467,136 @@ def _sdf_trilinear(grid, origin_m, spacing_m, points, outside_value):
     return jnp.where(valid, value, outside_value)
 
 
+def _sdf_grid_contains(grid, origin_m, spacing_m, points):
+    grid_shape = jnp.asarray(grid.shape)
+    local = (points - origin_m) / spacing_m
+    return jnp.all((local >= 0.0) & (local <= (grid_shape - 1)), axis=1)
+
+
+def _sdf_gridset_trilinear(grid_fields, points, outside_value):
+    """Interpolate base grid and overwrite with the finest covering patch."""
+    base_grid, base_origin, base_spacing = grid_fields[0]
+    value = _sdf_trilinear(
+        base_grid,
+        base_origin,
+        base_spacing,
+        points,
+        outside_value=outside_value,
+    )
+    for patch_grid, patch_origin, patch_spacing in grid_fields[1:]:
+        patch_value = _sdf_trilinear(
+            patch_grid,
+            patch_origin,
+            patch_spacing,
+            points,
+            outside_value=outside_value,
+        )
+        value = jnp.where(
+            _sdf_grid_contains(patch_grid, patch_origin, patch_spacing, points),
+            patch_value,
+            value,
+        )
+    return value
+
+
+def _sdf_trilinear_numpy(grid, origin_m, spacing_m, points, outside_value):
+    local = (points - origin_m) / spacing_m
+    shape = np.asarray(grid.shape, dtype=int)
+    valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
+    lower_f = np.floor(local)
+    lower = np.clip(lower_f.astype(int), 0, shape - 2)
+    frac = np.clip(local - lower_f, 0.0, 1.0)
+    i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
+    i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
+    tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
+    c000 = grid[i0, j0, k0]
+    c100 = grid[i1, j0, k0]
+    c010 = grid[i0, j1, k0]
+    c110 = grid[i1, j1, k0]
+    c001 = grid[i0, j0, k1]
+    c101 = grid[i1, j0, k1]
+    c011 = grid[i0, j1, k1]
+    c111 = grid[i1, j1, k1]
+    c00 = c000 * (1.0 - tx) + c100 * tx
+    c10 = c010 * (1.0 - tx) + c110 * tx
+    c01 = c001 * (1.0 - tx) + c101 * tx
+    c11 = c011 * (1.0 - tx) + c111 * tx
+    c0 = c00 * (1.0 - ty) + c10 * ty
+    c1 = c01 * (1.0 - ty) + c11 * ty
+    value = c0 * (1.0 - tz) + c1 * tz
+    return np.where(valid, value, outside_value)
+
+
+def _sdf_grid_contains_numpy(grid, origin_m, spacing_m, points):
+    shape = np.asarray(grid.shape, dtype=int)
+    local = (points - origin_m) / spacing_m
+    return np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
+
+
+def _sdf_gridset_trilinear_numpy(grid_fields, points, outside_value):
+    base_grid, base_origin, base_spacing = grid_fields[0]
+    value = _sdf_trilinear_numpy(
+        base_grid,
+        base_origin,
+        base_spacing,
+        points,
+        outside_value=outside_value,
+    )
+    for patch_grid, patch_origin, patch_spacing in grid_fields[1:]:
+        patch_value = _sdf_trilinear_numpy(
+            patch_grid,
+            patch_origin,
+            patch_spacing,
+            points,
+            outside_value=outside_value,
+        )
+        value = np.where(
+            _sdf_grid_contains_numpy(
+                patch_grid,
+                patch_origin,
+                patch_spacing,
+                points,
+            ),
+            patch_value,
+            value,
+        )
+    return value
+
+
+def _sdf_group_jax_fields(group):
+    fields = [(
+        jnp.asarray(group.grid),
+        jnp.asarray(group.origin_m, dtype=jnp.float64),
+        float(group.spacing_m),
+    )]
+    fields.extend(
+        (
+            jnp.asarray(patch.grid),
+            jnp.asarray(patch.origin_m, dtype=jnp.float64),
+            float(patch.spacing_m),
+        )
+        for patch in group.patches
+    )
+    return tuple(fields)
+
+
+def _sdf_group_numpy_fields(group):
+    fields = [(
+        np.ascontiguousarray(group.grid, dtype=np.float64),
+        np.asarray(group.origin_m, dtype=np.float64),
+        float(group.spacing_m),
+    )]
+    fields.extend(
+        (
+            np.ascontiguousarray(patch.grid, dtype=np.float64),
+            np.asarray(patch.origin_m, dtype=np.float64),
+            float(patch.spacing_m),
+        )
+        for patch in group.patches
+    )
+    return tuple(fields)
+
+
 def curvature_arc_weight(kappa, leg_weight, uturn_weight):
     """Per-station clearance weight that emphasizes high-curvature U-turn stations.
 
@@ -547,18 +717,15 @@ def _normalize_clearance_target_margin(target_margin, curves):
         f"got {target.size}")
 
 
-def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
-                              effective_margin_m, half_w, half_d,
-                              winding_r0, weights=None):
+def hardware_sdf_keepout_pure(gammac, grid_fields, effective_margin_m, half_w,
+                              half_d, winding_r0, weights=None):
     """SDF-backed keepout on sampled swept Type KK surface points."""
     surface_points = swept_channel_surface_points(
         gammac, half_w, half_d, winding_r0
     )
     scale = jnp.maximum(effective_margin_m, 1.0e-6)
-    phi = _sdf_trilinear(
-        grid,
-        origin_m,
-        spacing_m,
+    phi = _sdf_gridset_trilinear(
+        grid_fields,
         surface_points,
         outside_value=effective_margin_m,
     )
@@ -566,18 +733,16 @@ def hardware_sdf_keepout_pure(gammac, grid, origin_m, spacing_m,
     return _weighted_mean_square(violation, weights)
 
 
-def hardware_sdf_free_space_reward_pure(gammac, grid, origin_m, spacing_m,
-                                        effective_margin_m, half_w, half_d,
-                                        winding_r0, weights=None):
+def hardware_sdf_free_space_reward_pure(gammac, grid_fields, effective_margin_m,
+                                        half_w, half_d, winding_r0,
+                                        weights=None):
     """Bounded reward for sampled swept Type KK surface clearance in CAD SDF."""
     surface_points = swept_channel_surface_points(
         gammac, half_w, half_d, winding_r0
     )
     scale = jnp.maximum(effective_margin_m, 1.0e-6)
-    phi = _sdf_trilinear(
-        grid,
-        origin_m,
-        spacing_m,
+    phi = _sdf_gridset_trilinear(
+        grid_fields,
         surface_points,
         outside_value=effective_margin_m,
     )
@@ -585,9 +750,9 @@ def hardware_sdf_free_space_reward_pure(gammac, grid, origin_m, spacing_m,
     return -_weighted_mean_square(clearance_fraction, weights)
 
 
-def hardware_sdf_clearance_hinge_pure(gammac, grid, origin_m, spacing_m,
-                                      effective_margin_m, target_margin_m,
-                                      half_w, half_d, winding_r0, weights=None):
+def hardware_sdf_clearance_hinge_pure(gammac, grid_fields, effective_margin_m,
+                                      target_margin_m, half_w, half_d,
+                                      winding_r0, weights=None):
     """One-sided hinge driving sampled swept Type KK SDF clearance up to target.
 
     The hinge penalizes only the shortfall ``target_margin_m - phi`` below the
@@ -601,10 +766,8 @@ def hardware_sdf_clearance_hinge_pure(gammac, grid, origin_m, spacing_m,
     surface_points = swept_channel_surface_points(
         gammac, half_w, half_d, winding_r0
     )
-    phi = _sdf_trilinear(
-        grid,
-        origin_m,
-        spacing_m,
+    phi = _sdf_gridset_trilinear(
+        grid_fields,
         surface_points,
         outside_value=effective_margin_m,
     )
@@ -614,9 +777,7 @@ def hardware_sdf_clearance_hinge_pure(gammac, grid, origin_m, spacing_m,
 
 def hardware_sdf_clearance_softmin_hinge_pure(
     gammac,
-    grid,
-    origin_m,
-    spacing_m,
+    grid_fields,
     effective_margin_m,
     target_margin_m,
     soft_min_temperature_m,
@@ -629,10 +790,8 @@ def hardware_sdf_clearance_softmin_hinge_pure(
     surface_points = swept_channel_surface_points(
         gammac, half_w, half_d, winding_r0
     )
-    phi = _sdf_trilinear(
-        grid,
-        origin_m,
-        spacing_m,
+    phi = _sdf_gridset_trilinear(
+        grid_fields,
         surface_points,
         outside_value=effective_margin_m,
     )
@@ -850,11 +1009,8 @@ class CurveHardwareSdfKeepout(Optimizable):
         self._groups = [
             {
                 "label": group.label,
-                "grid_np": np.ascontiguousarray(group.grid, dtype=np.float64),
-                "grid": jnp.asarray(group.grid),
-                "origin_np": np.asarray(group.origin_m, dtype=np.float64),
-                "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
-                "spacing": float(group.spacing_m),
+                "grid_fields": _sdf_group_jax_fields(group),
+                "grid_fields_np": _sdf_group_numpy_fields(group),
                 "effective_margin": float(group.effective_margin_m),
             }
             for group in sdf_data.groups
@@ -863,12 +1019,10 @@ class CurveHardwareSdfKeepout(Optimizable):
         # value-live; frame-orientation gradient deferred -- the curve VJP keeps
         # the centerline-translation gradient). It stays in the JAX-traced path.
         self.J_jax = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
             hardware_sdf_keepout_pure(
                 gammac,
-                grid,
-                origin,
-                spacing,
+                grid_fields,
                 effective_margin,
                 self.half_w,
                 self.half_d,
@@ -877,9 +1031,9 @@ class CurveHardwareSdfKeepout(Optimizable):
             )
         )
         self.dJ_dgamma = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
             grad(self.J_jax, argnums=0)(
-                gammac, grid, origin, spacing, effective_margin, winding_r0_, weights
+                gammac, grid_fields, effective_margin, winding_r0_, weights
             )
         )
         super().__init__(depends_on=curves)
@@ -902,9 +1056,7 @@ class CurveHardwareSdfKeepout(Optimizable):
         return float(
             self.J_jax(
                 gammac,
-                group["grid"],
-                group["origin"],
-                group["spacing"],
+                group["grid_fields"],
                 group["effective_margin"],
                 winding_r0,
                 weights,
@@ -932,9 +1084,7 @@ class CurveHardwareSdfKeepout(Optimizable):
                 dgamma_vecs[curve_index] += np.asarray(
                     self.dJ_dgamma(
                         gammac,
-                        group["grid"],
-                        group["origin"],
-                        group["spacing"],
+                        group["grid_fields"],
                         group["effective_margin"],
                         winding_r0,
                         weights,
@@ -944,33 +1094,6 @@ class CurveHardwareSdfKeepout(Optimizable):
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
-
-    def _interp_numpy(self, grid, origin, spacing, points, outside_value):
-        local = (points - origin) / spacing
-        shape = np.asarray(grid.shape, dtype=int)
-        valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
-        lower_f = np.floor(local)
-        lower = np.clip(lower_f.astype(int), 0, shape - 2)
-        frac = np.clip(local - lower_f, 0.0, 1.0)
-        i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
-        i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
-        tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
-        c000 = grid[i0, j0, k0]
-        c100 = grid[i1, j0, k0]
-        c010 = grid[i0, j1, k0]
-        c110 = grid[i1, j1, k0]
-        c001 = grid[i0, j0, k1]
-        c101 = grid[i1, j0, k1]
-        c011 = grid[i0, j1, k1]
-        c111 = grid[i1, j1, k1]
-        c00 = c000 * (1.0 - tx) + c100 * tx
-        c10 = c010 * (1.0 - tx) + c110 * tx
-        c01 = c001 * (1.0 - tx) + c101 * tx
-        c11 = c011 * (1.0 - tx) + c111 * tx
-        c0 = c00 * (1.0 - ty) + c10 * ty
-        c1 = c01 * (1.0 - ty) + c11 * ty
-        value = c0 * (1.0 - tz) + c1 * tz
-        return np.where(valid, value, outside_value)
 
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
@@ -987,10 +1110,8 @@ class CurveHardwareSdfKeepout(Optimizable):
                 dtype=np.float64,
             )
             for group in self._groups:
-                values = self._interp_numpy(
-                    group["grid_np"],
-                    group["origin_np"],
-                    group["spacing"],
+                values = _sdf_gridset_trilinear_numpy(
+                    group["grid_fields_np"],
                     surface_points,
                     outside_value=group["effective_margin"],
                 )
@@ -1054,22 +1175,17 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
         self._groups = [
             {
                 "label": group.label,
-                "grid": jnp.asarray(group.grid),
-                "grid_np": np.asarray(group.grid, dtype=np.float64),
-                "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
-                "origin_np": np.asarray(group.origin_m, dtype=np.float64),
-                "spacing": float(group.spacing_m),
+                "grid_fields": _sdf_group_jax_fields(group),
+                "grid_fields_np": _sdf_group_numpy_fields(group),
                 "effective_margin": float(group.effective_margin_m),
             }
             for group in sdf_data.groups
         ]
         self.J_jax = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
             hardware_sdf_free_space_reward_pure(
                 gammac,
-                grid,
-                origin,
-                spacing,
+                grid_fields,
                 effective_margin,
                 self.half_w,
                 self.half_d,
@@ -1078,9 +1194,9 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
             )
         )
         self.dJ_dgamma = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
             grad(self.J_jax, argnums=0)(
-                gammac, grid, origin, spacing, effective_margin, winding_r0_, weights
+                gammac, grid_fields, effective_margin, winding_r0_, weights
             )
         )
         super().__init__(depends_on=curves)
@@ -1104,9 +1220,7 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                 total += float(
                     self.J_jax(
                         gammac,
-                        group["grid"],
-                        group["origin"],
-                        group["spacing"],
+                        group["grid_fields"],
                         group["effective_margin"],
                         winding_r0,
                         weights,
@@ -1125,9 +1239,7 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                 dgamma_vecs[curve_index] += np.asarray(
                     self.dJ_dgamma(
                         gammac,
-                        group["grid"],
-                        group["origin"],
-                        group["spacing"],
+                        group["grid_fields"],
                         group["effective_margin"],
                         winding_r0,
                         weights,
@@ -1137,33 +1249,6 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
-
-    def _interp_numpy(self, grid, origin, spacing, points, outside_value):
-        local = (points - origin) / spacing
-        shape = np.asarray(grid.shape, dtype=int)
-        valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
-        lower_f = np.floor(local)
-        lower = np.clip(lower_f.astype(int), 0, shape - 2)
-        frac = np.clip(local - lower_f, 0.0, 1.0)
-        i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
-        i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
-        tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
-        c000 = grid[i0, j0, k0]
-        c100 = grid[i1, j0, k0]
-        c010 = grid[i0, j1, k0]
-        c110 = grid[i1, j1, k0]
-        c001 = grid[i0, j0, k1]
-        c101 = grid[i1, j0, k1]
-        c011 = grid[i0, j1, k1]
-        c111 = grid[i1, j1, k1]
-        c00 = c000 * (1.0 - tx) + c100 * tx
-        c10 = c010 * (1.0 - tx) + c110 * tx
-        c01 = c001 * (1.0 - tx) + c101 * tx
-        c11 = c011 * (1.0 - tx) + c111 * tx
-        c0 = c00 * (1.0 - ty) + c10 * ty
-        c1 = c01 * (1.0 - ty) + c11 * ty
-        value = c0 * (1.0 - tz) + c1 * tz
-        return np.where(valid, value, outside_value)
 
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
@@ -1180,10 +1265,8 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                 dtype=np.float64,
             )
             for group in self._groups:
-                values = self._interp_numpy(
-                    group["grid_np"],
-                    group["origin_np"],
-                    group["spacing"],
+                values = _sdf_gridset_trilinear_numpy(
+                    group["grid_fields_np"],
                     surface_points,
                     outside_value=group["effective_margin"],
                 )
@@ -1272,24 +1355,19 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
         self._groups = [
             {
                 "label": group.label,
-                "grid": jnp.asarray(group.grid),
-                "grid_np": np.asarray(group.grid, dtype=np.float64),
-                "origin": jnp.asarray(group.origin_m, dtype=jnp.float64),
-                "origin_np": np.asarray(group.origin_m, dtype=np.float64),
-                "spacing": float(group.spacing_m),
+                "grid_fields": _sdf_group_jax_fields(group),
+                "grid_fields_np": _sdf_group_numpy_fields(group),
                 "effective_margin": float(group.effective_margin_m),
             }
             for group in sdf_data.groups
         ]
         if self.soft_min_temperature is None:
             self.J_jax = jit(
-                lambda gammac, grid, origin, spacing, effective_margin,
+                lambda gammac, grid_fields, effective_margin,
                 winding_r0_, weights:
                 hardware_sdf_clearance_hinge_pure(
                     gammac,
-                    grid,
-                    origin,
-                    spacing,
+                    grid_fields,
                     effective_margin,
                     self.target_margin,
                     self.half_w,
@@ -1300,13 +1378,11 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
             )
         else:
             self.J_jax = jit(
-                lambda gammac, grid, origin, spacing, effective_margin,
+                lambda gammac, grid_fields, effective_margin,
                 winding_r0_, weights:
                 hardware_sdf_clearance_softmin_hinge_pure(
                     gammac,
-                    grid,
-                    origin,
-                    spacing,
+                    grid_fields,
                     effective_margin,
                     self.target_margin,
                     self.soft_min_temperature,
@@ -1315,11 +1391,11 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                     winding_r0_,
                     weights,
                 )
-            )
+        )
         self.dJ_dgamma = jit(
-            lambda gammac, grid, origin, spacing, effective_margin, winding_r0_, weights:
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
             grad(self.J_jax, argnums=0)(
-                gammac, grid, origin, spacing, effective_margin, winding_r0_, weights
+                gammac, grid_fields, effective_margin, winding_r0_, weights
             )
         )
         super().__init__(depends_on=curves)
@@ -1343,9 +1419,7 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                 total += float(
                     self.J_jax(
                         gammac,
-                        group["grid"],
-                        group["origin"],
-                        group["spacing"],
+                        group["grid_fields"],
                         group["effective_margin"],
                         winding_r0,
                         weights,
@@ -1364,9 +1438,7 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                 dgamma_vecs[curve_index] += np.asarray(
                     self.dJ_dgamma(
                         gammac,
-                        group["grid"],
-                        group["origin"],
-                        group["spacing"],
+                        group["grid_fields"],
                         group["effective_margin"],
                         winding_r0,
                         weights,
@@ -1376,33 +1448,6 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
-
-    def _interp_numpy(self, grid, origin, spacing, points, outside_value):
-        local = (points - origin) / spacing
-        shape = np.asarray(grid.shape, dtype=int)
-        valid = np.all((local >= 0.0) & (local <= (shape - 1)), axis=1)
-        lower_f = np.floor(local)
-        lower = np.clip(lower_f.astype(int), 0, shape - 2)
-        frac = np.clip(local - lower_f, 0.0, 1.0)
-        i0, j0, k0 = lower[:, 0], lower[:, 1], lower[:, 2]
-        i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
-        tx, ty, tz = frac[:, 0], frac[:, 1], frac[:, 2]
-        c000 = grid[i0, j0, k0]
-        c100 = grid[i1, j0, k0]
-        c010 = grid[i0, j1, k0]
-        c110 = grid[i1, j1, k0]
-        c001 = grid[i0, j0, k1]
-        c101 = grid[i1, j0, k1]
-        c011 = grid[i0, j1, k1]
-        c111 = grid[i1, j1, k1]
-        c00 = c000 * (1.0 - tx) + c100 * tx
-        c10 = c010 * (1.0 - tx) + c110 * tx
-        c01 = c001 * (1.0 - tx) + c101 * tx
-        c11 = c011 * (1.0 - tx) + c111 * tx
-        c0 = c00 * (1.0 - ty) + c10 * ty
-        c1 = c01 * (1.0 - ty) + c11 * ty
-        value = c0 * (1.0 - tz) + c1 * tz
-        return np.where(valid, value, outside_value)
 
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
@@ -1419,10 +1464,8 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                 dtype=np.float64,
             )
             for group in self._groups:
-                values = self._interp_numpy(
-                    group["grid_np"],
-                    group["origin_np"],
-                    group["spacing"],
+                values = _sdf_gridset_trilinear_numpy(
+                    group["grid_fields_np"],
                     surface_points,
                     outside_value=group["effective_margin"],
                 )
@@ -1847,6 +1890,67 @@ def _validated_hardware_sdf_glb_sha(manifest, path, glb_path):
     return live_sha
 
 
+def _load_hardware_sdf_grid_spec(
+    *,
+    payload,
+    data_path,
+    spec,
+    owner,
+    field_key_default,
+    top_margin,
+    top_narrow_band,
+    minimum_effective_margin,
+    sign_method_default=None,
+):
+    field_key = str(spec.get("field_key", field_key_default))
+    if field_key not in payload:
+        raise ValueError(
+            f"SDF data payload {os.fspath(data_path)!r} is missing "
+            f"field {field_key!r} for {owner}")
+    grid = np.ascontiguousarray(np.asarray(payload[field_key], dtype=np.float64))
+    if grid.ndim != 3 or min(grid.shape) < 2:
+        raise ValueError(
+            f"SDF {owner} must be a 3-D grid with every "
+            f"dimension >= 2, got {grid.shape}")
+    if not np.isfinite(grid).all():
+        raise ValueError(f"SDF {owner} grid values must be finite")
+    expected_shape = spec.get("shape")
+    if expected_shape is not None and tuple(expected_shape) != grid.shape:
+        raise ValueError(
+            f"SDF {owner} shape mismatch: manifest "
+            f"{tuple(expected_shape)} vs payload {grid.shape}")
+    origin = np.asarray(spec["origin_m"], dtype=np.float64)
+    if origin.shape != (3,):
+        raise ValueError(
+            f"SDF {owner} origin_m must be length 3, got {origin.shape}")
+    if not np.isfinite(origin).all():
+        raise ValueError(f"SDF {owner} origin_m values must be finite")
+    spacing = float(spec["spacing_m"])
+    if not np.isfinite(spacing) or spacing <= 0.0:
+        raise ValueError(f"SDF {owner} spacing_m must be finite and > 0")
+    effective_margin = float(spec.get("effective_margin_m", top_margin))
+    if not np.isfinite(effective_margin) or effective_margin <= 0.0:
+        raise ValueError(
+            f"SDF {owner} effective_margin_m must be finite and > 0")
+    if effective_margin + 1.0e-12 < minimum_effective_margin:
+        raise ValueError(
+            f"SDF {owner} effective_margin_m must cover "
+            "safety_margin_m plus error_budget_m.e_total_m "
+            f"({effective_margin} < {minimum_effective_margin})")
+    narrow_band = float(spec.get("narrow_band_m", top_narrow_band))
+    _validate_hardware_sdf_narrow_band(narrow_band, effective_margin, owner)
+    sign_method = str(spec.get(
+        "sign_method",
+        "unknown" if sign_method_default is None else sign_method_default,
+    ))
+    if sign_method not in OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS:
+        allowed = ", ".join(sorted(OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS))
+        raise ValueError(
+            f"SDF {owner} sign_method {sign_method!r} is not "
+            f"optimizer-safe; expected one of {allowed}")
+    return grid, origin, spacing, narrow_band, effective_margin, sign_method
+
+
 def load_hardware_sdf(path, glb_path=None):
     """Load a manifest-bound ``hardware_sdf.json``/``.npz`` payload.
 
@@ -1899,56 +2003,63 @@ def load_hardware_sdf(path, glb_path=None):
     with np.load(data_path) as payload:
         for group in group_specs:
             label = str(group["label"])
-            field_key = str(group.get("field_key", label))
-            if field_key not in payload:
-                raise ValueError(
-                    f"SDF data payload {os.fspath(data_path)!r} is missing "
-                    f"field {field_key!r} for group {label!r}")
-            grid = np.ascontiguousarray(np.asarray(payload[field_key], dtype=np.float64))
-            if grid.ndim != 3 or min(grid.shape) < 2:
-                raise ValueError(
-                    f"SDF group {label!r} must be a 3-D grid with every "
-                    f"dimension >= 2, got {grid.shape}")
-            if not np.isfinite(grid).all():
-                raise ValueError(
-                    f"SDF group {label!r} grid values must be finite")
-            expected_shape = group.get("shape")
-            if expected_shape is not None and tuple(expected_shape) != grid.shape:
-                raise ValueError(
-                    f"SDF group {label!r} shape mismatch: manifest "
-                    f"{tuple(expected_shape)} vs payload {grid.shape}")
-            origin = np.asarray(group["origin_m"], dtype=np.float64)
-            if origin.shape != (3,):
-                raise ValueError(
-                    f"SDF group {label!r} origin_m must be length 3, got "
-                    f"{origin.shape}")
-            if not np.isfinite(origin).all():
-                raise ValueError(
-                    f"SDF group {label!r} origin_m values must be finite")
-            spacing = float(group["spacing_m"])
-            if not np.isfinite(spacing) or spacing <= 0.0:
-                raise ValueError(
-                    f"SDF group {label!r} spacing_m must be finite and > 0")
-            effective_margin = float(group.get("effective_margin_m", top_margin))
-            if not np.isfinite(effective_margin) or effective_margin <= 0.0:
-                raise ValueError(
-                    f"SDF group {label!r} effective_margin_m must be finite "
-                    "and > 0")
-            if effective_margin + 1.0e-12 < minimum_effective_margin:
-                raise ValueError(
-                    f"SDF group {label!r} effective_margin_m must cover "
-                    "safety_margin_m plus error_budget_m.e_total_m "
-                    f"({effective_margin} < {minimum_effective_margin})")
-            narrow_band = float(group.get("narrow_band_m", top_narrow_band))
-            _validate_hardware_sdf_narrow_band(
-                narrow_band, effective_margin, f"group {label!r}")
-            sign_method = str(group.get("sign_method", "unknown"))
-            if sign_method not in OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS:
-                allowed = ", ".join(sorted(
-                    OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS))
-                raise ValueError(
-                    f"SDF group {label!r} sign_method {sign_method!r} is not "
-                    f"optimizer-safe; expected one of {allowed}")
+            grid, origin, spacing, narrow_band, effective_margin, sign_method = (
+                _load_hardware_sdf_grid_spec(
+                    payload=payload,
+                    data_path=data_path,
+                    spec=group,
+                    owner=f"group {label!r}",
+                    field_key_default=label,
+                    top_margin=top_margin,
+                    top_narrow_band=top_narrow_band,
+                    minimum_effective_margin=minimum_effective_margin,
+                )
+            )
+            patches = []
+            seen_patch_labels = set()
+            for patch_index, patch in enumerate(group.get("patches", ())):
+                patch_label = str(patch.get("label", f"patch_{patch_index}"))
+                if patch_label in seen_patch_labels:
+                    raise ValueError(
+                        f"SDF group {label!r} has duplicate patch label "
+                        f"{patch_label!r}")
+                seen_patch_labels.add(patch_label)
+                (
+                    patch_grid,
+                    patch_origin,
+                    patch_spacing,
+                    patch_narrow_band,
+                    patch_effective_margin,
+                    patch_sign_method,
+                ) = _load_hardware_sdf_grid_spec(
+                    payload=payload,
+                    data_path=data_path,
+                    spec=patch,
+                    owner=f"group {label!r} patch {patch_label!r}",
+                    field_key_default=patch_label,
+                    top_margin=effective_margin,
+                    top_narrow_band=narrow_band,
+                    minimum_effective_margin=minimum_effective_margin,
+                    sign_method_default=sign_method,
+                )
+                if patch_spacing + 1.0e-12 >= spacing:
+                    raise ValueError(
+                        f"SDF group {label!r} patch {patch_label!r} "
+                        "spacing_m must be finer than the base grid")
+                patches.append(
+                    HardwareSdfPatch(
+                        label=patch_label,
+                        grid=patch_grid,
+                        origin_m=patch_origin,
+                        spacing_m=patch_spacing,
+                        narrow_band_m=patch_narrow_band,
+                        effective_margin_m=patch_effective_margin,
+                        sign_method=patch_sign_method,
+                    )
+                )
+            patches = tuple(
+                sorted(patches, key=lambda patch: (-patch.spacing_m, patch.label))
+            )
             groups.append(
                 HardwareSdfGroup(
                     label=label,
@@ -1958,6 +2069,7 @@ def load_hardware_sdf(path, glb_path=None):
                     narrow_band_m=narrow_band,
                     effective_margin_m=effective_margin,
                     sign_method=sign_method,
+                    patches=patches,
                 )
             )
 
@@ -1991,6 +2103,9 @@ def hardware_sdf_metadata_from_data(sdf_data):
         "HARDWARE_SDF_GROUPS": list(sdf_data.group_labels),
         "HARDWARE_SDF_SIGN_METHODS": sdf_data.sign_methods,
         "HARDWARE_SDF_EFFECTIVE_MARGIN_M": sdf_data.effective_margin_m,
+        "HARDWARE_SDF_PATCH_COUNT": sdf_data.patch_count,
+        "HARDWARE_SDF_PATCH_LABELS": sdf_data.patch_labels,
+        "HARDWARE_SDF_PATCH_SPACING_M": sdf_data.patch_spacing_m,
         "HARDWARE_SDF_SAFETY_MARGIN_M": sdf_data.safety_margin_m,
         "HARDWARE_SDF_ERROR_BUDGET_M": sdf_data.error_budget_m,
         "DOCUMENTED_GATE_ONLY_GROUPS": sorted(
