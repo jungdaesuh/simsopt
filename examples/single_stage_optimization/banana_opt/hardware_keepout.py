@@ -597,6 +597,27 @@ def _sdf_group_numpy_fields(group):
     return tuple(fields)
 
 
+CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE = "curvature"
+CLEARANCE_ARC_WEIGHT_PROFILE_SMOOTH_TOROIDAL_RATE = "smooth_toroidal_rate"
+CLEARANCE_ARC_WEIGHT_PROFILES = (
+    CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE,
+    CLEARANCE_ARC_WEIGHT_PROFILE_SMOOTH_TOROIDAL_RATE,
+)
+
+
+def _raised_cosine_arc_weight(signal, leg_weight, uturn_weight):
+    signal = np.asarray(signal, dtype=np.float64)
+    lo = float(signal.min())
+    hi = float(signal.max())
+    leg = float(leg_weight)
+    span = hi - lo
+    if span <= 1.0e-12 * max(abs(hi), 1.0):
+        return np.full_like(signal, leg)
+    frac = (signal - lo) / span
+    smooth = 0.5 - 0.5 * np.cos(np.pi * frac)
+    return leg + (float(uturn_weight) - leg) * smooth
+
+
 def curvature_arc_weight(kappa, leg_weight, uturn_weight):
     """Per-station clearance weight that emphasizes high-curvature U-turn stations.
 
@@ -622,36 +643,74 @@ def curvature_arc_weight(kappa, leg_weight, uturn_weight):
     return leg + (float(uturn_weight) - leg) * frac
 
 
-def resolve_clearance_arc_weight(leg_weight, uturn_weight):
+def smooth_toroidal_rate_arc_weight(gamma, leg_weight, uturn_weight):
+    """Smooth per-station clearance weight from toroidal-angle advance.
+
+    This profile is independent of local curvature spikes. It uses the periodic
+    finite-difference magnitude of the centerline toroidal angle and maps the
+    resulting signal through a raised-cosine profile, so the weights are smooth
+    in station index and never discontinuous. As with curvature weighting, the
+    returned NumPy array is frozen at objective construction and is not
+    differentiated.
+    """
+    gamma = np.asarray(gamma, dtype=np.float64)
+    if gamma.ndim != 2 or gamma.shape[1] != 3:
+        raise ValueError("gamma must have shape (n, 3)")
+    phi = np.arctan2(gamma[:, 1], gamma[:, 0])
+    forward = np.arctan2(
+        np.sin(np.roll(phi, -1) - phi),
+        np.cos(np.roll(phi, -1) - phi),
+    )
+    backward = np.arctan2(
+        np.sin(phi - np.roll(phi, 1)),
+        np.cos(phi - np.roll(phi, 1)),
+    )
+    toroidal_rate = 0.5 * (np.abs(forward) + np.abs(backward))
+    return _raised_cosine_arc_weight(toroidal_rate, leg_weight, uturn_weight)
+
+
+def resolve_clearance_arc_weight(
+    leg_weight,
+    uturn_weight,
+    profile=CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE,
+):
     """Normalize the (leg, U-turn) clearance-weight pair to an arc-weight config.
 
     Returns ``None`` for the uniform default (both weights 1.0), which selects
     the original unweighted-mean clearance objective byte-for-byte. Any other
-    pair returns ``(leg_weight, uturn_weight)`` to activate curvature-based arc
+    pair returns ``(profile, leg_weight, uturn_weight)`` to activate arc
     weighting. Both weights must be positive.
     """
     leg = float(leg_weight)
     uturn = float(uturn_weight)
     if leg <= 0.0 or uturn <= 0.0:
         raise ValueError("clearance leg/U-turn weights must be positive")
+    profile = str(profile)
+    if profile not in CLEARANCE_ARC_WEIGHT_PROFILES:
+        raise ValueError(
+            "clearance arc weight profile must be one of "
+            f"{', '.join(CLEARANCE_ARC_WEIGHT_PROFILES)}"
+        )
     if leg == 1.0 and uturn == 1.0:
         return None
-    return (leg, uturn)
+    return (profile, leg, uturn)
 
 
 def _station_arc_weights(curve, arc_weight):
     """Per-station clearance weights for ``curve``, or None when uniform.
 
-    ``arc_weight`` is the resolved (leg, U-turn) pair or None. Evaluated once at
-    construction from the seed curvature and then held fixed: the profile selects
+    ``arc_weight`` is the resolved profile config or None. Evaluated once at
+    construction from the seed geometry and then held fixed: the profile selects
     which arc stations the clearance term emphasizes and is never differentiated,
     so the term's J and dJ stay mutually consistent under optimization (the
     U-turn stations are a fixed property of the coil layout).
     """
     if arc_weight is None:
         return None
-    leg, uturn = arc_weight
-    return curvature_arc_weight(curve.kappa(), leg, uturn)
+    profile, leg, uturn = arc_weight
+    if profile == CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE:
+        return curvature_arc_weight(curve.kappa(), leg, uturn)
+    return smooth_toroidal_rate_arc_weight(curve.gamma(), leg, uturn)
 
 
 def _weighted_mean_square(values, weights):
@@ -985,7 +1044,8 @@ class CurveHardwareSdfKeepout(Optimizable):
                  half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
                  winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
                  clearance_leg_weight=1.0,
-                 clearance_uturn_weight=1.0):
+                 clearance_uturn_weight=1.0,
+                 clearance_arc_weight_profile=CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE):
         if not isinstance(sdf_data, HardwareSdfData):
             raise TypeError("sdf_data must come from load_hardware_sdf(...)")
         if not sdf_data.groups:
@@ -994,11 +1054,13 @@ class CurveHardwareSdfKeepout(Optimizable):
         self.sdf_data = sdf_data
         self.half_w = float(half_w)
         self.half_d = float(half_d)
-        # Curvature-based arc weighting (None = uniform, byte-identical default).
-        # Frozen here from the seed curvature so J and dJ stay mutually
+        # Arc weighting (None = uniform, byte-identical default).
+        # Frozen here from the seed geometry so J and dJ stay mutually
         # consistent (the weight profile is data, not an optimized quantity).
         self._arc_weight = resolve_clearance_arc_weight(
-            clearance_leg_weight, clearance_uturn_weight
+            clearance_leg_weight,
+            clearance_uturn_weight,
+            clearance_arc_weight_profile,
         )
         self._station_weights = [
             _station_arc_weights(c, self._arc_weight) for c in curves
@@ -1153,7 +1215,8 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                  half_d=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
                  winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
                  clearance_leg_weight=1.0,
-                 clearance_uturn_weight=1.0):
+                 clearance_uturn_weight=1.0,
+                 clearance_arc_weight_profile=CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE):
         if not isinstance(sdf_data, HardwareSdfData):
             raise TypeError("sdf_data must come from load_hardware_sdf(...)")
         if not sdf_data.groups:
@@ -1163,11 +1226,13 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
         self.half_w = float(half_w)
         self.half_d = float(half_d)
         self._winding_r0_fallback = float(winding_r0)
-        # Curvature-based arc weighting (None = uniform, byte-identical default).
-        # Frozen here from the seed curvature so J and dJ stay mutually
+        # Arc weighting (None = uniform, byte-identical default).
+        # Frozen here from the seed geometry so J and dJ stay mutually
         # consistent (the weight profile is data, not an optimized quantity).
         self._arc_weight = resolve_clearance_arc_weight(
-            clearance_leg_weight, clearance_uturn_weight
+            clearance_leg_weight,
+            clearance_uturn_weight,
+            clearance_arc_weight_profile,
         )
         self._station_weights = [
             _station_arc_weights(c, self._arc_weight) for c in curves
@@ -1322,6 +1387,7 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                  winding_r0=BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
                  clearance_leg_weight=1.0,
                  clearance_uturn_weight=1.0,
+                 clearance_arc_weight_profile=CLEARANCE_ARC_WEIGHT_PROFILE_CURVATURE,
                  soft_min_temperature=None):
         if not isinstance(sdf_data, HardwareSdfData):
             raise TypeError("sdf_data must come from load_hardware_sdf(...)")
@@ -1343,11 +1409,13 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
         self.half_w = float(half_w)
         self.half_d = float(half_d)
         self._winding_r0_fallback = float(winding_r0)
-        # Curvature-based arc weighting (None = uniform, byte-identical default).
-        # Frozen here from the seed curvature so J and dJ stay mutually
+        # Arc weighting (None = uniform, byte-identical default).
+        # Frozen here from the seed geometry so J and dJ stay mutually
         # consistent (the weight profile is data, not an optimized quantity).
         self._arc_weight = resolve_clearance_arc_weight(
-            clearance_leg_weight, clearance_uturn_weight
+            clearance_leg_weight,
+            clearance_uturn_weight,
+            clearance_arc_weight_profile,
         )
         self._station_weights = [
             _station_arc_weights(c, self._arc_weight) for c in curves

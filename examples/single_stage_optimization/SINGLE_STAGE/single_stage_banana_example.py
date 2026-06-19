@@ -18834,3 +18834,53 @@ if __name__ == "__main__":
             os.path.join(OUT_DIR_ITER, "seed_manifest.json"),
             strict_vacuum_seed_manifest,
         )
+    CLEARANCE_ARC_WEIGHT_PROFILES,
+    parser.add_argument(
+        "--clearance-arc-weight-profile",
+        choices=CLEARANCE_ARC_WEIGHT_PROFILES,
+        default=os.environ.get("CLEARANCE_ARC_WEIGHT_PROFILE", "curvature"),
+        help=(
+            "Station-weight profile for non-uniform SDF clearance reductions. "
+            "'curvature' preserves the existing min/max curvature map; "
+            "'smooth_toroidal_rate' uses a raised-cosine map of toroidal angle "
+            "advance to avoid curvature-spike anchoring. Active only when "
+            "--clearance-leg-weight/--clearance-uturn-weight are non-uniform and "
+            "an SDF clearance objective is active."
+        ),
+    )
+    for attr_name, flag in (
+        ("clearance_leg_weight", "--clearance-leg-weight"),
+        ("clearance_uturn_weight", "--clearance-uturn-weight"),
+    ):
+        value = float(getattr(args, attr_name))
+        if not np.isfinite(value) or value <= 0.0:
+            parser.error(f"{flag} must be finite and positive.")
+    if args.clearance_arc_weight_profile not in CLEARANCE_ARC_WEIGHT_PROFILES:
+        parser.error(
+            "--clearance-arc-weight-profile must be one of "
+            f"{', '.join(CLEARANCE_ARC_WEIGHT_PROFILES)}."
+        )
+                clearance_arc_weight_profile=(
+                    SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE
+                ),
+            clearance_arc_weight_profile=SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE,
+            clearance_arc_weight_profile=SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE,
+SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE = "curvature"
+    SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE = args.clearance_arc_weight_profile
+    clearance_arc_weight_active = any(
+        getattr(obj, "_arc_weight", None) is not None
+        for obj in (
+            JCurveHardwareKeepout,
+            JCurveHardwareSdfFreeSpaceReward,
+            JCurveHardwareSdfClearanceHinge,
+        )
+    )
+        "SINGLE_STAGE_CLEARANCE_LEG_WEIGHT": SINGLE_STAGE_CLEARANCE_LEG_WEIGHT,
+        "SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT": SINGLE_STAGE_CLEARANCE_UTURN_WEIGHT,
+        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE": (
+            SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_PROFILE
+        ),
+        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_ACTIVE": clearance_arc_weight_active,
+        "SINGLE_STAGE_CLEARANCE_ARC_WEIGHT_BACKEND_SCOPE": (
+            "sdf_station_reductions" if clearance_arc_weight_active else None
+        ),

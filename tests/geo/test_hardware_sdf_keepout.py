@@ -31,6 +31,7 @@ from banana_opt.hardware_keepout import (  # noqa: E402
     hardware_sdf_metadata,
     load_hardware_sdf,
     resolve_clearance_arc_weight,
+    smooth_toroidal_rate_arc_weight,
 )
 from banana_opt.single_stage_objectives import build_total_objective  # noqa: E402
 from simsopt.geo import CurveXYZFourier  # noqa: E402
@@ -869,16 +870,42 @@ class ClearanceArcWeightTests(unittest.TestCase):
 
     def test_resolve_clearance_arc_weight_default_and_validation(self):
         self.assertIsNone(resolve_clearance_arc_weight(1.0, 1.0))
-        self.assertEqual(resolve_clearance_arc_weight(0.2, 5.0), (0.2, 5.0))
+        self.assertEqual(
+            resolve_clearance_arc_weight(0.2, 5.0),
+            ("curvature", 0.2, 5.0),
+        )
+        self.assertEqual(
+            resolve_clearance_arc_weight(0.2, 5.0, "smooth_toroidal_rate"),
+            ("smooth_toroidal_rate", 0.2, 5.0),
+        )
         for bad in [(0.0, 1.0), (1.0, -1.0)]:
             with self.assertRaisesRegex(ValueError, "must be positive"):
                 resolve_clearance_arc_weight(*bad)
+        with self.assertRaisesRegex(ValueError, "profile must be one of"):
+            resolve_clearance_arc_weight(0.2, 5.0, "step")
 
     def test_curvature_arc_weight_maps_min_to_leg_max_to_uturn(self):
         w = curvature_arc_weight(np.array([10.0, 20.0, 30.0]), 0.5, 2.0)
         self.assertTrue(np.allclose(w, [0.5, 1.25, 2.0]))
         flat = curvature_arc_weight(np.array([7.0, 7.0]), 0.5, 2.0)
         self.assertTrue(np.allclose(flat, [0.5, 0.5]))
+
+    def test_smooth_toroidal_rate_arc_weight_is_smooth_and_periodic(self):
+        phi = np.array([0.0, 0.08, 0.31, 1.15, 2.2, 4.0])
+        gamma = np.column_stack(
+            [np.cos(phi), np.sin(phi), np.zeros_like(phi)]
+        )
+        w = smooth_toroidal_rate_arc_weight(gamma, 0.5, 2.0)
+        self.assertAlmostEqual(float(np.min(w)), 0.5)
+        self.assertAlmostEqual(float(np.max(w)), 2.0)
+        self.assertGreater(np.ptp(w), 0.0)
+
+        circle_phi = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False)
+        circle = np.column_stack(
+            [np.cos(circle_phi), np.sin(circle_phi), np.zeros_like(circle_phi)]
+        )
+        flat = smooth_toroidal_rate_arc_weight(circle, 0.5, 2.0)
+        self.assertTrue(np.allclose(flat, 0.5))
 
     def test_uniform_weights_are_byte_identical_to_default(self):
         with tempfile.TemporaryDirectory() as td:
@@ -935,6 +962,24 @@ class ClearanceArcWeightTests(unittest.TestCase):
                 uniform.J(), flared.J(), places=6,
                 msg="arc weighting must change J on a varying clearance field",
             )
+
+    def test_smooth_toroidal_rate_profile_freezes_expected_weights(self):
+        with tempfile.TemporaryDirectory() as td:
+            sdf = self._active_plane_sdf(Path(td))
+            curve = _wavy_curve()
+            flared = CurveHardwareSdfFreeSpaceReward(
+                [curve], sdf, winding_r0=0.0,
+                clearance_leg_weight=0.2, clearance_uturn_weight=5.0,
+                clearance_arc_weight_profile="smooth_toroidal_rate",
+            )
+            expected = smooth_toroidal_rate_arc_weight(
+                curve.gamma(), 0.2, 5.0
+            )
+            self.assertEqual(
+                flared._arc_weight,
+                ("smooth_toroidal_rate", 0.2, 5.0),
+            )
+            self.assertTrue(np.allclose(flared._station_weights[0], expected))
 
     def test_arc_weighted_gradient_matches_finite_difference(self):
         # The decisive guard for the freeze-at-construction design: weights are
