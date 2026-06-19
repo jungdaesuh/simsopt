@@ -346,6 +346,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
     _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE,
     _PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK,
     _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT,
+    _PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT,
     _SEED_REGIME_BRIDGE_ONLY as _PHASE1_SEED_REGIME_BRIDGE_ONLY,
     _SEED_REGIME_PRESERVE_FIRST as _PHASE1_SEED_REGIME_PRESERVE_FIRST,
     _SEED_REGIME_REPAIR_FIRST as _PHASE1_SEED_REGIME_REPAIR_FIRST,
@@ -354,6 +355,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
     build_phase1_config,
     resolve_initial_step_phase_maxiter,
     resolve_penalty_phase1_settings,
+    resolve_penalty_phase2_step_norm_limit,
     run_penalty_phase1,
 )
 from banana_opt.stage2_single_stage_handoff import (
@@ -1932,6 +1934,12 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--resume-solver-continuation-maxiter",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--warm-start-surface-stem",
         default=None,
         help=(
@@ -1939,6 +1947,17 @@ def parse_args():
             "(for example /path/to/surf_best_feasible). When set, the single-stage "
             "initializer reuses the saved Boozer surface geometry/iota/G as its "
             "starting seed."
+        ),
+    )
+    parser.add_argument(
+        "--warm-continue-step-norm-limit",
+        type=float,
+        default=float(os.environ.get("WARM_CONTINUE_STEP_NORM_LIMIT", "0.0")),
+        help=(
+            "Default-off trust cap for warm/resume continuations. When positive, "
+            "optimizer trial steps farther than this DOF-space norm from the "
+            "current accepted state are rejected before the Boozer solve. Requires "
+            "a solver checkpoint, single-stage resume seed, or warm-start surface."
         ),
     )
     parser.add_argument(
@@ -13374,6 +13393,7 @@ def build_single_stage_solver_checkpoint_state(
                 "curvature_precheck_rejects",
                 0,
             ),
+            "step_norm_rejects": run_dict.get("step_norm_rejects", 0),
             "curvature_overcap_boozer_evals": run_dict.get(
                 "curvature_overcap_boozer_evals",
                 0,
@@ -13632,6 +13652,7 @@ def new_search_step_metrics():
         "hardware_rejects": 0,
         "curvature_rejects": 0,
         "curvature_precheck_rejects": 0,
+        "step_norm_rejects": 0,
         "curvature_overcap_boozer_evals": 0,
         "other_rejects": 0,
         "objective_evaluations": 0,
@@ -13645,6 +13666,7 @@ def new_search_step_metrics():
         "total_seconds": 0.0,
         "last_rejection_reason": None,
         "last_step_norm": None,
+        "last_anchor_step_norm": None,
         "last_rejection_increment": None,
     }
 
@@ -13706,6 +13728,8 @@ def record_search_step_rejection(
     elif reason == "curvature_precheck":
         metrics["curvature_rejects"] += 1
         metrics["curvature_precheck_rejects"] += 1
+    elif reason == "step_norm_limit":
+        metrics["step_norm_rejects"] += 1
     else:
         metrics["other_rejects"] += 1
 
@@ -13736,6 +13760,7 @@ def search_step_metrics_payload(run_dict):
         "SEARCH_STEP_CURVATURE_PRECHECK_REJECTS": int(
             metrics["curvature_precheck_rejects"]
         ),
+        "SEARCH_STEP_STEP_NORM_REJECTS": int(metrics["step_norm_rejects"]),
         "SEARCH_STEP_CURVATURE_OVERCAP_BOOZER_EVALS": int(
             metrics["curvature_overcap_boozer_evals"]
         ),
@@ -13759,6 +13784,10 @@ def search_step_metrics_payload(run_dict):
         "SEARCH_STEP_LAST_STEP_NORM": optional_search_step_float(
             metrics,
             "last_step_norm",
+        ),
+        "SEARCH_STEP_LAST_ANCHOR_STEP_NORM": optional_search_step_float(
+            metrics,
+            "last_anchor_step_norm",
         ),
         "SEARCH_STEP_LAST_REJECTION_INCREMENT": optional_search_step_float(
             metrics,
@@ -13902,6 +13931,34 @@ def reject_search_step_on_curvature_precheck(metrics, precheck_status, step_star
     return {"total": run_dict["J"] + rejection_increment, "grad": run_dict["dJ"].copy()}
 
 
+def reject_search_step_on_step_norm_limit(
+    metrics,
+    *,
+    step_norm,
+    step_norm_limit,
+    step_start,
+):
+    rejection_increment = hardware_rejection_increment(run_dict["J"])
+    run_dict["step_norm_rejects"] = int(run_dict.get("step_norm_rejects", 0)) + 1
+    run_dict["invalid_state_rejects_total"] += 1
+    print("/!\\ /!\\ Step norm trust gate rejected candidate /!\\ /!\\")
+    print(
+        "Trial step norm "
+        f"{step_norm:.6e} exceeds active limit {step_norm_limit:.6e}"
+    )
+    record_search_step_rejection(
+        metrics,
+        rejection_reason="step_norm_limit",
+        stack_status={"success": False},
+        hardware_status=None,
+        rejection_increment=rejection_increment,
+    )
+    JF.x = run_dict["accepted_x"]
+    restore_surface_states(surface_data, run_dict["surface_state"])
+    metrics["total_seconds"] += time.perf_counter() - step_start
+    return {"total": run_dict["J"] + rejection_increment, "grad": run_dict["dJ"].copy()}
+
+
 def evaluate_search_step(x):
     """
     Objective function for L-BFGS-B optimization.
@@ -13935,8 +13992,22 @@ def evaluate_search_step(x):
     run_dict.setdefault("surface_solve_rejects", 0)
     run_dict.setdefault("frontier_trust_rejects", 0)
     run_dict.setdefault("curvature_precheck_rejects", 0)
+    run_dict.setdefault("step_norm_rejects", 0)
     run_dict.setdefault("curvature_overcap_boozer_evals", 0)
     run_dict.setdefault("curvature_overcap_boozer_evals_this_iteration", 0)
+    active_step_norm_limit = run_dict.get("active_step_norm_limit")
+    if active_step_norm_limit is not None:
+        candidate_anchor_step_norm = float(
+            np.linalg.norm(x - run_dict["accepted_x"])
+        )
+        metrics["last_anchor_step_norm"] = candidate_anchor_step_norm
+        if candidate_anchor_step_norm > float(active_step_norm_limit) + 1.0e-12:
+            return reject_search_step_on_step_norm_limit(
+                metrics,
+                step_norm=candidate_anchor_step_norm,
+                step_norm_limit=float(active_step_norm_limit),
+                step_start=step_start,
+            )
     active_surface_mode_contract = current_surface_mode_contract_for_surface_count(
         len(surface_data)
     )
@@ -15063,6 +15134,107 @@ def resolve_effective_single_stage_iota_target(args, stage2_results):
     return resolve_single_stage_iota_target(args)
 
 
+def combine_positive_step_norm_limits(*limits):
+    positive_limits = []
+    for limit in limits:
+        if limit is None:
+            continue
+        value = float(limit)
+        if not np.isfinite(value):
+            raise ValueError("step norm limits must be finite.")
+        if value > 0.0:
+            positive_limits.append(value)
+    if not positive_limits:
+        return None
+    return min(positive_limits)
+
+
+def resolve_warm_continue_step_norm_cap(
+    step_norm_limit,
+    *,
+    resume_solver_checkpoint_payload=None,
+    resume_solver_checkpoint_path=None,
+    seed_artifact_role=SEED_ARTIFACT_ROLE_STAGE2,
+    single_stage_resume_bs_path=None,
+    warm_start_surface_stem=None,
+):
+    limit = float(step_norm_limit)
+    if not np.isfinite(limit) or limit < 0.0:
+        raise ValueError(
+            "--warm-continue-step-norm-limit must be finite and non-negative."
+        )
+    config = {
+        "limit": limit,
+        "enabled": False,
+        "source": None,
+        "source_path": None,
+        "effective_limit": None,
+        "initial_accepted_iterations": None,
+    }
+    if limit == 0.0:
+        return config
+
+    if resume_solver_checkpoint_payload is not None:
+        accepted_iterations = int(
+            resume_solver_checkpoint_payload.get("accepted_iterations", 0)
+        )
+        if accepted_iterations > 0:
+            return {
+                **config,
+                "enabled": True,
+                "source": "solver_checkpoint",
+                "source_path": resume_solver_checkpoint_path,
+                "effective_limit": limit,
+                "initial_accepted_iterations": accepted_iterations,
+            }
+
+    if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME:
+        return {
+            **config,
+            "enabled": True,
+            "source": "single_stage_resume_seed",
+            "source_path": single_stage_resume_bs_path,
+            "effective_limit": limit,
+        }
+
+    if warm_start_surface_stem is not None:
+        return {
+            **config,
+            "enabled": True,
+            "source": "warm_start_surface_stem",
+            "source_path": warm_start_surface_stem,
+            "effective_limit": limit,
+        }
+
+    raise ValueError(
+        "--warm-continue-step-norm-limit requires --resume-solver-checkpoint "
+        "with accepted iterations, --single-stage-resume-bs-path, or "
+        "--warm-start-surface-stem."
+    )
+
+
+def warm_continue_step_norm_cap_result_fields(
+    config,
+    *,
+    applied_to=(),
+    combined_with_phase2_safe_step=False,
+):
+    return {
+        "WARM_CONTINUE_STEP_NORM_LIMIT": float(config["limit"]),
+        "WARM_CONTINUE_STEP_NORM_CAP_ENABLED": bool(config["enabled"]),
+        "WARM_CONTINUE_STEP_NORM_CAP_SOURCE": config["source"],
+        "WARM_CONTINUE_STEP_NORM_CAP_SOURCE_PATH": config["source_path"],
+        "WARM_CONTINUE_STEP_NORM_CAP_EFFECTIVE_LIMIT": config["effective_limit"],
+        "WARM_CONTINUE_STEP_NORM_CAP_COMBINED_WITH_PHASE2_SAFE_STEP": bool(
+            combined_with_phase2_safe_step
+        ),
+        "WARM_CONTINUE_STEP_NORM_CAP_APPLIED_TO": list(applied_to),
+        "WARM_CONTINUE_STEP_NORM_CAP_INITIAL_ACCEPTED_ITERATIONS": config[
+            "initial_accepted_iterations"
+        ],
+    }
+
+
 if __name__ == "__main__":
     # ==============================================================================
     # CONFIGURATION PARAMETERS
@@ -15183,11 +15355,42 @@ if __name__ == "__main__":
         if args.resume_solver_checkpoint is None
         else load_solver_checkpoint(args.resume_solver_checkpoint)
     )
+    if args.resume_solver_continuation_maxiter is not None:
+        if resume_solver_checkpoint_payload is None:
+            raise ValueError(
+                "--resume-solver-continuation-maxiter requires "
+                "--resume-solver-checkpoint."
+            )
+        if args.resume_solver_continuation_maxiter < 0:
+            raise ValueError("--resume-solver-continuation-maxiter must be non-negative.")
     RUNTIME_MAXITER = (
         MAXITER
         if resume_solver_checkpoint_payload is None
-        else int(resume_solver_checkpoint_payload["remaining_maxiter"])
+        else (
+            int(resume_solver_checkpoint_payload["accepted_iterations"])
+            + int(args.resume_solver_continuation_maxiter)
+            if args.resume_solver_continuation_maxiter is not None
+            else int(resume_solver_checkpoint_payload["remaining_maxiter"])
+        )
     )
+    warm_start_surface_stem = _resolved_optional_path_string(
+        args.warm_start_surface_stem
+    )
+    warm_continue_step_norm_cap = resolve_warm_continue_step_norm_cap(
+        args.warm_continue_step_norm_limit,
+        resume_solver_checkpoint_payload=resume_solver_checkpoint_payload,
+        resume_solver_checkpoint_path=args.resume_solver_checkpoint,
+        seed_artifact_role=seed_artifact_role,
+        single_stage_resume_bs_path=(
+            str(stage2_bs_path)
+            if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
+            else None
+        ),
+        warm_start_surface_stem=warm_start_surface_stem,
+    )
+    warm_continue_step_norm_limit = warm_continue_step_norm_cap["effective_limit"]
+    warm_continue_step_norm_cap_applied_to = []
+    warm_continue_step_norm_cap_combined_with_phase2_safe_step = False
     CHECKPOINT_EVERY = args.checkpoint_every
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
@@ -15470,9 +15673,6 @@ if __name__ == "__main__":
         R0,
         vol_target,
         surface_mode_contract,
-    )
-    warm_start_surface_stem = _resolved_optional_path_string(
-        args.warm_start_surface_stem
     )
     surf = surface_configs[-1]["initial_surface"]
     banana_surf_nfp = surf.nfp
@@ -16341,6 +16541,7 @@ if __name__ == "__main__":
         "topology_gate_rejects": 0,
         "hardware_rejects": 0,
         "curvature_precheck_rejects": 0,
+        "step_norm_rejects": 0,
         "curvature_overcap_boozer_evals": 0,
         "curvature_overcap_boozer_evals_this_iteration": 0,
         "surface_solve_rejects": 0,
@@ -16396,6 +16597,7 @@ if __name__ == "__main__":
         run_dict["curvature_precheck_rejects"] = int(
             run_counters.get("curvature_precheck_rejects", 0)
         )
+        run_dict["step_norm_rejects"] = int(run_counters.get("step_norm_rejects", 0))
         run_dict["curvature_overcap_boozer_evals"] = int(
             run_counters.get("curvature_overcap_boozer_evals", 0)
         )
@@ -16934,26 +17136,33 @@ if __name__ == "__main__":
             initial_alm_penalty,
             outer_iteration=0,
         )
-        res = minimize_alm(
-            dofs,
-            alm_constraint_names,
-            evaluate_problem,
-            alm_settings,
-            {
-                "maxiter": RUNTIME_MAXITER,
-                "maxcor": args.maxcor,
-                "ftol": ftol,
-                "gtol": gtol,
-            },
-            accepted_callback=callback,
-            outer_state_callback=outer_state_callback,
-            history_callback=history_callback,
-            snapshot_accepted_state_fn=snapshot_accepted_state,
-            restore_incumbent_state_fn=restore_incumbent_state,
-            initial_multipliers=initial_alm_multipliers,
-            initial_penalty=initial_alm_penalty,
-            base_bounds=run_dict["active_optimizer_bounds"],
-        )
+        if warm_continue_step_norm_limit is not None:
+            warm_continue_step_norm_cap_applied_to.append("alm_inner_optimizer")
+        with temporary_run_dict_value(
+            run_dict,
+            "active_step_norm_limit",
+            warm_continue_step_norm_limit,
+        ):
+            res = minimize_alm(
+                dofs,
+                alm_constraint_names,
+                evaluate_problem,
+                alm_settings,
+                {
+                    "maxiter": RUNTIME_MAXITER,
+                    "maxcor": args.maxcor,
+                    "ftol": ftol,
+                    "gtol": gtol,
+                },
+                accepted_callback=callback,
+                outer_state_callback=outer_state_callback,
+                history_callback=history_callback,
+                snapshot_accepted_state_fn=snapshot_accepted_state,
+                restore_incumbent_state_fn=restore_incumbent_state,
+                initial_multipliers=initial_alm_multipliers,
+                initial_penalty=initial_alm_penalty,
+                base_bounds=run_dict["active_optimizer_bounds"],
+            )
         alm_result = res
         alm_partial_state["history"] = [
             dict(entry) for entry in getattr(res, "history", [])
@@ -17024,17 +17233,26 @@ if __name__ == "__main__":
             f"niter_success={basin_niter_success}, "
             f"seed={rng_seed}"
         )
-        res, basin_telemetry = run_basin_hopping(
-            fun,
-            dofs,
-            basin_hops=args.basin_hops,
-            basin_stepsize=args.basin_stepsize,
-            basin_temperature=args.basin_temperature,
-            basin_niter_success=basin_niter_success,
-            rng_seed=rng_seed,
-            minimizer_kwargs=minimizer_kwargs,
-            disp=True,
-        )
+        if warm_continue_step_norm_limit is not None:
+            warm_continue_step_norm_cap_applied_to.append(
+                "basin_hopping_local_minimizer"
+            )
+        with temporary_run_dict_value(
+            run_dict,
+            "active_step_norm_limit",
+            warm_continue_step_norm_limit,
+        ):
+            res, basin_telemetry = run_basin_hopping(
+                fun,
+                dofs,
+                basin_hops=args.basin_hops,
+                basin_stepsize=args.basin_stepsize,
+                basin_temperature=args.basin_temperature,
+                basin_niter_success=basin_niter_success,
+                rng_seed=rng_seed,
+                minimizer_kwargs=minimizer_kwargs,
+                disp=True,
+            )
         (
             basin_accepted_hops,
             basin_rejected_hops,
@@ -17106,32 +17324,39 @@ if __name__ == "__main__":
             restore_surface_states(surface_data, run_dict["surface_state"])
             run_dict["x_prev"] = run_dict["accepted_x"].copy()
 
-        phase1_result = run_penalty_phase1(
-            dofs,
-            total_maxiter=RUNTIME_MAXITER,
-            maxcor=args.maxcor,
-            ftol=ftol,
-            gtol=gtol,
-            initial_step_scale=args.multisurface_initial_step_scale,
-            initial_step_maxiter=args.multisurface_initial_step_maxiter,
-            enable_local_preservation=enable_local_preservation,
-            seed_regime=EFFECTIVE_SEED_REGIME,
-            is_frontier_mode=args.single_stage_goal_mode == "frontier",
-            lower_bounds=JF.lower_bounds,
-            upper_bounds=JF.upper_bounds,
-            run_dict=run_dict,
-            objective_fn=fun,
-            callback_fn=callback,
-            refinement_eligible_fn=refinement_eligible_incumbent,
-            repair_progress_state_fn=repair_progress_state,
-            phase1_config=phase1_config,
-            objective_eval_fn=evaluate_search_step,
-            normalize_message_fn=normalize_optimizer_termination_message,
-            restore_accepted_state_fn=restore_accepted_state,
-            refresh_preserved_timeout_artifacts_fn=(
-                refresh_preserved_timeout_artifacts_from_best_states
-            ),
-        )
+        if warm_continue_step_norm_limit is not None:
+            warm_continue_step_norm_cap_applied_to.append("penalty_phase1")
+        with temporary_run_dict_value(
+            run_dict,
+            "active_step_norm_limit",
+            warm_continue_step_norm_limit,
+        ):
+            phase1_result = run_penalty_phase1(
+                dofs,
+                total_maxiter=RUNTIME_MAXITER,
+                maxcor=args.maxcor,
+                ftol=ftol,
+                gtol=gtol,
+                initial_step_scale=args.multisurface_initial_step_scale,
+                initial_step_maxiter=args.multisurface_initial_step_maxiter,
+                enable_local_preservation=enable_local_preservation,
+                seed_regime=EFFECTIVE_SEED_REGIME,
+                is_frontier_mode=args.single_stage_goal_mode == "frontier",
+                lower_bounds=JF.lower_bounds,
+                upper_bounds=JF.upper_bounds,
+                run_dict=run_dict,
+                objective_fn=fun,
+                callback_fn=callback,
+                refinement_eligible_fn=refinement_eligible_incumbent,
+                repair_progress_state_fn=repair_progress_state,
+                phase1_config=phase1_config,
+                objective_eval_fn=evaluate_search_step,
+                normalize_message_fn=normalize_optimizer_termination_message,
+                restore_accepted_state_fn=restore_accepted_state,
+                refresh_preserved_timeout_artifacts_fn=(
+                    refresh_preserved_timeout_artifacts_from_best_states
+                ),
+            )
         if phase1_result["used_phase1"]:
             phase1_iterations = phase1_result["phase1_iterations"]
             phase1_termination_message = phase1_result["phase1_termination_message"]
@@ -17190,30 +17415,55 @@ if __name__ == "__main__":
                 upper_bounds=JF.upper_bounds,
                 phase1_result=phase1_result,
             )
+            phase2_step_norm_limit = resolve_penalty_phase2_step_norm_limit(
+                phase1_result,
+                phase1_config=phase1_config,
+            )
+            effective_phase2_step_norm_limit = combine_positive_step_norm_limits(
+                warm_continue_step_norm_limit,
+                phase2_step_norm_limit,
+            )
+            warm_continue_step_norm_cap_combined_with_phase2_safe_step = bool(
+                warm_continue_step_norm_limit is not None
+                and phase2_step_norm_limit is not None
+                and effective_phase2_step_norm_limit is not None
+            )
             if startup_local_preservation_used:
                 print(
                     "Continuing penalty search with donor-local bounds at "
                     f"radius={startup_local_preservation_radius:.3e}"
                 )
+            if effective_phase2_step_norm_limit is not None:
+                print(
+                    "Continuing penalty search with step-norm trust limit "
+                    f"{effective_phase2_step_norm_limit:.3e}"
+                )
+                if warm_continue_step_norm_limit is not None:
+                    warm_continue_step_norm_cap_applied_to.append("penalty_phase2")
             with temporary_run_dict_value(
                 run_dict,
                 "active_optimizer_bounds",
                 phase2_bounds,
             ):
-                res = minimize(
-                    fun,
-                    dofs,
-                    jac=True,
-                    method="L-BFGS-B",
-                    bounds=phase2_bounds,
-                    callback=callback,
-                    options={
-                        "maxiter": remaining_maxiter,
-                        "maxcor": args.maxcor,
-                        "ftol": ftol,
-                        "gtol": gtol,
-                    },
-                )
+                with temporary_run_dict_value(
+                    run_dict,
+                    "active_step_norm_limit",
+                    effective_phase2_step_norm_limit,
+                ):
+                    res = minimize(
+                        fun,
+                        dofs,
+                        jac=True,
+                        method="L-BFGS-B",
+                        bounds=phase2_bounds,
+                        callback=callback,
+                        options={
+                            "maxiter": remaining_maxiter,
+                            "maxcor": args.maxcor,
+                            "ftol": ftol,
+                            "gtol": gtol,
+                        },
+                    )
             res_nit = (phase1_iterations or 0) + res.nit
             optimizer_status = getattr(res, "status", None)
             termination_message = normalize_optimizer_termination_message(
@@ -17641,6 +17891,13 @@ if __name__ == "__main__":
         "WARM_START_SURFACE_PATHS": (
             None if not warm_start_surface_paths else warm_start_surface_paths
         ),
+        **warm_continue_step_norm_cap_result_fields(
+            warm_continue_step_norm_cap,
+            applied_to=warm_continue_step_norm_cap_applied_to,
+            combined_with_phase2_safe_step=(
+                warm_continue_step_norm_cap_combined_with_phase2_safe_step
+            ),
+        ),
         STAGE2_SEED_CONTRACT_HASH_KEY: stage2_results.get("CONTRACT_HASH"),
         "STAGE2_SEED_MAJOR_RADIUS": R0,
         "STAGE2_SEED_TOROIDAL_FLUX": s,
@@ -17735,6 +17992,9 @@ if __name__ == "__main__":
         "INNER_SURFACE_INITIAL_WEIGHT": INNER_SURFACE_INITIAL_WEIGHT,
         "MULTISURFACE_INITIAL_STEP_SCALE": args.multisurface_initial_step_scale,
         "MULTISURFACE_INITIAL_STEP_MAXITER": args.multisurface_initial_step_maxiter,
+        "PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT": (
+            _PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT
+        ),
         "TOPOLOGY_GATE_FIELDLINES": TOPOLOGY_GATE_FIELDLINES,
         "TOPOLOGY_GATE_TMAX": TOPOLOGY_GATE_TMAX,
         "TOPOLOGY_GATE_TOL": TOPOLOGY_GATE_TOL,

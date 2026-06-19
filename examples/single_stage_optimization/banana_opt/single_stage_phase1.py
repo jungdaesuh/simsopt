@@ -36,6 +36,12 @@ _PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK = float(
 _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT = float(
     os.environ.get("PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT", "0.02")
 )
+_PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT = float(
+    os.environ.get("PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT", "0.0")
+)
+_PENALTY_FEASIBLE_START_STEP_NORM_PENALTY_SCALE = float(
+    os.environ.get("PENALTY_FEASIBLE_START_STEP_NORM_PENALTY_SCALE", "1.0e18")
+)
 _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE = float(
     os.environ.get("PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE", "0.5")
 )
@@ -76,6 +82,7 @@ class Phase1Config:
     local_radius_shrink: float = _PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK
     reject_radius_shrink: float = _PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
     safe_step_rms_limit: float = _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+    safe_step_norm_limit: float = _PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT
     phase2_radius_scale: float = _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE
     min_accepted_step_rms: float = _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS
     frontier_phase1_scale: float = _FRONTIER_FEASIBLE_START_PHASE1_SCALE
@@ -100,11 +107,15 @@ def build_phase1_config(
     local_radius_shrink=_PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK,
     reject_radius_shrink=_PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK,
     safe_step_rms_limit=_PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT,
+    safe_step_norm_limit=_PENALTY_FEASIBLE_START_SAFE_STEP_NORM_LIMIT,
     phase2_radius_scale=_PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE,
     min_accepted_step_rms=_PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS,
     frontier_phase1_scale=_FRONTIER_FEASIBLE_START_PHASE1_SCALE,
     frontier_local_relative_radius=_FRONTIER_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
 ):
+    safe_step_norm_limit = float(safe_step_norm_limit)
+    if not np.isfinite(safe_step_norm_limit) or safe_step_norm_limit < 0.0:
+        raise ValueError("safe_step_norm_limit must be finite and non-negative.")
     return Phase1Config(
         cc_weight=float(cc_weight),
         cs_weight=float(cs_weight),
@@ -120,6 +131,7 @@ def build_phase1_config(
         local_radius_shrink=float(local_radius_shrink),
         reject_radius_shrink=float(reject_radius_shrink),
         safe_step_rms_limit=float(safe_step_rms_limit),
+        safe_step_norm_limit=safe_step_norm_limit,
         phase2_radius_scale=float(phase2_radius_scale),
         min_accepted_step_rms=float(min_accepted_step_rms),
         frontier_phase1_scale=float(frontier_phase1_scale),
@@ -437,6 +449,7 @@ def _build_penalty_phase1_problem(
     phase1_scale,
     use_local_bounds,
     local_radius,
+    step_norm_limit,
     lower_bounds,
     upper_bounds,
     objective_fn,
@@ -452,9 +465,14 @@ def _build_penalty_phase1_problem(
         if use_local_bounds
         else build_scipy_bounds(lower_bounds, upper_bounds)
     )
+    phase1_objective_fn = _step_norm_limited_phase1_objective(
+        objective_fn,
+        anchor_x,
+        step_norm_limit=step_norm_limit if use_local_bounds else 0.0,
+    )
     if phase1_scale < 1.0:
         phase1_fun, phase1_callback = build_scaled_outer_problem(
-            objective_fn,
+            phase1_objective_fn,
             callback_fn,
             anchor_x,
             phase1_scale,
@@ -478,7 +496,35 @@ def _build_penalty_phase1_problem(
         )
         return phase1_fun, phase1_callback, x0, bounds, report_bounds
 
-    return objective_fn, callback_fn, anchor_x.copy(), report_bounds, report_bounds
+    return phase1_objective_fn, callback_fn, anchor_x.copy(), report_bounds, report_bounds
+
+
+def _step_norm_limited_phase1_objective(objective_fn, anchor_x, *, step_norm_limit):
+    limit = float(step_norm_limit)
+    if limit <= 0.0:
+        return objective_fn
+    anchor = np.asarray(anchor_x, dtype=float).copy()
+
+    def limited_objective(xk):
+        x = np.asarray(xk, dtype=float)
+        delta = x - anchor
+        step_norm = float(np.linalg.norm(delta))
+        if step_norm <= limit + 1.0e-12:
+            return objective_fn(x)
+        reference_limit = max(limit, 1.0e-12)
+        excess = step_norm - limit
+        penalty_scale = _PENALTY_FEASIBLE_START_STEP_NORM_PENALTY_SCALE
+        total = penalty_scale * (1.0 + (excess / reference_limit) ** 2)
+        grad = (
+            2.0
+            * penalty_scale
+            * excess
+            / (reference_limit * reference_limit * step_norm)
+            * delta
+        )
+        return total, grad
+
+    return limited_objective
 
 
 def build_penalty_phase2_bounds(
@@ -503,6 +549,19 @@ def build_penalty_phase2_bounds(
         lower_bounds,
         upper_bounds,
     )
+
+
+def resolve_penalty_phase2_step_norm_limit(
+    phase1_result,
+    *,
+    phase1_config=DEFAULT_PHASE1_CONFIG,
+):
+    if not phase1_result.get("local_preservation_used", False):
+        return None
+    safe_step_norm_limit = float(phase1_config.safe_step_norm_limit)
+    if safe_step_norm_limit <= 0.0:
+        return None
+    return safe_step_norm_limit
 
 
 def _repair_phase1_total_grad(objective_eval, *, phase1_config):
@@ -799,6 +858,7 @@ def run_penalty_phase1(
             phase1_scale=phase1_scale,
             use_local_bounds=settings["use_local_bounds"],
             local_radius=local_radius,
+            step_norm_limit=phase1_config.safe_step_norm_limit,
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
             objective_fn=phase1_objective,

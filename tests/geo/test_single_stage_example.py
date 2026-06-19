@@ -12627,6 +12627,111 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(bounds, [(1.9, 2.1), (-4.2, -3.8)])
 
+    def test_resolve_penalty_phase2_step_norm_limit_is_opt_in(self):
+        module = self.load_module()
+
+        phase1_result = {"local_preservation_used": True}
+
+        self.assertIsNone(
+            module.resolve_penalty_phase2_step_norm_limit(
+                phase1_result,
+                phase1_config=module.build_phase1_config(safe_step_norm_limit=0.0),
+            )
+        )
+        self.assertEqual(
+            module.resolve_penalty_phase2_step_norm_limit(
+                phase1_result,
+                phase1_config=module.build_phase1_config(safe_step_norm_limit=0.005),
+            ),
+            0.005,
+        )
+        self.assertIsNone(
+            module.resolve_penalty_phase2_step_norm_limit(
+                {"local_preservation_used": False},
+                phase1_config=module.build_phase1_config(safe_step_norm_limit=0.005),
+            )
+        )
+
+    def test_combine_positive_step_norm_limits_uses_tightest_positive_limit(self):
+        module = self.load_module()
+
+        self.assertIsNone(module.combine_positive_step_norm_limits(None, 0.0))
+        self.assertEqual(
+            module.combine_positive_step_norm_limits(None, 0.04, 0.01),
+            0.01,
+        )
+        with self.assertRaisesRegex(ValueError, "step norm limits must be finite"):
+            module.combine_positive_step_norm_limits(float("nan"))
+
+    def test_resolve_warm_continue_step_norm_cap_is_default_off(self):
+        module = self.load_module()
+
+        config = module.resolve_warm_continue_step_norm_cap(0.0)
+
+        self.assertEqual(config["limit"], 0.0)
+        self.assertFalse(config["enabled"])
+        self.assertIsNone(config["effective_limit"])
+
+    def test_resolve_warm_continue_step_norm_cap_requires_warm_source(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--warm-continue-step-norm-limit requires",
+        ):
+            module.resolve_warm_continue_step_norm_cap(0.02)
+
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            module.resolve_warm_continue_step_norm_cap(float("inf"))
+
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            module.resolve_warm_continue_step_norm_cap(-0.01)
+
+    def test_resolve_warm_continue_step_norm_cap_accepts_resume_sources(self):
+        module = self.load_module()
+
+        checkpoint_config = module.resolve_warm_continue_step_norm_cap(
+            0.02,
+            resume_solver_checkpoint_payload={"accepted_iterations": 3},
+            resume_solver_checkpoint_path="checkpoint.json",
+        )
+        self.assertTrue(checkpoint_config["enabled"])
+        self.assertEqual(checkpoint_config["source"], "solver_checkpoint")
+        self.assertEqual(checkpoint_config["source_path"], "checkpoint.json")
+        self.assertEqual(checkpoint_config["effective_limit"], 0.02)
+        self.assertEqual(checkpoint_config["initial_accepted_iterations"], 3)
+
+        seed_config = module.resolve_warm_continue_step_norm_cap(
+            0.03,
+            seed_artifact_role=module.SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME,
+            single_stage_resume_bs_path="resume/biot_savart.json",
+        )
+        self.assertTrue(seed_config["enabled"])
+        self.assertEqual(seed_config["source"], "single_stage_resume_seed")
+        self.assertEqual(seed_config["source_path"], "resume/biot_savart.json")
+
+        warm_start_config = module.resolve_warm_continue_step_norm_cap(
+            0.04,
+            warm_start_surface_stem="recovery/surf_best_feasible",
+        )
+        self.assertTrue(warm_start_config["enabled"])
+        self.assertEqual(warm_start_config["source"], "warm_start_surface_stem")
+        self.assertEqual(
+            warm_start_config["source_path"],
+            "recovery/surf_best_feasible",
+        )
+
+    def test_warm_continue_step_norm_cap_result_fields_stamp_inactive_defaults(self):
+        module = self.load_module()
+
+        config = module.resolve_warm_continue_step_norm_cap(0.0)
+        fields = module.warm_continue_step_norm_cap_result_fields(config)
+
+        self.assertEqual(fields["WARM_CONTINUE_STEP_NORM_LIMIT"], 0.0)
+        self.assertFalse(fields["WARM_CONTINUE_STEP_NORM_CAP_ENABLED"])
+        self.assertIsNone(fields["WARM_CONTINUE_STEP_NORM_CAP_SOURCE"])
+        self.assertEqual(fields["WARM_CONTINUE_STEP_NORM_CAP_APPLIED_TO"], [])
+
     def test_evaluate_total_objective_uses_surface_weights_for_qs_and_boozer_terms(
         self,
     ):
@@ -17529,6 +17634,22 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.warm_start_surface_stem, "recovery/surf_best_feasible")
+
+    def test_single_stage_parse_args_accepts_warm_continue_step_norm_limit(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--warm-continue-step-norm-limit",
+                "0.025",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.warm_continue_step_norm_limit, 0.025)
 
     def test_single_stage_parse_args_accepts_frontier_volume_weight_flag(self):
         module = load_single_stage_example_module()
