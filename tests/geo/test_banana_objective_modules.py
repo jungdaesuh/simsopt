@@ -6038,6 +6038,111 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(result["grad"], [4.6, 2.8, 0.0, 0.0])
 
+    def test_evaluate_base_objective_projects_enabled_optional_iota_term(self):
+        """An enabled optional iota term whose own leaf graph is a strict subset of the
+        optimizer dof vector is projected onto ``objective_optimizable`` and summed with
+        the base gradient.
+
+        This is the winding-surface-free / seed-order-upgrade case: those levers grow
+        ``base_objective``'s own graph past the iota terms' Boozer-adjoint reach, so the
+        gradient sum is only consistent when every term is projected onto the shared JF
+        basis. The optional term's own-graph length (3) deliberately differs from the
+        base terms' (2); both project to the 4-dof optimizer vector.
+        """
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+        noble = _FakeAlgebraicObjective(7.0, [9.0, 9.0, 9.0], [0.0, 0.0, 1.0, 2.0])
+
+        result = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            objective_optimizable=objective,
+            JNobleIotaPull=noble,
+            NOBLE_IOTA_PULL_WEIGHT=2.0,
+        )
+
+        # Base projects to [4.6, 2.8, 0, 0]; the weighted noble term adds 2 * [0, 0, 1, 2].
+        np.testing.assert_allclose(result["grad"], [4.6, 2.8, 2.0, 4.0])
+
+    def test_evaluate_base_objective_without_optimizable_rejects_divergent_iota_term(self):
+        """With ``objective_optimizable`` dropped, each term falls back to its OWN leaf
+        graph, so an enabled optional iota term whose own-graph length differs from the
+        base's makes the gradient sum a broadcast error.
+
+        This is exactly the post-solve crash the example wrapper's JF threading fixes
+        (observed as shapes ``(679,)`` vs ``(246,)`` once winding-surface-free and
+        seed-order-upgrade are active). The diagnostic evaluator therefore must always be
+        handed the optimizer dof vector.
+        """
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+        noble = _FakeAlgebraicObjective(7.0, [9.0, 9.0, 9.0], [0.0, 0.0, 1.0, 2.0])
+        with self.assertRaises(ValueError):
+            self.module.evaluate_base_objective(
+                np.array([1.0]),
+                nonqs,
+                brs,
+                RES_WEIGHT=2.0,
+                Jiota=jiota,
+                IOTAS_WEIGHT=3.0,
+                JVolume=None,
+                VOLUME_WEIGHT=0.0,
+                JCurveLength=jlength,
+                LENGTH_WEIGHT=1.0,
+                objective_optimizable=None,
+                JNobleIotaPull=noble,
+                NOBLE_IOTA_PULL_WEIGHT=2.0,
+            )
+
+    def test_example_wrapper_threads_jf_into_base_objective_eval(self):
+        """The post-solve example wrapper hands the optimizer dof vector (JF) to the base
+        evaluator so every term shares one gradient basis.
+
+        Dropping it regressed winding-surface-free / seed-order-upgrade runs with a
+        gradient shape mismatch at the final ``base_eval``. Extract the real wrapper
+        source (no heavy example import) and assert it forwards JF; this fails if the
+        kwarg is ever dropped again, matching the sibling total/ALM evaluators that
+        already pass it.
+        """
+        missing = object()
+        captured = {}
+
+        def _spy_impl(*_args, **kwargs):
+            captured["objective_optimizable"] = kwargs.get("objective_optimizable", missing)
+            return {"grad": np.zeros(1), "total": 0.0}
+
+        def _stub_surface_terms(res_weight, iotas_weight):
+            return {
+                "effective_res_weight": res_weight,
+                "effective_iotas_weight": iotas_weight,
+                "effective_volume_weight": 0.0,
+                "JVolume": None,
+                "JNonQSObjective": None,
+                "JBoozerObjective": None,
+            }
+
+        sentinel_jf = object()
+        funcs = _extract_functions(
+            SINGLE_STAGE_EXAMPLE_PATH,
+            ["evaluate_base_objective"],
+            {
+                "_evaluate_base_objective_impl": _spy_impl,
+                "resolve_current_surface_objective_terms": _stub_surface_terms,
+                "CONSTRAINT_METHOD": "penalty",
+                "JF": sentinel_jf,
+            },
+        )
+        funcs["evaluate_base_objective"](
+            np.array([1.0]), [], [], 0.0, None, 0.0, None, 0.0
+        )
+        self.assertIs(captured["objective_optimizable"], sentinel_jf)
+
     def test_evaluate_base_objective_thresholded_physics_formulation_zeros_base_value_and_grad(
         self,
     ):
