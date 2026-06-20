@@ -32,6 +32,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: E402
     _SEED_REGIME_REPAIR_FIRST,
     _phase1_incumbent_recovery,
     _repair_phase1_total_grad,
+    _step_norm_limited_phase1_objective,
     build_phase1_config,
     repair_state_is_clean,
     run_penalty_phase1,
@@ -109,6 +110,27 @@ def test_repair_objective_includes_keepout_axis():
     total, grad = _repair_phase1_total_grad(eval_dict, phase1_config=config)
     assert total == pytest.approx(2.0 * 1.0 + 3.0 * 5.0)
     np.testing.assert_allclose(grad, np.array([2.0, 3.0, 0.0]))
+
+
+def test_step_norm_limited_phase1_objective_rejects_before_expensive_eval():
+    calls = []
+
+    def objective(x):
+        calls.append(np.asarray(x, dtype=float))
+        return 1.0, np.ones(2)
+
+    limited_objective = _step_norm_limited_phase1_objective(
+        objective,
+        np.array([0.0, 0.0]),
+        step_norm_limit=0.1,
+    )
+
+    total, grad = limited_objective(np.array([0.2, 0.0]))
+
+    assert not calls
+    assert total > 1.0
+    assert grad[0] > 0.0
+    np.testing.assert_allclose(grad[1], 0.0)
 
 
 def test_repair_objective_raises_loudly_instead_of_falling_back():
