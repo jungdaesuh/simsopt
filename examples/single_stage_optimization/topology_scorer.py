@@ -47,6 +47,7 @@ from banana_opt.topology.kam_birkhoff import (
 from banana_opt.topology.rotation_plateau import (
     CLASS_INVARIANT_TORUS as PLATEAU_CLASS_INVARIANT_TORUS,
     CLASS_ISLAND_CHAIN as PLATEAU_CLASS_ISLAND_CHAIN,
+    RECONCILER_KNOWN_LIMITATION_SUBSEED_SPACING,
     RadialOmegaSeed,
     reconcile_radial_omega_plateau,
 )
@@ -79,8 +80,11 @@ def effective_known_limitations(bare_known_limitations, *, reconciliation_applie
     list (kam_birkhoff.WBA_CLASSIFIER_KNOWN_LIMITATIONS, the SSOT). When the
     scorer ran the radial ω-plateau reconciliation, the missing-radial-plateau
     limitation no longer holds for the published fraction: drop it and record the
-    downstream-discriminator provenance marker instead. When reconciliation did
-    not run, the bare-classifier limitations stand verbatim.
+    downstream-discriminator provenance marker instead. The reconciliation has its
+    own residual limitation -- it cannot resolve islands narrower than the seed
+    spacing (a sub-seed-spacing island is reclassified to a torus, raising the
+    fraction) -- so disclose that honestly alongside the provenance marker. When
+    reconciliation did not run, the bare-classifier limitations stand verbatim.
     """
 
     if not reconciliation_applied:
@@ -91,6 +95,7 @@ def effective_known_limitations(bare_known_limitations, *, reconciliation_applie
         if limitation != WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR
     ]
     composed.append(WBA_RADIAL_PLATEAU_RECONCILED_BY_SCORER)
+    composed.append(RECONCILER_KNOWN_LIMITATION_SUBSEED_SPACING)
     return composed
 
 

@@ -372,7 +372,14 @@ def _radial_direction_field(xyz: np.ndarray, axis: AxisModel) -> np.ndarray:
 # ----------------------------------------------------------------------------------------
 def _slope(alpha_xi: float, alpha_eta: float, clip: float) -> float:
     """Slope sigma = alpha(eta)/alpha(xi); +/- inf when alpha(xi) ~ 0 (paper's order
-    extension to alpha_0 with alpha(xi)=0 -> slope +/- inf)."""
+    extension to alpha_0 with alpha(xi)=0 -> slope +/- inf).
+
+    The +/-inf branch is the LOOSE side of the cone, not the collapsing side: a +inf only
+    raises sigma_plus and a -inf only lowers sigma_minus, so a near-zero |alpha_xi| sample
+    can never spuriously certify. That this holds for the relative/online clip too rests on
+    the t->0 sign-lock argued in the SOUNDNESS NOTE in ``_decide_point`` -- not on the clip
+    threshold alone.
+    """
     if abs(alpha_xi) <= clip:
         return math.inf if alpha_eta >= 0.0 else -math.inf
     return alpha_eta / alpha_xi
@@ -453,6 +460,15 @@ def _decide_point(
     # Running scale of |alpha_t(xi)|: the relative slope_clip gate is measured against it so
     # near-sign-flip samples (|alpha_t(xi)| ~ 0, slope spikes) are skipped robustly even as
     # |alpha_t(xi)| grows with the tangent map M(t). Seeded tiny-positive to avoid div-by-0.
+    # SOUNDNESS NOTE: that this relative/online scale cannot SPURIOUSLY collapse the cone
+    # (a false non-existence certificate) rests on a t->0 sign-lock, NOT on the clip
+    # threshold alone. Near t=0, M(t) ~= I so alpha_t(xi) = det[xi0, B0, M(t) xi0] = O(t)
+    # with sign locked to sign(t); the near-zero-|alpha_xi| spikes therefore always land on
+    # the LOOSE side of the cone -- a large +slope into T+ (raises sigma_plus, harmless) or a
+    # large -slope into T- (lowers sigma_minus, harmless), i.e. exactly the paper's
+    # order-extension limits (slope -> +/-inf at alpha(xi)=0, arXiv:2501.06796) -- never the
+    # collapsing side. (Empirically: 0 online-vs-global-scale disagreements over 200 random
+    # mixed-shear fields; an integrable sheared nested field certifies fraction 0.0.)
     alpha_xi_scale = np.finfo(float).tiny
 
     for sign in (+1.0, -1.0):

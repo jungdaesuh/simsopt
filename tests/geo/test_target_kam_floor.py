@@ -10,6 +10,13 @@ import unittest
 
 from geo._frontier_test_helpers import load_frontier_constraints_module
 
+from examples.single_stage_optimization.banana_opt.topology.kam_birkhoff import (
+    KAM_CLASS_INVARIANT_TORUS,
+    KAM_CLASS_LOST,
+    SeedClassification,
+    summarize_seed_classifications,
+)
+
 target_kam_floor_satisfied = (
     load_frontier_constraints_module().target_kam_floor_satisfied
 )
@@ -57,6 +64,53 @@ class TargetKamFloorTest(unittest.TestCase):
             )
         )
         self.assertFalse(target_kam_floor_satisfied({}, floor=0.60))
+
+    def test_low_evaluable_share_field_is_blocked_end_to_end(self):
+        # End-to-end guard for the false-optimistic denominator hole: a field whose
+        # lines mostly escape (2 classified-invariant out of 24 launched) produces a
+        # summary whose invariant_torus_fraction is None (insufficient evaluable
+        # share), so the floor blocks promotion. OLD behaviour reported 2/2 = 1.0 and
+        # would have cleared the floor on a sliver of the cross-section.
+        classifications = [
+            SeedClassification(
+                seed_index=0,
+                classification=KAM_CLASS_INVARIANT_TORUS,
+                return_count=512,
+                rotation_number=0.31,
+                matching_digits=9.0,
+                first_half_rotation_number=0.31,
+                second_half_rotation_number=0.31,
+                nearest_rational=None,
+                reason="weighted_birkhoff_average_converged",
+            ),
+            SeedClassification(
+                seed_index=1,
+                classification=KAM_CLASS_INVARIANT_TORUS,
+                return_count=512,
+                rotation_number=0.33,
+                matching_digits=9.0,
+                first_half_rotation_number=0.33,
+                second_half_rotation_number=0.33,
+                nearest_rational=None,
+                reason="weighted_birkhoff_average_converged",
+            ),
+        ] + [
+            SeedClassification(
+                seed_index=2 + i,
+                classification=KAM_CLASS_LOST,
+                return_count=4,
+                rotation_number=None,
+                matching_digits=None,
+                first_half_rotation_number=None,
+                second_half_rotation_number=None,
+                nearest_rational=None,
+                reason="field_line_exited_before_trace_horizon",
+            )
+            for i in range(22)
+        ]
+        summary = summarize_seed_classifications(classifications)
+        self.assertIsNone(summary["invariant_torus_fraction"])
+        self.assertFalse(target_kam_floor_satisfied(summary, floor=0.30))
 
     def test_current_geometry_with_sufficient_fraction_is_promotable(self):
         # Entry scored for the geometry under test, fraction >= floor -> promotable.

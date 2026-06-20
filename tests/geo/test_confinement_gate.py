@@ -434,6 +434,10 @@ def test_cli_certify_shares_certify_confinement_composition(monkeypatch, tmp_pat
         require_shear=False,
         qa_nonqs_max=1.0e-2,
         iota_shear_min=0.0,
+        # Mirror the real parser default (--converse-kam-gate-interval 0 = the
+        # advisory converse-KAM diagnostic OFF); converse_kam_config_from_args
+        # reads this attribute, so the hand-built namespace must carry it.
+        converse_kam_gate_interval=0,
     )
     payload = driver.certify(str(tmp_path), namespace)
     assert payload["confinement_verdict"]["accepted"] is True

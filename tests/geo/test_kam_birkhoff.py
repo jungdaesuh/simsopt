@@ -653,3 +653,89 @@ def test_invariant_torus_fraction_reports_not_evaluated_for_only_insufficient_re
     assert summary["invariant_torus_fraction"] is None
     assert summary["wba_evaluation_state"] == "not_evaluated_insufficient_returns"
     assert summary["wba_not_evaluated_reason"] == "not_evaluated_insufficient_returns"
+
+
+def _converged_seed(seed_index, classification, rotation_number):
+    return SeedClassification(
+        seed_index=seed_index,
+        classification=classification,
+        return_count=512,
+        rotation_number=rotation_number,
+        matching_digits=9.0,
+        first_half_rotation_number=rotation_number,
+        second_half_rotation_number=rotation_number,
+        nearest_rational=None,
+        reason="weighted_birkhoff_average_converged",
+    )
+
+
+def _lost_seed(seed_index):
+    return SeedClassification(
+        seed_index=seed_index,
+        classification=KAM_CLASS_LOST,
+        return_count=4,
+        rotation_number=None,
+        matching_digits=None,
+        first_half_rotation_number=None,
+        second_half_rotation_number=None,
+        nearest_rational=None,
+        reason="field_line_exited_before_trace_horizon",
+    )
+
+
+def test_invariant_torus_fraction_fails_closed_on_low_evaluable_share():
+    # The false-optimistic hole this guards: with the classifiable-seed denominator,
+    # a field whose lines mostly escape (lost) or never settle would otherwise
+    # certify on only the few that classified. Here 2 invariant tori classify but
+    # 22 of 24 launched seeds are lost -> classifiable share 2/24 ~ 0.083, far below
+    # WBA_MIN_EVALUABLE_SHARE. OLD behaviour: fraction = 2/2 = 1.0 (clears the 0.30
+    # gate on a sliver of the cross-section). CORRECTED: too sparsely traceable to
+    # report a cross-section fraction -> None (and the certification gate rejects a
+    # missing fraction).
+    classifications = [
+        _converged_seed(0, KAM_CLASS_INVARIANT_TORUS, 0.31),
+        _converged_seed(1, KAM_CLASS_INVARIANT_TORUS, 0.33),
+    ] + [_lost_seed(2 + i) for i in range(22)]
+
+    summary = summarize_seed_classifications(classifications)
+
+    assert summary["wba_seed_count"] == 24
+    assert summary["wba_classified_seed_count"] == 2
+    assert summary["invariant_torus_count"] == 2
+    # Two classifiable seeds clears WBA_MIN_CLASSIFIABLE_SEEDS but not the share.
+    assert summary["wba_evaluable_share"] == pytest.approx(2.0 / 24.0)
+    assert summary["wba_min_evaluable_share"] == 0.5
+    assert summary["invariant_torus_fraction"] is None
+    assert (
+        summary["wba_evaluation_state"]
+        == "not_evaluated_insufficient_evaluable_share"
+    )
+    assert (
+        summary["wba_not_evaluated_reason"]
+        == "not_evaluated_insufficient_evaluable_share"
+    )
+
+
+def test_invariant_torus_fraction_evaluable_share_floor_is_inclusive():
+    # Exactly at the floor (3 classifiable of 6 launched = 0.5) reports; one more
+    # lost line (3 of 7 ~ 0.43) fails closed. Confirms WBA_MIN_EVALUABLE_SHARE is
+    # an inclusive >= bound, consistent with the 2-of-4 denominator-policy test.
+    classified = [
+        _converged_seed(0, KAM_CLASS_INVARIANT_TORUS, 0.31),
+        _converged_seed(1, KAM_CLASS_INVARIANT_TORUS, 0.33),
+        _converged_seed(2, KAM_CLASS_CHAOTIC, 0.19),
+    ]
+    at_floor = classified + [_lost_seed(3), _lost_seed(4), _lost_seed(5)]
+    summary_at = summarize_seed_classifications(at_floor)
+    assert summary_at["wba_evaluable_share"] == pytest.approx(0.5)
+    assert summary_at["wba_evaluation_state"] == "evaluated"
+    assert summary_at["invariant_torus_fraction"] == pytest.approx(2.0 / 3.0)
+
+    below_floor = at_floor + [_lost_seed(6)]
+    summary_below = summarize_seed_classifications(below_floor)
+    assert summary_below["wba_evaluable_share"] < 0.5
+    assert summary_below["invariant_torus_fraction"] is None
+    assert (
+        summary_below["wba_evaluation_state"]
+        == "not_evaluated_insufficient_evaluable_share"
+    )

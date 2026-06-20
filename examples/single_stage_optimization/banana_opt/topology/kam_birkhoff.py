@@ -50,6 +50,21 @@ WBA_FRACTION_DENOMINATOR_POLICY = "classifiable_seeds"
 # which the fraction is a ratio over distinct survivors; it admits the cheap
 # tier (4 seeds) while rejecting the single-seed case.
 WBA_MIN_CLASSIFIABLE_SEEDS = 2
+# Minimum share of LAUNCHED seeds that must be classifiable before a fraction is
+# reported. invariant_torus_fraction is a cross-section statistic, so it must not
+# be computed from a small traceable minority: a champion whose field lines mostly
+# escape (lost) or never settle (insufficient returns / no axis) would otherwise
+# certify on only the lines that did classify (e.g. 2 invariant out of 50 launched
+# -> 2/2 = 1.0 over the classifiable subset), and at the strict trace horizon a
+# large untraceable share is itself a confinement red flag. Require at least half
+# the launched seeds to classify; below this the summary fails closed with
+# fraction=None (the certification gate rejects a missing fraction) rather than
+# publishing a high ratio over a sliver of the cross-section. Half is the smallest
+# non-arbitrary "a majority of the cross-section is traceable" bar and leaves wide
+# margin for legitimate edge-line loss near the LCFS. This is the seed-coverage
+# guard the bare WBA_MIN_CLASSIFIABLE_SEEDS count cannot provide once the seed
+# count grows (2 of 50 passes the count but not the share).
+WBA_MIN_EVALUABLE_SHARE = 0.5
 KAM_FRACTION_SEMANTICS = "weighted_birkhoff_invariant_torus_fraction"
 
 KAM_CLASS_INVARIANT_TORUS = "invariant_torus"
@@ -82,6 +97,9 @@ WBA_EVALUATION_NOT_EVALUATED_AXIS_NOT_LOCATED = "not_evaluated_axis_not_located"
 WBA_EVALUATION_NOT_EVALUATED_NO_CLASSIFIED_SEEDS = "not_evaluated_no_classified_seeds"
 WBA_EVALUATION_NOT_EVALUATED_TOO_FEW_CLASSIFIABLE_SEEDS = (
     "not_evaluated_too_few_classifiable_seeds"
+)
+WBA_EVALUATION_NOT_EVALUATED_INSUFFICIENT_EVALUABLE_SHARE = (
+    "not_evaluated_insufficient_evaluable_share"
 )
 WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER = "not_evaluated_skipped_by_caller"
 
@@ -523,14 +541,22 @@ def summarize_seed_classifications(
     # no valid rotation-number series (too few returns, invalid poloidal
     # reference, or missing axis). Reported separately; never in the denominator.
     not_evaluated_seed_count = survived_count - classified_count
-    # Denominator = classifiable seeds. Fail closed below the minimum so a
-    # champion cannot be certified on a fraction over one or zero seeds.
-    fraction = (
-        len(invariant) / float(classified_count)
-        if classified_count >= WBA_MIN_CLASSIFIABLE_SEEDS
-        else None
+    # Denominator = classifiable seeds, but a fraction is reported only when the
+    # cross-section was actually traceable enough to support a confinement claim:
+    # at least WBA_MIN_CLASSIFIABLE_SEEDS classifiable AND at least
+    # WBA_MIN_EVALUABLE_SHARE of the launched seeds classifiable. Otherwise fail
+    # closed with fraction=None so a champion cannot be certified on a high ratio
+    # over a traceable minority while most launched lines escape (lost) or never
+    # settle (insufficient returns / no axis). See WBA_MIN_EVALUABLE_SHARE.
+    evaluable_share = (classified_count / float(total)) if total > 0 else 0.0
+    enough_evaluable = (
+        classified_count >= WBA_MIN_CLASSIFIABLE_SEEDS
+        and evaluable_share >= WBA_MIN_EVALUABLE_SHARE
     )
-    if classified_count >= WBA_MIN_CLASSIFIABLE_SEEDS:
+    fraction = (
+        len(invariant) / float(classified_count) if enough_evaluable else None
+    )
+    if enough_evaluable:
         evaluation_state = WBA_EVALUATION_EVALUATED
         not_evaluated_reason = None
     elif total == 0:
@@ -538,6 +564,15 @@ def summarize_seed_classifications(
         not_evaluated_reason = evaluation_state
     elif survived_count == 0:
         evaluation_state = WBA_EVALUATION_NOT_EVALUATED_NO_SURVIVED_SEEDS
+        not_evaluated_reason = evaluation_state
+    elif (
+        classified_count >= WBA_MIN_CLASSIFIABLE_SEEDS
+        and evaluable_share < WBA_MIN_EVALUABLE_SHARE
+    ):
+        # Enough classifiable seeds in absolute count, but they are a minority of
+        # the launched cross-section -- insufficient coverage to certify a
+        # cross-section confinement fraction.
+        evaluation_state = WBA_EVALUATION_NOT_EVALUATED_INSUFFICIENT_EVALUABLE_SHARE
         not_evaluated_reason = evaluation_state
     elif classified_count > 0:
         evaluation_state = WBA_EVALUATION_NOT_EVALUATED_TOO_FEW_CLASSIFIABLE_SEEDS
@@ -570,6 +605,8 @@ def summarize_seed_classifications(
         "wba_fraction_denominator_policy": WBA_FRACTION_DENOMINATOR_POLICY,
         "wba_fraction_denominator_seed_count": int(classified_count),
         "wba_min_classifiable_seeds": int(WBA_MIN_CLASSIFIABLE_SEEDS),
+        "wba_min_evaluable_share": float(WBA_MIN_EVALUABLE_SHARE),
+        "wba_evaluable_share": float(evaluable_share),
         "wba_seed_count": int(total),
         "wba_survived_seed_count": int(survived_count),
         "wba_classified_seed_count": int(classified_count),

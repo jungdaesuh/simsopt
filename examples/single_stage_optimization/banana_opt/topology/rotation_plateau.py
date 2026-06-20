@@ -24,6 +24,20 @@ radii all sharing the island's rational; a nested family has finite shear, so ω
 varies monotonically with radius and merely *passes through* the rational. This
 module makes that radial decision and rewrites the per-seed class accordingly.
 
+Resolution limit (false-optimistic, by construction). This is a three-point
+radial test, so it can only resolve islands WIDER than the launch-radius spacing.
+A genuine island narrower than the gap between adjacent seeds has both neighbours
+on the sheared background profile, so they straddle p/q with finite shear and the
+seed is RECLASSIFIED to a torus -- the identical verdict a real nested torus at
+p/q produces. The discriminator cannot separate those two cases at this
+resolution, so a sub-seed-spacing island is read as a torus; this only ever
+RAISES the invariant-torus fraction (the false-optimistic direction). It is
+inherent to the radial sampling, NOT a logic gap -- the guard band below closes
+only the ULP-scatter fail-open, not under-resolution -- and is bounded by making
+the seed spacing finer than the narrowest island width that matters. The limit is
+published as ``RECONCILER_KNOWN_LIMITATION_SUBSEED_SPACING`` in the WBA payload's
+``known_limitations`` whenever the reconciliation runs.
+
 This mirrors the signed local-shear idea in
 ``iota_profile.RationalCrossing.local_shear`` (dι/dlabel across an adjacent
 bracket), but the quantity here is the WBA rotation number ω, which is reduced
@@ -94,6 +108,20 @@ DEFAULT_PLATEAU_RATIONAL_TOLERANCE = 1.0e-8
 # relies on. Asserted positive and > 1 so the guard band cannot collapse.
 DEFAULT_PLATEAU_SHEAR_MARGIN = 10.0
 assert DEFAULT_PLATEAU_SHEAR_MARGIN > 1.0
+
+# Known limitation of this discriminator, surfaced in the WBA payload's
+# known_limitations whenever the scorer runs the reconciliation (see the module
+# docstring's "Resolution limit"). Being a three-point radial test it cannot
+# resolve an island narrower than the launch-radius spacing: such an island's
+# neighbours sit on the sheared background, so it straddles p/q with genuine shear
+# and is RECLASSIFIED to a torus, indistinguishable from a real nested torus at p/q
+# at this resolution. This only ever RAISES the invariant-torus fraction (the
+# false-optimistic direction); it is bounded by the seed spacing, not by the guard
+# band. Owned here (the module that owns the discriminator); topology_scorer
+# composes it into the published limitation set when reconciliation runs.
+RECONCILER_KNOWN_LIMITATION_SUBSEED_SPACING = (
+    "radial_plateau_cannot_resolve_islands_narrower_than_seed_spacing"
+)
 
 
 def _signed_wrapped_offset(omega: float, rational_value: float) -> float:

@@ -195,6 +195,7 @@ def test_wba_settings_known_limitations_reflect_radial_reconciliation():
     axis_point = {"r": axis_r, "z": axis_z, "source": "test_magnetic_axis"}
     missing = topology_scorer.WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR
     marker = topology_scorer.WBA_RADIAL_PLATEAU_RECONCILED_BY_SCORER
+    subseed = topology_scorer.RECONCILER_KNOWN_LIMITATION_SUBSEED_SPACING
 
     # Reconciliation ran: per-seed radial labels supplied for two seeds.
     reconciled = topology_scorer.invariant_torus_classification(
@@ -209,6 +210,9 @@ def test_wba_settings_known_limitations_reflect_radial_reconciliation():
     # missing-radial-discriminator limitation even though the scorer reconciled it.
     assert missing not in reconciled_limitations
     assert marker in reconciled_limitations
+    # The discriminator's own residual limitation (it cannot resolve islands
+    # narrower than the seed spacing) must be disclosed honestly when it runs.
+    assert subseed in reconciled_limitations
 
     # Reconciliation did NOT run: no radial labels -> bare-classifier limitation
     # stands and the downstream-discriminator marker is absent.
@@ -222,6 +226,8 @@ def test_wba_settings_known_limitations_reflect_radial_reconciliation():
     bare_limitations = bare["wba_settings"]["known_limitations"]
     assert missing in bare_limitations
     assert marker not in bare_limitations
+    # The reconciliation did not run, so its resolution limitation is not published.
+    assert subseed not in bare_limitations
 
 
 def test_score_topology_threads_wba_min_returns_into_classifier(monkeypatch):
