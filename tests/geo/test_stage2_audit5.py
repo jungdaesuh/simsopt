@@ -400,12 +400,14 @@ class VesselKeepoutCliGateTest(unittest.TestCase):
             SimpleNamespace(
                 stage2_vessel_keepout_weight=0.0,
                 stage2_available_envelope_reward_weight=0.0,
+                stage2_hardware_sdf_free_space_reward_weight=0.0,
             )
         )
         _SOLVER.validate_stage2_vessel_keepout_cli_args(
             SimpleNamespace(
                 stage2_vessel_keepout_weight=2.5,
                 stage2_available_envelope_reward_weight=1.5,
+                stage2_hardware_sdf_free_space_reward_weight=0.0,
             )
         )
 
