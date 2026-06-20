@@ -721,9 +721,25 @@ def build_total_objective(
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
     PACK_TWIST_STRAIN_WEIGHT=0.0,
+    JRotationAwareCurvatureExcess=None,
+    ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=0.0,
     JTFCurvature=None,
     JTFCurveLength=None,
 ):
+    # Curvature STEERING term. Default: the scalar arclength-weighted LpCurveCurvature
+    # hinge at the fixed CURVATURE_THRESHOLD (JCurvature). When the rotation-aware
+    # per-point penalty is active (default-None so the objective graph is byte-identical
+    # until the finite-build-field rotation-aware-cap levers are set), it REPLACES the
+    # scalar term in the descent graph: its cap(theta)=1/(margin+reach(theta;alpha))
+    # rises toward flatwise exactly where the live pack twist lays the thin side into the
+    # bend, and its gradient flows through both the centerline kappa-dofs and the
+    # FrameRotation alpha-dofs. The scalar JCurvature stays available for the honest
+    # diagnostic reading and the ALM hard max_curvature constraint, neither touched here.
+    curvature_steering_term = (
+        CURVATURE_WEIGHT * JCurvature
+        if JRotationAwareCurvatureExcess is None
+        else ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT * JRotationAwareCurvatureExcess
+    )
     objective = (
         JnonQSRatio
         + RES_WEIGHT * JBoozerResidual
@@ -731,7 +747,7 @@ def build_total_objective(
         + LENGTH_WEIGHT * JCurveLength
         + CC_WEIGHT * JCurveCurve
         + CS_WEIGHT * JCurveSurface
-        + CURVATURE_WEIGHT * JCurvature
+        + curvature_steering_term
     )
     if JVolume is not None:
         objective = objective + VOLUME_WEIGHT * JVolume
@@ -1186,6 +1202,8 @@ def evaluate_total_objective(
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
     PACK_TWIST_STRAIN_WEIGHT=0.0,
+    JRotationAwareCurvatureExcess=None,
+    ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=0.0,
 ):
     (
         raw_J_QS_obj,
@@ -1265,6 +1283,10 @@ def evaluate_total_objective(
         PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
         JPackTwistStrain=JPackTwistStrain,
         PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
+        JRotationAwareCurvatureExcess=JRotationAwareCurvatureExcess,
+        ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=(
+            ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT
+        ),
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -1695,6 +1717,8 @@ def evaluate_base_objective(
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
     PACK_TWIST_STRAIN_WEIGHT=0.0,
+    JRotationAwareCurvatureExcess=None,
+    ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     if _surface_pair is not None:
@@ -1764,6 +1788,19 @@ def evaluate_base_objective(
         base_objective = base_objective + PACK_ROTATION_FOLD_WEIGHT * JPackRotationFold
     if JPackTwistStrain is not None:
         base_objective = base_objective + PACK_TWIST_STRAIN_WEIGHT * JPackTwistStrain
+    # Rotation-aware per-point curvature-excess STEERING term (opt-in, default-None so
+    # the ALM physics objective is byte-identical until the finite-build-field
+    # rotation-aware-cap levers are set). Soft penalty on the freed pack twist
+    # alpha(theta) + the centerline kappa, weighted by the curvature weight. The honest
+    # ALM hard max_curvature constraint (conservative scalar threshold) is unchanged; the
+    # scalar LpCurveCurvature steering it would otherwise duplicate never entered this ALM
+    # base objective, so this is purely additive here (the swap-vs-add distinction lives
+    # in the penalty-path build_total_objective).
+    if JRotationAwareCurvatureExcess is not None:
+        base_objective = (
+            base_objective
+            + ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT * JRotationAwareCurvatureExcess
+        )
     base_physics_terms_total = float(base_objective.J())
     base_physics_grad = _objective_gradient(base_objective, objective_optimizable)
     (
@@ -2351,6 +2388,12 @@ def evaluate_alm_objective(
     LGRADB_WEIGHT=0.0,
     JGeodesicCurvature=None,
     GEODESIC_CURVATURE_WEIGHT=0.0,
+    JPackRotationFold=None,
+    PACK_ROTATION_FOLD_WEIGHT=0.0,
+    JPackTwistStrain=None,
+    PACK_TWIST_STRAIN_WEIGHT=0.0,
+    JRotationAwareCurvatureExcess=None,
+    ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=0.0,
     include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs)
@@ -2406,6 +2449,14 @@ def evaluate_alm_objective(
         LGRADB_WEIGHT=LGRADB_WEIGHT,
         JGeodesicCurvature=JGeodesicCurvature,
         GEODESIC_CURVATURE_WEIGHT=GEODESIC_CURVATURE_WEIGHT,
+        JPackRotationFold=JPackRotationFold,
+        PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
+        JPackTwistStrain=JPackTwistStrain,
+        PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
+        JRotationAwareCurvatureExcess=JRotationAwareCurvatureExcess,
+        ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=(
+            ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT
+        ),
         include_diagnostics=include_diagnostics,
     )
 

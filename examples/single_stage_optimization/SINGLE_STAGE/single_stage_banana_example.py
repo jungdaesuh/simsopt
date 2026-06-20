@@ -236,6 +236,7 @@ from simsopt.geo.strain_optimization import LPTorsionalStrainPenalty
 from banana_opt.fold_buildability import (
     CurveSurfaceGeodesicCurvature,
     NormalizedCurveCurvatureHinge,
+    RotationAwareCurvatureExcessPenalty,
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
@@ -2923,9 +2924,9 @@ def parse_args():
         action="store_true",
         help=(
             "NON-PROMOTION-READY: relax the BANANA centerline curvature threshold from the "
-            "conservative worst-case corner cap to the realized rotation-aware cap "
+            "measured edgewise cap to the realized rotation-aware cap "
             "1/(floor + max reach(alpha)) (TF coils unchanged). The honest "
-            "FINITEBUILD_CURVATURE_OK gate stays at the conservative corner until the T3.1 "
+            "FINITEBUILD_CURVATURE_OK gate stays at the measured edgewise cap until the T3.1 "
             "hardware curvature ruling. Default off."
         ),
     )
@@ -9374,6 +9375,7 @@ def build_single_stage_objective_bundle(
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
     PACK_TWIST_STRAIN_WEIGHT=0.0,
+    JRotationAwareCurvatureExcess=None,
 ):
     global HARDWARE_KEEPOUT_GROUP_LABELS
     global HARDWARE_KEEPOUT_METADATA
@@ -9873,6 +9875,8 @@ def build_single_stage_objective_bundle(
         PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
         JPackTwistStrain=JPackTwistStrain,
         PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
+        JRotationAwareCurvatureExcess=JRotationAwareCurvatureExcess,
+        ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=CURVATURE_WEIGHT,
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -9936,6 +9940,7 @@ def build_single_stage_objective_bundle(
         "JTFCurveLength": JTFCurveLength,
         "JPackRotationFold": JPackRotationFold,
         "JPackTwistStrain": JPackTwistStrain,
+        "JRotationAwareCurvatureExcess": JRotationAwareCurvatureExcess,
         "JF": JF,
     }
 
@@ -9994,6 +9999,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JMinLGradB
     global JPackRotationFold
     global JPackTwistStrain
+    global JRotationAwareCurvatureExcess
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -10057,6 +10063,9 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JMinLGradB = objective_bundle["JMinLGradB"]
     JPackRotationFold = objective_bundle["JPackRotationFold"]
     JPackTwistStrain = objective_bundle["JPackTwistStrain"]
+    JRotationAwareCurvatureExcess = objective_bundle[
+        "JRotationAwareCurvatureExcess"
+    ]
     JF = objective_bundle["JF"]
 
 
@@ -10491,6 +10500,12 @@ def evaluate_total_objective(
             PACK_TWIST_STRAIN_WEIGHT=globals().get(
                 "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", 0.0
             ),
+            JRotationAwareCurvatureExcess=globals().get(
+                "JRotationAwareCurvatureExcess"
+            ),
+            ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=globals().get(
+                "CURVATURE_WEIGHT", 0.0
+            ),
         ),
         alm_formulation="weighted_sum",
     )
@@ -10560,6 +10575,12 @@ def evaluate_base_objective(
         JPackTwistStrain=globals().get("JPackTwistStrain"),
         PACK_TWIST_STRAIN_WEIGHT=globals().get(
             "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", 0.0
+        ),
+        JRotationAwareCurvatureExcess=globals().get(
+            "JRotationAwareCurvatureExcess"
+        ),
+        ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=globals().get(
+            "CURVATURE_WEIGHT", 0.0
         ),
         include_diagnostics=include_diagnostics,
     )
@@ -10739,6 +10760,12 @@ def evaluate_alm_objective(
             JPackTwistStrain=globals().get("JPackTwistStrain"),
             PACK_TWIST_STRAIN_WEIGHT=globals().get(
                 "SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT", 0.0
+            ),
+            JRotationAwareCurvatureExcess=globals().get(
+                "JRotationAwareCurvatureExcess"
+            ),
+            ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=globals().get(
+                "CURVATURE_WEIGHT", 0.0
             ),
             include_diagnostics=include_diagnostics,
         ),
@@ -14172,6 +14199,8 @@ def build_total_objective(
     PACK_ROTATION_FOLD_WEIGHT=0.0,
     JPackTwistStrain=None,
     PACK_TWIST_STRAIN_WEIGHT=0.0,
+    JRotationAwareCurvatureExcess=None,
+    ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=0.0,
     JTFCurvature=None,
     JTFCurveLength=None,
 ):
@@ -14241,6 +14270,10 @@ def build_total_objective(
         PACK_ROTATION_FOLD_WEIGHT=PACK_ROTATION_FOLD_WEIGHT,
         JPackTwistStrain=JPackTwistStrain,
         PACK_TWIST_STRAIN_WEIGHT=PACK_TWIST_STRAIN_WEIGHT,
+        JRotationAwareCurvatureExcess=JRotationAwareCurvatureExcess,
+        ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT=(
+            ROTATION_AWARE_CURVATURE_EXCESS_WEIGHT
+        ),
         JTFCurvature=JTFCurvature,
         JTFCurveLength=JTFCurveLength,
     )
@@ -16822,38 +16855,51 @@ if __name__ == "__main__":
             width=2.0 * SINGLE_STAGE_FINITE_BUILD_SETTINGS.pack_reach_m,
             p=2,
         )
-    # Rotation-aware curvature cap relax (NON-PROMOTION-READY; mirror STAGE_2
-    # ~4306-4337). Relaxes ONLY the in-loop LpCurveCurvature steering target
-    # CURVATURE_THRESHOLD up to the realized rotation-aware cap
-    # 1/(margin + max reach(alpha)) derived from the seed pack twist; as the coupled
-    # optimizer improves alpha the true cap only rises, so this is conservative. The
-    # honest gate (SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M ~38.5, feeding
-    # FINITEBUILD_CURVATURE_OK) is left UNTOUCHED, so a design that only builds under
-    # a favorable twist stays non-promotable.
+    # Rotation-aware curvature cap (NON-PROMOTION-READY). The earlier mechanism froze a
+    # SCALAR cap (np.max over quadpoints of the SEED reach -> ~38.5/m) and reassigned the
+    # in-loop LpCurveCurvature target CURVATURE_THRESHOLD to it for the whole run, so the
+    # cap never recoupled as the live pack twist alpha(theta) folded. That worst-apex
+    # scalar could not exceed ~42.5/m even fully folded, leaving alpha weight-invariant.
+    # Replacement (per-point): when requested AND the fold is active AND a finite-build
+    # pack frame exists, the curvature STEERING term becomes the differentiable per-point
+    # RotationAwareCurvatureExcessPenalty, whose cap(theta)=1/(margin+reach(theta;alpha))
+    # rises toward flatwise exactly where the live twist lays the thin side into the bend
+    # (gradient flows through both the centerline kappa-dofs and the FrameRotation alpha-
+    # dofs). This term REPLACES the scalar LpCurveCurvature steering in the descent graph
+    # (CURVATURE_THRESHOLD is left UNCHANGED, so the diagnostic LpCurveCurvature reading
+    # and the ALM hard max_curvature constraint stay honest). The honest gate
+    # (SINGLE_STAGE_FINITEBUILD_PACK_LIMIT_INV_M ~38.5, feeding FINITEBUILD_CURVATURE_OK)
+    # is left UNTOUCHED, so a design that only builds under a favorable twist stays
+    # non-promotable.
     SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED = False
     SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M = None
+    SINGLE_STAGE_ROTATION_AWARE_CURVATURE_EXCESS = None
     if (
         SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_REQUESTED
+        and Jfold is not None
         and SINGLE_STAGE_PACK_FRAMEDCURVE is not None
     ):
-        single_stage_realized_reach_m = rotation_aware_projected_half_extent_m(
-            SINGLE_STAGE_FINITE_BUILD_SETTINGS,
-            banana_curve,
+        SINGLE_STAGE_ROTATION_AWARE_CURVATURE_EXCESS = RotationAwareCurvatureExcessPenalty(
             SINGLE_STAGE_PACK_FRAMEDCURVE,
+            banana_curve,
+            SINGLE_STAGE_FINITE_BUILD_SETTINGS,
+            margin=TYPE_KK_INNER_RADIUS_MARGIN_M,
+            p=CURVATURE_P_NORM,
         )
-        SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M = 1.0 / (
-            TYPE_KK_INNER_RADIUS_MARGIN_M
-            + float(np.max(single_stage_realized_reach_m))
+        single_stage_realized_cap_inv_m = (
+            SINGLE_STAGE_ROTATION_AWARE_CURVATURE_EXCESS.rotation_aware_cap_inv_m()
         )
-        if SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M > CURVATURE_THRESHOLD:
-            print(
-                "Rotation-aware curvature cap (non-promotion-ready): "
-                f"{CURVATURE_THRESHOLD:.4f} -> "
-                f"{SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M:.4f} m^-1 "
-                "(realized seed twist; FINITEBUILD_CURVATURE_OK unchanged)"
-            )
-            CURVATURE_THRESHOLD = SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M
-            SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED = True
+        SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M = float(
+            np.min(single_stage_realized_cap_inv_m)
+        )
+        SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED = True
+        print(
+            "Rotation-aware per-point curvature steering (non-promotion-ready): "
+            f"scalar LpCurveCurvature -> RotationAwareCurvatureExcessPenalty "
+            f"(realized cap min {SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M:.4f} "
+            f"m^-1; CURVATURE_THRESHOLD {CURVATURE_THRESHOLD:.4f} m^-1 and "
+            "FINITEBUILD_CURVATURE_OK unchanged)"
+        )
     SINGLE_STAGE_PACK_ROTATION_FOLD_PENALTY = (
         None if Jfold is None else float(Jfold.J())
     )
@@ -17076,6 +17122,9 @@ if __name__ == "__main__":
             PACK_ROTATION_FOLD_WEIGHT=SINGLE_STAGE_PACK_ROTATION_FOLD_WEIGHT,
             JPackTwistStrain=Jtwist,
             PACK_TWIST_STRAIN_WEIGHT=SINGLE_STAGE_PACK_TWIST_STRAIN_WEIGHT,
+            JRotationAwareCurvatureExcess=(
+                SINGLE_STAGE_ROTATION_AWARE_CURVATURE_EXCESS
+            ),
         )
         objective_bundle["CURVATURE_P_CONTINUATION_ACTIVE_P"] = active_curvature_p
         apply_single_stage_objective_bundle(objective_bundle)
@@ -18838,6 +18887,21 @@ if __name__ == "__main__":
             None
             if SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M is None
             else float(SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M)
+        ),
+        # Realized rotation-aware curvature headroom on the FINAL selected geometry
+        # (mirror STAGE_2 banana_coil_solver.py:3141-3153). Diagnostic only: stamps the
+        # per-quadpoint cap stats + FINITEBUILD_ROTATION_AWARE_RESIDUAL_INFEASIBLE_FRACTION
+        # so a converged twist run proves realization without a post-hoc script. The
+        # in-loop steering cap and the honest FINITEBUILD_CURVATURE_OK gate are unchanged.
+        **(
+            rotation_aware_curvature_report(
+                SINGLE_STAGE_FINITE_BUILD_SETTINGS,
+                banana_curve,
+                SINGLE_STAGE_PACK_FRAMEDCURVE,
+                TYPE_KK_INNER_RADIUS_MARGIN_M,
+            )
+            if SINGLE_STAGE_PACK_FRAMEDCURVE is not None
+            else {}
         ),
         "MSC_WEIGHT": MSC_WEIGHT,
         "ARCLEN_WEIGHT": ARCLEN_WEIGHT,
