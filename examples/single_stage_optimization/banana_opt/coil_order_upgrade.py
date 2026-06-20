@@ -8,6 +8,7 @@ import numpy as np
 from simsopt.field import BiotSavart, Coil, coils_via_symmetries
 from simsopt.field.coil import CurrentBase
 from simsopt.geo import CurveCWSFourierCPP
+from simsopt.geo.finitebuild import CurveFilament
 
 
 def _resize_mode(mode: np.ndarray, target_size: int) -> np.ndarray:
@@ -72,12 +73,43 @@ def upgrade_cws_order(
     return upgraded_curve
 
 
+def _master_cws_curve(curve) -> CurveCWSFourierCPP | None:
+    """Return the underlying ``CurveCWSFourierCPP`` master of a banana coil curve.
+
+    A thin banana coil's curve IS the CWS master. A finite-build filament wraps it
+    in a ``CurveFilament`` whose ``.curve`` attribute is that same master (the pack
+    is built from one shared centerline), so unwrap one level. Returns ``None`` when
+    neither holds.
+    """
+    if isinstance(curve, CurveCWSFourierCPP):
+        return curve
+    inner = getattr(curve, "curve", None)
+    if isinstance(inner, CurveCWSFourierCPP):
+        return inner
+    return None
+
+
+def _net_banana_current(coil: Coil) -> CurrentBase:
+    """The NET banana current optimizable for a banana coil.
+
+    A thin banana coil's ``coil.current`` IS the net current. A finite-build pack
+    filament's ``coil.current`` is the per-filament ``ScaledCurrent`` (net/nfilaments)
+    whose ``current_to_scale`` is the single shared NET optimizable driving the whole
+    pack; recover that net so the upgraded family carries the seed's net current (not
+    the filament scale), mirroring how the example unwraps it.
+    """
+    if isinstance(coil.curve, CurveFilament):
+        return coil.current.current_to_scale
+    return coil.current
+
+
 def _resolve_master_banana_seed(
     banana_coils: Sequence[Coil],
 ) -> tuple[CurveCWSFourierCPP, CurrentBase]:
     for coil in banana_coils:
-        if isinstance(coil.curve, CurveCWSFourierCPP):
-            return coil.curve, coil.current
+        master_curve = _master_cws_curve(coil.curve)
+        if master_curve is not None:
+            return master_curve, _net_banana_current(coil)
     raise ValueError(
         "Loaded banana coils do not contain a CurveCWSFourierCPP master curve."
     )
