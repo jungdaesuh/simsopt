@@ -74,6 +74,16 @@ class ConfinementMetrics:
         <2 surfaces.
       beta: equilibrium beta. 0.0 => vacuum => Mercier not applicable.
       mercier_dmerc_min: min DMerc over the profile (>=0 stable); only meaningful at beta>0.
+
+    Converse-KAM (ADVISORY/diagnostic only; ADDITIVE; default None == not run):
+      converse_kam (a ``dict`` payload produced by ``converse_kam.ConverseKamResult.
+        to_dict``) carries the cone-crossing certified-NON-EXISTENCE diagnostic on the
+        Biot-Savart field. It is OPT-IN, DEFAULT-OFF, and is NOT decisive: the gate records
+        it but it MUST NOT flip the existing topology-based promotion verdict until the
+        converse-KAM direction-field construction has been donor-validated (see
+        ``converse_kam.validate_against_donors`` and the module docstring's UNVALIDATED-step
+        warning). It is a ``dict`` (not typed fields) so the gate stays decoupled from the
+        heavy converse-KAM module and the carrier is trivially JSON-serialisable.
     """
 
     survived_lines: Optional[int] = None
@@ -85,6 +95,8 @@ class ConfinementMetrics:
     iota_shear: Optional[float] = None
     beta: float = 0.0
     mercier_dmerc_min: Optional[float] = None
+    # ADVISORY converse-KAM diagnostic payload (None == not run). NEVER promotion-decisive.
+    converse_kam: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -151,10 +163,18 @@ class ConfinementVerdict:
     accepted: bool
     decisive_reason: str
     criteria: tuple[CriterionResult, ...] = field(default_factory=tuple)
+    # ADVISORY converse-KAM diagnostic (None == not run). It is ADDITIVE and NEVER affects
+    # ``accepted``/``decisive_reason``; surfaced only so consumers can read the cone-crossing
+    # non-existence diagnostic alongside the decisive topology verdict.
+    converse_kam: Optional[dict] = None
 
     def to_dict(self) -> dict:
-        """JSON-serializable verdict for results.json / the campaign ledger."""
-        return {
+        """JSON-serializable verdict for results.json / the campaign ledger.
+
+        ``converse_kam`` is emitted only when present (default-off path is byte-identical to
+        the pre-existing payload), keeping existing consumers unaffected.
+        """
+        payload = {
             "accepted": self.accepted,
             "decisive_reason": self.decisive_reason,
             "criteria": [
@@ -170,6 +190,10 @@ class ConfinementVerdict:
                 for c in self.criteria
             ],
         }
+        if self.converse_kam is not None:
+            # Advisory-only; never decisive (see dataclass docstring).
+            payload["converse_kam"] = self.converse_kam
+        return payload
 
 
 def evaluate_confinement_gate(
@@ -346,6 +370,10 @@ def evaluate_confinement_gate(
         accepted=accepted,
         decisive_reason=decisive_reason,
         criteria=tuple(criteria),
+        # ADVISORY: the converse-KAM diagnostic is carried through verbatim and does NOT
+        # enter ``accepted``/``failing_required`` above -- it never flips the verdict until
+        # donor-validated (see ConfinementMetrics.converse_kam / module-level note).
+        converse_kam=metrics.converse_kam,
     )
 
 
@@ -394,6 +422,35 @@ def metrics_from_topology_verdict(
     )
 
 
+def _run_converse_kam_diagnostic(
+    run_path: Path,
+    field_label: str | None,
+    converse_kam_config,
+) -> dict:
+    """Run the ADVISORY converse-KAM cone-crossing diagnostic on the saved field.
+
+    Loads the SAME persisted Biot-Savart field + surface the strict tier certified (so the
+    diagnostic and the decisive verdict refer to one artifact) and runs the conefield test.
+    Returns the ``ConverseKamResult`` dict payload. Imports are local: the converse-KAM
+    module and the field loader both pull in simsopt, so deferring them keeps the gate
+    library importable for pure unit tests. This is invoked ONLY when the caller opts in
+    (interval > 0 in the CLI); default-off leaves the gate path byte-identical.
+    """
+    # ``resolve_field_and_surface`` lives in the strict-tier runner module and is the SSOT
+    # for picking opt vs init artifacts -- reuse it rather than re-deriving artifact paths.
+    from run_topology_fidelity_ladder import resolve_field_and_surface
+    from banana_opt.topology.converse_kam import certify_nonexistence_on_field
+
+    bfield, surface, _label = resolve_field_and_surface(run_path)
+    result = certify_nonexistence_on_field(
+        bfield,
+        surface,
+        nfp=int(surface.nfp),
+        config=converse_kam_config,
+    )
+    return result.to_dict()
+
+
 def certify_confinement(
     run_dir: str | Path,
     *,
@@ -403,6 +460,7 @@ def certify_confinement(
     magnetic_well: float | None = None,
     iota_shear: float | None = None,
     mercier_dmerc_min: float | None = None,
+    converse_kam_config=None,
     write_verdict: bool = True,
 ) -> dict:
     """SSOT confinement certification for a saved candidate run directory.
@@ -421,6 +479,12 @@ def certify_confinement(
     typed thresholds); the physics values are advisory-by-default inside the gate. Returns the
     JSON-serializable payload (``run_dir`` / ``field_label`` / ``strict_topology_passed`` /
     ``confinement_verdict``).
+
+    ``converse_kam_config`` (a ``converse_kam.ConverseKamConfig`` or None) is OPT-IN /
+    DEFAULT-OFF: when None the behaviour is byte-identical to before; when supplied the
+    ADVISORY converse-KAM cone-crossing diagnostic is run on the same persisted field and
+    attached to the verdict's ``converse_kam`` payload. It is NEVER decisive (it does not
+    enter the accept/reject logic) until donor-validated.
     """
     # Import the strict-tier runner lazily: it transitively pulls in the heavy single-stage
     # module (simsopt/jax), so deferring it keeps this library module importable cheaply --
@@ -435,6 +499,14 @@ def certify_confinement(
     strict_verdict = strict_record["topology_verdict"]
     nfieldlines = DEFAULT_TOPOLOGY_TIER_SPECS[STRICT_TIER].nfieldlines
 
+    converse_kam_payload = (
+        None
+        if converse_kam_config is None
+        else _run_converse_kam_diagnostic(
+            run_path, case.get("field_label"), converse_kam_config
+        )
+    )
+
     metrics = metrics_from_topology_verdict(
         strict_verdict,
         nfieldlines,
@@ -443,6 +515,20 @@ def certify_confinement(
         iota_shear=iota_shear,
         beta=beta,
         mercier_dmerc_min=mercier_dmerc_min,
+    )
+    # Attach the advisory diagnostic to the (immutable) metrics carrier before evaluation;
+    # it flows into the verdict's ``converse_kam`` field but never into the accept logic.
+    metrics = ConfinementMetrics(
+        survived_lines=metrics.survived_lines,
+        total_lines=metrics.total_lines,
+        island_chains=metrics.island_chains,
+        classifiable_fraction=metrics.classifiable_fraction,
+        qa_nonqs_ratio=metrics.qa_nonqs_ratio,
+        magnetic_well=metrics.magnetic_well,
+        iota_shear=metrics.iota_shear,
+        beta=metrics.beta,
+        mercier_dmerc_min=metrics.mercier_dmerc_min,
+        converse_kam=converse_kam_payload,
     )
     verdict = evaluate_confinement_gate(metrics, config)
     payload = {

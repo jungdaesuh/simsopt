@@ -3541,10 +3541,33 @@ def parse_args():
         type=float,
         default=float(os.environ.get("SINGLE_STAGE_QA_RESIDUAL_WEIGHT", "0.0")),
         help=(
-            "Opt-in extra weight on the existing Boozer QA residual "
-            "NonQuasiSymmetricRatio(quasi_poloidal=False). This up-weights QA "
-            "orthogonally to surface-restoration terms and leaves the base QS term "
-            "unchanged when 0."
+            "Opt-in extra weight on a dedicated, explicit Boozer QA residual built "
+            "from NonQuasiSymmetricRatio(quasi_poloidal=False) (the proven (M=1, N=0) "
+            "two-term field-aligned decomposition with an analytic Boozer adjoint "
+            "gradient). This up-weights QA orthogonally to surface-restoration terms "
+            "and leaves the base QS term unchanged when 0."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-qa-helicity-m",
+        type=int,
+        default=int(os.environ.get("SINGLE_STAGE_QA_HELICITY_M", "1")),
+        help=(
+            "Poloidal helicity M of the explicit single-stage QA residual "
+            "(default 1). Only the quasi-axisymmetric helicity (M=1, N=0) is "
+            "realizable on the proven NonQuasiSymmetricRatio adjoint path; other "
+            "helicities are rejected."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-qa-helicity-n",
+        type=int,
+        default=int(os.environ.get("SINGLE_STAGE_QA_HELICITY_N", "0")),
+        help=(
+            "Toroidal helicity N of the explicit single-stage QA residual "
+            "(default 0). Only the quasi-axisymmetric helicity (M=1, N=0) is "
+            "realizable on the proven NonQuasiSymmetricRatio adjoint path; other "
+            "helicities are rejected."
         ),
     )
     parser.add_argument(
@@ -4469,6 +4492,15 @@ def parse_args():
         or args.single_stage_qa_residual_weight < 0.0
     ):
         parser.error("--single-stage-qa-residual-weight must be finite and non-negative.")
+    if args.single_stage_qa_residual_weight > 0.0 and (
+        int(args.single_stage_qa_helicity_m) != 1
+        or int(args.single_stage_qa_helicity_n) != 0
+    ):
+        parser.error(
+            "--single-stage-qa-helicity-m/--single-stage-qa-helicity-n must be (1, 0): "
+            "only the quasi-axisymmetric helicity is realizable on the proven "
+            "NonQuasiSymmetricRatio adjoint path."
+        )
     if args.single_stage_hardware_sdf_free_space_reward_weight > 0.0:
         if args.hardware_keepout_backend != "sdf":
             parser.error(
@@ -7127,6 +7159,8 @@ class RunIdentityConfig:
     single_stage_geodesic_curvature_threshold: float
     single_stage_geodesic_curvature_p: int
     single_stage_qa_residual_weight: float
+    single_stage_qa_helicity_m: int
+    single_stage_qa_helicity_n: int
     single_stage_poloidal_threshold_rad: float
     single_stage_width_min_threshold: float
     single_stage_width_max_threshold: float
@@ -7887,6 +7921,12 @@ def make_run_identity_config(
         single_stage_qa_residual_weight=float(
             getattr(args, "single_stage_qa_residual_weight", 0.0)
         ),
+        single_stage_qa_helicity_m=int(
+            getattr(args, "single_stage_qa_helicity_m", 1)
+        ),
+        single_stage_qa_helicity_n=int(
+            getattr(args, "single_stage_qa_helicity_n", 0)
+        ),
         single_stage_poloidal_threshold_rad=getattr(
             args,
             "single_stage_poloidal_threshold_rad",
@@ -8235,6 +8275,15 @@ def build_run_identity_config(config):
         if (
             field.name == "single_stage_qa_residual_weight"
             and float(value) == 0.0
+        ):
+            continue
+        if (
+            field.name
+            in {
+                "single_stage_qa_helicity_m",
+                "single_stage_qa_helicity_n",
+            }
+            and float(config.single_stage_qa_residual_weight) == 0.0
         ):
             continue
         if not config.finite_build and (
@@ -9311,6 +9360,8 @@ def build_single_stage_objective_bundle(
     GEODESIC_CURVATURE_THRESHOLD=SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT,
     GEODESIC_CURVATURE_P=SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT,
     QA_RESIDUAL_WEIGHT=0.0,
+    QA_HELICITY_M=1,
+    QA_HELICITY_N=0,
     LGRADB_WEIGHT=0.0,
     LGRADB_FLOOR=0.30,
     LGRADB_NTHETA=32,
@@ -9670,9 +9721,49 @@ def build_single_stage_objective_bundle(
         if IOTA_PIN_WEIGHT > 0.0
         else None
     )
-    # ``NonQuasiSymmetricRatio`` defaults to quasi_poloidal=False, the QA branch.
-    # Keep the base QS objective intact and expose an independent default-off QA weight.
-    JQAResidual = JnonQSRatio if QA_RESIDUAL_WEIGHT > 0.0 else None
+    # Explicit quasi-axisymmetry (QA) residual: a tunable UP-WEIGHT of the base QA
+    # objective.
+    #
+    # ``NonQuasiSymmetricRatio(quasi_poloidal=False)`` IS the QA (helicity M=1, N=0)
+    # two-term field-aligned decomposition -- B_QS averages |B| along the toroidal
+    # angle and J = <dS B_nonQS^2>/<dS B_QS^2> -- and it carries the proven analytic
+    # Boozer-adjoint gradient (dJ_by_dB + dJ_by_dsurfacecoefficients threaded through
+    # the surface ``forward_backward`` adjoint in its ``compute()``). That helicity is
+    # the only one realizable on this path (quasi_poloidal=True is QP/(M=0, N=1)), so
+    # we assert the requested helicity is (1, 0) and reuse the proven gradient rather
+    # than hand-rolling a new (and possibly wrong) adjoint.
+    #
+    # NOTE ON STACKING: the base ``JnonQSRatio`` (the SAME QA metric over the same
+    # surfaces) is already summed unconditionally with coefficient 1.0 in
+    # ``build_total_objective``. This dedicated term -- a distinct Optimizable that
+    # REUSES the base per-surface BiotSavart field objects (so it adds no duplicate
+    # field evaluations) and is mathematically the same QA residual -- is then
+    # added with ``QA_RESIDUAL_WEIGHT``, so the EFFECTIVE QA weight is
+    # ``1.0 + QA_RESIDUAL_WEIGHT`` (it up-weights QA; it is NOT an orthogonal/
+    # independent objective). Default-OFF (None) preserves byte-identical default
+    # behavior. (To make QA fully independent of the base term one would instead
+    # parameterize the base weight; that is out of scope here.)
+    if QA_RESIDUAL_WEIGHT > 0.0:
+        assert (int(QA_HELICITY_M), int(QA_HELICITY_N)) == (1, 0), (
+            "Explicit single-stage QA residual only supports helicity (M=1, N=0); "
+            f"got (M={QA_HELICITY_M}, N={QA_HELICITY_N})."
+        )
+        qa_boozer_surfaces = [entry["boozer_surface"] for entry in surface_data]
+        # Reuse the base per-surface BiotSavart fields (index-aligned: both are
+        # built from the same ``surface_data`` order) so the QA term shares the
+        # field cache instead of evaluating duplicate BiotSavart(coils) every step.
+        qa_residual_biot_savarts = boozer_terms["boozer_objective_biot_savarts"]
+        qa_residual_terms = [
+            NonQuasiSymmetricRatio(
+                qa_surface,
+                qa_residual_biot_savarts[qa_index],
+                quasi_poloidal=False,
+            )
+            for qa_index, qa_surface in enumerate(qa_boozer_surfaces)
+        ]
+        JQAResidual = average_surface_objectives(qa_residual_terms)
+    else:
+        JQAResidual = None
     # min(L_grad_B) Kappel coil-realizability gate/report metric (opt-in,
     # default-OFF): None when LGRADB_WEIGHT is 0, so default runs add nothing and
     # stay byte-identical. When enabled, evaluates L_grad_B on a theta x phi grid
@@ -16800,6 +16891,8 @@ if __name__ == "__main__":
     IOTA_PIN_TARGET = float(args.single_stage_iota_pin_target)
     IOTA_PIN_WINDOW = float(args.single_stage_iota_pin_window)
     QA_RESIDUAL_WEIGHT = float(args.single_stage_qa_residual_weight)
+    QA_HELICITY_M = int(args.single_stage_qa_helicity_m)
+    QA_HELICITY_N = int(args.single_stage_qa_helicity_n)
     if (
         not np.isfinite(RATIONAL_IOTA_AVOIDANCE_WEIGHT)
         or RATIONAL_IOTA_AVOIDANCE_WEIGHT < 0.0
@@ -16843,6 +16936,12 @@ if __name__ == "__main__":
         raise ValueError("--single-stage-iota-pin-window must be positive and finite")
     if not np.isfinite(QA_RESIDUAL_WEIGHT) or QA_RESIDUAL_WEIGHT < 0.0:
         raise ValueError("--single-stage-qa-residual-weight must be finite and non-negative")
+    if QA_RESIDUAL_WEIGHT > 0.0 and (QA_HELICITY_M != 1 or QA_HELICITY_N != 0):
+        raise ValueError(
+            "--single-stage-qa-helicity-m/--single-stage-qa-helicity-n must be (1, 0): "
+            "only the quasi-axisymmetric helicity is realizable on the proven "
+            "NonQuasiSymmetricRatio adjoint path"
+        )
     # min(L_grad_B) Kappel coil-realizability shortfall (opt-in, default weight 0 ->
     # term not constructed, objective graph byte-identical with prior runs).
     LGRADB_WEIGHT = float(args.lgradb_weight)
@@ -16963,6 +17062,8 @@ if __name__ == "__main__":
             ),
             GEODESIC_CURVATURE_P=SINGLE_STAGE_GEODESIC_CURVATURE_P,
             QA_RESIDUAL_WEIGHT=QA_RESIDUAL_WEIGHT,
+            QA_HELICITY_M=QA_HELICITY_M,
+            QA_HELICITY_N=QA_HELICITY_N,
             LGRADB_WEIGHT=LGRADB_WEIGHT,
             LGRADB_FLOOR=LGRADB_FLOOR,
             LGRADB_NTHETA=LGRADB_NTHETA,

@@ -15,6 +15,15 @@ computed by the producing solver / judge and are advisory-by-default in the gate
     python run_confinement_gate.py --run-dir <dir>
     python run_confinement_gate.py --run-dir <dir> --qa-nonqs 5e-3 --iota-shear 0.05 \
         --require-qa --min-survival 0.9
+
+Converse-KAM (OPT-IN, DEFAULT-OFF). With ``--converse-kam-gate-interval 0`` (the default)
+behaviour is byte-identical to before. Setting it > 0 turns on the ADVISORY converse-KAM
+cone-crossing non-existence diagnostic (arXiv:2501.06796) on the same persisted Biot-Savart
+field; it is recorded under ``confinement_verdict.converse_kam`` but is NOT decisive (it
+never flips accept/reject) until the direction-field construction is donor-validated:
+
+    python run_confinement_gate.py --run-dir <dir> --converse-kam-gate-interval 1 \
+        --converse-kam-seeds 24 --converse-kam-tf 600 --converse-kam-timeout 600
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ from banana_opt.confinement_gate import (
     ConfinementGateConfig,
     certify_confinement,
 )
+from banana_opt.topology.converse_kam import ConverseKamConfig
 
 
 def _optional_float(value: str | None) -> float | None:
@@ -76,7 +86,70 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-shear", action="store_true")
     parser.add_argument("--qa-nonqs-max", type=float, default=1.0e-2)
     parser.add_argument("--iota-shear-min", type=float, default=0.0)
+    # --- Converse-KAM (OPT-IN, DEFAULT-OFF) ----------------------------------------------
+    # Interval semantics: 0 == OFF (default; byte-identical legacy behaviour). Any value > 0
+    # enables the diagnostic for this single post-hoc certification. The "interval" name is
+    # kept for parity with the in-loop closed-loop convention (run the converse-KAM gate
+    # every Nth candidate); for the one-shot CLI, > 0 simply means "run it".
+    parser.add_argument(
+        "--converse-kam-gate-interval",
+        type=int,
+        default=0,
+        help=(
+            "0 (default) = OFF. > 0 enables the ADVISORY converse-KAM cone-crossing "
+            "non-existence diagnostic (arXiv:2501.06796). Recorded under "
+            "confinement_verdict.converse_kam; NOT promotion-decisive until donor-validated."
+        ),
+    )
+    parser.add_argument(
+        "--converse-kam-seeds",
+        type=int,
+        default=24,
+        help="Radial seeds across the phi=0 midplane for the converse-KAM sweep.",
+    )
+    parser.add_argument(
+        "--converse-kam-tf",
+        type=float,
+        default=600.0,
+        help="Converse-KAM integration window t_f (field-line time; [-t_f/2, +t_f/2]).",
+    )
+    parser.add_argument(
+        "--converse-kam-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Converse-KAM timeout (>= t_f). Reaching it without a cone collapse marks the "
+            "point UNDECIDED (fail-closed, never 'surface exists'). Default: equals t_f."
+        ),
+    )
+    parser.add_argument(
+        "--converse-kam-phi-planes",
+        type=int,
+        default=8,
+        help="Toroidal planes at which to locate the magnetic axis a(phi) for xi.",
+    )
     return parser.parse_args()
+
+
+def converse_kam_config_from_args(args: argparse.Namespace) -> ConverseKamConfig | None:
+    """Build a ConverseKamConfig only when the diagnostic is opted in (interval > 0).
+
+    Returns None when ``--converse-kam-gate-interval`` is 0 (the default), which makes
+    ``certify_confinement`` skip the diagnostic entirely (legacy path).
+    """
+    if int(args.converse_kam_gate_interval) <= 0:
+        return None
+    timeout = (
+        float(args.converse_kam_tf)
+        if args.converse_kam_timeout is None
+        else float(args.converse_kam_timeout)
+    )
+    return ConverseKamConfig(
+        t_f=float(args.converse_kam_tf),
+        timeout_t_f=timeout,
+        n_seeds=int(args.converse_kam_seeds),
+        n_phi_planes=int(args.converse_kam_phi_planes),
+    )
 
 
 def resolve_beta(run_dir: Path, override: float | None) -> float:
@@ -128,6 +201,7 @@ def certify(run_dir: str, args: argparse.Namespace) -> dict:
         magnetic_well=_optional_float(args.magnetic_well),
         iota_shear=_optional_float(args.iota_shear),
         mercier_dmerc_min=_optional_float(args.mercier_dmerc),
+        converse_kam_config=converse_kam_config_from_args(args),
     )
 
 
@@ -144,6 +218,18 @@ def main() -> None:
             "  WARNING: confinement gate ACCEPTED but the strict topology tier's own "
             "verdict was FAIL (survival below the tier's 1.0 threshold, or a tier gate the "
             "config relaxed). Review --min-survival / --advisory-* before promotion."
+        )
+    converse_kam = verdict.get("converse_kam")
+    if converse_kam is not None:
+        # ADVISORY ONLY: this fraction does NOT affect the accept/reject above. It is a
+        # LOWER bound (undecided seeds are in the denominator, never counted as existent).
+        print(
+            "  converse-KAM (ADVISORY, NOT decisive until donor-validated): certified "
+            f"non-existence {converse_kam['certified_nonexistence_fraction']:.3f} "
+            f"({converse_kam['n_certified']}/{converse_kam['n_total']} seeds; "
+            f"{converse_kam['n_undecided']} undecided; "
+            f"axis={converse_kam['axis_source']}, "
+            f"axis_residual_max={converse_kam['axis_residual_max']:g})"
         )
     print(f"  written -> {Path(args.run_dir).resolve() / 'confinement_verdict.json'}")
     raise SystemExit(0 if verdict["accepted"] else 1)
