@@ -6,7 +6,7 @@ import sys
 # SIMSOPT imports
 from simsopt.field import compute_fieldlines
 import numpy as np
-from simsopt.geo import curves_to_vtk
+from simsopt.geo import BoozerSurface, curves_to_vtk
 
 # Shared topology scorer — single source of truth for helpers and metrics
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -446,7 +446,10 @@ if __name__ == "__main__":
     # Load optimized field + surface if both available, otherwise fall back to init for both
     opt_bs_path = OUT_DIR + "/biot_savart_opt.json"
     init_bs_path = OUT_DIR + "/biot_savart_init.json"
-    opt_surf_path = OUT_DIR + "/surf_opt.json"
+    # POINCARE_OPT_SURF_PATH overrides the optimized-surface file for runs that
+    # serialized the boundary under a non-standard name (e.g. a BoozerSurface saved
+    # as onspec_surf_opt_boozer_surface.json). Default preserves surf_opt.json.
+    opt_surf_path = os.environ.get("POINCARE_OPT_SURF_PATH", OUT_DIR + "/surf_opt.json")
     init_surf_path = OUT_DIR + "/surf_init.json"
     results_meta = load_design_only_results_metadata(OUT_DIR)
     allow_design_only_field = design_only_override_enabled()
@@ -480,6 +483,13 @@ if __name__ == "__main__":
             )
         else:
             print("Loaded INITIAL field + surface (no opt found)")
+
+    # A surf_opt.json may serialize a BoozerSurface (it wraps the plasma boundary
+    # in `.surface`). The tracer and plotter operate on the plain Surface, so unwrap
+    # it here. This is a no-op for the common SurfaceXYZTensorFourier path, leaving
+    # the frozen render contract bit-identical for every already-working input.
+    if isinstance(surf, BoozerSurface):
+        surf = surf.surface
 
     # Export the exact geometry used by this Poincare run for ParaView inspection.
     curves_to_vtk(
