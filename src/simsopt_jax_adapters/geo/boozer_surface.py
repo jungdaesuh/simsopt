@@ -5576,7 +5576,24 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 resolved_constraint_weight,
             )
-            jacobian_fn = jax.jacfwd(residual_fn, argnums=0)
+            def jacobian_fn(x, coil_set_spec):
+                # Assemble the dense Jacobian in column batches (jax.lax.map
+                # batch_size) instead of jax.jacfwd's parallel vmap over all N
+                # input directions: the per-column JVP holds ~1 GB of BiotSavart
+                # intermediates, so the full N-wide vmap peaks at tens of GB and
+                # OOMs. Batching bounds peak memory to batch_size parallel JVPs
+                # (here 8) while staying far faster than a fully sequential map,
+                # and yields the identical Jacobian.
+                x_arr = jnp.asarray(x)
+
+                def jvp_column(tangent):
+                    return jax.jvp(
+                        lambda xi: residual_fn(xi, coil_set_spec), (x_arr,), (tangent,)
+                    )[1]
+
+                eye = jnp.eye(x_arr.shape[0], dtype=x_arr.dtype)
+                columns = jax.lax.map(jvp_column, eye, batch_size=8)
+                return jnp.moveaxis(columns, 0, -1)
             linear_solve_tol = self._linear_solve_tolerance()
             linear_solve_stab = float(self.options.get("newton_stab", 0.0))
 

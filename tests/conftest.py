@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import os
 import shlex
 import sys
+import gc
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -288,6 +289,15 @@ def _guard_backend_runtime_state():
         _restore_backend_runtime_env(env_snapshot)
         _restore_loaded_jax_runtime_config(jax_config_snapshot)
         _invalidate_loaded_backend_state()
+        # Bound JAX's XLA executable cache within a long-lived single process:
+        # the invalidations above clear simsopt_jax's caches but not JAX's, which
+        # otherwise grows unbounded across a module's tests until a native
+        # allocation fails (std::bad_alloc -> abort). Clearing per test keeps peak
+        # RSS bounded to ~one test's working set.
+        _jax_mod = sys.modules.get("jax")
+        if _jax_mod is not None:
+            _jax_mod.clear_caches()
+            gc.collect()
 
 
 def _activate_backend_mode(monkeypatch, request, *, mode, strict):
