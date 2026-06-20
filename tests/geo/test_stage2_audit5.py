@@ -34,7 +34,9 @@ if str(EXAMPLE_ROOT) not in sys.path:
 from banana_opt.coil_order_upgrade import realized_cws_winding_radii  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
-    TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+    TYPE_KK_INNER_RADIUS_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
 )
 from banana_opt.hardware_keepout import CurveVesselEnvelopeKeepout  # noqa: E402
@@ -103,19 +105,44 @@ def _build_cws_banana_family(major_radius, minor_radius=0.142):
 
 
 class FrameAwareCurvatureLimitTest(unittest.TestCase):
-    def test_limit_is_reciprocal_of_floor_plus_pack_reach(self) -> None:
+    def test_limit_is_reciprocal_of_margin_plus_outer_edgewise_reach(self) -> None:
+        # Adopted self-intersection model: cap = 1/(inner-radius margin +
+        # outer-channel edgewise reach max(half_depth, half_width)), independent
+        # of the conductor-pack grid. The bench measurement ruled only the
+        # flatwise/edgewise axis limits, so the conservative cap is the wider
+        # edgewise axis -- not a stricter diagonal corner that was never measured.
         fb = _settings()
-        floor = TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
-        limit = finite_build_frame_aware_curvature_limit_inv_m(fb, floor)
-        self.assertAlmostEqual(limit, 1.0 / (floor + fb.pack_reach_m), places=12)
+        margin = TYPE_KK_INNER_RADIUS_MARGIN_M
+        outer_edgewise_reach = max(
+            TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+            TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+        )
+        limit = finite_build_frame_aware_curvature_limit_inv_m(fb, margin)
+        self.assertAlmostEqual(
+            limit, 1.0 / (margin + outer_edgewise_reach), places=12
+        )
+        # ~43.31/m for the Type-KK outer channel.
+        self.assertAlmostEqual(limit, 43.31, places=1)
         # Stricter than the centerline cap (smaller inv_m = larger required radius).
         self.assertLess(limit, 100.0)
 
     def test_nonpositive_required_radius_is_infinite(self) -> None:
-        fb = _settings(numfilaments_n=1, numfilaments_b=1)  # zero pack reach
-        self.assertEqual(fb.pack_reach_m, 0.0)
+        # The outer-channel reach is a fixed positive constant, so the required
+        # radius is non-positive only when the margin cancels it; the helper
+        # returns inf at that degenerate boundary.
+        fb = _settings()
+        outer_corner_reach = float(
+            np.hypot(
+                TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+            )
+        )
         self.assertTrue(
-            np.isinf(finite_build_frame_aware_curvature_limit_inv_m(fb, 0.0))
+            np.isinf(
+                finite_build_frame_aware_curvature_limit_inv_m(
+                    fb, -outer_corner_reach
+                )
+            )
         )
 
 
@@ -158,7 +185,7 @@ class FrameAwareTighteningTest(unittest.TestCase):
     def test_opt_in_tightens_when_pack_limit_stricter(self) -> None:
         fb = _settings()
         expected = finite_build_frame_aware_curvature_limit_inv_m(
-            fb, TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            fb, TYPE_KK_INNER_RADIUS_MARGIN_M
         )
         threshold, pack_limit, applied = _SOLVER.stage2_frame_aware_curvature_tightening(
             100.0, fb, True
@@ -170,7 +197,7 @@ class FrameAwareTighteningTest(unittest.TestCase):
     def test_opt_in_never_loosens_an_already_stricter_threshold(self) -> None:
         fb = _settings()
         expected_limit = finite_build_frame_aware_curvature_limit_inv_m(
-            fb, TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+            fb, TYPE_KK_INNER_RADIUS_MARGIN_M
         )
         # 5.0 m^-1 (radius 0.2 m) is already stricter than the pack limit.
         threshold, pack_limit, applied = _SOLVER.stage2_frame_aware_curvature_tightening(
@@ -227,26 +254,37 @@ class FrameAwareTighteningTest(unittest.TestCase):
 
 
 class ProjectedBendHalfExtentTest(unittest.TestCase):
-    def test_non_surface_frame_uses_conservative_max_half_build(self) -> None:
+    def test_non_surface_frame_uses_conservative_outer_corner_reach(self) -> None:
         fb = _settings(frame="centroid")
         curve = _StubGamma([[1.0, 0.0, 0.0]])
-        # centroid frame has no surface normal -> conservative max(half_n, half_b)
-        # for every quadpoint. Provide kappa via a small stub.
+        # centroid frame has no surface normal -> conservative outer-channel corner
+        # reach for every quadpoint. Provide kappa via a small stub.
         curve.kappa = lambda: np.array([50.0])  # type: ignore[attr-defined]
         extent = _SOLVER._finite_build_projected_bend_half_extent_m(fb, curve)
-        self.assertTrue(
-            np.allclose(extent, max(fb.pack_half_extent_n_m, fb.pack_half_extent_b_m))
+        outer_corner_reach = float(
+            np.hypot(
+                TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+            )
         )
+        self.assertTrue(np.allclose(extent, outer_corner_reach))
 
-    def test_surface_tangent_projection_never_exceeds_pack_reach(self) -> None:
+    def test_surface_tangent_projection_never_exceeds_outer_corner_reach(self) -> None:
         fb = _settings(frame="surface_tangent")
         family = _build_cws_banana_family(BANANA_WINDING_SURFACE_MAJOR_RADIUS_M)
         curve = family[0].curve
         extent = _SOLVER._finite_build_projected_bend_half_extent_m(fb, curve)
         self.assertEqual(extent.shape[0], np.asarray(curve.kappa()).shape[0])
         self.assertTrue(np.all(extent >= 0.0))
-        # a*half_n + b*half_b with a^2+b^2=1, a,b>=0 -> bounded by hypot = pack_reach.
-        self.assertTrue(np.all(extent <= fb.pack_reach_m + 1e-9))
+        # a*half_n + b*half_b with a^2+b^2=1, a,b>=0 -> bounded by the outer-channel
+        # corner reach hypot(half_depth_normal, half_width_binormal).
+        outer_corner_reach = float(
+            np.hypot(
+                TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+            )
+        )
+        self.assertTrue(np.all(extent <= outer_corner_reach + 1e-9))
 
 
 # ───────────────────────── 5b ─────────────────────────

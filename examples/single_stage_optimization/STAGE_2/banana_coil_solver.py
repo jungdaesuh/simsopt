@@ -2036,7 +2036,7 @@ def parse_args():
         dest="stage2_rotation_aware_curvature_cap",
         action="store_true",
         help="T3.2/G3 (default off, NON-PROMOTION-READY): relax the in-run "
-        "curvature threshold from the conservative worst-case pack corner cap up "
+        "curvature threshold from the measured edgewise pack cap up "
         "to the realized rotation-aware cap (scalarized to the tightest realized "
         "point) using the live pack frame. The honest FINITEBUILD_CURVATURE_OK "
         "gate (alpha=0 corner frame) is unchanged, so a design that only builds "
@@ -4301,7 +4301,7 @@ def main(parsed_args=None):
             "Frame-aware curvature threshold: "
             f"{pre_tightening_curvature_threshold:.4f} -> "
             f"{CURVATURE_THRESHOLD:.4f} m^-1 "
-            "(inner-radius margin + outer-channel corner reach)"
+            "(outer-channel edgewise reach)"
         )
     rotation_aware_curvature_cap_applied = False
     rotation_aware_curvature_cap_inv_m = None
@@ -4310,7 +4310,7 @@ def main(parsed_args=None):
         and FINITE_BUILD
     ):
         # T3.2/G3 (NON-PROMOTION-READY): relax the in-run curvature threshold from
-        # the conservative worst-case corner cap up to the realized rotation-aware
+        # the conservative measured edgewise cap up to the realized rotation-aware
         # cap, scalarized to the TIGHTEST realized point (1/(margin + max reach)).
         # Derived from the seed pack twist alpha(theta); as the coupled optimizer
         # improves alpha the true cap only rises, so this is a conservative

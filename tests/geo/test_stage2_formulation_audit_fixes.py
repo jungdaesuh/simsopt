@@ -48,7 +48,9 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     TYPE_KK_FINITE_BUILD_GAPSIZE_N_M,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B,
     TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N,
-    TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+    TYPE_KK_INNER_RADIUS_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     VACUUM_VESSEL_MINOR_RADIUS_M,
 )
@@ -125,69 +127,72 @@ class FrameAwareCurvatureThresholdTests(unittest.TestCase):
     """Audit 5a: frame-aware pack curvature limit drives the optimizer."""
 
     def test_pack_limit_matches_type_kk_constants(self):
+        # Adopted self-intersection model: cap = 1/(inner-radius margin +
+        # outer-channel edgewise reach max(half_depth, half_width)), independent
+        # of the conductor-pack grid.
         settings = _type_kk_finite_build_settings()
         limit = finite_build_frame_aware_curvature_limit_inv_m(
             settings,
-            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
-        )
-        half_n = 0.5 * (TYPE_KK_FINITE_BUILD_NUMFILAMENTS_N - 1) * (
-            TYPE_KK_FINITE_BUILD_GAPSIZE_N_M
-        )
-        half_b = 0.5 * (TYPE_KK_FINITE_BUILD_NUMFILAMENTS_B - 1) * (
-            TYPE_KK_FINITE_BUILD_GAPSIZE_B_M
+            TYPE_KK_INNER_RADIUS_MARGIN_M,
         )
         expected = 1.0 / (
-            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M + math.hypot(half_n, half_b)
+            TYPE_KK_INNER_RADIUS_MARGIN_M
+            + max(
+                TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+            )
         )
         self.assertAlmostEqual(limit, expected, places=12)
-        # External anchor: the audit-measured frame-aware limit for the
-        # Type KK 2x7 pack is ~32.77 1/m, far below the 100 centerline cap.
-        self.assertAlmostEqual(limit, 32.765, delta=0.005)
+        # External anchor: the conservative edgewise cap for the Type KK outer
+        # channel is ~43.31 1/m, far below the 100 centerline cap.
+        self.assertAlmostEqual(limit, 43.31, delta=0.01)
         self.assertLess(limit, 100.0)
 
     def test_pack_limit_is_conservative_for_every_bend_direction(self):
-        # The per-point frame-aware bound uses the projected half-extent
-        # |b.n|*half_n + |b.bn|*half_b for a unit bend direction b. The pack
-        # corner reach bounds that projection for EVERY direction, so a curve
-        # at the pack limit satisfies every per-point bound.
+        # The per-point frame-aware bound uses the axis-interpolated projected
+        # half-extent cos^2*half_n + sin^2*half_b for a bend direction over the
+        # OUTER channel. That convex interpolation never exceeds the edgewise
+        # reach max(half_n, half_b), so a curve at the conservative cap satisfies
+        # every per-point bound.
         settings = _type_kk_finite_build_settings()
         limit = finite_build_frame_aware_curvature_limit_inv_m(
             settings,
-            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M,
+            TYPE_KK_INNER_RADIUS_MARGIN_M,
         )
-        half_n = settings.pack_half_extent_n_m
-        half_b = settings.pack_half_extent_b_m
+        half_n = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M
+        half_b = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
         rng = np.random.default_rng(20260611)
         angles = rng.uniform(0.0, 2.0 * np.pi, size=256)
-        projected = np.abs(np.cos(angles)) * half_n + np.abs(np.sin(angles)) * half_b
-        per_point_limits = 1.0 / (
-            TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M + projected
-        )
+        projected = np.cos(angles) ** 2 * half_n + np.sin(angles) ** 2 * half_b
+        per_point_limits = 1.0 / (TYPE_KK_INNER_RADIUS_MARGIN_M + projected)
         self.assertLessEqual(
             limit,
             float(np.min(per_point_limits)) + 1e-12,
-            "pack limit must be at most the per-point frame-aware limit for "
-            "every bend direction",
+            "conservative cap must be at most the per-point frame-aware limit "
+            "for every bend direction",
         )
 
     def test_degenerate_zero_radius_returns_inf(self):
-        settings = FiniteBuildSettings(
-            numfilaments_n=1,
-            numfilaments_b=1,
-            gapsize_n=1.0e-3,
-            gapsize_b=1.0e-3,
-            rotation_order=None,
-            frame="centroid",
+        # The outer-channel reach is a fixed positive constant, so the required
+        # radius is non-positive only when the margin cancels it; the helper
+        # returns inf at that degenerate boundary.
+        settings = _type_kk_finite_build_settings()
+        outer_corner_reach = math.hypot(
+            TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+            TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
         )
         self.assertEqual(
-            finite_build_frame_aware_curvature_limit_inv_m(settings, 0.0),
+            finite_build_frame_aware_curvature_limit_inv_m(
+                settings, -outer_corner_reach
+            ),
             float("inf"),
         )
 
-    def test_projected_reach_endpoints_and_maximum_is_corner_reach(self):
-        # T3.2: the projected reach is half_n along the normal (angle 0), half_b
-        # along the binormal (angle pi/2), and maxes out at the corner reach
-        # (pack_reach_m) at the diagonal angle atan2(half_b, half_n).
+    def test_projected_reach_endpoints_and_maximum_is_edgewise_axis(self):
+        # T3.2: the axis-interpolated projected reach is half_n along the normal
+        # (angle 0), half_b along the binormal (angle pi/2), and -- being a convex
+        # interpolation cos^2*half_n + sin^2*half_b -- maxes out at the edgewise
+        # axis reach max(half_n, half_b), with no stricter diagonal-corner reach.
         settings = _type_kk_finite_build_settings()
         half_n = settings.pack_half_extent_n_m
         half_b = settings.pack_half_extent_b_m
@@ -195,62 +200,58 @@ class FrameAwareCurvatureThresholdTests(unittest.TestCase):
         self.assertAlmostEqual(
             pack_projected_reach_m(half_n, half_b, np.pi / 2.0), half_b
         )
-        worst_angle = math.atan2(half_b, half_n)
-        self.assertAlmostEqual(
-            pack_projected_reach_m(half_n, half_b, worst_angle),
-            settings.pack_reach_m,
-            places=12,
-        )
+        # The edgewise axis reach max(half_n, half_b) is attained at pi/2 (asserted
+        # above) and -- by convexity -- bounds the reach for every other angle.
+        edgewise_reach = max(half_n, half_b)
         angles = np.linspace(0.0, 2.0 * np.pi, 720)
         projected = [pack_projected_reach_m(half_n, half_b, a) for a in angles]
-        self.assertLessEqual(float(np.max(projected)), settings.pack_reach_m + 1e-12)
+        self.assertLessEqual(float(np.max(projected)), edgewise_reach + 1e-12)
 
-    def test_rotation_aware_limit_matches_conservative_at_worst_bend_angle(self):
-        # At the corner-reach bend angle the rotation-aware cap reproduces the
-        # conservative worst-case cap exactly (SSOT: same required-radius formula).
+    def test_rotation_aware_limit_matches_conservative_at_edgewise_bend_angle(self):
+        # At the edgewise (wide-axis) bend angle the rotation-aware cap reproduces
+        # the conservative cap exactly (SSOT: same required-radius formula). The
+        # conservative cap uses the edgewise reach max(half_n, half_b) = half_b for
+        # the Type-KK outer channel, realized at the binormal axis (pi/2).
         settings = _type_kk_finite_build_settings()
-        floor = TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
-        conservative = finite_build_frame_aware_curvature_limit_inv_m(settings, floor)
-        worst_angle = math.atan2(
-            settings.pack_half_extent_b_m, settings.pack_half_extent_n_m
-        )
+        margin = TYPE_KK_INNER_RADIUS_MARGIN_M
+        conservative = finite_build_frame_aware_curvature_limit_inv_m(settings, margin)
+        edgewise_angle = np.pi / 2.0
         self.assertAlmostEqual(
             finite_build_rotation_aware_curvature_limit_inv_m(
-                settings, floor, worst_angle
+                settings, margin, edgewise_angle
             ),
             conservative,
             places=12,
         )
 
     def test_rotation_aware_limit_lifts_cap_when_bend_favours_narrow_extent(self):
-        # T3.2 cap-lift: aligning the bend plane with the narrow (2-wide normal)
-        # extent lifts the Type KK pack cap from ~32.77 toward the ~50-67 band.
+        # T3.2 cap-lift: aligning the bend plane with the thin (flatwise/normal)
+        # outer-channel extent lifts the Type KK cap from ~43.31 to ~123.03.
         settings = _type_kk_finite_build_settings()
-        floor = TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
-        conservative = finite_build_frame_aware_curvature_limit_inv_m(settings, floor)
-        narrow_aligned = finite_build_rotation_aware_curvature_limit_inv_m(
-            settings, floor, 0.0
+        margin = TYPE_KK_INNER_RADIUS_MARGIN_M
+        conservative = finite_build_frame_aware_curvature_limit_inv_m(settings, margin)
+        flatwise = finite_build_rotation_aware_curvature_limit_inv_m(
+            settings, margin, 0.0
         )
-        self.assertGreater(narrow_aligned, conservative)
-        self.assertGreater(narrow_aligned, 50.0)
-        # Independent closed form: 1 / (floor + half_n).
+        self.assertGreater(flatwise, conservative)
+        self.assertAlmostEqual(flatwise, 123.03, delta=0.01)
+        # Independent closed form: 1 / (margin + outer half_depth_normal).
         self.assertAlmostEqual(
-            narrow_aligned,
-            1.0 / (floor + settings.pack_half_extent_n_m),
+            flatwise,
+            1.0 / (margin + TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M),
             places=12,
         )
 
     def test_rotation_aware_limit_degenerate_zero_radius_returns_inf(self):
-        settings = FiniteBuildSettings(
-            numfilaments_n=1,
-            numfilaments_b=1,
-            gapsize_n=1.0e-3,
-            gapsize_b=1.0e-3,
-            rotation_order=None,
-            frame="centroid",
-        )
+        # Required radius is non-positive only when the margin cancels the fixed
+        # outer-channel reach; the helper returns inf at that boundary.
+        settings = _type_kk_finite_build_settings()
         self.assertEqual(
-            finite_build_rotation_aware_curvature_limit_inv_m(settings, 0.0, 0.0),
+            finite_build_rotation_aware_curvature_limit_inv_m(
+                settings,
+                -TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                0.0,
+            ),
             float("inf"),
         )
 

@@ -29,6 +29,9 @@ from simsopt.geo import (
 from plotting_utils import magnitude_field_plot, norm_field_plot
 from workflow_helpers import validate_normalized_toroidal_flux
 from banana_opt.hardware_contracts import (
+    TYPE_KK_INNER_RADIUS_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
 )
@@ -932,88 +935,95 @@ def magnetic_field_plots(surf, bs, out_dir_iter):
 
 def finite_build_frame_aware_curvature_limit_inv_m(
     finite_build,
-    single_filament_min_bend_radius_m,
+    inner_radius_margin_m=TYPE_KK_INNER_RADIUS_MARGIN_M,
 ):
-    """Conservative frame-aware centerline curvature cap for a winding pack (1/m).
+    """Conservative frame-aware centerline curvature cap for the Type-KK outer
+    build channel (1/m).
 
-    Buildability requires, at every quadpoint, centerline bend radius >=
-    projected pack half-extent + single-filament bend-radius floor. The
-    projected half-extent never exceeds the pack corner reach
-    (``pack_reach_m``: the bend direction is a unit vector in the normal/
-    binormal plane, so its projection is at most ``hypot(half_n, half_b)``),
-    so capping centerline curvature at ``1 / (floor + pack_reach_m)``
-    guarantees the post-hoc frame-aware inner-edge bound
-    (``FINITEBUILD_CURVATURE_OK``) for every bend direction.
+    Bench-measured self-intersection model: the 1/8" FEP jacket protects the
+    conductor, so the binding bend constraint is geometric self-intersection of
+    the OUTER build envelope at zero inner-surface radius -- not the conductor
+    wire bend radius. Buildability requires centerline bend radius >= the
+    relevant outer-channel half-dimension in the bend plane. Without relying on a
+    realized pack twist, the strict axis-safe value is the edgewise half-width,
+    so the conservative cap is ``1 / max(outer_half_depth, outer_half_width)``.
+    For the Type-KK outer channel this is ~43.31/m. The ``finite_build`` pack-grid
+    argument is accepted for interface parity with the rotation-aware helpers; the
+    cap depends only on the fixed outer-channel contract.
     """
-    required_radius_m = float(single_filament_min_bend_radius_m) + float(
-        finite_build.pack_reach_m
+    outer_edge_reach_m = float(
+        max(
+            TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+            TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+        )
     )
+    required_radius_m = float(inner_radius_margin_m) + outer_edge_reach_m
     if required_radius_m <= 0.0:
         return float("inf")
     return 1.0 / required_radius_m
 
 
 def pack_projected_reach_m(half_extent_n_m, half_extent_b_m, bend_angle_rad):
-    """Pack inner-edge reach (m) projected into a centerline bend direction.
+    """Axis-interpolated inner-edge reach (m) in a centerline bend direction.
 
-    The finite-build pack is a rectangle of half-extents (``half_extent_n_m`` along
-    the pack normal axis, ``half_extent_b_m`` along the binormal). ``bend_angle_rad``
-    is the angle between the centerline bend direction and the pack normal axis, so
-    the inner-edge reach in that direction is the rectangle support function
-    ``half_n*|cos| + half_b*|sin|``: it equals ``half_extent_n_m`` for a bend along
-    the normal (angle 0), ``half_extent_b_m`` for a bend along the binormal
-    (angle pi/2), and is maximal -- the corner reach ``hypot(half_n, half_b)`` =
-    ``FiniteBuildSettings.pack_reach_m`` -- at ``atan2(half_b, half_n)``. Rotating
-    the pack so the bend plane favours the narrow extent shrinks this reach, which
-    is the lever the rotation-aware curvature cap exploits.
+    The cross-section is a rectangle of half-extents (``half_extent_n_m`` along the
+    normal axis, ``half_extent_b_m`` along the binormal). ``bend_angle_rad`` is the
+    angle between the centerline bend direction and the normal axis. The Type-KK
+    bend ruling is expressed by the measured axis limits: flatwise uses the thin
+    normal half-depth, edgewise uses the wide binormal half-width. The smooth
+    interpolation below stays inside that measured band and avoids introducing a
+    stricter diagonal-corner cap that was not present in the bench measurement.
     """
     half_n = abs(float(half_extent_n_m))
     half_b = abs(float(half_extent_b_m))
-    return half_n * abs(np.cos(bend_angle_rad)) + half_b * abs(np.sin(bend_angle_rad))
+    cos2 = float(np.cos(bend_angle_rad)) ** 2
+    sin2 = float(np.sin(bend_angle_rad)) ** 2
+    return half_n * cos2 + half_b * sin2
 
 
 def finite_build_rotation_aware_curvature_limit_inv_m(
     finite_build,
-    single_filament_min_bend_radius_m,
-    bend_angle_rad,
+    inner_radius_margin_m=TYPE_KK_INNER_RADIUS_MARGIN_M,
+    bend_angle_rad=0.0,
 ):
-    """Rotation-aware centerline curvature cap for a winding pack (1/m).
+    """Rotation-aware centerline curvature cap for the Type-KK outer channel (1/m).
 
     Identical to ``finite_build_frame_aware_curvature_limit_inv_m`` except it uses
-    the pack reach PROJECTED into the actual centerline bend direction
-    (``pack_projected_reach_m``) instead of the worst-case corner reach. When the
-    pack rotation aligns the bend plane with the narrow pack extent the required
-    inner-edge radius shrinks, so the cap rises above the conservative value (which
-    this reproduces exactly at the worst bend angle ``atan2(half_b, half_n)``, where
-    the projected reach equals ``pack_reach_m``). This quantifies the rotation
-    cap-lift (Phase 3, T3.2); the in-loop gate retains the conservative worst-case
-    cap until the hardware curvature ruling (T3.1).
+    the outer-channel reach interpolated into the actual centerline bend direction
+    (``pack_projected_reach_m`` over the outer half-extents) instead of the
+    edgewise fallback. ``bend_angle_rad`` is the angle from the outer-channel
+    NORMAL axis (flatwise/thin). When the pack rotation aligns the bend plane with
+    the thin normal extent the required inner-edge radius shrinks, so the cap rises
+    above the conservative value: flatwise (angle 0) gives ~123.03/m, edgewise
+    (angle pi/2, bend along the wide binormal) gives ~43.31/m. This quantifies the
+    rotation cap-lift.
     """
     projected_reach_m = pack_projected_reach_m(
-        finite_build.pack_half_extent_n_m,
-        finite_build.pack_half_extent_b_m,
+        TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+        TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
         bend_angle_rad,
     )
-    required_radius_m = float(single_filament_min_bend_radius_m) + float(
-        projected_reach_m
-    )
+    required_radius_m = float(inner_radius_margin_m) + float(projected_reach_m)
     if required_radius_m <= 0.0:
         return float("inf")
     return 1.0 / required_radius_m
 
 
 def rotation_aware_projected_half_extent_m(finite_build, banana_curve, framedcurve):
-    """Per-quadpoint pack half-extent projected into the centerline bend plane,
-    using the REALIZED rotated pack frame (the live twist ``alpha(theta)``).
+    """Per-quadpoint outer-channel half-extent projected into the centerline bend
+    plane, using the REALIZED rotated pack frame (the live twist ``alpha(theta)``).
 
     The rotated ``(normal, binormal)`` axes are read straight from
     ``framedcurve.rotated_frame()`` -- the very frame ``CurveFilament`` lays the
-    filaments on -- so the projection reflects where the pack actually sits, not
-    a worst-case corner. This is the realized-orientation analogue of the scalar
-    ``pack_projected_reach_m`` / ``pack_reach_m`` (T3.2 / G1, measurement only).
+    pack on -- so the projection reflects where the OUTER build channel actually
+    sits, not a worst-case corner. The projected extent uses the fixed Type-KK
+    outer-channel half-extents (depth along the rotated normal, width along the
+    rotated binormal); the ``finite_build`` pack-grid argument is accepted for
+    interface parity. This is the realized-orientation analogue of the scalar
+    ``pack_projected_reach_m`` (T3.2 / G1, measurement only).
     """
-    half_n_m = float(finite_build.pack_half_extent_n_m)
-    half_b_m = float(finite_build.pack_half_extent_b_m)
+    half_n_m = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M
+    half_b_m = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
     gammadash = np.asarray(banana_curve.gammadash(), dtype=float)
     gammadashdash = np.asarray(banana_curve.gammadashdash(), dtype=float)
     tangent_norm = np.linalg.norm(gammadash, axis=1)
@@ -1036,35 +1046,37 @@ def rotation_aware_projected_half_extent_m(finite_build, banana_curve, framedcur
     _, normal_axis, binormal_axis = (
         np.asarray(axis, dtype=float) for axis in framedcurve.rotated_frame()
     )
-    return (
-        np.abs(np.sum(bend_direction * normal_axis, axis=1)) * half_n_m
-        + np.abs(np.sum(bend_direction * binormal_axis, axis=1)) * half_b_m
-    )
+    normal_projection = np.sum(bend_direction * normal_axis, axis=1)
+    binormal_projection = np.sum(bend_direction * binormal_axis, axis=1)
+    return half_n_m * normal_projection**2 + half_b_m * binormal_projection**2
 
 
 def rotation_aware_curvature_report(
-    finite_build, banana_curve, framedcurve, single_filament_min_bend_radius_m
+    finite_build,
+    banana_curve,
+    framedcurve,
+    inner_radius_margin_m=TYPE_KK_INNER_RADIUS_MARGIN_M,
 ):
     """Realized rotation-aware curvature cap + cashable headroom (T3.2 / G1).
 
     Diagnostic only. Compares realized centerline ``|kappa|`` against:
-    - the realized rotation-aware cap ``1 / (floor + reach(alpha(theta)))`` from
-      the live rotated pack frame, and
-    - the conservative worst-case corner cap
+    - the realized rotation-aware cap ``1 / (margin + reach(alpha(theta)))`` from
+      the live rotated outer-channel frame, and
+    - the conservative measured edgewise cap
       ``finite_build_frame_aware_curvature_limit_inv_m`` (the in-loop steering cap,
-      ~32.77/m for the Type-KK pack).
+      ~43.31/m for the Type-KK outer channel).
 
     Returns the arclength fraction where the live twist turns an
     over-conservative-cap bend buildable (``...HEADROOM_ARCLEN_FRACTION``) and the
     fraction still infeasible (``...RESIDUAL_INFEASIBLE_FRACTION``). No objective
     or gate is touched.
     """
-    floor_m = float(single_filament_min_bend_radius_m)
+    margin_m = float(inner_radius_margin_m)
     kappa = np.asarray(banana_curve.kappa(), dtype=float)
     rotated_half_extent_m = rotation_aware_projected_half_extent_m(
         finite_build, banana_curve, framedcurve
     )
-    required_radius_m = rotated_half_extent_m + floor_m
+    required_radius_m = rotated_half_extent_m + margin_m
     rotation_aware_cap_inv_m = np.divide(
         1.0,
         required_radius_m,
@@ -1072,7 +1084,7 @@ def rotation_aware_curvature_report(
         where=required_radius_m > 0.0,
     )
     conservative_cap_inv_m = float(
-        finite_build_frame_aware_curvature_limit_inv_m(finite_build, floor_m)
+        finite_build_frame_aware_curvature_limit_inv_m(finite_build, margin_m)
     )
     arclen_weight = np.linalg.norm(
         np.asarray(banana_curve.gammadash(), dtype=float), axis=1

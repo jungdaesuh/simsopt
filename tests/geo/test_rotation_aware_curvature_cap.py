@@ -4,9 +4,10 @@ These cover the pure helpers added to ``banana_opt.stage2_geometry``:
 ``rotation_aware_projected_half_extent_m`` and ``rotation_aware_curvature_report``.
 They are frame-independent: the pack twist ``alpha`` is scanned and the realized
 projected reach must sweep the full physical band ``[min(half_n, half_b),
-hypot(half_n, half_b)]`` -- i.e. the curvature cap sweeps ``[32.77, 66.88]/m`` for
-the Type-KK 2x7 pack -- and the rotation-aware cap is never below the conservative
-worst-case corner cap.
+max(half_n, half_b)]`` of the Type-KK OUTER build channel -- i.e. the curvature
+cap sweeps ``[43.31, 123.03]/m`` (bench-measured zero inner-radius
+self-intersection model) -- and the rotation-aware cap is never below the
+conservative measured edgewise cap.
 """
 
 import sys
@@ -20,6 +21,11 @@ EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 if str(EXAMPLES_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_ROOT))
 
+from banana_opt.hardware_contracts import (  # noqa: E402
+    TYPE_KK_INNER_RADIUS_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+)
 from banana_opt.stage2_geometry import (  # noqa: E402
     FiniteBuildSettings,
     finite_build_frame_aware_curvature_limit_inv_m,
@@ -34,9 +40,15 @@ from simsopt.geo import (  # noqa: E402
     ZeroRotation,
 )
 
-# Type-KK 2x7 pack geometry (matches hardware_contracts Type-KK conductor pack).
+# Bench-measured Type-KK curvature model: the binding bend constraint is the OUTER
+# build channel's inner surface at zero inner-radius margin (jacket-protected
+# conductor bend). The realized reach interpolates between the measured flatwise
+# and edgewise outer-channel half-extents.
 WINDING_R0 = 0.903
-FLOOR_M = 0.01  # TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M = 1/100
+MARGIN_M = TYPE_KK_INNER_RADIUS_MARGIN_M  # 0.0 m inner-surface radius
+OUTER_HALF_N_M = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M  # flatwise / thin
+OUTER_HALF_B_M = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M  # edgewise / wide
+# Conductor-pack grid spacings still parameterize the FiniteBuildSettings pack.
 GAPSIZE_N = 0.390 * 0.0254  # conductor depth (normal), inches -> m
 GAPSIZE_B = (1.568 * 0.0254) / (7 - 1)  # conductor width / (nfil_b - 1), m
 
@@ -77,19 +89,25 @@ def _set_constant_alpha(rotation, alpha):
 class RotationAwareProjectedReachTest(unittest.TestCase):
     def setUp(self):
         self.fb = _type_kk_settings()
-        self.half_n = self.fb.pack_half_extent_n_m
-        self.half_b = self.fb.pack_half_extent_b_m
+        # Outer build channel half-extents -- the realized reach the rotation-aware
+        # helpers project (depth=normal, width=binormal).
+        self.half_n = OUTER_HALF_N_M
+        self.half_b = OUTER_HALF_B_M
         self.reach_min = min(self.half_n, self.half_b)
-        self.reach_max = float(np.hypot(self.half_n, self.half_b))
+        self.reach_max = max(self.half_n, self.half_b)
 
     def test_type_kk_scalar_caps_match_expected(self):
-        # Sanity-pin the conservative (worst corner) and best (narrow-aligned) caps.
-        conservative = finite_build_frame_aware_curvature_limit_inv_m(self.fb, FLOOR_M)
-        narrow = finite_build_rotation_aware_curvature_limit_inv_m(
-            self.fb, FLOOR_M, bend_angle_rad=0.0  # bend along the narrow (normal) axis
+        # Sanity-pin the conservative measured edgewise and best flatwise caps.
+        conservative = finite_build_frame_aware_curvature_limit_inv_m(self.fb, MARGIN_M)
+        flatwise = finite_build_rotation_aware_curvature_limit_inv_m(
+            self.fb, MARGIN_M, bend_angle_rad=0.0  # bend along the thin (normal) axis
         )
-        self.assertAlmostEqual(conservative, 32.77, places=1)
-        self.assertAlmostEqual(narrow, 66.88, places=1)
+        edgewise = finite_build_rotation_aware_curvature_limit_inv_m(
+            self.fb, MARGIN_M, bend_angle_rad=np.pi / 2
+        )
+        self.assertAlmostEqual(conservative, 43.31, places=1)
+        self.assertAlmostEqual(edgewise, 43.31, places=1)
+        self.assertAlmostEqual(flatwise, 123.03, places=1)
 
     def test_constant_alpha_helper_is_constant(self):
         # Guards the 0th-dof-is-constant assumption used to set a known twist.
@@ -110,8 +128,8 @@ class RotationAwareProjectedReachTest(unittest.TestCase):
             self.assertLessEqual(float(np.max(reach)), self.reach_max + 1e-9)
 
     def test_twist_scan_sweeps_full_reach_band(self):
-        # Across the alpha scan the realized reach must reach both the narrow-axis
-        # minimum and the worst-case corner maximum -> the cap spans 32.77..66.88.
+        # Across the alpha scan the realized reach must reach both the thin-axis
+        # minimum and the measured edgewise maximum -> the cap spans 43.31..123.03.
         curve = _poloidal_circle()
         global_min = np.inf
         global_max = -np.inf
@@ -145,7 +163,7 @@ class RotationAwareReportTest(unittest.TestCase):
         rotation = FrameRotation(curve.quadpoints, 1)
         _set_constant_alpha(rotation, alpha)
         fc = FramedCurveSurfaceTangent(curve, WINDING_R0, 0.0, rotation)
-        return rotation_aware_curvature_report(self.fb, curve, fc, FLOOR_M)
+        return rotation_aware_curvature_report(self.fb, curve, fc, MARGIN_M)
 
     def test_report_keys_and_invariants(self):
         report = self._report(alpha=0.3)
@@ -160,11 +178,11 @@ class RotationAwareReportTest(unittest.TestCase):
         conservative = report["FINITEBUILD_CONSERVATIVE_CORNER_CAP_INV_M"]
         cap_min = report["FINITEBUILD_ROTATION_AWARE_CAP_MIN_INV_M"]
         cap_mean = report["FINITEBUILD_ROTATION_AWARE_CAP_MEAN_INV_M"]
-        self.assertAlmostEqual(conservative, 32.77, places=1)
-        # The rotation-aware cap is never tighter than the conservative corner cap
-        # and never looser than the narrow-axis best case (~66.88/m).
+        self.assertAlmostEqual(conservative, 43.31, places=1)
+        # The rotation-aware cap is never tighter than the conservative edgewise cap
+        # and never looser than the flatwise/thin-axis best case (~123.03/m).
         self.assertGreaterEqual(cap_min, conservative - 1e-6)
-        self.assertLessEqual(cap_mean, 66.88 + 1e-6)
+        self.assertLessEqual(cap_mean, 123.03 + 1e-6)
         self.assertGreaterEqual(cap_mean, cap_min - 1e-9)
 
     def test_fractions_are_well_formed(self):

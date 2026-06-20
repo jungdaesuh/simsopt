@@ -497,7 +497,8 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
     def test_curvature_gate_uses_corner_reach_for_non_surface_tangent(self):
-        # half_n = 0.5*(5-1)*0.02 = 0.04; half_b = 0.5*(3-1)*0.01 = 0.01.
+        # Adopted self-intersection model: the gate projects the fixed Type-KK
+        # OUTER build channel, not the conductor-pack grid.
         settings = FiniteBuildSettings(
             numfilaments_n=5,
             numfilaments_b=3,
@@ -507,29 +508,39 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
             frame="centroid",
         )
         # A centroid/frenet frame has no surface normal for a bend-plane projection,
-        # so the conservative support bound is the rectangle corner reach.
+        # so the conservative support bound is the outer-channel corner reach.
         banana_curve = SimpleNamespace(kappa=lambda: np.array([50.0]))  # radius 0.02
         metadata = self.module._finite_build_artifact_metadata(
             settings, banana_curve, NET_BANANA_CURRENT_A
         )
-        pack_reach = float(np.hypot(0.04, 0.01))
-        self.assertAlmostEqual(metadata["FINITEBUILD_BINDING_HALF_BUILD_M"], pack_reach)
+        outer_corner_reach = float(
+            np.hypot(
+                self.module.TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                self.module.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+            )
+        )
         self.assertAlmostEqual(
-            metadata["FINITEBUILD_INNER_EDGE_RADIUS_M"], 0.02 - pack_reach
+            metadata["FINITEBUILD_BINDING_HALF_BUILD_M"], outer_corner_reach
+        )
+        self.assertAlmostEqual(
+            metadata["FINITEBUILD_INNER_EDGE_RADIUS_M"], 0.02 - outer_corner_reach
         )
         self.assertFalse(metadata["FINITEBUILD_CURVATURE_OK"])
 
     def test_curvature_margin_tightens_gate(self):
-        # radius 0.052 m, corner reach ~0.0412 -> inner-wire radius ~0.0108 m.
-        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0 / 0.052]))
+        # radius 0.035 m, outer-channel corner reach ~0.02448 m. Required
+        # centerline radius = reach + inner-radius margin (~0.0015) = ~0.02598 m,
+        # so the bend is buildable; a +0.02 m steering margin lifts the
+        # requirement to ~0.04598 m and the same bend now fails.
+        banana_curve = SimpleNamespace(kappa=lambda: np.array([1.0 / 0.035]))
         ok = self.module._finite_build_artifact_metadata(
             _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.0
         )
-        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])  # ~0.0108 >= 10 mm floor
+        self.assertTrue(ok["FINITEBUILD_CURVATURE_OK"])
         tight = self.module._finite_build_artifact_metadata(
             _settings(), banana_curve, NET_BANANA_CURRENT_A, curvature_margin_m=0.02
         )
-        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])  # ~0.0108 < 30 mm floor
+        self.assertFalse(tight["FINITEBUILD_CURVATURE_OK"])
 
     def test_surface_tangent_curvature_gate_projects_type_kk_pack_into_bend_plane(self):
         settings = FiniteBuildSettings(
@@ -541,6 +552,9 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
             frame="surface_tangent",
         )
 
+        # Adopted self-intersection model: the bend-plane projection uses the
+        # fixed OUTER channel half-extents (depth=normal, width=binormal) and the
+        # inner-radius margin, not the conductor-pack grid or the wire floor.
         radial = self.module._finite_build_artifact_metadata(
             settings,
             _FrameAwareCurve([1.0, 0.0, 0.0], kappa=50.0),
@@ -548,7 +562,7 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             radial["FINITEBUILD_FRAME_AWARE_MAX_PROJECTED_HALF_EXTENT_M"],
-            settings.pack_half_extent_n_m,
+            self.module.TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
         )
         self.assertTrue(radial["FINITEBUILD_CURVATURE_OK"])
 
@@ -559,14 +573,14 @@ class SolverFiniteBuildHelpersTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             hard_way["FINITEBUILD_FRAME_AWARE_MAX_PROJECTED_HALF_EXTENT_M"],
-            settings.pack_half_extent_b_m,
+            self.module.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
         )
         self.assertAlmostEqual(
             hard_way["FINITEBUILD_FRAME_AWARE_CURVATURE_LIMIT_INV_M"],
             1.0
             / (
-                settings.pack_half_extent_b_m
-                + self.module.TYPE_KK_SINGLE_FILAMENT_MIN_BEND_RADIUS_M
+                self.module.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
+                + self.module.TYPE_KK_INNER_RADIUS_MARGIN_M
             ),
         )
         self.assertFalse(hard_way["FINITEBUILD_CURVATURE_OK"])
