@@ -1715,8 +1715,12 @@ def _sha256_file(path):
 EFFECTIVE_KEEPOUT_GROUPS_KEY = "EFFECTIVE_KEEPOUT_GROUPS"
 OPTIMIZER_SAFE_HARDWARE_SDF_SIGN_METHODS = frozenset({
     "component_union_watertight_contains_trimesh_nearest",
+    "component_union_watertight_pseudonormal_libigl",
     "watertight_contains_trimesh_nearest",
+    "watertight_pseudonormal_libigl",
 })
+SPARSE_NARROW_BAND_SHELL_STORAGE_KIND = "sparse_narrow_band_shell"
+SPARSE_NARROW_BAND_SHELL_LAYOUT = "per_group_sparse_narrow_band_shell_v1"
 HARDWARE_SDF_ERROR_BUDGET_COMPONENT_KEYS = (
     "e_sweep_sample_m",
     "e_grid_m",
@@ -1958,6 +1962,133 @@ def _validated_hardware_sdf_glb_sha(manifest, path, glb_path):
     return live_sha
 
 
+def _parse_hardware_sdf_shape(shape, owner):
+    if shape is None:
+        raise ValueError(f"SDF {owner} sparse layout requires shape")
+    shape_values = tuple(shape)
+    if len(shape_values) != 3:
+        raise ValueError(
+            f"SDF {owner} shape must have three dimensions, got {shape_values}")
+    parsed_shape = []
+    for value in shape_values:
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(
+                f"SDF {owner} shape values must be integer, got {shape_values}")
+        parsed_shape.append(int(value))
+    parsed_shape = tuple(parsed_shape)
+    if min(parsed_shape) < 2:
+        raise ValueError(
+            f"SDF {owner} must be a 3-D grid with every dimension >= 2, "
+            f"got {parsed_shape}")
+    return parsed_shape
+
+
+def _parse_sparse_stored_cell_count(spec, owner):
+    count = spec.get("stored_cell_count")
+    if isinstance(count, bool) or not isinstance(count, (int, np.integer)):
+        raise ValueError(
+            f"SDF {owner} sparse layout requires integer stored_cell_count")
+    count = int(count)
+    if count < 0:
+        raise ValueError(
+            f"SDF {owner} stored_cell_count must be >= 0, got {count}")
+    return count
+
+
+def _hardware_sdf_spec_storage(spec, manifest_storage_kind,
+                               manifest_storage_layout):
+    storage_kind = str(spec.get(
+        "storage_kind",
+        "" if manifest_storage_kind is None else manifest_storage_kind,
+    ))
+    storage_layout = str(spec.get(
+        "storage_layout",
+        "" if manifest_storage_layout is None else manifest_storage_layout,
+    ))
+    return storage_kind, storage_layout
+
+
+def _load_sparse_hardware_sdf_grid(
+    *,
+    payload,
+    data_path,
+    spec,
+    owner,
+    effective_margin,
+    storage_kind,
+    storage_layout,
+):
+    if storage_kind != SPARSE_NARROW_BAND_SHELL_STORAGE_KIND:
+        raise ValueError(
+            f"SDF {owner} sparse layout requires storage_kind "
+            f"{SPARSE_NARROW_BAND_SHELL_STORAGE_KIND!r}, got "
+            f"{storage_kind!r}")
+    if storage_layout != SPARSE_NARROW_BAND_SHELL_LAYOUT:
+        raise ValueError(
+            f"SDF {owner} sparse layout requires storage_layout "
+            f"{SPARSE_NARROW_BAND_SHELL_LAYOUT!r}, got "
+            f"{storage_layout!r}")
+    shape = _parse_hardware_sdf_shape(spec.get("shape"), owner)
+    sparse_indices_key = str(spec.get("sparse_indices_key", ""))
+    sparse_values_key = str(spec.get("sparse_values_key", ""))
+    if not sparse_indices_key or not sparse_values_key:
+        raise ValueError(
+            f"SDF {owner} sparse layout requires sparse_indices_key and "
+            "sparse_values_key")
+    if sparse_indices_key not in payload:
+        raise ValueError(
+            f"SDF data payload {os.fspath(data_path)!r} is missing sparse "
+            f"field {sparse_indices_key!r} for {owner}")
+    if sparse_values_key not in payload:
+        raise ValueError(
+            f"SDF data payload {os.fspath(data_path)!r} is missing sparse "
+            f"field {sparse_values_key!r} for {owner}")
+    sparse_indices = np.asarray(payload[sparse_indices_key])
+    if sparse_indices.ndim != 2 or sparse_indices.shape[1] != 3:
+        raise ValueError(
+            f"SDF {owner} sparse_indices must have shape (N, 3), got "
+            f"{sparse_indices.shape}")
+    if not np.issubdtype(sparse_indices.dtype, np.integer):
+        raise ValueError(f"SDF {owner} sparse_indices must be integer")
+    sparse_indices = np.ascontiguousarray(
+        sparse_indices.astype(np.int64, copy=False)
+    )
+    sparse_values = np.ascontiguousarray(
+        np.asarray(payload[sparse_values_key], dtype=np.float64)
+    )
+    if sparse_values.ndim != 1:
+        raise ValueError(
+            f"SDF {owner} sparse_values must be 1-D, got "
+            f"{sparse_values.shape}")
+    if sparse_indices.shape[0] != sparse_values.shape[0]:
+        raise ValueError(
+            f"SDF {owner} sparse index/value length mismatch: "
+            f"{sparse_indices.shape[0]} vs {sparse_values.shape[0]}")
+    stored_cell_count = _parse_sparse_stored_cell_count(spec, owner)
+    if stored_cell_count != sparse_values.shape[0]:
+        raise ValueError(
+            f"SDF {owner} stored_cell_count mismatch: manifest "
+            f"{stored_cell_count} vs payload {sparse_values.shape[0]}")
+    if not np.isfinite(sparse_values).all():
+        raise ValueError(f"SDF {owner} sparse_values must be finite")
+    for axis, axis_size in enumerate(shape):
+        axis_indices = sparse_indices[:, axis]
+        if np.any(axis_indices < 0) or np.any(axis_indices >= axis_size):
+            raise ValueError(
+                f"SDF {owner} sparse_indices axis {axis} exceed shape {shape}")
+    flat_indices = np.ravel_multi_index(
+        (sparse_indices[:, 0], sparse_indices[:, 1], sparse_indices[:, 2]),
+        shape,
+    )
+    if np.unique(flat_indices).size != flat_indices.size:
+        raise ValueError(f"SDF {owner} sparse_indices contain duplicates")
+    grid = np.full(shape, effective_margin, dtype=np.float64)
+    grid[sparse_indices[:, 0], sparse_indices[:, 1], sparse_indices[:, 2]] = (
+        sparse_values
+    )
+    return np.ascontiguousarray(grid)
+
+
 def _load_hardware_sdf_grid_spec(
     *,
     payload,
@@ -1968,25 +2099,10 @@ def _load_hardware_sdf_grid_spec(
     top_margin,
     top_narrow_band,
     minimum_effective_margin,
+    manifest_storage_kind,
+    manifest_storage_layout,
     sign_method_default=None,
 ):
-    field_key = str(spec.get("field_key", field_key_default))
-    if field_key not in payload:
-        raise ValueError(
-            f"SDF data payload {os.fspath(data_path)!r} is missing "
-            f"field {field_key!r} for {owner}")
-    grid = np.ascontiguousarray(np.asarray(payload[field_key], dtype=np.float64))
-    if grid.ndim != 3 or min(grid.shape) < 2:
-        raise ValueError(
-            f"SDF {owner} must be a 3-D grid with every "
-            f"dimension >= 2, got {grid.shape}")
-    if not np.isfinite(grid).all():
-        raise ValueError(f"SDF {owner} grid values must be finite")
-    expected_shape = spec.get("shape")
-    if expected_shape is not None and tuple(expected_shape) != grid.shape:
-        raise ValueError(
-            f"SDF {owner} shape mismatch: manifest "
-            f"{tuple(expected_shape)} vs payload {grid.shape}")
     origin = np.asarray(spec["origin_m"], dtype=np.float64)
     if origin.shape != (3,):
         raise ValueError(
@@ -2016,6 +2132,42 @@ def _load_hardware_sdf_grid_spec(
         raise ValueError(
             f"SDF {owner} sign_method {sign_method!r} is not "
             f"optimizer-safe; expected one of {allowed}")
+    storage_kind, storage_layout = _hardware_sdf_spec_storage(
+        spec, manifest_storage_kind, manifest_storage_layout
+    )
+    if (
+        storage_kind == SPARSE_NARROW_BAND_SHELL_STORAGE_KIND
+        or storage_layout == SPARSE_NARROW_BAND_SHELL_LAYOUT
+    ):
+        grid = _load_sparse_hardware_sdf_grid(
+            payload=payload,
+            data_path=data_path,
+            spec=spec,
+            owner=owner,
+            effective_margin=effective_margin,
+            storage_kind=storage_kind,
+            storage_layout=storage_layout,
+        )
+    else:
+        field_key = str(spec.get("field_key", field_key_default))
+        if field_key not in payload:
+            raise ValueError(
+                f"SDF data payload {os.fspath(data_path)!r} is missing "
+                f"field {field_key!r} for {owner}")
+        grid = np.ascontiguousarray(
+            np.asarray(payload[field_key], dtype=np.float64)
+        )
+        if grid.ndim != 3 or min(grid.shape) < 2:
+            raise ValueError(
+                f"SDF {owner} must be a 3-D grid with every "
+                f"dimension >= 2, got {grid.shape}")
+        if not np.isfinite(grid).all():
+            raise ValueError(f"SDF {owner} grid values must be finite")
+        expected_shape = spec.get("shape")
+        if expected_shape is not None and tuple(expected_shape) != grid.shape:
+            raise ValueError(
+                f"SDF {owner} shape mismatch: manifest "
+                f"{tuple(expected_shape)} vs payload {grid.shape}")
     return grid, origin, spacing, narrow_band, effective_margin, sign_method
 
 
@@ -2067,6 +2219,8 @@ def load_hardware_sdf(path, glb_path=None):
     top_narrow_band = float(manifest.get("narrow_band_m", -1.0))
     _validate_hardware_sdf_narrow_band(
         top_narrow_band, top_margin, "manifest")
+    manifest_storage_kind = manifest.get("storage_kind")
+    manifest_storage_layout = manifest.get("storage_layout")
     groups = []
     with np.load(data_path) as payload:
         for group in group_specs:
@@ -2081,6 +2235,8 @@ def load_hardware_sdf(path, glb_path=None):
                     top_margin=top_margin,
                     top_narrow_band=top_narrow_band,
                     minimum_effective_margin=minimum_effective_margin,
+                    manifest_storage_kind=manifest_storage_kind,
+                    manifest_storage_layout=manifest_storage_layout,
                 )
             )
             patches = []
@@ -2108,6 +2264,8 @@ def load_hardware_sdf(path, glb_path=None):
                     top_margin=effective_margin,
                     top_narrow_band=narrow_band,
                     minimum_effective_margin=minimum_effective_margin,
+                    manifest_storage_kind=manifest_storage_kind,
+                    manifest_storage_layout=manifest_storage_layout,
                     sign_method_default=sign_method,
                 )
                 if patch_spacing + 1.0e-12 >= spacing:

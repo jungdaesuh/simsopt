@@ -26,6 +26,8 @@ from banana_opt.hardware_keepout import (  # noqa: E402
     CurveHardwareSdfClearanceHinge,
     CurveHardwareSdfFreeSpaceReward,
     CurveHardwareSdfKeepout,
+    SPARSE_NARROW_BAND_SHELL_LAYOUT,
+    SPARSE_NARROW_BAND_SHELL_STORAGE_KIND,
     _weighted_soft_min,
     curvature_arc_weight,
     hardware_sdf_metadata,
@@ -38,6 +40,10 @@ from simsopt.geo import CurveXYZFourier  # noqa: E402
 
 SIGNED_TEST_METHOD = "watertight_contains_trimesh_nearest"
 COMPONENT_UNION_TEST_METHOD = "component_union_watertight_contains_trimesh_nearest"
+PSEUDONORMAL_TEST_METHOD = "watertight_pseudonormal_libigl"
+COMPONENT_UNION_PSEUDONORMAL_TEST_METHOD = (
+    "component_union_watertight_pseudonormal_libigl"
+)
 
 
 def _circle_curve(radius=1.0, order=3, quadpoints=64, seed=None):
@@ -167,6 +173,84 @@ def _write_sdf_payload(
         manifest["static_hardware_keys"] = list(static_keys)
     if covered_by_other_in_loop is not None:
         manifest["covered_by_other_in_loop"] = covered_by_other_in_loop
+    manifest_path = root / "hardware_sdf.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
+def _write_sparse_sdf_payload(
+    root,
+    *,
+    shape,
+    origin,
+    spacing,
+    effective_margin,
+    sparse_indices,
+    sparse_values,
+    stored_cell_count=None,
+    sparse_indices_key="sensors_sparse_indices",
+    sparse_values_key="sensors_sparse_values",
+    omit_sparse_indices_payload=False,
+    omit_sparse_values_payload=False,
+):
+    data_path = root / "hardware_sdf.npz"
+    payload = {}
+    if not omit_sparse_indices_payload:
+        payload[sparse_indices_key] = np.asarray(sparse_indices, dtype=np.int64)
+    if not omit_sparse_values_payload:
+        payload[sparse_values_key] = np.asarray(sparse_values, dtype=float)
+    np.savez(data_path, **payload)
+    data_sha = hashlib.sha256(data_path.read_bytes()).hexdigest()
+    if stored_cell_count is None:
+        stored_cell_count = len(sparse_values)
+    manifest = {
+        "schema_version": 1,
+        "kind": "hardware_sdf",
+        "storage_kind": SPARSE_NARROW_BAND_SHELL_STORAGE_KIND,
+        "storage_layout": SPARSE_NARROW_BAND_SHELL_LAYOUT,
+        "frame": "machine_metres_zup",
+        "units": "m",
+        "data_file": data_path.name,
+        "data_sha256": data_sha,
+        "safety_margin_m": effective_margin,
+        "error_budget_m": {
+            "e_sweep_sample_m": 0.0,
+            "e_grid_m": 0.0,
+            "e_sign_m": 0.0,
+            "e_mesh_m": 0.0,
+            "e_oracle_mapping_m": 0.0,
+            "e_total_m": 0.0,
+        },
+        "effective_margin_m": effective_margin,
+        "narrow_band_m": 0.02,
+        "static_hardware_keys": ["sensors", "frame", "sample"],
+        "groups": [
+            {
+                "label": "sensors",
+                "storage_layout": SPARSE_NARROW_BAND_SHELL_LAYOUT,
+                "origin_m": list(origin),
+                "spacing_m": spacing,
+                "shape": list(shape),
+                "sign_method": SIGNED_TEST_METHOD,
+                "effective_margin_m": effective_margin,
+                "narrow_band_m": 0.02,
+                "sparse_indices_key": sparse_indices_key,
+                "sparse_values_key": sparse_values_key,
+                "stored_cell_count": stored_cell_count,
+            }
+        ],
+        "documented_gate_only": {
+            "frame": {
+                "reason": "not represented in this test SDF",
+                "covered_by": "hardware_contact_report oracle",
+            },
+            "sample": {
+                "reason": "not represented in this test SDF",
+                "covered_by": "hardware_contact_report oracle",
+            },
+        },
+        "provenance": {"generator": "tests/geo/test_hardware_sdf_keepout.py"},
+    }
     manifest_path = root / "hardware_sdf.json"
     manifest_path.write_text(json.dumps(manifest))
     return manifest_path
@@ -323,6 +407,89 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
                 sdf_data.sign_methods,
                 {"sensors": COMPONENT_UNION_TEST_METHOD},
             )
+
+    def test_loader_accepts_pseudonormal_libigl_sign_methods(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for sign_method in (
+                PSEUDONORMAL_TEST_METHOD,
+                COMPONENT_UNION_PSEUDONORMAL_TEST_METHOD,
+            ):
+                case_root = root / sign_method
+                case_root.mkdir()
+                manifest = _write_sdf_payload(
+                    case_root,
+                    grid=np.ones((3, 3, 3), dtype=float),
+                    origin=(0.0, 0.0, 0.0),
+                    spacing=0.01,
+                    effective_margin=0.005,
+                    sign_method=sign_method,
+                )
+
+                sdf_data = load_hardware_sdf(manifest)
+
+                self.assertEqual(sdf_data.sign_methods, {"sensors": sign_method})
+
+    def test_loader_accepts_sparse_narrow_band_shell_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            margin = 0.006
+            shape = (4, 4, 4)
+            sparse_indices = np.array([[1, 1, 1], [2, 1, 1]], dtype=np.int64)
+            sparse_values = np.array([-0.003, 0.011], dtype=float)
+            manifest = _write_sparse_sdf_payload(
+                root,
+                shape=shape,
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.004,
+                effective_margin=margin,
+                sparse_indices=sparse_indices,
+                sparse_values=sparse_values,
+            )
+
+            sdf_data = load_hardware_sdf(manifest)
+            grid = sdf_data.groups[0].grid
+
+            self.assertEqual(grid.shape, shape)
+            self.assertEqual(sdf_data.group_labels, ("sensors",))
+            self.assertAlmostEqual(grid[1, 1, 1], sparse_values[0])
+            self.assertAlmostEqual(grid[2, 1, 1], sparse_values[1])
+            self.assertAlmostEqual(grid[0, 0, 0], margin)
+            self.assertAlmostEqual(sdf_data.groups[0].spacing_m, 0.004)
+
+    def test_loader_rejects_sparse_payload_with_missing_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sparse_sdf_payload(
+                root,
+                shape=(4, 4, 4),
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.004,
+                effective_margin=0.006,
+                sparse_indices=np.array([[1, 1, 1]], dtype=np.int64),
+                sparse_values=np.array([0.001], dtype=float),
+                omit_sparse_indices_payload=True,
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing sparse field"):
+                load_hardware_sdf(manifest)
+
+    def test_loader_rejects_sparse_stored_cell_count_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sparse_sdf_payload(
+                root,
+                shape=(4, 4, 4),
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.004,
+                effective_margin=0.006,
+                sparse_indices=np.array([[1, 1, 1]], dtype=np.int64),
+                sparse_values=np.array([0.001], dtype=float),
+                stored_cell_count=2,
+            )
+
+            with self.assertRaisesRegex(ValueError, "stored_cell_count mismatch"):
+                load_hardware_sdf(manifest)
 
     def test_loader_validates_error_budget_components(self):
         with tempfile.TemporaryDirectory() as td:
