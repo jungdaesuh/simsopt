@@ -513,6 +513,20 @@ CURVATURE_P_NORM = 4
 CURVATURE_HINGE_NORMALIZATION_DEFAULT = "raw"
 CURVATURE_P_CONTINUATION_DEFAULT = ""
 CURVATURE_P_CONTINUATION_STAGE_ORDER = ("initial", "final")
+RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT = "off"
+RESIDUE_SELECTED_CHAIN_CONFIG_ONE_OVER_11_12 = "one-over-11-12"
+RESIDUE_SELECTED_CHAIN_CONFIGS = (
+    RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+    RESIDUE_SELECTED_CHAIN_CONFIG_ONE_OVER_11_12,
+)
+RESIDUE_SELECTED_CHAIN_TARGETS = {
+    RESIDUE_SELECTED_CHAIN_CONFIG_ONE_OVER_11_12: ((1, 11), (1, 12)),
+}
+RESIDUE_PROMOTION_GATE_SCHEMA_VERSION = "greene_residue_promotion_gate_v1"
+DEFAULT_RESIDUE_PROMOTION_GATE_THRESHOLD = 0.25
+DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES = 8
+DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS = 0.0
+DEFAULT_RESIDUE_PROMOTION_GATE_SEED = 0
 SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT = 0.0
 SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT = (
     BANANA_FOLD_GEODESIC_CURVATURE_LIMIT_INV_M
@@ -4054,6 +4068,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--residue-objective-selected-chain-config",
+        choices=RESIDUE_SELECTED_CHAIN_CONFIGS,
+        default=os.environ.get(
+            "RESIDUE_OBJECTIVE_SELECTED_CHAIN_CONFIG",
+            RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+        ),
+        help=(
+            "Optional first-class Greene chain contract. "
+            "'one-over-11-12' requires the loaded target manifest to contain "
+            "only the 1/11 and 1/12 selected rational chains."
+        ),
+    )
+    parser.add_argument(
         "--residue-objective-axis-r",
         type=float,
         default=(
@@ -4224,6 +4251,63 @@ def parse_args():
             os.environ.get("RESIDUE_OBJECTIVE_AUTOGENERATE_BRANCH_PHASE_COUNT", "8")
         ),
         help="Number of poloidal phase starts used for island discovery.",
+    )
+    parser.add_argument(
+        "--residue-promotion-gate",
+        action="store_true",
+        default=(
+            os.environ.get("RESIDUE_PROMOTION_GATE", "0")
+            not in ("", "0", "false", "False")
+        ),
+        help=(
+            "Default-off Greene residue perturbation gate for selected chains. "
+            "Requires a nonzero selected-chain residue objective and reports "
+            "pass/fail without acting as a global confinement certificate."
+        ),
+    )
+    parser.add_argument(
+        "--residue-promotion-gate-threshold",
+        type=float,
+        default=float(
+            os.environ.get(
+                "RESIDUE_PROMOTION_GATE_THRESHOLD",
+                str(DEFAULT_RESIDUE_PROMOTION_GATE_THRESHOLD),
+            )
+        ),
+        help="Dimensionless absolute Greene-residue threshold for the perturbation gate.",
+    )
+    parser.add_argument(
+        "--residue-promotion-gate-samples",
+        type=int,
+        default=int(
+            os.environ.get(
+                "RESIDUE_PROMOTION_GATE_SAMPLES",
+                str(DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES),
+            )
+        ),
+        help="Number of deterministic small-DOF perturbation samples for the gate.",
+    )
+    parser.add_argument(
+        "--residue-promotion-gate-radius",
+        type=float,
+        default=float(
+            os.environ.get(
+                "RESIDUE_PROMOTION_GATE_RADIUS",
+                str(DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS),
+            )
+        ),
+        help="Euclidean optimizer-DOF perturbation radius used by the gate.",
+    )
+    parser.add_argument(
+        "--residue-promotion-gate-seed",
+        type=int,
+        default=int(
+            os.environ.get(
+                "RESIDUE_PROMOTION_GATE_SEED",
+                str(DEFAULT_RESIDUE_PROMOTION_GATE_SEED),
+            )
+        ),
+        help="RNG seed for deterministic residue perturbation directions.",
     )
     add_confinement_surrogate_args(parser)
     parser.add_argument(
@@ -6230,10 +6314,243 @@ def validate_confinement_surrogate_args(args):
         raise ValueError("--confinement-surrogate-* weights must be non-negative")
 
 
+def residue_selected_chain_pairs(selected_chain_config):
+    config_name = str(selected_chain_config)
+    if config_name == RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT:
+        return ()
+    if config_name not in RESIDUE_SELECTED_CHAIN_TARGETS:
+        raise ValueError(
+            "--residue-objective-selected-chain-config must be one of "
+            f"{RESIDUE_SELECTED_CHAIN_CONFIGS}"
+        )
+    return RESIDUE_SELECTED_CHAIN_TARGETS[config_name]
+
+
+def residue_selected_chain_labels(selected_chain_config):
+    return [
+        f"{int(p)}/{int(q)}"
+        for p, q in residue_selected_chain_pairs(selected_chain_config)
+    ]
+
+
+def validate_residue_selected_chain_targets(targets, selected_chain_config):
+    required_pairs = tuple(residue_selected_chain_pairs(selected_chain_config))
+    if not required_pairs:
+        return
+    required_set = set(required_pairs)
+    actual_pairs = [(int(target.p), int(target.q)) for target in targets]
+    actual_set = set(actual_pairs)
+    missing = sorted(required_set - actual_set)
+    unexpected = sorted(actual_set - required_set)
+    if len(actual_pairs) != len(required_pairs) or missing or unexpected:
+        raise ValueError(
+            "--residue-objective-selected-chain-config "
+            f"{selected_chain_config!r} requires exactly the selected Greene "
+            f"chains {residue_selected_chain_labels(selected_chain_config)}; "
+            f"actual={actual_pairs}, missing={missing}, unexpected={unexpected}"
+        )
+
+
+def residue_selected_chain_results_payload(args):
+    selected_chain_config = str(
+        getattr(
+            args,
+            "residue_objective_selected_chain_config",
+            RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+        )
+    )
+    return {
+        "GREENE_RESIDUE_OBJECTIVE_SELECTED_CHAIN_CONFIG": selected_chain_config,
+        "GREENE_RESIDUE_OBJECTIVE_SELECTED_CHAIN_TARGETS": (
+            residue_selected_chain_labels(selected_chain_config)
+        ),
+    }
+
+
+def validate_residue_promotion_gate_args(args, residue_objective_weight):
+    threshold = float(args.residue_promotion_gate_threshold)
+    radius = float(args.residue_promotion_gate_radius)
+    samples = int(args.residue_promotion_gate_samples)
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("--residue-promotion-gate-threshold must be finite and positive")
+    if not np.isfinite(radius) or radius < 0.0:
+        raise ValueError("--residue-promotion-gate-radius must be finite and non-negative")
+    if samples <= 0:
+        raise ValueError("--residue-promotion-gate-samples must be positive")
+    if not bool(getattr(args, "residue_promotion_gate", False)):
+        return
+    if radius <= 0.0:
+        raise ValueError("--residue-promotion-gate requires a positive radius")
+    selected_chain_config = str(args.residue_objective_selected_chain_config)
+    if selected_chain_config == RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT:
+        raise ValueError(
+            "--residue-promotion-gate requires "
+            "--residue-objective-selected-chain-config=one-over-11-12"
+        )
+    if residue_objective_weight <= 0.0:
+        raise ValueError(
+            "--residue-promotion-gate requires --residue-objective-weight > 0"
+        )
+
+
+def residue_promotion_gate_inactive_report(args):
+    return {
+        "schema_version": RESIDUE_PROMOTION_GATE_SCHEMA_VERSION,
+        "enabled": False,
+        "selected_chain_config": str(
+            getattr(
+                args,
+                "residue_objective_selected_chain_config",
+                RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+            )
+        ),
+        "threshold": float(
+            getattr(
+                args,
+                "residue_promotion_gate_threshold",
+                DEFAULT_RESIDUE_PROMOTION_GATE_THRESHOLD,
+            )
+        ),
+        "radius": float(
+            getattr(
+                args,
+                "residue_promotion_gate_radius",
+                DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS,
+            )
+        ),
+        "samples": int(
+            getattr(
+                args,
+                "residue_promotion_gate_samples",
+                DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES,
+            )
+        ),
+        "seed": int(
+            getattr(
+                args,
+                "residue_promotion_gate_seed",
+                DEFAULT_RESIDUE_PROMOTION_GATE_SEED,
+            )
+        ),
+        "passed": None,
+        "sample_reports": [],
+    }
+
+
+def _residue_gate_branch_reports(payload, threshold):
+    branch_reports = []
+    passed = True
+    for branch in payload["branches"]:
+        abs_residue = abs(float(branch["residue"]))
+        branch_passed = (
+            str(branch["status"]) == "converged" and abs_residue < threshold
+        )
+        passed = passed and branch_passed
+        branch_reports.append(
+            {
+                "target_id": branch["target_id"],
+                "branch": branch["branch"],
+                "status": branch["status"],
+                "residue": float(branch["residue"]),
+                "abs_residue": abs_residue,
+                "passed": branch_passed,
+            }
+        )
+    return passed, branch_reports
+
+
+def residue_promotion_gate_report(args, residue_objective):
+    if not bool(getattr(args, "residue_promotion_gate", False)):
+        return residue_promotion_gate_inactive_report(args)
+    if residue_objective is None:
+        raise ValueError("--residue-promotion-gate requires a Greene residue objective")
+    threshold = float(args.residue_promotion_gate_threshold)
+    radius = float(args.residue_promotion_gate_radius)
+    samples = int(args.residue_promotion_gate_samples)
+    rng = np.random.default_rng(int(args.residue_promotion_gate_seed))
+    base_x = np.asarray(residue_objective.biot_savart.x, dtype=float).copy()
+    sample_reports = []
+    passed = True
+    try:
+        residue_objective.recompute_bell()
+        base_payload = residue_objective.to_json_dict()
+        base_passed, base_branches = _residue_gate_branch_reports(
+            base_payload, threshold
+        )
+        passed = passed and base_passed
+        sample_reports.append(
+            {
+                "sample_index": -1,
+                "dof_radius": 0.0,
+                "passed": base_passed,
+                "branches": base_branches,
+            }
+        )
+        for sample_index in range(samples):
+            direction = rng.normal(size=base_x.shape)
+            direction_norm = float(np.linalg.norm(direction))
+            if direction_norm == 0.0:
+                direction = np.ones_like(base_x)
+                direction_norm = float(np.linalg.norm(direction))
+            residue_objective.biot_savart.x = base_x + radius * (
+                direction / direction_norm
+            )
+            residue_objective.recompute_bell()
+            payload = residue_objective.to_json_dict()
+            sample_passed, branch_reports = _residue_gate_branch_reports(
+                payload, threshold
+            )
+            passed = passed and sample_passed
+            sample_reports.append(
+                {
+                    "sample_index": sample_index,
+                    "dof_radius": radius,
+                    "passed": sample_passed,
+                    "branches": branch_reports,
+                }
+            )
+    finally:
+        residue_objective.biot_savart.x = base_x
+        residue_objective.recompute_bell()
+    return {
+        "schema_version": RESIDUE_PROMOTION_GATE_SCHEMA_VERSION,
+        "enabled": True,
+        "selected_chain_config": str(args.residue_objective_selected_chain_config),
+        "selected_chain_targets": residue_selected_chain_labels(
+            args.residue_objective_selected_chain_config
+        ),
+        "threshold": threshold,
+        "radius": radius,
+        "samples": samples,
+        "seed": int(args.residue_promotion_gate_seed),
+        "passed": bool(passed),
+        "sample_reports": sample_reports,
+    }
+
+
+def residue_promotion_gate_results_payload(report):
+    return {
+        "GREENE_RESIDUE_PROMOTION_GATE_ENABLED": bool(report["enabled"]),
+        "GREENE_RESIDUE_PROMOTION_GATE_PASSED": report["passed"],
+        "GREENE_RESIDUE_PROMOTION_GATE_THRESHOLD": report["threshold"],
+        "GREENE_RESIDUE_PROMOTION_GATE_RADIUS": report["radius"],
+        "GREENE_RESIDUE_PROMOTION_GATE_SAMPLES": report["samples"],
+        "GREENE_RESIDUE_PROMOTION_GATE_SEED": report["seed"],
+        "GREENE_RESIDUE_PROMOTION_GATE_REPORT": report,
+    }
+
+
 def validate_residue_objective_args(args):
     residue_objective_weight = float(args.residue_objective_weight)
     if residue_objective_weight < 0.0 or not np.isfinite(residue_objective_weight):
         raise ValueError("--residue-objective-weight must be finite and non-negative")
+    selected_chain_config = str(args.residue_objective_selected_chain_config)
+    if selected_chain_config not in RESIDUE_SELECTED_CHAIN_CONFIGS:
+        raise ValueError(
+            "--residue-objective-selected-chain-config must be one of "
+            f"{RESIDUE_SELECTED_CHAIN_CONFIGS}"
+        )
+    validate_residue_promotion_gate_args(args, residue_objective_weight)
     positive_fields = {
         "--residue-objective-radial-label-scale": args.residue_objective_radial_label_scale,
         "--residue-objective-scale": args.residue_objective_scale,
@@ -6262,6 +6579,14 @@ def validate_residue_objective_args(args):
         raise ValueError("--residue-objective-samples-per-full-torus must be >= 8")
     if int(args.residue_objective_max_newton_iterations) <= 0:
         raise ValueError("--residue-objective-max-newton-iterations must be positive")
+    if (
+        residue_objective_weight == 0.0
+        and selected_chain_config != RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT
+    ):
+        raise ValueError(
+            "--residue-objective-selected-chain-config requires "
+            "--residue-objective-weight > 0"
+        )
     if residue_objective_weight == 0.0:
         return
     if args.residue_objective_targets_json is None:
@@ -6332,6 +6657,9 @@ def build_residue_objective_from_args(args, biot_savart):
             solver_options=solver_options,
         )
     targets = load_residue_objective_targets(args.residue_objective_targets_json)
+    validate_residue_selected_chain_targets(
+        targets, args.residue_objective_selected_chain_config
+    )
     target_manifest_id = residue_objective_target_manifest_id(targets)
     validation_id, branch_seeds = load_residue_objective_seeds(
         args.residue_objective_seeds_json,
@@ -6431,6 +6759,70 @@ def residue_objective_replay_config(args, residue_objective=None):
         ("seeds_sha256", _optional_file_sha256(seeds_json)),
         ("target_manifest_id", target_manifest_id),
         ("validation_id", validation_id),
+        (
+            "selected_chain_config",
+            str(
+                getattr(
+                    args,
+                    "residue_objective_selected_chain_config",
+                    RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+                )
+            ),
+        ),
+        (
+            "selected_chain_targets",
+            residue_selected_chain_labels(
+                getattr(
+                    args,
+                    "residue_objective_selected_chain_config",
+                    RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+                )
+            ),
+        ),
+        (
+            "promotion_gate_enabled",
+            bool(getattr(args, "residue_promotion_gate", False)),
+        ),
+        (
+            "promotion_gate_threshold",
+            float(
+                getattr(
+                    args,
+                    "residue_promotion_gate_threshold",
+                    DEFAULT_RESIDUE_PROMOTION_GATE_THRESHOLD,
+                )
+            ),
+        ),
+        (
+            "promotion_gate_samples",
+            int(
+                getattr(
+                    args,
+                    "residue_promotion_gate_samples",
+                    DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES,
+                )
+            ),
+        ),
+        (
+            "promotion_gate_radius",
+            float(
+                getattr(
+                    args,
+                    "residue_promotion_gate_radius",
+                    DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS,
+                )
+            ),
+        ),
+        (
+            "promotion_gate_seed",
+            int(
+                getattr(
+                    args,
+                    "residue_promotion_gate_seed",
+                    DEFAULT_RESIDUE_PROMOTION_GATE_SEED,
+                )
+            ),
+        ),
         ("axis_r", getattr(args, "residue_objective_axis_r", None)),
         ("axis_z", float(getattr(args, "residue_objective_axis_z", 0.0))),
         (
@@ -6821,6 +7213,12 @@ class RunIdentityConfig:
     residue_objective_target_manifest_id: str | None = None
     residue_objective_validation_id: str | None = None
     residue_objective_replay_config: tuple[tuple[str, object], ...] | None = None
+    residue_objective_selected_chain_config: str = RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT
+    residue_promotion_gate_enabled: bool = False
+    residue_promotion_gate_threshold: float = DEFAULT_RESIDUE_PROMOTION_GATE_THRESHOLD
+    residue_promotion_gate_samples: int = DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES
+    residue_promotion_gate_radius: float = DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS
+    residue_promotion_gate_seed: int = DEFAULT_RESIDUE_PROMOTION_GATE_SEED
 
 
 @dataclass(frozen=True)
@@ -7666,6 +8064,44 @@ def make_run_identity_config(
             args,
             residue_objective,
         ),
+        residue_objective_selected_chain_config=str(
+            getattr(
+                args,
+                "residue_objective_selected_chain_config",
+                RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT,
+            )
+        ),
+        residue_promotion_gate_enabled=bool(
+            getattr(args, "residue_promotion_gate", False)
+        ),
+        residue_promotion_gate_threshold=float(
+            getattr(
+                args,
+                "residue_promotion_gate_threshold",
+                DEFAULT_RESIDUE_PROMOTION_GATE_THRESHOLD,
+            )
+        ),
+        residue_promotion_gate_samples=int(
+            getattr(
+                args,
+                "residue_promotion_gate_samples",
+                DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES,
+            )
+        ),
+        residue_promotion_gate_radius=float(
+            getattr(
+                args,
+                "residue_promotion_gate_radius",
+                DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS,
+            )
+        ),
+        residue_promotion_gate_seed=int(
+            getattr(
+                args,
+                "residue_promotion_gate_seed",
+                DEFAULT_RESIDUE_PROMOTION_GATE_SEED,
+            )
+        ),
     )
 
 
@@ -7812,6 +8248,15 @@ def build_run_identity_config(config):
         ):
             continue
         if field.name == "residue_objective_weight" and float(value) == 0.0:
+            continue
+        if (
+            field.name == "residue_objective_selected_chain_config"
+            and value == RESIDUE_SELECTED_CHAIN_CONFIG_DEFAULT
+        ):
+            continue
+        if field.name.startswith("residue_promotion_gate_") and (
+            not config.residue_promotion_gate_enabled
+        ):
             continue
         if (
             field.name
@@ -17999,6 +18444,9 @@ if __name__ == "__main__":
             JCurveHardwareSdfClearanceHinge,
         )
     )
+    residue_promotion_gate_status = residue_promotion_gate_report(
+        args, JResidueObjective
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -18729,7 +19177,9 @@ if __name__ == "__main__":
                 current_preserved_timeout_replay_config().residue_objective_replay_config
             )
         ),
+        **residue_selected_chain_results_payload(args),
         **residue_objective_results_payload(run_dict["search_eval"]),
+        **residue_promotion_gate_results_payload(residue_promotion_gate_status),
         **magnetic_well_objective_results_payload(run_dict["search_eval"]),
         "BANANA_CURRENT_DIAGNOSTICS_ENABLED": (
             run_dict.get("banana_current_diagnostics") is not None

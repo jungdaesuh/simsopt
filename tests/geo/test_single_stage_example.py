@@ -17214,10 +17214,21 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "targets.json",
                 "--residue-objective-seeds-json",
                 "seeds.json",
+                "--residue-objective-selected-chain-config",
+                "one-over-11-12",
                 "--residue-objective-axis-r",
                 "1.02",
                 "--residue-objective-det-tolerance",
                 "2e-5",
+                "--residue-promotion-gate",
+                "--residue-promotion-gate-threshold",
+                "0.2",
+                "--residue-promotion-gate-samples",
+                "3",
+                "--residue-promotion-gate-radius",
+                "1e-4",
+                "--residue-promotion-gate-seed",
+                "17",
             ],
         ):
             args = module.parse_args()
@@ -17225,12 +17236,89 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.residue_objective_weight, 0.25)
         self.assertEqual(args.residue_objective_targets_json, "targets.json")
         self.assertEqual(args.residue_objective_seeds_json, "seeds.json")
+        self.assertEqual(
+            args.residue_objective_selected_chain_config, "one-over-11-12"
+        )
         self.assertEqual(args.residue_objective_axis_r, 1.02)
         self.assertEqual(args.residue_objective_det_tolerance, 2.0e-5)
+        self.assertTrue(args.residue_promotion_gate)
+        self.assertEqual(args.residue_promotion_gate_threshold, 0.2)
+        self.assertEqual(args.residue_promotion_gate_samples, 3)
+        self.assertEqual(args.residue_promotion_gate_radius, 1.0e-4)
+        self.assertEqual(args.residue_promotion_gate_seed, 17)
         self.assertEqual(
             args.residue_objective_samples_per_full_torus,
             module.DEFAULT_RESIDUE_OBJECTIVE_SAMPLES_PER_FULL_TORUS,
         )
+
+    def test_selected_residue_chain_requires_exact_target_pairs(self):
+        module = load_single_stage_example_module()
+        selected_targets = [
+            SimpleNamespace(p=1, q=11),
+            SimpleNamespace(p=1, q=12),
+        ]
+
+        module.validate_residue_selected_chain_targets(
+            selected_targets, "one-over-11-12"
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires exactly"):
+            module.validate_residue_selected_chain_targets(
+                [SimpleNamespace(p=1, q=11), SimpleNamespace(p=1, q=10)],
+                "one-over-11-12",
+            )
+        with self.assertRaisesRegex(ValueError, "requires exactly"):
+            module.validate_residue_selected_chain_targets(
+                [SimpleNamespace(p=1, q=11), SimpleNamespace(p=1, q=11)],
+                "one-over-11-12",
+            )
+
+    def test_residue_promotion_gate_report_restores_biot_savart_dofs(self):
+        module = load_single_stage_example_module()
+
+        class FakeResidueObjective:
+            def __init__(self):
+                self.biot_savart = SimpleNamespace(x=np.array([1.0, 2.0, 3.0]))
+                self.recompute_count = 0
+
+            def recompute_bell(self, parent=None):
+                self.recompute_count += 1
+
+            def to_json_dict(self):
+                return {
+                    "branches": [
+                        {
+                            "target_id": "p1_q11",
+                            "branch": "O",
+                            "status": "converged",
+                            "residue": 0.1,
+                        },
+                        {
+                            "target_id": "p1_q12",
+                            "branch": "X",
+                            "status": "converged",
+                            "residue": -0.2,
+                        },
+                    ]
+                }
+
+        args = SimpleNamespace(
+            residue_promotion_gate=True,
+            residue_objective_selected_chain_config="one-over-11-12",
+            residue_promotion_gate_threshold=0.25,
+            residue_promotion_gate_samples=2,
+            residue_promotion_gate_radius=1.0e-4,
+            residue_promotion_gate_seed=7,
+        )
+        residue_objective = FakeResidueObjective()
+        original_x = residue_objective.biot_savart.x.copy()
+
+        report = module.residue_promotion_gate_report(args, residue_objective)
+
+        self.assertTrue(report["enabled"])
+        self.assertTrue(report["passed"])
+        self.assertEqual(len(report["sample_reports"]), 3)
+        np.testing.assert_allclose(residue_objective.biot_savart.x, original_x)
 
     def test_single_stage_parse_args_accepts_magnetic_well_flags(self):
         module = load_single_stage_example_module()
