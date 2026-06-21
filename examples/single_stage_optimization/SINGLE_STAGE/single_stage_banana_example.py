@@ -8618,6 +8618,172 @@ def build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls)
     return boozer_residual_cls(boozer_surface, bs_obj)
 
 
+@dataclass(frozen=True)
+class SingleStageObjectiveBackend:
+    """Backend-matched field + objective classes for the single-stage objective.
+
+    Single source of truth for which implementation (native C++ or JAX) supplies
+    each term, so ``main()`` and the cross-backend parity test build the *same*
+    objective rather than two copies that can drift.
+    """
+
+    bs_obj: object
+    iota_cls: object
+    nonqs_cls: object
+    boozer_residual_cls: object
+
+
+def select_single_stage_iota_class(*, use_jax):
+    """Single ``use_jax`` -> iota class mapping.
+
+    Shared by the startup diagnostics and ``select_single_stage_objective_backend``
+    so exactly one place decides native ``Iotas`` vs JAX ``IotasJAX``.
+    """
+    if use_jax:
+        _, iotas_cls, _ = get_jax_surface_objective_classes()
+        return iotas_cls
+    return Iotas
+
+
+def select_single_stage_objective_backend(*, use_jax, boozer_kind, jax_bs, coils):
+    """Select the backend-matched field + objective classes (SSOT selection)."""
+    if use_jax:
+        _, _, nonqs_cls = get_jax_surface_objective_classes()
+        return SingleStageObjectiveBackend(
+            bs_obj=jax_bs,
+            iota_cls=select_single_stage_iota_class(use_jax=True),
+            nonqs_cls=nonqs_cls,
+            boozer_residual_cls=select_boozer_residual_class(
+                use_jax=True, boozer_kind=boozer_kind
+            ),
+        )
+    return SingleStageObjectiveBackend(
+        bs_obj=BiotSavart(coils),
+        iota_cls=select_single_stage_iota_class(use_jax=False),
+        nonqs_cls=NonQuasiSymmetricRatio,
+        boozer_residual_cls=select_boozer_residual_class(
+            use_jax=False, boozer_kind=boozer_kind
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class SingleStageObjectiveWeights:
+    """Weights and distance/curvature thresholds for the 8-term objective."""
+
+    non_qs: float
+    res: float
+    iotas: float
+    length: float
+    cc: float
+    cs: float
+    surf_dist: float
+    curvature: float
+    cc_dist: float
+    cs_dist: float
+    ss_dist: float
+    curvature_threshold: float
+    length_target: float
+
+
+@dataclass(frozen=True)
+class SingleStageObjective:
+    """The single-stage banana objective ``JF`` plus its component terms.
+
+    ``JF`` is the weighted sum the outer optimizer minimizes; the individual
+    terms are retained because downstream reporting, the full-graph DOF map, and
+    constraint bookkeeping consume them by name.
+    """
+
+    JF: object
+    nonQSs: object
+    brs: object
+    iota: object
+    Jiota: object
+    JnonQSRatio: object
+    JBoozerResidual: object
+    JCurveLength: object
+    JCurveCurve: object
+    JCurveSurface: object
+    JSurfSurf: object
+    JCurvature: object
+    curvelength: object
+
+
+def build_single_stage_vessel_surface():
+    """Vacuum-vessel surface for the coil/surface-vessel distance penalty (SSOT)."""
+    vessel_surface = SurfaceRZFourier(nfp=5, stellsym=True)
+    vessel_surface.set_rc(0, 0, 0.976)
+    vessel_surface.set_rc(1, 0, 0.222)
+    vessel_surface.set_zs(1, 0, 0.222)
+    return vessel_surface
+
+
+def build_single_stage_objective(
+    *,
+    boozer_surface,
+    backend,
+    banana_curves,
+    curves,
+    vessel_surface,
+    iota_target,
+    weights,
+):
+    """Assemble the 8-term single-stage banana objective ``JF`` (the SSOT).
+
+    ``main()`` and the cross-backend parity test both call this so the native and
+    JAX lanes minimize byte-identical objective definitions; ``backend`` selects
+    the term implementations and ``weights`` carries the run's weights/thresholds.
+    """
+    nonQSs = [backend.nonqs_cls(boozer_surface, backend.bs_obj)]
+    brs = [
+        build_boozer_residual_objective(
+            boozer_surface, backend.bs_obj, backend.boozer_residual_cls
+        )
+    ]
+    iota = build_iota_objective(boozer_surface, backend.iota_cls)
+    curvelength = CurveLength(banana_curves[0])
+
+    Jiota = QuadraticPenalty(iota, iota_target)
+    JnonQSRatio = sum(nonQSs)
+    JBoozerResidual = sum(brs)
+    JCurveLength = QuadraticPenalty(curvelength, weights.length_target, "max")
+    JCurveCurve = CurveCurveDistance(curves, weights.cc_dist)
+    JCurveSurface = CurveSurfaceDistance(
+        curves, boozer_surface.surface, weights.cs_dist
+    )
+    JSurfSurf = SurfaceSurfaceDistance(
+        boozer_surface.surface, vessel_surface, weights.ss_dist
+    )
+    JCurvature = LpCurveCurvature(banana_curves[0], 2, weights.curvature_threshold)
+
+    JF = (
+        weights.non_qs * JnonQSRatio
+        + weights.res * JBoozerResidual
+        + weights.iotas * Jiota
+        + weights.length * JCurveLength
+        + weights.cc * JCurveCurve
+        + weights.cs * JCurveSurface
+        + weights.surf_dist * JSurfSurf
+        + weights.curvature * JCurvature
+    )
+    return SingleStageObjective(
+        JF=JF,
+        nonQSs=nonQSs,
+        brs=brs,
+        iota=iota,
+        Jiota=Jiota,
+        JnonQSRatio=JnonQSRatio,
+        JBoozerResidual=JBoozerResidual,
+        JCurveLength=JCurveLength,
+        JCurveCurve=JCurveCurve,
+        JCurveSurface=JCurveSurface,
+        JSurfSurf=JSurfSurf,
+        JCurvature=JCurvature,
+        curvelength=curvelength,
+    )
+
+
 def resolve_boozer_optimizer_backend(
     field_backend,
     optimizer_backend,
@@ -14042,10 +14208,7 @@ if __name__ == "__main__":
     surface_geometry_start_s = _perf_counter_s()
     # The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
     # Solely for visualization purposes
-    VV = SurfaceRZFourier(nfp=5, stellsym=True)
-    VV.set_rc(0, 0, 0.976)
-    VV.set_rc(1, 0, 0.222)
-    VV.set_zs(1, 0, 0.222)
+    VV = build_single_stage_vessel_surface()
 
     # The proposed new HBT LCFS
     hbt = SurfaceRZFourier(nfp=5, stellsym=True)
@@ -14080,18 +14243,16 @@ if __name__ == "__main__":
 
     biotsavart_wrap_start_s = _perf_counter_s()
     if use_jax:
-        _, IotasJAX, NonQuasiSymmetricRatioJAX = get_jax_surface_objective_classes()
         bs = SingleStageRuntimeSpecBiotSavartJAX(
             warm_start_runtime_spec_state["runtime_spec"]
         )
         bs_cpu_diag = None
-        iota_cls = IotasJAX
     else:
         stage2_bs_load_start_s = _perf_counter_s()
         bs = load(stage2_bs_path)
         _mark_startup_progress("stage2_bs_loaded", start_s=stage2_bs_load_start_s)
         bs_cpu_diag = None
-        iota_cls = Iotas
+    iota_cls = select_single_stage_iota_class(use_jax=use_jax)
     _mark_startup_progress("biotsavart_ready", start_s=biotsavart_wrap_start_s)
 
     bs_diag = diagnostic_field(bs, bs_cpu_diag)
@@ -14732,23 +14893,13 @@ if __name__ == "__main__":
     # ==============================================================================
     objective_setup_start_s = _perf_counter_s()
     record_outer_optimizer_event("objective_setup_started")
-    # Biot-Savart field calculation
-    if use_jax:
-        bs_obj = bs
-    else:
-        bs_obj = BiotSavart(coils)
-
-    boozer_residual_cls = select_boozer_residual_class(
+    # Biot-Savart field + backend-matched objective classes (SSOT selection)
+    _ss_backend = select_single_stage_objective_backend(
         use_jax=use_jax,
         boozer_kind=boozer_type[stage],
+        jax_bs=bs,
+        coils=coils,
     )
-
-    # Quasi-symmetry and Boozer coordinate residuals
-    if use_jax:
-        nonQSs = [NonQuasiSymmetricRatioJAX(boozer_surface, bs_obj)]
-    else:
-        nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
-    brs = [build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls)]
 
     # Objective function weights and parameters
     LENGTH_WEIGHT = args.length_weight
@@ -14763,32 +14914,45 @@ if __name__ == "__main__":
     SS_DIST = max(args.ss_dist, PLASMA_VESSEL_MIN_DIST_M)
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = args.curvature_threshold
-
-    # Individual objective terms
-    iota = build_iota_objective(boozer_surface, iota_cls)
-    curvelength = CurveLength(banana_curves[0])
     length_target = min(float(args.length_target), COIL_LENGTH_TARGET_M)
 
-    Jiota = QuadraticPenalty(iota, iota_target)
-    JnonQSRatio = sum(nonQSs)
-    JBoozerResidual = sum(brs)
-    JCurveLength = QuadraticPenalty(curvelength, length_target, "max")
-    JCurveCurve = CurveCurveDistance(curves, CC_DIST)
-    JCurveSurface = CurveSurfaceDistance(curves, boozer_surface.surface, CS_DIST)
-    JSurfSurf = SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)
-    JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
-
-    # Combined objective function
-    JF = (
-        NON_QS_WEIGHT * JnonQSRatio
-        + RES_WEIGHT * JBoozerResidual
-        + IOTAS_WEIGHT * Jiota
-        + LENGTH_WEIGHT * JCurveLength
-        + CC_WEIGHT * JCurveCurve
-        + CS_WEIGHT * JCurveSurface
-        + SURF_DIST_WEIGHT * JSurfSurf
-        + CURVATURE_WEIGHT * JCurvature
+    # Combined objective (SSOT assembly shared with the cross-backend parity test)
+    _single_stage_objective = build_single_stage_objective(
+        boozer_surface=boozer_surface,
+        backend=_ss_backend,
+        banana_curves=banana_curves,
+        curves=curves,
+        vessel_surface=VV,
+        iota_target=iota_target,
+        weights=SingleStageObjectiveWeights(
+            non_qs=NON_QS_WEIGHT,
+            res=RES_WEIGHT,
+            iotas=IOTAS_WEIGHT,
+            length=LENGTH_WEIGHT,
+            cc=CC_WEIGHT,
+            cs=CS_WEIGHT,
+            surf_dist=SURF_DIST_WEIGHT,
+            curvature=CURVATURE_WEIGHT,
+            cc_dist=CC_DIST,
+            cs_dist=CS_DIST,
+            ss_dist=SS_DIST,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            length_target=length_target,
+        ),
     )
+    nonQSs = _single_stage_objective.nonQSs
+    brs = _single_stage_objective.brs
+    iota = _single_stage_objective.iota
+    curvelength = _single_stage_objective.curvelength
+    Jiota = _single_stage_objective.Jiota
+    JnonQSRatio = _single_stage_objective.JnonQSRatio
+    JBoozerResidual = _single_stage_objective.JBoozerResidual
+    JCurveLength = _single_stage_objective.JCurveLength
+    JCurveCurve = _single_stage_objective.JCurveCurve
+    JCurveSurface = _single_stage_objective.JCurveSurface
+    JSurfSurf = _single_stage_objective.JSurfSurf
+    JCurvature = _single_stage_objective.JCurvature
+    JF = _single_stage_objective.JF
     full_graph_optimizer_dof_map = (
         build_single_stage_full_graph_jax_cpu_order_dof_map(
             JF,
