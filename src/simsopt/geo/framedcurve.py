@@ -135,6 +135,23 @@ class FramedCurveFrenet(FramedCurve):
             self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints)
         )
 
+    def rotated_frame_dashdash(self):
+        r"""
+        The second curve-parameter derivative of the Frenet frame is not
+        available: the Frenet frame already depends on the curve's second
+        derivative, so its first derivative consumes the third
+        (:math:`\gamma'''`) and the second derivative would require the fourth
+        (:math:`\gamma''''`), which the curve classes do not expose. Use the
+        ``centroid`` or ``surface_tangent`` frame for finite-build curvature.
+        """
+        raise NotImplementedError(
+            "rotated_frame_dashdash is not implemented for the Frenet frame: it "
+            "would require the curve's fourth derivative (gammadashdashdashdash), "
+            "which CurveXYZFourier/CurveCWSFourierCPP do not provide. Build "
+            "finite-build filaments with the 'centroid' or 'surface_tangent' "
+            "frame to evaluate filament curvature."
+        )
+
     def frame_torsion(self):
         """
         Returns the frame torsion, :math:`\hat{\textbf{n}}'(l) \cdot \hat{\textbf{b}}`,
@@ -396,10 +413,25 @@ class FramedCurveCentroid(FramedCurve):
             self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints)
         )
 
+    def rotated_frame_dashdash(self):
+        r"""
+        Returns the second derivative of the frame with respect to the
+        parameterization of the curve,
+        :math:`(\hat{\textbf{t}}''(\phi), \hat{\textbf{n}}''(\phi), \hat{\textbf{b}}''(\phi))`,
+        for the centroid reference frame rotated by the rotation.
+        """
+        return rotated_centroid_frame_dashdash(
+            self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
+            self.curve.gammadashdashdash(),
+            self.rotation.alpha(self.curve.quadpoints),
+            self.rotation.alphadash(self.curve.quadpoints),
+            self.rotation.alphadashdash(self.curve.quadpoints)
+        )
+
     def dframe_binormal_curvature_by_dcoeff_vjp(self, v):
         """
         VJP function for the derivatives of the binormal curvature with respect to the curve
-        and rotation dofs. 
+        and rotation dofs.
         """
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
@@ -556,6 +588,21 @@ class FramedCurveSurfaceTangent(FramedCurve):
             self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints),
             self.major_radius, self.midplane_z)
 
+    def rotated_frame_dashdash(self):
+        r"""
+        Returns the second derivative of the frame with respect to the
+        parameterization of the curve,
+        :math:`(\hat{\textbf{t}}''(\phi), \hat{\textbf{n}}''(\phi), \hat{\textbf{b}}''(\phi))`,
+        for the surface-tangent reference frame rotated by the rotation.
+        """
+        return rotated_surface_tangent_frame_dashdash(
+            self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
+            self.curve.gammadashdashdash(),
+            self.rotation.alpha(self.curve.quadpoints),
+            self.rotation.alphadash(self.curve.quadpoints),
+            self.rotation.alphadashdash(self.curve.quadpoints),
+            self.major_radius, self.midplane_z)
+
     def frame_torsion(self):
         """
         Returns the frame torsion, :math:`\hat{\textbf{n}}'(l) \cdot \hat{\textbf{b}}`,
@@ -698,12 +745,18 @@ class FrameRotation(Optimizable):
         self.jacdash = rotationdash_dcoeff(quadpoints, order)
         self.jax_alpha = jit(lambda dofs, points: jaxrotation_pure(dofs, points, self.order))
         self.jax_alphadash = jit(lambda dofs, points: jaxrotationdash_pure(dofs, points, self.order))
+        self.jax_alphadashdash = jit(lambda dofs, points: jaxrotationdashdash_pure(dofs, points, self.order))
 
     def alpha(self, quadpoints):
         return self.scale * self.jax_alpha(self._dofs.full_x, quadpoints)
 
     def alphadash(self, quadpoints):
         return self.scale * self.jax_alphadash(self._dofs.full_x, quadpoints)
+
+    def alphadashdash(self, quadpoints):
+        """Second derivative of the rotation angle with respect to the curve
+        parameter, scaled identically to :meth:`alpha`/:meth:`alphadash`."""
+        return self.scale * self.jax_alphadashdash(self._dofs.full_x, quadpoints)
 
     def dalpha_by_dcoeff_vjp(self, quadpoints, v):
         return Derivative({self: self.scale * sopp.vjp(v, self.jac)})
@@ -734,6 +787,9 @@ class ZeroRotation(Optimizable):
     def alphadash(self, quadpoints):
         return self.zero
 
+    def alphadashdash(self, quadpoints):
+        return self.zero
+
     def dalpha_by_dcoeff_vjp(self, quadpoints, v):
         return Derivative({})
 
@@ -761,6 +817,17 @@ rotated_centroid_frame_dash = jit(
     lambda gamma, gammadash, gammadashdash, alpha, alphadash: jvp(rotated_centroid_frame,
                                                                   (gamma, gammadash, alpha),
                                                                   (gammadash, gammadashdash, alphadash))[1])
+
+# Second derivative of the centroid frame w.r.t. the curve parameter: the
+# curve-parameter pushforward of ``rotated_centroid_frame_dash``. Each argument
+# of the first derivative advances by its own derivative (gamma->gammadash,
+# alpha->alphadash, ...), so the highest inputs needed are gammadashdashdash and
+# alphadashdash. Exact (machine precision) like the first derivative above.
+rotated_centroid_frame_dashdash = jit(
+    lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, alphadashdash: jvp(
+        rotated_centroid_frame_dash,
+        (gamma, gammadash, gammadashdash, alpha, alphadash),
+        (gammadash, gammadashdash, gammadashdashdash, alphadash, alphadashdash))[1])
 
 rotated_centroid_frame_dcoeff_vjp0 = jit(
     lambda gamma, gammadash, alpha, v: vjp(
@@ -835,6 +902,16 @@ rotated_surface_tangent_frame_dash = jit(
         lambda g, gd, a: rotated_surface_tangent_frame(g, gd, a, R0, z0),
         (gamma, gammadash, alpha),
         (gammadash, gammadashdash, alphadash))[1])
+
+# Second derivative of the surface-tangent frame w.r.t. the curve parameter: the
+# curve-parameter pushforward of ``rotated_surface_tangent_frame_dash`` (R0, z0
+# are constant geometry, not differentiated). Needs gammadashdashdash and
+# alphadashdash; exact like the first derivative.
+rotated_surface_tangent_frame_dashdash = jit(
+    lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, alphadashdash, R0, z0: jvp(
+        lambda g, gd, gdd, a, ad: rotated_surface_tangent_frame_dash(g, gd, gdd, a, ad, R0, z0),
+        (gamma, gammadash, gammadashdash, alpha, alphadash),
+        (gammadash, gammadashdash, gammadashdashdash, alphadash, alphadashdash))[1])
 
 rotated_surface_tangent_frame_dcoeff_vjp0 = jit(
     lambda gamma, gammadash, alpha, R0, z0, v: vjp(
@@ -951,6 +1028,17 @@ def jaxrotationdash_pure(dofs, points, order):
     for j in range(1, order+1):
         rotation += dofs[2*j-1] * 2*np.pi*j*jnp.cos(2*np.pi*j*points)
         rotation -= dofs[2*j] * 2*np.pi*j*jnp.sin(2*np.pi*j*points)
+    return rotation
+
+
+def jaxrotationdashdash_pure(dofs, points, order):
+    """Second derivative with respect to ``points`` of the truncated Fourier
+    rotation angle; the analytic twin of :func:`jaxrotationdash_pure`. The
+    constant ``dofs[0]`` term drops out and each mode picks up ``-(2*pi*j)**2``."""
+    rotation = jnp.zeros((len(points), ))
+    for j in range(1, order+1):
+        rotation -= dofs[2*j-1] * (2*np.pi*j)**2*jnp.sin(2*np.pi*j*points)
+        rotation -= dofs[2*j] * (2*np.pi*j)**2*jnp.cos(2*np.pi*j*points)
     return rotation
 
 

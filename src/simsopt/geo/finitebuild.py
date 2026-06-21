@@ -57,6 +57,19 @@ class CurveFilament(FramedCurve):
         td, nd, bd = self.framedcurve.rotated_frame_dash()
         gammadash[:] = self.curve.gammadash() + self.dn * nd + self.db * bd
 
+    def gammadashdash_impl(self, gammadashdash):
+        """Second derivative of the filament position w.r.t. the curve parameter.
+
+        The filament is the centerline shifted by ``dn`` along the frame normal
+        and ``db`` along the frame binormal, so its second derivative is the
+        centerline's second derivative offset by the frame's second derivative.
+        Enables curvature (``kappa``) on the finite-build conductor itself rather
+        than only on the centerline. Requires a frame whose
+        ``rotated_frame_dashdash`` is available (centroid / surface_tangent).
+        """
+        tdd, ndd, bdd = self.framedcurve.rotated_frame_dashdash()
+        gammadashdash[:] = self.curve.gammadashdash() + self.dn * ndd + self.db * bdd
+
     def dgamma_by_dcoeff_vjp(self, v):
         zero = np.zeros_like(v)
         return self.curve.dgamma_by_dcoeff_vjp(v) \

@@ -7,7 +7,6 @@ from .._core.derivative import Derivative
 from .curve import Curve
 
 from .jit import jit
-from .._core.derivative import derivative_dec
 
 __all__ = ['CurveCWSFourierCPP']
 
@@ -251,6 +250,22 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.dgammadashdash_by_dsurf_vjp_jax = jit(
             lambda cdofs, sdofs, v: vjp(lambda dofs: self.gammadashdash_jax(cdofs, dofs), sdofs)[1](v)[0]
         )
+
+        ## gammadashdashdash
+        # Third derivative w.r.t. the curve parameter, following the same
+        # nested-jvp pattern as gammadash/gammadashdash. Needed to evaluate the
+        # curvature of finite-build filaments offset from this centerline: a
+        # filament's second derivative depends on the centerline's third (via the
+        # rotated frame's second derivative). Forward-evaluation only -- no
+        # optimizer path differentiates it with respect to the dofs.
+        self.gammadashdashdash_pure = jit(
+            lambda cdofs, sdofs, qpts: jvp(
+                lambda pts: self.gammadashdash_pure(cdofs, sdofs, pts),
+                (qpts,),
+                (jnp.ones_like(qpts),),
+            )[1]
+        )
+        self.gammadashdashdash_jax = jit(lambda cdofs, sdofs: self.gammadashdashdash_pure(cdofs, sdofs, points))
 
 
         # determine sign for normal
@@ -496,7 +511,16 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         return np.asarray(
             self.dgammadashdash_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
         )
-    
+
+    #=========================================================================
+    # GAMMADASHDASHDASH
+    # -----------------
+    def gammadashdashdash(self):
+        return np.asarray(self.gammadashdashdash_jax(self.get_dofs(), self.surf.get_dofs()))
+
+    def gammadashdashdash_impl(self, gammadashdashdash):
+        gammadashdashdash[:, :] = self.gammadashdashdash()
+
     #=========================================================================
     # NORMAL
     # ------

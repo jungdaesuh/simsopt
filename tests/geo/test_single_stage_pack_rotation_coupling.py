@@ -335,11 +335,13 @@ class FiniteBuildFieldSwapTest(unittest.TestCase):
         )
         self.assertEqual(len(banana_curves), len(self.partitions.banana_coils))
 
-    def test_pack_filaments_lack_second_derivative_master_provides_it(self):
-        # The coil-force regularizer needs gammadashdash on the acted-on coil. Pack
-        # filaments (CurveFilament) implement none, so the force term must act on the
-        # master centerlines (which do) -- this is why the field-on force-target coils
-        # are rebuilt from the master, not taken from the pack filaments.
+    def test_pack_filaments_lack_force_gradient_master_provides_it(self):
+        # The coil-force regularizer DIFFERENTIATES gammadashdash w.r.t. the coil
+        # dofs. Pack filaments (CurveFilament) now provide the forward second
+        # derivative (so filament curvature is available), but NOT its dof-gradient
+        # dgammadashdash_by_dcoeff_vjp -- so the force term must act on the master
+        # centerlines (which provide both). This is why the field-on force-target
+        # coils are rebuilt from the master, not taken from the pack filaments.
         _, new_partitions, master_curve, net_current = (
             sse.swap_single_stage_finite_build_field(
                 self.thin_bs,
@@ -350,16 +352,26 @@ class FiniteBuildFieldSwapTest(unittest.TestCase):
             )
         )
         filament_curve = new_partitions.banana_coils[0].curve
+        # The forward second derivative (curvature) is now available on the conductor.
+        self.assertEqual(np.asarray(filament_curve.gammadashdash()).shape[1], 3)
+        # But its dof-gradient -- what the coil-force regularizer needs -- is not,
+        # so a filament cannot serve as a force target.
         with self.assertRaises(RuntimeError):
-            filament_curve.gammadashdash()
+            filament_curve.dgammadashdash_by_dcoeff_vjp(
+                np.zeros_like(np.asarray(filament_curve.gammadashdash()))
+            )
         force_target_coils = list(
             coils_via_symmetries(
                 [master_curve], [net_current], self.surf_coils.nfp, self.surf_coils.stellsym
             )
         )
-        # Master force-target coils evaluate the second derivative cleanly.
+        # Master force-target coils evaluate the second derivative cleanly...
         self.assertEqual(
             np.asarray(force_target_coils[0].curve.gammadashdash()).shape[1], 3
+        )
+        # ...and, unlike the filaments, expose its dof-gradient.
+        master_curve.dgammadashdash_by_dcoeff_vjp(
+            np.zeros_like(np.asarray(master_curve.gammadashdash()))
         )
 
 
