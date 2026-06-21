@@ -49,132 +49,13 @@ sopp = pytest.importorskip(
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.single_stage_smoke_fixture import (  # noqa: E402
-    DEFAULT_NUM_TF_COILS,
-    build_real_single_stage_init_fixture,
+from benchmarks.single_stage_objective_eval import (  # noqa: E402
+    build_lane_objective,
+    build_matched_same_state_fixture_pair,
 )
 from benchmarks.validation_ladder_contract import (  # noqa: E402
     parity_ladder_tolerances,
 )
-from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
-    single_stage_banana_example as single_stage_example,
-)
-
-
-def _build_matched_same_state_fixture_pair():
-    """Build CPU + JAX fixtures on the *identical* resolved Boozer state.
-
-    Replicates ``_build_real_fixture_ondevice_m5_same_state_pair`` from
-    ``test_single_stage_jax_cpu_reference.py``: solve the Boozer surface once on
-    the native CPU lane, then seed the JAX lane's Boozer solve with the CPU
-    lane's converged surface DOFs / iota / G so both objectives evaluate at the
-    same converged state (same-state parity, not two independent solves).
-    """
-    cpu_fixture = build_real_single_stage_init_fixture(
-        backend="cpu",
-        optimizer_backend="scipy",
-    )
-    cpu_boozer = cpu_fixture["boozer_surface"]
-    cpu_result = cpu_boozer.res
-    assert cpu_result is not None and cpu_result.get("success", False), (
-        "CPU reduced-real fixture did not converge"
-    )
-    jax_fixture = build_real_single_stage_init_fixture(
-        backend="jax",
-        optimizer_backend="ondevice",
-        boozer_surface_dofs_override=np.asarray(
-            cpu_boozer.surface.get_dofs(), dtype=float
-        ),
-        boozer_iota_override=float(cpu_result["iota"]),
-        boozer_G_override=float(cpu_result["G"]),
-    )
-    return cpu_fixture, jax_fixture
-
-
-# ``main()`` selects the residual kind via ``boozer_type[stage]`` where
-# ``boozer_type = {"initial": "least_squares", "final": "exact"}`` and the
-# default ``--boozer-stage`` is "initial".  "least_squares" is the
-# constraint_weight=1.0 LS Boozer surface the smoke fixture builds.
-# ``select_boozer_residual_class`` only special-cases the literal "exact"; every
-# non-"exact" kind routes to ``BoozerResidual`` (native) / ``BoozerResidualJAX``
-# (jax), so this LS string is the correct ``boozer_kind`` for this fixture.
-_BOOZER_KIND = "least_squares"
-
-# First ``num_tf_coils`` coils are the fixed TF set; the remainder are the banana
-# coils whose curves drive the length / curvature penalties.
-_NUM_TF_COILS = DEFAULT_NUM_TF_COILS
-
-
-def _objective_weights_from_example_defaults():
-    """Build ``SingleStageObjectiveWeights`` from the example's argparse defaults.
-
-    Mirrors ``main()``'s weight assembly (including the ``max``/``min`` clamps
-    against the module's hardware-minimum constants) so the objective under test
-    is the realistic production objective rather than an ad-hoc one. The parity
-    assertion only requires both lanes to use *identical* weights; deriving them
-    from the shared defaults keeps this drift-proof if the example's defaults
-    change.
-    """
-    argv_backup = sys.argv
-    try:
-        sys.argv = ["single_stage_banana_example.py"]
-        args = single_stage_example.parse_args()
-    finally:
-        sys.argv = argv_backup
-
-    cc_dist = max(args.cc_dist, single_stage_example.COIL_COIL_MIN_DIST_M)
-    cs_dist = max(args.cs_dist, single_stage_example.COIL_PLASMA_MIN_DIST_M)
-    ss_dist = max(args.ss_dist, single_stage_example.PLASMA_VESSEL_MIN_DIST_M)
-    length_target = min(
-        float(args.length_target), single_stage_example.COIL_LENGTH_TARGET_M
-    )
-    return single_stage_example.SingleStageObjectiveWeights(
-        non_qs=args.non_qs_weight,
-        res=args.res_weight,
-        iotas=args.iotas_weight,
-        length=args.length_weight,
-        cc=args.cc_weight,
-        cs=args.cs_weight,
-        surf_dist=args.surf_dist_weight,
-        curvature=args.curvature_weight,
-        cc_dist=cc_dist,
-        cs_dist=cs_dist,
-        ss_dist=ss_dist,
-        curvature_threshold=args.curvature_threshold,
-        length_target=length_target,
-    )
-
-
-def _build_lane_objective(fixture, *, use_jax):
-    """Assemble the SSOT single-stage objective for one backend lane.
-
-    Uses exactly the same factory entry points ``main()`` uses so the native and
-    JAX lanes minimize byte-identical objective *definitions*; only the term
-    implementations differ via ``use_jax``.
-    """
-    bs = fixture["bs"]
-    coils = bs.coils
-    curves = [c.curve for c in coils]
-    banana_curves = [c.curve for c in coils[_NUM_TF_COILS:]]
-
-    backend = single_stage_example.select_single_stage_objective_backend(
-        use_jax=use_jax,
-        boozer_kind=_BOOZER_KIND,
-        # ``jax_bs`` is only consumed on the JAX lane; ``coils`` only on the
-        # native lane (it builds its own ``BiotSavart(coils)``).
-        jax_bs=bs if use_jax else None,
-        coils=coils,
-    )
-    objective = single_stage_example.build_single_stage_objective(
-        boozer_surface=fixture["boozer_surface"],
-        backend=backend,
-        banana_curves=banana_curves,
-        curves=curves,
-        vessel_surface=single_stage_example.build_single_stage_vessel_surface(),
-        iota_target=fixture["iota_target"],
-        weights=_objective_weights_from_example_defaults(),
-    )
-    return objective
 
 
 # --- Tolerances -------------------------------------------------------------
@@ -227,7 +108,7 @@ class TestSingleStageObjectiveCrossBoundaryParity:
     """Native C++ objective vs JAX objective at one matched coil-DOF point."""
 
     def test_value_and_gradient_match_native_vs_jax(self):
-        cpu_fixture, jax_fixture = _build_matched_same_state_fixture_pair()
+        cpu_fixture, jax_fixture = build_matched_same_state_fixture_pair()
 
         # Sanity: matched-state fixture really did converge both Boozer solves and
         # the JAX lane ran the on-device LS solver (not a CPU re-solve).
@@ -237,8 +118,8 @@ class TestSingleStageObjectiveCrossBoundaryParity:
         assert jax_booz.res is not None and jax_booz.res.get("success", False)
         assert jax_fixture["boozer_optimizer_backend"] == "ondevice"
 
-        cpu_obj = _build_lane_objective(cpu_fixture, use_jax=False)
-        jax_obj = _build_lane_objective(jax_fixture, use_jax=True)
+        cpu_obj = build_lane_objective(cpu_fixture, use_jax=False)
+        jax_obj = build_lane_objective(jax_fixture, use_jax=True)
 
         # STRUCTURAL non-tautology guarantee: the native lane must route every
         # Boozer/quasi-symmetry term through the C++-backed ``simsopt.*`` classes
