@@ -38,6 +38,7 @@ from banana_opt.topology.kam_birkhoff import (
     WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER,
     WBA_LIMITATION_NO_RADIAL_PLATEAU_DISCRIMINATOR,
     WBA_MIN_CLASSIFIABLE_SEEDS,
+    WBA_MIN_EVALUABLE_SHARE,
     SeedClassification,
     missing_magnetic_axis_classification,
     classify_fieldline_hits,
@@ -1461,6 +1462,8 @@ def wba_not_evaluated_payload(reason):
         # classifiability floor here, so the not-evaluated count is zero; the
         # floor itself is a module constant, reported verbatim.
         "wba_min_classifiable_seeds": int(WBA_MIN_CLASSIFIABLE_SEEDS),
+        "wba_min_evaluable_share": float(WBA_MIN_EVALUABLE_SHARE),
+        "wba_evaluable_share": 0.0,
         "wba_not_evaluated_seed_count": 0,
         "wba_seed_count": 0,
         "wba_survived_seed_count": 0,
@@ -1716,6 +1719,8 @@ def score_topology(
             wba["wba_fraction_denominator_seed_count"]
         ),
         "wba_min_classifiable_seeds": int(wba["wba_min_classifiable_seeds"]),
+        "wba_min_evaluable_share": float(wba["wba_min_evaluable_share"]),
+        "wba_evaluable_share": float(wba["wba_evaluable_share"]),
         "wba_not_evaluated_seed_count": int(wba["wba_not_evaluated_seed_count"]),
         "wba_seed_count": int(wba["wba_seed_count"]),
         "wba_survived_seed_count": int(wba["wba_survived_seed_count"]),

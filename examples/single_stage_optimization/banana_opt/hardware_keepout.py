@@ -1995,6 +1995,19 @@ def _parse_sparse_stored_cell_count(spec, owner):
     return count
 
 
+def _parse_sparse_default_value_m(spec, owner, effective_margin):
+    if "sparse_default_value_m" not in spec:
+        raise ValueError(
+            f"SDF {owner} sparse layout requires sparse_default_value_m")
+    default_value = float(spec["sparse_default_value_m"])
+    if not np.isfinite(default_value):
+        raise ValueError(f"SDF {owner} sparse_default_value_m must be finite")
+    if default_value < float(effective_margin):
+        raise ValueError(
+            f"SDF {owner} sparse_default_value_m must be >= effective_margin_m")
+    return default_value
+
+
 def _hardware_sdf_spec_storage(spec, manifest_storage_kind,
                                manifest_storage_layout):
     storage_kind = str(spec.get(
@@ -2069,6 +2082,9 @@ def _load_sparse_hardware_sdf_grid(
         raise ValueError(
             f"SDF {owner} stored_cell_count mismatch: manifest "
             f"{stored_cell_count} vs payload {sparse_values.shape[0]}")
+    sparse_default_value = _parse_sparse_default_value_m(
+        spec, owner, effective_margin
+    )
     if not np.isfinite(sparse_values).all():
         raise ValueError(f"SDF {owner} sparse_values must be finite")
     for axis, axis_size in enumerate(shape):
@@ -2082,7 +2098,7 @@ def _load_sparse_hardware_sdf_grid(
     )
     if np.unique(flat_indices).size != flat_indices.size:
         raise ValueError(f"SDF {owner} sparse_indices contain duplicates")
-    grid = np.full(shape, effective_margin, dtype=np.float64)
+    grid = np.full(shape, sparse_default_value, dtype=np.float64)
     grid[sparse_indices[:, 0], sparse_indices[:, 1], sparse_indices[:, 2]] = (
         sparse_values
     )

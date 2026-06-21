@@ -22,10 +22,8 @@ with the lightweight algebraic fakes used across the other wiring suites:
   assembly is exercised by the example ``--init-only`` smoke).
 """
 
-import importlib.util
 import inspect
 import sys
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,29 +31,11 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
-SINGLE_STAGE_OBJECTIVES_PATH = (
-    EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
-)
-
-
-def _load_module(module_path: Path, prefix: str):
-    module_name = f"{prefix}_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    original_sys_path = sys.path.copy()
+if str(EXAMPLES_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_ROOT))
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path[:] = original_sys_path
-    return module
-
 
 import unittest  # noqa: E402
 
-if str(EXAMPLES_ROOT) not in sys.path:
-    sys.path.insert(0, str(EXAMPLES_ROOT))
 from banana_opt.fold_buildability import (  # noqa: E402
     RotationAwareCurvatureExcessPenalty,
 )
@@ -66,6 +46,7 @@ from simsopt.geo import (  # noqa: E402
     CurveXYZFourier,
     create_multifilament_grid,
 )
+from banana_opt import single_stage_objectives  # noqa: E402
 
 WINDING_R0 = 0.903
 
@@ -183,9 +164,7 @@ class BuildTotalObjectiveSwapTest(unittest.TestCase):
     """Penalty path: the rotation-aware term REPLACES the scalar curvature steering."""
 
     def setUp(self):
-        self.module = _load_module(
-            SINGLE_STAGE_OBJECTIVES_PATH, "ra_curvature_single_stage_objectives"
-        )
+        self.module = single_stage_objectives
 
     def test_signature_binds_the_rotation_aware_kwargs(self):
         signature = inspect.signature(self.module.build_total_objective)
@@ -258,9 +237,7 @@ class EvaluateAlmObjectiveRotationAwareTest(unittest.TestCase):
     """ALM path: the rotation-aware term threads into the ALM physics objective."""
 
     def setUp(self):
-        self.module = _load_module(
-            SINGLE_STAGE_OBJECTIVES_PATH, "ra_curvature_alm_single_stage_objectives"
-        )
+        self.module = single_stage_objectives
 
     def _evaluate(self, **extra_kwargs):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])

@@ -2,12 +2,15 @@
 
 These cover the pure helpers added to ``banana_opt.stage2_geometry``:
 ``rotation_aware_projected_half_extent_m`` and ``rotation_aware_curvature_report``.
-They are frame-independent: the pack twist ``alpha`` is scanned and the realized
-projected reach must sweep the full physical band ``[min(half_n, half_b),
-max(half_n, half_b)]`` of the Type-KK OUTER build channel -- i.e. the curvature
-cap sweeps ``[43.31, 123.03]/m`` (bench-measured zero inner-radius
-self-intersection model) -- and the rotation-aware cap is never below the
-conservative measured edgewise cap.
+The realized reach is the rectangle SUPPORT FUNCTION ``half_n*|n| + half_b*|b|``
+(worst inner-corner half-extent in the centerline bend direction), not an
+optimistic axis blend. As the pack twist ``alpha`` is scanned the realized reach
+sweeps ``[min(half_n, half_b), sqrt(half_n^2 + half_b^2)]`` of the Type-KK OUTER
+build channel: the floor is the thin-axis half-depth (flatwise, cap ~123.03/m) and
+the ceiling is the DIAGONAL CORNER ``sqrt(half_n^2 + half_b^2)`` (cap ~40.85/m),
+which pokes out FURTHER than the wide binormal axis (half_b, edgewise cap
+~43.31/m). The edgewise axis cap is therefore NOT the worst case -- the
+support-function corner is -- so the rotation-aware cap can dip below it.
 """
 
 import sys
@@ -30,6 +33,7 @@ from banana_opt.stage2_geometry import (  # noqa: E402
     FiniteBuildSettings,
     finite_build_frame_aware_curvature_limit_inv_m,
     finite_build_rotation_aware_curvature_limit_inv_m,
+    pack_projected_reach_m,
     rotation_aware_curvature_report,
     rotation_aware_projected_half_extent_m,
 )
@@ -94,7 +98,12 @@ class RotationAwareProjectedReachTest(unittest.TestCase):
         self.half_n = OUTER_HALF_N_M
         self.half_b = OUTER_HALF_B_M
         self.reach_min = min(self.half_n, self.half_b)
-        self.reach_max = max(self.half_n, self.half_b)
+        # Support-function ceiling: the worst inner-corner half-extent is the
+        # diagonal corner sqrt(half_n^2 + half_b^2), attained when the bend
+        # direction is ~45deg between the rotated normal and binormal axes. This
+        # exceeds the wide binormal axis reach max(half_n, half_b); the old
+        # quadratic blend half_n*n^2 + half_b*b^2 never exceeded that axis value.
+        self.reach_corner = np.hypot(self.half_n, self.half_b)
 
     def test_type_kk_scalar_caps_match_expected(self):
         # Sanity-pin the conservative measured edgewise and best flatwise caps.
@@ -109,6 +118,14 @@ class RotationAwareProjectedReachTest(unittest.TestCase):
         self.assertAlmostEqual(edgewise, 43.31, places=1)
         self.assertAlmostEqual(flatwise, 123.03, places=1)
 
+    def test_scalar_reach_is_support_function_not_quadratic_blend(self):
+        reach = pack_projected_reach_m(self.half_n, self.half_b, np.pi / 4.0)
+        support_function = (self.half_n + self.half_b) / np.sqrt(2.0)
+        old_quadratic = (self.half_n + self.half_b) / 2.0
+
+        self.assertAlmostEqual(reach, support_function, places=9)
+        self.assertGreater(reach, old_quadratic + 1e-4)
+
     def test_constant_alpha_helper_is_constant(self):
         # Guards the 0th-dof-is-constant assumption used to set a known twist.
         curve = _poloidal_circle()
@@ -118,18 +135,33 @@ class RotationAwareProjectedReachTest(unittest.TestCase):
         self.assertTrue(np.allclose(alpha, 0.37, atol=1e-9))
 
     def test_reach_stays_within_physical_band_for_any_twist(self):
+        # The support-function reach is bounded below by the thin-axis half-depth
+        # and above by the diagonal corner sqrt(half_n^2 + half_b^2). It may exceed
+        # the wide binormal axis (half_b) at intermediate misalignment -- that is
+        # the corner the old quadratic blend optimistically under-reported.
         curve = _poloidal_circle()
         for alpha in np.linspace(0.0, np.pi, 13):
             rotation = FrameRotation(curve.quadpoints, 1)
             _set_constant_alpha(rotation, alpha)
             fc = FramedCurveSurfaceTangent(curve, WINDING_R0, 0.0, rotation)
             reach = rotation_aware_projected_half_extent_m(self.fb, curve, fc)
-            self.assertGreaterEqual(float(np.min(reach)), self.reach_min - 1e-9)
-            self.assertLessEqual(float(np.max(reach)), self.reach_max + 1e-9)
+            self.assertGreaterEqual(
+                float(np.min(reach)),
+                self.reach_min - 1e-9,
+                "reach fell below the thin-axis half-depth floor",
+            )
+            self.assertLessEqual(
+                float(np.max(reach)),
+                self.reach_corner + 1e-9,
+                "reach exceeded the diagonal-corner support-function ceiling",
+            )
 
     def test_twist_scan_sweeps_full_reach_band(self):
         # Across the alpha scan the realized reach must reach both the thin-axis
-        # minimum and the measured edgewise maximum -> the cap spans 43.31..123.03.
+        # minimum (flatwise, cap ~123.03/m) and the diagonal-corner maximum
+        # sqrt(half_n^2 + half_b^2) (cap ~40.85/m). The corner -- not the wide
+        # binormal axis -- is the support-function worst case; the old quadratic
+        # blend topped out at the axis value max(half_n, half_b) instead.
         curve = _poloidal_circle()
         global_min = np.inf
         global_max = -np.inf
@@ -140,8 +172,14 @@ class RotationAwareProjectedReachTest(unittest.TestCase):
             reach = rotation_aware_projected_half_extent_m(self.fb, curve, fc)
             global_min = min(global_min, float(np.min(reach)))
             global_max = max(global_max, float(np.max(reach)))
-        self.assertAlmostEqual(global_min, self.reach_min, places=4)
-        self.assertAlmostEqual(global_max, self.reach_max, places=4)
+        self.assertAlmostEqual(
+            global_min, self.reach_min, places=4,
+            msg="twist scan never reached the thin-axis flatwise floor",
+        )
+        self.assertAlmostEqual(
+            global_max, self.reach_corner, places=4,
+            msg="twist scan never reached the diagonal-corner support ceiling",
+        )
 
     def test_zero_rotation_matches_frame_rotation_at_alpha_zero(self):
         curve = _poloidal_circle()
@@ -179,9 +217,16 @@ class RotationAwareReportTest(unittest.TestCase):
         cap_min = report["FINITEBUILD_ROTATION_AWARE_CAP_MIN_INV_M"]
         cap_mean = report["FINITEBUILD_ROTATION_AWARE_CAP_MEAN_INV_M"]
         self.assertAlmostEqual(conservative, 43.31, places=1)
-        # The rotation-aware cap is never tighter than the conservative edgewise cap
-        # and never looser than the flatwise/thin-axis best case (~123.03/m).
-        self.assertGreaterEqual(cap_min, conservative - 1e-6)
+        # Universal support-function bounds: the rotation-aware cap is never tighter
+        # than the diagonal-corner cap 1/(margin + sqrt(half_n^2 + half_b^2))
+        # (~40.85/m) and never looser than the flatwise thin-axis cap (~123.03/m).
+        # (The edgewise axis cap ~43.31/m is NOT a floor -- the corner can poke
+        # past the wide binormal axis -- so we bound by the corner, not the
+        # conservative edgewise cap.)
+        corner_cap = 1.0 / (
+            MARGIN_M + np.hypot(OUTER_HALF_N_M, OUTER_HALF_B_M)
+        )
+        self.assertGreaterEqual(cap_min, corner_cap - 1e-6)
         self.assertLessEqual(cap_mean, 123.03 + 1e-6)
         self.assertGreaterEqual(cap_mean, cap_min - 1e-9)
 

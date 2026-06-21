@@ -25,6 +25,7 @@ from simsopt.geo import (
     create_multifilament_grid,
     curves_to_vtk,
 )
+from simsopt.geo.framedcurve import rotated_surface_tangent_frame
 
 from plotting_utils import magnitude_field_plot, norm_field_plot
 from workflow_helpers import validate_normalized_toroidal_flux
@@ -964,21 +965,22 @@ def finite_build_frame_aware_curvature_limit_inv_m(
 
 
 def pack_projected_reach_m(half_extent_n_m, half_extent_b_m, bend_angle_rad):
-    """Axis-interpolated inner-edge reach (m) in a centerline bend direction.
+    """Rectangle support-function reach (m) in a centerline bend direction.
 
     The cross-section is a rectangle of half-extents (``half_extent_n_m`` along the
     normal axis, ``half_extent_b_m`` along the binormal). ``bend_angle_rad`` is the
-    angle between the centerline bend direction and the normal axis. The Type-KK
-    bend ruling is expressed by the measured axis limits: flatwise uses the thin
-    normal half-depth, edgewise uses the wide binormal half-width. The smooth
-    interpolation below stays inside that measured band and avoids introducing a
-    stricter diagonal-corner cap that was not present in the bench measurement.
+    angle between the centerline bend direction and the normal axis. The reach is
+    the same rectangle support function used by
+    ``rotation_aware_projected_half_extent_m``:
+    ``half_n*abs(cos(angle)) + half_b*abs(sin(angle))``. A quadratic blend
+    under-reports intermediate misalignment and is optimistic for the Type-KK
+    outer-channel non-fold condition.
     """
     half_n = abs(float(half_extent_n_m))
     half_b = abs(float(half_extent_b_m))
-    cos2 = float(np.cos(bend_angle_rad)) ** 2
-    sin2 = float(np.sin(bend_angle_rad)) ** 2
-    return half_n * cos2 + half_b * sin2
+    cos_abs = abs(float(np.cos(bend_angle_rad)))
+    sin_abs = abs(float(np.sin(bend_angle_rad)))
+    return half_n * cos_abs + half_b * sin_abs
 
 
 def finite_build_rotation_aware_curvature_limit_inv_m(
@@ -992,11 +994,12 @@ def finite_build_rotation_aware_curvature_limit_inv_m(
     the outer-channel reach interpolated into the actual centerline bend direction
     (``pack_projected_reach_m`` over the outer half-extents) instead of the
     edgewise fallback. ``bend_angle_rad`` is the angle from the outer-channel
-    NORMAL axis (flatwise/thin). When the pack rotation aligns the bend plane with
-    the thin normal extent the required inner-edge radius shrinks, so the cap rises
-    above the conservative value: flatwise (angle 0) gives ~123.03/m, edgewise
-    (angle pi/2, bend along the wide binormal) gives ~43.31/m. This quantifies the
-    rotation cap-lift.
+    NORMAL axis (flatwise/thin). Axis-aligned flatwise bends shrink the required
+    inner-edge radius and lift the cap (~123.03/m), while edgewise bends recover
+    the legacy axis-safe value (~43.31/m). Intermediate angles use the rectangle
+    support function directly; diagonal corner reach can be stricter than the
+    edgewise endpoint, so callers must treat this as the realized-orientation cap,
+    not a monotone cap-lift.
     """
     projected_reach_m = pack_projected_reach_m(
         TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
@@ -1009,21 +1012,14 @@ def finite_build_rotation_aware_curvature_limit_inv_m(
     return 1.0 / required_radius_m
 
 
-def rotation_aware_projected_half_extent_m(finite_build, banana_curve, framedcurve):
-    """Per-quadpoint outer-channel half-extent projected into the centerline bend
-    plane, using the REALIZED rotated pack frame (the live twist ``alpha(theta)``).
+def _centerline_bend_direction(banana_curve):
+    """Unit in-plane curvature (bend) direction per quadpoint.
 
-    The rotated ``(normal, binormal)`` axes are read straight from
-    ``framedcurve.rotated_frame()`` -- the very frame ``CurveFilament`` lays the
-    pack on -- so the projection reflects where the OUTER build channel actually
-    sits, not a worst-case corner. The projected extent uses the fixed Type-KK
-    outer-channel half-extents (depth along the rotated normal, width along the
-    rotated binormal); the ``finite_build`` pack-grid argument is accepted for
-    interface parity. This is the realized-orientation analogue of the scalar
-    ``pack_projected_reach_m`` (T3.2 / G1, measurement only).
+    The component of ``gamma''`` perpendicular to the unit tangent, normalized.
+    Zero at points where the curve is locally straight (no bend). Shared SSOT for
+    the rotation-aware reach projection and the alpha warm-start, which both need
+    the direction the centerline bends in.
     """
-    half_n_m = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M
-    half_b_m = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
     gammadash = np.asarray(banana_curve.gammadash(), dtype=float)
     gammadashdash = np.asarray(banana_curve.gammadashdash(), dtype=float)
     tangent_norm = np.linalg.norm(gammadash, axis=1)
@@ -1037,18 +1033,40 @@ def rotation_aware_projected_half_extent_m(finite_build, banana_curve, framedcur
         gammadashdash - np.sum(gammadashdash * tangent, axis=1)[:, None] * tangent
     )
     bend_norm = np.linalg.norm(curvature_vector, axis=1)
-    bend_direction = np.divide(
+    return np.divide(
         curvature_vector,
         bend_norm[:, None],
         out=np.zeros_like(curvature_vector),
         where=bend_norm[:, None] > 0.0,
     )
+
+
+def rotation_aware_projected_half_extent_m(finite_build, banana_curve, framedcurve):
+    """Per-quadpoint outer-channel half-extent projected into the centerline bend
+    plane, using the REALIZED rotated pack frame (the live twist ``alpha(theta)``).
+
+    The rotated ``(normal, binormal)`` axes are read straight from
+    ``framedcurve.rotated_frame()`` -- the very frame ``CurveFilament`` lays the
+    pack on. The reach is the rectangle SUPPORT FUNCTION in the bend direction,
+    ``half_n*|bend.n| + half_b*|bend.b|`` (depth along the rotated normal, width
+    along the rotated binormal) -- i.e. the worst (inner) corner half-extent,
+    which is exactly the quantity the non-fold condition ``w|kappa_w| +
+    h|kappa_h| < 1`` binds on. (A quadratic blend ``half_n*n^2 + half_b*b^2``
+    under-reports the support function at intermediate misalignment -- it agrees
+    only when the bend is axis-aligned -- and is therefore optimistic.) The
+    ``finite_build`` pack-grid argument is accepted for interface parity. SSOT
+    for the rotated-frame reach VALUE; the JAX twin ``_projected_reach_pure`` must
+    match it (pinned by the numpy<->JAX consistency test).
+    """
+    half_n_m = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M
+    half_b_m = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
+    bend_direction = _centerline_bend_direction(banana_curve)
     _, normal_axis, binormal_axis = (
         np.asarray(axis, dtype=float) for axis in framedcurve.rotated_frame()
     )
     normal_projection = np.sum(bend_direction * normal_axis, axis=1)
     binormal_projection = np.sum(bend_direction * binormal_axis, axis=1)
-    return half_n_m * normal_projection**2 + half_b_m * binormal_projection**2
+    return half_n_m * np.abs(normal_projection) + half_b_m * np.abs(binormal_projection)
 
 
 def rotation_aware_curvature_report(
@@ -1109,6 +1127,88 @@ def rotation_aware_curvature_report(
         "FINITEBUILD_ROTATION_AWARE_HEADROOM_ARCLEN_FRACTION": cashed_fraction,
         "FINITEBUILD_ROTATION_AWARE_RESIDUAL_INFEASIBLE_FRACTION": residual_fraction,
     }
+
+
+def rotation_aware_warm_start_alpha_dofs(
+    banana_curve,
+    framedcurve,
+    half_n_m=TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    half_b_m=TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+):
+    """``FrameRotation`` dofs that lay the thinner pack axis into the centerline
+    bend (rotation-aware curvature warm-start).
+
+    Root cause this addresses: from ``alpha=0`` the optimizer satisfies
+    buildability by flattening the centerline ``|kappa|`` and never folds the pack
+    (twist-strain pressure pulls ``alpha`` back to 0), so the realized cap stays
+    pinned at the conservative corner. Seeding ``alpha`` at the reach-minimizing
+    profile starts the descent already folded, inside the basin the folded optimum
+    lives in.
+
+    The projected outer-channel reach is the rectangle support function
+    ``half_n*|bend.n(alpha)| + half_b*|bend.b(alpha)|`` (see
+    ``rotation_aware_projected_half_extent_m``). The rotated ``(n, b)`` preserve the
+    in-plane bend norm, so with ``half_n < half_b`` the reach is minimized by the
+    rotation that aligns the thin normal ``n`` with the bend direction (the optimum
+    is the same for the support function and the old quadratic blend, so this
+    warm-start target is unchanged by the support-function fix). From the
+    ``rotated_surface_tangent_frame`` convention
+    ``n(alpha) = cos(alpha) n0 - sin(alpha) b0`` this is
+    ``alpha*(theta) = -atan2(bend.b0, bend.n0)`` (modulo pi; the reach is
+    pi-periodic in alpha), where ``(t, n0, b0)`` is the UNROTATED (alpha=0)
+    surface-tangent reference frame. The degenerate ``half_n > half_b`` case aligns
+    the binormal instead (shift by pi/2). ``alpha*`` is director-unwrapped for
+    continuity, then least-squares fit -- curvature-magnitude weighted so the
+    high-``kappa`` apexes that actually bind the cap dominate -- onto the live
+    ``FrameRotation`` Fourier basis. Pure: returns the dof vector; the caller
+    assigns ``framedcurve.rotation.x``.
+    """
+    rotation = framedcurve.rotation
+    quadpoints = np.asarray(banana_curve.quadpoints, dtype=float)
+    bend_direction = _centerline_bend_direction(banana_curve)
+    # Unrotated (alpha=0) surface-tangent reference frame, computed independently of
+    # the rotation's current dofs so a re-warm-start reads the same reference.
+    _, normal0, binormal0 = (
+        np.asarray(axis, dtype=float)
+        for axis in rotated_surface_tangent_frame(
+            np.asarray(banana_curve.gamma(), dtype=float),
+            np.asarray(banana_curve.gammadash(), dtype=float),
+            np.zeros(quadpoints.shape[0]),
+            framedcurve.major_radius,
+            framedcurve.midplane_z,
+        )
+    )
+    bend_dot_n0 = np.sum(bend_direction * normal0, axis=1)
+    bend_dot_b0 = np.sum(bend_direction * binormal0, axis=1)
+    alpha_principal = -np.arctan2(bend_dot_b0, bend_dot_n0)
+    if half_n_m > half_b_m:
+        alpha_principal = alpha_principal + 0.5 * np.pi
+    # The reach is pi-periodic in alpha (n and -n give the same reach), so the raw
+    # principal angle carries spurious pi jumps. Unwrap the doubled angle (single-
+    # valued mod 2pi) then halve for a continuous director-consistent fit target.
+    # Assumes the bend director has no net winding over the period (true for the
+    # banana U-turn geometry); a residual seam at theta=1->0 is harmless because this
+    # is a warm-start the optimizer refines from, not a hard target.
+    alpha_target = 0.5 * np.unwrap(2.0 * alpha_principal)
+    # Curvature-magnitude weights focus the low-order fit on the high-kappa apexes
+    # (where the cap binds); flat segments (kappa~0, arbitrary alpha*) get ~0 weight
+    # and do not distort the fit.
+    curvature = np.asarray(banana_curve.kappa(), dtype=float)
+    sqrt_weight = np.sqrt(np.maximum(curvature, 0.0))
+    # Live FrameRotation Fourier basis (mirrors framedcurve.jaxrotation_pure):
+    # alpha = scale * (dofs[0] + sum_j dofs[2j-1] sin(2 pi j theta)
+    #                           + dofs[2j] cos(2 pi j theta)).
+    order = int(rotation.order)
+    scale = float(rotation.scale)
+    columns = [np.ones_like(quadpoints)]
+    for j in range(1, order + 1):
+        columns.append(np.sin(2.0 * np.pi * j * quadpoints))
+        columns.append(np.cos(2.0 * np.pi * j * quadpoints))
+    design = scale * np.stack(columns, axis=1)
+    dofs, _, _, _ = np.linalg.lstsq(
+        sqrt_weight[:, None] * design, sqrt_weight * alpha_target, rcond=None
+    )
+    return dofs
 
 
 def closed_polyline_segments(gamma):

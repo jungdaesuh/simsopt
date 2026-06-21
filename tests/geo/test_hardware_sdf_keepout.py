@@ -188,10 +188,12 @@ def _write_sparse_sdf_payload(
     sparse_indices,
     sparse_values,
     stored_cell_count=None,
+    sparse_default_value=None,
     sparse_indices_key="sensors_sparse_indices",
     sparse_values_key="sensors_sparse_values",
     omit_sparse_indices_payload=False,
     omit_sparse_values_payload=False,
+    omit_sparse_default_value=False,
 ):
     data_path = root / "hardware_sdf.npz"
     payload = {}
@@ -203,6 +205,23 @@ def _write_sparse_sdf_payload(
     data_sha = hashlib.sha256(data_path.read_bytes()).hexdigest()
     if stored_cell_count is None:
         stored_cell_count = len(sparse_values)
+    if sparse_default_value is None:
+        sparse_default_value = effective_margin
+    group_spec = {
+        "label": "sensors",
+        "storage_layout": SPARSE_NARROW_BAND_SHELL_LAYOUT,
+        "origin_m": list(origin),
+        "spacing_m": spacing,
+        "shape": list(shape),
+        "sign_method": SIGNED_TEST_METHOD,
+        "effective_margin_m": effective_margin,
+        "narrow_band_m": 0.02,
+        "sparse_indices_key": sparse_indices_key,
+        "sparse_values_key": sparse_values_key,
+        "stored_cell_count": stored_cell_count,
+    }
+    if not omit_sparse_default_value:
+        group_spec["sparse_default_value_m"] = sparse_default_value
     manifest = {
         "schema_version": 1,
         "kind": "hardware_sdf",
@@ -224,21 +243,7 @@ def _write_sparse_sdf_payload(
         "effective_margin_m": effective_margin,
         "narrow_band_m": 0.02,
         "static_hardware_keys": ["sensors", "frame", "sample"],
-        "groups": [
-            {
-                "label": "sensors",
-                "storage_layout": SPARSE_NARROW_BAND_SHELL_LAYOUT,
-                "origin_m": list(origin),
-                "spacing_m": spacing,
-                "shape": list(shape),
-                "sign_method": SIGNED_TEST_METHOD,
-                "effective_margin_m": effective_margin,
-                "narrow_band_m": 0.02,
-                "sparse_indices_key": sparse_indices_key,
-                "sparse_values_key": sparse_values_key,
-                "stored_cell_count": stored_cell_count,
-            }
-        ],
+        "groups": [group_spec],
         "documented_gate_only": {
             "frame": {
                 "reason": "not represented in this test SDF",
@@ -437,6 +442,7 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             shape = (4, 4, 4)
             sparse_indices = np.array([[1, 1, 1], [2, 1, 1]], dtype=np.int64)
             sparse_values = np.array([-0.003, 0.011], dtype=float)
+            sparse_default_value = margin + 0.004
             manifest = _write_sparse_sdf_payload(
                 root,
                 shape=shape,
@@ -445,6 +451,7 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
                 effective_margin=margin,
                 sparse_indices=sparse_indices,
                 sparse_values=sparse_values,
+                sparse_default_value=sparse_default_value,
             )
 
             sdf_data = load_hardware_sdf(manifest)
@@ -454,8 +461,42 @@ class HardwareSdfKeepoutTests(unittest.TestCase):
             self.assertEqual(sdf_data.group_labels, ("sensors",))
             self.assertAlmostEqual(grid[1, 1, 1], sparse_values[0])
             self.assertAlmostEqual(grid[2, 1, 1], sparse_values[1])
-            self.assertAlmostEqual(grid[0, 0, 0], margin)
+            self.assertAlmostEqual(grid[0, 0, 0], sparse_default_value)
             self.assertAlmostEqual(sdf_data.groups[0].spacing_m, 0.004)
+
+    def test_loader_rejects_sparse_payload_without_default_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sparse_sdf_payload(
+                root,
+                shape=(4, 4, 4),
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.004,
+                effective_margin=0.006,
+                sparse_indices=np.array([[1, 1, 1]], dtype=np.int64),
+                sparse_values=np.array([0.001], dtype=float),
+                omit_sparse_default_value=True,
+            )
+
+            with self.assertRaisesRegex(ValueError, "sparse_default_value_m"):
+                load_hardware_sdf(manifest)
+
+    def test_loader_rejects_sparse_default_below_effective_margin(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest = _write_sparse_sdf_payload(
+                root,
+                shape=(4, 4, 4),
+                origin=(0.0, 0.0, 0.0),
+                spacing=0.004,
+                effective_margin=0.006,
+                sparse_indices=np.array([[1, 1, 1]], dtype=np.int64),
+                sparse_values=np.array([0.001], dtype=float),
+                sparse_default_value=0.005,
+            )
+
+            with self.assertRaisesRegex(ValueError, "sparse_default_value_m"):
+                load_hardware_sdf(manifest)
 
     def test_loader_rejects_sparse_payload_with_missing_key(self):
         with tempfile.TemporaryDirectory() as td:

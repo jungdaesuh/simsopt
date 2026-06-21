@@ -237,9 +237,12 @@ def test_score_topology_threads_wba_min_returns_into_classifier(monkeypatch):
 
     def fake_itc(*_args, **kwargs):
         captured["min_returns"] = kwargs.get("min_returns")
-        return topology_scorer.wba_not_evaluated_payload(
+        payload = topology_scorer.wba_not_evaluated_payload(
             topology_scorer.WBA_EVALUATION_NOT_EVALUATED_SKIPPED_BY_CALLER
         )
+        payload["wba_min_evaluable_share"] = 0.7
+        payload["wba_evaluable_share"] = 0.25
+        return payload
 
     monkeypatch.setattr(
         topology_scorer,
@@ -267,7 +270,7 @@ def test_score_topology_threads_wba_min_returns_into_classifier(monkeypatch):
         ),
     )
 
-    topology_scorer.score_topology(
+    result = topology_scorer.score_topology(
         RingSurface(),
         object(),
         nfieldlines=2,
@@ -281,6 +284,8 @@ def test_score_topology_threads_wba_min_returns_into_classifier(monkeypatch):
     )
 
     assert captured["min_returns"] == 128
+    assert result["wba_min_evaluable_share"] == 0.7
+    assert result["wba_evaluable_share"] == 0.25
 
 
 def test_score_topology_axis_bphi_null_trial_is_not_broken(monkeypatch):
@@ -406,6 +411,11 @@ def test_empty_topology_score_does_not_promote_not_evaluated_wba_to_kam_fraction
     assert result["kam_fraction"] is None
     assert result["kam_fraction_semantics"] is None
     assert result["wba_evaluation_state"] == "not_evaluated_no_classified_seeds"
+    assert (
+        result["wba_min_evaluable_share"]
+        == topology_scorer.WBA_MIN_EVALUABLE_SHARE
+    )
+    assert result["wba_evaluable_share"] == 0.0
 
 
 def test_score_topology_axis_not_located_is_wba_not_evaluated(monkeypatch):
