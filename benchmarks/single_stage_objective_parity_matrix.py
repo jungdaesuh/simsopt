@@ -19,14 +19,16 @@ the two runs; ``--collate`` cross-checks that and assembles the final table.
 This is a fixed-point (single-evaluation) parity matrix, NOT a converged-trajectory
 comparison: per-evaluation ``J``/``dJ`` at a matched resolved state is the
 well-posed cross-backend parity claim (different outer optimizers diverge after
-step 1 even when both are correct).  For each seed the native-CPU lane solves the
-Boozer surface fresh from the seed's coils / equilibrium / config, then the JAX
-lane is seeded from the CPU lane's converged surface / iota / G so both lanes
-evaluate at the identical state.  The seed supplies the diverse coil set + config;
-the Boozer surface resolution (``--mpol`` / ``--ntor`` / ``--nphi`` / ``--ntheta``)
-is a free choice of the matrix -- parity holds at any valid resolved state -- so a
-uniform moderate resolution keeps every lane tractable (mpol10 jax-CPU Boozer
-solves are impractically slow) and lets same-shape seeds share one XLA compile.
+step 1 even when both are correct).  For each seed the native-CPU lane warm-starts
+from the seed's *resolved* Boozer surface at its NATIVE resolution: it installs the
+resolved surface DOFs, recovers the consistent ``(iota*, G*)`` and full-solves from
+that Boozer fixed point (a fresh solve at a coarser resolution collapses to a
+degenerate, self-intersecting surface for production seeds).  The JAX lane is then
+seeded from the CPU lane's converged surface / iota / G so both lanes evaluate at the
+identical state.  The seed supplies the diverse coil set + config + its native
+resolution; ``--mpol`` / ``--ntor`` / ``--nphi`` / ``--ntheta`` are diagnostic
+overrides only and must match the seed's resolved surface (its DOFs are read at that
+resolution).
 
 Run (on the pod, per platform), then collate::
 
@@ -65,6 +67,9 @@ from benchmarks.single_stage_objective_eval import (  # noqa: E402
     build_matched_same_state_fixture_pair,
     objective_weights_from_example_defaults,
 )
+from benchmarks.single_stage_smoke_fixture import (  # noqa: E402
+    DEFAULT_CONSTRAINT_WEIGHT,
+)
 from benchmarks.validation_ladder_contract import (  # noqa: E402
     parity_ladder_tolerances,
 )
@@ -93,6 +98,7 @@ class SeedSpec:
     iota_target: float
     num_tf_coils: int
     final_iota: float
+    constraint_weight: float
 
 
 def _seed_name(run_dir: str) -> str:
@@ -110,12 +116,14 @@ def load_seed_spec(
 ) -> SeedSpec:
     """Read a seed's ``results.json`` into a :class:`SeedSpec`.
 
-    The Boozer surface resolution (``mpol`` / ``ntor`` / ``nphi`` / ``ntheta``) may
-    be overridden: because the matrix solves the Boozer surface *fresh* at each
-    seed's coils (it does not consume the seed's production-resolution resolved
-    DOFs), the resolution is a free choice.  A uniform moderate resolution across
-    seeds keeps the jax-CPU lane tractable and lets same-shape seeds share one XLA
-    compile.  Overrides default to the seed's production values when None.
+    The matrix evaluates each seed at its NATIVE Boozer resolution (``mpol`` /
+    ``ntor`` / ``nphi`` / ``ntheta`` from ``results.json``) and consumes the seed's
+    resolved surface DOFs (see :func:`load_resolved_surface_dofs`) -- a fresh solve
+    at a coarser resolution collapses to a degenerate surface for production seeds.
+    The resolution overrides exist only for diagnostics and default to the seed's
+    production values when None.  ``CONSTRAINT_WEIGHT`` is read so the matched-state
+    solve uses the seed's own Boozer penalty weighting (defaults to
+    ``DEFAULT_CONSTRAINT_WEIGHT`` for legacy seeds that predate the field).
     """
     run_dir = os.path.abspath(run_dir)
     with open(os.path.join(run_dir, "results.json"), encoding="utf-8") as f:
@@ -137,7 +145,16 @@ def load_seed_spec(
         vol_target=float(r["TARGET_VOLUME"]),
         iota_target=float(r["TARGET_IOTA"]),
         num_tf_coils=int(r["NUM_TF_COILS"]),
-        final_iota=float(r.get("FINAL_IOTA", r["TARGET_IOTA"])),
+        # ``.get(key, default)`` returns None for a present-but-null key, so guard
+        # explicitly (some seeds persist FINAL_IOTA / CONSTRAINT_WEIGHT as JSON null).
+        final_iota=(
+            float(r["FINAL_IOTA"]) if r.get("FINAL_IOTA") is not None
+            else float(r["TARGET_IOTA"])
+        ),
+        constraint_weight=(
+            float(r["CONSTRAINT_WEIGHT"]) if r.get("CONSTRAINT_WEIGHT") is not None
+            else DEFAULT_CONSTRAINT_WEIGHT
+        ),
     )
 
 
@@ -151,12 +168,14 @@ def load_resolved_surface_dofs(run_dir: str, *, mpol: int, ntor: int) -> np.ndar
     ``banana_opt``) that is not importable here, so ``simsopt.load`` of the whole
     object fails with ``ModuleNotFoundError``.  The resolved surface itself is a
     standard simsopt ``SurfaceXYZTensorFourier`` whose DOFs live in the
-    ``simsopt_objs`` graph, so read its *free* DOFs directly -- the exact vector
-    ``surface.set_dofs`` / ``initialize_boozer_surface``'s
-    ``surface_dofs_override`` expects.  Reading the graph rather than
-    reconstructing the object keeps this drift-proof against the serializing
-    pipeline's module layout.  ``mpol``/``ntor`` select the surface and assert the
-    file matches the seed's ``results.json`` resolution.
+    ``simsopt_objs`` graph, so read its FULL dof vector directly -- the exact vector
+    ``surface.set_dofs`` (which assigns ``local_full_x``) /
+    ``initialize_boozer_surface``'s ``surface_dofs_override`` expects.  Reading the
+    graph rather than reconstructing the object keeps this drift-proof against the
+    serializing pipeline's module layout.  The resolved Boozer surface is all-free
+    (no fixed DOFs); this is asserted, so a future fixed-DOF seed fails loud instead
+    of silently returning a short free-only vector to ``set_dofs``.  ``mpol``/``ntor``
+    select the surface and assert the file matches the ``results.json`` resolution.
     """
     path = os.path.join(os.path.abspath(run_dir), "surf_opt_boozer_surface.json")
     with open(path, encoding="utf-8") as f:
@@ -171,11 +190,19 @@ def load_resolved_surface_dofs(run_dir: str, *, mpol: int, ntor: int) -> np.ndar
         dofs_node = obj["dofs"]
         if isinstance(dofs_node, dict) and dofs_node.get("$type") == "ref":
             dofs_node = objs[dofs_node["value"]]
-        x = np.asarray(dofs_node["x"]["data"], dtype=float)
+        x_full = np.asarray(dofs_node["x"]["data"], dtype=float)
         free = dofs_node.get("free")
         if isinstance(free, dict) and "data" in free:
-            x = x[np.asarray(free["data"], dtype=bool)]
-        matches.append(x)
+            free_mask = np.asarray(free["data"], dtype=bool)
+            if not bool(free_mask.all()):
+                raise ValueError(
+                    f"{run_dir}: resolved SurfaceXYZTensorFourier has "
+                    f"{int((~free_mask).sum())}/{free_mask.size} fixed DOF(s); the "
+                    "value-only install assigns this vector to set_dofs "
+                    "(local_full_x), which expects the FULL dof vector -- an "
+                    "all-free resolved surface is required."
+                )
+        matches.append(x_full)
     if len(matches) != 1:
         raise ValueError(
             f"{run_dir}: expected exactly one SurfaceXYZTensorFourier at "
@@ -219,12 +246,14 @@ def _grad_stats(dJ: np.ndarray) -> dict[str, float]:
     }
 
 
-# Per-term sub-objectives of the SSOT SingleStageObjective.  Recording each term's
-# J localizes any cross-lane gap: the field/surface-coupled terms (nonqs /
-# boozer_residual / iota) are the genuine cross-boundary parity signal, while the
-# coil-curve terms (length / curve_curve / curvature) use the SAME curve class in
-# both lanes and the surface-distance terms (curve_surface / surf_surf) read the
-# backend-specific surface object.
+# Per-term sub-objectives of the SSOT SingleStageObjective.  Recording each term's J
+# localizes any cross-lane gap.  Only the field/surface-coupled terms (nonqs /
+# boozer_residual / iota) are backend-selected (simsopt vs simsopt_jax_adapters) and
+# are thus the genuine cross-boundary parity signal.  The five geometric terms
+# (curve_length / curve_curve / curvature / curve_surface / surf_surf) use the SAME
+# class in both lanes (curve objectives from simsopt.geo; SurfaceSurfaceDistance is a
+# single JAX-backed class shared by both lanes), so they agree by construction at the
+# matched coil/surface state -- a self-consistency check, not a cross-kernel one.
 _TERM_FIELDS = (
     ("nonqs", "JnonQSRatio"),
     ("boozer_residual", "JBoozerResidual"),
@@ -283,6 +312,7 @@ def run_seed(
         vol_target=seed.vol_target,
         iota_target=seed.iota_target,
         num_tf_coils=seed.num_tf_coils,
+        constraint_weight=seed.constraint_weight,
         jax_optimizer_backend=jax_optimizer_backend,
         cpu_boozer_surface_dofs_override=resolved_dofs,
         cpu_boozer_iota_override=seed.final_iota,
@@ -534,8 +564,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--mpol", type=int, default=None,
-        help="override seed mpol (fresh-solve resolution; uniform across seeds keeps "
-        "the jax-CPU lane tractable and shares one XLA compile)",
+        help="diagnostic override of the seed's native mpol; the matrix consumes the "
+        "seed's resolved surface DOFs, so this must equal the value in results.json "
+        "(load_resolved_surface_dofs raises if no resolved surface at this mpol/ntor)",
     )
     parser.add_argument("--ntor", type=int, default=None, help="override seed ntor")
     parser.add_argument("--nphi", type=int, default=None, help="override seed nphi")
