@@ -153,10 +153,14 @@ def _recover_consistent_iota_G(cpu_boozer, bs, *, num_tf_coils, iota_guess,
     in G and the residual affine in iota), so a few Newton steps on the 2x2
     ``(iota, G)`` sub-block of the penalty Hessian recover the unique
     ``(iota*, G*)`` minimizing the Boozer residual at the resolved surface -- the
-    production-consistent pair.  The surface DOFs are held at their resolved values
-    throughout (only the last two entries of the dof vector are updated), so this
-    cannot drift the surface.  ``(resolved_dofs, iota*, G*)`` is then a Boozer fixed
-    point, and a subsequent full solve from it converges in place without drift.
+    pair consistent with that surface.  The surface DOFs are held at their resolved
+    values throughout (only the last two entries of the dof vector are updated), so
+    the recovery itself cannot move the surface.  ``(resolved_dofs, iota*, G*)`` is
+    stationary in ``(iota, G)`` only -- the surface-dof gradient is generally nonzero
+    -- so the subsequent full solve (which frees all DOFs) may relax the surface, but
+    starting from the consistent ``(iota, G)`` it stays on the resolved Boozer branch
+    rather than collapsing to a degenerate one (the caller asserts this in-place
+    convergence via a post-solve iota drift check).
 
     Raises ``RuntimeError`` if the 2x2 Newton does not drive ``||grad_(iota,G)||``
     below ``tol`` within ``max_newton`` steps (the resolved surface is not a Boozer
@@ -235,9 +239,10 @@ def build_matched_same_state_fixture_pair(
     (``cpu_boozer_iota_override``): the CPU lane installs the resolved surface
     value-only (no drift), recovers the consistent ``(iota*, G*)`` for it
     (:func:`_recover_consistent_iota_G`), then full-solves from
-    ``(resolved_dofs, iota*, G*)`` -- a Boozer fixed point, so it converges in place
-    with the full transform/adjoint.  The JAX lane then full-solves from the CPU
-    lane's converged state, reaching the same surface.
+    ``(resolved_dofs, iota*, G*)`` -- stationary in ``(iota, G)`` -- so the full solve
+    relaxes any residual surface gradient on the resolved Boozer branch (asserted via
+    a post-solve iota drift check) rather than collapsing.  The JAX lane then
+    full-solves from the CPU lane's converged state, reaching the same surface.
     """
     if recover_iota_G and cpu_boozer_surface_dofs_override is None:
         raise ValueError(
@@ -270,7 +275,8 @@ def build_matched_same_state_fixture_pair(
     cpu_boozer = cpu_fixture["boozer_surface"]
     if recover_iota_G:
         # Recover (iota*, G*) consistent with the fixed resolved surface, then
-        # full-solve from that Boozer fixed point (converges in place, no drift).
+        # full-solve from the (iota, G)-stationary state (relaxes on the resolved
+        # branch; the in-place convergence is asserted just below).
         iota_star, G_star = _recover_consistent_iota_G(
             cpu_boozer,
             cpu_fixture["bs"],
