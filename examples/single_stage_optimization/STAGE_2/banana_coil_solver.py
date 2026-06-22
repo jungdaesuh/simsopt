@@ -98,6 +98,11 @@ from banana_opt.stage2_geometry import (
     select_plasma_geometry_preflight_candidate,
     shared_vf_current_control_for_coils,
     surface_surface_min_distance as _surface_surface_min_distance,
+    WINDING_DOF_CORRIDOR_SCALE_MAP,
+)
+from banana_opt.single_stage_geometry import (
+    build_winding_dof_scale_vector,
+    run_scaled_winding_minimize,
 )
 from banana_opt.hardware_contracts import (
     BANANA_CC_OBJECTIVE_MARGIN_M,
@@ -1110,6 +1115,20 @@ def parse_args():
             "bounded DOFs (last-resort lever floored at the on-spec a). Valid on "
             "a fresh CWS or a loaded seed (re-sizes the loaded winding surface; "
             "T1.5). Default OFF keeps the historical fixed minor radius."
+        ),
+    )
+    parser.add_argument(
+        "--winding-dof-scale",
+        action="store_true",
+        default=os.environ.get("WINDING_DOF_SCALE", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Apply a per-DOF variable transform (u = x/scale) around the L-BFGS-B "
+            "penalty solve so the small-corridor winding SIZE DOFs "
+            "(rc(0,0)=R0, rc(1,0)/zs(1,0)=minor) are scaled by their corridor "
+            "widths and not swamped by the curve harmonics. Default OFF == "
+            "byte-identical (scale == 1 everywhere); no effect under "
+            "--constraint-method alm or --basin-hops (penalty path only)."
         ),
     )
     parser.add_argument(
@@ -4843,11 +4862,17 @@ def main(parsed_args=None):
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
+    # Opt-in winding-size DOF scaling (default OFF -> empty map -> identity).
+    winding_dof_scale_map = (
+        WINDING_DOF_CORRIDOR_SCALE_MAP
+        if getattr(args, "winding_dof_scale", False)
+        else {}
+    )
     alm_base_bounds = None
     if CONSTRAINT_METHOD == "alm":
         # ALM (unlike L-BFGS-B) does not clip the seed into the base bounds, so a
         # freed winding-surface DOF whose seed sits outside its corridor (e.g.
-        # rc(0,0)=0.903 below the 0.908 lower bound) would invert the first
+        # an rc(0,0) seed below the 0.903 lower bound) would invert the first
         # trust-box intersection and raise. Clip the seed into the corridor up
         # front, mirroring the penalty path's L-BFGS-B x0 clipping. No-op when the
         # bounds are unbounded (the default, no freed size DOFs).
@@ -5227,11 +5252,11 @@ def main(parsed_args=None):
             f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}"
         )
     else:
-        res = minimize(
+        res = run_scaled_winding_minimize(
+            minimize,
             fun,
             dofs,
-            jac=True,
-            method="L-BFGS-B",
+            scale=build_winding_dof_scale_vector(JF.dof_names, winding_dof_scale_map),
             bounds=lbfgsb_bounds,
             options=lbfgsb_options,
         )

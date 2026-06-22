@@ -16,6 +16,7 @@ from banana_opt.single_stage_geometry import (
     build_scaled_outer_bounds,
     build_scaled_outer_problem,
     build_scipy_bounds,
+    run_scaled_winding_minimize,
 )
 
 _PENALTY_FEASIBLE_START_LOCAL_MAXITER = int(
@@ -748,6 +749,7 @@ def run_penalty_phase1(
     restore_accepted_state_fn,
     refresh_preserved_timeout_artifacts_fn=None,
     minimize_fn=minimize,
+    winding_dof_scale_vector=None,
 ):
     use_local_startup = bool(
         enable_local_preservation or penalty_seed_regime_uses_local_startup(seed_regime)
@@ -872,11 +874,15 @@ def run_penalty_phase1(
             previous_active_bounds = run_dict.get("active_optimizer_bounds")
             run_dict["active_optimizer_bounds"] = report_bounds
             try:
-                last_result = minimize_fn(
+                last_result = run_scaled_winding_minimize(
+                    minimize_fn,
                     phase1_fun,
                     x0,
-                    jac=True,
-                    method="L-BFGS-B",
+                    scale=(
+                        np.ones_like(np.asarray(x0, dtype=float))
+                        if winding_dof_scale_vector is None
+                        else np.asarray(winding_dof_scale_vector, dtype=float)
+                    ),
                     bounds=bounds,
                     callback=tracked_phase1_callback,
                     options={

@@ -100,7 +100,7 @@ def test_free_r0_unfixes_and_bounds_major_radius():
     assert "rc(0,0)" in free_names
     assert not surf.is_fixed("rc(0,0)")
     assert _bounds_of(surf, "rc(0,0)") == WINDING_SURFACE_FREE_R0_BOUNDS_M
-    assert _bounds_of(surf, "rc(0,0)") == (0.908, 0.993)
+    assert _bounds_of(surf, "rc(0,0)") == (0.903, 0.993)
     # free_minor was not requested: the minor pair stays pinned.
     assert "rc(1,0)" not in free_names
     assert "zs(1,0)" not in free_names
@@ -123,7 +123,7 @@ def test_free_minor_unfixes_and_bounds_minor_radius():
     assert not surf.is_fixed("zs(1,0)")
     assert _bounds_of(surf, "rc(1,0)") == WINDING_SURFACE_FREE_MINOR_BOUNDS_M
     assert _bounds_of(surf, "zs(1,0)") == WINDING_SURFACE_FREE_MINOR_BOUNDS_M
-    assert _bounds_of(surf, "rc(1,0)") == (0.142, 0.20)
+    assert _bounds_of(surf, "rc(1,0)") == (0.130, 0.20)
     # free_r0 was not requested: the major radius stays pinned.
     assert "rc(0,0)" not in free_names
     assert surf.is_fixed("rc(0,0)")
@@ -178,14 +178,15 @@ def test_build_lbfgsb_bounds_exposes_free_r0_corridor():
     names = list(surf.local_dof_names)
     bounds = build_lbfgsb_bounds(surf)
 
-    assert bounds[names.index("rc(0,0)")] == (0.908, 0.993)
+    assert bounds[names.index("rc(0,0)")] == (0.903, 0.993)
 
 
 def test_box_bounds_clamp_free_r0_to_corridor_lower_bound():
     """B1.1(2): the trust box intersected with the corridor clamps rc(0,0).
 
-    The seed rc(0,0)=0.903 sits below the 0.908 corridor floor; the corridor
-    lower bound wins, while a small trust radius caps the upper bound.
+    The 0.015 trust box around the on-spec seed rc(0,0)=0.903 reaches down to
+    0.888, but the 0.903 corridor floor clamps the lower bound; the trust radius
+    caps the upper bound below the 0.993 corridor ceiling.
     """
     surf = _on_spec_cws()
     configure_winding_surface_shape_dofs(surf, free_r0=True)
@@ -199,10 +200,10 @@ def test_box_bounds_clamp_free_r0_to_corridor_lower_bound():
     )
     lower, upper = box_bounds[index]
 
-    # Corridor floor 0.908 clamps the lower bound above the 0.903 seed; the
-    # 0.015 trust box around 0.903 caps the upper bound at ~0.918, inside the
+    # Corridor floor 0.903 clamps the lower bound (the trust box reaches 0.888);
+    # the 0.015 trust box around 0.903 caps the upper bound at ~0.918, inside the
     # 0.993 corridor ceiling.
-    assert lower == pytest.approx(0.908)
+    assert lower == pytest.approx(0.903)
     assert upper == pytest.approx(0.918)
 
 
@@ -353,28 +354,29 @@ def test_free_loaded_winding_dofs_free_minor_frees_bounded_on_loaded_surf():
 def test_alm_seed_clip_keeps_trust_box_feasible_for_freed_r0():
     """B1.1: the ALM seed must be clipped into the corridor before the trust box.
 
-    The freed rc(0,0) seed (0.903) sits below the 0.908 corridor floor. ALM does
-    not clip x0 the way L-BFGS-B does, so a small trust radius (< 0.005) around
-    0.903 never reaches 0.908: the trust-box / corridor intersection inverts and
-    raises. The solver clips the seed into the corridor first -- this proves the
-    unclipped seed inverts and the clipped seed yields a feasible box.
+    A freed rc(0,0) seed BELOW the corridor floor (here 0.900 < the 0.903 floor)
+    is not clipped by ALM the way L-BFGS-B clips x0, so a small trust radius
+    around 0.900 never reaches 0.903: the trust-box / corridor intersection
+    inverts and raises. The solver clips the seed into the corridor first -- this
+    proves the unclipped seed inverts and the clipped seed yields a feasible box.
     """
     surf = _on_spec_cws()
+    surf.set_rc(0, 0, 0.900)  # below the 0.903 corridor floor
     configure_winding_surface_shape_dofs(surf, free_r0=True)
     base_bounds = build_lbfgsb_bounds(surf)
     index = list(surf.local_dof_names).index("rc(0,0)")
-    tiny_radius = 0.001  # 0.903 +/- 0.001 never reaches the 0.908 corridor floor
+    tiny_radius = 0.001  # 0.900 +/- 0.001 never reaches the 0.903 corridor floor
 
-    # Unclipped 0.903 seed: trust box (0.902, 0.904) misses the (0.908, 0.993)
+    # Unclipped 0.900 seed: trust box (0.899, 0.901) misses the (0.903, 0.993)
     # corridor -> empty intersection -> raises.
     with pytest.raises(ValueError):
         _build_box_bounds(surf.x, tiny_radius, base_bounds=base_bounds)
 
-    # The solver's seed clip lifts rc(0,0) to the 0.908 floor; the box is feasible.
+    # The solver's seed clip lifts rc(0,0) to the 0.903 floor; the box is feasible.
     lower = np.array([lo for lo, _ in base_bounds])
     upper = np.array([hi for _, hi in base_bounds])
     clipped = np.clip(surf.x, lower, upper)
-    assert clipped[index] == pytest.approx(0.908)
+    assert clipped[index] == pytest.approx(0.903)
     box_lower, box_upper = _build_box_bounds(
         clipped, tiny_radius, base_bounds=base_bounds
     )[index]

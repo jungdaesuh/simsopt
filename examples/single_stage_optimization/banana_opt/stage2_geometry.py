@@ -57,18 +57,36 @@ LOGGER = logging.getLogger(__name__)
 
 # Optional bounded winding-surface size DOFs for Stage 2 (default OFF).
 #
-# rc(0,0) is the coil-winding-surface MAJOR radius (R0 translation). The
-# corridor (0.908, 0.993) m is the T0.3-verified ``both_clear`` vessel-clearance
-# window: the on-spec base R0 of 0.903 m is infeasible (vessel clearance
-# -3.299 mm), so the lower bound sits above it. NOTE: the on-spec seed
-# rc(0,0)=0.903 is BELOW this lower bound by design; at optimize time L-BFGS-B
-# clips the seed x0 into [lb, ub] before the first evaluation. (This module does
-# not run the optimizer; the bound is recorded on the surf DOF for the solver.)
-WINDING_SURFACE_FREE_R0_BOUNDS_M = (0.908, 0.993)
-# rc(1,0)/zs(1,0) are the coil-winding-surface MINOR radius (a). Growing a
-# worsens vessel clearance (T0.2), so this is a last-resort lever floored at the
-# on-spec a=0.142 m with a 0.20 m ceiling.
-WINDING_SURFACE_FREE_MINOR_BOUNDS_M = (0.142, 0.20)
+# rc(0,0) is the coil-winding-surface MAJOR radius (R0 translation); rc(1,0)/
+# zs(1,0) are the MINOR radius (a). The corridors admit the on-spec winding
+# corner (R0=0.903 m, a=0.130 m) so the optimizer can search outward from it.
+#
+# The R0 floor was previously 0.908 m because R0=0.903 m had negative vessel
+# clearance at a>=0.142 m (the T0.3 ``both_clear`` window). That floor is
+# a-DEPENDENT, not absolute: shrinking a improves vessel clearance (T0.2), so the
+# (R0=0.903, a=0.130) corner recovers the clearance the a=0.142 corner lacked.
+# These box bounds are the search envelope only; true (R0, a) feasibility is
+# enforced at optimize time by the hardware keepout / vessel-clearance terms, not
+# by the bound. (This module records the bound on the surf DOF; the solver runs
+# the optimizer and the HW gates.)
+WINDING_SURFACE_FREE_R0_BOUNDS_M = (0.903, 0.993)
+WINDING_SURFACE_FREE_MINOR_BOUNDS_M = (0.130, 0.20)
+
+# Per-DOF characteristic scale for the opt-in u = x/scale transform
+# (``run_scaled_winding_minimize``). PROVISIONAL heuristic = corridor WIDTH, which
+# normalizes the size-DOF variable RANGE to ~1 in optimizer space. CAVEAT: because
+# L-BFGS-B's identity-initialized step is dx ~ scale^2 * grad, a width < 1 SHRINKS
+# soft size-DOF steps and can UNDER-converge them at default tolerances
+# (cold/full-convergence regime); it may still help the warm-start / small-maxiter
+# chunked regime. The scale VALUE is regime-dependent and must be validated/tuned
+# on the real objective before the lever is relied on (the transform itself is
+# correct -- a bijection preserving the minimizer). Keyed by DOF-name suffix; SSOT
+# derived from the corridors above (auto-tracks any future re-widening).
+WINDING_DOF_CORRIDOR_SCALE_MAP = {
+    "rc(0,0)": WINDING_SURFACE_FREE_R0_BOUNDS_M[1] - WINDING_SURFACE_FREE_R0_BOUNDS_M[0],
+    "rc(1,0)": WINDING_SURFACE_FREE_MINOR_BOUNDS_M[1] - WINDING_SURFACE_FREE_MINOR_BOUNDS_M[0],
+    "zs(1,0)": WINDING_SURFACE_FREE_MINOR_BOUNDS_M[1] - WINDING_SURFACE_FREE_MINOR_BOUNDS_M[0],
+}
 
 
 @dataclass(frozen=True)

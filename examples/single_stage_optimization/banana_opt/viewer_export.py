@@ -112,7 +112,10 @@ STAGE2_RESULTS_FILENAME = "results.json"
 # its realized radii here, so the oracle audits the geometry as built rather than
 # the fixed Type-KK contract default.
 RESULTS_WINDING_R0_KEY = "COIL_WINDING_SURFACE_MAJOR_RADIUS_M"
-RESULTS_WINDING_A_KEY = "banana_surf_radius"
+# Realized embedded winding minor radius (tracks the moving DOF). NOT
+# ``banana_surf_radius`` — that is the contract/seed value and does not move, so
+# auditing it would render the as-built geometry as the seed for a drifted run.
+RESULTS_WINDING_A_KEY = "BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M"
 FINITE_BUILD_ENABLED_KEY = "FINITE_BUILD_ENABLED"
 FINITEBUILD_FILAMENTS_PER_BANANA_KEY = "FINITEBUILD_FILAMENTS_PER_BANANA"
 FINITEBUILD_NUMFILAMENTS_N_KEY = "FINITEBUILD_NUMFILAMENTS_N"
@@ -298,7 +301,7 @@ def resolve_realized_winding_surface(
     Type-KK hardware contract; this resolves only the *winding radius being
     audited*. Per radius, an explicit override wins; otherwise the realized value
     is read from the sibling ``results.json`` (``COIL_WINDING_SURFACE_MAJOR_RADIUS_M``
-    / ``banana_surf_radius``); otherwise it falls back to the Type-KK contract
+    / ``BANANA_CWS_EMBEDDED_WINDING_MINOR_RADIUS_M``); otherwise it falls back to the Type-KK contract
     default for legacy or metadata-free artifacts that record no sibling results.
     An on-spec a=0.142 candidate (or a results-free artifact) therefore yields the
     contract defaults exactly, while an off-spec remap audits its realized radii."""

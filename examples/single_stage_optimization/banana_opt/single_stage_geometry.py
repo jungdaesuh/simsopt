@@ -1371,6 +1371,83 @@ def build_scaled_outer_problem(base_fun, base_callback, anchor_x, step_scale):
     return scaled_fun, scaled_callback
 
 
+def build_winding_dof_scale_vector(dof_names, scale_map):
+    """Per-DOF scale vector aligned to ``dof_names`` for the u = x/scale transform.
+
+    ``scale_map`` keys are DOF-name *suffixes* (e.g. ``rc(0,0)``); a DOF whose
+    qualified name (``...:rc(0,0)``) ends in a mapped suffix gets that scale, and
+    every other DOF gets 1.0. An empty/None ``scale_map`` returns all-ones (the
+    exact identity used when the transform is off).
+    """
+    names = list(dof_names)
+    scale = np.ones(len(names), dtype=float)
+    if not scale_map:
+        return scale
+    for i, name in enumerate(names):
+        suffix = str(name).rsplit(":", 1)[-1]
+        if suffix in scale_map:
+            value = float(scale_map[suffix])
+            if not (np.isfinite(value) and value > 0.0):
+                raise ValueError(
+                    f"winding-dof scale for {suffix!r} must be finite and "
+                    f"positive, got {value!r}."
+                )
+            scale[i] = value
+    return scale
+
+
+def run_scaled_winding_minimize(
+    minimize_fn,
+    fun,
+    x0,
+    *,
+    scale,
+    bounds,
+    callback=None,
+    **minimize_kwargs,
+):
+    """Run ``minimize_fn`` (L-BFGS-B, jac=True) under the transform ``u = x/scale``.
+
+    Chain rule: x = u*scale so dJ/du = (dJ/dx)*scale; the wrapped objective
+    returns ``(J, grad*scale)``. Bounds map element-wise to ``(lo/scale,
+    hi/scale)`` (``inf`` preserved). The callback is un-scaled before the caller's
+    callback runs, and the result is inverted in place (``res.x *= scale``) so
+    every downstream ``res.x`` consumer sees physical DOFs. ``res.nit/.success/
+    .message/.status`` are untouched. ``scale`` all-ones is an exact identity.
+    """
+    scale = np.asarray(scale, dtype=float)
+    x0 = np.asarray(x0, dtype=float)
+
+    def scaled_fun(u):
+        J, grad = fun(u * scale)
+        return J, np.asarray(grad, dtype=float) * scale
+
+    scaled_callback = None
+    if callback is not None:
+        def scaled_callback(u):
+            return callback(u * scale)
+
+    scaled_bounds = None
+    if bounds is not None:
+        lower = np.asarray([b[0] for b in bounds], dtype=float)
+        upper = np.asarray([b[1] for b in bounds], dtype=float)
+        scaled_lower = np.where(np.isfinite(lower), lower / scale, lower)
+        scaled_upper = np.where(np.isfinite(upper), upper / scale, upper)
+        scaled_bounds = list(zip(scaled_lower.tolist(), scaled_upper.tolist()))
+
+    result = minimize_fn(
+        scaled_fun,
+        x0 / scale,
+        jac=True,
+        method="L-BFGS-B",
+        bounds=scaled_bounds,
+        callback=scaled_callback,
+        **minimize_kwargs,
+    )
+    result.x = np.asarray(result.x, dtype=float) * scale
+    return result
+
+
 def build_scipy_bounds(lower_bounds, upper_bounds):
     lower = np.asarray(lower_bounds, dtype=float)
     upper = np.asarray(upper_bounds, dtype=float)

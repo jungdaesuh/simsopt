@@ -294,6 +294,7 @@ def _run_phase1_with_dirty_final_state(run_dict, *, seed_regime):
             success = True
             message = "fake"
             status = 0
+            x = x0  # scipy minimize always returns the final point
 
         return Result()
 
@@ -357,6 +358,7 @@ def test_run_penalty_phase1_still_fails_closed_without_incumbent():
             success = True
             message = "fake"
             status = 0
+            x = x0  # scipy minimize always returns the final point
 
         return Result()
 

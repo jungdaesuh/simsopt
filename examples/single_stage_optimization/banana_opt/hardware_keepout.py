@@ -105,7 +105,7 @@ from banana_opt.hardware_contracts import (
 )
 from banana_opt.coil_order_upgrade import realized_cws_winding_radii
 from simsopt._core import Optimizable
-from simsopt._core.derivative import derivative_dec
+from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.geo.jit import jit
 
 #: Sentinel coordinate for chunk padding — far from any machine geometry
@@ -125,6 +125,30 @@ def resolve_keepout_winding_r0(banana_coils):
     return realized_winding_radii[0]
 
 
+def _master_cws_surf(curves):
+    """The master CWS winding surface shared by the family, or ``None`` for a
+    non-CWS lineage. The first curve exposing a ``surf`` with ``get_rc`` is the
+    master; ``RotatedCurve`` symmetry copies wrap it and expose neither."""
+    for curve in curves:
+        surf = getattr(curve, "surf", None)
+        if surf is not None and hasattr(surf, "get_rc"):
+            return surf
+    return None
+
+
+def _winding_r0_frame_derivative(master_surf, frame_partial):
+    """Map the frame-orientation partial dJ/d winding_r0 onto the master CWS
+    surface's ``rc(0,0)`` DOF. winding_r0 = ``surf.get_rc(0, 0)`` enters the
+    swept-bracket frame EXPLICITLY (separate from the centerline VJP path), so its
+    partial contributes to dJ/d rc(0,0) with chain factor d winding_r0/d rc(0,0)=1.
+    Callers inject this ONLY when rc(0,0) is a free DOF, so non-CWS lineages and
+    non-free-R0 runs stay byte-identical (no injection)."""
+    names = list(master_surf.local_full_dof_names)
+    seed = np.zeros(len(names))
+    seed[names.index("rc(0,0)")] = float(frame_partial)
+    return Derivative({master_surf: seed})
+
+
 def live_winding_r0(curves, fallback):
     """LIVE winding major radius of the curves' embedded CWS torus, or ``fallback``.
 
@@ -141,11 +165,8 @@ def live_winding_r0(curves, fallback):
     surface, so ``fallback`` -- the constructor's frozen ``winding_r0`` -- is
     returned unchanged.
     """
-    for curve in curves:
-        surf = getattr(curve, "surf", None)
-        if surf is not None and hasattr(surf, "get_rc"):
-            return float(surf.get_rc(0, 0))
-    return fallback
+    surf = _master_cws_surf(curves)
+    return float(surf.get_rc(0, 0)) if surf is not None else fallback
 
 
 # Surface quadrature over the swept rectangular Type KK U-channel sample box.
@@ -943,6 +964,14 @@ class CurveHardwareKeepout(Optimizable):
         self.dJ_dgamma = jit(
             lambda gammac, pts_, winding_r0_: grad(self.J_jax, argnums=0)(
                 gammac, pts_, winding_r0_))
+        # B1.3 frame-orientation partial: dJ/d winding_r0 at FIXED centerline.
+        # winding_r0 enters the U-channel frame (radial/tangential) explicitly,
+        # so this is the R0 gradient the centerline curve VJP cannot carry. It is
+        # zero for a midplane cloud and nonzero where the frame rolls with R0
+        # (off-midplane); measured ~40% of dJ/dR0 on the frame-split fixture.
+        self.dJ_dwinding_r0 = jit(
+            lambda gammac, pts_, winding_r0_: grad(self.J_jax, argnums=2)(
+                gammac, pts_, winding_r0_))
         self.candidates = None
         super().__init__(depends_on=curves)
 
@@ -1015,16 +1044,33 @@ class CurveHardwareKeepout(Optimizable):
     def dJ(self):
         self.compute_candidates()
         winding_r0 = self.live_winding_r0()
+        # The swept-bracket frame depends on winding_r0 = the master surf's
+        # rc(0,0) EXPLICITLY (separate from the centerline path), so dJ/d rc(0,0)
+        # gains a frame-orientation partial the curve VJP cannot carry. Inject it
+        # ONLY when rc(0,0) is a free DOF -> non-CWS lineages and non-free-R0 runs
+        # stay byte-identical (and skip the partial's grad evals).
+        master_surf = _master_cws_surf(self.curves)
+        free_winding_r0 = master_surf is not None and not master_surf.is_fixed(
+            "rc(0,0)"
+        )
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        frame_partial = 0.0
         for i, j in self.candidates:
             gammac = self.curves[i].gamma()
-            dgamma_vecs[i] += np.asarray(
-                self.dJ_dgamma(gammac, self._chunks[j], winding_r0))
+            chunk = self._chunks[j]
+            dgamma_vecs[i] += np.asarray(self.dJ_dgamma(gammac, chunk, winding_r0))
+            if free_winding_r0:
+                frame_partial += float(
+                    self.dJ_dwinding_r0(gammac, chunk, winding_r0)
+                )
         res = [
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         ]
-        return sum(res)
+        total = sum(res)
+        if free_winding_r0:
+            total = total + _winding_r0_frame_derivative(master_surf, frame_partial)
+        return total
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -1037,6 +1083,20 @@ class CurveHardwareSdfKeepout(Optimizable):
     queries one or more manifest-bound hardware distance grids.  It is a
     steering proxy only: ``hardware_contact_report`` remains the direct CAD
     oracle for promotion and handoff.
+
+    winding_r0 (the master CWS ``rc(0,0)``) enters the swept-bracket frame, so
+    under ``--winding-surface-free-r0`` dJ/d rc(0,0) carries a frame-orientation
+    partial in addition to the centerline VJP. This term and its siblings
+    (:class:`CurveHardwareSdfFreeSpaceReward`, :class:`CurveHardwareSdfClearanceHinge`)
+    inject that partial via ``grad(self.J_jax, argnums=3)`` +
+    :func:`_winding_r0_frame_derivative`, guarded on a free ``rc(0,0)`` so
+    non-free-R0 runs stay byte-identical (mirrors the point-cloud keepout and the
+    vessel-envelope terms). This matters because under ``--hardware-keepout-backend
+    sdf`` the SDF keepout *is* the primary keepout (taking the role the point-cloud
+    term holds by default), and the live ``--winding-surface-free-r0`` space-squeeze
+    campaign runs SDF + free-R0 together -- so the SDF frame partial, not the
+    point-cloud one, governs rc(0,0) steering there. As always the term is a
+    steering proxy only: ``hardware_contact_report`` is the CAD oracle for promotion.
     """
 
     def __init__(self, curves, sdf_data,
@@ -1098,6 +1158,16 @@ class CurveHardwareSdfKeepout(Optimizable):
                 gammac, grid_fields, effective_margin, winding_r0_, weights
             )
         )
+        # B1.3 frame-orientation partial: winding_r0 (the master CWS rc(0,0))
+        # enters the swept-bracket frame at argnums=3, separate from the centerline
+        # VJP. Injected in dJ only when rc(0,0) is free -> non-free-R0 runs stay
+        # byte-identical (mirrors the point-cloud keepout / vessel-envelope terms).
+        self.dJ_dwinding_r0 = jit(
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
+            grad(self.J_jax, argnums=3)(
+                gammac, grid_fields, effective_margin, winding_r0_, weights
+            )
+        )
         super().__init__(depends_on=curves)
 
     @property
@@ -1138,7 +1208,17 @@ class CurveHardwareSdfKeepout(Optimizable):
     @derivative_dec
     def dJ(self):
         winding_r0 = self.live_winding_r0()
+        # winding_r0 (the master CWS rc(0,0)) enters the swept-bracket frame
+        # EXPLICITLY, so dJ/d rc(0,0) gains a frame-orientation partial the curve
+        # VJP cannot carry. Accumulate it in the SAME pass as the centerline VJP
+        # and inject ONLY when rc(0,0) is a free DOF -> non-CWS lineages and
+        # non-free-R0 runs stay byte-identical (and skip the partial's grad evals).
+        master_surf = _master_cws_surf(self.curves)
+        free_winding_r0 = master_surf is not None and not master_surf.is_fixed(
+            "rc(0,0)"
+        )
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        frame_partial = 0.0
         for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
             weights = self._station_weights[curve_index]
@@ -1152,10 +1232,25 @@ class CurveHardwareSdfKeepout(Optimizable):
                         weights,
                     )
                 )
-        return sum(
+                if free_winding_r0:
+                    frame_partial += float(
+                        self.dJ_dwinding_r0(
+                            gammac,
+                            group["grid_fields"],
+                            group["effective_margin"],
+                            winding_r0,
+                            weights,
+                        )
+                    )
+        total = sum(
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
+        if free_winding_r0:
+            total = total + _winding_r0_frame_derivative(
+                master_surf, frame_partial
+            )
+        return total
 
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
@@ -1264,6 +1359,16 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                 gammac, grid_fields, effective_margin, winding_r0_, weights
             )
         )
+        # B1.3 frame-orientation partial: winding_r0 (the master CWS rc(0,0))
+        # enters the swept-bracket frame at argnums=3, separate from the centerline
+        # VJP. Injected in dJ only when rc(0,0) is free -> non-free-R0 runs stay
+        # byte-identical (mirrors the point-cloud keepout / vessel-envelope terms).
+        self.dJ_dwinding_r0 = jit(
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
+            grad(self.J_jax, argnums=3)(
+                gammac, grid_fields, effective_margin, winding_r0_, weights
+            )
+        )
         super().__init__(depends_on=curves)
 
     @property
@@ -1296,7 +1401,17 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
     @derivative_dec
     def dJ(self):
         winding_r0 = self.live_winding_r0()
+        # winding_r0 (the master CWS rc(0,0)) enters the swept-bracket frame
+        # EXPLICITLY, so dJ/d rc(0,0) gains a frame-orientation partial the curve
+        # VJP cannot carry. Accumulate it in the SAME pass as the centerline VJP
+        # and inject ONLY when rc(0,0) is a free DOF -> non-CWS lineages and
+        # non-free-R0 runs stay byte-identical (and skip the partial's grad evals).
+        master_surf = _master_cws_surf(self.curves)
+        free_winding_r0 = master_surf is not None and not master_surf.is_fixed(
+            "rc(0,0)"
+        )
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        frame_partial = 0.0
         for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
             weights = self._station_weights[curve_index]
@@ -1310,10 +1425,25 @@ class CurveHardwareSdfFreeSpaceReward(Optimizable):
                         weights,
                     )
                 )
-        return sum(
+                if free_winding_r0:
+                    frame_partial += float(
+                        self.dJ_dwinding_r0(
+                            gammac,
+                            group["grid_fields"],
+                            group["effective_margin"],
+                            winding_r0,
+                            weights,
+                        )
+                    )
+        total = sum(
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
+        if free_winding_r0:
+            total = total + _winding_r0_frame_derivative(
+                master_surf, frame_partial
+            )
+        return total
 
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
@@ -1466,6 +1596,16 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                 gammac, grid_fields, effective_margin, winding_r0_, weights
             )
         )
+        # B1.3 frame-orientation partial: winding_r0 (the master CWS rc(0,0))
+        # enters the swept-bracket frame at argnums=3, separate from the centerline
+        # VJP. Injected in dJ only when rc(0,0) is free -> non-free-R0 runs stay
+        # byte-identical (mirrors the point-cloud keepout / vessel-envelope terms).
+        self.dJ_dwinding_r0 = jit(
+            lambda gammac, grid_fields, effective_margin, winding_r0_, weights:
+            grad(self.J_jax, argnums=3)(
+                gammac, grid_fields, effective_margin, winding_r0_, weights
+            )
+        )
         super().__init__(depends_on=curves)
 
     @property
@@ -1498,7 +1638,17 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
     @derivative_dec
     def dJ(self):
         winding_r0 = self.live_winding_r0()
+        # winding_r0 (the master CWS rc(0,0)) enters the swept-bracket frame
+        # EXPLICITLY, so dJ/d rc(0,0) gains a frame-orientation partial the curve
+        # VJP cannot carry. Accumulate it in the SAME pass as the centerline VJP
+        # and inject ONLY when rc(0,0) is a free DOF -> non-CWS lineages and
+        # non-free-R0 runs stay byte-identical (and skip the partial's grad evals).
+        master_surf = _master_cws_surf(self.curves)
+        free_winding_r0 = master_surf is not None and not master_surf.is_fixed(
+            "rc(0,0)"
+        )
         dgamma_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        frame_partial = 0.0
         for curve_index, curve in enumerate(self.curves):
             gammac = curve.gamma()
             weights = self._station_weights[curve_index]
@@ -1512,10 +1662,25 @@ class CurveHardwareSdfClearanceHinge(Optimizable):
                         weights,
                     )
                 )
-        return sum(
+                if free_winding_r0:
+                    frame_partial += float(
+                        self.dJ_dwinding_r0(
+                            gammac,
+                            group["grid_fields"],
+                            group["effective_margin"],
+                            winding_r0,
+                            weights,
+                        )
+                    )
+        total = sum(
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_vecs[i])
             for i in range(len(self.curves))
         )
+        if free_winding_r0:
+            total = total + _winding_r0_frame_derivative(
+                master_surf, frame_partial
+            )
+        return total
 
     def per_group_min_clearance(self):
         """Minimum sampled swept-surface SDF value per represented group, m."""
@@ -1586,6 +1751,9 @@ class CurveVesselEnvelopeKeepout(Optimizable):
         self.dJ_dgamma = jit(
             lambda gammac, winding_r0_: grad(self.J_jax, argnums=0)(
                 gammac, winding_r0_))
+        self.dJ_dwinding_r0 = jit(
+            lambda gammac, winding_r0_: grad(self.J_jax, argnums=1)(
+                gammac, winding_r0_))
         super().__init__(depends_on=curves)
 
     @property
@@ -1623,12 +1791,22 @@ class CurveVesselEnvelopeKeepout(Optimizable):
     @derivative_dec
     def dJ(self):
         winding_r0 = self.live_winding_r0()
-        return sum(
+        total = sum(
             curve.dgamma_by_dcoeff_vjp(
                 np.asarray(self.dJ_dgamma(curve.gamma(), winding_r0))
             )
             for curve in self.curves
         )
+        # Frame-orientation partial (winding_r0 = master rc(0,0)); injected only
+        # when rc(0,0) is free -> non-free-R0 runs are byte-identical.
+        master_surf = _master_cws_surf(self.curves)
+        if master_surf is None or master_surf.is_fixed("rc(0,0)"):
+            return total
+        frame_partial = sum(
+            float(self.dJ_dwinding_r0(curve.gamma(), winding_r0))
+            for curve in self.curves
+        )
+        return total + _winding_r0_frame_derivative(master_surf, frame_partial)
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -1672,6 +1850,9 @@ class CurveVesselAvailableEnvelopeReward(Optimizable):
         self.dJ_dgamma = jit(
             lambda gammac, winding_r0_: grad(self.J_jax, argnums=0)(
                 gammac, winding_r0_))
+        self.dJ_dwinding_r0 = jit(
+            lambda gammac, winding_r0_: grad(self.J_jax, argnums=1)(
+                gammac, winding_r0_))
         super().__init__(depends_on=curves)
 
     @property
@@ -1692,12 +1873,22 @@ class CurveVesselAvailableEnvelopeReward(Optimizable):
     @derivative_dec
     def dJ(self):
         winding_r0 = self.live_winding_r0()
-        return sum(
+        total = sum(
             curve.dgamma_by_dcoeff_vjp(
                 np.asarray(self.dJ_dgamma(curve.gamma(), winding_r0))
             )
             for curve in self.curves
         )
+        # Frame-orientation partial (winding_r0 = master rc(0,0)); injected only
+        # when rc(0,0) is free -> non-free-R0 runs are byte-identical.
+        master_surf = _master_cws_surf(self.curves)
+        if master_surf is None or master_surf.is_fixed("rc(0,0)"):
+            return total
+        frame_partial = sum(
+            float(self.dJ_dwinding_r0(curve.gamma(), winding_r0))
+            for curve in self.curves
+        )
+        return total + _winding_r0_frame_derivative(master_surf, frame_partial)
 
     return_fn_map = {'J': J, 'dJ': dJ}
 

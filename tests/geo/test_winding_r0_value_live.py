@@ -193,14 +193,19 @@ class VesselEnvelopeKeepoutValueLiveTest(unittest.TestCase):
         self.assertAlmostEqual(term.live_winding_r0(), MOVED_R0_M, places=12)
         self.assertNotAlmostEqual(term.J(), j_before, places=9)
 
-    def test_frozen_cws_is_byte_identical_to_frozen_closure(self) -> None:
+    def test_frozen_cws_J_value_live_dJ_includes_frame_partial(self) -> None:
+        # Value-live (B1.3): the live read equals the constructor constant, so J is
+        # byte-identical to the pre-B1.3 frozen closure. Phase 3 un-defers the
+        # frame-orientation partial dJ/d winding_r0; with rc(0,0) free in this
+        # fixture it adds a real component to dJ (the COMPLETE gradient), so the dJ
+        # norm is no longer byte-identical to the deferred closure (was 13.8666).
         curves, _ = _cws_vessel_family(0.920)
         term = CurveVesselEnvelopeKeepout(
             curves, minimum_clearance=0.02, winding_r0=0.920
         )
         self.assertAlmostEqual(term.live_winding_r0(), 0.920, places=12)
         self.assertAlmostEqual(term.J(), 0.01616892284029552, places=12)
-        self.assertAlmostEqual(_dj_norm(term), 13.866553670970998, places=9)
+        self.assertAlmostEqual(_dj_norm(term), 13.895570617973368, places=9)
 
     def test_non_cws_fallback_is_unchanged(self) -> None:
         term = CurveVesselEnvelopeKeepout(
