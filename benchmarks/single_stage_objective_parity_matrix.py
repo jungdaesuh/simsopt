@@ -68,6 +68,9 @@ from benchmarks.single_stage_objective_eval import (  # noqa: E402
 from benchmarks.validation_ladder_contract import (  # noqa: E402
     parity_ladder_tolerances,
 )
+from examples.single_stage_optimization.equilibria_paths import (  # noqa: E402
+    DEFAULT_EQUILIBRIA_DIR,
+)
 
 # ``ru_maxrss`` is reported in KiB on Linux and in bytes on macOS.  The matrix runs
 # on the Linux pod; convert to bytes consistently for the table.
@@ -138,6 +141,50 @@ def load_seed_spec(
     )
 
 
+def load_resolved_surface_dofs(run_dir: str, *, mpol: int, ntor: int) -> np.ndarray:
+    """Extract the resolved Boozer surface free-DOFs from the GSON object graph.
+
+    A fresh Boozer solve at a tractable resolution collapses to a degenerate
+    surface for production seeds, so the matrix warm-starts the CPU lane from the
+    seed's *resolved* surface at its native ``mpol``/``ntor``.  The serialized
+    ``BoozerSurface`` container can reference an autoresearch pipeline module (e.g.
+    ``banana_opt``) that is not importable here, so ``simsopt.load`` of the whole
+    object fails with ``ModuleNotFoundError``.  The resolved surface itself is a
+    standard simsopt ``SurfaceXYZTensorFourier`` whose DOFs live in the
+    ``simsopt_objs`` graph, so read its *free* DOFs directly -- the exact vector
+    ``surface.set_dofs`` / ``initialize_boozer_surface``'s
+    ``surface_dofs_override`` expects.  Reading the graph rather than
+    reconstructing the object keeps this drift-proof against the serializing
+    pipeline's module layout.  ``mpol``/``ntor`` select the surface and assert the
+    file matches the seed's ``results.json`` resolution.
+    """
+    path = os.path.join(os.path.abspath(run_dir), "surf_opt_boozer_surface.json")
+    with open(path, encoding="utf-8") as f:
+        objs = json.load(f)["simsopt_objs"]
+
+    matches = []
+    for obj in objs.values():
+        if not (isinstance(obj, dict) and obj.get("@class") == "SurfaceXYZTensorFourier"):
+            continue
+        if int(obj["mpol"]) != int(mpol) or int(obj["ntor"]) != int(ntor):
+            continue
+        dofs_node = obj["dofs"]
+        if isinstance(dofs_node, dict) and dofs_node.get("$type") == "ref":
+            dofs_node = objs[dofs_node["value"]]
+        x = np.asarray(dofs_node["x"]["data"], dtype=float)
+        free = dofs_node.get("free")
+        if isinstance(free, dict) and "data" in free:
+            x = x[np.asarray(free["data"], dtype=bool)]
+        matches.append(x)
+    if len(matches) != 1:
+        raise ValueError(
+            f"{run_dir}: expected exactly one SurfaceXYZTensorFourier at "
+            f"mpol={mpol} ntor={ntor} in surf_opt_boozer_surface.json, "
+            f"found {len(matches)}"
+        )
+    return matches[0]
+
+
 def _peak_host_rss_bytes() -> int:
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * _RSS_TO_BYTES
 
@@ -172,9 +219,36 @@ def _grad_stats(dJ: np.ndarray) -> dict[str, float]:
     }
 
 
+# Per-term sub-objectives of the SSOT SingleStageObjective.  Recording each term's
+# J localizes any cross-lane gap: the field/surface-coupled terms (nonqs /
+# boozer_residual / iota) are the genuine cross-boundary parity signal, while the
+# coil-curve terms (length / curve_curve / curvature) use the SAME curve class in
+# both lanes and the surface-distance terms (curve_surface / surf_surf) read the
+# backend-specific surface object.
+_TERM_FIELDS = (
+    ("nonqs", "JnonQSRatio"),
+    ("boozer_residual", "JBoozerResidual"),
+    ("iota", "Jiota"),
+    ("curve_length", "JCurveLength"),
+    ("curve_curve", "JCurveCurve"),
+    ("curve_surface", "JCurveSurface"),
+    ("surf_surf", "JSurfSurf"),
+    ("curvature", "JCurvature"),
+)
+
+
+def _term_values(obj) -> dict[str, float]:
+    """Per-term J of the single-stage objective (to localize any parity gap)."""
+    return {
+        name: float(np.asarray(getattr(obj, attr).J(), dtype=float))
+        for name, attr in _TERM_FIELDS
+    }
+
+
 def run_seed(
     seed: SeedSpec,
     *,
+    equilibria_dir: str,
     jax_optimizer_backend: str,
     jax_lane_label: str,
     warm_eval: bool,
@@ -189,14 +263,18 @@ def run_seed(
     # is the backend, never the weights.
     weights = objective_weights_from_example_defaults()
 
-    # Fresh native-CPU Boozer solve at the seed's config (coils + equilibrium +
-    # mpol/ntor/grid/targets); the JAX lane is then seeded from the CPU lane's
-    # converged surface/iota/G so both lanes evaluate at the IDENTICAL resolved
-    # state (same-state parity).  The seed supplies the diverse coil set / config;
-    # parity compares the two backends at whatever valid Boozer state the CPU lane
-    # converges to (it need not be the seed's exact production surface).
+    # Warm-start the native-CPU Boozer solve at the seed's RESOLVED surface (at the
+    # seed's native mpol/ntor) -- a fresh solve at a tractable resolution collapses
+    # to a degenerate (near-zero-iota, self-intersecting) surface for production
+    # seeds.  The JAX lane is then seeded from the CPU lane's converged
+    # surface/iota/G so both lanes evaluate at the IDENTICAL resolved state
+    # (same-state parity).
+    resolved_dofs = load_resolved_surface_dofs(
+        seed.run_dir, mpol=seed.mpol, ntor=seed.ntor
+    )
     cpu_fixture, jax_fixture = build_matched_same_state_fixture_pair(
         plasma_surf_filename=seed.plasma_surf_filename,
+        equilibria_dir=equilibria_dir,
         stage2_bs_path=seed.stage2_bs_path,
         nphi=seed.nphi,
         ntheta=seed.ntheta,
@@ -206,6 +284,9 @@ def run_seed(
         iota_target=seed.iota_target,
         num_tf_coils=seed.num_tf_coils,
         jax_optimizer_backend=jax_optimizer_backend,
+        cpu_boozer_surface_dofs_override=resolved_dofs,
+        cpu_boozer_iota_override=seed.final_iota,
+        recover_iota_G=True,
     )
     assert cpu_fixture["boozer_surface"].res.get("success", False)
     assert jax_fixture["boozer_surface"].res.get("success", False)
@@ -239,6 +320,11 @@ def run_seed(
     jax_J, jax_dJ, jax_wall = _evaluate(jax_JF, x0)
     rss_jax = _peak_host_rss_bytes()
     gpu_peak = _gpu_peak_bytes()
+
+    # Per-term breakdown at x0 (cached) -- localizes any cross-lane gap to specific
+    # objective terms (cross-boundary nonqs/boozer_residual/iota vs geometric).
+    cpp_terms = _term_values(cpu_obj)
+    jax_terms = _term_values(jax_obj)
 
     cpu_warm = jax_warm = None
     if warm_eval:
@@ -280,6 +366,7 @@ def run_seed(
             "grad_abs_diff": grad_abs_diff,
             "grad_rel_diff": grad_rel_diff,
         },
+        "terms": {"cpp": cpp_terms, "jax": jax_terms},
         "host_rss_baseline_bytes": rss0,
     }
 
@@ -313,6 +400,7 @@ def _run(args: argparse.Namespace) -> None:
         )
         rec = run_seed(
             seed,
+            equilibria_dir=args.equilibria_dir,
             jax_optimizer_backend=args.jax_optimizer_backend,
             jax_lane_label=args.lane_label,
             warm_eval=not args.no_warm_eval,
@@ -434,6 +522,11 @@ def main(argv: list[str] | None = None) -> None:
         "biot_savart_opt.json, surf_opt_boozer_surface.json)",
     )
     parser.add_argument("--out", default="/tmp/single_stage_parity_matrix.json")
+    parser.add_argument(
+        "--equilibria-dir", default=str(DEFAULT_EQUILIBRIA_DIR),
+        help="directory holding the seeds' wout_*.nc equilibria (e.g. the pod's "
+        "/workspace/equilibria); defaults to the repo's example equilibria dir",
+    )
     parser.add_argument(
         "--lane-label", default=None,
         help="label for the JAX column ('jax-cpu' or 'jax-gpu'); defaults to "

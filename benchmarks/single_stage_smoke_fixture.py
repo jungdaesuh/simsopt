@@ -79,6 +79,7 @@ def build_real_single_stage_init_fixture(
     boozer_surface_dofs_override: np.ndarray | None = None,
     boozer_iota_override: float | None = None,
     boozer_G_override: float | None = None,
+    reuse_resolved_warm_start_solve: bool = False,
     constraint_weight: float = DEFAULT_CONSTRAINT_WEIGHT,
     num_tf_coils: int = DEFAULT_NUM_TF_COILS,
     on_stage=None,
@@ -223,6 +224,7 @@ def build_real_single_stage_init_fixture(
         surface_dofs_override=boozer_surface_dofs_override,
         iota_override=boozer_iota_override,
         G_override=boozer_G_override,
+        reuse_resolved_warm_start_solve=reuse_resolved_warm_start_solve,
         on_stage=on_stage,
     )
     return {

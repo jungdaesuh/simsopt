@@ -140,6 +140,45 @@ def build_lane_objective(
     )
 
 
+def _recover_consistent_iota_G(cpu_boozer, bs, *, num_tf_coils, iota_guess,
+                               max_newton=12, tol=1e-13):
+    """Recover the (iota, G) consistent with a FIXED resolved Boozer surface.
+
+    The serialized resolved surface does not store its production (iota, G), and a
+    full re-solve from ``(resolved_dofs, FINAL_IOTA, g0)`` drifts to a different
+    (degenerate, self-intersecting) Boozer branch because ``g0`` (the abs-current
+    seed guess) is not the production G.  But for a *fixed* surface the Boozer
+    least-squares penalty is exactly quadratic in ``(iota, G)`` (the field is affine
+    in G and the residual affine in iota), so a few Newton steps on the 2x2
+    ``(iota, G)`` sub-block of the penalty Hessian recover the unique
+    ``(iota*, G*)`` minimizing the Boozer residual at the resolved surface -- the
+    production-consistent pair.  The surface DOFs are held at their resolved values
+    throughout (only the last two entries of the dof vector are updated), so this
+    cannot drift the surface.  ``(resolved_dofs, iota*, G*)`` is then a Boozer fixed
+    point, and a subsequent full solve from it converges in place without drift.
+    """
+    coils = bs.coils
+    current_sum = sum(abs(c.current.get_value()) for c in coils[:num_tf_coils])
+    g0 = float(2.0 * np.pi * current_sum * (4.0 * np.pi * 1e-7 / (2.0 * np.pi)))
+    surf = cpu_boozer.surface
+    weight_inv_modB = bool(cpu_boozer.options.get("weight_inv_modB", True))
+    x = np.concatenate([np.asarray(surf.x, dtype=float), [float(iota_guess), g0]])
+    for _ in range(max_newton):
+        _, grad, hess = cpu_boozer.boozer_penalty_constraints_vectorized(
+            x,
+            derivatives=2,
+            constraint_weight=cpu_boozer.constraint_weight,
+            optimize_G=True,
+            weight_inv_modB=weight_inv_modB,
+        )
+        sub_grad = np.asarray(grad, dtype=float)[-2:]
+        if float(np.linalg.norm(sub_grad)) <= tol:
+            break
+        sub_hess = np.asarray(hess, dtype=float)[-2:, -2:]
+        x[-2:] = x[-2:] - np.linalg.solve(sub_hess, sub_grad)
+    return float(x[-2]), float(x[-1])
+
+
 def build_matched_same_state_fixture_pair(
     *,
     plasma_surf_filename=DEFAULT_PLASMA_SURF_FILENAME,
@@ -154,37 +193,99 @@ def build_matched_same_state_fixture_pair(
     iota_target=DEFAULT_IOTA_TARGET,
     num_tf_coils=DEFAULT_NUM_TF_COILS,
     jax_optimizer_backend="ondevice",
+    cpu_boozer_surface_dofs_override=None,
+    cpu_boozer_iota_override=None,
+    cpu_boozer_G_override=None,
+    recover_iota_G=False,
 ):
-    """Build CPU + JAX fixtures on the *identical* resolved Boozer state.
+    """Build CPU + JAX fixtures on the *identical* fully Boozer-solved state.
 
-    The native CPU lane solves the Boozer surface fresh from the given coils /
-    equilibrium / config, then the JAX lane's Boozer solve is seeded with the CPU
-    lane's converged surface DOFs / iota / G so both objectives evaluate at the
-    same converged state (same-state parity, not two independent solves).
+    The native CPU lane solves the Boozer surface, then the JAX lane's Boozer solve
+    is seeded with the CPU lane's converged surface DOFs / iota / G so both
+    objectives evaluate at the same converged state (same-state parity, not two
+    independent solves).  Both lanes solve to convergence from the *same* warm
+    start, so they reach the same physical surface -- this is what makes the
+    cross-boundary (field/surface-coupled) terms agree to machine precision.
 
-    With all arguments at their defaults this reproduces the smoke-config pair the
-    cross-backend parity test uses.  For an autoresearch seed, pass the seed's
-    config (``stage2_bs_path`` / equilibrium / ``mpol`` / ``ntor`` / grid / targets
-    / ``num_tf_coils``); the Boozer surface resolution is a free choice (a uniform
-    moderate ``mpol`` keeps the jax-CPU lane tractable).  Ultra-low-|iota| configs
-    whose fresh Boozer solve does not converge are out of scope for this matrix.
+    With all arguments at their defaults the CPU lane solves *fresh* from the
+    Stage-2 seed -- the smoke-config pair the cross-backend parity test uses.
+
+    For a production autoresearch seed neither a fresh solve nor a re-solve from the
+    resolved DOFs reaches the production surface: a fresh solve at a tractable
+    resolution collapses to a degenerate (near-zero-iota, self-intersecting)
+    surface, and a re-solve from ``(resolved_dofs, FINAL_IOTA, g0)`` drifts to a
+    different Boozer branch because the production ``G`` is not stored and ``g0`` is
+    only the seed guess.  Pass ``recover_iota_G=True`` with the seed's resolved
+    surface DOFs (``cpu_boozer_surface_dofs_override``) and resolved iota
+    (``cpu_boozer_iota_override``): the CPU lane installs the resolved surface
+    value-only (no drift), recovers the consistent ``(iota*, G*)`` for it
+    (:func:`_recover_consistent_iota_G`), then full-solves from
+    ``(resolved_dofs, iota*, G*)`` -- a Boozer fixed point, so it converges in place
+    with the full transform/adjoint.  The JAX lane then full-solves from the CPU
+    lane's converged state, reaching the same surface.
     """
-    cpu_fixture = build_real_single_stage_init_fixture(
-        backend="cpu",
-        optimizer_backend="scipy",
-        plasma_surf_filename=plasma_surf_filename,
-        equilibrium_path=equilibrium_path,
-        equilibria_dir=equilibria_dir,
-        stage2_bs_path=stage2_bs_path,
-        nphi=nphi,
-        ntheta=ntheta,
-        mpol=mpol,
-        ntor=ntor,
-        vol_target=vol_target,
-        iota_target=iota_target,
-        num_tf_coils=num_tf_coils,
-    )
-    cpu_boozer = cpu_fixture["boozer_surface"]
+    if recover_iota_G:
+        if cpu_boozer_surface_dofs_override is None:
+            raise ValueError(
+                "recover_iota_G requires cpu_boozer_surface_dofs_override "
+                "(the seed's resolved Boozer surface DOFs)."
+            )
+        # Install the resolved surface value-only (no nonlinear solve -> no drift).
+        cpu_fixture = build_real_single_stage_init_fixture(
+            backend="cpu",
+            optimizer_backend="scipy",
+            plasma_surf_filename=plasma_surf_filename,
+            equilibrium_path=equilibrium_path,
+            equilibria_dir=equilibria_dir,
+            stage2_bs_path=stage2_bs_path,
+            nphi=nphi,
+            ntheta=ntheta,
+            mpol=mpol,
+            ntor=ntor,
+            vol_target=vol_target,
+            iota_target=iota_target,
+            num_tf_coils=num_tf_coils,
+            boozer_surface_dofs_override=cpu_boozer_surface_dofs_override,
+            boozer_iota_override=cpu_boozer_iota_override,
+            boozer_G_override=cpu_boozer_G_override,
+            reuse_resolved_warm_start_solve=True,
+        )
+        cpu_boozer = cpu_fixture["boozer_surface"]
+        # Recover (iota*, G*) consistent with the fixed resolved surface, then
+        # full-solve from that Boozer fixed point (converges in place, no drift).
+        iota_star, G_star = _recover_consistent_iota_G(
+            cpu_boozer,
+            cpu_fixture["bs"],
+            num_tf_coils=num_tf_coils,
+            iota_guess=(
+                cpu_boozer_iota_override
+                if cpu_boozer_iota_override is not None
+                else iota_target
+            ),
+        )
+        cpu_boozer.need_to_run_code = True
+        cpu_boozer.run_code(iota_star, G_star)
+    else:
+        cpu_fixture = build_real_single_stage_init_fixture(
+            backend="cpu",
+            optimizer_backend="scipy",
+            plasma_surf_filename=plasma_surf_filename,
+            equilibrium_path=equilibrium_path,
+            equilibria_dir=equilibria_dir,
+            stage2_bs_path=stage2_bs_path,
+            nphi=nphi,
+            ntheta=ntheta,
+            mpol=mpol,
+            ntor=ntor,
+            vol_target=vol_target,
+            iota_target=iota_target,
+            num_tf_coils=num_tf_coils,
+            boozer_surface_dofs_override=cpu_boozer_surface_dofs_override,
+            boozer_iota_override=cpu_boozer_iota_override,
+            boozer_G_override=cpu_boozer_G_override,
+        )
+        cpu_boozer = cpu_fixture["boozer_surface"]
+
     cpu_result = cpu_boozer.res
     assert cpu_result is not None and cpu_result.get("success", False), (
         "CPU reduced-real fixture did not converge"
