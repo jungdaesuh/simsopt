@@ -875,6 +875,12 @@ class BoozerSurfaceFiniteI(BoozerSurface):
             if norm <= tol:
                 break
             J_augmented = constrained_jacobian(J)
+            if not np.all(np.isfinite(J_augmented)):
+                # Diverged iterate (or a non-finite initial Jacobian): ``lu`` would raise on a
+                # non-finite matrix. Break so the solve is reported ``success=False`` below and the
+                # caller's surface-stack gate rejects the step. Mirrors the upstream
+                # BoozerSurface.solve_residual_equation_exactly_newton guard.
+                break
             P, L, U = lu(J_augmented)
             dx = forward_solve(P, L, U, b)
             dx += forward_solve(P, L, U, b - J_augmented @ dx)
@@ -918,5 +924,11 @@ class BoozerSurfaceFiniteI(BoozerSurface):
 
         J = constrained_jacobian(J)
 
-        P, L, U = lu(J)
-        return result_from_state(r, J, i, norm <= tol, (P, L, U))
+        # Only factor a finite Jacobian: a diverged finite-I solve otherwise crashes in ``lu``.
+        # Report ``success=False`` / ``PLU=None`` so the caller's surface-stack gate rejects the step;
+        # a finite solve keeps its factorization and ``success = norm <= tol`` as before. Mirrors the
+        # upstream BoozerSurface.solve_residual_equation_exactly_newton guard.
+        if np.all(np.isfinite(J)):
+            P, L, U = lu(J)
+            return result_from_state(r, J, i, norm <= tol, (P, L, U))
+        return result_from_state(r, J, i, False, None)

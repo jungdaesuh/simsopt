@@ -1027,6 +1027,15 @@ class BoozerSurface(Optimizable):
             norm = np.linalg.norm(b)
             if norm <= tol:
                 break
+            if not np.all(np.isfinite(J)):
+                # The Newton iterate diverged into a region where the (raw) residual Jacobian is
+                # non-finite (inf/NaN) -- e.g. a self-intersecting/degenerate trial surface where the
+                # field evaluation overflows. ``scipy.linalg.lu`` raises on a non-finite matrix, so
+                # break before assembling/factoring it (and before ``J`` is reassigned to the masked
+                # block below): ``norm`` is already > tol, the solve is reported ``success=False``,
+                # and the caller's surface-stack gate rejects this trial step like any other
+                # non-converged outcome.
+                break
             if s.stellsym:
                 J = np.vstack((
                     J[mask, :],
@@ -1060,9 +1069,19 @@ class BoozerSurface(Optimizable):
                 np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
             ))
 
-        P, L, U = lu(J)
+        # Only factor a finite Jacobian: ``scipy.linalg.lu`` raises on inf/NaN. A diverged solve leaves
+        # ``J`` non-finite -- report ``success=False`` with ``PLU=None`` so the caller's surface-stack
+        # gate rejects this step instead of crashing. A finite (incl. finite-but-non-converged) solve
+        # keeps its factorization and ``success = norm <= tol`` exactly as before.
+        if np.all(np.isfinite(J)):
+            P, L, U = lu(J)
+            PLU = (P, L, U)
+            success = norm <= tol
+        else:
+            PLU = None
+            success = False
         res = {
-            "residual": r, "jacobian": J, "iter": i, "success": norm <= tol, "G": G, "s": s, "iota": iota, "PLU": (P, L, U),
+            "residual": r, "jacobian": J, "iter": i, "success": success, "G": G, "s": s, "iota": iota, "PLU": PLU,
             "mask": mask, 'type': 'exact', "weight_inv_modB": False,
             "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp
         }

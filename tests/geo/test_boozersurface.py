@@ -199,6 +199,83 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         self.assertTrue(boozer_surface.need_to_run_code)
 
+    def test_exact_newton_rejects_nonfinite_jacobian_without_crashing(self):
+        """A diverged exact Newton re-solve whose residual Jacobian goes non-finite reports
+        ``success=False`` / ``PLU=None`` instead of raising inside ``scipy.linalg.lu``.
+
+        The per-eval surface-stack gate rejects an unsuccessful solve before any adjoint objective
+        (MajorRadius/VolumeBoozer) consumes ``res['PLU']``, so honoring the solver's own ``success``
+        contract routes a divergent re-solve into the existing reject path. Regression: an unguarded
+        ``lu(J)`` on a non-finite Jacobian raised ``ValueError: array must not contain infs or NaNs``
+        and crashed the multisurface optimization (boozersurface.py:1063).
+        """
+        bs, boozer_surface = get_boozer_surface(boozer_type='exact')
+        iota0, G0 = boozer_surface.res['iota'], boozer_surface.res['G']
+
+        def nonfinite_jacobian_residual(surface, iota, G, biotsavart, derivatives=1):
+            residual_size = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
+            residual = np.ones(residual_size)
+            jacobian = np.full((residual_size, surface.get_dofs().size + 2), np.inf)
+            return residual, jacobian
+
+        boozer_surface.need_to_run_code = True
+        with patch(
+            "simsopt.geo.boozersurface.boozer_surface_residual",
+            side_effect=nonfinite_jacobian_residual,
+        ):
+            res = boozer_surface.solve_residual_equation_exactly_newton(
+                iota=iota0, G=G0, tol=1e-12, maxiter=3,
+            )
+
+        self.assertFalse(bool(res["success"]))
+        self.assertIsNone(res["PLU"])
+
+    def test_finite_current_exact_newton_rejects_nonfinite_jacobian_without_crashing(self):
+        """The finite-I exact Newton solver honors the same contract: a non-finite residual Jacobian
+        yields ``success=False`` / ``PLU=None`` rather than raising in ``lu``. The I=0.37 fixture
+        exercises the in-loop guard on the iteration-0 Jacobian (reached before the I-dependent
+        backtracking branch)."""
+        boozer_surface = self._make_synthetic_exact_finite_i_newton_surface()
+
+        def nonfinite_jacobian_residual_finite_I(surface, iota, G, biotsavart, derivatives, I):
+            residual_size = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
+            residual = np.ones(residual_size)
+            jacobian = np.full((residual_size, surface.get_dofs().size + 2), np.inf)
+            return residual, jacobian
+
+        with patch(
+            "banana_opt.boozer_finite_current.boozer_surface_residual_finite_I",
+            side_effect=nonfinite_jacobian_residual_finite_I,
+        ):
+            res = boozer_surface.solve_residual_equation_exactly_newton(
+                tol=1e-12, maxiter=3, iota=0.0, G=2.0,
+            )
+
+        self.assertFalse(bool(res["success"]))
+        self.assertIsNone(res["PLU"])
+
+    def test_exact_newton_finite_nonconverged_solve_preserves_plu(self):
+        """A FINITE but non-converged exact solve keeps its factorization: ``success=False`` with a
+        valid (non-None) 3-tuple ``PLU``. Only a NON-finite Jacobian nulls ``PLU``; the non-finite
+        guard deliberately preserves this legacy branch byte-for-byte (e.g. examples/2_Intermediate/
+        boozerQA.py reads the factorization on a non-converged-but-finite surface before its own
+        success check). This pins the preserved behavior against an over-broad future regression that
+        might null ``PLU`` whenever ``success`` is False.
+        """
+        bs, boozer_surface = get_boozer_surface(boozer_type='exact')
+        iota0, G0 = boozer_surface.res['iota'], boozer_surface.res['G']
+
+        # Re-solve the (real, finite, well-conditioned) converged surface with an unreachable
+        # tolerance so the solve cannot converge in the budget -> exits finite + success=False.
+        boozer_surface.need_to_run_code = True
+        res = boozer_surface.solve_residual_equation_exactly_newton(
+            iota=iota0, G=G0, tol=1e-300, maxiter=1,
+        )
+
+        self.assertFalse(bool(res["success"]))
+        self.assertIsNotNone(res["PLU"])
+        self.assertEqual(len(res["PLU"]), 3)
+
     def _assert_directional_fd_convergence(self, f, coeffs, direction, directional_derivative):
         err_old = 1e9
         epsilons = np.power(2., -np.asarray(range(11, 18)))
