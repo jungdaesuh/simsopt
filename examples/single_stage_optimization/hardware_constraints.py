@@ -108,11 +108,25 @@ def accepted_result_rejection_reasons(
     require_gradient,
     required_metric_paths=(),
     required_metadata_paths=(),
+    require_hardware=False,
+    hardware_constraints_ok=None,
 ):
     """Return acceptance-gate failures for a result artifact payload."""
     reasons = []
     if optimizer_success is not True:
         reasons.append("optimizer_success_not_true")
+    # Certification runs (non-init-only) must not accept an artifact whose
+    # hardware verdict explicitly failed.  ``hardware_constraints_ok is None``
+    # marks a deliberately skipped verdict (benchmark mode), left to emit its
+    # honestly-null hardware status.  This is a direct defence-in-depth gate;
+    # the primary protection remains the upstream optimizer-success demotion in
+    # ``apply_hardware_constraint_verdict``.
+    if (
+        require_hardware
+        and hardware_constraints_ok is not None
+        and not bool(hardware_constraints_ok)
+    ):
+        reasons.append("hardware_constraints_failed")
     if optimizer_status is not None:
         status = int(optimizer_status)
         if status not in _ACCEPTED_OPTIMIZER_STATUSES:
@@ -151,6 +165,8 @@ def accepted_result_payload(
     require_gradient,
     required_metric_paths=(),
     required_metadata_paths=(),
+    require_hardware=False,
+    hardware_constraints_ok=None,
 ):
     """Return strict JSON payload data after proving accepted-result gates."""
     reasons = accepted_result_rejection_reasons(
@@ -164,6 +180,8 @@ def accepted_result_payload(
         require_gradient=require_gradient,
         required_metric_paths=required_metric_paths,
         required_metadata_paths=required_metadata_paths,
+        require_hardware=require_hardware,
+        hardware_constraints_ok=hardware_constraints_ok,
     )
     if reasons:
         raise ValueError(
