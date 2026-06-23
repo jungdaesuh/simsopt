@@ -2,6 +2,7 @@
 
 from simsopt._core.json import GSONDecoder
 from simsopt._core.optimizable import load
+from simsopt.geo.boozersurface import BoozerSurface
 
 from .boozer_finite_current import BoozerSurfaceFiniteI
 
@@ -46,3 +47,27 @@ class BoozerFiniteIDecoder(GSONDecoder):
 def load_boozer_finite_i(filename, *args, **kwargs):
     kwargs.setdefault("cls", BoozerFiniteIDecoder)
     return load(filename, *args, **kwargs)
+
+
+def save_boozer_finite_i(boozer_surface, filename) -> None:
+    """Sanctioned save for Boozer-surface artifacts -- the counterpart to
+    :func:`load_boozer_finite_i`.
+
+    Refuses to write a *surface-only* artifact: ``boozer_surface`` must be a
+    :class:`~simsopt.geo.boozersurface.BoozerSurface` (the finite-I subclass
+    included) whose ``biotsavart`` field carries at least one coil, so the saved
+    SIMSON graph embeds the ``BiotSavart`` + coils that the clearance viewer and
+    the topology/Poincare consumers render and trace. Saving a bare ``.surface``
+    under a ``*_boozer_surface.json`` name yields a graph with no ``BiotSavart``
+    node -- the recurring viewer ``NoBiotSavart`` failure this guard prevents.
+    """
+    field = getattr(boozer_surface, "biotsavart", None)
+    coils = getattr(field, "coils", None)
+    if not isinstance(boozer_surface, BoozerSurface) or not coils:
+        raise ValueError(
+            "save_boozer_finite_i requires a BoozerSurface embedding a BiotSavart "
+            f"with >=1 coil; got {type(boozer_surface).__name__} carrying "
+            f"{0 if not coils else len(coils)} coils. Save the BoozerSurface "
+            "itself, not its `.surface`."
+        )
+    boozer_surface.save(str(filename))

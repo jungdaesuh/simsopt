@@ -12,7 +12,7 @@ from simsopt.field import BiotSavart
 from simsopt.geo import BoozerSurface, Volume
 
 from banana_opt.boozer_finite_current import derive_signed_G_from_field
-from banana_opt.json_compat import load_boozer_finite_i
+from banana_opt.json_compat import load_boozer_finite_i, save_boozer_finite_i
 
 
 def _load_stage_state(path: Path) -> Mapping[str, object]:
@@ -85,7 +85,7 @@ def regenerate_signed_boozer_surface(
 
     for output_path in output_paths:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        regenerated.save(str(output_path))
+        save_boozer_finite_i(regenerated, output_path)
 
     return {
         "iota": float(regenerated.res["iota"]),
