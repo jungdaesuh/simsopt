@@ -371,6 +371,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
 )
 from banana_opt.stage2_single_stage_handoff import (
     WarmStartBoozerSeed,
+    attempt_initialize_boozer_surface as _attempt_initialize_boozer_surface_impl,
     build_equilibrium_path as _build_equilibrium_path_impl,
     compute_tf_G0 as _compute_tf_G0_impl,
     initialize_boozer_surface as _initialize_boozer_surface_impl,
@@ -2509,6 +2510,19 @@ def parse_args():
         help=(
             "Search-time policy for realized hardware violations: hard reject, warn only, "
             "or adaptive softening during early continuation."
+        ),
+    )
+    parser.add_argument(
+        "--multisurface-resolve-mode",
+        choices=["ls", "exact_twin"],
+        default="ls",
+        help=(
+            "Per-eval Boozer re-solve mode for the published_multisurface family. 'ls' (default) "
+            "keeps the legacy BoozerLS BFGS re-solve byte-for-byte. 'exact_twin' hands the solved "
+            "family off to exact-grid Newton twins re-solved by root-find, which track the coils "
+            "instead of collapsing iota->0 along the optimizer gradient direction -- the fix that "
+            "unblocks multisurface optimization (every trial step was otherwise rejected for "
+            "non-nesting)."
         ),
     )
     parser.add_argument(
@@ -5095,6 +5109,72 @@ def initialize_surface_data_in_config_order(
         )
         surface_data.append(_surface_data_entry(config, boozer_surface, provenance))
     return surface_data, warm_start_surface_paths
+
+
+def _resolve_published_family_to_exact_twins(
+    ordered_surface_data,
+    *,
+    mpol,
+    ntor,
+    bs,
+    boozer_I,
+    nfp,
+):
+    """Re-solve each published surface as an EXACT-grid Boozer twin (Newton root-find).
+
+    The published family is BUILT with the BoozerLS solver (``boozer_type='ls'``) because the
+    outer->inner volume-contraction continuation needs the least-squares basin to march from a
+    contracted guess. But the per-eval re-solve under that 'ls' solver slides ``iota`` -> 0 onto a
+    self-intersecting surface along the optimizer's gradient direction (a lower penalty minimum), so
+    every multisurface trial step is rejected for non-nesting. Exact Newton
+    (``solve_residual_equation_exactly_newton``) ROOT-FINDS the Boozer residual to zero instead of
+    MINIMIZING the labelled penalty, so from a good warm start it converges to the NEAREST Boozer
+    surface and stays on the continuation branch, where the BoozerLS BFGS instead slides downhill
+    toward the lower penalty minimum at collapse. Empirically a warm-started twin tracks a coil step
+    (e.g. +20% current) that drives the 'ls' re-solve self-intersecting, and ~1000x faster. This
+    tracking is WARM-START-GATED, not basin-agnostic: exact Newton from a COLLAPSED guess (iota ~ 0)
+    also diverges. We therefore (a) build the family with 'ls' and seed each twin from its OWN
+    converged 'ls' dofs here -- exact Newton from a contracted continuation guess diverges, which is
+    why the family is not built exact directly -- and (b) rely on the per-eval re-solve always
+    warm-starting from the last ACCEPTED family's iota/G (a rejected step is never snapshotted, so the
+    warm start is never collapsed), with a diverged or folded twin re-solve rejected downstream by
+    ``evaluate_surface_stack`` (self-intersection / solve-success / iota-collapse) so it never
+    promotes.
+
+    ``ordered_surface_data`` is the single list every per-surface objective term, the Boozer adjoint,
+    and the per-eval re-solve read live, so mutating ``entry["boozer_surface"]`` in place rebinds the
+    whole stack; the per-eval re-solve (``solve_surface_stack_at_dofs``) then dispatches to exact
+    Newton automatically (twins are ``boozer_type='exact'``), which is also cheaper than the
+    hundreds-of-iterations 'ls' BFGS it replaces. Fail closed: a twin that does not re-solve from its
+    converged 'ls' dofs would leave the objective bound to a surface with an inconsistent coil
+    gradient.
+    """
+    for entry in ordered_surface_data:
+        ls_boozer_surface = entry["boozer_surface"]
+        ls_surface = ls_boozer_surface.surface
+        twin_result = _attempt_initialize_boozer_surface_impl(
+            ls_surface,
+            mpol,
+            ntor,
+            bs,
+            entry["target_volume"],
+            None,
+            float(ls_boozer_surface.res["iota"]),
+            float(ls_boozer_surface.res["G"]),
+            boozer_I=boozer_I,
+            initial_surface_guess=ls_surface,
+            nfp=nfp,
+        )
+        if not twin_result.success:
+            raise RuntimeError(
+                "exact-twin handoff failed to re-solve published surface "
+                f"{entry.get('name')!r} from its converged least-squares dofs "
+                f"(solve_success={twin_result.solve_success}, "
+                f"self_intersecting={twin_result.self_intersecting}, "
+                f"error_type={twin_result.error_type!r}): cannot bind a consistent coil "
+                "gradient for the multisurface optimization."
+            )
+        entry["boozer_surface"] = twin_result.boozer_surface
 
 
 def initialize_published_surface_data_from_stage2_seed(
@@ -16487,6 +16567,7 @@ if __name__ == "__main__":
     )
     args.curvature_threshold = float(SINGLE_STAGE_EFFECTIVE_CURVATURE_THRESHOLD)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
+    MULTISURFACE_RESOLVE_MODE = args.multisurface_resolve_mode
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
     TOPOLOGY_GATE_TMAX = args.topology_gate_tmax

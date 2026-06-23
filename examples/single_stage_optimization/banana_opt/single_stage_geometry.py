@@ -388,7 +388,11 @@ def evaluate_surface_stack(
                     inner_entry["boozer_surface"].surface,
                     outer_entry["boozer_surface"].surface,
                 )
-            except RuntimeError as exc:
+            # ``Surface.cross_section`` raises a BARE ``Exception`` (not ``RuntimeError``) when a
+            # folded trial surface 'goes back' on itself (surface.py:433); catch ``Exception`` so a
+            # folded re-solve is rejected as non-nested instead of crashing the optimization. Mirrors
+            # ``surface_self_intersection_status`` (:90), which guards the same failure the same way.
+            except Exception as exc:
                 if not _is_surface_goes_back_error(exc):
                     raise
                 pair_nesting_ok = False
