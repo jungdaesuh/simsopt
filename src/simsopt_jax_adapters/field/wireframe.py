@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 import jax
+import jax.numpy as jnp
 
 from simsopt_jax._array_contracts import require_nonnegative_int32_indices
 
@@ -164,11 +165,15 @@ class WireframeFieldJAX(MagneticField):
         else:
             fac = np.ones(absn.shape, dtype=_runtime_host_dtype())
 
-        matrix = np.ascontiguousarray(
-            np.zeros((n_points, self._n_segments), dtype=_runtime_host_dtype())
+        contributions = _wireframe_segment_B_contributions_jit(
+            self._points_device,
+            self._nodes_device,
+            self._segments_device,
+            self._seg_signs_device,
         )
-        dB_dsc = self.dB_by_dsegmentcurrents(0)
-        for i in range(self._n_segments):
-            dB_dsc_i = dB_dsc[i].reshape(normal.shape)
-            matrix[:, i] = (fac * np.sum(dB_dsc_i * unitn, axis=2)).reshape((-1))
-        return matrix
+        unitn_flat = _as_runtime_array(np.reshape(unitn, (n_points, 3)))
+        fac_flat = _as_runtime_array(np.reshape(fac, (n_points,)))
+        matrix = jnp.einsum("spc,pc->ps", contributions, unitn_flat) * fac_flat[
+            :, None
+        ]
+        return np.ascontiguousarray(_host_cache_array(matrix, dtype=_runtime_host_dtype()))

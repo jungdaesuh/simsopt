@@ -25,6 +25,16 @@ def _newton_step(
     return x + jnp.reshape(step, x.shape)
 
 
+def _newton_step_diagonal(
+    residual: Callable[[jax.Array], jax.Array],
+    diagonal_jacobian_fn: Callable[[jax.Array], jax.Array],
+    x: jax.Array,
+) -> jax.Array:
+    residual_value = residual(x)
+    diagonal = jnp.reshape(diagonal_jacobian_fn(x), residual_value.shape)
+    return x - residual_value / diagonal
+
+
 def newton_scan_fixed_iters(
     residual: Callable[[jax.Array], jax.Array],
     x0: jax.Array,
@@ -37,6 +47,20 @@ def newton_scan_fixed_iters(
 
     def body(x, _):
         return _newton_step(residual, jacobian_fn, x), None
+
+    root, _ = jax.lax.scan(body, jnp.asarray(x0), None, length=int(max_iter))
+    return root
+
+
+def _newton_scan_fixed_iters_diagonal(
+    residual: Callable[[jax.Array], jax.Array],
+    x0: jax.Array,
+    *,
+    max_iter: int,
+    jac_diagonal: Callable[[jax.Array], jax.Array],
+) -> jax.Array:
+    def body(x, _):
+        return _newton_step_diagonal(residual, jac_diagonal, x), None
 
     root, _ = jax.lax.scan(body, jnp.asarray(x0), None, length=int(max_iter))
     return root
@@ -72,6 +96,40 @@ def _newton_while_solve(
     def body(state):
         iteration, x, _ = state
         next_x = _newton_step(residual_at_params, jacobian_fn, x)
+        return iteration + 1, next_x, residual_norm(next_x)
+
+    _, root, _ = jax.lax.while_loop(should_continue, body, initial_state)
+    return root
+
+
+def _newton_while_solve_diagonal(
+    residual: Callable[[jax.Array, object], jax.Array],
+    x0: jax.Array,
+    params: object,
+    *,
+    max_iter: int,
+    tol: float,
+    jac_diagonal: Callable[[jax.Array, object], jax.Array],
+) -> jax.Array:
+    def residual_at_params(x):
+        return residual(x, params)
+
+    diagonal_at_params = lambda x: jac_diagonal(x, params)
+
+    def residual_norm(x):
+        return jnp.linalg.norm(jnp.ravel(residual_at_params(x)), ord=jnp.inf)
+
+    initial_x = jnp.asarray(x0)
+    initial_norm = residual_norm(initial_x)
+    initial_state = (jnp.asarray(0), initial_x, initial_norm)
+
+    def should_continue(state):
+        iteration, _, norm = state
+        return (iteration < int(max_iter)) & (norm > jnp.asarray(tol, dtype=norm.dtype))
+
+    def body(state):
+        iteration, x, _ = state
+        next_x = _newton_step_diagonal(residual_at_params, diagonal_at_params, x)
         return iteration + 1, next_x, residual_norm(next_x)
 
     _, root, _ = jax.lax.while_loop(should_continue, body, initial_state)
@@ -125,6 +183,44 @@ def newton_with_implicit_vjp(
             jnp.ravel(root_cotangent),
         )
         adjoint_residual = jnp.reshape(adjoint, residual_value.shape)
+        _, params_pullback = jax.vjp(lambda p: residual(root, p), params_arg)
+        (params_cotangent,) = params_pullback(adjoint_residual)
+        params_cotangent = jax.tree_util.tree_map(lambda leaf: -leaf, params_cotangent)
+        return params_cotangent, jnp.zeros_like(x0_arg)
+
+    solve.defvjp(solve_fwd, solve_bwd)
+    return solve(params, x0)
+
+
+def _newton_with_implicit_vjp_diagonal(
+    residual: Callable[[jax.Array, object], jax.Array],
+    x0: jax.Array,
+    params: object,
+    *,
+    max_iter: int,
+    tol: float,
+    jac_diagonal: Callable[[jax.Array, object], jax.Array],
+) -> jax.Array:
+    @jax.custom_vjp
+    def solve(params_arg, x0_arg):
+        return _newton_while_solve_diagonal(
+            residual,
+            x0_arg,
+            params_arg,
+            max_iter=max_iter,
+            tol=tol,
+            jac_diagonal=jac_diagonal,
+        )
+
+    def solve_fwd(params_arg, x0_arg):
+        root = solve(params_arg, x0_arg)
+        return root, (root, params_arg, x0_arg)
+
+    def solve_bwd(saved, root_cotangent):
+        root, params_arg, x0_arg = saved
+        residual_value = residual(root, params_arg)
+        diagonal = jnp.reshape(jac_diagonal(root, params_arg), residual_value.shape)
+        adjoint_residual = jnp.reshape(root_cotangent, residual_value.shape) / diagonal
         _, params_pullback = jax.vjp(lambda p: residual(root, p), params_arg)
         (params_cotangent,) = params_pullback(adjoint_residual)
         params_cotangent = jax.tree_util.tree_map(lambda leaf: -leaf, params_cotangent)

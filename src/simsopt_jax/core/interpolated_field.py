@@ -257,6 +257,7 @@ def _cyl_vector_to_cart(field_cyl: jax.Array, phi: jax.Array) -> jax.Array:
         "degree",
         "value_size",
         "out_of_bounds_ok",
+        "strict_cell_order",
     ),
 )
 def _evaluate_cyl_field_jit(
@@ -289,6 +290,7 @@ def _evaluate_cyl_field_jit(
     degree: int,
     value_size: int,
     out_of_bounds_ok: bool,
+    strict_cell_order: bool = False,
 ) -> jax.Array:
     """Symmetry-fold + rectangular kernel + cylindrical cache preservation.
 
@@ -336,6 +338,7 @@ def _evaluate_cyl_field_jit(
         degree=degree,
         value_size=value_size,
         out_of_bounds_ok=out_of_bounds_ok,
+        strict_cell_order=strict_cell_order,
     )
     if unfold_kind == 0:
         return _unfold_B_cyl(field_cyl_fold, sign_br)
@@ -351,6 +354,7 @@ def _evaluate_cyl_field_jit(
         "degree",
         "value_size",
         "out_of_bounds_ok",
+        "strict_cell_order",
     ),
 )
 def _evaluate_cart_field_jit(
@@ -383,6 +387,7 @@ def _evaluate_cart_field_jit(
     degree: int,
     value_size: int,
     out_of_bounds_ok: bool,
+    strict_cell_order: bool = False,
 ) -> jax.Array:
     """Evaluate the cylindrical kernel and rotate the result to Cartesian."""
 
@@ -416,6 +421,7 @@ def _evaluate_cart_field_jit(
         degree=degree,
         value_size=value_size,
         out_of_bounds_ok=out_of_bounds_ok,
+        strict_cell_order=strict_cell_order,
     )
     return _cyl_vector_to_cart(field_cyl, phi)
 
@@ -429,6 +435,7 @@ def _evaluate_cart_field_jit(
         "degree",
         "value_size",
         "out_of_bounds_ok",
+        "strict_cell_order",
     ),
 )
 def _evaluate_cart_field_zero_jit(
@@ -460,6 +467,7 @@ def _evaluate_cart_field_zero_jit(
     degree: int,
     value_size: int,
     out_of_bounds_ok: bool,
+    strict_cell_order: bool = False,
 ) -> jax.Array:
     return _evaluate_cart_field_jit(
         points_cart,
@@ -490,6 +498,7 @@ def _evaluate_cart_field_zero_jit(
         degree=degree,
         value_size=value_size,
         out_of_bounds_ok=out_of_bounds_ok,
+        strict_cell_order=strict_cell_order,
     )
 
 
@@ -500,6 +509,7 @@ def _evaluate_cart_field_zero(
     nfp: int,
     stellsym: bool,
     unfold_kind: int,
+    strict_cell_order: bool = False,
 ) -> jax.Array:
     return _evaluate_cart_field_zero_jit(
         points_cart,
@@ -510,6 +520,7 @@ def _evaluate_cart_field_zero(
         degree=device_spec.degree,
         value_size=device_spec.value_size,
         out_of_bounds_ok=device_spec.out_of_bounds_ok,
+        strict_cell_order=bool(strict_cell_order),
     )
 
 
@@ -521,6 +532,7 @@ def _evaluate_cyl_field(
     nfp: int,
     stellsym: bool,
     unfold_kind: int,
+    strict_cell_order: bool = False,
 ) -> jax.Array:
     return _evaluate_cyl_field_jit(
         points_cart,
@@ -532,6 +544,7 @@ def _evaluate_cyl_field(
         degree=device_spec.degree,
         value_size=device_spec.value_size,
         out_of_bounds_ok=device_spec.out_of_bounds_ok,
+        strict_cell_order=bool(strict_cell_order),
     )
 
 

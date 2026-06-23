@@ -5,12 +5,10 @@ from functools import lru_cache
 from threading import RLock
 from weakref import WeakValueDictionary
 
-from scipy import constants
 import numpy as np
 import jax.numpy as jnp
 import jax.scipy as jscp
-from jax import grad, vmap
-from jax.lax import cond
+from jax import grad, lax, vmap
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import (
     Current,
@@ -51,8 +49,6 @@ from simsopt_jax_adapters.geo.curve_specs import (
     supports_adapter_curve_spec,
 )
 
-Biot_savart_prefactor = constants.mu_0 / 4 / np.pi
-
 __all__ = [
     "_coil_coil_inductances_pure",
     "_coil_coil_inductances_inv_pure",
@@ -64,6 +60,9 @@ __all__ = [
     "SquaredMeanTorque",
     "LpCurveTorque",
 ]
+
+_FORCE_COIL_MAP_BATCH_SIZE = 8
+_FORCE_POINT_MAP_BATCH_SIZE = 32
 
 
 def _check_quadpoints_consistency(coils, label="coils"):
@@ -140,7 +139,7 @@ def _B_at_point_from_coil_set_pure(
         return jnp.zeros(3)
 
     def from_j(j):
-        return cond(
+        return lax.cond(
             (exclude_index >= 0) & (j == exclude_index),
             lambda _: jnp.zeros(3),
             lambda _: jnp.asarray(
@@ -154,8 +153,15 @@ def _B_at_point_from_coil_set_pure(
             operand=None,
         )
 
-    B = jnp.sum(vmap(from_j)(jnp.arange(n)), axis=0)
+    B = jnp.sum(
+        lax.map(from_j, jnp.arange(n), batch_size=_FORCE_COIL_MAP_BATCH_SIZE),
+        axis=0,
+    )
     return B / npts * 1e-7
+
+
+def _map_force_points(point_fn, points):
+    return lax.map(point_fn, points, batch_size=_FORCE_POINT_MAP_BATCH_SIZE)
 
 
 def _mutual_B_field_at_point_pure(
@@ -1100,37 +1106,30 @@ def _coil_coil_inductances_pure(
     gammas = _as_jax_float64(gammas)[:, ::downsample, :]
     gammadashs = _as_jax_float64(gammadashs)[:, ::downsample, :]
     N = gammas.shape[0]
+    n_quadpoints = jnp.shape(gammas)[1]
 
-    # Compute Lij, i != j
-    r_ij = gammas[None, :, None, :, :] - gammas[:, None, :, None, :] + eps
-    rij_norm = jnp.linalg.norm(r_ij, axis=-1)
-    gammadash_prod = jnp.sum(
-        gammadashs[None, :, None, :, :] * gammadashs[:, None, :, None, :], axis=-1
-    )
-
-    # Double sum over each of the closed curves for off-diagonal elements
-    Lij = (
-        jnp.sum(jnp.sum(gammadash_prod / rij_norm, axis=-1), axis=-1)
-        / jnp.shape(gammas)[1] ** 2
-    )
-
-    # Compute diagonal elements for each coil
-    diag_values = (
-        jnp.sum(
-            jnp.sum(
-                gammadash_prod
-                / jnp.sqrt(rij_norm**2 + regularizations[None, :, None, None]),
-                axis=-1,
-            ),
+    def inductance_row(i):
+        displacement = gammas[:, None, :, :] - gammas[i][None, :, None, :] + eps
+        rij_norm = jnp.linalg.norm(displacement, axis=-1)
+        gammadash_prod = jnp.sum(
+            gammadashs[:, None, :, :] * gammadashs[i][None, :, None, :],
             axis=-1,
         )
-        / jnp.shape(gammas)[1] ** 2
-    )
+        mutual_row = jnp.sum(gammadash_prod / rij_norm, axis=(1, 2)) / (
+            n_quadpoints**2
+        )
+        self_row = jnp.sum(
+            gammadash_prod
+            / jnp.sqrt(rij_norm**2 + regularizations[:, None, None]),
+            axis=(1, 2),
+        ) / (n_quadpoints**2)
+        return jnp.where(jnp.arange(N) == i, self_row, mutual_row)
 
-    # Now use a mask to replace the wrong diagonal with the correct numbers in diag_values
-    diag_mask = jnp.eye(N, dtype=bool)
-    Lij = jnp.where(diag_mask, diag_values, Lij)
-    return 1e-7 * Lij
+    return 1e-7 * lax.map(
+        inductance_row,
+        jnp.arange(N),
+        batch_size=_FORCE_COIL_MAP_BATCH_SIZE,
+    )
 
 
 def _solve_triangular_columns(matrix, rhs_matrix, *, lower):
@@ -1255,9 +1254,10 @@ def _induced_currents_pure(
     Returns:
         array (shape (m,)): Array of induced currents.
     """
-    return -_coil_coil_inductances_inv_pure(
+    inductance_matrix = _coil_coil_inductances_pure(
         gammas_targets, gammadashs_targets, downsample, regularizations
-    ) @ _net_fluxes_pure(
+    )
+    fluxes = _net_fluxes_pure(
         gammas_targets,
         gammadashs_targets,
         gammas_sources,
@@ -1265,6 +1265,8 @@ def _induced_currents_pure(
         currents_sources,
         downsample,
     )
+    cholesky_factor, lower = jscp.linalg.cho_factor(inductance_matrix, lower=True)
+    return jscp.linalg.cho_solve((cholesky_factor, lower), -fluxes)
 
 
 def b2energy_pure(gammas, gammadashs, currents, downsample, regularizations):
@@ -1466,27 +1468,36 @@ def _net_fluxes_pure(
         currents_sources,
         downsample,
     )
-    rij_norm = jnp.linalg.norm(
-        gammas_targets[:, :, None, None, :] - gammas_sources[None, None, :, :, :],
-        axis=-1,
-    )
-    # sum over the currents, and sum over the biot savart integral
-    A_ext = (
-        jnp.sum(
-            currents_sources[None, None, :, None]
-            * jnp.sum(
-                gammadashs_sources[None, None, :, :, :] / rij_norm[:, :, :, :, None],
-                axis=-2,
-            ),
+    n_source_quadpoints = jnp.shape(gammadashs_sources)[1]
+    n_target_quadpoints = jnp.shape(gammadashs_targets)[1]
+
+    def target_flux(target_inputs):
+        gamma_target, gammadash_target = target_inputs
+        rij_norm = jnp.linalg.norm(
+            gamma_target[:, None, None, :] - gammas_sources[None, :, :, :],
+            axis=-1,
+        )
+        source_vector_potential = jnp.sum(
+            gammadashs_sources[None, :, :, :] / rij_norm[:, :, :, None],
             axis=-2,
         )
-        / jnp.shape(gammadashs_sources)[1]
-    )
-    # Now sum over all the coil loops
-    return (
-        1e-7
-        * jnp.sum(jnp.sum(A_ext * gammadashs_targets, axis=-1), axis=-1)
-        / jnp.shape(gammadashs_targets)[1]
+        vector_potential = (
+            jnp.sum(
+                currents_sources[None, :, None] * source_vector_potential,
+                axis=-2,
+            )
+            / n_source_quadpoints
+        )
+        return (
+            1e-7
+            * jnp.sum(vector_potential * gammadash_target)
+            / n_target_quadpoints
+        )
+
+    return lax.map(
+        target_flux,
+        (gammas_targets, gammadashs_targets),
+        batch_size=_FORCE_COIL_MAP_BATCH_SIZE,
     )
 
 
@@ -1763,7 +1774,7 @@ def squared_mean_force_pure(
                 eps,
             )
 
-        B_mutual = vmap(B_at_pt)(gamma_i)
+        B_mutual = _map_force_points(B_at_pt, gamma_i)
         force_density = _lorentz_force_density_pure(tangent_i, current_i, B_mutual)
         return jnp.sum(force_density * gammadash_norm_i, axis=0) / npts1
 
@@ -2103,7 +2114,7 @@ def lp_force_pure(
     )
 
     def per_coil_obj_group1(i, gamma_i, tangent_i, B_self_i, current_i):
-        B_mutual = vmap(
+        B_mutual = _map_force_points(
             lambda pt: _mutual_B_field_at_point_pure(
                 i,
                 pt,
@@ -2117,8 +2128,9 @@ def lp_force_pure(
                 gammadashs_sources_fine,
                 currents_sources_fine,
                 eps,
-            )
-        )(gamma_i)
+            ),
+            gamma_i,
+        )
         F = _lorentz_force_density_pure(tangent_i, current_i, B_mutual + B_self_i)
         # Force per unit length is in N/m, convert to MN/m
         return jnp.linalg.norm(F, axis=-1) / 1e6
@@ -2483,10 +2495,11 @@ def lp_torque_pure(
     npts1 = gammas_targets.shape[1]
 
     def per_coil_obj_group1(i, gamma_i, center_i, tangent_i, B_self_i, current_i):
-        def torque_at_point(idx):
+        def torque_at_point(point_inputs):
+            gamma_point, tangent_point, B_self_point = point_inputs
             B_mutual = _mutual_B_field_at_point_pure(
                 i,
-                gamma_i[idx],
+                gamma_point,
                 gammas_targets,
                 gammadashs_targets,
                 currents_targets,
@@ -2498,13 +2511,13 @@ def lp_torque_pure(
                 currents_sources_fine,
                 eps,
             )
-            F = current_i * jnp.cross(tangent_i[idx], B_mutual + B_self_i[idx])
-            tau = jnp.cross(gamma_i[idx] - center_i, F)
+            F = current_i * jnp.cross(tangent_point, B_mutual + B_self_point)
+            tau = jnp.cross(gamma_point - center_i, F)
             # Torque per unit length is in N, convert to MN
             torque_per_unit_length_N = jnp.linalg.norm(tau)
             return torque_per_unit_length_N / 1e6  # Convert to MN
 
-        return vmap(torque_at_point)(jnp.arange(npts1))
+        return _map_force_points(torque_at_point, (gamma_i, tangent_i, B_self_i))
 
     obj1 = vmap(per_coil_obj_group1, in_axes=(0, 0, 0, 0, 0, 0))(
         jnp.arange(n1), gammas_targets, centers, tangents, B_self, currents_targets
@@ -2840,7 +2853,7 @@ def squared_mean_torque(
     def mean_torque_group1(i, gamma_i, gammadash_i, center_i, current_i):
         arclength = jnp.linalg.norm(gammadash_i, axis=-1)
         tangent = gammadash_i / arclength[:, None]
-        B_mutual = vmap(
+        B_mutual = _map_force_points(
             lambda pt: _mutual_B_field_at_point_pure(
                 i,
                 pt,
@@ -2854,8 +2867,9 @@ def squared_mean_torque(
                 gammadashs_sources_fine,
                 currents_sources_fine,
                 eps,
-            )
-        )(gamma_i)
+            ),
+            gamma_i,
+        )
         F = _lorentz_force_density_pure(tangent, current_i, B_mutual)
         torques = jnp.cross(gamma_i - center_i[None, :], F) * arclength[:, None]
         return jnp.sum(torques, axis=0) / npts1

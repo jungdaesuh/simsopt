@@ -61,8 +61,9 @@ from simsopt_jax_adapters.field._coil_graph import (
 )
 from simsopt_jax_adapters.geo.surface_objectives import _surface_spec_from_surface
 from simsopt_jax.geo._pairwise_reductions import (
+    pairwise_min_distance_batched_pure,
     pairwise_min_distance_pure,
-    pairwise_selected_smoothmin_distance_pure,
+    pairwise_selected_smoothmin_distance_batched_pure,
 )
 from simsopt_jax.geo.optimizers.optimizer import (
     _mark_cacheable_jit_value_and_grad,
@@ -275,10 +276,6 @@ def _curve_pairs_from_grouped_coil_set_spec(coil_set_spec):
     return tuple(curve_pairs)
 
 
-def _curve_group_arrays(group):
-    return _as_jax_float64(group.gammas), _as_jax_float64(group.gammadashs)
-
-
 def _curve_group_host_arrays(group):
     return (
         _shared_host_array(group.gammas, dtype=np.float64),
@@ -361,6 +358,129 @@ def _curve_groups_from_grouped_coil_set_spec(coil_set_spec):
     for group in coil_set_spec.groups:
         curve_groups.append(_curve_group_host_arrays(group))
     return tuple(curve_groups)
+
+
+def _point_pair_batch_count(point_pair_batches) -> int:
+    return sum(int(points_a.shape[0]) for points_a, _points_b in point_pair_batches)
+
+
+def _stack_point_pair_batches(point_pairs) -> tuple[tuple[jax.Array, jax.Array], ...]:
+    grouped: dict[
+        tuple[tuple[int, ...], tuple[int, ...]],
+        list[tuple[jax.Array, jax.Array]],
+    ] = {}
+    for left_points, right_points in point_pairs:
+        left = _as_jax_float64(left_points).reshape((-1, 3))
+        right = _as_jax_float64(right_points).reshape((-1, 3))
+        key = (
+            tuple(int(dim) for dim in left.shape),
+            tuple(int(dim) for dim in right.shape),
+        )
+        grouped.setdefault(key, []).append((left, right))
+    return tuple(
+        (
+            jnp.stack(tuple(left for left, _right in pairs), axis=0),
+            jnp.stack(tuple(right for _left, right in pairs), axis=0),
+        )
+        for pairs in grouped.values()
+    )
+
+
+def _static_cross_pair_indices(left_count: int, right_count: int):
+    return (
+        np.repeat(np.arange(left_count, dtype=np.int32), right_count),
+        np.tile(np.arange(right_count, dtype=np.int32), left_count),
+    )
+
+
+def _static_strict_lower_pair_indices(curve_count: int):
+    left_indices, right_indices = np.tril_indices(curve_count, k=-1)
+    return (
+        left_indices.astype(np.int32, copy=False),
+        right_indices.astype(np.int32, copy=False),
+    )
+
+
+def _runtime_point_pair_batches(point_pair_batches, *, reference):
+    return tuple(
+        (
+            _runtime_float64_array(left_points, reference=reference),
+            _runtime_float64_array(right_points, reference=reference),
+        )
+        for left_points, right_points in point_pair_batches
+    )
+
+
+def _curve_curve_alm_point_pair_batches(
+    dynamic_gammas,
+    tf_curve_groups,
+    fixed_curve_curve_point_pair_batches,
+    *,
+    reference,
+):
+    """Return all curve-curve ALM point-cloud pairs as homogeneous batches."""
+
+    dynamic_count = int(dynamic_gammas.shape[0])
+    batches = list(
+        _runtime_point_pair_batches(
+            fixed_curve_curve_point_pair_batches,
+            reference=reference,
+        )
+    )
+    tf_curve_count = 0
+    for tf_gammas, _tf_gammadashs in tf_curve_groups:
+        tf_gammas_runtime = _runtime_float64_array(tf_gammas, reference=reference)
+        tf_count = int(tf_gammas_runtime.shape[0])
+        tf_curve_count += tf_count
+        left_indices, right_indices = _static_cross_pair_indices(
+            dynamic_count,
+            tf_count,
+        )
+        if left_indices.size > 0:
+            batches.append(
+                (
+                    dynamic_gammas[left_indices],
+                    tf_gammas_runtime[right_indices],
+                )
+            )
+
+    left_indices, right_indices = _static_strict_lower_pair_indices(dynamic_count)
+    if left_indices.size > 0:
+        batches.append(
+            (
+                dynamic_gammas[left_indices],
+                dynamic_gammas[right_indices],
+            )
+        )
+
+    expected_pair_count = (
+        _point_pair_batch_count(fixed_curve_curve_point_pair_batches)
+        + dynamic_count * tf_curve_count
+        + dynamic_count * (dynamic_count - 1) // 2
+    )
+    assert _point_pair_batch_count(tuple(batches)) == expected_pair_count
+    return tuple(batches)
+
+
+def _curve_surface_alm_point_pair_batches(
+    dynamic_gammas,
+    tf_curve_groups,
+    flat_surface,
+    *,
+    reference,
+):
+    """Return all curve-surface ALM point-cloud pairs as homogeneous batches."""
+
+    batches = []
+    expected_pair_count = int(dynamic_gammas.shape[0])
+    for tf_gammas, _tf_gammadashs in tf_curve_groups:
+        tf_gammas_runtime = _runtime_float64_array(tf_gammas, reference=reference)
+        expected_pair_count += int(tf_gammas_runtime.shape[0])
+        batches.append((tf_gammas_runtime, flat_surface))
+    if int(dynamic_gammas.shape[0]) > 0:
+        batches.append((dynamic_gammas, flat_surface))
+    assert _point_pair_batch_count(tuple(batches)) == expected_pair_count
+    return tuple(batches)
 
 
 def _banana_symmetry_runtime_inputs_from_coils(banana_coils):
@@ -516,25 +636,18 @@ def _dynamic_curve_curve_min_distance(
         initial_min_distance,
         reference=dynamic_gammas,
     )
-    dynamic_points = dynamic_gammas.reshape((-1, 3))
-    for tf_gammas, _tf_gammadashs in tf_curve_groups:
-        min_distance = jnp.minimum(
-            min_distance,
-            pairwise_min_distance_pure(
-                dynamic_points,
-                _runtime_float64_array(tf_gammas, reference=dynamic_gammas).reshape(
-                    (-1, 3)
-                ),
-            ),
-        )
-    for curve_index in range(int(dynamic_gammas.shape[0])):
-        gamma_i = dynamic_gammas[curve_index]
-        for previous_index in range(curve_index):
-            min_distance = jnp.minimum(
-                min_distance,
-                pairwise_min_distance_pure(gamma_i, dynamic_gammas[previous_index]),
-            )
-    return min_distance
+    point_pair_batches = _curve_curve_alm_point_pair_batches(
+        dynamic_gammas,
+        tf_curve_groups,
+        (),
+        reference=dynamic_gammas,
+    )
+    if not point_pair_batches:
+        return min_distance
+    return jnp.minimum(
+        min_distance,
+        pairwise_min_distance_batched_pure(point_pair_batches),
+    )
 
 
 def _dynamic_curve_surface_min_distance(
@@ -543,23 +656,15 @@ def _dynamic_curve_surface_min_distance(
     surface_gamma,
 ):
     surface_points = surface_gamma.reshape((-1, 3))
-    min_distance = _runtime_float64_scalar(np.inf, reference=dynamic_gammas)
-    for tf_gammas, _tf_gammadashs in tf_curve_groups:
-        min_distance = jnp.minimum(
-            min_distance,
-            pairwise_min_distance_pure(
-                _runtime_float64_array(tf_gammas, reference=dynamic_gammas).reshape(
-                    (-1, 3)
-                ),
-                surface_points,
-            ),
-        )
-    for curve_index in range(int(dynamic_gammas.shape[0])):
-        min_distance = jnp.minimum(
-            min_distance,
-            pairwise_min_distance_pure(dynamic_gammas[curve_index], surface_points),
-        )
-    return min_distance
+    point_pair_batches = _curve_surface_alm_point_pair_batches(
+        dynamic_gammas,
+        tf_curve_groups,
+        surface_points,
+        reference=dynamic_gammas,
+    )
+    if not point_pair_batches:
+        return _runtime_float64_scalar(np.inf, reference=dynamic_gammas)
+    return pairwise_min_distance_batched_pure(point_pair_batches)
 
 
 def _summarize_pairwise_row_triplet_sharding(
@@ -692,6 +797,12 @@ def build_stage2_target_objective(
             fixed_curve_curve_min_distance,
             _host_float64_scalar(pairwise_min_distance_pure(left_gamma, right_gamma)),
         )
+    fixed_curve_curve_point_pair_batches = _stack_point_pair_batches(
+        tuple(fixed_curve_curve_point_pairs)
+    )
+    assert _point_pair_batch_count(
+        fixed_curve_curve_point_pair_batches
+    ) == len(fixed_curve_curve_point_pairs)
 
     banana_rotmats, banana_current_scales = _banana_symmetry_runtime_inputs_from_coils(
         banana_coils
@@ -707,8 +818,8 @@ def build_stage2_target_objective(
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
     surface_gamma_runtime = _runtimeify_tree(surface_gamma)
-    fixed_curve_curve_point_pairs_runtime = _runtimeify_tree(
-        tuple(fixed_curve_curve_point_pairs)
+    fixed_curve_curve_point_pair_batches_runtime = _runtimeify_tree(
+        fixed_curve_curve_point_pair_batches
     )
 
     def _dynamic_curve_runtime_state(dofs):
@@ -1058,30 +1169,16 @@ def build_stage2_target_objective(
         include_coil_surface = curve_surface_threshold is not None
 
         def _curve_curve_signed_constraint(dynamic_gammas, *, reference):
-            point_pairs = []
-            for left_gamma, right_gamma in fixed_curve_curve_point_pairs_runtime:
-                point_pairs.append(
-                    (
-                        _runtime_float64_array(left_gamma, reference=reference),
-                        _runtime_float64_array(right_gamma, reference=reference),
-                    )
-                )
-            for dynamic_index in range(int(dynamic_gammas.shape[0])):
-                gamma_i = dynamic_gammas[dynamic_index]
-                for tf_gammas, _tf_gammadashs in tf_curve_groups_runtime:
-                    point_pairs.append(
-                        (
-                            gamma_i,
-                            _runtime_float64_array(tf_gammas, reference=reference),
-                        )
-                    )
-                for previous_index in range(dynamic_index):
-                    gamma_j = dynamic_gammas[previous_index]
-                    point_pairs.append((gamma_i, gamma_j))
-            if not point_pairs:
+            point_pair_batches = _curve_curve_alm_point_pair_batches(
+                dynamic_gammas,
+                tf_curve_groups_runtime,
+                fixed_curve_curve_point_pair_batches_runtime,
+                reference=reference,
+            )
+            if not point_pair_batches:
                 return _runtime_float64_scalar(cc_threshold, reference=reference)
-            smooth_min = pairwise_selected_smoothmin_distance_pure(
-                tuple(point_pairs),
+            smooth_min = pairwise_selected_smoothmin_distance_batched_pure(
+                point_pair_batches,
                 temperature=distance_smoothing,
             )
             return (
@@ -1093,28 +1190,19 @@ def build_stage2_target_objective(
                 surface_gamma_runtime,
                 reference=reference,
             ).reshape((-1, 3))
-            point_pairs = []
-            for tf_gammas, _tf_gammadashs in tf_curve_groups_runtime:
-                point_pairs.append(
-                    (
-                        _runtime_float64_array(tf_gammas, reference=reference),
-                        flat_surface,
-                    )
-                )
-            for dynamic_index in range(int(dynamic_gammas.shape[0])):
-                point_pairs.append(
-                    (
-                        dynamic_gammas[dynamic_index],
-                        flat_surface,
-                    )
-                )
-            if not point_pairs:
+            point_pair_batches = _curve_surface_alm_point_pair_batches(
+                dynamic_gammas,
+                tf_curve_groups_runtime,
+                flat_surface,
+                reference=reference,
+            )
+            if not point_pair_batches:
                 return _runtime_float64_scalar(
                     curve_surface_threshold,
                     reference=reference,
                 )
-            smooth_min = pairwise_selected_smoothmin_distance_pure(
-                tuple(point_pairs),
+            smooth_min = pairwise_selected_smoothmin_distance_batched_pure(
+                point_pair_batches,
                 temperature=distance_smoothing,
             )
             return (

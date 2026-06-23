@@ -780,6 +780,7 @@ def _run_mwpgp_with_alpha(
     nu: float,
     reg_l2: float,
     max_iter: int,
+    record_residual: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     spec = PMOptimizationSpec(
         m_maxima=grid.m_maxima,
@@ -788,7 +789,14 @@ def _run_mwpgp_with_alpha(
         reg_l2=_scalar_like(reg_l2, grid.A_obj),
         alpha=alpha,
     )
-    return mwpgp_solve(spec, grid.A_obj, grid.ATb, m0, n_steps=max_iter)
+    return mwpgp_solve(
+        spec,
+        grid.A_obj,
+        grid.ATb,
+        m0,
+        n_steps=max_iter,
+        record_residual=record_residual,
+    )
 
 
 @jax.jit
@@ -852,6 +860,7 @@ def _relax_and_split_scan(
             nu=nu,
             reg_l2=reg_l2,
             max_iter=max_iter,
+            record_residual=False,
         )
         error = _relax_and_split_cost(
             grid,

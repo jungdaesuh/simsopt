@@ -3,8 +3,11 @@
 Lane key: derivative_heavy for explicit traceable Jacobian checks.
 """
 
+import ast
 import csv
+import inspect
 import os
+import textwrap
 
 import jax
 import jax.numpy as jnp
@@ -53,6 +56,32 @@ def _assert_log_records_multiple_ordered_evaluations(path):
     assert len(rows) >= 3
     assert [int(row["function_evaluation"]) for row in rows] == list(range(len(rows)))
     return rows
+
+
+def test_constrained_serial_solve_jax_augmented_objective_is_loop_invariant():
+    """AL solve passes changing multipliers/penalty as args, not closure state."""
+    source = textwrap.dedent(inspect.getsource(constrained_serial_solve_jax))
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For):
+            assert not any(
+                isinstance(child, ast.FunctionDef)
+                and child.name == "augmented_objective"
+                for child in node.body
+            )
+
+    minimise_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "minimise"
+    ]
+    assert any(
+        any(keyword.arg == "args" for keyword in call.keywords)
+        for call in minimise_calls
+    )
 
 
 def _weighted_quadratic_residual(x):

@@ -145,6 +145,18 @@ def _analytic_trapped_fraction_inputs(dimension):
     return modB, sqrtg
 
 
+def test_not_a_knot_coefficients_uses_compact_banded_solve():
+    source = Path("src/simsopt_jax/core/mhd_bootstrap.py").read_text()
+    function_source = source[
+        source.index("def _not_a_knot_coefficients") : source.index("def _eval_cubic")
+    ]
+
+    assert "tridiagonal_solve" in function_source
+    assert "jnp.linalg.solve" not in function_source
+    assert "jnp.zeros((size, size)" not in function_source
+    assert "matrix_rows" not in function_source
+
+
 def test_compute_trapped_fraction_jax_matches_cpu_2d_and_3d():
     """Oracle: upstream CPU trapped-fraction routine on analytic fixtures.
 

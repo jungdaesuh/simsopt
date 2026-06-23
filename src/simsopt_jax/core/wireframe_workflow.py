@@ -80,6 +80,7 @@ class WireframeGSCOLiveParams:
     no_crossing: bool
     no_new_coils: bool
     match_current: bool
+    loop_columns: jax.Array | None = None
 
 
 jax.tree_util.register_dataclass(
@@ -94,6 +95,7 @@ jax.tree_util.register_dataclass(
         "max_current",
         "lambda_s",
         "tol",
+        "loop_columns",
     ],
     meta_fields=["max_loop_count", "no_crossing", "no_new_coils", "match_current"],
 )
@@ -216,11 +218,26 @@ def _gsco_signed_loop_delta(currents: jax.Array) -> jax.Array:
     return jnp.stack((currents, currents, -currents, -currents), axis=-1)
 
 
+@jax.jit
 def _update_vector_entry(
     vector: jax.Array, index: jax.Array, value: jax.Array
 ) -> jax.Array:
-    positions = jnp.arange(int(vector.shape[0]), dtype=index.dtype)
-    return jnp.where(positions == index, jnp.broadcast_to(value, vector.shape), vector)
+    # jit so the scatter's negative-index normalization (which materializes the
+    # axis size as an int64 device scalar) is traced to a compile-time constant
+    # rather than executed eagerly -- the latter trips transfer_guard("disallow")
+    # when this helper is called outside jit (e.g. the final-flush history writes).
+    return vector.at[index].set(value, mode="drop")
+
+
+@jax.jit
+def _gsco_loop_columns(A: jax.Array, loops: jax.Array) -> jax.Array:
+    # jit for the same reason as _update_vector_entry: the eager gather below
+    # would normalize indices via a device-resident size scalar (host->device
+    # transfer) when hoisted out of the jitted candidate-objective body.
+    n_loops = int(loops.shape[0])
+    candidate_ids = jnp.arange(2 * n_loops, dtype=jnp.int32)
+    loop_ids = candidate_ids % _runtime_init_scalar(n_loops, candidate_ids.dtype)
+    return A[:, loops[loop_ids, :]]
 
 
 def _gsco_two_f_s(x: jax.Array, tol: jax.Array) -> jax.Array:
@@ -336,7 +353,12 @@ def _gsco_candidate_objectives(
     ]
     loop_delta = _gsco_signed_loop_delta(candidate_currents)
 
-    field_delta = jnp.sum(params.A[:, loop_inds] * loop_delta[None, :, :], axis=2)
+    loop_columns = (
+        _gsco_loop_columns(params.A, params.loops)
+        if params.loop_columns is None
+        else params.loop_columns
+    )
+    field_delta = jnp.sum(loop_columns * loop_delta[None, :, :], axis=2)
     two_f_b = jnp.sum((residual[:, None] + field_delta) ** 2, axis=0)
 
     loop_x = x[loop_inds]
@@ -678,25 +700,27 @@ def _gsco_live_step(
     two_f_next = jnp.where(accept_loop, two_f_candidate, state.two_f)
 
     write_index = state.history_length
+    dropped_index = _runtime_init_scalar(state.iter_history.shape[0], write_index.dtype)
+    write_index_or_drop = jnp.where(accept_loop, write_index, dropped_index)
     history_length_next = write_index + accept_loop.astype(write_index.dtype)
     iter_history_candidate = _update_vector_entry(
-        state.iter_history, write_index, write_index
+        state.iter_history, write_index_or_drop, write_index
     )
     curr_history_candidate = _update_vector_entry(
-        state.curr_history, write_index, current
+        state.curr_history, write_index_or_drop, current
     )
     loop_history_candidate = _update_vector_entry(
-        state.loop_history, write_index, loop_ind
+        state.loop_history, write_index_or_drop, loop_ind
     )
     half = _runtime_init_scalar(0.5, params.A.dtype)
     f_b_history_candidate = _update_vector_entry(
-        state.f_B_history, write_index, half * two_f_b_next
+        state.f_B_history, write_index_or_drop, half * two_f_b_next
     )
     f_s_history_candidate = _update_vector_entry(
-        state.f_S_history, write_index, half * two_f_s_next
+        state.f_S_history, write_index_or_drop, half * two_f_s_next
     )
     f_history_candidate = _update_vector_entry(
-        state.f_history, write_index, half * two_f_next
+        state.f_history, write_index_or_drop, half * two_f_next
     )
 
     next_state = WireframeGSCOLiveState(
@@ -713,12 +737,12 @@ def _gsco_live_step(
         ),
         history_length=history_length_next,
         done=state.done | stop_now,
-        iter_history=jnp.where(accept_loop, iter_history_candidate, state.iter_history),
-        curr_history=jnp.where(accept_loop, curr_history_candidate, state.curr_history),
-        loop_history=jnp.where(accept_loop, loop_history_candidate, state.loop_history),
-        f_B_history=jnp.where(accept_loop, f_b_history_candidate, state.f_B_history),
-        f_S_history=jnp.where(accept_loop, f_s_history_candidate, state.f_S_history),
-        f_history=jnp.where(accept_loop, f_history_candidate, state.f_history),
+        iter_history=iter_history_candidate,
+        curr_history=curr_history_candidate,
+        loop_history=loop_history_candidate,
+        f_B_history=f_b_history_candidate,
+        f_S_history=f_s_history_candidate,
+        f_history=f_history_candidate,
     )
     return replace(next_state, done=next_state.done | stop_rule(next_state))
 
@@ -897,6 +921,8 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
         recorded_count_next = recorded_count + should_record.astype(
             recorded_count.dtype
         )
+        dropped_slot = _runtime_init_scalar(iter_history.shape[0], slot.dtype)
+        slot_or_drop = jnp.where(should_record, slot, dropped_slot)
         f_b_row = half * two_f_b_next
         f_s_row = half * two_f_s_next
         f_row = half * two_f_next
@@ -922,35 +948,35 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
             jnp.where(accept_loop, f_b_row, last_f_b),
             jnp.where(accept_loop, f_s_row, last_f_s),
             jnp.where(accept_loop, f_row, last_f),
-            jnp.where(
-                should_record,
-                _update_vector_entry(iter_history, slot, accepted_count_next),
+            _update_vector_entry(
                 iter_history,
+                slot_or_drop,
+                accepted_count_next,
             ),
-            jnp.where(
-                should_record,
-                _update_vector_entry(curr_history, slot, current),
+            _update_vector_entry(
                 curr_history,
+                slot_or_drop,
+                current,
             ),
-            jnp.where(
-                should_record,
-                _update_vector_entry(loop_history, slot, loop_ind),
+            _update_vector_entry(
                 loop_history,
+                slot_or_drop,
+                loop_ind,
             ),
-            jnp.where(
-                should_record,
-                _update_vector_entry(f_b_history, slot, f_b_row),
+            _update_vector_entry(
                 f_b_history,
+                slot_or_drop,
+                f_b_row,
             ),
-            jnp.where(
-                should_record,
-                _update_vector_entry(f_s_history, slot, f_s_row),
+            _update_vector_entry(
                 f_s_history,
+                slot_or_drop,
+                f_s_row,
             ),
-            jnp.where(
-                should_record,
-                _update_vector_entry(f_history, slot, f_row),
+            _update_vector_entry(
                 f_history,
+                slot_or_drop,
+                f_row,
             ),
         ), None
 
@@ -1020,40 +1046,42 @@ def _greedy_stellarator_coil_optimization_sampled_jax(
         (accepted_count % record_every_arr) != zero_count
     )
     final_slot = recorded_count
+    dropped_final_slot = _runtime_init_scalar(iter_history.shape[0], final_slot.dtype)
+    final_slot_or_drop = jnp.where(final_unrecorded, final_slot, dropped_final_slot)
     history_length = recorded_count + final_unrecorded.astype(recorded_count.dtype)
     return WireframeGSCOResult(
         x=jnp.reshape(x, (-1, 1)),
         loop_count=loop_count,
         history_length=history_length,
-        iter_history=jnp.where(
-            final_unrecorded,
-            _update_vector_entry(iter_history, final_slot, last_iter),
+        iter_history=_update_vector_entry(
             iter_history,
+            final_slot_or_drop,
+            last_iter,
         ),
-        curr_history=jnp.where(
-            final_unrecorded,
-            _update_vector_entry(curr_history, final_slot, last_curr),
+        curr_history=_update_vector_entry(
             curr_history,
+            final_slot_or_drop,
+            last_curr,
         ),
-        loop_history=jnp.where(
-            final_unrecorded,
-            _update_vector_entry(loop_history, final_slot, last_loop),
+        loop_history=_update_vector_entry(
             loop_history,
+            final_slot_or_drop,
+            last_loop,
         ),
-        f_B_history=jnp.where(
-            final_unrecorded,
-            _update_vector_entry(f_b_history, final_slot, last_f_b),
+        f_B_history=_update_vector_entry(
             f_b_history,
+            final_slot_or_drop,
+            last_f_b,
         ),
-        f_S_history=jnp.where(
-            final_unrecorded,
-            _update_vector_entry(f_s_history, final_slot, last_f_s),
+        f_S_history=_update_vector_entry(
             f_s_history,
+            final_slot_or_drop,
+            last_f_s,
         ),
-        f_history=jnp.where(
-            final_unrecorded,
-            _update_vector_entry(f_history, final_slot, last_f),
+        f_history=_update_vector_entry(
             f_history,
+            final_slot_or_drop,
+            last_f,
         ),
     )
 
@@ -1080,12 +1108,13 @@ def greedy_stellarator_coil_optimization_jax(
     """Run the fixed-state GSCO live loop and return fixed-shape histories."""
 
     A = _as_runtime_array(A_obj)
+    loops_arr = _as_jax_int32(loops)
     n_iter = int(max_iter)
     _validate_record_every(record_every)
     default_current_abs = jnp.abs(_runtime_init_scalar(default_current, A.dtype))
     params = WireframeGSCOLiveParams(
         A=A,
-        loops=_as_jax_int32(loops),
+        loops=loops_arr,
         free_loops=_as_jax_int32(free_loops),
         segments=_as_jax_int32(segments),
         connections=_as_jax_int32(connections),
@@ -1097,6 +1126,7 @@ def greedy_stellarator_coil_optimization_jax(
         no_crossing=no_crossing,
         no_new_coils=no_new_coils,
         match_current=match_current,
+        loop_columns=_gsco_loop_columns(A, loops_arr),
     )
     if record_every is not None:
         return _greedy_stellarator_coil_optimization_sampled_jax(

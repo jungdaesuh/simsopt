@@ -964,8 +964,14 @@ def boozer_residual_jacobian_composed(
             x_value, **kwargs
         )
         r, vjp_fn = jax.vjp(residual_fn, x_jax)
-        cotangent_basis = jnp.eye(n_res, dtype=r.dtype)
-        (J,) = jax.vmap(vjp_fn)(cotangent_basis)
+        row_indices = jnp.arange(n_res, dtype=jnp.int32)
+
+        def vjp_row(row_index):
+            cotangent = jnp.zeros((n_res,), dtype=r.dtype).at[row_index].set(1.0)
+            (row,) = vjp_fn(cotangent)
+            return row
+
+        J = jax.lax.map(vjp_row, row_indices)
         return r, J
 
     jvp_kwargs = dict(kwargs)
@@ -974,8 +980,13 @@ def boozer_residual_jacobian_composed(
         x_value, **jvp_kwargs
     )
     r, jvp_fn = jax.linearize(residual_fn, x_jax)
-    tangent_basis = jnp.eye(n_dofs, dtype=x_jax.dtype)
-    return r, jnp.swapaxes(jax.vmap(jvp_fn)(tangent_basis), 0, 1)
+    column_indices = jnp.arange(n_dofs, dtype=jnp.int32)
+
+    def jvp_column(column_index):
+        tangent = jnp.zeros((n_dofs,), dtype=x_jax.dtype).at[column_index].set(1.0)
+        return jvp_fn(tangent)
+
+    return r, jnp.swapaxes(jax.lax.map(jvp_column, column_indices), 0, 1)
 
 
 def boozer_residual_coil_vjp(

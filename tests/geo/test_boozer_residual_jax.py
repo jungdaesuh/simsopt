@@ -17,9 +17,10 @@ C++ oracle tests use ``pytest.importorskip("simsoptpp")`` so this file
 remains runnable in pure-JAX environments without ``simsoptpp``.
 """
 
+import inspect
 import math
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 import numpy as np
@@ -59,6 +60,13 @@ from simsopt_jax.geo.boozer_residual import (
 from simsopt_jax.geo.label_constraints import compute_G_from_currents
 
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+
+
+def test_boozer_residual_jacobian_composed_avoids_dense_basis_eye():
+    source = inspect.getsource(boozer_residual_jacobian_composed)
+
+    assert "jnp.eye" not in source
+    assert "jax.lax.map" in source
 
 
 @pytest.fixture(autouse=True)

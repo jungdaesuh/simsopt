@@ -4,6 +4,7 @@ The filename tracks the original review item for optimizer dispatch cleanup;
 the Boozer M1 Hessian split regression lives in ``test_boozer_residual_jax.py``.
 """
 
+import inspect
 from pathlib import Path
 
 import jax
@@ -26,6 +27,45 @@ def test_item19_optimizer_jax_exposes_no_dynamic_private_loader():
     assert not hasattr(_opt, "_private_pkg")
     assert not hasattr(_opt, "_load_private_pkg")
     assert not hasattr(_opt, "_load_reference_optimizer_module")
+
+
+def test_item19_host_dense_hessian_reuses_chunked_device_materializer():
+    assert not hasattr(_opt, "_materialize_dense_linear_operator_host")
+
+
+def test_item19_host_dense_hessian_agrees_with_device_materializer():
+    operator = jnp.asarray(
+        [
+            [2.0, 0.5 + 1.0e-8, -0.25],
+            [0.5 - 2.0e-8, 3.0, 0.75 + 3.0e-8],
+            [-0.25, 0.75 - 1.0e-8, 4.0],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def hvp_fn(_x, v):
+        return operator @ v
+
+    x = jnp.zeros(3, dtype=jnp.float64)
+    host_hessian = _opt._materialize_dense_hessian_host(hvp_fn, x)
+    device_hessian = _opt._materialize_dense_hessian(hvp_fn, x)
+
+    np.testing.assert_allclose(
+        np.asarray(host_hessian),
+        np.asarray(device_hessian),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_item19_dense_lm_damping_avoids_identity_allocation():
+    propose_step_source = inspect.getsource(_opt._dense_lm_propose_step)
+    stabilize_source = inspect.getsource(_opt._stabilize_dense_hessian)
+
+    assert "jnp.diag_indices" in propose_step_source
+    assert "jnp.diag_indices" in stabilize_source
+    assert "jnp.eye" not in propose_step_source
+    assert "jnp.eye" not in stabilize_source
 
 
 def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():

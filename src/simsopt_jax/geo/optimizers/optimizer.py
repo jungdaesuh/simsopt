@@ -2432,9 +2432,8 @@ def _dense_lm_propose_step(hessian, gradient, damping):
     gradient = jnp.asarray(gradient)
     dtype = hessian.dtype
     cols = hessian.shape[1]
-    damped_hessian = hessian + jnp.asarray(damping, dtype=dtype) * jnp.eye(
-        cols,
-        dtype=dtype,
+    damped_hessian = hessian.at[jnp.diag_indices(cols)].add(
+        jnp.asarray(damping, dtype=dtype)
     )
     return jnp.linalg.solve(damped_hessian, gradient)
 
@@ -3621,17 +3620,6 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
     return jnp.swapaxes(cols, 0, 1)
 
 
-def _materialize_dense_linear_operator_host(linear_operator_fn, x):
-    x_array = jnp.ravel(jnp.asarray(x))
-    columns = []
-    for index in range(int(x_array.size)):
-        basis = jnp.zeros_like(x_array).at[index].set(
-            _device_scalar(1.0, dtype=x_array.dtype)
-        )
-        columns.append(jnp.ravel(jnp.asarray(linear_operator_fn(x, basis))))
-    return jnp.stack(columns, axis=1)
-
-
 def _hessian_vector_product_fn(objective_fn):
     def build_compiled(fn):
         grad_fn = jax.grad(fn, argnums=0)
@@ -3663,11 +3651,7 @@ def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
 
 
 def _materialize_dense_hessian_host(hvp_fn, x, *, symmetrize=True):
-    dense = _materialize_dense_linear_operator_host(hvp_fn, x)
-    if not bool(symmetrize):
-        return dense
-    upper = jnp.triu(dense)
-    return upper + jnp.triu(dense, 1).T
+    return _materialize_dense_hessian(hvp_fn, x, symmetrize=symmetrize)
 
 
 def _materialize_dense_jacobian(jvp_fn, x):
@@ -3761,7 +3745,7 @@ def _exact_newton_dense_jacobian_policy(rows, cols, dtype, max_dense_bytes):
 
 def _stabilize_dense_hessian(H, stab):
     stab_value = _optimizer_scalar(stab, dtype=H.dtype)
-    return H + stab_value * jnp.eye(H.shape[0], dtype=H.dtype)
+    return H.at[jnp.diag_indices(H.shape[0])].add(stab_value)
 
 
 def _solve_dense_newton_step(H, grad, *, refine):

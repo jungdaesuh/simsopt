@@ -775,6 +775,9 @@ def gpmo_baseline_candidate_costs(
     A_scaled: jax.Array,
     residual: jax.Array,
     available: jax.Array,
+    *,
+    penalty: jax.Array | None = None,
+    col_sq: jax.Array | None = None,
 ) -> jax.Array:
     """Return baseline GPMO plus/minus candidate costs.
 
@@ -790,12 +793,20 @@ def gpmo_baseline_candidate_costs(
     reg_l2 = _as_runtime_array(spec.reg_l2)
 
     n_components = A_arr.shape[1]
-    penalty = reg_l2 * _component_mmax(m_maxima) ** 2
+    penalty_arr = (
+        reg_l2 * _component_mmax(m_maxima) ** 2
+        if penalty is None
+        else _as_runtime_array(penalty)
+    )
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = A_arr.T @ residual_arr
-    col_sq = jnp.sum(A_arr * A_arr, axis=0)
-    plus = residual_sq + 2.0 * dot + col_sq + penalty
-    minus = residual_sq - 2.0 * dot + col_sq + penalty
+    col_sq_arr = (
+        jnp.sum(A_arr * A_arr, axis=0)
+        if col_sq is None
+        else _as_runtime_array(col_sq)
+    )
+    plus = residual_sq + 2.0 * dot + col_sq_arr + penalty_arr
+    minus = residual_sq - 2.0 * dot + col_sq_arr + penalty_arr
 
     available_components = jnp.reshape(available, (n_components,))
     direction_mask = _single_direction_mask(n_components, spec.single_direction)
@@ -810,11 +821,21 @@ def gpmo_baseline_step(
     spec: GPMOBaselineSpec,
     state: tuple[jax.Array, jax.Array, jax.Array],
     A_scaled: jax.Array,
+    *,
+    penalty: jax.Array | None = None,
+    col_sq: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
     """Run one normalized baseline GPMO placement step."""
 
     x, residual, available = state
-    costs = gpmo_baseline_candidate_costs(spec, A_scaled, residual, available)
+    costs = gpmo_baseline_candidate_costs(
+        spec,
+        A_scaled,
+        residual,
+        available,
+        penalty=penalty,
+        col_sq=col_sq,
+    )
     n_components = A_scaled.shape[1]
     choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_components
@@ -879,6 +900,7 @@ def gpmo_baseline_solve(
     A_arr = _as_runtime_array(A_scaled)
     b_arr = _as_runtime_array(b)
     m_maxima = _as_runtime_array(spec.m_maxima)
+    reg_l2 = _as_runtime_array(spec.reg_l2)
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_static_args(K, spec.single_direction, ndipoles)
     _validate_record_every(record_every)
@@ -899,10 +921,18 @@ def gpmo_baseline_solve(
             selected_components=empty_int,
             selected_signs=empty_float,
         )
+    penalty = reg_l2 * _component_mmax(m_maxima) ** 2
+    col_sq = jnp.sum(A_arr * A_arr, axis=0)
     if record_every is not None:
 
         def _recording_step(state, _iteration):
-            return gpmo_baseline_step(spec, state, A_arr)
+            return gpmo_baseline_step(
+                spec,
+                state,
+                A_arr,
+                penalty=penalty,
+                col_sq=col_sq,
+            )
 
         final_state, x_history, residual_history, extra_histories = (
             _gpmo_recording_scan(
@@ -932,7 +962,13 @@ def gpmo_baseline_solve(
         )
 
     def _scan_body(state, _):
-        return gpmo_baseline_step(spec, state, A_arr)
+        return gpmo_baseline_step(
+            spec,
+            state,
+            A_arr,
+            penalty=penalty,
+            col_sq=col_sq,
+        )
 
     final_state, trace = jax.lax.scan(
         _scan_body, (x0, residual0, available0), xs=None, length=K
@@ -975,6 +1011,9 @@ def _gpmo_arbvec_candidate_costs_for_allowed(
     contributions: jax.Array,
     residual: jax.Array,
     allowed: jax.Array,
+    *,
+    col_sq: jax.Array | None = None,
+    penalty: jax.Array | None = None,
 ) -> jax.Array:
     residual_arr = _as_runtime_array(residual)
     m_maxima = _as_runtime_array(spec.m_maxima)
@@ -983,15 +1022,23 @@ def _gpmo_arbvec_candidate_costs_for_allowed(
 
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = jnp.einsum("m,mnp->np", residual_arr, contributions_arr)
-    col_sq = jnp.sum(contributions_arr * contributions_arr, axis=0)
-    plus = residual_sq + 2.0 * dot + col_sq
-    minus = residual_sq - 2.0 * dot + col_sq
+    col_sq_arr = (
+        jnp.sum(contributions_arr * contributions_arr, axis=0)
+        if col_sq is None
+        else _as_runtime_array(col_sq)
+    )
+    plus = residual_sq + 2.0 * dot + col_sq_arr
+    minus = residual_sq - 2.0 * dot + col_sq_arr
 
     # ``GPMO_ArbVec`` indexes the component-expanded regularization vector by
     # dipole id, matching the C++ quirk also covered by ``GPMO_multi``.
-    penalty = reg_l2 * _component_mmax(m_maxima)[: m_maxima.shape[0]] ** 2
-    plus = plus + penalty[:, None]
-    minus = minus + penalty[:, None]
+    penalty_arr = (
+        (reg_l2 * _component_mmax(m_maxima)[: m_maxima.shape[0]] ** 2)[:, None]
+        if penalty is None
+        else _as_runtime_array(penalty)
+    )
+    plus = plus + penalty_arr
+    minus = minus + penalty_arr
 
     sentinel = _scalar_like(contributions_arr, _UNAVAILABLE_CANDIDATE_COST)
     plus = jnp.where(allowed, plus, sentinel)
@@ -1028,6 +1075,9 @@ def _gpmo_arbvec_candidate_costs_masked(
     residual: jax.Array,
     available: jax.Array,
     vector_available: jax.Array,
+    *,
+    col_sq: jax.Array | None = None,
+    penalty: jax.Array | None = None,
 ) -> jax.Array:
     allowed = available[:, None] & vector_available[None, :]
     return _gpmo_arbvec_candidate_costs_for_allowed(
@@ -1035,6 +1085,8 @@ def _gpmo_arbvec_candidate_costs_masked(
         contributions,
         residual,
         allowed,
+        col_sq=col_sq,
+        penalty=penalty,
     )
 
 
@@ -1043,6 +1095,9 @@ def gpmo_arbvec_step(
     state: tuple[jax.Array, jax.Array, jax.Array],
     A_scaled: jax.Array,
     contributions: jax.Array | None = None,
+    *,
+    col_sq: jax.Array | None = None,
+    penalty: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
     """Run one normalized arbitrary-vector GPMO placement step."""
 
@@ -1050,7 +1105,12 @@ def gpmo_arbvec_step(
     if contributions is None:
         contributions = _gpmo_arbvec_contributions(A_scaled, spec.pol_vectors)
     costs = _gpmo_arbvec_candidate_costs_for_allowed(
-        spec, contributions, residual, available[:, None]
+        spec,
+        contributions,
+        residual,
+        available[:, None],
+        col_sq=col_sq,
+        penalty=penalty,
     )
     n_candidates = spec.pol_vectors.shape[0] * spec.pol_vectors.shape[1]
     choice = _argmin_finite_cost(costs)
@@ -1147,11 +1207,23 @@ def gpmo_arbvec_solve(
         pol_vectors=pol_vectors,
     )
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
+    col_sq = jnp.sum(contributions * contributions, axis=0)
+    penalty = (
+        _as_runtime_array(spec.reg_l2)
+        * _component_mmax(m_maxima)[: m_maxima.shape[0]] ** 2
+    )[:, None]
 
     if record_every is not None:
 
         def _recording_step(state, _iteration):
-            return gpmo_arbvec_step(scan_spec, state, A_arr, contributions)
+            return gpmo_arbvec_step(
+                scan_spec,
+                state,
+                A_arr,
+                contributions,
+                col_sq=col_sq,
+                penalty=penalty,
+            )
 
         final_state, x_history, residual_history, extra_histories = (
             _gpmo_recording_scan(
@@ -1181,7 +1253,14 @@ def gpmo_arbvec_solve(
         )
 
     def _scan_body(state, _):
-        return gpmo_arbvec_step(scan_spec, state, A_arr, contributions)
+        return gpmo_arbvec_step(
+            scan_spec,
+            state,
+            A_arr,
+            contributions,
+            col_sq=col_sq,
+            penalty=penalty,
+        )
 
     final_state, trace = jax.lax.scan(
         _scan_body, (x0, residual0, available0), xs=None, length=K
@@ -1291,6 +1370,11 @@ def _gpmo_arbvec_solve_bucketed_impl(
         pol_vectors=pol_vectors,
     )
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
+    col_sq = jnp.sum(contributions * contributions, axis=0)
+    penalty = (
+        _as_runtime_array(spec.reg_l2)
+        * _component_mmax(m_maxima)[: m_maxima.shape[0]] ** 2
+    )[:, None]
 
     def _scan_body(state, _):
         x, residual, available, done = state
@@ -1300,6 +1384,8 @@ def _gpmo_arbvec_solve_bucketed_impl(
             residual,
             available,
             active_vectors,
+            col_sq=col_sq,
+            penalty=penalty,
         )
         n_candidates = pol_vectors.shape[0] * pol_vectors.shape[1]
         choice = _argmin_finite_cost(costs)
@@ -1524,19 +1610,30 @@ def _gpmo_arbvec_backtracking_candidate_costs_from_contributions(
     available: jax.Array,
     m_maxima: jax.Array,
     reg_l2: jax.Array,
+    *,
+    col_sq: jax.Array | None = None,
+    penalty: jax.Array | None = None,
 ) -> jax.Array:
     contributions_arr = _as_runtime_array(contributions)
     residual_arr = _as_runtime_array(residual)
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = jnp.einsum("m,mnp->np", residual_arr, contributions_arr)
-    col_sq = jnp.sum(contributions_arr * contributions_arr, axis=0)
-    plus = residual_sq + 2.0 * dot + col_sq
-    minus = residual_sq - 2.0 * dot + col_sq
+    col_sq_arr = (
+        jnp.sum(contributions_arr * contributions_arr, axis=0)
+        if col_sq is None
+        else _as_runtime_array(col_sq)
+    )
+    plus = residual_sq + 2.0 * dot + col_sq_arr
+    minus = residual_sq - 2.0 * dot + col_sq_arr
 
     component_mmax = _component_mmax(m_maxima)[: m_maxima.shape[0]]
-    penalty = (reg_l2 * component_mmax * component_mmax)[:, None]
-    plus = plus + penalty
-    minus = minus + penalty
+    penalty_arr = (
+        (reg_l2 * component_mmax * component_mmax)[:, None]
+        if penalty is None
+        else _as_runtime_array(penalty)
+    )
+    plus = plus + penalty_arr
+    minus = minus + penalty_arr
 
     allowed = available[:, None]
     sentinel = _scalar_like(contributions_arr, _UNAVAILABLE_CANDIDATE_COST)
@@ -1709,6 +1806,9 @@ def gpmo_arbvec_backtracking_step(
     cos_thresh_angle: jax.Array,
     iteration: jax.Array,
     contributions: jax.Array | None = None,
+    *,
+    col_sq: jax.Array | None = None,
+    penalty: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, ...], tuple[jax.Array, ...]]:
     """Run one arbitrary-vector backtracking GPMO placement step.
 
@@ -1743,6 +1843,8 @@ def gpmo_arbvec_backtracking_step(
         available,
         spec.m_maxima,
         spec.reg_l2,
+        col_sq=col_sq,
+        penalty=penalty,
     )
     n_candidates = spec.pol_vectors.shape[0] * spec.pol_vectors.shape[1]
     choice = _argmin_finite_cost(costs)
@@ -1936,6 +2038,14 @@ def gpmo_arbvec_backtracking_solve(
     )
     cos_thresh_angle = jnp.cos(_scalar_like(A_arr, spec.thresh_angle))
     contributions = _gpmo_arbvec_contributions(A_arr, pol_vectors)
+    col_sq = jnp.sum(contributions * contributions, axis=0)
+    # Left-associated ``(reg_l2*cm)*cm`` to match the backtracking candidate-cost
+    # fallback (and the pre-hoist in-function form); ``reg_l2*cm**2`` would
+    # reassociate the product and diverge at the ULP level from HEAD.
+    component_mmax = _component_mmax(m_maxima)[: m_maxima.shape[0]]
+    penalty = (_as_runtime_array(spec.reg_l2) * component_mmax * component_mmax)[
+        :, None
+    ]
 
     # Stopping at the initial-state check: if initialization already
     # satisfies the C++ stop predicate, propagate a final-state carry.
@@ -1956,6 +2066,8 @@ def gpmo_arbvec_backtracking_solve(
                 cos_thresh_angle,
                 iteration,
                 contributions,
+                col_sq=col_sq,
+                penalty=penalty,
             )
 
         final_state, x_history, residual_history, extra_histories = (
@@ -2020,6 +2132,8 @@ def gpmo_arbvec_backtracking_solve(
             cos_thresh_angle,
             iteration,
             contributions,
+            col_sq=col_sq,
+            penalty=penalty,
         )
 
     final_state, trace = jax.lax.scan(
@@ -2103,6 +2217,9 @@ def gpmo_multi_candidate_costs(
     residual: jax.Array,
     available: jax.Array,
     connectivity: jax.Array,
+    *,
+    col_sq: jax.Array | None = None,
+    regularizer_sq: jax.Array | None = None,
 ) -> jax.Array:
     """Return multi-neighbour GPMO plus/minus candidate costs.
 
@@ -2130,9 +2247,13 @@ def gpmo_multi_candidate_costs(
     selected_component_indices = 3 * ordered_dipoles + components[:, None]
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = A_arr.T @ residual_arr
-    col_sq = jnp.sum(A_arr * A_arr, axis=0)
+    col_sq_arr = (
+        jnp.sum(A_arr * A_arr, axis=0)
+        if col_sq is None
+        else _as_runtime_array(col_sq)
+    )
     selected_dot = dot[selected_component_indices]
-    selected_col_sq = col_sq[selected_component_indices]
+    selected_col_sq = col_sq_arr[selected_component_indices]
     plus_per_neighbor = residual_sq + 2.0 * selected_dot + selected_col_sq
     minus_per_neighbor = residual_sq - 2.0 * selected_dot + selected_col_sq
 
@@ -2143,8 +2264,15 @@ def gpmo_multi_candidate_costs(
     # ``GPMO_multi`` indexes the regularization vector by dipole id in the C++
     # loop. The vector passed from Python is component-expanded, so this uses
     # the same first-N entries rather than the baseline component index.
-    regularizer = _component_mmax(m_maxima)[ordered_dipoles]
-    penalty = reg_l2 * jnp.sum(regularizer * regularizer * selected_float, axis=1)
+    regularizer_sq_arr = (
+        _component_mmax(m_maxima)[ordered_dipoles] ** 2
+        if regularizer_sq is None
+        else _as_runtime_array(regularizer_sq)
+    )
+    # Keep ``reg_l2`` OUTSIDE the reduction to stay bit-identical to the
+    # pre-hoist form ``reg_l2 * sum(reg*reg*sel)`` -- distributing it inside
+    # (``sum(reg_l2*reg*reg*sel)``) reassociates the FP sum (c*Sx != S(c*x)).
+    penalty = reg_l2 * jnp.sum(regularizer_sq_arr * selected_float, axis=1)
     plus = plus + penalty
     minus = minus + penalty
 
@@ -2161,12 +2289,21 @@ def gpmo_multi_step(
     state: tuple[jax.Array, jax.Array, jax.Array],
     A_scaled: jax.Array,
     connectivity: jax.Array,
+    *,
+    col_sq: jax.Array | None = None,
+    regularizer_sq: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
     """Run one normalized multi-neighbour GPMO placement step."""
 
     x, residual, available = state
     costs = gpmo_multi_candidate_costs(
-        spec, A_scaled, residual, available, connectivity
+        spec,
+        A_scaled,
+        residual,
+        available,
+        connectivity,
+        col_sq=col_sq,
+        regularizer_sq=regularizer_sq,
     )
     n_components = A_scaled.shape[1]
     choice = _argmin_finite_cost(costs)
@@ -2268,11 +2405,26 @@ def gpmo_multi_solve(
         )
 
     connectivity = gpmo_connectivity_matrix(spec.dipole_grid_xyz)
+    n_components = A_arr.shape[1]
+    component_indices = jnp.arange(n_components)
+    seed_dipoles = component_indices // 3
+    ordered_dipoles = connectivity[seed_dipoles]
+    col_sq = jnp.sum(A_arr * A_arr, axis=0)
+    # Squared regularizer only (no reg_l2): gpmo_multi_candidate_costs applies
+    # reg_l2 outside the reduction to preserve the pre-hoist FP association.
+    regularizer_sq = _component_mmax(m_maxima)[ordered_dipoles] ** 2
 
     if record_every is not None:
 
         def _recording_step(state, _iteration):
-            return gpmo_multi_step(spec, state, A_arr, connectivity)
+            return gpmo_multi_step(
+                spec,
+                state,
+                A_arr,
+                connectivity,
+                col_sq=col_sq,
+                regularizer_sq=regularizer_sq,
+            )
 
         final_state, x_history, residual_history, extra_histories = (
             _gpmo_recording_scan(
@@ -2309,7 +2461,14 @@ def gpmo_multi_solve(
         )
 
     def _scan_body(state, _):
-        return gpmo_multi_step(spec, state, A_arr, connectivity)
+        return gpmo_multi_step(
+            spec,
+            state,
+            A_arr,
+            connectivity,
+            col_sq=col_sq,
+            regularizer_sq=regularizer_sq,
+        )
 
     final_state, trace = jax.lax.scan(
         _scan_body, (x0, residual0, available0), xs=None, length=K
@@ -2488,6 +2647,8 @@ def gpmo_backtracking_step(
     iteration: jax.Array,
     *,
     K: int,
+    penalty: jax.Array | None = None,
+    col_sq: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, ...], tuple[jax.Array, ...]]:
     """Run one normalized backtracking GPMO placement step."""
 
@@ -2507,7 +2668,14 @@ def gpmo_backtracking_step(
         reg_l2=spec.reg_l2,
         single_direction=spec.single_direction,
     )
-    costs = gpmo_baseline_candidate_costs(candidate_spec, A_scaled, residual, available)
+    costs = gpmo_baseline_candidate_costs(
+        candidate_spec,
+        A_scaled,
+        residual,
+        available,
+        penalty=penalty,
+        col_sq=col_sq,
+    )
     n_components = A_scaled.shape[1]
     choice = _argmin_finite_cost(costs)
     is_minus = choice >= n_components
@@ -2657,17 +2825,33 @@ def gpmo_backtracking_solve(
         backtracking=spec.backtracking,
         max_nMagnets=spec.max_nMagnets,
     )
+    penalty = scan_spec.reg_l2 * _component_mmax(m_maxima) ** 2
+    col_sq = jnp.sum(A_arr * A_arr, axis=0)
 
     def _scan_body(state, iteration):
         return gpmo_backtracking_step(
-            scan_spec, state, A_arr, connectivity, iteration, K=K
+            scan_spec,
+            state,
+            A_arr,
+            connectivity,
+            iteration,
+            K=K,
+            penalty=penalty,
+            col_sq=col_sq,
         )
 
     if record_every is not None:
 
         def _recording_step(state, iteration):
             return gpmo_backtracking_step(
-                scan_spec, state, A_arr, connectivity, iteration, K=K
+                scan_spec,
+                state,
+                A_arr,
+                connectivity,
+                iteration,
+                K=K,
+                penalty=penalty,
+                col_sq=col_sq,
             )
 
         final_state, x_history, residual_history, extra_histories = (
@@ -3118,7 +3302,7 @@ def mwpgp_initial_state(
     return _initial_state(m0_arr, A_arr, ATb_rs, m_maxima, reg_l2, nu)
 
 
-@partial(jax.jit, static_argnames=("n_steps",))
+@partial(jax.jit, static_argnames=("n_steps", "record_residual"))
 def mwpgp_solve(
     spec: PMOptimizationSpec,
     A: jax.Array,
@@ -3126,6 +3310,7 @@ def mwpgp_solve(
     m0: jax.Array,
     *,
     n_steps: int,
+    record_residual: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """Run ``n_steps`` MwPGP iterations under ``jax.lax.scan``.
 
@@ -3141,6 +3326,10 @@ def mwpgp_solve(
         Initial guess, shape ``(N, 3)``. Must lie in the L2 ball.
     n_steps
         Static iteration count. The solver never short-circuits.
+    record_residual
+        When true, return the per-step residual proxy history used by the
+        direct MwPGP path. When false, skip that diagnostic matvec and return a
+        zero history with the same static shape.
 
     Returns
     -------
@@ -3193,7 +3382,19 @@ def mwpgp_solve(
     if n_steps == 0:
         return m0_arr, _zeros_like_shape(m0_arr, (0,), dtype=m0_arr.dtype)
 
-    final_state, residual_history = jax.lax.scan(
-        _scan_body, init_state, xs=None, length=n_steps
+    if record_residual:
+        final_state, residual_history = jax.lax.scan(
+            _scan_body, init_state, xs=None, length=n_steps
+        )
+        return final_state[0], residual_history
+
+    def _scan_body_without_residual(state, _):
+        x_new, g_new, p_new = _step_body(
+            state, A_arr, ATb_rs, m_maxima, alpha, reg_l2, nu
+        )
+        return (x_new, g_new, p_new), None
+
+    final_state, _ = jax.lax.scan(
+        _scan_body_without_residual, init_state, xs=None, length=n_steps
     )
-    return final_state[0], residual_history
+    return final_state[0], _zeros_like_shape(m0_arr, (n_steps,), dtype=m0_arr.dtype)

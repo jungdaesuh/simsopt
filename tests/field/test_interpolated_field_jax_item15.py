@@ -23,6 +23,8 @@ Coverage:
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -34,6 +36,7 @@ from simsopt.field.magneticfieldclasses import (
     InterpolatedField,
     ToroidalField,
 )
+import simsopt_jax.core.interpolated_field as interpolated_field_core
 from simsopt_jax.core.interpolated_field import (
     interpolated_field_B,
     interpolated_field_B_cyl_with_initial,
@@ -649,6 +652,14 @@ class TestInterpolatedFieldJAXTransferGuard:
             interpolated_field_GradAbsB_cyl_with_initial(
                 jax_._spec, device_points, device_initial
             ).block_until_ready()
+
+
+def test_interpolated_field_jit_entrypoints_default_to_fast_cell_order():
+    cyl_signature = inspect.signature(interpolated_field_core._evaluate_cyl_field_jit)
+    cart_signature = inspect.signature(interpolated_field_core._evaluate_cart_field_jit)
+
+    assert cyl_signature.parameters["strict_cell_order"].default is False
+    assert cart_signature.parameters["strict_cell_order"].default is False
 
 
 class TestInterpolatedFieldJAXSpecImmutability:

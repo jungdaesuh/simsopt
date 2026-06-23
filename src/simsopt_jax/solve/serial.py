@@ -378,35 +378,34 @@ def constrained_serial_solve_jax(
             objective_logger = _ObjectiveEvaluationLogger(objective_file, start_time)
             constraint_logger = _ConstraintEvaluationLogger(constraint_file, start_time)
 
+            def augmented_objective(candidate_x, al_state):
+                al_multipliers, al_penalty_weight = al_state
+                constraints = equality_constraints(candidate_x)
+                objective_value = objective(candidate_x)
+                jax.debug.callback(
+                    objective_logger,
+                    candidate_x,
+                    objective_value,
+                    ordered=False,
+                )
+                jax.debug.callback(
+                    constraint_logger,
+                    candidate_x,
+                    constraints,
+                    ordered=False,
+                )
+                return (
+                    objective_value
+                    + jnp.dot(al_multipliers, constraints)
+                    + 0.5 * al_penalty_weight * jnp.sum(constraints * constraints)
+                )
+
             for _outer_index in range(max_outer_value):
-
-                def augmented_objective(candidate_x, _args):
-                    constraints = equality_constraints(candidate_x)
-                    objective_value = objective(candidate_x)
-                    jax.debug.callback(
-                        objective_logger,
-                        candidate_x,
-                        objective_value,
-                        ordered=False,
-                    )
-                    jax.debug.callback(
-                        constraint_logger,
-                        candidate_x,
-                        constraints,
-                        ordered=False,
-                    )
-                    return (
-                        objective_value
-                        + jnp.dot(current_multipliers, constraints)
-                        + 0.5
-                        * current_penalty_weight
-                        * jnp.sum(constraints * constraints)
-                    )
-
                 solution = optx.minimise(
                     augmented_objective,
                     solver,
                     current_x,
+                    args=(current_multipliers, current_penalty_weight),
                     max_steps=inner_max_steps_value,
                     throw=True,
                 )

@@ -24,11 +24,9 @@ from .curve_xyz_fourier import (
     jaxfouriercurve_pure,
 )
 from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
-from ._math_utils import has_tracer_leaf as _contains_jax_tracer
 from ._math_utils import (
     as_runtime_array as _as_runtime_array,
     as_runtime_float64 as _as_runtime_float64,
-    runtime_device_put as _runtime_device_put,
 )
 from .framedcurve import (
     rotated_centroid_frame,
@@ -126,49 +124,11 @@ def _element_count_runtime(array: jax.Array) -> jax.Array:
     return _runtime_scalar(float(np.prod(array.shape)), reference=array)
 
 
-def _slice_1d_static_selector(
-    array: jax.Array,
-    start: int,
-    end: int,
-) -> jax.Array:
-    selector = np.zeros((int(end) - int(start), int(array.shape[0])), dtype=np.float64)
-    for row, column in enumerate(range(int(start), int(end))):
-        selector[row, column] = 1.0
-    return _runtime_device_put(selector, dtype=np.float64) @ array
-
-
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
-    # Static (Python-int) bounds: use lax.slice_in_dim, which lowers to a static
-    # slice. dynamic_slice / fancy indexing / .at[] would push the index to the
-    # device as an int scalar and trip transfer_guard("disallow").
-    if _contains_jax_tracer(array):
-        return _slice_1d_static_selector(array, start, end)
     return jax.lax.slice_in_dim(array, int(start), int(end), axis=0)
 
 
-def _update_1d_static_selector(
-    array: jax.Array,
-    start: int,
-    values: jax.Array,
-) -> jax.Array:
-    start = int(start)
-    stop = start + int(values.shape[0])
-    keep = np.eye(int(array.shape[0]), dtype=np.float64)
-    keep[start:stop, :] = 0.0
-    insert = np.zeros((int(array.shape[0]), int(values.shape[0])), dtype=np.float64)
-    for column, row in enumerate(range(start, stop)):
-        insert[row, column] = 1.0
-    return (
-        _runtime_device_put(keep, dtype=np.float64) @ array
-        + _runtime_device_put(insert, dtype=np.float64) @ values
-    )
-
-
 def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
-    # Static-bounds segment replacement built from device-resident slices so no
-    # host int index crosses to the device under transfer_guard("disallow").
-    if _contains_jax_tracer(array) or _contains_jax_tracer(values):
-        return _update_1d_static_selector(array, start, values)
     start = int(start)
     stop = start + values.shape[0]
     head = jax.lax.slice_in_dim(array, 0, start, axis=0)
@@ -530,7 +490,7 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
             gammadashdash,
             alpha,
         )
-        tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
+        _tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
             gamma,
             gammadash,
             gammadashdash,

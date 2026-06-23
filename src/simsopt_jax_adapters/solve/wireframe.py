@@ -118,6 +118,28 @@ def _regularization_matrix(W: object, n: int) -> jax.Array:
     raise ValueError("W must be a scalar, 1d array, or 2d array")
 
 
+def _regularization_weighted_basis(W: object, n: int, basis: jax.Array) -> jax.Array:
+    """Apply scalar/vector diagonal regularization by row-scaling ``basis``."""
+
+    W_arr = jnp.squeeze(_as_runtime_array(W))
+    if W_arr.ndim == 0:
+        return W_arr * basis
+    if W_arr.ndim == 1:
+        if W_arr.shape[0] != n:
+            raise ValueError(
+                "Number of elements in vector-form W must match columns in A"
+            )
+        return W_arr[:, None] * basis
+    if W_arr.ndim == 2:
+        if W_arr.shape != (n, n):
+            raise ValueError(
+                "Number of rows and columns in matrix-form W must both equal "
+                "number of columns in A"
+            )
+        return W_arr @ basis
+    raise ValueError("W must be a scalar, 1d array, or 2d array")
+
+
 def _half_like(reference: jax.Array) -> jax.Array:
     return _as_runtime_value(0.5, reference=reference, dtype=reference.dtype)
 
@@ -137,7 +159,6 @@ def _regularized_constrained_least_squares_core(
     dvec: jax.Array,
 ) -> jax.Array:
     m, n = (int(dim) for dim in Amat.shape)
-    Wmat = _regularization_matrix(W, n)
     Ctra = Cmat.T
     Qfull, Rtall = jnp.linalg.qr(Ctra, mode="complete")
     p = int(Cmat.shape[0])
@@ -148,11 +169,11 @@ def _regularized_constrained_least_squares_core(
     uvec = jnp.linalg.solve(Rmat.T, dvec)
 
     AQ2mat = Amat @ Q2mat
-    WQ2mat = Wmat @ Q2mat
+    WQ2mat = _regularization_weighted_basis(W, n, Q2mat)
     LHS = AQ2mat.T @ AQ2mat + WQ2mat.T @ WQ2mat
 
     AQ1mat = Amat @ Q1mat
-    WQ1mat = Wmat @ Q1mat
+    WQ1mat = _regularization_weighted_basis(W, n, Q1mat)
     AQ1uvec = AQ1mat @ uvec
     WQ1uvec = WQ1mat @ uvec
     AQ2bvec = AQ2mat.T @ bvec

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import pickle
 from dataclasses import FrozenInstanceError, asdict, dataclass, fields
 
@@ -16,6 +17,7 @@ from simsopt_jax.geo.permanent_magnet_grid import (
     PermanentMagnetGridJAX,
     mwpgp_alpha_from_grid,
 )
+import simsopt_jax.solve.permanent_magnet as _pm_solve
 from simsopt_jax.core.pm_optimization import (
     GPMOBaselineResult as CoreGPMOBaselineResult,
     PMOptimizationSpec,
@@ -54,6 +56,14 @@ _RTOL = _DIRECT_KERNEL["rtol"]
 _ATOL = _DIRECT_KERNEL["atol"]
 _STATE_TRACE_RTOL = _PM_FIXED_STEP["state_trace_rtol"]
 _STATE_TRACE_ATOL = _PM_FIXED_STEP["state_trace_atol"]
+
+
+def test_relax_and_split_routes_mwpgp_without_residual_diagnostic() -> None:
+    scan_source = inspect.getsource(_pm_solve._relax_and_split_scan)
+    helper_source = inspect.getsource(_pm_solve._run_mwpgp_with_alpha)
+
+    assert "record_residual: bool = True" in helper_source
+    assert "record_residual=False" in scan_source
 
 
 @dataclass

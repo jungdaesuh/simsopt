@@ -16,77 +16,58 @@ def _not_a_knot_coefficients(values: jax.Array) -> jax.Array:
     """Return piecewise cubic coefficients for unit-spaced not-a-knot data."""
     y = as_jax_float64(values)
     intervals = int(y.shape[0]) - 1
-    size = 3 * intervals
-    matrix_rows: list[int] = []
-    matrix_cols: list[int] = []
-    matrix_vals: list[float] = []
-    rhs = jnp.zeros((size,), dtype=y.dtype)
-    row = 0
+    delta = y[1:] - y[:-1]
 
-    def b_index(interval):
-        return interval
-
-    def c_index(interval):
-        return intervals + interval
-
-    def d_index(interval):
-        return 2 * intervals + interval
-
-    def add_entries(entries):
-        for col, value in entries:
-            matrix_rows.append(row)
-            matrix_cols.append(col)
-            matrix_vals.append(value)
-
-    for interval in range(intervals):
-        add_entries(
-            (
-                (b_index(interval), 1.0),
-                (c_index(interval), 1.0),
-                (d_index(interval), 1.0),
-            )
+    left_c = 0.5 * (delta[1] - delta[0])
+    tail_size = intervals - 2
+    if intervals == 3:
+        c_tail = jnp.reshape(0.5 * (delta[-1] - delta[-2]), (1,))
+    else:
+        interior_rhs = 3.0 * (
+            delta[2 : intervals - 1] - delta[1 : intervals - 2]
         )
-        rhs = rhs.at[row].set(y[interval + 1] - y[interval])
-        row += 1
-
-    for interval in range(intervals - 1):
-        add_entries(
-            (
-                (b_index(interval), 1.0),
-                (c_index(interval), 2.0),
-                (d_index(interval), 3.0),
-                (b_index(interval + 1), -1.0),
-            )
+        tail_rhs = jnp.concatenate(
+            (interior_rhs, jnp.reshape(delta[-1] - delta[-2], (1,))),
+            axis=0,
         )
-        row += 1
-
-    for interval in range(intervals - 1):
-        add_entries(
+        tail_rhs = tail_rhs.at[0].add(-left_c)
+        tail_lower = jnp.concatenate(
             (
-                (c_index(interval), 2.0),
-                (d_index(interval), 6.0),
-                (c_index(interval + 1), -2.0),
-            )
+                jnp.zeros((1,), dtype=y.dtype),
+                jnp.ones((tail_size - 2,), dtype=y.dtype),
+                jnp.zeros((1,), dtype=y.dtype),
+            ),
+            axis=0,
         )
-        row += 1
+        tail_diag = jnp.concatenate(
+            (
+                jnp.full((tail_size - 1,), 4.0, dtype=y.dtype),
+                jnp.full((1,), 2.0, dtype=y.dtype),
+            ),
+            axis=0,
+        )
+        tail_upper = jnp.concatenate(
+            (
+                jnp.ones((tail_size - 1,), dtype=y.dtype),
+                jnp.zeros((1,), dtype=y.dtype),
+            ),
+            axis=0,
+        )
+        c_tail = jax.lax.linalg.tridiagonal_solve(
+            tail_lower, tail_diag, tail_upper, tail_rhs[:, None]
+        )[:, 0]
 
-    add_entries(((d_index(0), 1.0), (d_index(1), -1.0)))
-    row += 1
-    add_entries(((d_index(intervals - 2), 1.0), (d_index(intervals - 1), -1.0)))
-
-    matrix = (
-        jnp.zeros((size, size), dtype=y.dtype)
-        .at[
-            np.asarray(matrix_rows, dtype=np.int32),
-            np.asarray(matrix_cols, dtype=np.int32),
-        ]
-        .set(jnp.asarray(matrix_vals, dtype=y.dtype))
+    c = jnp.concatenate(
+        (
+            jnp.reshape(2.0 * left_c - c_tail[0], (1,)),
+            jnp.reshape(left_c, (1,)),
+            c_tail,
+        ),
+        axis=0,
     )
-
-    solved = jnp.linalg.solve(matrix, rhs)
-    b = solved[:intervals]
-    c = solved[intervals : 2 * intervals]
-    d = solved[2 * intervals :]
+    d_internal = (c[1:] - c[:-1]) / 3.0
+    d = jnp.concatenate((d_internal, d_internal[-1:]), axis=0)
+    b = delta - c - d
     return jnp.stack((y[:-1], b, c, d), axis=1)
 
 

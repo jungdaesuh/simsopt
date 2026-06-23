@@ -91,7 +91,7 @@ def signed_distance_to_cartesian_classifier(
         )
         z = xyz_arr[:, 2]
         rphiz = jnp.stack([r, phi, z], axis=-1)
-        dist = evaluate_batch_device(device_spec, rphiz)
+        dist = evaluate_batch_device(device_spec, rphiz, strict_cell_order=False)
         dist_flat = dist.reshape((-1,))
         in_bounds = (
             (r >= device_spec.xmin)

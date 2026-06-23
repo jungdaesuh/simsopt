@@ -42,6 +42,8 @@ from simsopt_jax.core import (
     make_curve_xyzfouriersymmetries_spec,
 )
 from simsopt_jax.core.curve_geometry import (
+    _slice_1d_static,
+    _update_1d_static,
     curve_gamma_and_dash_from_dofs,
     curve_geometry_from_dofs,
     curve_pullback_from_dofs,
@@ -463,6 +465,51 @@ def test_spec_geometry_runs_under_strict_transfer_guard() -> None:
     assert np.all(np.isfinite(np.asarray(gamma)))
     assert np.all(np.isfinite(np.asarray(gammadash)))
     assert np.all(np.isfinite(np.asarray(gammadashdash)))
+
+
+def test_static_slice_and_update_grad_run_under_strict_transfer_guard() -> None:
+    values_host = np.linspace(-2.0, 3.0, num=6, dtype=np.float64)
+    replacement_host = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+    values = jax.device_put(jnp.asarray(values_host))
+    replacement = jax.device_put(jnp.asarray(replacement_host))
+
+    def objective(values_arg, replacement_arg):
+        segment = _slice_1d_static(values_arg, 2, 5)
+        updated = _update_1d_static(values_arg, 1, replacement_arg)
+        return jnp.sum(segment * segment) + jnp.sum(updated)
+
+    value_fn = jax.jit(objective).lower(values, replacement).compile()
+    grad_fn = (
+        jax.jit(jax.grad(objective, argnums=(0, 1)))
+        .lower(values, replacement)
+        .compile()
+    )
+
+    with jax.transfer_guard("disallow"):
+        actual_value = value_fn(values, replacement)
+        grad_values, grad_replacement = grad_fn(values, replacement)
+
+    expected_updated = np.concatenate(
+        [values_host[:1], replacement_host, values_host[4:]]
+    )
+    expected_value = np.sum(values_host[2:5] ** 2) + np.sum(expected_updated)
+    expected_grad_values = np.zeros_like(values_host)
+    expected_grad_values[2:5] += 2.0 * values_host[2:5]
+    expected_grad_values[:1] += 1.0
+    expected_grad_values[4:] += 1.0
+
+    np.testing.assert_allclose(
+        np.asarray(actual_value), expected_value, rtol=0.0, atol=0.0
+    )
+    np.testing.assert_allclose(
+        np.asarray(grad_values), expected_grad_values, rtol=0.0, atol=0.0
+    )
+    np.testing.assert_allclose(
+        np.asarray(grad_replacement),
+        np.ones_like(replacement_host),
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_coprime_invariant_unchanged() -> None:

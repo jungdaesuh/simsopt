@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 
 from ._math_utils import as_jax_float64
-from ._root import newton_scan_fixed_iters, newton_with_implicit_vjp
+from ._root import _newton_scan_fixed_iters_diagonal, _newton_with_implicit_vjp_diagonal
 
 __all__ = [
     "theta_vmec_residual_jax",
@@ -37,7 +37,7 @@ def theta_vmec_residual_jax(
     return theta_pest_jax - (theta_vmec_jax + lambd)
 
 
-def _theta_vmec_jacobian(theta_vmec, phi, xm, xn, lmns):
+def _theta_vmec_jacobian_diagonal(theta_vmec, phi, xm, xn, lmns):
     theta_vmec_jax = as_jax_float64(theta_vmec)
     phi_jax = as_jax_float64(phi)
     xm_jax = as_jax_float64(xm)
@@ -49,7 +49,7 @@ def _theta_vmec_jacobian(theta_vmec, phi, xm, xn, lmns):
     diagonal = -(
         1.0 + jnp.sum(lmns_jax[:, None] * xm_jax[:, None] * jnp.cos(angle), axis=0)
     )
-    return jnp.diag(diagonal)
+    return diagonal
 
 
 def _theta_vmec_line_scan(
@@ -58,14 +58,14 @@ def _theta_vmec_line_scan(
     def residual(theta_vmec):
         return theta_vmec_residual_jax(theta_vmec, theta_pest, phi, xm, xn, lmns)
 
-    def jacobian(theta_vmec):
-        return _theta_vmec_jacobian(theta_vmec, phi, xm, xn, lmns)
+    def jacobian_diagonal(theta_vmec):
+        return _theta_vmec_jacobian_diagonal(theta_vmec, phi, xm, xn, lmns)
 
-    return newton_scan_fixed_iters(
+    return _newton_scan_fixed_iters_diagonal(
         residual,
         as_jax_float64(initial_theta_vmec),
         max_iter=max_iter,
-        jac=jacobian,
+        jac_diagonal=jacobian_diagonal,
     )
 
 
@@ -89,8 +89,8 @@ def _theta_vmec_line_implicit(
             params["lmns"],
         )
 
-    def jacobian(theta_vmec, params):
-        return _theta_vmec_jacobian(
+    def jacobian_diagonal(theta_vmec, params):
+        return _theta_vmec_jacobian_diagonal(
             theta_vmec,
             params["phi"],
             params["xm"],
@@ -98,7 +98,7 @@ def _theta_vmec_line_implicit(
             params["lmns"],
         )
 
-    return newton_with_implicit_vjp(
+    return _newton_with_implicit_vjp_diagonal(
         residual,
         as_jax_float64(initial_theta_vmec),
         {
@@ -110,7 +110,7 @@ def _theta_vmec_line_implicit(
         },
         max_iter=max_iter,
         tol=tol,
-        jac=jacobian,
+        jac_diagonal=jacobian_diagonal,
     )
 
 
