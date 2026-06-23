@@ -38,6 +38,8 @@ POINCARE_RENDER_MODE_ORDER = ("validation", "diagnostic", "default")
 SUPPORTED_POINCARE_FIELD_POLICIES = frozenset({"auto", "always", "never"})
 SUPPORTED_POINCARE_RENDER_MODES = frozenset(POINCARE_RENDER_MODE_ORDER)
 POINCARE_DESIGN_ONLY_OVERRIDE_VALUES = frozenset({"1", "true", "yes"})
+# Boundary-outline render resolution only (physics-neutral; no effect on tracing).
+POINCARE_BOUNDARY_THETA_POINTS = 200
 
 
 def resolve_poincare_field_policy(env=None):
@@ -399,13 +401,17 @@ def plot_poincare_data(
         # if passed a surface, plot the plasma surface outline
         if surf is not None:
             phi_new = phis[i] * 1 / (2 * np.pi)
-            cross_section = surf.cross_section(phi=phi_new)
+            cross_section = surf.cross_section(
+                phi=phi_new, thetas=POINCARE_BOUNDARY_THETA_POINTS
+            )
             r_interp = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
             z_interp = cross_section[:, 2]
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c="k")
         if surf1 is not None:
             phi_new = phis[i] * 1 / (2 * np.pi)
-            cross_section = surf1.cross_section(phi=phi_new)
+            cross_section = surf1.cross_section(
+                phi=phi_new, thetas=POINCARE_BOUNDARY_THETA_POINTS
+            )
             r_interp = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
             z_interp = cross_section[:, 2]
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c="r")
