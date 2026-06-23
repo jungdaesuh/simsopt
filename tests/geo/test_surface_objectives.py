@@ -6,7 +6,7 @@ import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import coils_via_symmetries
-from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, MinorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, SurfaceSurfaceDistance
+from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, VolumeBoozer, PrincipalCurvature, MajorRadius, MinorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, SurfaceSurfaceDistance
 from simsopt.configs.zoo import get_ncsx_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
@@ -344,6 +344,70 @@ class MajorRadiusTests(unittest.TestCase):
                      epsilons=np.power(2., -np.asarray(range(13, 18))))
 
 
+class VolumeBoozerTests(unittest.TestCase):
+    def test_volume_boozer_derivative(self):
+        """
+        Taylor test for derivative of Boozer-surface enclosed volume wrt coil parameters.
+
+        VolumeBoozer is the coil-DOF-live counterpart of Volume; this mirrors
+        test_major_radius_derivative and is the load-bearing proof that the
+        Boozer-adjoint volume gradient (cached PLU + dconstraint_dcoils_vjp) is
+        correct, not merely the geometric surface-coefficient derivative.
+        """
+        for boozer_type in ['exact', 'ls']:
+            for label in ["Volume", "ToroidalFlux"]:
+                for optimize_G in [True, False]:
+                    for weight_inv_modB in [True, False]:
+                        with self.subTest(label=label, boozer_type=boozer_type, optimize_G=optimize_G):
+                            if boozer_type == 'ls' and label == 'ToroidalFlux':
+                                continue
+                            if boozer_type == 'exact' and optimize_G is False:
+                                continue
+                            if boozer_type == 'exact' and weight_inv_modB:
+                                continue
+                            self.subtest_volume_boozer_surface_derivative(label, boozer_type, optimize_G, weight_inv_modB)
+
+    def subtest_volume_boozer_surface_derivative(self, label, boozer_type, optimize_G, weight_inv_modB):
+        bs, boozer_surface = get_boozer_surface(label=label, nphi=51, ntheta=51, boozer_type=boozer_type, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        coeffs = bs.x
+        vb = VolumeBoozer(boozer_surface)
+
+        def f(dofs):
+            bs.x = dofs
+            return vb.J()
+
+        def df(dofs):
+            bs.x = dofs
+            return vb.dJ()
+        taylor_test1(f, df, coeffs,
+                     epsilons=np.power(2., -np.asarray(range(13, 18))))
+
+    def test_bare_volume_coil_gradient_is_dead(self):
+        """
+        The dead-gradient trap the wrapper exists to fix: bare Volume(surface) has no
+        coil ancestor, so projecting its gradient onto the coil dofs yields nothing,
+        whereas VolumeBoozer reaches the coils through the BoozerSurface adjoint and
+        yields a nonzero coil-DOF gradient. Both report the same enclosed-volume value.
+        """
+        bs, boozer_surface = get_boozer_surface(label="Volume", nphi=51, ntheta=51, boozer_type='ls', optimize_G=True, weight_inv_modB=False)
+        coeffs = bs.x
+
+        vb = VolumeBoozer(boozer_surface)
+        bare = Volume(boozer_surface.surface)
+
+        self.assertTrue(any(a is bs for a in vb.ancestors),
+                        "VolumeBoozer must depend on the BiotSavart coil field")
+        self.assertFalse(any(a is bs for a in bare.ancestors),
+                         "bare Volume(surface) must NOT see the coils (the dead-gradient trap)")
+
+        np.testing.assert_allclose(float(vb.J()), float(bare.J()), rtol=1e-7, atol=0.0)
+
+        live = vb.dJ()
+        self.assertEqual(live.shape, coeffs.shape)
+        self.assertGreater(np.linalg.norm(live), 0.0,
+                           "VolumeBoozer must supply a nonzero coil-DOF volume gradient")
+
+
 class MinorRadiusTests(unittest.TestCase):
     def test_minor_radius_derivative(self):
         """
@@ -386,6 +450,7 @@ class IotasTests(unittest.TestCase):
             NonQuasiSymmetricRatio(boozer_surface, bs),
             BoozerResidual(boozer_surface, bs),
             MajorRadius(boozer_surface),
+            VolumeBoozer(boozer_surface),
         ]
 
         for objective in objectives:

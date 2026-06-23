@@ -54,6 +54,7 @@ from simsopt.geo import (
 )
 from simsopt.geo.surfaceobjectives import (
     Volume,
+    VolumeBoozer,
     Iotas,
     MajorRadius,
     MinorRadius,
@@ -137,6 +138,10 @@ from banana_opt.alm_adaptive_smoothing import (
     adapt_alm_smoothing_from_history,
 )
 from banana_opt.boozer_finite_current import derive_signed_G_from_field
+from banana_opt.boozer_surface_family import (
+    BoozerFamilyOuterSeed,
+    build_boozer_surface_family,
+)
 from banana_opt.boozer_warm_start import save_boozer_surface_with_state
 from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for importlib-loaded tests
     BoozerResidualExact,
@@ -432,10 +437,12 @@ from banana_opt.single_stage_objectives import (
     ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     average_surface_objectives as _average_surface_objectives_impl,
     build_single_stage_iota_pin_objective,
+    build_single_stage_iota_profile_objective,
     build_single_stage_magnetic_well_objective,
     build_single_stage_noble_iota_pull_objective,
     build_single_stage_rational_iota_avoidance_objective,
     build_single_stage_shear_objective,
+    build_single_stage_volume_profile_objective,
     build_total_objective as _build_total_objective_impl,
     evaluate_base_objective as _evaluate_base_objective_impl,
     evaluate_total_objective as _evaluate_total_objective_impl,
@@ -3411,6 +3418,41 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-iota-profile-weight",
+        dest="iota_profile_weight",
+        type=float,
+        default=float(os.environ.get("IOTA_PROFILE_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the per-surface iota-PROFILE shortfall term "
+            "(default 0 = off). Requires at least two Boozer surfaces; targets a "
+            "shear-shape iota(s) = iota_edge + slope*(s - s_edge) profile anchored "
+            "at the existing edge iota target, rather than a single averaged iota."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-volume-profile-weight",
+        dest="volume_profile_weight",
+        type=float,
+        default=float(os.environ.get("VOLUME_PROFILE_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the per-surface volume-PROFILE shortfall term "
+            "(default 0 = off). Requires at least two Boozer surfaces; holds the "
+            "nested family near its per-surface target volumes via coil-live "
+            "VolumeBoozer terms (soft objective, not an ALM constraint)."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-iota-profile-slope",
+        dest="iota_profile_slope",
+        type=float,
+        default=float(os.environ.get("IOTA_PROFILE_SLOPE_TARGET", "0.0")),
+        help=(
+            "Target diota/ds slope for the iota-PROFILE shortfall term. The "
+            "per-surface target is iota_edge + slope*(s - s_edge), anchored at the "
+            "existing edge iota target. Default 0 targets a flat iota profile."
+        ),
+    )
+    parser.add_argument(
         "--single-stage-rational-iota-avoidance-weight",
         type=float,
         default=float(
@@ -5001,63 +5043,26 @@ def initialize_published_surface_data_from_stage2_seed(
             f"{list(ordered_names)}; received {sorted(configs_by_name)}."
         )
 
-    outer_config = configs_by_name["outer"]
-    outer_iota = float(stage2_seed_surface.iota)
-    outer_G = _require_finite_explicit_G("outer", stage2_seed_surface.G)
-    outer_boozer_surface = initialize_boozer_surface(
-        stage2_seed_surface.surface,
-        mpol,
-        ntor,
-        bs,
-        outer_config["target_volume"],
-        constraint_weight,
-        outer_iota,
-        outer_G,
-        boozer_I,
-        initial_surface_guess=stage2_seed_surface.surface,
-        nfp=nfp,
+    ordered_configs = [configs_by_name[name] for name in ordered_names]
+    outer_seed = BoozerFamilyOuterSeed(
+        surface=stage2_seed_surface.surface,
+        iota=float(stage2_seed_surface.iota),
+        G=_require_finite_explicit_G("outer", stage2_seed_surface.G),
     )
-    solved_by_name = {
-        "outer": _surface_data_entry(
-            outer_config,
-            outer_boozer_surface,
-            "stage2_outer_seed",
-        )
-    }
-    previous_name = "outer"
-    previous_boozer_surface = outer_boozer_surface
-    # Walk the inner shells from outermost (innerN-2) to innermost (inner0).
-    for surface_name in reversed(ordered_names[:-1]):
-        config = configs_by_name[surface_name]
-        continuation_surface = contract_surface_to_target_volume(
-            previous_boozer_surface.surface,
-            config["target_volume"],
-        )
-        boozer_surface = initialize_boozer_surface(
-            continuation_surface,
-            mpol,
-            ntor,
-            bs,
-            config["target_volume"],
-            constraint_weight,
-            _boozer_res_scalar(previous_boozer_surface, "iota"),
-            _require_finite_explicit_G(
-                surface_name,
-                _boozer_res_scalar(previous_boozer_surface, "G"),
-            ),
-            boozer_I,
-            initial_surface_guess=continuation_surface,
-            nfp=nfp,
-        )
-        solved_by_name[surface_name] = _surface_data_entry(
-            config,
-            boozer_surface,
-            f"{previous_name}_continuation_{surface_name}",
-        )
-        previous_name = surface_name
-        previous_boozer_surface = boozer_surface
-
-    ordered_surface_data = [solved_by_name[name] for name in ordered_names]
+    ordered_surface_data, _ = build_boozer_surface_family(
+        ordered_configs,
+        mpol=mpol,
+        ntor=ntor,
+        bs=bs,
+        constraint_weight=constraint_weight,
+        boozer_I=boozer_I,
+        nfp=nfp,
+        outer_seed=outer_seed,
+        contract=contract_surface_to_target_volume,
+        make_entry=_surface_data_entry,
+        allow_truncation=False,
+        min_surfaces=len(surface_configs),
+    )
     _require_published_surface_data_postconditions(ordered_surface_data)
     return ordered_surface_data, []
 
@@ -7244,6 +7249,9 @@ class RunIdentityConfig:
     seed_regime: str | None = None
     magnetic_well_weight: float = 0.0
     magnetic_well_target: float = 0.0
+    iota_profile_weight: float = 0.0
+    volume_profile_weight: float = 0.0
+    iota_profile_slope_target: float = 0.0
     residue_objective_weight: float = 0.0
     residue_objective_target_manifest_id: str | None = None
     residue_objective_validation_id: str | None = None
@@ -8094,6 +8102,11 @@ def make_run_identity_config(
         ),
         magnetic_well_weight=float(getattr(args, "magnetic_well_weight", 0.0)),
         magnetic_well_target=float(getattr(args, "magnetic_well_target", 0.0)),
+        iota_profile_weight=float(getattr(args, "iota_profile_weight", 0.0)),
+        volume_profile_weight=float(getattr(args, "volume_profile_weight", 0.0)),
+        iota_profile_slope_target=float(
+            getattr(args, "iota_profile_slope", 0.0)
+        ),
         residue_objective_weight=float(getattr(args, "residue_objective_weight", 0.0)),
         residue_objective_target_manifest_id=(
             None if residue_objective is None else residue_objective.target_manifest_id
@@ -8295,6 +8308,15 @@ def build_run_identity_config(config):
             continue
         if field.name in {"magnetic_well_weight", "magnetic_well_target"} and (
             float(config.magnetic_well_weight) == 0.0
+        ):
+            continue
+        if field.name in {
+            "iota_profile_weight",
+            "iota_profile_slope_target",
+        } and (float(config.iota_profile_weight) == 0.0):
+            continue
+        if field.name == "volume_profile_weight" and (
+            float(config.volume_profile_weight) == 0.0
         ):
             continue
         if field.name == "residue_objective_weight" and float(value) == 0.0:
@@ -9346,6 +9368,9 @@ def build_single_stage_objective_bundle(
     SHEAR_WEIGHT=0.0,
     MAGNETIC_WELL_WEIGHT=0.0,
     MAGNETIC_WELL_TARGET=0.0,
+    IOTA_PROFILE_WEIGHT=0.0,
+    VOLUME_PROFILE_WEIGHT=0.0,
+    IOTA_PROFILE_SLOPE_TARGET=0.0,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR=(
         RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
@@ -9672,18 +9697,40 @@ def build_single_stage_objective_bundle(
     # (no axis->edge profile) or when SHEAR_WEIGHT is 0, so default runs add
     # nothing to the objective graph and stay byte-identical. With >=2 surfaces
     # and SHEAR_WEIGHT > 0 it rewards a larger |iota_edge - iota_axis| spread.
+    # Per-surface iota-PROFILE shortfall (opt-in, default-OFF): None in single-surface
+    # mode (no axis->edge profile) or when the weight is 0. Targets a shear-shape
+    # iota(s) = iota_edge + slope*(s - s_edge) profile (negative-shear nontwist),
+    # anchored at the existing edge iota_target (SSOT), rather than a single averaged
+    # iota. Gradient flows through the proven per-surface Iotas Boozer adjoint.
     JShear = (
         build_single_stage_shear_objective(surface_iota_terms, SHEAR_TARGET)
         if SHEAR_WEIGHT > 0.0
         else None
     )
-    if MAGNETIC_WELL_WEIGHT > 0.0:
+    if IOTA_PROFILE_WEIGHT > 0.0:
+        JIotaProfile = build_single_stage_iota_profile_objective(
+            surface_iota_terms,
+            [float(entry["seed_label"]) for entry in surface_data],
+            iota_target,
+            IOTA_PROFILE_SLOPE_TARGET,
+        )
+    else:
+        JIotaProfile = None
+    # Per-surface coil-DOF-live volume terms (VolumeBoozer, NOT bare Volume): shared by
+    # the magnetic-well proxy and the volume-profile shortfall, built once (DRY) only
+    # when a consuming weight is on so default runs stay byte-identical. Bare
+    # Volume(surface) is keyed only on its surface, so its gradient projects to zero on
+    # the coil DOFs (a silent no-op for any coil-driving volume term); VolumeBoozer
+    # routes the volume sensitivity through the BoozerSurface adjoint (as MajorRadius
+    # does), giving a live coil gradient -- this is the latent-magnetic-well-bug fix.
+    if MAGNETIC_WELL_WEIGHT > 0.0 or VOLUME_PROFILE_WEIGHT > 0.0:
         _surface_volume_terms = [
-            Volume(entry["boozer_surface"].surface) for entry in surface_data
+            VolumeBoozer(entry["boozer_surface"]) for entry in surface_data
         ]
         _surface_labels = [
             float(entry["seed_label"]) for entry in surface_data
         ]
+    if MAGNETIC_WELL_WEIGHT > 0.0:
         JMagneticWell = build_single_stage_magnetic_well_objective(
             _surface_volume_terms,
             _surface_labels,
@@ -9691,6 +9738,16 @@ def build_single_stage_objective_bundle(
         )
     else:
         JMagneticWell = None
+    # Per-surface volume-PROFILE shortfall (opt-in, default-OFF): None when the weight
+    # is 0 or <2 surfaces. Holds the nested family near its per-surface target volumes
+    # via the SAME coil-live VolumeBoozer terms (soft objective, not an ALM constraint).
+    if VOLUME_PROFILE_WEIGHT > 0.0:
+        JVolumeProfile = build_single_stage_volume_profile_objective(
+            _surface_volume_terms,
+            [float(entry["target_volume"]) for entry in surface_data],
+        )
+    else:
+        JVolumeProfile = None
     # Rational-iota avoidance penalty (opt-in, default-OFF): None when the weight is 0,
     # so default runs add nothing to the objective graph and stay byte-identical. When
     # enabled it wraps the SAME outermost Iotas term feeding the iota target (SSOT for
@@ -9847,6 +9904,10 @@ def build_single_stage_objective_bundle(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JIotaProfile=JIotaProfile,
+        IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
+        JVolumeProfile=JVolumeProfile,
+        VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
         JRationalIotaAvoidance=JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
@@ -9931,6 +9992,8 @@ def build_single_stage_objective_bundle(
         "coil_force_target_count": 0 if JCoilForce is None else len(coil_force_targets),
         "JShear": JShear,
         "JMagneticWell": JMagneticWell,
+        "JIotaProfile": JIotaProfile,
+        "JVolumeProfile": JVolumeProfile,
         "JRationalIotaAvoidance": JRationalIotaAvoidance,
         "JNobleIotaPull": JNobleIotaPull,
         "JIotaPin": JIotaPin,
@@ -9992,6 +10055,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCoilForce
     global JShear
     global JMagneticWell
+    global JIotaProfile
+    global JVolumeProfile
     global JRationalIotaAvoidance
     global JNobleIotaPull
     global JIotaPin
@@ -10056,6 +10121,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCoilForce = objective_bundle["JCoilForce"]
     JShear = objective_bundle["JShear"]
     JMagneticWell = objective_bundle["JMagneticWell"]
+    JIotaProfile = objective_bundle["JIotaProfile"]
+    JVolumeProfile = objective_bundle["JVolumeProfile"]
     JRationalIotaAvoidance = objective_bundle["JRationalIotaAvoidance"]
     JNobleIotaPull = objective_bundle["JNobleIotaPull"]
     JIotaPin = objective_bundle["JIotaPin"]
@@ -10392,6 +10459,10 @@ def evaluate_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JIotaProfile=None,
+    IOTA_PROFILE_WEIGHT=0.0,
+    JVolumeProfile=None,
+    VOLUME_PROFILE_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
@@ -10478,6 +10549,10 @@ def evaluate_total_objective(
             SHEAR_WEIGHT=SHEAR_WEIGHT,
             JMagneticWell=JMagneticWell,
             MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+            JIotaProfile=JIotaProfile,
+            IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
+            JVolumeProfile=JVolumeProfile,
+            VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
             JRationalIotaAvoidance=JRationalIotaAvoidance,
             RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
             JNobleIotaPull=JNobleIotaPull,
@@ -10552,6 +10627,10 @@ def evaluate_base_objective(
         SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
         JMagneticWell=globals().get("JMagneticWell"),
         MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+        JIotaProfile=globals().get("JIotaProfile"),
+        IOTA_PROFILE_WEIGHT=globals().get("IOTA_PROFILE_WEIGHT", 0.0),
+        JVolumeProfile=globals().get("JVolumeProfile"),
+        VOLUME_PROFILE_WEIGHT=globals().get("VOLUME_PROFILE_WEIGHT", 0.0),
         JRationalIotaAvoidance=globals().get("JRationalIotaAvoidance"),
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=globals().get(
             "RATIONAL_IOTA_AVOIDANCE_WEIGHT", 0.0
@@ -10737,6 +10816,10 @@ def evaluate_alm_objective(
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             JMagneticWell=globals().get("JMagneticWell"),
             MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+            JIotaProfile=globals().get("JIotaProfile"),
+            IOTA_PROFILE_WEIGHT=globals().get("IOTA_PROFILE_WEIGHT", 0.0),
+            JVolumeProfile=globals().get("JVolumeProfile"),
+            VOLUME_PROFILE_WEIGHT=globals().get("VOLUME_PROFILE_WEIGHT", 0.0),
             JRationalIotaAvoidance=globals().get("JRationalIotaAvoidance"),
             RATIONAL_IOTA_AVOIDANCE_WEIGHT=globals().get(
                 "RATIONAL_IOTA_AVOIDANCE_WEIGHT", 0.0
@@ -10857,6 +10940,10 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             SHEAR_WEIGHT=globals().get("SHEAR_WEIGHT", 0.0),
             JMagneticWell=globals().get("JMagneticWell"),
             MAGNETIC_WELL_WEIGHT=globals().get("MAGNETIC_WELL_WEIGHT", 0.0),
+            JIotaProfile=globals().get("JIotaProfile"),
+            IOTA_PROFILE_WEIGHT=globals().get("IOTA_PROFILE_WEIGHT", 0.0),
+            JVolumeProfile=globals().get("JVolumeProfile"),
+            VOLUME_PROFILE_WEIGHT=globals().get("VOLUME_PROFILE_WEIGHT", 0.0),
             JRationalIotaAvoidance=globals().get("JRationalIotaAvoidance"),
             RATIONAL_IOTA_AVOIDANCE_WEIGHT=globals().get(
                 "RATIONAL_IOTA_AVOIDANCE_WEIGHT", 0.0
@@ -14183,6 +14270,10 @@ def build_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JIotaProfile=None,
+    IOTA_PROFILE_WEIGHT=0.0,
+    JVolumeProfile=None,
+    VOLUME_PROFILE_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
@@ -14254,6 +14345,10 @@ def build_total_objective(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JIotaProfile=JIotaProfile,
+        IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
+        JVolumeProfile=JVolumeProfile,
+        VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
         JRationalIotaAvoidance=JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
@@ -16918,6 +17013,12 @@ if __name__ == "__main__":
     SHEAR_WEIGHT = float(args.shear_weight)
     MAGNETIC_WELL_WEIGHT = float(args.magnetic_well_weight)
     MAGNETIC_WELL_TARGET = float(args.magnetic_well_target)
+    # Per-surface iota/volume PROFILE shortfalls (opt-in, default weight 0 -> terms not
+    # constructed, objective graph byte-identical with prior runs). The slope only takes
+    # effect once IOTA_PROFILE_WEIGHT > 0.
+    IOTA_PROFILE_WEIGHT = float(args.iota_profile_weight)
+    VOLUME_PROFILE_WEIGHT = float(args.volume_profile_weight)
+    IOTA_PROFILE_SLOPE_TARGET = float(args.iota_profile_slope)
     # Rational-iota avoidance penalty (opt-in, default weight 0 -> term not constructed,
     # objective graph byte-identical with prior runs). Q and sigma0 default to the
     # module constants and only take effect once the weight is > 0.
@@ -17091,6 +17192,9 @@ if __name__ == "__main__":
             SHEAR_WEIGHT=SHEAR_WEIGHT,
             MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
             MAGNETIC_WELL_TARGET=MAGNETIC_WELL_TARGET,
+            IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
+            VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
+            IOTA_PROFILE_SLOPE_TARGET=IOTA_PROFILE_SLOPE_TARGET,
             RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
             RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR=(
                 RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR

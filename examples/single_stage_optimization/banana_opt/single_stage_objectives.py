@@ -151,6 +151,50 @@ def build_single_stage_shear_objective(surface_iota_terms, shear_target):
     )
 
 
+def build_single_stage_iota_profile_objective(
+    surface_iota_terms,
+    surface_labels,
+    iota_edge_target,
+    iota_slope_target,
+    weights=None,
+):
+    r"""Per-surface iota-*profile* shortfall against a shear-shape target, or ``None``.
+
+    With negative shear (the nontwist banana-coil regime) the physical target is
+    an iota *profile* ``iota(s)`` that differs per surface, not a single averaged
+    scalar -- averaging the per-surface iotas to one number would fight the shear
+    that :class:`IotaShearShortfall` is trying to build. This composes a per-surface
+    two-sided quadratic penalty ``QuadraticPenalty(Iotas_i, target_i)`` against the
+    linear shear-shape target anchored at the edge (outer) surface
+
+    .. math::
+       \text{target}_i = \iota_\text{edge} + \frac{d\iota}{ds}\,(s_i - s_\text{edge}),
+       \qquad s_\text{edge} = \text{surface\_labels}[-1],
+
+    and weighted-averages them via :func:`average_surface_objectives`. The coil-DOF
+    gradient of each penalty flows through the proven, Taylor-tested ``Iotas`` Boozer
+    adjoint, so no new gradient code is needed.
+
+    ``surface_iota_terms`` is the axis->edge-ordered list of per-surface ``Iotas``
+    objectives; ``surface_labels`` the matching normalized-toroidal-flux ``s`` values.
+    Returns ``None`` for <2 surfaces (no profile), mirroring
+    :func:`build_single_stage_shear_objective`; the caller's default weight is 0, so
+    the term is also absent from default-OFF runs.
+    """
+    if len(surface_iota_terms) < 2:
+        return None
+    if len(surface_iota_terms) != len(surface_labels):
+        raise ValueError("Iota terms and surface labels must match in length")
+    s_edge = float(surface_labels[-1])
+    slope = float(iota_slope_target)
+    edge = float(iota_edge_target)
+    penalties = [
+        QuadraticPenalty(term, edge + slope * (float(s) - s_edge), "identity")
+        for term, s in zip(surface_iota_terms, surface_labels)
+    ]
+    return average_surface_objectives(penalties, weights)
+
+
 # Default low-order-rational cutoff for the rational-iota avoidance penalty. q<=13
 # spans the operationally dangerous low-order resonances: for a fixed perturbation
 # spectrum the island half-width scales like 1/q (Chirikov), and the natural
@@ -546,6 +590,40 @@ def build_single_stage_magnetic_well_objective(
     )
 
 
+def build_single_stage_volume_profile_objective(
+    surface_volume_terms,
+    target_volumes,
+    weights=None,
+):
+    r"""Per-surface volume-*profile* shortfall against per-surface targets, or ``None``.
+
+    Composes a per-surface two-sided quadratic penalty
+    ``QuadraticPenalty(V_i, target_volume_i)`` and weighted-averages them via
+    :func:`average_surface_objectives`. This is a *soft* objective (NOT an ALM
+    volume constraint) that holds the nested family near its target volume profile
+    while the coils move.
+
+    ``surface_volume_terms`` MUST be coil-DOF-live :class:`~simsopt.geo.VolumeBoozer`
+    terms (constructed from each ``boozer_surface``), not bare
+    :class:`~simsopt.geo.Volume` terms: bare ``Volume`` is keyed only on its surface,
+    so its gradient projects to zero on the coil DOFs and this objective would be a
+    silent no-op. ``VolumeBoozer`` routes the geometric volume sensitivity through the
+    BoozerSurface adjoint, giving a live coil gradient.
+
+    Returns ``None`` for <2 surfaces; the caller's default weight is 0 so the term is
+    absent from default-OFF runs.
+    """
+    if len(surface_volume_terms) < 2:
+        return None
+    if len(surface_volume_terms) != len(target_volumes):
+        raise ValueError("Volume terms and target volumes must match in length")
+    penalties = [
+        QuadraticPenalty(term, float(target), "identity")
+        for term, target in zip(surface_volume_terms, target_volumes)
+    ]
+    return average_surface_objectives(penalties, weights)
+
+
 class MinLGradBShortfall(Optimizable):
     r"""Coil-realizability shortfall on the minimum Kappel L_grad_B scale length.
 
@@ -705,6 +783,10 @@ def build_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JIotaProfile=None,
+    IOTA_PROFILE_WEIGHT=0.0,
+    JVolumeProfile=None,
+    VOLUME_PROFILE_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
@@ -814,6 +896,17 @@ def build_total_objective(
         objective = objective + SHEAR_WEIGHT * JShear
     if JMagneticWell is not None:
         objective = objective + MAGNETIC_WELL_WEIGHT * JMagneticWell
+    # Per-surface iota-PROFILE shortfall (opt-in; default weight 0 and a None term
+    # for <2 surfaces, so the objective graph is byte-identical until an iota-profile
+    # weight is set on a multisurface build). Targets a shear-shape iota(s) profile
+    # (negative-shear nontwist) rather than a single averaged iota.
+    if JIotaProfile is not None:
+        objective = objective + IOTA_PROFILE_WEIGHT * JIotaProfile
+    # Per-surface volume-PROFILE shortfall (opt-in; default weight 0 and a None term
+    # for <2 surfaces). Holds the nested family near its target volume profile via
+    # coil-DOF-live VolumeBoozer terms (bare Volume would be a silent no-op).
+    if JVolumeProfile is not None:
+        objective = objective + VOLUME_PROFILE_WEIGHT * JVolumeProfile
     # Rational-iota avoidance penalty (opt-in; default weight 0 and a None term, so the
     # objective graph is byte-identical until --single-stage-rational-iota-avoidance-weight
     # > 0 is set). Repels the outer Boozer iota from low-order rationals (q<=Q) that seed
@@ -1186,6 +1279,10 @@ def evaluate_total_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JIotaProfile=None,
+    IOTA_PROFILE_WEIGHT=0.0,
+    JVolumeProfile=None,
+    VOLUME_PROFILE_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
@@ -1267,6 +1364,10 @@ def evaluate_total_objective(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JIotaProfile=JIotaProfile,
+        IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
+        JVolumeProfile=JVolumeProfile,
+        VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
         JRationalIotaAvoidance=JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
@@ -1693,6 +1794,10 @@ def evaluate_base_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JIotaProfile=None,
+    IOTA_PROFILE_WEIGHT=0.0,
+    JVolumeProfile=None,
+    VOLUME_PROFILE_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
@@ -1882,6 +1987,32 @@ def evaluate_base_objective(
         objective_optimizable,
     )
     (
+        iota_profile_value,
+        iota_profile_grad,
+        iota_profile_weight,
+        iota_profile_objective_enabled,
+        weighted_iota_profile_value,
+        weighted_iota_profile_grad,
+    ) = _optional_weighted_objective_terms(
+        JIotaProfile,
+        IOTA_PROFILE_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    (
+        volume_profile_value,
+        volume_profile_grad,
+        volume_profile_weight,
+        volume_profile_objective_enabled,
+        weighted_volume_profile_value,
+        weighted_volume_profile_grad,
+    ) = _optional_weighted_objective_terms(
+        JVolumeProfile,
+        VOLUME_PROFILE_WEIGHT,
+        base_physics_grad,
+        objective_optimizable,
+    )
+    (
         rational_iota_avoidance_value,
         rational_iota_avoidance_grad,
         rational_iota_avoidance_weight,
@@ -1950,6 +2081,8 @@ def evaluate_base_objective(
         base_physics_terms_total
         + weighted_shear_value
         + weighted_magnetic_well_value
+        + weighted_iota_profile_value
+        + weighted_volume_profile_value
         + weighted_rational_iota_avoidance_value
         + weighted_noble_iota_pull_value
         + weighted_iota_pin_value
@@ -1959,6 +2092,8 @@ def evaluate_base_objective(
         base_physics_grad
         + weighted_shear_grad
         + weighted_magnetic_well_grad
+        + weighted_iota_profile_grad
+        + weighted_volume_profile_grad
         + weighted_rational_iota_avoidance_grad
         + weighted_noble_iota_pull_grad
         + weighted_iota_pin_grad
@@ -1974,6 +2109,8 @@ def evaluate_base_objective(
             residue_value
             + weighted_shear_value
             + weighted_magnetic_well_value
+            + weighted_iota_profile_value
+            + weighted_volume_profile_value
             + weighted_rational_iota_avoidance_value
             + weighted_noble_iota_pull_value
             + weighted_iota_pin_value
@@ -1988,6 +2125,8 @@ def evaluate_base_objective(
             residue_grad
             + weighted_shear_grad
             + weighted_magnetic_well_grad
+            + weighted_iota_profile_grad
+            + weighted_volume_profile_grad
             + weighted_rational_iota_avoidance_grad
             + weighted_noble_iota_pull_grad
             + weighted_iota_pin_grad
@@ -2049,6 +2188,14 @@ def evaluate_base_objective(
             "dJ_magnetic_well": magnetic_well_grad,
             "magnetic_well_weight": magnetic_well_weight,
             "magnetic_well_objective_enabled": magnetic_well_objective_enabled,
+            "J_iota_profile": iota_profile_value,
+            "dJ_iota_profile": iota_profile_grad,
+            "iota_profile_weight": iota_profile_weight,
+            "iota_profile_objective_enabled": iota_profile_objective_enabled,
+            "J_volume_profile": volume_profile_value,
+            "dJ_volume_profile": volume_profile_grad,
+            "volume_profile_weight": volume_profile_weight,
+            "volume_profile_objective_enabled": volume_profile_objective_enabled,
             "J_rational_iota_avoidance": rational_iota_avoidance_value,
             "dJ_rational_iota_avoidance": rational_iota_avoidance_grad,
             "rational_iota_avoidance_weight": rational_iota_avoidance_weight,
@@ -2376,6 +2523,10 @@ def evaluate_alm_objective(
     SHEAR_WEIGHT=0.0,
     JMagneticWell=None,
     MAGNETIC_WELL_WEIGHT=0.0,
+    JIotaProfile=None,
+    IOTA_PROFILE_WEIGHT=0.0,
+    JVolumeProfile=None,
+    VOLUME_PROFILE_WEIGHT=0.0,
     JRationalIotaAvoidance=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     JNobleIotaPull=None,
@@ -2427,6 +2578,10 @@ def evaluate_alm_objective(
         SHEAR_WEIGHT=SHEAR_WEIGHT,
         JMagneticWell=JMagneticWell,
         MAGNETIC_WELL_WEIGHT=MAGNETIC_WELL_WEIGHT,
+        JIotaProfile=JIotaProfile,
+        IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
+        JVolumeProfile=JVolumeProfile,
+        VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
         JRationalIotaAvoidance=JRationalIotaAvoidance,
         RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
         JNobleIotaPull=JNobleIotaPull,
