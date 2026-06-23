@@ -5262,6 +5262,15 @@ def initialize_published_surface_data_from_stage2_seed(
             boozer_I=boozer_I,
             nfp=nfp,
         )
+        # Re-validate the re-solved twins. The postconditions above ran on the least-squares
+        # family BEFORE the in-place exact-twin handoff; exact Newton converges to the NEAREST
+        # Boozer surface, so a twin's solved volume/G can drift off the validated LS values. Re-run
+        # the name-agnostic stack invariants on the twin-replaced stack so a volume-crossed (non-
+        # nested) or shared-G-inconsistent stack fails loud here, instead of silently seeding the
+        # optimizer warm-start with an invalid family. (Names are unchanged by the handoff, so the
+        # inner0-based name postcondition does not need re-running.)
+        _require_published_volume_order(ordered_surface_data)
+        _require_published_G_consistency(ordered_surface_data)
     return ordered_surface_data, []
 
 
