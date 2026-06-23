@@ -1,6 +1,6 @@
 # Topology-Aware Multi-Surface Confinement Optimization — Design & Implementation Plan
 
-> Status: DESIGN (no code written yet). Last updated: 2026-06-23.
+> Status: DESIGN (Phase 1-4 implementation not yet applied by this plan). Last updated: 2026-06-23.
 > Scope: extend the banana-coil single-stage optimizer from a single Boozer surface to
 > multi-surface, topology-aware confinement optimization (nested family, per-surface
 > iota/volume profile, Greene residue [already wired], WBA [already coded], Chirikov
@@ -15,7 +15,7 @@ Capture, in a durable spec, the design produced by a read-only multi-agent inves
 so it can be executed and reviewed against a written plan rather than a chat transcript.
 
 The motivation is physical. A field-line-topology investigation of the certified
-`runs/slid_clean_R0p9095_2026-06-22/` design found that its **edge is a non-resonant
+`slid_clean_R0p9095_2026-06-22` design found that its **edge is a non-resonant
 X-point divertor**: a genuine hyperbolic X-point separatrix at (R,Z)=(1.0258, 0)
 (return-map Jacobian det≈1.000 [symplectic], eigenvalues 0.895/1.117, Greene residue
 −0.003), bounding a ~0.18 m-thick stochastic island-overlap layer formed by overlapping
@@ -51,6 +51,10 @@ optimize the confined region, not just converge one flux surface.
 
 Confirmed facts (file:line verified 2026-06-23). Paths relative to
 `examples/single_stage_optimization/` (= `SS`); driver lives under `SS/SINGLE_STAGE/`.
+Artifact root for the cited topology figures/data is
+`/Users/suhjungdae/code/columbia/autoresearch/campaigns/balance_pareto_singlestage_2026-06-17/runs/slid_clean_R0p9095_2026-06-22`.
+That path is outside this repo; the repo-root `runs/slid_clean_R0p9095_2026-06-22/` path
+does not exist in this checkout.
 
 **Objective + single-surface gap**
 - Objective assembler `build_total_objective` — `SS/banana_opt/single_stage_objectives.py:660`.
@@ -164,8 +168,9 @@ edits + light unit tests (less CPU-bound than tracing).
          edge X-point (expect ≈ −0.003 at R≈1.0258).
    - [ ] Run `converse_kam` over the edge band → independent non-existence certificate of
          the loss boundary.
-   - [ ] Record baselines in `runs/slid_clean_R0p9095_2026-06-22/` (these are the numbers
-         the new objectives will move).
+   - [ ] Record baselines under the artifact root above (or copy them into an intentional
+         repo-local path if this plan is promoted to tracked docs). These are the numbers
+         the new objectives will move.
 
 2. **Phase 1 — Unit #1: per-surface profile objectives + the latent-bug fix (smallest, highest leverage).**
    - [ ] Add `VolumeBoozer(Optimizable)` to `src/simsopt/geo/surfaceobjectives.py`, a
@@ -200,10 +205,14 @@ edits + light unit tests (less CPU-bound than tracing).
          reusable `banana_opt/boozer_surface_family.py::build_boozer_surface_family(...)`;
          make `initialize_published_surface_data_from_stage2_seed` a thin caller (DRY).
    - [ ] Replace the all-or-nothing raise with **fail-closed-to-last-good**: use the
-         non-raising `attempt_initialize_boozer_surface`; accept a shell iff solved AND
-         nested-inside the last accepted AND volume-ordered; stop at the first failure.
-   - [ ] Add `min_surfaces` (default = `len(label_fractions)`, i.e. strict) + `allow_truncation`
-         (opt-in); raise if accepted < `min_surfaces`; never fabricate a surface.
+         non-raising `banana_opt/stage2_single_stage_handoff.py:1425`
+         `attempt_initialize_boozer_surface` helper (currently not imported by the driver);
+         accept a shell iff solved AND nested-inside the last accepted AND volume-ordered;
+         stop at the first failure.
+   - [ ] Add `min_surfaces` (default 3, matching the magnetic-well floor) +
+         `allow_truncation` (default true for this family helper; false for strict
+         validation); raise if accepted < `min_surfaces`; in strict mode also raise if
+         accepted < `len(label_fractions)`; never fabricate a surface.
    - [ ] Return `_surface_data_entry`-shaped list so all per-surface terms consume it unchanged.
 
 4. **Phase 3 — Unit D: Chirikov island-overlap scalar.**
@@ -233,8 +242,8 @@ edits + light unit tests (less CPU-bound than tracing).
 - [ ] **Byte-identical default regression**: with all new weights 0 and single-surface,
       `build_total_objective` output is byte-identical to a captured pre-change baseline.
 - [ ] **Family nesting/ordering test**: `cross_sections_are_nested` for every adjacent pair
-      and `np.all(np.diff(volumes) > 0)`; fail-closed truncation returns the outer band with
-      provenance and stays ordered; default (strict) raises and fabricates nothing.
+      and `np.all(np.diff(volumes) > 0)`; default truncation returns the outer band with
+      provenance and stays ordered; strict validation mode raises and fabricates nothing.
 - [ ] **Chirikov standard-map calibration**: s crosses 1 when analytic half-widths sum to the
       spacing; nontwist regression returns the twin pair and stays finite (no 1/√0).
 - [ ] **Mather standard-map calibration**: ΔW(golden) → 0 for K < K_c = 0.971635 and lifts
@@ -278,10 +287,7 @@ edits + light unit tests (less CPU-bound than tracing).
 ## Open Questions
 
 - Green-light to start **Phase 0 (baseline)** then **Phase 1 (Unit #1)**? (Awaiting user.)
-- `min_surfaces` floor confirmed at **3**? (Default assumed; change if a 2-surface stack is
-  wanted.)
-- Should Phase 0 baselines run now (needs CPU; `edge-laminar` render + a CAD process are
-  active), or after the cores free?
+- Should Phase 0 baselines run now, or after current local CPU/GPU capacity is checked?
 - Doc home: kept here (`SS/TOPOLOGY_OPTIMIZATION_DESIGN.md`, matching the other top-level
   pipeline docs) — move to `autoresearch/docs/` if preferred.
 
@@ -293,4 +299,5 @@ objective architecture, simsopt capability inventory, WBA/topology-objective men
 edge-topology motivation (non-resonant X-point divertor; X-point R=1.0258, det≈1,
 λ=0.895/1.117, residue −0.003; ~0.18 m stochastic island-overlap layer; nontwist edge) was
 established by a separate two-wave field-line-topology investigation on the same design.
-Figures: `runs/slid_clean_R0p9095_2026-06-22/{connlength_vs_R,edge_poincare_offsym_zoom,edge_manifold_legs,iota_vs_R_edge}.png`.
+Figures:
+`/Users/suhjungdae/code/columbia/autoresearch/campaigns/balance_pareto_singlestage_2026-06-17/runs/slid_clean_R0p9095_2026-06-22/{connlength_vs_R,edge_poincare_offsym_zoom,edge_manifold_legs,iota_vs_R_edge}.png`.
