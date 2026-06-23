@@ -321,6 +321,7 @@ from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.poloidal_extent import (
     PoloidalExtent,
+    PoloidalExtentFloor,
     max_poloidal_extent_rad,
     poloidal_extent_rad_from_objective,
     smooth_max_poloidal_extent_signed_constraint as _smooth_max_poloidal_extent_signed_constraint,
@@ -2402,7 +2403,8 @@ def parse_args():
     parser.add_argument(
         "--surface-allow-truncation",
         action="store_true",
-        default=bool(os.environ.get("SURFACE_ALLOW_TRUNCATION")),
+        default=os.environ.get("SURFACE_ALLOW_TRUNCATION", "").strip().lower()
+        in ("1", "true", "yes", "on"),
         help=(
             "published_multisurface: keep the outer converging subset instead of "
             "requiring all N nested shells (truncate at the single family build; "
@@ -3102,6 +3104,32 @@ def parse_args():
             )
         ),
         help="Single-stage poloidal extent upper threshold in radians.",
+    )
+    parser.add_argument(
+        "--single-stage-poloidal-floor-weight",
+        type=float,
+        default=float(
+            os.environ.get("SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT", "0.0")
+        ),
+        help=(
+            "Penalty weight for the Single Stage poloidal-extent FLOOR (spread) "
+            "term. Default 0 (off): the term is absent and the objective graph is "
+            "byte-identical. When > 0 (with --single-stage-poloidal-floor-rad > 0) "
+            "the peak inboard poloidal extent is pushed up toward the floor, "
+            "spreading the banana-tip U-turn to relax its curvature."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-poloidal-floor-rad",
+        type=float,
+        default=float(
+            os.environ.get("SINGLE_STAGE_POLOIDAL_FLOOR_RAD", "0.0")
+        ),
+        help=(
+            "Single-stage poloidal extent lower target (floor) in radians, paired "
+            "with --single-stage-poloidal-floor-weight. Must be below the upper "
+            "threshold. Default 0 (no floor)."
+        ),
     )
     parser.add_argument(
         "--single-stage-width-min-threshold",
@@ -5079,6 +5107,8 @@ def initialize_published_surface_data_from_stage2_seed(
     boozer_I,
     nfp,
     stage2_seed_surface,
+    allow_truncation=False,
+    min_surfaces=3,
 ):
     """Solve published stacks outer-to-inner, then return inner-to-outer data.
 
@@ -5103,19 +5133,15 @@ def initialize_published_surface_data_from_stage2_seed(
         iota=float(stage2_seed_surface.iota),
         G=_require_finite_explicit_G("outer", stage2_seed_surface.G),
     )
-    # Opt-in HOLD-FIXED truncation: read the policy published in __main__ (default
-    # OFF -> allow_truncation=False with min_surfaces=len(configs), so the strict
-    # postcondition runs and the band stays byte-identical with prior runs). The
-    # truncated count is held fixed for the inner optimization loop because this
-    # family is built ONCE at setup (initialize_surface_data_for_contract, the
-    # single surface_data build); fun(x) never rebuilds it. It is only re-truncated
-    # if setup re-runs at an outer/ALM restart.
-    allow_truncation = bool(globals().get("SURFACE_ALLOW_TRUNCATION", False))
-    min_surfaces = (
-        int(globals().get("SURFACE_MIN_SURFACES", 3))
-        if allow_truncation
-        else len(surface_configs)
-    )
+    # Opt-in HOLD-FIXED truncation (default OFF -> the strict all-N policy, so the
+    # strict postcondition runs and the band stays byte-identical with prior runs).
+    # The policy arrives as explicit args threaded from the single setup-time caller,
+    # so it is held fixed for the inner optimization loop: this family is built ONCE
+    # at setup (initialize_surface_data_for_contract), and fun(x) never rebuilds it;
+    # it is only re-truncated if setup re-runs at an outer/ALM restart. When off,
+    # min_surfaces is pinned to the full requested stack so build_boozer_surface_family
+    # raises (all-or-nothing) if any shell fails.
+    effective_min_surfaces = min_surfaces if allow_truncation else len(surface_configs)
     ordered_surface_data, provenance = build_boozer_surface_family(
         ordered_configs,
         mpol=mpol,
@@ -5128,15 +5154,34 @@ def initialize_published_surface_data_from_stage2_seed(
         contract=contract_surface_to_target_volume,
         make_entry=_surface_data_entry,
         allow_truncation=allow_truncation,
-        min_surfaces=min_surfaces,
+        min_surfaces=effective_min_surfaces,
     )
     # A truncated band is an outer suffix (e.g. {inner2, inner3, outer}), so its
     # names are not inner0-based and the strict inner0-based name postcondition
     # cannot apply -- build_boozer_surface_family already validated the band with
     # its relaxed nested+ordered postcondition. Run the strict one only when the
     # full requested stack was accepted.
-    if not provenance.truncated:
+    if provenance.truncated:
+        # Outer-suffix band: the inner0-based name postcondition cannot apply (the
+        # relaxed family postcondition already checked nesting+volume-order), but
+        # G-consistency is name-agnostic (every shell shares the outer G) and the
+        # relaxed check omits it, so enforce it here.
+        _require_published_G_consistency(ordered_surface_data)
+    else:
         _require_published_surface_data_postconditions(ordered_surface_data)
+    # Opt-in: hand the solved least-squares family off to exact-grid Newton twins so the per-eval
+    # re-solve tracks the coils instead of collapsing iota->0 (see
+    # _resolve_published_family_to_exact_twins). Default 'ls' keeps the legacy re-solve byte-for-byte
+    # so existing runs/tests are unchanged; the multisurface optimization sets 'exact_twin'.
+    if globals().get("MULTISURFACE_RESOLVE_MODE", "ls") == "exact_twin":
+        _resolve_published_family_to_exact_twins(
+            ordered_surface_data,
+            mpol=mpol,
+            ntor=ntor,
+            bs=bs,
+            boozer_I=boozer_I,
+            nfp=nfp,
+        )
     return ordered_surface_data, []
 
 
@@ -5154,6 +5199,8 @@ def initialize_surface_data_for_contract(
     nfp,
     stage2_seed_surface,
     warm_start_surface_stem,
+    allow_truncation=False,
+    min_surfaces=3,
 ):
     if (
         surface_mode_contract.mode == PUBLISHED_MULTISURFACE
@@ -5168,6 +5215,8 @@ def initialize_surface_data_for_contract(
             boozer_I=boozer_I,
             nfp=nfp,
             stage2_seed_surface=stage2_seed_surface,
+            allow_truncation=allow_truncation,
+            min_surfaces=min_surfaces,
         )
 
     standard_stage2_seed_surface = (
@@ -9587,6 +9636,26 @@ def build_single_stage_objective_bundle(
         for curve in banana_curves
     ]
     JPoloidalExtent = average_surface_objectives(JPoloidalExtentTerms)
+    # Poloidal-extent FLOOR (spread) term: default-None so the descent graph is
+    # byte-identical until --single-stage-poloidal-floor-weight and -rad are set.
+    JPoloidalExtentFloorTerms = (
+        [
+            PoloidalExtentFloor(
+                curve,
+                banana_surf_major_radius,
+                SINGLE_STAGE_POLOIDAL_FLOOR_RAD,
+            )
+            for curve in banana_curves
+        ]
+        if SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT > 0.0
+        and SINGLE_STAGE_POLOIDAL_FLOOR_RAD > 0.0
+        else []
+    )
+    JPoloidalExtentFloor = (
+        average_surface_objectives(JPoloidalExtentFloorTerms)
+        if JPoloidalExtentFloorTerms
+        else None
+    )
     JCoilWidthTerms = [
         EllipseWidth(
             curve,
@@ -9972,6 +10041,8 @@ def build_single_stage_objective_bundle(
         JCurvature,
         POLOIDAL_EXTENT_WEIGHT=SINGLE_STAGE_POLOIDAL_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
+        POLOIDAL_FLOOR_WEIGHT=SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT,
+        JPoloidalExtentFloor=JPoloidalExtentFloor,
         JCurveLengthMin=JCurveLengthMin,
         width_min_threshold=SINGLE_STAGE_WIDTH_MIN_THRESHOLD,
         width_max_threshold=SINGLE_STAGE_WIDTH_MAX_THRESHOLD,
@@ -10055,6 +10126,8 @@ def build_single_stage_objective_bundle(
         "JGeodesicCurvatureTerms": JGeodesicCurvatureTerms,
         "JPoloidalExtent": JPoloidalExtent,
         "JPoloidalExtentTerms": JPoloidalExtentTerms,
+        "JPoloidalExtentFloor": JPoloidalExtentFloor,
+        "JPoloidalExtentFloorTerms": JPoloidalExtentFloorTerms,
         "JCoilWidth": JCoilWidth,
         "JCoilWidthTerms": JCoilWidthTerms,
         "JCurveSelfIntersect": JCurveSelfIntersect,
@@ -10119,6 +10192,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JGeodesicCurvatureTerms
     global JPoloidalExtent
     global JPoloidalExtentTerms
+    global JPoloidalExtentFloor
+    global JPoloidalExtentFloorTerms
     global JCoilWidth
     global JCoilWidthTerms
     global JCurveSelfIntersect
@@ -10177,6 +10252,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JGeodesicCurvatureTerms = objective_bundle["JGeodesicCurvatureTerms"]
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JPoloidalExtentTerms = objective_bundle["JPoloidalExtentTerms"]
+    JPoloidalExtentFloor = objective_bundle["JPoloidalExtentFloor"]
+    JPoloidalExtentFloorTerms = objective_bundle["JPoloidalExtentFloorTerms"]
     JCoilWidth = objective_bundle["JCoilWidth"]
     JCoilWidthTerms = objective_bundle["JCoilWidthTerms"]
     JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
@@ -10558,6 +10635,8 @@ def evaluate_total_objective(
     JCurvature,
     CURVATURE_WEIGHT,
     JPoloidalExtent=None,
+    POLOIDAL_FLOOR_WEIGHT=0.0,
+    JPoloidalExtentFloor=None,
     include_diagnostics=True,
     JCurveLengthMin=None,
     JCoilWidth=None,
@@ -10634,6 +10713,10 @@ def evaluate_total_objective(
             include_diagnostics=include_diagnostics,
             POLOIDAL_EXTENT_WEIGHT=SINGLE_STAGE_POLOIDAL_WEIGHT,
             JPoloidalExtent=JPoloidalExtent,
+            POLOIDAL_FLOOR_WEIGHT=globals().get(
+                "SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT", 0.0
+            ),
+            JPoloidalExtentFloor=globals().get("JPoloidalExtentFloor"),
             JCurveLengthMin=JCurveLengthMin,
             JCoilWidth=JCoilWidth,
             WIDTH_WEIGHT=WIDTH_WEIGHT,
@@ -14362,6 +14445,8 @@ def build_total_objective(
     JCurvature,
     POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
     JPoloidalExtent=None,
+    POLOIDAL_FLOOR_WEIGHT=0.0,
+    JPoloidalExtentFloor=None,
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
@@ -14435,6 +14520,8 @@ def build_total_objective(
         JCurvature,
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
+        POLOIDAL_FLOOR_WEIGHT=POLOIDAL_FLOOR_WEIGHT,
+        JPoloidalExtentFloor=JPoloidalExtentFloor,
         JCurveLengthMin=JCurveLengthMin,
         JCoilWidth=JCoilWidth,
         WIDTH_WEIGHT=WIDTH_WEIGHT,
@@ -15934,6 +16021,8 @@ JnonQSRatioObjective = None
 JBoozerResidualObjective = None
 JCurveLengthMin = None
 JPoloidalExtent = None
+JPoloidalExtentFloor = None
+JPoloidalExtentFloorTerms = None
 JCoilWidth = None
 JCurveSelfIntersect = None
 JCurveHardwareKeepout = None
@@ -15945,6 +16034,8 @@ JLCFSMajorRadius = None
 JLCFSMinorRadius = None
 JResidueObjective = None
 SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
+SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT = 0.0
+SINGLE_STAGE_POLOIDAL_FLOOR_RAD = 0.0
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
 SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT_DEFAULT
@@ -16862,6 +16953,8 @@ if __name__ == "__main__":
         nfp=banana_surf_nfp,
         stage2_seed_surface=stage2_seed_surface,
         warm_start_surface_stem=warm_start_surface_stem,
+        allow_truncation=bool(args.surface_allow_truncation),
+        min_surfaces=int(args.surface_min_surfaces),
     )
     outer_surface_data = surface_data[-1]
     boozer_surface_lineage_metadata = boozer_surface_lineage_metadata_from_surface_data(
@@ -16928,6 +17021,10 @@ if __name__ == "__main__":
     # Hardware floors/ceilings are strict; weights remain freely configurable.
     LENGTH_WEIGHT = args.length_weight
     SINGLE_STAGE_POLOIDAL_WEIGHT = float(args.single_stage_poloidal_weight)
+    SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT = float(
+        args.single_stage_poloidal_floor_weight
+    )
+    SINGLE_STAGE_POLOIDAL_FLOOR_RAD = float(args.single_stage_poloidal_floor_rad)
     SINGLE_STAGE_WIDTH_WEIGHT = float(args.single_stage_width_weight)
     SINGLE_STAGE_SELFINT_WEIGHT = float(args.single_stage_selfint_weight)
     SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT = float(
@@ -16974,6 +17071,14 @@ if __name__ == "__main__":
     SINGLE_STAGE_WIDTH_MAX_THRESHOLD = float(args.single_stage_width_max_threshold)
     if SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD <= 0.0:
         raise ValueError("--single-stage-poloidal-threshold-rad must be positive.")
+    if SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT > 0.0 and not (
+        0.0 < SINGLE_STAGE_POLOIDAL_FLOOR_RAD < SINGLE_STAGE_POLOIDAL_THRESHOLD_RAD
+    ):
+        raise ValueError(
+            "--single-stage-poloidal-floor-rad must be in "
+            "(0, --single-stage-poloidal-threshold-rad) when "
+            "--single-stage-poloidal-floor-weight > 0."
+        )
     if SINGLE_STAGE_WIDTH_MIN_THRESHOLD <= 0.0:
         raise ValueError("--single-stage-width-min-threshold must be positive.")
     if SINGLE_STAGE_WIDTH_MAX_THRESHOLD < SINGLE_STAGE_WIDTH_MIN_THRESHOLD:
@@ -19003,6 +19108,8 @@ if __name__ == "__main__":
         "CS_DIST": CS_DIST,
         "CS_WEIGHT": CS_WEIGHT,
         "SINGLE_STAGE_POLOIDAL_WEIGHT": SINGLE_STAGE_POLOIDAL_WEIGHT,
+        "SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT": SINGLE_STAGE_POLOIDAL_FLOOR_WEIGHT,
+        "SINGLE_STAGE_POLOIDAL_FLOOR_RAD": SINGLE_STAGE_POLOIDAL_FLOOR_RAD,
         "SINGLE_STAGE_WIDTH_WEIGHT": SINGLE_STAGE_WIDTH_WEIGHT,
         "SINGLE_STAGE_SELFINT_WEIGHT": SINGLE_STAGE_SELFINT_WEIGHT,
         "SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT": SINGLE_STAGE_HARDWARE_KEEPOUT_WEIGHT,

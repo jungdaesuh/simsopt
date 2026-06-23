@@ -753,6 +753,8 @@ def build_total_objective(
     JCurvature,
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
+    POLOIDAL_FLOOR_WEIGHT=0.0,
+    JPoloidalExtentFloor=None,
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
@@ -837,6 +839,11 @@ def build_total_objective(
         objective = objective + LENGTH_WEIGHT * JCurveLengthMin
     if JPoloidalExtent is not None:
         objective = objective + POLOIDAL_EXTENT_WEIGHT * JPoloidalExtent
+    # Poloidal-extent FLOOR (opt-in, default-None so the objective graph is
+    # byte-identical until --single-stage-poloidal-floor-weight > 0). Rewards the
+    # banana-tip U-turn spreading further poloidally to relax tip curvature.
+    if JPoloidalExtentFloor is not None:
+        objective = objective + POLOIDAL_FLOOR_WEIGHT * JPoloidalExtentFloor
     if JCoilWidth is not None:
         objective = objective + WIDTH_WEIGHT * (
             QuadraticPenalty(JCoilWidth, width_min_threshold, "min")
@@ -1249,6 +1256,8 @@ def evaluate_total_objective(
     include_diagnostics=True,
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
+    POLOIDAL_FLOOR_WEIGHT=0.0,
+    JPoloidalExtentFloor=None,
     JCurveLengthMin=None,
     JCoilWidth=None,
     WIDTH_WEIGHT=0.0,
@@ -1332,6 +1341,8 @@ def evaluate_total_objective(
         JCurvature,
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
+        POLOIDAL_FLOOR_WEIGHT=POLOIDAL_FLOOR_WEIGHT,
+        JPoloidalExtentFloor=JPoloidalExtentFloor,
         JCurveLengthMin=JCurveLengthMin,
         JCoilWidth=JCoilWidth,
         WIDTH_WEIGHT=WIDTH_WEIGHT,

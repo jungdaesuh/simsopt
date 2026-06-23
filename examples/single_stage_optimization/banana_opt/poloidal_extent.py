@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from jax import grad
 import jax.numpy as jnp
+from jax.scipy.special import logsumexp
 
 from banana_opt.hardware_keepout import live_winding_r0
 from banana_opt.smoothing import smoothmax_selected
@@ -217,6 +218,101 @@ class PoloidalExtent(Optimizable):
             np.asarray(self.dJ_dgamma(gamma, gammadash, r_winding))
         ) + self.curve.dgammadash_by_dcoeff_vjp(
             np.asarray(self.dJ_dgammadash(gamma, gammadash, r_winding))
+        )
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+# Smooth-max temperature (rad) for the poloidal-floor objective. The floor scores
+# the PEAK inboard poloidal extent against a target, so it needs a differentiable
+# maximum; this temperature sets how tightly the log-mean-exp tracks the hard max.
+# Module-owned (not a caller knob): small enough that the smooth max sits within a
+# few percent of the hard max at the ~1 rad banana-tip peak, large enough that the
+# gradient is shared across the near-peak points (not just the single argmax) for
+# stable descent.
+POLOIDAL_FLOOR_SMOOTH_MAX_TEMPERATURE_RAD = 0.05
+
+
+@jit
+def _poloidal_floor_pure(
+    gamma,
+    R_winding,
+    Z_winding,
+    theta_floor,
+    temperature,
+    p,
+):
+    R = jnp.linalg.norm(gamma[:, :2], axis=-1)
+    Z = gamma[:, 2]
+    theta_in = jnp.arctan2(Z - Z_winding, -(R - R_winding))
+    abs_theta = jnp.abs(theta_in)
+    # Normalized log-mean-exp: a differentiable max that is exact for a constant
+    # profile and approaches max|theta_in| as temperature -> 0.
+    smooth_max = temperature * (
+        logsumexp(abs_theta / temperature) - jnp.log(abs_theta.shape[0])
+    )
+    deficit = jnp.maximum(theta_floor - smooth_max, 0.0)
+    return (1.0 / p) * deficit**p
+
+
+class PoloidalExtentFloor(Optimizable):
+    """Soft lower bound on the peak inboard poloidal extent of a banana coil.
+
+    J = (1/p) * max(theta_floor - smoothmax|theta_in|, 0)^p, in rad^p. Zero once
+    the furthest-inboard point of the coil reaches theta_floor; otherwise positive
+    and decreasing in extent, so descent spreads the banana-tip U-turn further
+    poloidally (distributing the turn over a longer arc, relaxing the tip
+    curvature) instead of turning around within a short poloidal arc. The
+    complement of PoloidalExtent, which caps the peak from above; here the peak is
+    floored from below. theta is measured inboard about the live winding major
+    radius (value-live under a freed winding R0), matching PoloidalExtent's frame.
+    """
+
+    def __init__(
+        self,
+        curve,
+        R_winding,
+        theta_floor,
+        p=2,
+        Z_winding=0.0,
+        temperature=POLOIDAL_FLOOR_SMOOTH_MAX_TEMPERATURE_RAD,
+    ):
+        self.curve = curve
+        self.R_winding = float(R_winding)
+        self.Z_winding = float(Z_winding)
+        self.theta_floor = float(theta_floor)
+        self.p = int(p)
+        self.temperature = float(temperature)
+        super().__init__(depends_on=[curve])
+        # theta_in depends on gamma only (no arc-length weighting on a peak term),
+        # so the descent carries a single gamma VJP. R_winding enters live in J/dJ.
+        self.J_jax = jit(
+            lambda g, r_winding: _poloidal_floor_pure(
+                g,
+                r_winding,
+                self.Z_winding,
+                self.theta_floor,
+                self.temperature,
+                self.p,
+            )
+        )
+        self.dJ_dgamma = jit(
+            lambda g, r_winding: grad(self.J_jax, argnums=0)(g, r_winding)
+        )
+
+    def live_R_winding(self):
+        """Live winding major radius the poloidal frame is measured about, m."""
+        return live_winding_r0([self.curve], self.R_winding)
+
+    def J(self):
+        return float(self.J_jax(self.curve.gamma(), self.live_R_winding()))
+
+    @derivative_dec
+    def dJ(self):
+        gamma = self.curve.gamma()
+        r_winding = self.live_R_winding()
+        return self.curve.dgamma_by_dcoeff_vjp(
+            np.asarray(self.dJ_dgamma(gamma, r_winding))
         )
 
     return_fn_map = {"J": J, "dJ": dJ}

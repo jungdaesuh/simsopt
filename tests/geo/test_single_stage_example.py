@@ -3680,6 +3680,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self,
     ):
         module = self.load_module()
+        family = importlib.import_module("banana_opt.boozer_surface_family")
         contract = module.resolve_surface_mode_contract(
             SimpleNamespace(
                 surface_mode=module.PUBLISHED_MULTISURFACE,
@@ -3754,8 +3755,16 @@ class SingleStageExampleTests(unittest.TestCase):
                 "solved_inner0": 0.06,
             }[solved_name]
             return SimpleNamespace(
-                surface=FakeSurface(solved_name, solved_volume),
-                res={"iota": float(iota) + 0.01, "G": float(G0) + 1e-9},
+                success=True,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=float(iota) + 0.01,
+                solved_G=float(G0) + 1e-9,
+                volume=solved_volume,
+                boozer_surface=SimpleNamespace(
+                    surface=FakeSurface(solved_name, solved_volume),
+                    res={"iota": float(iota) + 0.01, "G": float(G0) + 1e-9},
+                ),
             )
 
         def fake_contract_surface_to_target_volume(previous_surface, target_volume):
@@ -3772,8 +3781,8 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         with (
             patch.object(
-                module,
-                "initialize_boozer_surface",
+                family,
+                "attempt_initialize_boozer_surface",
                 side_effect=fake_initialize_boozer_surface,
             ),
             patch.object(
@@ -3980,6 +3989,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_published_stage2_seed_rejects_solved_G_drift(self):
         module = self.load_module()
+        family = importlib.import_module("banana_opt.boozer_surface_family")
         contract = module.resolve_surface_mode_contract(
             SimpleNamespace(
                 surface_mode=module.PUBLISHED_MULTISURFACE,
@@ -4021,8 +4031,18 @@ class SingleStageExampleTests(unittest.TestCase):
                 "contracted_solved_contracted_solved_stage2_outer_to_0.08_to_0.06": 0.06,
             }[initial_surface.name]
             return SimpleNamespace(
-                surface=FakeSurface(f"solved_{initial_surface.name}", solved_volume),
-                res={"iota": 0.15, "G": solved_G},
+                success=True,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=0.15,
+                solved_G=solved_G,
+                volume=solved_volume,
+                boozer_surface=SimpleNamespace(
+                    surface=FakeSurface(
+                        f"solved_{initial_surface.name}", solved_volume
+                    ),
+                    res={"iota": 0.15, "G": solved_G},
+                ),
             )
 
         def fake_contract_surface_to_target_volume(previous_surface, target_volume):
@@ -4033,8 +4053,8 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with (
             patch.object(
-                module,
-                "initialize_boozer_surface",
+                family,
+                "attempt_initialize_boozer_surface",
                 side_effect=fake_initialize_boozer_surface,
             ),
             patch.object(
@@ -4084,6 +4104,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_published_stage2_seed_rejects_nonmonotone_actual_volumes(self):
         module = self.load_module()
+        family = importlib.import_module("banana_opt.boozer_surface_family")
         contract = module.resolve_surface_mode_contract(
             SimpleNamespace(
                 surface_mode=module.PUBLISHED_MULTISURFACE,
@@ -4127,8 +4148,16 @@ class SingleStageExampleTests(unittest.TestCase):
                 "solved_inner0": 0.12,
             }[solved_name]
             return SimpleNamespace(
-                surface=FakeSurface(solved_name, solved_volume),
-                res={"iota": float(iota), "G": float(G0)},
+                success=True,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=float(iota),
+                solved_G=float(G0),
+                volume=solved_volume,
+                boozer_surface=SimpleNamespace(
+                    surface=FakeSurface(solved_name, solved_volume),
+                    res={"iota": float(iota), "G": float(G0)},
+                ),
             )
 
         def fake_contract_surface_to_target_volume(previous_surface, target_volume):
@@ -4139,8 +4168,8 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with (
             patch.object(
-                module,
-                "initialize_boozer_surface",
+                family,
+                "attempt_initialize_boozer_surface",
                 side_effect=fake_initialize_boozer_surface,
             ),
             patch.object(
