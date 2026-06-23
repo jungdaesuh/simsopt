@@ -3606,6 +3606,26 @@ _DENSE_OPERATOR_CHUNK_BATCH_SIZE = max(
 )
 
 
+# Solver for the inner-Boozer Gauss-Newton adjoint system (``J^T J + stab I``,
+# symmetric positive-(semi)definite).  Any value other than ``"cg"`` (default
+# ``"dense"``) keeps the established path: a dense ``lstsq`` solve when the N x N
+# operator fits ``max_dense_jacobian_bytes``, else an operator-only GMRES
+# refinement.  ``"cg"`` solves the same system matrix-free with ``lineax``
+# Conjugate Gradients -- the Krylov method matched to an SPD operator (cheaper
+# per step than GMRES, which targets nonsymmetric systems and stores the full
+# Krylov basis).  Its GUARANTEED benefit is bounded memory, NOT speed: CG needs
+# O(kappa_eff) matvecs, and at production conditioning (kappa(J^T J) ~ 4e5 with
+# stab=0) an unclustered spectrum needs thousands of HVPs, so ``"cg"`` wins only
+# when the operator spectrum is favourably clustered.  The genuine
+# kappa-reducing speedup (preconditioned CG, or LSMR on ``J`` at kappa(J) ~ 625)
+# requires exposing the residual Jacobian ``J`` at this seam -- a follow-up; the
+# bare penalty-Hessian matvec admits no preconditioner.  Read once at import
+# (selects a static trace-time branch).
+_ADJOINT_LINEAR_SOLVER = (
+    os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower()
+)
+
+
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
     # Assemble the dense operator in column batches rather than mapping all N basis
@@ -4636,6 +4656,55 @@ def _solve_hessian_system_with_status(
     )
 
 
+def _solve_symmetric_operator_cg_with_status(matvec, rhs, *, tol):
+    """Solve a symmetric PSD operator system matrix-free via ``lineax`` CG.
+
+    For the inner-Boozer Gauss-Newton adjoint (``J^T J + stab I``), which is
+    symmetric positive-(semi)definite.  Bounded memory (no dense N x N); see
+    ``_ADJOINT_LINEAR_SOLVER`` for the speed/conditioning caveats.  Handles a
+    1-D rhs directly and a column-batched 2-D rhs by mapping over columns,
+    mirroring ``_solve_square_array_system_operator_only``.
+    """
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim != 1:
+        def solve_column(column):
+            return _solve_symmetric_operator_cg_with_status(matvec, column, tol=tol)
+
+        solutions, column_statuses = jax.vmap(
+            solve_column,
+            in_axes=1,
+            out_axes=(1, 0),
+        )(rhs)
+        return solutions, _LinearSolveStatus(
+            success=jnp.all(column_statuses.success),
+            residual=jnp.max(column_statuses.residual),
+            residual_relative=jnp.max(column_statuses.residual_relative),
+            iterations=jnp.max(column_statuses.iterations),
+        )
+
+    effective_tol = _effective_linear_solve_tolerance(rhs, tol)
+    operator = lineax.FunctionLinearOperator(
+        matvec,
+        jax.ShapeDtypeStruct(rhs.shape, rhs.dtype),
+        tags=(lineax.positive_semidefinite_tag, lineax.symmetric_tag),
+    )
+    solution = lineax.linear_solve(
+        operator,
+        rhs,
+        solver=lineax.CG(rtol=effective_tol, atol=effective_tol),
+        throw=False,
+    )
+    residual = rhs - matvec(solution.value)
+    iterations = _device_int32(solution.stats["num_steps"])
+    return solution.value, _linear_solve_status(
+        solution.value,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=iterations,
+    )
+
+
 def _solve_hessian_least_squares_system_with_status(
     objective_fn,
     x,
@@ -4647,6 +4716,12 @@ def _solve_hessian_least_squares_system_with_status(
     """Solve a Hessian adjoint system without forming normal equations."""
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
     rhs = jnp.asarray(rhs)
+    if _ADJOINT_LINEAR_SOLVER == "cg":
+        return _solve_symmetric_operator_cg_with_status(
+            operator["matvec"],
+            rhs,
+            tol=tol,
+        )
     if _dense_square_operator_materialization_allowed(rhs):
         return _solve_dense_square_operator_least_squares_system_with_status(
             operator["matvec"],
