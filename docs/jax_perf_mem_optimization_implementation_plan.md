@@ -3,8 +3,10 @@
 ## Purpose
 
 Track the concrete remediation of the performance/memory optimization opportunities found by the
-multi-agent JAX audit (9 subsystem finders → 51 candidates → adversarial verification → 17 confirmed)
-and refined across three independent validation passes against live source at HEAD `f85b7ec7c`.
+multi-agent JAX audit (9 subsystem finders -> 51 candidates -> adversarial verification). The original
+write-up contained 16 named findings because #3 was dropped from the ranked list; this plan restores #3,
+ranks the missed adjacent sites found during validation, and was doc-review revalidated against live source
+at HEAD `5fe184308`.
 
 This file is the single execution + review + progress-tracking artifact for that work. Each task carries
 its file:line anchor, the concrete JAX-level change, the parity guard, and a runnable validation command so
@@ -24,10 +26,13 @@ another engineer/agent can execute it without re-deriving the audit.
 
 ## Non-Goals
 
-- No changes to the physics kernels (BiotSavart B/dB, surface-Fourier eval, Boozer residual) — the audit
-  swept these clean and prior work measured machine-precision C++↔JAX parity.
+- No changes to production physics kernels on the single-stage path (BiotSavart B/dB, surface-Fourier eval,
+  Boozer residual objective/VJP/HVP). A1 is explicitly a low-priority public/test dense-Jacobian helper, not
+  a production Boozer residual rewrite.
 - No re-work of already-resolved poles: the dense LS-Hessian adjoint assembler is already chunked
-  (`lax.map` + `SIMSOPT_MAX_DENSE_JACOBIAN_BYTES`) and the outer LBFGS loop is already host-driven.
+  (`lax.map` + `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` at `optimizer.py:3605,3642`), and dense
+  finalization is already byte-gated by the live `max_dense_hessian_bytes` / `max_dense_jacobian_bytes`
+  policy surfaces. The outer LBFGS loop is already host-driven.
 - No blanket float32 downcast — this is an FP64-critical codebase.
 - No action on the guarded watch-item (`solve/dispatch.py:539`) unless a production route is found that
   enables dense linearization without a byte cap.
@@ -41,10 +46,11 @@ another engineer/agent can execute it without re-deriving the audit.
   and came out essentially clean — only Phase 1 items land on it.
 - Parity convention: bit-exact is preferred; the existing chunked-reduction order change of ~1e-16 is an
   already-accepted tolerance (documented at `optimizer.py:3636-3637`), well below the 1e-11 Newton tol.
-- Test runner: targeted `pytest` files listed per task. `import jax` works under the repo's base
-  interpreter (`python3`, jax 0.10.0). Some suites also import `simsoptpp`; if the base interpreter fails on
-  that import, run under the project's configured env. Suite is **not** xdist-safe and the JAX cache can
-  accumulate across tests — run per-file (or rely on the conftest per-test `jax.clear_caches`).
+- Test runner: targeted `pytest` files are listed per task. This plan is source-validated but the current
+  doc-review pass did **not** rerun local JAX kernels/tests; execute the listed commands under the repo's
+  configured Python/JAX environment before checking off implementation tasks. For CPU parity checks, use
+  `JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python3 -m pytest <file>`. The suite is **not** xdist-safe and the JAX
+  cache can accumulate across tests — run per-file (or rely on the conftest per-test `jax.clear_caches`).
 
 ## Rationale
 
@@ -98,14 +104,10 @@ C++ bit-parity oracles. The watch-item is intentionally deferred.
    - [ ] Replace the **tracer** branches (`_slice_1d_static_selector` / `_update_1d_static_selector`, which
          actually run under jit) with a **tracer-safe static slice**: `lax.slice_in_dim` (static int bounds)
          for `_slice_1d_static`, and `slice_in_dim` head/tail + `concatenate` for `_update_1d_static`.
-   - [x] **Transfer-guard check DONE (2026-06-23, jax 0.10.0, CPU probe).** Under `jax.jit` +
-         `transfer_guard("disallow")`, static-bound `lax.slice_in_dim` on a tracer is guard-safe in **both**
-         forward and backward (when grad runs in jitted form, as the real `value_and_grad` does), and is
-         **bit-exact** to the selector matmul in value *and* gradient. The selector was over-defensive; the
-         `:141-143` comment only condemns dynamic-slice/`.at[]` with traced indices, not static `slice_in_dim`.
-         Caveat: an *eager* `jax.grad` (host `1.0` seed) trips the guard — but it trips the selector form
-         **identically**, so it is orthogonal to this change. Probe:
-         `scratchpad/t31_guard_probe.py` + `t31_grad_probe.py`.
+   - [ ] Before deleting the helpers, add a durable regression/guard probe in the test suite for
+         `jax.jit` + `transfer_guard("disallow")` covering static-bound `lax.slice_in_dim` in both value and
+         jitted-gradient form. Earlier scratch probes were not present in the repo during this doc review, so
+         this plan must not treat the transfer-guard question as closed until the executable test exists.
    - [ ] Delete the two selector helpers and replace both branches unconditionally with
          `lax.slice_in_dim` (slice) / `slice_in_dim` head+tail + `concatenate` (update).
 
@@ -189,14 +191,39 @@ C++ bit-parity oracles. The watch-item is intentionally deferred.
           `record_residual=True` (reports `residual_history[-1]`).
     - [ ] Do **not** reconstruct the proxy from `g_new + ATb_rs` (breaks C++ bit-parity).
 
-14. **T3.6 (#8 / #2) — GSCO candidate gather + coil-coil inductance rank-5 broadcast**
+14. **T3.3 (#5) — `theta_vmec` dense diagonal Jacobian** · `src/simsopt_jax/core/vmec_fieldlines.py:40-52`; `src/simsopt_jax/core/_root.py:21-25,121-124`
+    - [ ] Stop materializing `jnp.diag(diagonal)` for the VMEC theta solve. Thread the diagonal vector through
+          a diagonal-specific Newton step (`step = -residual / diagonal`) and implicit backward solve
+          (`cotangent / diagonal`) so the solver avoids dense `Ntheta x Ntheta` allocation and LU.
+    - [ ] Keep the generic `_root.py` dense path for non-diagonal callers; do not widen this into a public
+          root-solver API change unless a caller inventory proves it is needed.
+    - [ ] Gate against CPU `vmec_fieldlines` and current JAX results at the existing `test_vmec_fieldlines_jax`
+          tolerances; this is not a bit-exact promise because it changes a linear-solve route.
+
+15. **T3.4 (#17) — Not-a-knot spline dense `(3M)^2` solve** · `src/simsopt_jax/core/mhd_bootstrap.py:15-90`
+    - [ ] Replace `_not_a_knot_coefficients`' dense assembled `(3*intervals, 3*intervals)` system with a
+          compact banded/tridiagonal not-a-knot solve for the cubic coefficients. Keep the dense version only
+          as a test oracle if useful.
+    - [ ] Preserve the current unit-spacing contract and derivative conventions in `_eval_cubic`; do not
+          switch interpolation families.
+    - [ ] Gate with `tests/mhd/test_bootstrap_jax.py`; accept tolerance-matched JVP/FD parity, not byte identity.
+
+16. **T3.5 (#6) — VMEC geometry pre-broadcasted mode tensors** · `src/simsopt_jax/core/vmec_geometry.py:390-413`
+    - [ ] Avoid materializing the full family of `mcosangle`, `ncosangle`, `mncosangle`, `m2cosangle`,
+          `n2cosangle`, `msinangle`, `nsinangle`, `mnsinangle`, `m2sinangle`, and `n2sinangle` tensors.
+          Compute weighted mode sums from `cosangle`/`sinangle` with the mode multipliers folded into the
+          coefficient argument at each use.
+    - [ ] Keep formulas source-local in `vmec_geometry.py`; do not introduce a second VMEC mode-sum SSOT.
+    - [ ] Gate with VMEC compute-geometry diagnostics because this touches many derived geometry fields.
+
+17. **T3.6 (#8 / #2) — GSCO candidate gather + coil-coil inductance rank-5 broadcast**
     - [ ] `wireframe_workflow.py:339-340`: hoist the loop-static `Acol` gather into params; keep the direct
           `(r+d)²` form (do **not** expand — catastrophic cancellation).
     - [ ] `field/force.py:1097-1130` `_coil_coil_inductances_pure`: drop the ×3 `r_ij` tensor (preserve the
           exact per-component `+eps`) and `lax.map` over the coil axis. (Off single-stage; advanced
           coil-force example only.)
 
-15. **#3 (dropped finding) — Self-field-force B vmap** · `src/simsopt_jax_adapters/field/force.py:134-155` `_B_at_point_from_coil_set_pure` (def `:105`)
+18. **#3 (dropped finding) — Self-field-force B vmap** · `src/simsopt_jax_adapters/field/force.py:134-155` `_B_at_point_from_coil_set_pure` (def `:105`)
     - [ ] Note: `_B_at_point_from_coil_set_pure` is a **single-point** evaluator; its internal
           `vmap(from_j)(jnp.arange(n))` (`:154`) maps **over coils** (`n` = number of coils), not over
           evaluation points. The unchunked **per-point** mapping happens at the **caller**
@@ -205,24 +232,24 @@ C++ bit-parity oracles. The watch-item is intentionally deferred.
           coil axis inside `:154` if the coil count is large. Small impact, off single-stage; do only if
           `force.py` is already open for T3.6/A3/A4.
 
-16. **A3 — NetFluxes rank-5 quadrature broadcast** · `src/simsopt_jax_adapters/field/force.py:1397` (def), `:1466-1469` (broadcast) `_net_fluxes_pure`
+19. **A3 — NetFluxes rank-5 quadrature broadcast** · `src/simsopt_jax_adapters/field/force.py:1397` (def), `:1466-1469` (broadcast) `_net_fluxes_pure`
     - [ ] Replace the `(m,n,m',n',3)` broadcast `gammas_targets[:,:,None,None,:] - gammas_sources[None,None,:,:,:]`
           with a `lax.map`/chunked reduction over the target-coil axis (mirror the T3.6 inductance fix).
           Off single-stage (NetFluxes/induced-current workflow).
 
-17. **A4 — Explicit `L⁻¹` then `@ flux`** · `src/simsopt_jax_adapters/field/force.py:1195-1202` (inverse), `:1255-1264` (`@ _net_fluxes_pure` token at `:1257`) `_coil_coil_inductances_inv_pure` / `_induced_currents_pure`
+20. **A4 — Explicit `L⁻¹` then `@ flux`** · `src/simsopt_jax_adapters/field/force.py:1195-1202` (inverse), `:1255-1264` (`@ _net_fluxes_pure` token at `:1257`) `_coil_coil_inductances_inv_pure` / `_induced_currents_pure`
     - [ ] Replace forming `inv_L` (two `_solve_triangular_columns` against a full `m×m` identity) + matmul
           with a direct Cholesky solve of `L·I = −flux` against the `m`-vector RHS (`cho_factor`/`cho_solve`).
           Shared `O(m³)` Cholesky dominates, so this is a modest win — do only when touching this file.
           Scope: the JAX adapter only (not `src/simsopt/field/force.py`).
 
-18. **A1 — Boozer residual dense-Jacobian helper (test/reference surface)** · `src/simsopt_jax/geo/boozer_residual.py:967,977` `boozer_residual_jacobian_composed`
+21. **A1 — Boozer residual dense-Jacobian helper (test/reference surface)** · `src/simsopt_jax/geo/boozer_residual.py:967,977` `boozer_residual_jacobian_composed`
     - [ ] Low priority / API-risk: the `jnp.eye(n_res)` (VJP) and `jnp.eye(n_dofs)` (JVP) dense bases are
           materialized only for the public/test/benchmark derivative surface (no `src/` production caller;
           production exact solves route through the operator-backed adjoint). If addressed, gate any change
           behind the existing parity tests and keep the public signature.
 
-19. **A2 — Stage-2 dynamic min-distance Python loops** · `src/simsopt_jax_adapters/objectives/stage2_target.py:506,536` (called at `:983,:992`)
+22. **A2 — Stage-2 dynamic min-distance Python loops** · `src/simsopt_jax_adapters/objectives/stage2_target.py:506,536` (called at `:983,:992`)
     - [x] **Jit context RESOLVED (2026-06-23, static inspection):** the calls are inside `_reporting_summary`
           (`:939`), wrapped as a **separate** `reporting_summary = jax.jit(_reporting_summary)` (`:1045`) and
           exposed as a distinct `Stage2ReportingFn` (`:160`, `:1331`) — **not** part of the differentiated
@@ -246,7 +273,7 @@ Run targeted suites per change (per-file; suite is not xdist-safe):
 - [ ] **T1.2** — `python3 -m pytest tests/solve/test_serial_jax.py tests/objectives/test_constrained.py tests/solve/test_constrained.py -q`; plus `JAX_LOG_COMPILES=1` manual check of single inner-solve compile after warm-up.
 - [ ] **T1.1** — `python3 -m pytest tests/geo/test_optimizer_jax_item19.py tests/geo/test_optimizer_jax_reference.py -q`; assert host-vs-device dense build agreement ≤ 1e-12 rel-L2.
 - [ ] **T3.1** — `python3 -m pytest tests/geo/test_optimizer_jax_reference.py -q` and any curve-geometry suite; explicit `transfer_guard("disallow")` + `jax.jit` slice probe; assert bit-exact gather.
-- [ ] **T2.2 / T2.4 / #3** — `python3 -m pytest tests/jax/core/test_pm_optimization_jax_item25.py tests/solve/test_pm_optimization.py tests/solve/test_pm_workflow_jax.py -q` (T2.2 expects bit-identical).
+- [ ] **T2.2 / T2.4** — `python3 -m pytest tests/jax/core/test_pm_optimization_jax_item25.py tests/solve/test_pm_optimization.py tests/solve/test_pm_workflow_jax.py -q` (T2.2 expects bit-identical).
 - [ ] **T2.6 / T3.6 (gsco)** — `python3 -m pytest tests/solve/test_wireframe_workflow_jax.py tests/solve/test_wireframe_optimization_jax_item31.py -q`.
 - [ ] **T3.2** — `python3 -m pytest tests/core/test_reductions.py -q`; assert 0.0 diff vs current tree.
 - [ ] **T2.5** — `python3 -m pytest tests/jax/core/test_boozer_interp_device_cache_and_regular_grid_fused.py tests/jax/core/test_regular_grid_interp_item13.py tests/field/test_interpolated_field_jax_item15.py -q`; + 1 Poincaré/DOPRI5 trajectory spot-check.
@@ -255,14 +282,15 @@ Run targeted suites per change (per-file; suite is not xdist-safe):
 - [ ] **T2.3** — `python3 -m pytest tests/field/test_wireframefield_jax_item30.py tests/field/test_wireframefield.py -q`.
 - [ ] **T3.3** — `python3 -m pytest tests/mhd/test_vmec_fieldlines_jax.py -q` (re-validate at 1e-13).
 - [ ] **T3.4** — `python3 -m pytest tests/mhd/test_bootstrap_jax.py -q` (re-validate JVP-vs-FD oracle; tolerance-matched, not byte-pinned).
-- [ ] **A3 / A4 / #3** — `python3 -m pytest tests/field/test_selffieldforces.py -q`.
+- [ ] **T3.5** — `python3 -m pytest tests/mhd/test_vmec_compute_geometry_jax.py tests/mhd/test_vmec_diagnostics.py -q` (VMEC geometry field parity/consistency).
+- [ ] **T3.6(force) / A3 / A4 / #3** — `python3 -m pytest tests/field/test_selffieldforces.py -q`.
 - [ ] **A1** — `python3 -m pytest tests/geo/test_boozer_residual_jax.py tests/geo/test_boozer_derivatives_jax.py -q`.
 - [ ] **Cross-cutting regression** — `python3 -m pytest tests/integration/test_single_stage_objective_parity.py -q` after Phase 1 and Phase 3 (cross-backend J/∇J parity; objective value is env/config-hash sensitive, so compare J/∇J not raw bytes).
 
 ## Risks and Mitigations
 
 - Risk: **T3.1** static `slice_in_dim` trips `transfer_guard("disallow")` under jit (the reason the selector
-  exists). Mitigation: probe the guard first; fall back to a tracer-safe gather, never the dense matmul.
+  exists). Mitigation: add a durable guard regression first; fall back to a tracer-safe gather, never the dense matmul.
 - Risk: **T2.4 / T3.6 / A4** disturb C++ bit-parity oracles in pm/wireframe/self-force tests.
   Mitigation: opt-in flags only; keep the default path identical; do not algebraically rewrite the proxy.
 - Risk: **T2.5** long chaotic DOPRI5 trajectories shadow-diverge from the ~1e-12 einsum reassociation.
@@ -271,6 +299,9 @@ Run targeted suites per change (per-file; suite is not xdist-safe):
   Mitigation: assert exact pair count + J/∇J parity at 1e-12 against the pre-change tree.
 - Risk: **T1.1** host-vs-device reduction-order delta exceeds tolerance on some shapes.
   Mitigation: bounded agreement assertion (≤1e-12 rel-L2); the device lane already accepts ~1e-16.
+- Risk: **T3.3 / T3.4 / T3.5** alter MHD numerical routes and drift from CPU/JAX oracles.
+  Mitigation: keep current dense/pre-broadcast forms available as test oracles until the replacement passes
+  the named VMEC/bootstrap suites at their existing tolerances.
 - Risk: JAX cache accumulation across the non-xdist suite produces spurious OOM/aborts.
   Mitigation: run per-file; rely on the conftest per-test `jax.clear_caches`.
 
@@ -281,29 +312,22 @@ Run targeted suites per change (per-file; suite is not xdist-safe):
 - [ ] Phase 2 bit-exact items merged with 0.0 (or ≤1e-12 where reduction-order changes) diffs on their suites.
 - [ ] Phase 3 (T2.5 widened incl. classifier, T2.1, #11) merged; Stage-2 pair count unchanged; Cartesian/cyl
       + classifier tracing default to the fast contraction with strict reachable behind a flag.
-- [ ] Phase 4 items either merged behind opt-in flags with C++ bit-parity preserved, or explicitly deferred
-      with a one-line note here.
+- [ ] Phase 4 items either merged with their VMEC/bootstrap/self-force parity gates preserved, merged behind
+      opt-in flags where the current default must stay identical, or explicitly deferred with a one-line note here.
 - [ ] A5 watch-item documented as deferred (no production uncapped route found) or escalated.
 - [ ] This plan updated: each task checkbox reflects merged/deferred state; no answered Open Question left open.
 
-## Resolved Questions (was Open)
+## Resolved Questions
 
-- **T3.1 — RESOLVED 2026-06-23 (jax 0.10.0 CPU probe):** static-bound `lax.slice_in_dim` on a tracer **is**
-  transfer-guard-safe under `transfer_guard("disallow")` in both forward and backward (jitted-grad form),
-  and bit-exact to the selector matmul in value + gradient. The selector was over-defensive. Proceed with
-  the unconditional `slice_in_dim` rewrite and delete the helpers. (An eager `jax.grad` host-`1.0` seed
-  trips the guard for *both* forms — orthogonal.) Probes: `scratchpad/t31_guard_probe.py`, `t31_grad_probe.py`.
 - **A2 — RESOLVED 2026-06-23 (static inspection):** the min-distance loops are inside `_reporting_summary`
   (`:939`), a **separate** `jax.jit(_reporting_summary)` (`:1045`) exposed as `Stage2ReportingFn` — not in the
   differentiated objective graph. Impact = one-time compile breadth of a reporting-only fn; batch only if
   reporting is invoked per-iteration. Lowest priority.
-- **Test runner — RESOLVED 2026-06-23:** the canonical runner in this checkout is base `python3 -m pytest`
-  (miniforge py3.13, jax 0.10.0, pytest 9.0.2); `import simsoptpp` succeeds, so the stale project-memory note
-  about needing `./.conda-env/bin/python` (py3.11) does **not** apply here. Use `JAX_ENABLE_X64=1
-  JAX_PLATFORMS=cpu python3 -m pytest <file>` for CPU parity checks. Baseline confirmed green:
-  `tests/core/test_reductions.py` → 6 passed, 1 xfailed (the T3.2 target file at HEAD `f85b7ec7c`).
 
-## Open Questions
+## Open Questions / Execution Gates
 
-- None outstanding. (All three prior open questions resolved above; remaining work is execution per the
-  phased plan.)
+- **T3.1 transfer-guard gate:** static inspection cannot prove that the planned `slice_in_dim` replacement is
+  safe under the repo's active JAX transfer-guard settings. The prior scratch probe paths named in an earlier
+  draft are not present in this checkout, so implement a durable regression before deleting the selector helpers.
+- **Local runtime gate:** this doc-review pass did not rerun local JAX imports or pytest. The validation plan
+  lists the commands to run after implementation; do not mark a task complete from this document alone.
