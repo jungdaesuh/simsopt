@@ -425,6 +425,7 @@ from banana_opt.single_stage_constraints import (
     smooth_min_curve_surface_signed_constraint_with_hard_signal as _smooth_min_curve_surface_signed_constraint_with_hard_signal,
     smooth_min_surface_stack_signed_constraint as _smooth_min_surface_stack_signed_constraint,
     smooth_min_surface_stack_signed_constraint_with_hard_signal as _smooth_min_surface_stack_signed_constraint_with_hard_signal,
+    surface_stack_nesting_penalty as _surface_stack_nesting_penalty,
 )
 from banana_opt.single_stage_search_policy import (
     CurvatureTraversalPolicy,
@@ -3469,6 +3470,40 @@ def parse_args():
             "Target diota/ds slope for the iota-PROFILE shortfall term. The "
             "per-surface target is iota_edge + slope*(s - s_edge), anchored at the "
             "existing edge iota target. Default 0 targets a flat iota profile."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-surface-nesting-weight",
+        dest="surface_nesting_weight",
+        type=float,
+        default=float(os.environ.get("SURFACE_NESTING_WEIGHT", "0.0")),
+        help=(
+            "Opt-in weight for the soft surface-nesting barrier in weighted-sum "
+            "(--constraint-method penalty) mode (default 0 = off, objective "
+            "byte-identical until set). Penalty mode has NO inter-surface spacing "
+            "term, so a moving coil set can drive adjacent Boozer surfaces toward "
+            "contact with no gradient steering them apart and the line search "
+            "hard-rejects every non-nested trial. This adds a coil-live one-sided "
+            "barrier 0.5*w*max(0, clearance - smooth_min_gap)^2 on the SAME "
+            "smooth-min margin the ALM surface-stack constraint uses, so the "
+            "gradient widens the gap before the hard nesting gate fires. Requires "
+            "at least two surfaces and a positive --single-stage-surface-nesting-"
+            "clearance. In --constraint-method alm mode the ALM constraint already "
+            "owns nesting, so this lever is intended for penalty mode."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-surface-nesting-clearance",
+        dest="surface_nesting_clearance",
+        type=float,
+        default=float(os.environ.get("SURFACE_NESTING_CLEARANCE", "0.0")),
+        help=(
+            "Clearance band (metres) for the soft surface-nesting barrier: the "
+            "barrier activates when the smooth-min gap between adjacent Boozer "
+            "surfaces drops below this value. Default 0 leaves the barrier inert "
+            "even when its weight is set. Choose it at or above the hard "
+            "--surface-gap-threshold so the soft gradient steers the surfaces "
+            "apart before the hard nesting gate rejects the step."
         ),
     )
     parser.add_argument(
@@ -7290,6 +7325,8 @@ class RunIdentityConfig:
     iota_profile_weight: float = 0.0
     volume_profile_weight: float = 0.0
     iota_profile_slope_target: float = 0.0
+    surface_nesting_weight: float = 0.0
+    surface_nesting_clearance: float = 0.0
     residue_objective_weight: float = 0.0
     residue_objective_target_manifest_id: str | None = None
     residue_objective_validation_id: str | None = None
@@ -8145,6 +8182,10 @@ def make_run_identity_config(
         iota_profile_slope_target=float(
             getattr(args, "iota_profile_slope", 0.0)
         ),
+        surface_nesting_weight=float(getattr(args, "surface_nesting_weight", 0.0)),
+        surface_nesting_clearance=float(
+            getattr(args, "surface_nesting_clearance", 0.0)
+        ),
         residue_objective_weight=float(getattr(args, "residue_objective_weight", 0.0)),
         residue_objective_target_manifest_id=(
             None if residue_objective is None else residue_objective.target_manifest_id
@@ -8356,6 +8397,11 @@ def build_run_identity_config(config):
         if field.name == "volume_profile_weight" and (
             float(config.volume_profile_weight) == 0.0
         ):
+            continue
+        if field.name in {
+            "surface_nesting_weight",
+            "surface_nesting_clearance",
+        } and (float(config.surface_nesting_weight) == 0.0):
             continue
         if field.name == "residue_objective_weight" and float(value) == 0.0:
             continue
@@ -10459,6 +10505,43 @@ def penalty_feasible_start_local_preservation_enabled(
     return refinement_eligible_incumbent(run_dict)
 
 
+def _apply_surface_nesting_penalty(evaluation):
+    """Fold the soft surface-nesting barrier into a weighted-sum evaluation in place.
+
+    Weighted-sum (penalty) mode carries no inter-surface spacing term -- that lives
+    only on the augmented-Lagrangian path -- so a moving coil set can drive adjacent
+    nested Boozer surfaces toward contact with nothing in the gradient steering them
+    apart, and the line search hard-rejects every non-nested trial. When
+    ``SURFACE_NESTING_WEIGHT`` and ``SURFACE_NESTING_CLEARANCE`` are both positive and
+    the stack has >= 2 surfaces, this adds a coil-live one-sided barrier on the SAME
+    smooth-min margin the ALM surface-stack constraint uses (SSOT), reusing the
+    already-cached Boozer solves (no fresh solve). Inert otherwise -- the evaluation is
+    returned unchanged, so default runs stay byte-identical. Penalty mode only: in ALM
+    mode ``evaluate_search_objective`` routes to ``evaluate_alm_objective`` instead, so
+    this is never called and the ALM constraint owns nesting.
+    """
+    weight = float(globals().get("SURFACE_NESTING_WEIGHT", 0.0))
+    clearance = float(globals().get("SURFACE_NESTING_CLEARANCE", 0.0))
+    if weight <= 0.0 or clearance <= 0.0 or len(surface_data) < 2:
+        return evaluation
+    surfaces = tuple(entry["boozer_surface"].surface for entry in surface_data)
+    boozer_surfaces = tuple(entry["boozer_surface"] for entry in surface_data)
+    signed_value, signed_grad, _ = _smooth_min_surface_stack_signed_constraint(
+        surfaces,
+        clearance,
+        current_alm_distance_smoothing(),
+        globals().get("JF"),
+        boozer_surfaces=boozer_surfaces,
+    )
+    penalty_value, penalty_grad = _surface_stack_nesting_penalty(
+        signed_value, signed_grad, weight
+    )
+    evaluation["total"] = float(evaluation["total"]) + penalty_value
+    evaluation["grad"] = np.asarray(evaluation["grad"], dtype=float) + penalty_grad
+    evaluation["J_surface_nesting"] = penalty_value
+    return evaluation
+
+
 def evaluate_total_objective(
     diagnostic_surface_weights,
     nonQSs,
@@ -10622,6 +10705,7 @@ def evaluate_total_objective(
         ),
         alm_formulation="weighted_sum",
     )
+    return _apply_surface_nesting_penalty(evaluation)
 
 
 def evaluate_base_objective(
@@ -17051,16 +17135,17 @@ if __name__ == "__main__":
     SHEAR_WEIGHT = float(args.shear_weight)
     MAGNETIC_WELL_WEIGHT = float(args.magnetic_well_weight)
     MAGNETIC_WELL_TARGET = float(args.magnetic_well_target)
-    # published_multisurface truncation policy (opt-in, default OFF -> the family
-    # build keeps requiring all N nested shells, so the path stays byte-identical).
-    SURFACE_ALLOW_TRUNCATION = bool(args.surface_allow_truncation)
-    SURFACE_MIN_SURFACES = int(args.surface_min_surfaces)
     # Per-surface iota/volume PROFILE shortfalls (opt-in, default weight 0 -> terms not
     # constructed, objective graph byte-identical with prior runs). The slope only takes
     # effect once IOTA_PROFILE_WEIGHT > 0.
     IOTA_PROFILE_WEIGHT = float(args.iota_profile_weight)
     VOLUME_PROFILE_WEIGHT = float(args.volume_profile_weight)
     IOTA_PROFILE_SLOPE_TARGET = float(args.iota_profile_slope)
+    # Soft surface-nesting barrier for weighted-sum (penalty) mode (opt-in, default
+    # weight 0 -> the barrier is never folded, weighted-sum objective byte-identical
+    # with prior runs). Inert unless BOTH weight and clearance are positive.
+    SURFACE_NESTING_WEIGHT = float(args.surface_nesting_weight)
+    SURFACE_NESTING_CLEARANCE = float(args.surface_nesting_clearance)
     # Rational-iota avoidance penalty (opt-in, default weight 0 -> term not constructed,
     # objective graph byte-identical with prior runs). Q and sigma0 default to the
     # module constants and only take effect once the weight is > 0.

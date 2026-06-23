@@ -504,6 +504,27 @@ def smooth_min_surface_stack_signed_constraint_with_hard_signal(
     )
 
 
+def surface_stack_nesting_penalty(signed_value, signed_grad, weight):
+    """One-sided quadratic barrier on the smooth-min surface-stack spacing margin.
+
+    ``signed_value`` and ``signed_grad`` are the first two entries returned by
+    :func:`smooth_min_surface_stack_signed_constraint`: ``signed_value = clearance -
+    smooth_min`` (positive when adjacent Boozer surfaces are closer than the clearance,
+    i.e. approaching non-nesting) and ``signed_grad = d(signed_value)/dx`` already
+    projected onto the coil objective. The augmented-Lagrangian path consumes the same
+    margin as a constraint; weighted-sum (penalty) mode has no such term, so this packages
+    it as a fixed-weight barrier ``0.5 * weight * max(0, signed_value)**2`` that is active
+    ONLY inside the clearance band. Its gradient ``weight * max(0, signed_value) *
+    signed_grad`` steers the coils to widen the adjacent-surface gap before the hard
+    nesting gate fires. Returns ``(penalty_value, penalty_grad)``; both are zero outside
+    the band (including ``weight <= 0``), so the lever is inert by default.
+    """
+    active = max(0.0, float(signed_value))
+    penalty_value = 0.5 * float(weight) * active * active
+    penalty_grad = (float(weight) * active) * np.asarray(signed_grad, dtype=float)
+    return penalty_value, penalty_grad
+
+
 def single_stage_constraint_activity_tolerances(
     distance_smoothing,
     curvature_smoothing,
