@@ -1,7 +1,10 @@
 import unittest
 from pathlib import Path
 
-from qsc import Qsc
+try:
+    from qsc import Qsc
+except ImportError:
+    Qsc = None
 import numpy as np
 from monty.tempfile import ScratchDir
 from scipy.special import jv as bessel_J
@@ -468,6 +471,7 @@ class SurfaceRZFourierTests(unittest.TestCase):
         regcoil_surf = SurfaceRZFourier.from_nescoil_input(nescin_filename, "current", range="field period", ntheta=21, nphi=20)
         np.testing.assert_allclose(coil_surf_test.gamma(), regcoil_surf.gamma(), rtol=2e-4)
 
+    @unittest.skipIf(Qsc is None, "pyQSC (qsc, optional [ALGS] extra) not installed")
     def test_from_pyQSC(self):
         """
         Try reading in a near-axis pyQSC equilibrium.

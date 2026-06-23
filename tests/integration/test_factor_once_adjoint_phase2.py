@@ -100,6 +100,13 @@ def test_plu_from_lu_piv_handles_pivoting():
     assert err <= eps * (H.shape[0] ** 2)
 
 
+@pytest.mark.skipif(
+    jax.default_backend() != "cpu",
+    reason="byte-identical packed factor bytes are a host-CPU LAPACK determinism "
+    "contract; on a GPU/TPU the 'ondevice' branch uses a vendor solver (e.g. "
+    "cuSOLVER) that is numerically equal but not byte-identical to scipy's host "
+    "LAPACK. Numerical equivalence is covered by the solve-layer tests below.",
+)
 def test_factor_dense_hessian_scipy_and_jax_branches_share_bytes():
     """``optimizer_backend == "scipy"`` and ``"ondevice"`` must yield
     identical packed factor bytes on a shared host-CPU LAPACK fixture.

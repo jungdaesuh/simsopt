@@ -146,9 +146,11 @@ def test_split_x_inner_runtime_preserves_surface_iota_and_G(
     calls = {"count": 0}
     original_device_put = soj.jax.device_put
 
-    def _counting_device_put(value: object) -> object:
+    def _counting_device_put(
+        value: object, *args: object, **kwargs: object
+    ) -> object:
         calls["count"] += 1
-        return original_device_put(value)
+        return original_device_put(value, *args, **kwargs)
 
     monkeypatch.setattr(soj.jax, "device_put", _counting_device_put)
 
