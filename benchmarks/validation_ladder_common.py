@@ -97,10 +97,18 @@ def _platform_spec_requests_cpu_callback_lane(
     return "cuda" in requested and "cpu" in requested
 _NVIDIA_SMI_CUDA_VERSION_RE = re.compile(r"CUDA Version:\s*([0-9.]+)")
 _NVCC_RELEASE_RE = re.compile(r"release\s+([^,\s]+)")
+# Defaults applied via os.environ.setdefault when a compilation-cache dir is
+# present (see apply_compilation_cache_policy). The enable-xla-caches value is
+# the SAFE narrow GPU autotune cache only, NOT "all": the broad "all" mode can
+# force nvlink through a container CUDA toolkit vs the wheel-bundled NVIDIA libs
+# (the RunPod cu1290 block). Kept aligned with apply_jax_runtime_config
+# (src/simsopt_jax/backend/runtime.py) and prepare_cuda_gpu_lowres_tests.py.
 _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
     _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR: "0",
     _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR: "-1",
-    _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR: "all",
+    _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR: (
+        "xla_gpu_per_fusion_autotune_cache_dir"
+    ),
 }
 _REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
     "cpu": frozenset({"cpu"}),
@@ -414,10 +422,14 @@ def current_compilation_cache_metadata() -> dict[str, Any]:
     disabled = disable_raw.strip().lower() in _TRUTHY_ENV_VALUES
     cache_dir = os.environ.get(_JAX_COMPILATION_CACHE_ENV_VAR)
     policy = os.environ.get(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR)
+    enable_xla_caches = os.environ.get(_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR)
     metadata = {
         "compilation_cache_enabled": bool(cache_dir) and not disabled,
         "compilation_cache_dir": None if disabled or cache_dir is None else cache_dir,
         "compilation_cache_policy": "disabled" if disabled else "unset",
+        "compilation_cache_enable_xla_caches": (
+            None if disabled else enable_xla_caches
+        ),
     }
     if policy:
         metadata["compilation_cache_policy"] = policy
