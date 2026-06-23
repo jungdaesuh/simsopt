@@ -7,6 +7,47 @@
 > Doc-review pass 2026-06-22: all file:line refs verified against the working tree (codex edits had
 > shifted several); the byte-parity enforcement site was located (it was NOT "refactored away").
 
+> ## RESOLUTION (2026-06-22) — PLAN RETIRED. Matrix-free adjoint REFUTED twice.
+>
+> **(1) By code (Step-1 trace, 3 agents + self-verified):** the exact-Jacobian/LS inner-Boozer
+> adjoint is ALREADY operator-GMRES; the dense linearization is reporting/parity metadata only
+> (`boozer_surface.py:195-199` `EXACT_FACTORIZATION_BACKEND="operator-gmres"`, "dense PLU storage is
+> reporting metadata only"). There is no dense-factor adjoint to "route matrix-free" — Step 2's flag
+> is a no-op for the exact lane.
+>
+> **(2) By measurement (warm A/B SWEEP, 4 seeds, `preallocate=true`, all bit-identically correct):**
+>
+> | seed | nphi | `False` (skip) warm / peak GPU | `True`+chunk warm / peak GPU | grad_rel |
+> |---|---|---|---|---|
+> | april285 | 127 | 271.2s / 33.14 GiB | 255.2s / **0.342 GiB** | 1.47e-16 |
+> | april299 | 127 | 418.0s / 33.15 GiB | 389.1s / **0.346 GiB** | 1.11e-16 |
+> | champion_nv2 | 127 | 408.6s / 33.15 GiB | 373.5s / **0.346 GiB** | 3.02e-16 |
+> | corner_ms | 255 | **OOM (alloc 34.38 GiB)** | 789.4s / **0.384 GiB** | 9.04e-15 |
+>
+> Across EVERY seed, `True`+chunk is **~96× leaner on peak GPU** (≈33 GiB → ≈0.34 GiB) and **faster
+> warm** than `False`; at nphi255 (`corner_ms`) `False` **OOMs outright** (single 34.38 GiB allocation)
+> while `True`+chunk runs in 0.384 GiB. With `True` the chunked build yields a compact shared-`(lu,piv)`
+> factor (`_traceable_solve_plu_linearization`) giving cheap O(n²) forward+adjoint solves; `False` falls
+> back to operator-GMRES whose UNBATCHED full-grid HVPs balloon (33 GiB at nphi127 = 96% of the pool;
+> OOM at nphi255). **The dense + chunk path is faster, ~96× leaner, and the only one that scales.**
+> (`edge_m9` was excluded — null `final_iota` seed data → float(None) TypeError, a separate fixture bug.)
+>
+> **VERDICT: keep `materialize_dense_linearization=True` + the `batch_size=8` chunk (`optimizer.py:3608`,
+> the proven fix). Do NOT pursue the matrix-free adjoint — it is a measured regression.** The A/B was
+> enabled by a `materialize_dense_linearization` override threaded through the benchmark harness
+> (diagnostic; default = current behavior). The plan body below is retained as the investigation record.
+>
+> **CRUCIBLE (2026-06-23, 2 adversarial agents) — PASS; requirements-e2e-review-loop CLOSED.** The kept
+> diagnostic override (`materialize_dense_linearization_override`, 4 files) is strictly behavior-preserving
+> by default: `override=None` ⇒ production `materialize_dense_linearization=True` unchanged, verified by a
+> full end-to-end trace (`main()` → `boozer_limited_memory` resolves False → `initialize_boozer_surface`
+> `:5788` skipped → override block `:5799` skipped (None) → consumer `optimizer.py:5616` defaults True).
+> SSOT (`_MATERIALIZE_CHOICE` at `single_stage_objective_parity_matrix.py:277`, `auto→None/true→True/false→False`),
+> no dead code, docstrings accurate. The pre-existing `boozer_limited_memory`→False branch (`:5788`) is
+> conditional and CANNOT co-occur with the override on the ondevice lane (`boozer_limited_memory=True` raises
+> ValueError there). **Commit scope (dirty tree):** the 3 benchmark files whole + exactly 3 banana hunks
+> (param `:5617`, docstring `:5651-5656`, application `:5799-5801`, all in `initialize_boozer_surface`).
+
 ## Purpose
 
 Decide and (behind a flag) implement whether the **exact-Jacobian inner-Boozer lane** — the path that
