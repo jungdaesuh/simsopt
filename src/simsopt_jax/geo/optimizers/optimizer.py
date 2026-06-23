@@ -70,8 +70,12 @@ Target private methods (maintained for the pinned JAX 0.10.0 runtime after the
 initial port from the upstream JAX optimizer sources):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: in-tree SciPy-compatible L-BFGS-B state
-    machine on the target lane. It uses stepwise compiled macro-step kernels
-    and preserves SciPy-style counters, statuses, and inverse-Hessian history.
+    machine on the target lane. It uses a host stepwise loop over explicit
+    macro-step observables rather than reverse-communication task reads,
+    specializes the public no-bounds lane to an Optax-style two-loop L-BFGS
+    direction, and preserves SciPy-style counters, statuses, callbacks, and
+    inverse-Hessian history. The full L-BFGS-B compact subspace path remains
+    available for bounded states and generic private kernels.
 
 Target SciPy-control method:
   - ``method="lbfgs-scipy-jax"``: host SciPy L-BFGS-B control with JAX
@@ -115,6 +119,7 @@ import sys
 from threading import Lock
 from typing import Callable, NamedTuple
 import warnings
+import os
 from weakref import ref
 
 import numpy as np
@@ -302,6 +307,7 @@ OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
     "ondevice": "target",
     "scipy-jax": "target-scipy-control",
+    "scipy-jax-decomposed": "target-scipy-control",
     HOST_JAX_OUTER_OPTIMIZER_BACKEND: "target-host-control",
     "scipy-jax-fullgraph": "target-scipy-control-fullgraph",
     "optax-lbfgs": "target-optax-lbfgs",
@@ -319,6 +325,7 @@ _SUPPORTED_METHODS = {
     "bfgs",
     "lbfgs",
     "lbfgs-scipy-jax",
+    "lbfgs-scipy-jax-decomposed",
     "lbfgs-scipy-jax-fullgraph",
     "optax-lbfgs-ondevice",
     "optimistix-lbfgs-ondevice",
@@ -341,7 +348,7 @@ _REFERENCE_TRACE_METHODS = frozenset({"lbfgs-trace"})
 _REFERENCE_JAX_METHODS = frozenset({"adam"})
 _TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
 _TARGET_SCIPY_CONTROL_METHODS = frozenset(
-    {"lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"}
+    {"lbfgs-scipy-jax", "lbfgs-scipy-jax-decomposed", "lbfgs-scipy-jax-fullgraph"}
 )
 _TARGET_PUBLIC_LBFGS_METHODS = frozenset(
     {"optax-lbfgs-ondevice", "optimistix-lbfgs-ondevice"}
@@ -401,6 +408,7 @@ _DEPRECATED_MINIMIZE_METHOD_TO_DRIVER = {
     "lbfgs": "scipy_lbfgsb",
     "lbfgs-ondevice": "simsopt_lbfgsb",
     "lbfgs-scipy-jax": "scipy_lbfgsb",
+    "lbfgs-scipy-jax-decomposed": "scipy_lbfgsb",
     "lbfgs-scipy-jax-fullgraph": "scipy_lbfgsb",
     "optax-lbfgs-ondevice": "optax_lbfgs",
     "optimistix-lbfgs-ondevice": "optimistix_lbfgs",
@@ -686,6 +694,7 @@ class TargetObjectiveRoute(str, Enum):
     ARRAY_NATIVE = "array_native"
     SCIPY_JAX = "scipy_jax"
     SCIPY_JAX_FULLGRAPH = "scipy_jax_fullgraph"
+    SCIPY_JAX_DECOMPOSED = "scipy_jax_decomposed"
 
 
 @dataclass(frozen=True)
@@ -830,6 +839,8 @@ def _target_objective_route_for_optimizer_backend(optimizer_backend):
         return TargetObjectiveRoute.SCIPY_JAX_FULLGRAPH
     if optimizer_backend == "scipy-jax":
         return TargetObjectiveRoute.SCIPY_JAX
+    if optimizer_backend == "scipy-jax-decomposed":
+        return TargetObjectiveRoute.SCIPY_JAX_DECOMPOSED
     return TargetObjectiveRoute.ARRAY_NATIVE
 
 
@@ -1322,6 +1333,7 @@ def resolve_reference_optimizer_contract(
         raise ValueError(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+            "optimizer_backend='scipy-jax-decomposed', "
             "optimizer_backend='host-jax', "
             "optimizer_backend='scipy-jax-fullgraph', "
             "optimizer_backend='optax-lbfgs', or "
@@ -1358,6 +1370,7 @@ def resolve_target_optimizer_contract(
         raise ValueError(
             f"{component_label} with backend='jax' requires "
             "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
+            "optimizer_backend='scipy-jax-decomposed', "
             "optimizer_backend='host-jax', "
             "optimizer_backend='scipy-jax-fullgraph', "
             "optimizer_backend='optax-lbfgs', or "
@@ -3583,9 +3596,28 @@ def jax_least_squares_optimistix(
 # ---------------------------------------------------------------------------
 
 
+# Chunk size for assembling dense Jacobian/Hessian operators column-by-column via
+# ``lax.map``.  Bounded batches stop XLA from constant-folding the full identity
+# matrix (the mpol10 "pole-1" compile hang) and cap peak memory to ``batch_size``
+# parallel JVP/HVPs.  Default 8 is OOM-safe at high resolution; raise it (e.g. 32-64)
+# on a large GPU to recover parallelism and cut per-eval wall time.  Read once at
+# import because ``lax.map`` requires a static (compile-time) ``batch_size``.
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE = max(
+    1, int(os.environ.get("SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE", "8"))
+)
+
+
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
-    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye)
+    # Assemble the dense operator in column batches rather than mapping all N basis
+    # columns in parallel: numerically identical up to floating-point reduction
+    # order (bit-exact for a linear Jacobian column; the Hessian's reducing HVP can
+    # differ by ~1e-16 because batching reorders the reduction), with peak memory
+    # bounded to batch_size parallel JVP/HVPs instead of N (each column is a full
+    # BiotSavart JVP). Mirrors the chunked dense Boozer-Jacobian fix in
+    # simsopt_jax_adapters/geo/boozer_surface.py (commit dcd70a2ae); without it the
+    # dense linearization OOMs under XLA preallocation.
+    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye, batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
     return jnp.swapaxes(cols, 0, 1)
 
 
@@ -4505,39 +4537,19 @@ def _dense_square_operator_matrix(matvec, rhs):
         np.eye(dimension, dtype=np.dtype(rhs.dtype)),
         dtype=rhs.dtype,
     )
-    return _apply_column_batched_operator(matvec, eye)
-
-
-def _solve_dense_square_operator_system_with_status(matvec, rhs, *, tol):
-    matrix = _dense_square_operator_matrix(matvec, rhs)
-    lu_piv = jsp_linalg.lu_factor(matrix)
-    solution = jsp_linalg.lu_solve(lu_piv, rhs)
-
-    def refine_once(current_solution):
-        current_residual = rhs - matrix @ current_solution
-        correction = jsp_linalg.lu_solve(lu_piv, current_residual)
-        candidate_solution = current_solution + correction
-        candidate_residual = rhs - matrix @ candidate_solution
-        candidate_finite = _linear_solve_finite(
-            candidate_solution,
-            candidate_residual,
-        )
-        improved = candidate_finite & (
-            jnp.linalg.norm(candidate_residual) <= jnp.linalg.norm(current_residual)
-        )
-        return lax.select(improved, candidate_solution, current_solution)
-
-    for _ in range(2):
-        solution = refine_once(solution)
-
-    residual = rhs - matrix @ solution
-    return solution, _linear_solve_status(
-        solution,
-        residual,
-        rhs,
-        tol=tol,
-        iterations=_device_int32(0),
-    )
+    # Assemble the dense operator in bounded column batches via ``lax.map`` rather
+    # than an unchunked ``vmap`` over all N identity columns.  ``eye`` is a
+    # compile-time constant, so an unchunked map lets XLA constant-fold the full
+    # N-wide ``dot(constant, constant)`` -- this never finishes at high mode counts
+    # (mpol10 -> N=1323; the documented pole-1 compile hang, RUNBOOK sec 6.4).
+    # ``lax.map`` lowers to a loop XLA does not fold across, and bounds peak memory
+    # to ``batch_size`` HVPs.  Numerically identical up to floating-point reduction
+    # order.  Mirrors the forward chunk in ``_materialize_dense_linear_operator``
+    # and the chunked Boozer Jacobian in ``boozer_surface.py``.  ``eye`` is
+    # symmetric, so mapping over its rows yields ``matvec(e_j)`` = column ``j`` of the
+    # operator; transpose back to the (row, col) layout the dense solve expects.
+    columns = lax.map(matvec, eye, batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
+    return jnp.swapaxes(columns, 0, 1)
 
 
 def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
@@ -4698,23 +4710,6 @@ def _jacobian_linear_operator(residual_fn, x):
         "matvec": matvec,
         "transpose_matvec": transpose_matvec,
     }
-
-
-def _solve_jacobian_system(
-    residual_fn,
-    x,
-    rhs,
-    *,
-    transpose,
-    tol,
-):
-    operator = _jacobian_linear_operator(residual_fn, x)
-    return _solve_jacobian_operator(
-        operator,
-        rhs,
-        transpose=transpose,
-        tol=tol,
-    )
 
 
 def _solve_jacobian_operator(
@@ -5900,6 +5895,8 @@ def target_minimize(
         required_backend = (
             "scipy-jax-fullgraph"
             if method == "lbfgs-scipy-jax-fullgraph"
+            else "scipy-jax-decomposed"
+            if method == "lbfgs-scipy-jax-decomposed"
             else "scipy-jax"
         )
         require_target_backend_x64(required_backend)
@@ -5972,7 +5969,7 @@ def target_minimize(
             public_options = OptaxLBFGSOptions(
                 maxiter=maxiter,
                 gtol=tol,
-                memory_size=int(options.get("maxcor", 200)),
+                memory_size=int(options.get("maxcor", OptaxLBFGSOptions().memory_size)),
                 scale_init_precond=bool(options.get("scale_init_precond", True)),
                 max_linesearch_steps=int(options.get("maxls", 20)),
             )

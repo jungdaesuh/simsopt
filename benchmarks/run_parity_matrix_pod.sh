@@ -42,13 +42,13 @@ if [ "$PLATFORM" = cuda ]; then
     SIMSOPT_JAX_PLATFORM=cuda \
     SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled \
     XLA_FLAGS=--xla_gpu_exclude_nondeterministic_ops=true \
-    JAX_COMPILATION_CACHE_DIR=/tmp/jaxcache_cuda \
+    JAX_COMPILATION_CACHE_DIR=/workspace/jaxcache_cuda \
     "$PY" -m benchmarks.single_stage_objective_parity_matrix \
       --out "$OUT" --lane-label "$LANE" "$@"
 else
   exec env -u OPTIMIZER_BACKEND "${COMMON[@]}" \
     JAX_PLATFORMS=cpu \
-    JAX_COMPILATION_CACHE_DIR=/tmp/jaxcache_cpu \
+    JAX_COMPILATION_CACHE_DIR=/workspace/jaxcache_cpu \
     "$PY" -m benchmarks.single_stage_objective_parity_matrix \
       --out "$OUT" --lane-label "$LANE" "$@"
 fi
