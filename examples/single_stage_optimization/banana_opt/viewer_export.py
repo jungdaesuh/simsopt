@@ -779,7 +779,7 @@ def build_artifact_payload(
     partition: SourcePartition,
     winding: WindingSurfaceRadii,
 ) -> dict[str, object]:
-    coils_payload = rendered_coil_payloads(partition.render_coils)
+    coils_payload = rendered_coil_payloads(partition)
     generated_meshes = (
         generated_mesh_payloads(
             partition.render_coils,
@@ -829,15 +829,30 @@ def build_artifact_payload(
     }
 
 
-def rendered_coil_payloads(coils: Sequence[object]) -> list[dict[str, object]]:
-    return [
-        {
-            "id": f"banana_{index + 1:03d}",
-            "current_A": coil_current_A(coil),
-            "points": coil_points(coil).tolist(),
-        }
-        for index, coil in enumerate(coils)
-    ]
+def rendered_coil_payloads(partition: SourcePartition) -> list[dict[str, object]]:
+    """Display records for ``partition.render_coils``, one per coil.
+
+    Each ``id`` is ``<role>_<NNN>`` with a per-role 1-based counter. ``role`` is
+    ``tf`` for coils the partition classified as toroidal-field coils and
+    ``banana`` for every other render coil (in the rare ``all`` investigation
+    scope this also covers any proxy/VF coils, which the partition does not track
+    separately). ``render_coils`` is built from the same coil objects the
+    partition classified, so object identity recovers the role.
+    """
+    tf_coil_ids = {id(coil) for coil in partition.tf_coils}
+    role_counts: dict[str, int] = {}
+    payloads: list[dict[str, object]] = []
+    for coil in partition.render_coils:
+        role = "tf" if id(coil) in tf_coil_ids else "banana"
+        role_counts[role] = role_counts.get(role, 0) + 1
+        payloads.append(
+            {
+                "id": f"{role}_{role_counts[role]:03d}",
+                "current_A": coil_current_A(coil),
+                "points": coil_points(coil).tolist(),
+            }
+        )
+    return payloads
 
 
 def generated_mesh_payloads(

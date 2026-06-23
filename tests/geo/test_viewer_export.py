@@ -152,6 +152,61 @@ class ViewerExportTests(unittest.TestCase):
         )
         self.assertEqual(partition.render_coils[0].current.get_value(), -10000.0)
 
+    def test_rendered_coil_payloads_labels_tf_and_banana_by_role(self):
+        coils = _coils()
+        partition = module.SourcePartition(
+            tf_coils=coils[:20],
+            render_coils=coils,
+            finite_current_mode="vacuum",
+        )
+
+        payloads = module.rendered_coil_payloads(partition)
+
+        self.assertEqual(
+            [p["id"] for p in payloads[:20]],
+            [f"tf_{index + 1:03d}" for index in range(20)],
+        )
+        self.assertEqual(
+            [p["id"] for p in payloads[20:]],
+            [f"banana_{index + 1:03d}" for index in range(10)],
+        )
+        # Role comes from tf_coils membership, not the render order or current sign.
+        self.assertEqual(payloads[0]["current_A"], -80000.0)
+        self.assertEqual(payloads[20]["current_A"], -10000.0)
+
+    def test_rendered_coil_payloads_banana_scope_has_no_tf_ids(self):
+        coils = _coils()
+        partition = module.SourcePartition(
+            tf_coils=coils[:20],
+            render_coils=coils[20:],
+            finite_current_mode="vacuum",
+        )
+
+        payloads = module.rendered_coil_payloads(partition)
+
+        self.assertEqual(
+            [p["id"] for p in payloads],
+            [f"banana_{index + 1:03d}" for index in range(10)],
+        )
+        self.assertFalse(any(str(p["id"]).startswith("tf_") for p in payloads))
+
+    def test_rendered_coil_payloads_counters_are_per_role_and_order_independent(self):
+        coils = _coils()
+        # Interleave TF and banana coils so a single global counter would mislabel:
+        # role is decided by tf_coils membership, each role numbered independently.
+        partition = module.SourcePartition(
+            tf_coils=(coils[0], coils[1]),
+            render_coils=(coils[0], coils[20], coils[1], coils[21]),
+            finite_current_mode="vacuum",
+        )
+
+        payloads = module.rendered_coil_payloads(partition)
+
+        self.assertEqual(
+            [p["id"] for p in payloads],
+            ["tf_001", "banana_001", "tf_002", "banana_002"],
+        )
+
     def test_generated_solid_payload_matches_viewer_artifact_shape(self):
         partition = module.SourcePartition(
             tf_coils=_coils()[:20],
