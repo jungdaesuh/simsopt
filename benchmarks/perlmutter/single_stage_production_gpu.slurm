@@ -25,7 +25,12 @@ PROD_MAXITER="${PROD_MAXITER:-1500}"
 # the inner Boozer BFGS cap flag and the child falls back to its default.
 PROD_BOOZER_BFGS_MAXITER="${PROD_BOOZER_BFGS_MAXITER-1500}"
 PROD_NEWTON_MAXITER="${PROD_NEWTON_MAXITER:-50}"
-PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-scipy-jax}"
+# Default to the decomposed lane (host outer L-BFGS-B + split K1 forward /
+# K2 value+adjoint): campaign-productionized as the lane that compiles and
+# passes at mpol10, where plain scipy-jax re-fuses K1+K2 into the heavier
+# kernel. Export PROD_OPTIMIZER_BACKEND=scipy-jax or scipy-jax-fullgraph to
+# exercise the fused lanes instead.
+PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-scipy-jax-decomposed}"
 PROD_BOOZER_LS_ALGORITHM="${PROD_BOOZER_LS_ALGORITHM:-}"
 PROD_BOOZER_OPTIMIZER_BACKEND="${PROD_BOOZER_OPTIMIZER_BACKEND:-}"
 PROD_VARIANT="${PROD_OPTIMIZER_BACKEND}${PROD_BOOZER_LS_ALGORITHM:+-${PROD_BOOZER_LS_ALGORITHM}}"
