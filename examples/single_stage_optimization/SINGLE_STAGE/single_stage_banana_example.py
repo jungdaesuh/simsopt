@@ -2399,6 +2399,25 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--surface-allow-truncation",
+        action="store_true",
+        default=bool(os.environ.get("SURFACE_ALLOW_TRUNCATION")),
+        help=(
+            "published_multisurface: keep the outer converging subset instead of "
+            "requiring all N nested shells (truncate at the single family build; "
+            "the count is then held fixed for the inner loop)."
+        ),
+    )
+    parser.add_argument(
+        "--surface-min-surfaces",
+        type=int,
+        default=int(os.environ.get("SURFACE_MIN_SURFACES", "3")),
+        help=(
+            "minimum accepted shells when --surface-allow-truncation "
+            "(default 3 = the magnetic-well floor)."
+        ),
+    )
+    parser.add_argument(
         "--surface-gap-threshold",
         type=float,
         default=float(os.environ.get("SURFACE_GAP_THRESHOLD", "0.0")),
@@ -5049,7 +5068,20 @@ def initialize_published_surface_data_from_stage2_seed(
         iota=float(stage2_seed_surface.iota),
         G=_require_finite_explicit_G("outer", stage2_seed_surface.G),
     )
-    ordered_surface_data, _ = build_boozer_surface_family(
+    # Opt-in HOLD-FIXED truncation: read the policy published in __main__ (default
+    # OFF -> allow_truncation=False with min_surfaces=len(configs), so the strict
+    # postcondition runs and the band stays byte-identical with prior runs). The
+    # truncated count is held fixed for the inner optimization loop because this
+    # family is built ONCE at setup (initialize_surface_data_for_contract, the
+    # single surface_data build); fun(x) never rebuilds it. It is only re-truncated
+    # if setup re-runs at an outer/ALM restart.
+    allow_truncation = bool(globals().get("SURFACE_ALLOW_TRUNCATION", False))
+    min_surfaces = (
+        int(globals().get("SURFACE_MIN_SURFACES", 3))
+        if allow_truncation
+        else len(surface_configs)
+    )
+    ordered_surface_data, provenance = build_boozer_surface_family(
         ordered_configs,
         mpol=mpol,
         ntor=ntor,
@@ -5060,10 +5092,16 @@ def initialize_published_surface_data_from_stage2_seed(
         outer_seed=outer_seed,
         contract=contract_surface_to_target_volume,
         make_entry=_surface_data_entry,
-        allow_truncation=False,
-        min_surfaces=len(surface_configs),
+        allow_truncation=allow_truncation,
+        min_surfaces=min_surfaces,
     )
-    _require_published_surface_data_postconditions(ordered_surface_data)
+    # A truncated band is an outer suffix (e.g. {inner2, inner3, outer}), so its
+    # names are not inner0-based and the strict inner0-based name postcondition
+    # cannot apply -- build_boozer_surface_family already validated the band with
+    # its relaxed nested+ordered postcondition. Run the strict one only when the
+    # full requested stack was accepted.
+    if not provenance.truncated:
+        _require_published_surface_data_postconditions(ordered_surface_data)
     return ordered_surface_data, []
 
 
@@ -17013,6 +17051,10 @@ if __name__ == "__main__":
     SHEAR_WEIGHT = float(args.shear_weight)
     MAGNETIC_WELL_WEIGHT = float(args.magnetic_well_weight)
     MAGNETIC_WELL_TARGET = float(args.magnetic_well_target)
+    # published_multisurface truncation policy (opt-in, default OFF -> the family
+    # build keeps requiring all N nested shells, so the path stays byte-identical).
+    SURFACE_ALLOW_TRUNCATION = bool(args.surface_allow_truncation)
+    SURFACE_MIN_SURFACES = int(args.surface_min_surfaces)
     # Per-surface iota/volume PROFILE shortfalls (opt-in, default weight 0 -> terms not
     # constructed, objective graph byte-identical with prior runs). The slope only takes
     # effect once IOTA_PROFILE_WEIGHT > 0.
@@ -18991,6 +19033,16 @@ if __name__ == "__main__":
             None
             if SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M is None
             else float(SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M)
+        ),
+        # Rotation-aware alpha warm-start provenance (default off). APPLIED marks a
+        # run that seeded the pack twist thin-side-into-bend instead of alpha=0;
+        # MAX_ABS_DEG is the seeded |alpha| peak. Realization is still judged by the
+        # FINITEBUILD_ROTATION_AWARE_RESIDUAL_INFEASIBLE_FRACTION report below.
+        "SINGLE_STAGE_ROTATION_AWARE_ALPHA_WARM_START_APPLIED": (
+            SINGLE_STAGE_ROTATION_AWARE_ALPHA_WARM_START_APPLIED
+        ),
+        "SINGLE_STAGE_ROTATION_AWARE_ALPHA_WARM_START_MAX_ABS_DEG": (
+            SINGLE_STAGE_ROTATION_AWARE_ALPHA_WARM_START_MAX_ABS_DEG
         ),
         # Realized rotation-aware curvature headroom on the FINAL selected geometry
         # (mirror STAGE_2 banana_coil_solver.py:3141-3153). Diagnostic only: stamps the
