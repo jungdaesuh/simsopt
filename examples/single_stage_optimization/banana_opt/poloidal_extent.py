@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 from jax import grad
 import jax.numpy as jnp
-from jax.scipy.special import logsumexp
 
 from banana_opt.hardware_keepout import live_winding_r0
 from banana_opt.smoothing import smoothmax_selected
@@ -225,11 +224,11 @@ class PoloidalExtent(Optimizable):
 
 # Smooth-max temperature (rad) for the poloidal-floor objective. The floor scores
 # the PEAK inboard poloidal extent against a target, so it needs a differentiable
-# maximum; this temperature sets how tightly the log-mean-exp tracks the hard max.
-# Module-owned (not a caller knob): small enough that the smooth max sits within a
-# few percent of the hard max at the ~1 rad banana-tip peak, large enough that the
-# gradient is shared across the near-peak points (not just the single argmax) for
-# stable descent.
+# maximum; this temperature sets how tightly the softmax-weighted mean tracks the
+# hard max. Module-owned (not a caller knob): small enough that the smooth max sits
+# within a few percent of the hard max at the sharp ~1 rad banana-tip peak, large
+# enough that the gradient is shared across the near-peak points (not just the single
+# argmax) for stable descent.
 POLOIDAL_FLOOR_SMOOTH_MAX_TEMPERATURE_RAD = 0.05
 
 
@@ -246,11 +245,18 @@ def _poloidal_floor_pure(
     Z = gamma[:, 2]
     theta_in = jnp.arctan2(Z - Z_winding, -(R - R_winding))
     abs_theta = jnp.abs(theta_in)
-    # Normalized log-mean-exp: a differentiable max that is exact for a constant
-    # profile and approaches max|theta_in| as temperature -> 0.
-    smooth_max = temperature * (
-        logsumexp(abs_theta / temperature) - jnp.log(abs_theta.shape[0])
-    )
+    # Softmax-weighted mean (Boltzmann soft-max): a differentiable, RESOLUTION-STABLE
+    # estimate of max|theta_in|, tight (within ~T of the hard max for the sharp banana
+    # tip the floor targets) and exact for a constant profile. The prior
+    # T*(logsumexp(x/T) - log N) log-MEAN-exp under-read a peak by up to ~T*log(N) -- a
+    # resolution-DEPENDENT bias (worst-case ~0.42 rad at T=0.05, N=4096; ~0.27 rad realized
+    # on a sharp tip, and growing with the quadpoint count) that silently raised the
+    # effective floor. The max-shift cancels in the ratio
+    # (gradient unaffected); it only guards exp overflow. Under-estimating is the
+    # conservative direction for a one-sided floor (the CAP path over-estimates via the
+    # upper-bound LSE for the symmetric reason).
+    weights = jnp.exp((abs_theta - jnp.max(abs_theta)) / temperature)
+    smooth_max = jnp.sum(weights * abs_theta) / jnp.sum(weights)
     deficit = jnp.maximum(theta_floor - smooth_max, 0.0)
     return (1.0 / p) * deficit**p
 

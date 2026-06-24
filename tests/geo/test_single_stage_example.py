@@ -19931,6 +19931,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_plasma_scaling_mode": "lcfs",
             "stage2_plasma_surface_path": None,
             "accept_offspec_major_radius": False,
+            "accept_offspec_winding_radius": False,
             "accept_offspec_banana_current_sign": False,
             "accept_offspec_banana_current_max": False,
             "accept_offspec_tf_current_sign": False,

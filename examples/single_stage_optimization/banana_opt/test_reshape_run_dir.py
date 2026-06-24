@@ -31,7 +31,11 @@ for _p in (_HERE, _EXAMPLE_ROOT):
         sys.path.insert(0, _p)
 
 from banana_opt import reshape_run_dir as R  # noqa: E402
-from simsopt.geo import CurveCWSFourierCPP, SurfaceRZFourier  # noqa: E402
+from simsopt.geo import (  # noqa: E402
+    CurveCWSFourierCPP,
+    RotatedCurve,
+    SurfaceRZFourier,
+)
 
 
 def _cws_curve(g: int) -> CurveCWSFourierCPP:
@@ -92,6 +96,27 @@ def test_max_kappa_highres_preserves_GH() -> None:
                                c1.order, c1.surf, G=1, H=0)
     dense.set_dofs(c1.get_dofs())
     assert abs(k1 - float(dense.kappa().max())) < 1e-6, (k1, float(dense.kappa().max()))
+
+
+def test_max_kappa_highres_unwraps_rotated_curve() -> None:
+    """Symmetric coils deserialize as RotatedCurve wrappers (coils_via_symmetries).
+
+    Max scalar curvature is invariant under the rigid rotation/flip a RotatedCurve
+    applies, so the helper must measure the underlying base curve -- NOT fall through
+    to the unsupported-type raise. Regression for the real-field crash: a saved banana
+    field's ``.coils`` carry RotatedCurve copies, which the old leaf-only dispatch
+    rejected with TypeError.
+    """
+    base = _cws_curve(1)
+    k_base = R._max_kappa_highres(base)
+    for flip in (False, True):
+        rotated = RotatedCurve(base, 0.37, flip)
+        k_rot = R._max_kappa_highres(rotated)
+        assert np.isfinite(k_rot)
+        assert abs(k_rot - k_base) < 1e-9, (flip, k_rot, k_base)
+    # nested wrappers fully unwrap to the base
+    nested = RotatedCurve(RotatedCurve(base, 0.1, False), 0.2, True)
+    assert abs(R._max_kappa_highres(nested) - k_base) < 1e-9
 
 
 def test_write_reshape_provenance_is_honest() -> None:

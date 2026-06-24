@@ -10791,7 +10791,7 @@ def evaluate_total_objective(
         if width_max_threshold is None
         else width_max_threshold
     )
-    return apply_frontier_scalarization_override(
+    evaluation = apply_frontier_scalarization_override(
         _evaluate_total_objective_impl(
             diagnostic_surface_weights,
             nonQSs,

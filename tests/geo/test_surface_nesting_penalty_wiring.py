@@ -163,3 +163,53 @@ def test_out_of_band_margin_leaves_total_and_grad_unchanged(monkeypatch):
     assert out["total"] == pytest.approx(100.0)
     np.testing.assert_allclose(out["grad"], np.array([1.0, 2.0]))
     assert out["J_surface_nesting"] == 0.0
+
+
+def test_evaluate_total_objective_routes_through_surface_nesting_penalty(monkeypatch):
+    """The INTEGRATION boundary: evaluate_total_objective must return
+    ``_apply_surface_nesting_penalty(evaluation)``, not early-return the scalarized
+    evaluation.
+
+    The dead-return bug -- ``return apply_frontier_scalarization_override(...)`` with an
+    unreachable ``return _apply_surface_nesting_penalty(evaluation)`` below it -- silently
+    disabled the penalty for every multisurface penalty-mode run while keeping the helper
+    unit-correct. The helper-only tests above pass either way; this drives the real
+    driver function and asserts the wrapper is on the live return path.
+    """
+    terms = {
+        "effective_res_weight": 0.0,
+        "effective_iotas_weight": 0.0,
+        "JNonQSObjective": None,
+        "JBoozerObjective": None,
+        "JVolume": None,
+        "effective_volume_weight": 0.0,
+    }
+    monkeypatch.setattr(
+        drv, "resolve_current_surface_objective_terms", lambda *a, **k: terms
+    )
+    monkeypatch.setattr(drv, "SINGLE_STAGE_POLOIDAL_WEIGHT", 0.0, raising=False)
+    scalarized = {"total": 42.0, "grad": np.zeros(2)}
+    monkeypatch.setattr(drv, "_evaluate_total_objective_impl", lambda *a, **k: scalarized)
+    # The frontier override is a passthrough here; the penalty wrapper is under test.
+    monkeypatch.setattr(
+        drv, "apply_frontier_scalarization_override", lambda evaluation, **k: evaluation
+    )
+    sentinel = {"total": -1.0, "grad": np.ones(2), "wrapped_by_penalty": True}
+    received = {}
+
+    def fake_penalty(evaluation):
+        received["evaluation"] = evaluation
+        return sentinel
+
+    monkeypatch.setattr(drv, "_apply_surface_nesting_penalty", fake_penalty)
+
+    out = drv.evaluate_total_objective(
+        None, None, None, 0.0, None, 0.0, None, 0.0, None, 0.0, None, 0.0, None, 0.0,
+        width_min_threshold=0.0,
+        width_max_threshold=0.0,
+    )
+    # The live return path went THROUGH the penalty wrapper, applied to the scalarized
+    # evaluation -- the early-return regression would instead return `scalarized` and
+    # never populate `received`.
+    assert out is sentinel
+    assert received["evaluation"] is scalarized

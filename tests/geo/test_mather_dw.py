@@ -468,6 +468,27 @@ def test_delta_w_from_orbits_is_zero_for_identical_orbits():
     assert mather_delta_w_from_orbits(field, loop, loop) == pytest.approx(0.0, abs=1e-12)
 
 
+def test_action_field_passes_c_contiguous_points_to_set_points():
+    """A non-C-contiguous orbit must reach ``set_points`` as a C-contiguous array.
+
+    The pybind ``simsoptpp.BiotSavart.set_points`` overload rejects a non-C-contiguous
+    (N, 3) array; a Cartesian orbit assembled by column-stacking is column-strided, and
+    a bare ``reshape(-1, 3)`` preserves those strides. Regression: feed a Fortran-ordered
+    (non-C-contiguous) trajectory through a stub whose ``set_points`` asserts contiguity.
+    This FAILS under the old bare-reshape and passes after ``np.ascontiguousarray``.
+    """
+
+    class _ContiguityCheckingField(_StubSymmetricGaugeField):
+        def set_points(self, points: np.ndarray) -> None:
+            assert points.flags["C_CONTIGUOUS"], "set_points received non-contiguous points"
+            super().set_points(points)
+
+    field = _ContiguityCheckingField(b0=1.0)
+    strided = np.asfortranarray(_unit_circle(1.0, 64))  # same orbit, column-major
+    assert not strided.flags["C_CONTIGUOUS"]
+    assert mather_delta_w_from_orbits(field, strided, strided) == pytest.approx(0.0, abs=1e-12)
+
+
 def test_delta_w_from_orbits_rejects_bad_trajectory_shape():
     field = _StubSymmetricGaugeField(b0=1.0)
     good_loop = _unit_circle(1.0, 32)

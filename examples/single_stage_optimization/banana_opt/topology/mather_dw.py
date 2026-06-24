@@ -276,6 +276,12 @@ def _action_in_field(field, trajectory: np.ndarray) -> float:
     pts = np.asarray(trajectory, dtype=float)
     if pts.ndim != 2 or pts.shape[1] != 3:
         raise ValueError(f"orbit trajectory must be (N, 3); got {pts.shape}")
-    field.set_points(pts.reshape(-1, 3))
+    # ascontiguousarray (not just asarray/reshape): a Cartesian orbit built by transposing
+    # a (3, N) stack -- np.array([R cos phi, R sin phi, Z]).T, the (N, 3) layout this
+    # module's docstring tells callers to pass -- is non-C-contiguous, and reshape preserves
+    # those strides -> the pybind simsoptpp.BiotSavart.set_points overload rejects a
+    # non-contiguous (N, 3) array (same trap converse_kam._b_and_dB fixes). (np.column_stack
+    # / np.stack(axis=1) are already C-contiguous; this guards the .T-of-stacked layout.)
+    field.set_points(np.ascontiguousarray(pts, dtype=np.float64))
     a_field = np.asarray(field.A(), dtype=float).reshape(pts.shape)
     return closed_loop_action(pts, a_field)

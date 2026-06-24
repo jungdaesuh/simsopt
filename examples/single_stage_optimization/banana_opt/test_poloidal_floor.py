@@ -12,7 +12,7 @@ of ``PoloidalExtent`` (which caps the peak from above).
 
 Each assertion is tied to an externally checkable consequence:
   * the analytic hinge value on a controlled-angle point cloud (constant profile
-    => the normalized log-mean-exp smooth max is *exact*, so J is exact),
+    => the softmax-weighted mean smooth max is *exact*, so J is exact),
   * monotone decrease of J as the realized extent rises toward the floor,
   * the smooth max tracking the hard max within the temperature band (the
     property that makes a "spread to 86 deg" target meaningful),
@@ -96,9 +96,9 @@ def test_floor_inactive_once_peak_reaches_target_is_exactly_zero():
 def test_floor_active_below_target_matches_squared_hinge():
     """Constant extent below the floor => exact 0.5*(floor - extent)^2.
 
-    For a constant |theta| profile the normalized log-mean-exp smooth max equals
-    the value exactly, so the hinge value is analytic and independent of the
-    smoothing temperature -- the contract a squared floor must satisfy.
+    For a constant |theta| profile the softmax-weighted mean smooth max equals the
+    value exactly (all weights equal), so the hinge value is analytic and independent
+    of the smoothing temperature -- the contract a squared floor must satisfy.
     """
     floor = 1.0
     for extent in (0.3, 0.5, 0.9):
@@ -130,6 +130,26 @@ def test_smooth_max_tracks_hard_max_within_temperature_band():
     smooth_max = floor - np.sqrt(2.0 * J)
     assert smooth_max <= hard_max + 1e-9
     assert smooth_max >= hard_max - 5.0 * _TEMP  # within the smoothing band
+
+
+def test_smooth_max_tracks_a_sharp_tip_at_production_resolution():
+    """A sharp banana-tip peak must read ~its true height, not peak - O(T*log N).
+
+    Regression for the resolution-dependent bias: the previous normalized
+    log-mean-exp (T*(logsumexp(x/T) - log N)) under-read a single sharp arc by
+    ~T*log(N) (~0.25 rad here at N=4096), which silently lifted the effective floor
+    as the quadpoint grid refined. The softmax-weighted mean tracks the true peak
+    within the smoothing band at any resolution. This case FAILS under the old
+    normalized log-mean-exp (smooth max ~0.74 << 0.85) and passes after the fix.
+    """
+    n = 4096
+    s = np.linspace(0.0, 1.0, n, endpoint=False)
+    theta = np.maximum(0.0, 1.0 - np.abs(s - 0.5) / 0.05)  # sharp tip, hard max = 1.0
+    floor = 1.0 + 0.3
+    J = _floor_J_on_angles(theta, theta_floor=floor)
+    smooth_max = floor - np.sqrt(2.0 * J)
+    # Tight to the true peak (within ~3T), never ~T*log(N) below it.
+    assert 1.0 - 3.0 * _TEMP <= smooth_max <= 1.0 + 1e-9, smooth_max
 
 
 # --------------------------------------------------------------------------- #

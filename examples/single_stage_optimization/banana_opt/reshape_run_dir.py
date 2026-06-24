@@ -54,7 +54,7 @@ from banana_opt.hardware_keepout import CurveHardwareSdfKeepout, load_hardware_s
 from banana_opt.json_compat import load_boozer_finite_i
 from banana_opt.poloidal_extent import max_poloidal_extent_rad
 from simsopt import load as sload
-from simsopt.geo import CurveXYZFourier
+from simsopt.geo import CurveXYZFourier, RotatedCurve
 from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
 
 # The U-turn curvature peak is sharp; default curve quadpoints under-resolve it
@@ -117,6 +117,12 @@ def _max_kappa_highres(curve, n: int = KAPPA_RESOLUTION) -> float:
     the sharp U-turn peak). Rebuilds the curve of its own type at ``n`` quadpoints
     from the same dofs; pure geometry, no optimizer path."""
     qp = np.linspace(0.0, 1.0, n, endpoint=False)
+    # Symmetric coils deserialize as RotatedCurve wrappers (coils_via_symmetries);
+    # max scalar curvature is invariant under the rigid rotation/flip RotatedCurve
+    # applies, so measure the underlying base curve (the leaf type the rebuild below
+    # understands) -- otherwise the wrapper falls through to the unsupported-type raise.
+    while isinstance(curve, RotatedCurve):
+        curve = curve.curve
     name = type(curve).__name__
     if name == "CurveCWSFourierCPP":
         # G/H are secular winding terms NOT carried by get_dofs(); they must be
