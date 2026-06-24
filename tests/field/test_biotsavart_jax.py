@@ -1330,6 +1330,70 @@ class TestBiotSavartJaxChunkedSelfConsistency:
                 atol=1e-14,
             )
 
+    def test_d2B_contracted_helper_matches_dense_hessian_contraction(self, monkeypatch):
+        from simsopt_jax.core import biotsavart as core_bs
+
+        gammas, gammadashs, currents = _make_shifted_circular_coils(4, R=0.74, nquad=14)
+        points = jnp.asarray(
+            (
+                (0.18, -0.12, 0.07),
+                (-0.21, 0.16, -0.05),
+                (0.09, 0.20, 0.11),
+            ),
+            dtype=jnp.float64,
+        )
+        left_directions = jnp.asarray(
+            (
+                ((0.8, -0.1, 0.3), (-0.2, 0.5, 0.4)),
+                ((0.1, 0.9, -0.4), (0.6, -0.3, 0.2)),
+                ((-0.5, 0.7, 0.1), (0.3, 0.2, -0.8)),
+            ),
+            dtype=jnp.float64,
+        )
+        right_directions = jnp.asarray(
+            (
+                ((-0.3, 0.4, 0.7), (0.5, 0.1, -0.6)),
+                ((0.2, -0.8, 0.3), (-0.4, 0.6, 0.5)),
+                ((0.7, 0.2, -0.1), (-0.6, -0.2, 0.4)),
+            ),
+            dtype=jnp.float64,
+        )
+
+        for tuning in ((0, 0, 0), (3, 5, 2)):
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: tuning)
+            core_bs.invalidate_kernel_cache()
+            dense_d2B = core_bs.biot_savart_d2B_by_dXdX(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            expected = jnp.einsum(
+                "pjkl,paj,pbk->pabl",
+                dense_d2B,
+                left_directions,
+                right_directions,
+                precision=jax.lax.Precision.HIGHEST,
+            )
+            actual = core_bs._biot_savart_d2B_by_dXdX_contract(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+                left_directions,
+                right_directions,
+            )
+            np.testing.assert_allclose(
+                np.asarray(actual),
+                np.asarray(expected),
+                rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+            )
+
+        assert core_bs._make_d2B_contracted_kernel.cache_info().currsize > 0
+        core_bs.invalidate_kernel_cache()
+        assert core_bs._make_d2B_contracted_kernel.cache_info().currsize == 0
+
     def test_kernel_factories_do_not_key_equivalent_kernels_by_platform(self):
         from simsopt_jax.core import biotsavart as core_bs
 
@@ -1349,12 +1413,18 @@ class TestBiotSavartJaxChunkedSelfConsistency:
             "point_vma_axis_name",
         )
         assert make_b_vjp_kernel_params == ("coil_cs", "quad_bs", "point_cs")
+        assert tuple(
+            inspect.signature(
+                core_bs._make_d2B_contracted_kernel.__wrapped__
+            ).parameters
+        ) == ("coil_cs", "quad_bs", "point_cs")
 
     def test_kernel_factory_lru_capacities_cover_mode_sweeps(self):
         from simsopt_jax.core import biotsavart as core_bs
 
         assert core_bs._make_kernel.cache_info().maxsize == 256
         assert core_bs._make_B_vjp_kernel.cache_info().maxsize == 64
+        assert core_bs._make_d2B_contracted_kernel.cache_info().maxsize == 64
 
     def test_backend_cache_invalidation_clears_kernel_cache(self):
         with _kernel_tuning_env("jax_cpu_parity"):

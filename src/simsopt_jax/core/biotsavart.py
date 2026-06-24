@@ -358,6 +358,62 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     return _tree_trim(padded_result, point_count)
 
 
+def _point_direction_chunk_reduce(
+    points,
+    left_directions,
+    right_directions,
+    chunk_kernel,
+    chunk_size,
+):
+    """Chunk points and their point-aligned direction tensors together.
+
+    ``left_directions`` and ``right_directions`` must share the point leading
+    axis with ``points``. The helper preserves that axis and trims any padding
+    before returning the chunked result tree.
+    """
+    point_count = points.shape[0]
+    if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
+        return chunk_kernel(points, left_directions, right_directions)
+
+    chunk_count = (point_count + chunk_size - 1) // chunk_size
+    padded_point_count = chunk_count * chunk_size
+    padded_points = _pad_axis(points, axis=0, padded_size=padded_point_count)
+    padded_left_directions = _pad_axis(
+        left_directions,
+        axis=0,
+        padded_size=padded_point_count,
+    )
+    padded_right_directions = _pad_axis(
+        right_directions,
+        axis=0,
+        padded_size=padded_point_count,
+    )
+
+    remat_chunk_kernel = jax.checkpoint(chunk_kernel)
+    first_result = remat_chunk_kernel(
+        _slice_point_chunk(padded_points, 0, chunk_size),
+        _slice_point_chunk(padded_left_directions, 0, chunk_size),
+        _slice_point_chunk(padded_right_directions, 0, chunk_size),
+    )
+    padded_result = _tree_dynamic_update(
+        _tree_zeros_like_prefix(first_result, padded_point_count),
+        first_result,
+        0,
+    )
+
+    def body(chunk_index: int, acc):
+        start = chunk_index * chunk_size
+        chunk_result = remat_chunk_kernel(
+            _slice_point_chunk(padded_points, start, chunk_size),
+            _slice_point_chunk(padded_left_directions, start, chunk_size),
+            _slice_point_chunk(padded_right_directions, start, chunk_size),
+        )
+        return _tree_dynamic_update(acc, chunk_result, start)
+
+    padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
+    return _tree_trim(padded_result, point_count)
+
+
 # ── Physics integrands ────────────────────────────────────────────────
 
 
@@ -680,6 +736,102 @@ def _get_B_vjp_kernel():
     return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
 
 
+@lru_cache(maxsize=64)
+def _make_d2B_contracted_kernel(coil_cs, quad_bs, point_cs):
+    """Build a private d2B contraction kernel.
+
+    Returns ``out[p, a, b, l] = left[p, a, j] d_j d_k B_l right[p, b, k]``.
+    This keeps the public dense-Hessian API unchanged while testing low-rank
+    second-derivative contractions without materializing ``(P, 3, 3, 3)``.
+    """
+
+    def one_point(x, gammas, gammadashs, currents):
+        return _coil_chunk_reduce(
+            gammas,
+            gammadashs,
+            currents,
+            chunk_size=coil_cs,
+            zero=_zeros((3,), dtype=jnp.float64),
+            reduce_chunk=lambda cg, cgd, cc: _one_point_dense(
+                x,
+                cg,
+                cgd,
+                cc,
+                integrand=_biot_savart_B_integrand,
+                quadrature_block_size=quad_bs,
+            ),
+        )
+
+    def contract_one_point(x, gammas, gammadashs, currents, left_dirs, right_dirs):
+        def dB_one(xx):
+            return jnp.swapaxes(
+                jax.jacfwd(one_point, argnums=0)(xx, gammas, gammadashs, currents),
+                -1,
+                -2,
+            )
+
+        def contract_right(right_dir):
+            _, directional_dB = jax.jvp(dB_one, (x,), (right_dir,))
+            return jnp.einsum(
+                "jl,aj->al",
+                directional_dB,
+                left_dirs,
+                precision=lax.Precision.HIGHEST,
+            )
+
+        return jnp.swapaxes(jax.vmap(contract_right)(right_dirs), 0, 1)
+
+    @jax.jit
+    def kernel(points, gammas, gammadashs, currents, left_directions, right_directions):
+        def chunk_fn(chunk_points, chunk_left_directions, chunk_right_directions):
+            return jax.vmap(
+                lambda x, left_dirs, right_dirs: contract_one_point(
+                    x,
+                    gammas,
+                    gammadashs,
+                    currents,
+                    left_dirs,
+                    right_dirs,
+                ),
+                in_axes=(0, 0, 0),
+            )(chunk_points, chunk_left_directions, chunk_right_directions)
+
+        return _point_direction_chunk_reduce(
+            points,
+            left_directions,
+            right_directions,
+            chunk_fn,
+            point_cs,
+        )
+
+    return kernel
+
+
+def _biot_savart_d2B_by_dXdX_contract(
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    left_directions,
+    right_directions,
+):
+    """Privately contract dense-Hessian axes against point-aligned directions.
+
+    ``left_directions`` and ``right_directions`` have shapes ``(P, L, 3)`` and
+    ``(P, R, 3)``; the return shape is ``(P, L, R, 3)``. Public callers should
+    continue to use ``biot_savart_d2B_by_dXdX`` unless they own a contracted API.
+    """
+    coil_cs, quad_bs, point_cs = _read_tuning_config()
+    return _make_d2B_contracted_kernel(coil_cs, quad_bs, point_cs)(
+        points,
+        gammas,
+        gammadashs,
+        currents,
+        left_directions,
+        right_directions,
+    )
+
+
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
@@ -688,6 +840,7 @@ def invalidate_kernel_cache() -> None:
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()
+    _make_d2B_contracted_kernel.cache_clear()
 
 
 register_backend_cache_clear(invalidate_kernel_cache)

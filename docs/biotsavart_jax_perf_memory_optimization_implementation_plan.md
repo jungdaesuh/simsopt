@@ -176,8 +176,9 @@ Tasks:
 Exit criteria:
 
 - [x] CPU chunked-vs-dense gates pass for the measured no-default-change policy.
-- [ ] GPU chunked-vs-dense gates still need a CUDA/JAX environment before any
-      GPU policy promotion.
+- [x] GPU chunked-vs-dense gates passed on Perlmutter debug GPU job `54985084`
+      with one visible A100 device. The gate produced both `jax_gpu_parity` and
+      `jax_gpu_fast` quadrature JSON artifacts without loosening tolerances.
 - [x] C++ direct and derivative parity gates still pass on the local CPU lane.
 - [x] A before/after table justifies not changing a default with only local CPU
       evidence: memory improves, but runtime is mixed and GPU evidence is
@@ -243,7 +244,7 @@ Exit criteria:
 
 ### Phase 5 - Matrix-Free d2B Contraction Feasibility
 
-Tier: larger API/internal-structure change, deferred.
+Tier: private internal helper; public dense-Hessian API unchanged.
 
 Files:
 
@@ -256,33 +257,36 @@ Tasks:
 - [x] Inventory all production consumers of `biot_savart_d2B_by_dXdX` and any
       coil-current derivative variants.
 - [x] Identify call sites that immediately contract dense Hessian output.
-- [ ] Prototype an internal contracted helper without changing the public dense
-      Hessian API. Deferred: the current production-like users still require
-      dense shape contracts, so this needs a broader Boozer/surface-objective
-      interface change rather than a local hidden helper.
-- [ ] Compare against the dense result at derivative-heavy second-derivative
-      tolerances once a contracted consumer boundary exists.
+- [x] Prototype an internal contracted helper without changing the public dense
+      Hessian API: `_biot_savart_d2B_by_dXdX_contract(...)` contracts
+      point-aligned left/right directions through a private JVP-based kernel and
+      is not exported from `__all__`.
+- [x] Compare against the dense result at derivative-heavy second-derivative
+      tolerances with
+      `TestBiotSavartJaxChunkedSelfConsistency::test_d2B_contracted_helper_matches_dense_hessian_contraction`.
 
 Exit criteria:
 
 - [x] No public API change is required for the first implementation.
-- [ ] Dense and contracted paths agree inside existing second-derivative
-      tolerances once a contracted helper is implemented.
-- [ ] Peak-memory savings are large enough to justify the larger surface area.
+- [x] Dense and contracted paths agree inside existing second-derivative
+      tolerances for dense and point-chunked tuning.
+- [x] Peak-memory savings are large enough to justify the private helper surface
+      for low-rank contractions: the local CPU probe measured a 414064-byte
+      XLA temp reduction, 20.6% versus dense Hessian materialization, at
+      64 points / 12 coils / 48 quadrature samples / 2 left directions /
+      1 right direction.
 
 Decision:
 
-- Defer matrix-free `d2B` contraction from this slice. The live inventory found
-  dense public and production consumers: `BiotSavartJAX.d2B_by_dXdX()` returns
-  the dense grouped Hessian directly in
+- Implement the matrix-free `d2B` contraction as a private helper, with the
+  dense public/API-oracle consumers intentionally unchanged. The live inventory
+  remains: `BiotSavartJAX.d2B_by_dXdX()` returns a dense grouped Hessian in
   `src/simsopt_jax_adapters/field/biotsavart_backend.py`, `BoozerSurface`
   reshapes dense `d2B_by_dXdX` and passes it to the C++ oracle
-  `sopp.boozer_residual_ds2`, and
-  `src/simsopt/geo/surfaceobjectives.py` immediately contracts dense
-  `d2B_by_dXdX` with `dx_dc`. The surface-objective contraction is a real
-  future target, but avoiding the dense allocation safely requires a contracted
-  consumer boundary and Boozer residual API work. No production matrix-free
-  helper was added in this execution pass.
+  `sopp.boozer_residual_ds2`, and `src/simsopt/geo/surfaceobjectives.py`
+  immediately contracts dense `d2B_by_dXdX` with `dx_dc`. This phase provides
+  the validated low-rank contraction primitive without migrating those public
+  or C++-oracle contracts.
 
 ## Validation
 
@@ -343,6 +347,7 @@ PYTHONNOUSERSITE=1 "${PYTHON}" -m compileall -q \
   benchmarks/per_coil_unit_field_vmap_probe.py \
   benchmarks/biotsavart_quadrature_chunking_probe.py \
   benchmarks/biotsavart_phase4_micro_probe.py \
+  benchmarks/biotsavart_phase5_d2B_contract_probe.py \
   src/simsopt_jax/core/biotsavart.py \
   src/simsopt_jax/core/biotsavart_cpu_ordered.py \
   src/simsopt_jax_adapters/field/biotsavart_backend.py \
@@ -352,6 +357,7 @@ git diff --check -- \
   benchmarks/per_coil_unit_field_vmap_probe.py \
   benchmarks/biotsavart_quadrature_chunking_probe.py \
   benchmarks/biotsavart_phase4_micro_probe.py \
+  benchmarks/biotsavart_phase5_d2B_contract_probe.py \
   docs/biotsavart_jax_perf_memory_optimization_implementation_plan.md \
   src/simsopt_jax/core/biotsavart.py \
   src/simsopt_jax_adapters/field/biotsavart_backend.py \
@@ -375,6 +381,11 @@ This wrapper fails early unless `nvidia-smi` is available, the selected Python i
 3.11, `simsoptpp.Curve` imports, and JAX selects a CUDA/GPU backend. It then runs
 the focused BiotSavart pytest parity/self-consistency/analytical gates plus the
 quadrature block-size probe for both `jax_gpu_parity` and `jax_gpu_fast`.
+On Perlmutter debug GPU nodes, make only one GPU visible for this focused
+single-GPU gate, for example with `CUDA_VISIBLE_DEVICES=0`; Slurm can allocate a
+full four-GPU node even when the script requests `--gpus=1`, and the explicit
+point-sharding regression is intentionally shape-sensitive to the visible device
+mesh.
 
 ## Progress
 
@@ -422,8 +433,18 @@ quadrature block-size probe for both `jax_gpu_parity` and `jax_gpu_fast`.
       max absolute drift versus dense <= 5.56e-17. Runtime was mixed and
       sometimes slower, and no GPU lane was available locally, so no
       `jax_gpu_parity` default change is promoted from this evidence.
-- [ ] Phase 2 GPU parity/fast confirmation still required before any
-      quadrature default change.
+- [x] Phase 2 GPU parity/fast confirmation completed on Perlmutter debug GPU
+      job `54985084` (`gpu_debug`, `m4680_g`, node `nid001301`,
+      `CUDA_VISIBLE_DEVICES=0`). The gate ran against the staged contents of
+      local source commit `6dc71710ab5825ee1200fbd6f6763abb24ad4384` with
+      Python 3.11.15 and JAX 0.10.0. Focused pytest passed
+      `49 passed, 2 skipped` in 168.25 s. The quadrature probe produced
+      `.artifacts/biotsavart_gpu_gate_perlmutter_54985084/biotsavart_quadrature_chunking_jax_gpu_parity.json`
+      and
+      `.artifacts/biotsavart_gpu_gate_perlmutter_54985084/biotsavart_quadrature_chunking_jax_gpu_fast.json`.
+      For both GPU backend modes, block size 32 gave the lowest XLA temp size
+      for `B`, `dB`, and `B_and_dB`, and max absolute drift versus dense was
+      <= 1.11e-16.
 - [x] Phase 3 analytic `B+dB` fast path implemented for
       `_DiffMode.VALUE_AND_JACOBIAN`; standalone `dB` and `d2B` AD paths were
       left unchanged. Added an analytic-vs-old-linearized regression across
@@ -451,25 +472,44 @@ quadrature block-size probe for both `jax_gpu_parity` and `jax_gpu_fast`.
       The local `r_inv3 = r_inv*r_inv*r_inv` experiment reduced temp size by
       2097152 B but was slightly slower post-compile and ULP-changing
       (max abs output drift 5.56e-17), so production algebra was left unchanged.
-- [x] Phase 5 matrix-free `d2B` feasibility decided and deferred. Dense
-      consumers remain part of the current public/API-oracle contract:
-      `BiotSavartJAX.d2B_by_dXdX()` returns a dense grouped Hessian,
-      `BoozerSurface` passes dense `d2B_by_dXdX` into
-      `sopp.boozer_residual_ds2`, and `surfaceobjectives.py` contracts dense
-      Hessians with `dx_dc`. A matrix-free implementation should wait for a
-      contracted consumer boundary rather than changing this slice.
+- [x] Phase 5 matrix-free `d2B` contraction helper implemented privately in
+      `src/simsopt_jax/core/biotsavart.py` as
+      `_biot_savart_d2B_by_dXdX_contract(...)`. The helper keeps the dense
+      public Hessian API unchanged, is cache-keyed on the existing
+      coil/quadrature/point tuning tuple, and is cleared by
+      `invalidate_kernel_cache()`.
+- [x] Phase 5 dense-oracle regression added and passed:
+      `TestBiotSavartJaxChunkedSelfConsistency::test_d2B_contracted_helper_matches_dense_hessian_contraction`.
+      It compares the helper against
+      `einsum("pjkl,paj,pbk->pabl", dense_d2B, left, right)` under dense and
+      point-chunked tuning, using the validation-ladder second-derivative
+      tolerances.
+- [x] Phase 5 measurement artifact captured:
+      `.artifacts/biotsavart_phase5_d2B_contract_probe_20260624.json`. Shape:
+      64 points, 12 coils, 48 quadrature samples, 2 left directions, 1 right
+      direction, coil chunk 8, quadrature block 24, point chunk 16. Dense
+      Hessian compiled temp size was 2014336 B; contracted helper compiled temp
+      size was 1600272 B; savings were 414064 B (20.6%). The contracted helper
+      also compiled 0.043 s faster and ran 0.0013 s faster post-compile on this
+      CPU microcase. Dense-contraction delta was max abs 8.88e-16 and max rel
+      1.93e-12.
 - [x] Final local validation rerun completed on 2026-06-24 with the explicit
       Python 3.11/JAX 0.10.0 CPU environment: validation smoke passed and showed
-      `[CpuDevice(id=0)]`; collect-only found 47 tests; full
-      `tests/field/test_biotsavart_jax.py` passed `52 passed, 3 skipped`;
-      `tests/field/test_biotsavart_jax_cpu_ordered.py` passed `4 passed`;
-      scoped `git diff --check` and `compileall` passed.
-- [ ] GPU parity/fast confirmation remains external to this local execution
-      pass. The local machine exposes only a JAX CPU device, a noninteractive
-      Empire Alpha login context has `nvidia-smi` but no working NVIDIA driver,
-      and the Perlmutter SSH probe reached the login banner but did not return a
-      noninteractive command before timeout. Do not promote a GPU quadrature
-      policy from the current local artifacts.
+      `[CpuDevice(id=0)]`; collect-only found 47 tests before Phase 5 and the
+      final focused BiotSavart suite passed `57 passed, 3 skipped` across
+      `tests/field/test_biotsavart_jax.py` and
+      `tests/field/test_biotsavart_jax_cpu_ordered.py`; scoped
+      `git diff --check` and `compileall` passed.
+- [x] GPU parity/fast confirmation is no longer external. The successful
+      Perlmutter debug run is archived locally under
+      `.artifacts/biotsavart_gpu_gate_perlmutter_54985084/`. A first Perlmutter
+      attempt (`54984765`) intentionally remains non-promotional evidence: it
+      exposed all four A100s to JAX and failed only the explicit point-sharding
+      regression with a 3-coil/4-device indivisibility error. The promotional
+      rerun constrained the visible CUDA mesh to one GPU and passed. This GPU
+      gate covers the public BiotSavart paths in commit `6dc71710`; the private
+      Phase 5 helper added after that gate is locally CPU-validated and has no
+      production caller.
 - [x] Focused BiotSavart CUDA gate wrapper added at
       `scripts/run_biotsavart_gpu_gate.sh` and syntax-checked locally with
       `bash -n`. It composes the focused pytest gates and CUDA quadrature probe
