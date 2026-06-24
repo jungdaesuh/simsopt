@@ -168,11 +168,15 @@ def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
     )
 
 
+def _tree_add(left, right):
+    return jax.tree.map(lambda left_leaf, right_leaf: left_leaf + right_leaf, left, right)
+
+
 # ── Tiling primitives ────────────────────────────────────────────────
 
 
 def _two_chunk_sum(first_chunk, second_chunk, reduce_chunk):
-    return reduce_chunk(*first_chunk) + reduce_chunk(*second_chunk)
+    return _tree_add(reduce_chunk(*first_chunk), reduce_chunk(*second_chunk))
 
 
 def _coil_chunk_reduce(
@@ -239,7 +243,10 @@ def _coil_chunk_reduce(
             (start,),
             (chunk_size,),
         )
-        return acc + reduce_chunk(chunk_gammas, chunk_gammadashs, chunk_currents)
+        return _tree_add(
+            acc,
+            reduce_chunk(chunk_gammas, chunk_gammadashs, chunk_currents),
+        )
 
     return lax.fori_loop(0, chunk_count, body, zero)
 
@@ -370,6 +377,33 @@ def _biot_savart_A_integrand(x, gammas, gammadashs):
     return gammadashs * r_inv[..., None]
 
 
+def _biot_savart_B_and_dB_integrand(x, gammas, gammadashs):
+    diff = x - gammas
+    r2 = _radius_squared(diff)
+    r_inv = _explicit_rsqrt(r2)
+    r_inv3 = r_inv * _explicit_inv(r2)
+    r_inv4 = r_inv3 * r_inv
+    norm = r2 * r_inv
+
+    cross = _cross_product(gammadashs, diff)
+    B_integrand = cross * r_inv3[..., None]
+
+    dg_norm = gammadashs * norm[..., None]
+    zero = _zeros(diff.shape[:-1], dtype=diff.dtype)
+    numerator0 = jnp.stack((zero, dg_norm[..., 2], -dg_norm[..., 1]), axis=-1)
+    numerator1 = jnp.stack((-dg_norm[..., 2], zero, dg_norm[..., 0]), axis=-1)
+    numerator2 = jnp.stack((dg_norm[..., 1], -dg_norm[..., 0], zero), axis=-1)
+
+    three_cross_inv = cross * (3.0 * r_inv)[..., None]
+    temp0 = numerator0 - three_cross_inv * diff[..., 0, None]
+    temp1 = numerator1 - three_cross_inv * diff[..., 1, None]
+    temp2 = numerator2 - three_cross_inv * diff[..., 2, None]
+    dB_integrand = jnp.stack((temp0, temp1, temp2), axis=-2) * r_inv4[
+        ..., None, None
+    ]
+    return B_integrand, dB_integrand
+
+
 # ── Dense one-point kernels ──────────────────────────────────────────
 
 
@@ -404,6 +438,82 @@ def _one_point_dense(
     return _float64_scalar(currents, _MU0_OVER_4PI) * jnp.einsum(
         "c,cj->j", currents, integral, precision=lax.Precision.HIGHEST
     )
+
+
+def _quadrature_block_B_and_dB_integral(x, gammas, gammadashs, *, block_size: int):
+    quadrature_count = gammas.shape[1]
+
+    def reduce_values(block_gammas, block_gammadashs):
+        return jax.tree.map(
+            lambda values: _pairwise_sum_axis(values, axis=1),
+            _biot_savart_B_and_dB_integrand(x, block_gammas, block_gammadashs),
+        )
+
+    def average_sum(integral_sum):
+        return jax.tree.map(lambda values: values / quadrature_count, integral_sum)
+
+    if block_size <= 0 or quadrature_count <= block_size:
+        return average_sum(reduce_values(gammas, gammadashs))
+
+    block_count = (quadrature_count + block_size - 1) // block_size
+    if block_count == 2:
+        second_block_size = quadrature_count - block_size
+        first = reduce_values(
+            _slice_quadrature_block(gammas, 0, block_size),
+            _slice_quadrature_block(gammadashs, 0, block_size),
+        )
+        second = reduce_values(
+            _slice_quadrature_block(gammas, block_size, second_block_size),
+            _slice_quadrature_block(gammadashs, block_size, second_block_size),
+        )
+        return average_sum(_tree_add(first, second))
+
+    padded_quadrature_count = block_count * block_size
+    padded_gammas = _pad_axis(gammas, axis=1, padded_size=padded_quadrature_count)
+    padded_gammadashs = _pad_axis(
+        gammadashs,
+        axis=1,
+        padded_size=padded_quadrature_count,
+    )
+    zero = (
+        _zeros((gammas.shape[0], 3), dtype=jnp.float64),
+        _zeros((gammas.shape[0], 3, 3), dtype=jnp.float64),
+    )
+
+    def body(block_index: int, acc):
+        start = block_index * block_size
+        block_gammas = _slice_quadrature_block(padded_gammas, start, block_size)
+        block_gammadashs = _slice_quadrature_block(
+            padded_gammadashs,
+            start,
+            block_size,
+        )
+        return _tree_add(acc, reduce_values(block_gammas, block_gammadashs))
+
+    return average_sum(lax.fori_loop(0, block_count, body, zero))
+
+
+def _one_point_dense_B_and_dB(x, gammas, gammadashs, currents, *, quadrature_block_size):
+    B_integral, dB_integral = _quadrature_block_B_and_dB_integral(
+        x,
+        gammas,
+        gammadashs,
+        block_size=quadrature_block_size,
+    )
+    scale = _float64_scalar(currents, _MU0_OVER_4PI)
+    B = scale * jnp.einsum(
+        "c,cj->j",
+        currents,
+        B_integral,
+        precision=lax.Precision.HIGHEST,
+    )
+    dB = scale * jnp.einsum(
+        "c,cjl->jl",
+        currents,
+        dB_integral,
+        precision=lax.Precision.HIGHEST,
+    )
+    return B, dB
 
 
 # ── Kernel factory ────────────────────────────────────────────────────
@@ -471,6 +581,27 @@ def _make_kernel(
                     currents,
                 ),
                 (1, 2, 0),
+            )
+
+    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN and integrand_key is _Integrand.B:
+
+        def per_point(x, gammas, gammadashs, currents):
+            return _coil_chunk_reduce(
+                gammas,
+                gammadashs,
+                currents,
+                chunk_size=coil_cs,
+                zero=(
+                    _zeros((3,), dtype=jnp.float64),
+                    _zeros((3, 3), dtype=jnp.float64),
+                ),
+                reduce_chunk=lambda cg, cgd, cc: _one_point_dense_B_and_dB(
+                    x,
+                    cg,
+                    cgd,
+                    cc,
+                    quadrature_block_size=quad_bs,
+                ),
             )
 
     elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN:

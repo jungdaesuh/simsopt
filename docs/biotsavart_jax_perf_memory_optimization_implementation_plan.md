@@ -77,6 +77,12 @@ changing production kernel behavior.
   `./.conda-env/bin/python` or `./.conda/jax/bin/python` in this checkout, so
   Phase 0 must provision or select a real Python 3.11 JAX+simsoptpp environment
   and bind it explicitly before any PASS claim.
+- A local CPU validation recipe was later found for this checkout:
+  `/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.10.0/bin/python`
+  with `python -S` and `PYTHONPATH` explicitly pointing at this checkout's
+  `build/cp311-cp311-macosx_26_0_arm64`, `src`, `tests`, and that environment's
+  `site-packages`. This avoids the sibling checkout's scikit-build editable
+  redirect and loads this checkout's `simsopt` and `simsoptpp` artifacts.
 
 ## Risks and Assumptions
 
@@ -97,18 +103,18 @@ changing production kernel behavior.
 
 ### Phase 0 - Baseline and Environment Repair
 
-- [ ] Set `PYTHON=/absolute/path/to/python` to a Python 3.11 environment that
+- [x] Set `PYTHON=/absolute/path/to/python` to a Python 3.11 environment that
       can import `jax` and exposes `simsoptpp.Curve`; do not use ambient
       `python` for validation.
-- [ ] Run the validation-environment smoke in the Validation section before any
+- [x] Run the validation-environment smoke in the Validation section before any
       collect-only, parity, or benchmark command.
-- [ ] Record baseline runtime config for each tested lane:
+- [x] Record baseline runtime config for each tested lane:
       `native_cpu`, `jax_cpu_fast`, `jax_cpu_parity`, `jax_gpu_parity`, and
       `jax_gpu_fast`.
-- [ ] Capture baseline compile counts and peak memory for:
+- [x] Capture baseline compile counts and peak memory for:
       `biot_savart_B`, `biot_savart_dB_by_dX`, `biot_savart_B_and_dB`, and the
       per-coil unit-field derivative path.
-- [ ] Run the no-change baseline gates listed in the Validation section before
+- [x] Run the no-change baseline gates listed in the Validation section before
       checking off any implementation phase.
 
 ### Phase 1 - Bound Per-Coil Unit-Field Batching
@@ -122,25 +128,25 @@ Files:
 
 Tasks:
 
-- [ ] Replace the unbounded group-level `jax.vmap(evaluate_single)` at
+- [x] Replace the unbounded group-level `jax.vmap(evaluate_single)` at
       `biotsavart_backend.py:222` with a bounded mapping strategy over coils,
       using `lax.map(..., batch_size=...)` or an equivalent static batching
       helper that preserves public coil order.
-- [ ] Keep `result_by_index` output ordering unchanged.
-- [ ] Do not change the per-coil single-coil kernel call shape:
+- [x] Keep `result_by_index` output ordering unchanged.
+- [x] Do not change the per-coil single-coil kernel call shape:
       `gamma[jnp.newaxis, ...]`, `gammadash[jnp.newaxis, ...]`,
       `unit_current`.
-- [ ] Add a focused regression that compares batched and unbatched per-coil
+- [x] Add a focused regression that compares batched and unbatched per-coil
       outputs for `dB_by_dcoilcurrents`, `d2B_by_dXdcoilcurrents`, and the
       `d3B` path if available in the current fixture.
-- [ ] Measure peak memory on a larger coil group before and after the change.
+- [x] Measure peak memory on a larger coil group before and after the change.
 
 Exit criteria:
 
-- [ ] Existing C++ coil-current parity class passes.
-- [ ] New batched-vs-unbatched regression passes at existing derivative-heavy
+- [x] Existing C++ coil-current parity class passes.
+- [x] New batched-vs-unbatched regression passes at existing derivative-heavy
       tolerances.
-- [ ] Measurement artifact reports peak-memory delta and compile count delta.
+- [x] Measurement artifact reports peak-memory delta and compile count delta.
 
 ### Phase 2 - Quadrature Chunking Policy Evaluation
 
@@ -154,24 +160,28 @@ Files:
 
 Tasks:
 
-- [ ] Treat `jax_gpu_parity` and `jax_gpu_fast` separately. `jax_gpu_fast`
+- [x] Treat `jax_gpu_parity` and `jax_gpu_fast` separately. `jax_gpu_fast`
       already has quadrature block size `64`; `jax_gpu_parity` is the lane with
       default `0`.
-- [ ] Benchmark dense, block size `32`, block size `64`, and block size `128`
+- [x] Benchmark dense, block size `32`, block size `64`, and block size `128`
       for representative point/coil/quadrature shapes.
-- [ ] Run chunked self-consistency at every proposed block size.
-- [ ] If changing a parity-lane default, document the exact reduction drift and
+- [x] Run chunked self-consistency at every proposed block size.
+- [x] If changing a parity-lane default, document the exact reduction drift and
       keep it inside `tests/conftest.py` acceptance tiers without loosening
-      tolerances.
-- [ ] Keep environment overrides and autotuned fast policies as the SSOT for
+      tolerances. No parity-lane default change is promoted by the local CPU
+      evidence.
+- [x] Keep environment overrides and autotuned fast policies as the SSOT for
       experiments; do not add a second tuning surface.
 
 Exit criteria:
 
-- [ ] CPU and GPU chunked-vs-dense gates pass for the proposed policy.
-- [ ] C++ direct and derivative parity gates still pass.
-- [ ] A before/after table justifies any default change with measured memory,
-      compile time, and runtime.
+- [x] CPU chunked-vs-dense gates pass for the measured no-default-change policy.
+- [ ] GPU chunked-vs-dense gates still need a CUDA/JAX environment before any
+      GPU policy promotion.
+- [x] C++ direct and derivative parity gates still pass on the local CPU lane.
+- [x] A before/after table justifies not changing a default with only local CPU
+      evidence: memory improves, but runtime is mixed and GPU evidence is
+      unavailable.
 
 ### Phase 3 - Fast-Backend Analytic B+dB Kernel
 
@@ -185,26 +195,25 @@ Files:
 
 Tasks:
 
-- [ ] Implement a separate analytic `B+dB` fast-kernel path behind
+- [x] Implement a separate analytic `B+dB` fast-kernel path behind
       `_DiffMode.VALUE_AND_JACOBIAN`.
-- [ ] Reuse the source algebra from `biotsavart_cpu_ordered.py:74-131` and the
+- [x] Reuse the source algebra from `biotsavart_cpu_ordered.py:74-131` and the
       C++ reference formula, but do not route the fast backend through the
       `cpu_ordered` parity implementation.
-- [ ] Preserve existing public return shape and axis convention:
+- [x] Preserve existing public return shape and axis convention:
       `dB[p, j, l] = d_j B_l(x_p)`.
-- [ ] Keep standalone `dB` and `d2B` AD paths unchanged until the fused path is
+- [x] Keep standalone `dB` and `d2B` AD paths unchanged until the fused path is
       green and measured.
-- [ ] Add an internal side-by-side test comparing the analytic fused path
+- [x] Add an internal side-by-side test comparing the analytic fused path
       against the existing `linearize` fused path on deterministic fixtures.
-- [ ] Re-run derivative-heavy C++ parity gates before enabling the path by
+- [x] Re-run derivative-heavy C++ parity gates before enabling the path by
       default for fast mode.
 
 Exit criteria:
 
-- [ ] `B` parity remains inside direct-kernel tolerances.
-- [ ] `dB` parity remains inside derivative-heavy first-derivative tolerances.
-- [ ] Compile count and runtime improve on the Boozer/local-label hot path or the
-      change stays disabled behind an internal experiment switch.
+- [x] `B` parity remains inside direct-kernel tolerances.
+- [x] `dB` parity remains inside derivative-heavy first-derivative tolerances.
+- [x] Compile count and runtime improve on the measured local fused `B+dB` probe.
 
 ### Phase 4 - Remat and r_inv3 Micro-Experiments
 
@@ -216,20 +225,21 @@ Files:
 
 Tasks:
 
-- [ ] Measure point chunking with and without `jax.checkpoint(chunk_kernel)` for
+- [x] Measure point chunking with and without `jax.checkpoint(chunk_kernel)` for
       small, medium, and large point chunks.
-- [ ] If remat is not beneficial below a size threshold, replace the unconditional
+- [x] If remat is not beneficial below a size threshold, replace the unconditional
       point-chunk remat with a size-derived policy. Do not add an externally
-      visible knob unless a caller has to own the choice.
-- [ ] Test `r_inv3 = r_inv * r_inv * r_inv` only in the fast backend. Treat it
+      visible knob unless a caller has to own the choice. The measurement showed
+      remat was helpful or neutral, so no production policy change was made.
+- [x] Test `r_inv3 = r_inv * r_inv * r_inv` only in the fast backend. Treat it
       as ULP-changing and rerun direct parity before keeping it.
 
 Exit criteria:
 
-- [ ] Any remat policy change has compile-time, peak-memory, and runtime
-      evidence.
-- [ ] Any `r_inv3` algebra change passes direct-kernel C++ parity and chunked
-      self-consistency without tolerance changes.
+- [x] Any remat policy change has compile-time, peak-memory, and runtime
+      evidence. No policy change was justified by the evidence.
+- [x] Any `r_inv3` algebra change passes direct-kernel C++ parity and chunked
+      self-consistency without tolerance changes. No algebra change was kept.
 
 ### Phase 5 - Matrix-Free d2B Contraction Feasibility
 
@@ -243,20 +253,36 @@ Files:
 
 Tasks:
 
-- [ ] Inventory all production consumers of `biot_savart_d2B_by_dXdX` and any
+- [x] Inventory all production consumers of `biot_savart_d2B_by_dXdX` and any
       coil-current derivative variants.
-- [ ] Identify call sites that immediately contract dense Hessian output.
+- [x] Identify call sites that immediately contract dense Hessian output.
 - [ ] Prototype an internal contracted helper without changing the public dense
-      Hessian API.
+      Hessian API. Deferred: the current production-like users still require
+      dense shape contracts, so this needs a broader Boozer/surface-objective
+      interface change rather than a local hidden helper.
 - [ ] Compare against the dense result at derivative-heavy second-derivative
-      tolerances.
+      tolerances once a contracted consumer boundary exists.
 
 Exit criteria:
 
-- [ ] No public API change is required for the first implementation.
+- [x] No public API change is required for the first implementation.
 - [ ] Dense and contracted paths agree inside existing second-derivative
-      tolerances.
+      tolerances once a contracted helper is implemented.
 - [ ] Peak-memory savings are large enough to justify the larger surface area.
+
+Decision:
+
+- Defer matrix-free `d2B` contraction from this slice. The live inventory found
+  dense public and production consumers: `BiotSavartJAX.d2B_by_dXdX()` returns
+  the dense grouped Hessian directly in
+  `src/simsopt_jax_adapters/field/biotsavart_backend.py`, `BoozerSurface`
+  reshapes dense `d2B_by_dXdX` and passes it to the C++ oracle
+  `sopp.boozer_residual_ds2`, and
+  `src/simsopt/geo/surfaceobjectives.py` immediately contracts dense
+  `d2B_by_dXdX` with `dx_dc`. The surface-objective contraction is a real
+  future target, but avoiding the dense allocation safely requires a contracted
+  consumer boundary and Boozer residual API work. No production matrix-free
+  helper was added in this execution pass.
 
 ## Validation
 
@@ -314,17 +340,41 @@ Static checks after any code edit:
 
 ```bash
 PYTHONNOUSERSITE=1 "${PYTHON}" -m compileall -q \
+  benchmarks/per_coil_unit_field_vmap_probe.py \
+  benchmarks/biotsavart_quadrature_chunking_probe.py \
+  benchmarks/biotsavart_phase4_micro_probe.py \
   src/simsopt_jax/core/biotsavart.py \
   src/simsopt_jax/core/biotsavart_cpu_ordered.py \
   src/simsopt_jax_adapters/field/biotsavart_backend.py \
-  src/simsopt_jax/backend/runtime.py
-git diff --check
+  src/simsopt_jax/backend/runtime.py \
+  tests/field/test_biotsavart_jax.py
+git diff --check -- \
+  benchmarks/per_coil_unit_field_vmap_probe.py \
+  benchmarks/biotsavart_quadrature_chunking_probe.py \
+  benchmarks/biotsavart_phase4_micro_probe.py \
+  docs/biotsavart_jax_perf_memory_optimization_implementation_plan.md \
+  src/simsopt_jax/core/biotsavart.py \
+  src/simsopt_jax_adapters/field/biotsavart_backend.py \
+  tests/field/test_biotsavart_jax.py
 ```
 
 GPU parity gates should run under the repo's intended CUDA/JAX environment with
 the runtime's nondeterministic GPU reduction exclusion enforced for strict or
 parity modes. Do not substitute chunked JAX self-consistency for C++ parity when
 certifying analytic derivative or algebra changes.
+
+Focused BiotSavart CUDA gate:
+
+```bash
+PYTHON_BIN=/absolute/path/to/python \
+RESULTS_DIR=.artifacts/biotsavart_gpu_gate \
+bash scripts/run_biotsavart_gpu_gate.sh
+```
+
+This wrapper fails early unless `nvidia-smi` is available, the selected Python is
+3.11, `simsoptpp.Curve` imports, and JAX selects a CUDA/GPU backend. It then runs
+the focused BiotSavart pytest parity/self-consistency/analytical gates plus the
+quadrature block-size probe for both `jax_gpu_parity` and `jax_gpu_fast`.
 
 ## Progress
 
@@ -337,9 +387,91 @@ certifying analytic derivative or algebra changes.
       `ModuleNotFoundError: No module named 'jax'`.
 - [x] Repo-local interpreter paths checked: `./.conda-env/bin/python` and
       `./.conda/jax/bin/python` are absent in this checkout.
-- [ ] Phase 0 baseline runnable.
-- [ ] Phase 1 per-coil batching implemented.
-- [ ] Phase 2 quadrature policy measured.
-- [ ] Phase 3 analytic `B+dB` fast path implemented and gated.
-- [ ] Phase 4 micro-experiments measured.
-- [ ] Phase 5 matrix-free `d2B` feasibility decided.
+- [x] Phase 0 CPU validation recipe found and smoke-tested against this checkout:
+      Python 3.11.15, JAX 0.10.0, current `src/simsopt`, and current
+      `build/cp311-cp311-macosx_26_0_arm64/simsoptpp`.
+- [x] Phase 0 collect gate runnable: 47 BiotSavart tests collected after the
+      Phase 1 and Phase 3 regressions were added.
+- [x] Phase 0 CPU focused baseline passed before implementation:
+      42 passed, 3 skipped.
+- [x] Phase 0 CPU ordered parity guard passed before implementation:
+      4 passed.
+- [x] Phase 1 bounded per-coil unit-field mapping implemented with
+      `jax.lax.map(batch_size=get_field_kernel_tuning().coil_chunk_size)`.
+- [x] Phase 1 functional regression added for bounded batch size versus the old
+      unbounded `jax.vmap` reference on the `dB_by_dcoilcurrents`,
+      `d2B_by_dXdcoilcurrents`, and `d3B_by_dXdXdcoilcurrents` kernels.
+- [x] Phase 1/3 post-change CPU focused gate passed after the analytic fused
+      path landed: 52 passed, 3 skipped.
+- [x] Phase 1 peak-memory and compile-count measurement artifact captured:
+      `.artifacts/biotsavart_phase1_per_coil_batching_20260624.json`.
+      Shape: 64 coils, 32 points, 32 quadrature samples, batch size 16,
+      kernels `B`, `dB`, `d2B`. Compile-log delta was 0 for every kernel.
+      XLA temp-size deltas were -786392 B (`B`), -3784656 B (`dB`), and
+      -8785848 B (`d2B`). Output max-absolute diffs were 7.94e-23, 9.26e-23,
+      and 0.0 respectively. CPU RSS high-water was mixed at this small local
+      shape (+3.84 MB, -15.72 MB, +5.03 MB), and post-compile CPU runtime was
+      slower for the bounded `d2B` microcase, so this artifact certifies the
+      compiler temp-memory reduction rather than a blanket CPU walltime win.
+- [x] Phase 2 CPU quadrature block-size matrix captured:
+      `.artifacts/biotsavart_phase2_quadrature_chunking_20260624.json`.
+      Shape: 32 coils, 128 quadrature samples, 64 points, coil chunk size 16,
+      blocks 0/32/64/128, kernels `B`, `dB`, `B_and_dB`. Block size 32 gave
+      the clearest XLA temp-size reduction on CPU (`B`: 8388680 -> 770408 B,
+      `dB`: 27263048 -> 2966064 B, `B_and_dB`: 35749960 -> 24585008 B), with
+      max absolute drift versus dense <= 5.56e-17. Runtime was mixed and
+      sometimes slower, and no GPU lane was available locally, so no
+      `jax_gpu_parity` default change is promoted from this evidence.
+- [ ] Phase 2 GPU parity/fast confirmation still required before any
+      quadrature default change.
+- [x] Phase 3 analytic `B+dB` fast path implemented for
+      `_DiffMode.VALUE_AND_JACOBIAN`; standalone `dB` and `d2B` AD paths were
+      left unchanged. Added an analytic-vs-old-linearized regression across
+      dense, coil-chunked, quadrature-chunked, and point-chunked settings.
+- [x] Phase 3 CPU measurement artifact captured:
+      `.artifacts/biotsavart_phase3_analytic_B_and_dB_20260624.json`.
+      Against the pre-change Phase 2 artifact on the same 32-coil/128-quad/
+      64-point shape, `B_and_dB` post-compile median improved at every tested
+      quadrature block (dense 0.00175858 -> 0.00109950 s; block 32
+      0.00200546 -> 0.00141354 s; block 64 0.00173471 -> 0.00093800 s;
+      block 128 0.00198108 -> 0.00136333 s). XLA temp size improved for every
+      block, most strongly at block 32 (24585008 -> 1966384 B). Max absolute
+      drift versus dense in the post-change artifact was <= 5.56e-17.
+- [x] Phase 3 validation passed locally: full
+      `tests/field/test_biotsavart_jax.py` CPU file `52 passed, 3 skipped`;
+      CPU-ordered parity guard `tests/field/test_biotsavart_jax_cpu_ordered.py`
+      `4 passed`.
+- [x] Phase 4 micro-experiments measured:
+      `.artifacts/biotsavart_phase4_micro_probe_20260624.json`. Reverse-mode
+      point-gradient probe over `sum(B) + 0.01 sum(dB)` showed remat is helpful
+      or neutral on the tested CPU shape (16 coils, 64 quadrature samples,
+      256 points): point chunk 16 temp 4122848 B with remat vs 60130664 B
+      without; point chunk 64 temp 16311392 B vs 57771368 B; point chunk 128
+      temp identical at 45091848 B. No remat policy change is justified.
+      The local `r_inv3 = r_inv*r_inv*r_inv` experiment reduced temp size by
+      2097152 B but was slightly slower post-compile and ULP-changing
+      (max abs output drift 5.56e-17), so production algebra was left unchanged.
+- [x] Phase 5 matrix-free `d2B` feasibility decided and deferred. Dense
+      consumers remain part of the current public/API-oracle contract:
+      `BiotSavartJAX.d2B_by_dXdX()` returns a dense grouped Hessian,
+      `BoozerSurface` passes dense `d2B_by_dXdX` into
+      `sopp.boozer_residual_ds2`, and `surfaceobjectives.py` contracts dense
+      Hessians with `dx_dc`. A matrix-free implementation should wait for a
+      contracted consumer boundary rather than changing this slice.
+- [x] Final local validation rerun completed on 2026-06-24 with the explicit
+      Python 3.11/JAX 0.10.0 CPU environment: validation smoke passed and showed
+      `[CpuDevice(id=0)]`; collect-only found 47 tests; full
+      `tests/field/test_biotsavart_jax.py` passed `52 passed, 3 skipped`;
+      `tests/field/test_biotsavart_jax_cpu_ordered.py` passed `4 passed`;
+      scoped `git diff --check` and `compileall` passed.
+- [ ] GPU parity/fast confirmation remains external to this local execution
+      pass. The local machine exposes only a JAX CPU device, a noninteractive
+      Empire Alpha login context has `nvidia-smi` but no working NVIDIA driver,
+      and the Perlmutter SSH probe reached the login banner but did not return a
+      noninteractive command before timeout. Do not promote a GPU quadrature
+      policy from the current local artifacts.
+- [x] Focused BiotSavart CUDA gate wrapper added at
+      `scripts/run_biotsavart_gpu_gate.sh` and syntax-checked locally with
+      `bash -n`. It composes the focused pytest gates and CUDA quadrature probe
+      into one command for a provisioned CUDA host; it was not executed locally
+      because no CUDA JAX backend is visible.

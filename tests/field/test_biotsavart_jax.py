@@ -1183,6 +1183,153 @@ class TestBiotSavartJaxChunkedSelfConsistency:
     ``TestBiotSavartJaxCppParity`` above.
     """
 
+    def test_per_coil_unit_field_batch_matches_unbounded_vmap_reference(self):
+        from simsopt_jax_adapters.field.biotsavart_backend import (
+            _per_coil_unit_field_with_batch_size,
+        )
+        from simsopt_jax.core.biotsavart import (
+            biot_savart_B,
+            biot_savart_dB_by_dX,
+            biot_savart_d2B_by_dXdX,
+        )
+
+        gammas, gammadashs, currents = _make_shifted_circular_coils(5, R=0.72, nquad=12)
+        points = jnp.asarray(
+            (
+                (0.18, -0.12, 0.07),
+                (-0.22, 0.15, -0.05),
+            ),
+            dtype=jnp.float64,
+        )
+        coil_set_spec = GroupedCoilSetSpec(
+            groups=(
+                CoilGroupSpec(
+                    gammas=gammas[jnp.asarray((3, 0, 4))],
+                    gammadashs=gammadashs[jnp.asarray((3, 0, 4))],
+                    currents=currents[jnp.asarray((3, 0, 4))],
+                    coil_indices=(3, 0, 4),
+                ),
+                CoilGroupSpec(
+                    gammas=gammas[jnp.asarray((1, 2))],
+                    gammadashs=gammadashs[jnp.asarray((1, 2))],
+                    currents=currents[jnp.asarray((1, 2))],
+                    coil_indices=(1, 2),
+                ),
+            )
+        )
+
+        def unbounded_vmap_reference(kernel):
+            result_by_index = {}
+            for group in coil_set_spec.groups:
+                unit_current = jnp.ones((1,), dtype=group.currents.dtype)
+
+                def evaluate_single(gamma, gammadash):
+                    return kernel(
+                        points,
+                        gamma[jnp.newaxis, ...],
+                        gammadash[jnp.newaxis, ...],
+                        unit_current,
+                    )
+
+                group_results = jax.vmap(evaluate_single)(
+                    group.gammas,
+                    group.gammadashs,
+                )
+                for position, coil_index in enumerate(group.coil_indices):
+                    result_by_index[int(coil_index)] = group_results[position]
+            return [result_by_index[index] for index in range(len(currents))]
+
+        for batch_size in (0, 2):
+            for kernel in (
+                biot_savart_B,
+                biot_savart_dB_by_dX,
+                biot_savart_d2B_by_dXdX,
+            ):
+                actual_entries = _per_coil_unit_field_with_batch_size(
+                    points,
+                    coil_set_spec,
+                    kernel,
+                    batch_size=batch_size,
+                )
+                expected_entries = unbounded_vmap_reference(kernel)
+                assert len(actual_entries) == len(expected_entries)
+                for actual, expected in zip(actual_entries, expected_entries, strict=True):
+                    np.testing.assert_allclose(
+                        np.asarray(actual),
+                        np.asarray(expected),
+                        rtol=0.0,
+                        atol=0.0,
+                    )
+
+    def test_analytic_B_and_dB_matches_linearized_reference(self, monkeypatch):
+        from simsopt_jax.core import biotsavart as core_bs
+
+        def linearized_reference(points, gammas, gammadashs, currents, tuning):
+            coil_cs, quad_bs, point_cs = tuning
+
+            def one_point(x, group_gammas, group_gammadashs, group_currents):
+                return core_bs._coil_chunk_reduce(
+                    group_gammas,
+                    group_gammadashs,
+                    group_currents,
+                    chunk_size=coil_cs,
+                    zero=core_bs._zeros((3,), dtype=jnp.float64),
+                    reduce_chunk=lambda cg, cgd, cc: core_bs._one_point_dense(
+                        x,
+                        cg,
+                        cgd,
+                        cc,
+                        integrand=core_bs._biot_savart_B_integrand,
+                        quadrature_block_size=quad_bs,
+                    ),
+                )
+
+            def per_point(x):
+                f = lambda xx: one_point(xx, gammas, gammadashs, currents)
+                primals, tangents_fn = jax.linearize(f, x)
+                basis = core_bs._eye(3, dtype=jnp.float64)
+                return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
+
+            def chunk_fn(chunk_points):
+                return jax.vmap(per_point, in_axes=(0,))(chunk_points)
+
+            return core_bs._point_chunk_reduce(points, chunk_fn, point_cs)
+
+        points, gammas, gammadashs, currents = _make_random_fixture(
+            seed=71,
+            ncoils=9,
+            nquad=25,
+            npoints=7,
+        )
+        for tuning in ((0, 0, 0), (4, 0, 0), (0, 7, 0), (4, 7, 3)):
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: tuning)
+            core_bs.invalidate_kernel_cache()
+            actual_B, actual_dB = core_bs.biot_savart_B_and_dB(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            expected_B, expected_dB = linearized_reference(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+                tuning,
+            )
+            np.testing.assert_allclose(
+                np.asarray(actual_B),
+                np.asarray(expected_B),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+            np.testing.assert_allclose(
+                np.asarray(actual_dB),
+                np.asarray(expected_dB),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+
     def test_kernel_factories_do_not_key_equivalent_kernels_by_platform(self):
         from simsopt_jax.core import biotsavart as core_bs
 

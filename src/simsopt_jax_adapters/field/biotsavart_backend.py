@@ -22,6 +22,7 @@ from simsopt.field.coil import Current
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.runtime.host_boundary import host_array, host_float
 from simsopt._core.optimizable import Optimizable
+from simsopt_jax.backend import get_field_kernel_tuning
 from simsopt_jax.core.state_tokens import make_state_token_factory
 from simsopt_jax.backend.dtypes import runtime_device_put
 from simsopt_jax.core import (
@@ -191,7 +192,7 @@ def _grad_absB_from_B_and_dB(B, dB_by_dX):
     return jnp.sum(dB_jax * B_jax[:, None, :], axis=2) / absB[:, None]
 
 
-def _per_coil_unit_field(points, coil_set_spec, kernel):
+def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch_size):
     """Per-coil unit-current field as a list of JAX arrays.
 
     For each coil ``k`` in the public coil ordering, evaluates ``kernel``
@@ -211,7 +212,8 @@ def _per_coil_unit_field(points, coil_set_spec, kernel):
     for group in coil_set_spec.groups:
         unit_current = jnp.ones((1,), dtype=group.currents.dtype)
 
-        def evaluate_single(gamma, gammadash):
+        def evaluate_single(coil_geometry):
+            gamma, gammadash = coil_geometry
             return kernel(
                 points,
                 gamma[jnp.newaxis, ...],
@@ -219,10 +221,28 @@ def _per_coil_unit_field(points, coil_set_spec, kernel):
                 unit_current,
             )
 
-        group_results = jax.vmap(evaluate_single)(group.gammas, group.gammadashs)
+        if batch_size <= 0:
+            group_results = jax.vmap(
+                lambda gamma, gammadash: evaluate_single((gamma, gammadash))
+            )(group.gammas, group.gammadashs)
+        else:
+            group_results = jax.lax.map(
+                evaluate_single,
+                (group.gammas, group.gammadashs),
+                batch_size=batch_size,
+            )
         for position, coil_index in enumerate(group.coil_indices):
             result_by_index[int(coil_index)] = group_results[position]
     return [result_by_index[index] for index in range(ncoils)]
+
+
+def _per_coil_unit_field(points, coil_set_spec, kernel):
+    return _per_coil_unit_field_with_batch_size(
+        points,
+        coil_set_spec,
+        kernel,
+        batch_size=get_field_kernel_tuning().coil_chunk_size,
+    )
 
 
 def _build_profile_breakdown(timings):
