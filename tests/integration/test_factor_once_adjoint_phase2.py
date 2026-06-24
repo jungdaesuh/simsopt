@@ -100,22 +100,24 @@ def test_plu_from_lu_piv_handles_pivoting():
     assert err <= eps * (H.shape[0] ** 2)
 
 
-@pytest.mark.skipif(
-    jax.default_backend() != "cpu",
-    reason="byte-identical packed factor bytes are a host-CPU LAPACK determinism "
-    "contract; on a GPU/TPU the 'ondevice' branch uses a vendor solver (e.g. "
-    "cuSOLVER) that is numerically equal but not byte-identical to scipy's host "
-    "LAPACK. Numerical equivalence is covered by the solve-layer tests below.",
-)
 def test_factor_dense_hessian_scipy_and_jax_branches_share_bytes():
     """``optimizer_backend == "scipy"`` and ``"ondevice"`` must yield
     identical packed factor bytes on a shared host-CPU LAPACK fixture.
+
+    Pinned to a CPU device so the byte-identity contract is exercised on every
+    backend, not only on CPU processes: the ``"scipy"`` branch is always host
+    LAPACK, while the ``"ondevice"`` branch follows the array's device, so in a
+    GPU process it would route through cuSOLVER (numerically equal but not
+    byte-identical). Forcing both onto CPU keeps the byte contract well-defined
+    regardless of the default backend; cross-vendor numerical equivalence is a
+    separate concern not asserted here.
     """
-    H = _spd_hessian(8, seed=42)
-    lu_p, piv_p = opt_jax._factor_dense_hessian(H, optimizer_backend="scipy")
-    lu_j, piv_j = opt_jax._factor_dense_hessian(H, optimizer_backend="ondevice")
-    assert np.array_equal(np.asarray(lu_p), np.asarray(lu_j))
-    assert np.array_equal(np.asarray(piv_p), np.asarray(piv_j))
+    with jax.default_device(jax.devices("cpu")[0]):
+        H = _spd_hessian(8, seed=42)
+        lu_p, piv_p = opt_jax._factor_dense_hessian(H, optimizer_backend="scipy")
+        lu_j, piv_j = opt_jax._factor_dense_hessian(H, optimizer_backend="ondevice")
+        assert np.array_equal(np.asarray(lu_p), np.asarray(lu_j))
+        assert np.array_equal(np.asarray(piv_p), np.asarray(piv_j))
 
 
 def test_factor_dense_hessian_returns_none_on_missing_input():
