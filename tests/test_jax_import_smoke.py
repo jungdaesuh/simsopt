@@ -878,12 +878,14 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         expected_case="compile-count",
     )
     expected_compile_count = 5 if method == "lbfgs-ondevice" else 1
-    assert payload == {
-        "case": "compile-count",
-        "method": method,
-        "compile_count": expected_compile_count,
-        "run_count": 3,
-    }
+    assert payload["case"] == "compile-count"
+    assert payload["method"] == method
+    assert payload["compile_count"] == expected_compile_count
+    assert payload["run_count"] == 3
+    if method == "lbfgs-ondevice":
+        assert payload["stepwise_compile_count"] == expected_compile_count
+        assert payload["monolithic_compile_count"] == 0
+        assert sum(payload["counts_by_fragment"].values()) == expected_compile_count
 
 
 def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
@@ -908,13 +910,14 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
         expected_case="target-compile-count",
     )
-    assert payload == {
-        "case": "target-compile-count",
-        "method": "lbfgs-ondevice",
-        "compile_count": 5,
-        "run_count": 3,
-        "value_and_grad": True,
-    }
+    assert payload["case"] == "target-compile-count"
+    assert payload["method"] == "lbfgs-ondevice"
+    assert payload["compile_count"] == 5
+    assert payload["stepwise_compile_count"] == 5
+    assert payload["monolithic_compile_count"] == 0
+    assert payload["run_count"] == 3
+    assert payload["value_and_grad"] is True
+    assert sum(payload["counts_by_fragment"].values()) == 5
 
 
 def test_ondevice_solver_cache_respects_mutable_objective_state():

@@ -190,6 +190,9 @@ from simsopt_jax_adapters.geo.surface_objectives import (  # noqa: E402
     compute_standard_surface_objective_gradients,
     make_traceable_objective,
     make_traceable_objective_runtime_bundle,
+    make_traceable_objective_seeded_value_and_grad,
+    make_traceable_objective_solved_pair,
+    make_traceable_objective_value_and_grad,
     make_traceable_single_stage_alm_runtime_bundle,
 )
 from simsopt_jax_adapters.geo.curve_specs import (  # noqa: E402
@@ -7032,6 +7035,331 @@ class TestTraceableObjective:
         )
 
         assert bool(np.asarray(feasible))
+
+    def test_scipy_jax_decomposed_lane_wiring_and_parity(self, boozer_setup):
+        """Edit 3: the scipy-jax-decomposed backend resolves to the decomposed route,
+        and its host objective matches the fused coil-space value/grad on the
+        solve-success branch (so the lane is bit-for-bit comparable to scipy-jax).
+        """
+        contract = single_stage_example.resolve_single_stage_optimizer_contract(
+            "jax", "scipy-jax-decomposed"
+        )
+        assert single_stage_example.single_stage_optimizer_contract_uses_decomposed_solved_pair(
+            contract
+        )
+        assert single_stage_example.single_stage_optimizer_contract_uses_array_native_target_lane(
+            contract, constraint_method="penalty"
+        )
+        assert not single_stage_example.single_stage_optimizer_contract_uses_full_state_target_lane(
+            contract, constraint_method="penalty"
+        )
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
+
+        solved_pair = make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target)
+        seed = make_traceable_objective_seeded_value_and_grad(
+            booz_jax, bs_jax, iota_target
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            solved_pair, seed.optimizer_initial_value_and_grad[1]
+        )
+        fused = make_traceable_objective_value_and_grad(booz_jax, bs_jax, iota_target)
+
+        v2, g2 = host_fun(coil_dofs)
+        v1, g1 = fused(coil_dofs)
+        g1 = np.asarray(jax.device_get(g1), dtype=np.float64)
+        g2 = np.asarray(jax.device_get(g2), dtype=np.float64)
+        np.testing.assert_allclose(
+            float(jax.device_get(v1)), float(jax.device_get(v2)), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(g1, g2, rtol=1e-10, atol=1e-12)
+
+    def test_scipy_jax_decomposed_lane_registered_like_scipy_jax(self):
+        """Regression: the CLI startup path gates fused/decomposed objective
+        construction on ``use_target_lane_value_and_grad`` and indexes
+        ``OPTIMIZER_BACKEND_ROLE`` by key (no ``.get``). A real GPU run died at
+        ``seed_pending_single_stage_target_lane_initial_objective`` ("Target-lane
+        startup requires the fused target-lane value/gradient objective") because
+        ``scipy-jax-decomposed`` was missing from ``JAX_TARGET_OUTER_OPTIMIZER_BACKENDS``
+        -> ``use_target_lane_vg`` was False -> the objective was never built. Assert
+        the decomposed lane mirrors ``scipy-jax`` across every SSOT the startup path
+        consults, so a future backend addition cannot silently regress this path.
+        """
+        from simsopt_jax.geo.optimizers.single_stage_routing import (
+            JAX_TARGET_OUTER_OPTIMIZER_BACKENDS,
+        )
+
+        assert "scipy-jax-decomposed" in JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
+        # The exact predicate that gates objective construction in __main__.
+        assert single_stage_example.use_target_lane_value_and_grad(
+            backend="jax", optimizer_backend="scipy-jax-decomposed"
+        )
+        _, effective_vg = single_stage_example.resolve_target_lane_value_and_grad_modes(
+            backend="jax",
+            optimizer_backend="scipy-jax-decomposed",
+            experimental_enabled=False,
+        )
+        assert effective_vg
+        # OPTIMIZER_BACKEND_ROLE is indexed by key (no .get); mirror scipy-jax.
+        assert (
+            optimizer_jax_module.OPTIMIZER_BACKEND_ROLE["scipy-jax-decomposed"]
+            == optimizer_jax_module.OPTIMIZER_BACKEND_ROLE["scipy-jax"]
+            == "target-scipy-control"
+        )
+
+    def test_decomposed_host_objective_failure_branch_returns_baseline(self):
+        """Failure-branch coverage: on solve-FAILURE the decomposed host objective must
+        return ``(forward_result["value"], baseline_coil_gradient)`` and must NOT call the
+        K2 solved-state value/grad -- mirroring the fused ``lax.cond`` baseline-fallback.
+        The happy-path parity + e2e tests exercise only solve-success, so this locks the
+        failure branch (a baseline-gradient rewiring could otherwise silently diverge).
+        Also exercises the SSOT ``host_bool`` success-gate (so the gate is safe under
+        ``transfer_guard=disallow``). Stub pair => no GPU/boozer fixture needed.
+        """
+        import jax.numpy as jnp
+
+        baseline = np.array([1.0, -2.0, 3.0, 4.5])
+        failed_value = jnp.asarray(123.456)
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(False),
+                "value": failed_value,
+                "x": jnp.zeros_like(arr),
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(*_args, **_kwargs):
+            raise AssertionError(
+                "K2 (value_grad_from_solved) must not run on solve-failure"
+            )
+
+        pair = single_stage_example.TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn, value_grad_from_solved=value_grad_from_solved
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair, baseline
+        )
+        value, grad = host_fun(np.zeros(4))
+        assert float(jax.device_get(value)) == pytest.approx(123.456)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            baseline,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_decomposed_lane_host_sync_count_is_bounded(self, boozer_setup, monkeypatch):
+        """Sync-count budget: the decomposed host objective performs a BOUNDED number of
+        host<-device syncs per evaluation (~1, the success-flag read) — linear in the
+        number of evaluations with no runaway. (Project history: sync COUNT, not
+        wall-seconds, is the reliable host-overhead signal for host-driven lanes.)
+        """
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target),
+            make_traceable_objective_seeded_value_and_grad(
+                booz_jax, bs_jax, iota_target
+            ).optimizer_initial_value_and_grad[1],
+        )
+        host_fun(coil_dofs)  # warm/compile outside the counted window
+
+        real_device_get = jax.device_get
+        sync_count = {"n": 0}
+
+        def _counting_device_get(value):
+            sync_count["n"] += 1
+            return real_device_get(value)
+
+        monkeypatch.setattr(jax, "device_get", _counting_device_get)
+        n_evals = 4
+        for _ in range(n_evals):
+            host_fun(coil_dofs)
+        monkeypatch.undo()
+
+        # >=1 sync/eval (the success gate runs) and bounded (no runaway).
+        assert sync_count["n"] >= n_evals, (
+            f"expected >= {n_evals} success-gate syncs, got {sync_count['n']}"
+        )
+        assert sync_count["n"] <= 3 * n_evals, (
+            f"host syncs not bounded ~1/eval (possible runaway): "
+            f"{sync_count['n']} for {n_evals} evals"
+        )
+
+    def test_decomposed_lane_gate1_compile_trace_no_monolith(self, boozer_setup):
+        """Gate 1 (formal compile-trace): the decomposed lane compiles the forward
+        Boozer solve (K1) and the solved-state value/grad (K2) as SEPARATE jitted
+        units, and NO single compiled unit encloses the forward solve together with an
+        optimizer loop. The host success-gate between K1 and K2 makes a monolithic
+        graph structurally impossible; this asserts it empirically via jax.log_compiles
+        (pattern mirrors benchmarks/lbfgs_ondevice_compile_shape.py).
+        """
+        import logging
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target),
+            make_traceable_objective_seeded_value_and_grad(
+                booz_jax, bs_jax, iota_target
+            ).optimizer_initial_value_and_grad[1],
+        )
+
+        messages: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                message = record.getMessage()
+                if "Compiling jit(" in message:
+                    messages.append(message)
+
+        jax.clear_caches()  # force a complete, fresh compile trace
+        logger = logging.getLogger("jax")
+        handler = _Capture()
+        prev_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+        try:
+            with jax.log_compiles(True):
+                value, grad = host_fun(coil_dofs)
+                jax.block_until_ready((value, grad))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(prev_level)
+
+        # K1 (forward solve) and K2 (solved-state value/grad) compile as SEPARATE units.
+        assert any("forward_result" in m for m in messages), (
+            f"K1 forward-solve compile not observed: {messages}"
+        )
+        assert any("solved_state" in m for m in messages), (
+            f"K2 solved-state value/grad compile not observed: {messages}"
+        )
+        assert len(set(messages)) >= 2, (
+            f"expected >=2 distinct compiled units (K1, K2), got {set(messages)}"
+        )
+        # Gate 1: no monolithic macro-step unit enclosing the optimizer loop + solve.
+        assert not any(
+            ("macro_step" in m) or ("lbfgs_private_macro" in m) for m in messages
+        ), f"a monolithic optimizer-loop unit was compiled (Gate 1 fail): {messages}"
+
+    def test_scipy_jax_decomposed_lane_runs_end_to_end_matches_scipy_jax(
+        self, boozer_setup
+    ):
+        """Edit 3 end-to-end: the decomposed lane runs a REAL outer optimization via
+        run_single_stage_optimizer (host SciPy L-BFGS-B over the K1/K2 split) and
+        tracks scipy-jax step-for-step (identical objective values -> identical
+        trajectory -> identical DOFs after the same iterations).
+        """
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
+        x0 = np.asarray(jax.device_get(coil_dofs), dtype=np.float64)
+
+        decomposed_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target),
+            make_traceable_objective_seeded_value_and_grad(
+                booz_jax, bs_jax, iota_target
+            ).optimizer_initial_value_and_grad[1],
+        )
+        fused_fun = make_traceable_objective_value_and_grad(
+            booz_jax, bs_jax, iota_target
+        )
+
+        run_kwargs = dict(
+            maxiter=2,
+            ftol=1e-12,
+            gtol=1e-12,
+            maxcor=10,
+            outer_maxls=20,
+            callback=None,
+        )
+
+        def _run(fun, route):
+            return single_stage_example.run_single_stage_optimizer(
+                fun,
+                x0,
+                contract=single_stage_example.TargetOptimizerContract(
+                    driver=single_stage_example.Driver.SCIPY_LBFGSB,
+                    objective_route=route,
+                ),
+                **run_kwargs,
+            )
+
+        res_dec = _run(
+            decomposed_fun,
+            single_stage_example.TargetObjectiveRoute.SCIPY_JAX_DECOMPOSED,
+        )
+        res_sj = _run(
+            fused_fun,
+            single_stage_example.TargetObjectiveRoute.SCIPY_JAX,
+        )
+
+        x_dec = np.asarray(res_dec.x, dtype=np.float64)
+        x_sj = np.asarray(res_sj.x, dtype=np.float64)
+        assert np.all(np.isfinite(x_dec))
+        assert bool(res_dec.success) == bool(res_sj.success)
+        np.testing.assert_allclose(x_dec, x_sj, rtol=1e-8, atol=1e-10)
+
+    def test_full_state_solved_pair_matches_fused_value_and_grad(self, boozer_setup):
+        """Edit 2: the lifted (solve_fn, value_grad_from_solved) pair reproduces the
+        fused full-state value+grad.
+
+        ``build_target_lane_full_state_solved_pair`` is the decomposed counterpart of
+        ``build_target_lane_full_state_value_and_grad``: the optimizer->coil DOF gather
+        is applied to the coil-dof input of both halves and the adjoint scatter to the
+        gradient output of ``value_grad_from_solved``. We exercise that lifting with a
+        synthetic embedding DOF map (coils occupy the leading optimizer DOFs, padded by
+        extra non-coil DOFs) on the small solved fixture; on the solve-success branch the
+        lifted pair must match the fused full-state value and the full-dimension gradient
+        to machine precision, with zero gradient on the non-coil DOFs.
+        """
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        assert booz_jax.res is not None and booz_jax.res.get("success", False)
+
+        iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
+        coil_size = int(coil_dofs.shape[0])
+        n_extra = 3  # synthetic non-coil (e.g. surface) optimizer DOFs
+
+        # Synthetic embedding map: coils are the leading optimizer DOFs.
+        dof_map = single_stage_example.SingleStageFullGraphOptimizerDofMap(
+            optimizer_to_native_indices=np.arange(coil_size + n_extra),
+            coil_optimizer_indices=np.arange(coil_size),
+        )
+        optimizer_dofs = jnp.concatenate(
+            [coil_dofs, jnp.zeros(n_extra, dtype=coil_dofs.dtype)]
+        )
+
+        fused_full = single_stage_example.build_target_lane_full_state_value_and_grad(
+            make_traceable_objective_value_and_grad(booz_jax, bs_jax, iota_target),
+            dof_map,
+        )
+        lifted = single_stage_example.build_target_lane_full_state_solved_pair(
+            make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target),
+            dof_map,
+        )
+
+        fr = lifted.solve_fn(optimizer_dofs)
+        assert bool(fr["success"]) is True
+
+        v2, g2 = lifted.value_grad_from_solved(
+            optimizer_dofs, fr["x"], fr["linear_solve_factors"]
+        )
+        v1, g1 = fused_full(optimizer_dofs)
+
+        g1 = np.asarray(jax.device_get(g1), dtype=np.float64)
+        g2 = np.asarray(jax.device_get(g2), dtype=np.float64)
+        assert g1.shape == (coil_size + n_extra,)
+        assert g2.shape == (coil_size + n_extra,)
+        assert np.all(np.isfinite(g1)) and np.all(np.isfinite(g2))
+
+        np.testing.assert_allclose(
+            float(jax.device_get(v1)), float(jax.device_get(v2)), rtol=1e-9, atol=1e-11
+        )
+        np.testing.assert_allclose(g1, g2, rtol=1e-9, atol=1e-11)
+        # Non-coil optimizer DOFs receive zero gradient (scatter correctness).
+        np.testing.assert_allclose(g2[coil_size:], 0.0, atol=1e-12)
 
     def test_pure_objective_matches_optimizable_value(self, boozer_setup):
         """Test 1: Pure JAX objective returns same value as JF.J()."""

@@ -16,7 +16,7 @@ class OptaxLineSearch(StrEnum):
 class OptaxLBFGSOptions(OptionsBase):
     maxiter: int = 15000
     gtol: float = 1e-10
-    memory_size: int = 200
+    memory_size: int = 10
     line_search: OptaxLineSearch = OptaxLineSearch.ZOOM
     scale_init_precond: bool = True
     max_linesearch_steps: int = 30

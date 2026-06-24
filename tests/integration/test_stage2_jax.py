@@ -150,6 +150,10 @@ from simsopt_jax.geo.optimizers.optimizer import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     private_optimizer_runtime_is_supported,
 )
+from simsopt_jax.geo._pairwise_reductions import (
+    pairwise_selected_smoothmin_distance_batched_pure,
+    pairwise_selected_smoothmin_distance_pure,
+)
 from simsopt_jax.solve import Driver, ScipyLBFGSBOptions
 from simsopt_jax.solve.dispatch import minimize
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
@@ -5512,6 +5516,216 @@ class TestStage2OptimizerContract:
             float(fixed_curve_penalty),
         )
         assert "scan[" in str(scan_jaxpr)
+
+    def test_target_alm_curve_curve_batches_match_legacy_smoothmin_pair_set(self):
+        _objective, _target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
+        )
+        banana_curve = context["banana_curve"]
+        banana_coils = context["banana_coils"]
+        tf_coils = context["tf_coils"]
+        current_dof = jnp.asarray(1.25e4, dtype=jnp.float64)
+        distance_smoothing = jnp.asarray(0.005, dtype=jnp.float64)
+        base_gamma, base_gammadash = _stage2_contract_case_base_curve_geometry(
+            banana_curve
+        )
+        banana_rotmats, banana_current_scales = (
+            _stage2_contract_case_banana_symmetry_inputs(banana_coils)
+        )
+        dynamic_gammas, _dynamic_gammadashs, _dynamic_currents = (
+            stage2_target_objective_module._build_dynamic_curve_data(
+                base_gamma,
+                base_gammadash,
+                jnp.asarray(banana_rotmats, dtype=jnp.float64),
+                jnp.asarray(banana_current_scales, dtype=jnp.float64),
+                current_dof,
+            )
+        )
+        tf_coil_spec = (
+            stage2_target_objective_module.grouped_coil_set_spec_from_coil_specs(
+                tuple(
+                    stage2_target_objective_module._coil_spec_from_coil(coil)
+                    for coil in tf_coils
+                )
+            )
+        )
+        tf_curve_groups = (
+            stage2_target_objective_module._curve_groups_from_grouped_coil_set_spec(
+                tf_coil_spec
+            )
+        )
+
+        fixed_curve_curve_point_pairs = []
+        for left_group_index, (left_group_gammas, _left_gammadashs) in enumerate(
+            tf_curve_groups
+        ):
+            for left_curve_index, left_gamma in enumerate(left_group_gammas):
+                for right_group_index in range(left_group_index + 1):
+                    right_group_gammas, _right_gammadashs = tf_curve_groups[
+                        right_group_index
+                    ]
+                    right_limit = (
+                        left_curve_index
+                        if right_group_index == left_group_index
+                        else int(right_group_gammas.shape[0])
+                    )
+                    for right_gamma in right_group_gammas[:right_limit]:
+                        fixed_curve_curve_point_pairs.append((left_gamma, right_gamma))
+
+        fixed_curve_curve_point_pair_batches = (
+            stage2_target_objective_module._stack_point_pair_batches(
+                tuple(fixed_curve_curve_point_pairs)
+            )
+        )
+        fixed_pair_count = stage2_target_objective_module._point_pair_batch_count(
+            fixed_curve_curve_point_pair_batches
+        )
+        dynamic_count = int(dynamic_gammas.shape[0])
+        tf_curve_count = sum(int(gammas.shape[0]) for gammas, _ in tf_curve_groups)
+        expected_curve_pair_count = (
+            fixed_pair_count
+            + dynamic_count * tf_curve_count
+            + dynamic_count * (dynamic_count - 1) // 2
+        )
+
+        assert fixed_pair_count == 190
+        assert expected_curve_pair_count == 435
+
+        point_pair_batches = (
+            stage2_target_objective_module._curve_curve_alm_point_pair_batches(
+                dynamic_gammas,
+                stage2_target_objective_module._runtimeify_tree(tf_curve_groups),
+                stage2_target_objective_module._runtimeify_tree(
+                    fixed_curve_curve_point_pair_batches
+                ),
+                reference=dynamic_gammas,
+            )
+        )
+        assert (
+            stage2_target_objective_module._point_pair_batch_count(point_pair_batches)
+            == expected_curve_pair_count
+        )
+
+        legacy_point_pairs = list(fixed_curve_curve_point_pairs)
+        for dynamic_index in range(dynamic_count):
+            gamma_i = dynamic_gammas[dynamic_index]
+            for tf_gammas, _tf_gammadashs in tf_curve_groups:
+                legacy_point_pairs.append(
+                    (
+                        gamma_i,
+                        stage2_target_objective_module._runtime_float64_array(
+                            tf_gammas,
+                            reference=dynamic_gammas,
+                        ),
+                    )
+                )
+            for previous_index in range(dynamic_index):
+                legacy_point_pairs.append((gamma_i, dynamic_gammas[previous_index]))
+
+        batched_smooth_min = pairwise_selected_smoothmin_distance_batched_pure(
+            point_pair_batches,
+            temperature=distance_smoothing,
+        )
+        legacy_smooth_min = pairwise_selected_smoothmin_distance_pure(
+            tuple(legacy_point_pairs),
+            temperature=distance_smoothing,
+        )
+
+        np.testing.assert_allclose(
+            float(np.asarray(batched_smooth_min)),
+            float(np.asarray(legacy_smooth_min)),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_target_alm_curve_surface_batches_match_legacy_smoothmin_pair_set(self):
+        _objective, _target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
+        )
+        banana_curve = context["banana_curve"]
+        banana_coils = context["banana_coils"]
+        tf_coils = context["tf_coils"]
+        current_dof = jnp.asarray(1.25e4, dtype=jnp.float64)
+        distance_smoothing = jnp.asarray(0.005, dtype=jnp.float64)
+        base_gamma, base_gammadash = _stage2_contract_case_base_curve_geometry(
+            banana_curve
+        )
+        banana_rotmats, banana_current_scales = (
+            _stage2_contract_case_banana_symmetry_inputs(banana_coils)
+        )
+        dynamic_gammas, _dynamic_gammadashs, _dynamic_currents = (
+            stage2_target_objective_module._build_dynamic_curve_data(
+                base_gamma,
+                base_gammadash,
+                jnp.asarray(banana_rotmats, dtype=jnp.float64),
+                jnp.asarray(banana_current_scales, dtype=jnp.float64),
+                current_dof,
+            )
+        )
+        tf_coil_spec = (
+            stage2_target_objective_module.grouped_coil_set_spec_from_coil_specs(
+                tuple(
+                    stage2_target_objective_module._coil_spec_from_coil(coil)
+                    for coil in tf_coils
+                )
+            )
+        )
+        tf_curve_groups = (
+            stage2_target_objective_module._curve_groups_from_grouped_coil_set_spec(
+                tf_coil_spec
+            )
+        )
+        flat_surface = jnp.asarray(
+            context["eval_surf"].gamma().reshape((-1, 3)),
+            dtype=jnp.float64,
+        )
+        point_pair_batches = (
+            stage2_target_objective_module._curve_surface_alm_point_pair_batches(
+                dynamic_gammas,
+                stage2_target_objective_module._runtimeify_tree(tf_curve_groups),
+                flat_surface,
+                reference=dynamic_gammas,
+            )
+        )
+        expected_curve_pair_count = int(dynamic_gammas.shape[0]) + sum(
+            int(gammas.shape[0]) for gammas, _ in tf_curve_groups
+        )
+
+        assert expected_curve_pair_count == 30
+        assert (
+            stage2_target_objective_module._point_pair_batch_count(point_pair_batches)
+            == expected_curve_pair_count
+        )
+
+        legacy_point_pairs = []
+        for tf_gammas, _tf_gammadashs in tf_curve_groups:
+            legacy_point_pairs.append(
+                (
+                    stage2_target_objective_module._runtime_float64_array(
+                        tf_gammas,
+                        reference=dynamic_gammas,
+                    ),
+                    flat_surface,
+                )
+            )
+        for dynamic_index in range(int(dynamic_gammas.shape[0])):
+            legacy_point_pairs.append((dynamic_gammas[dynamic_index], flat_surface))
+
+        batched_smooth_min = pairwise_selected_smoothmin_distance_batched_pure(
+            point_pair_batches,
+            temperature=distance_smoothing,
+        )
+        legacy_smooth_min = pairwise_selected_smoothmin_distance_pure(
+            tuple(legacy_point_pairs),
+            temperature=distance_smoothing,
+        )
+
+        np.testing.assert_allclose(
+            float(np.asarray(batched_smooth_min)),
+            float(np.asarray(legacy_smooth_min)),
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
     def test_target_curve_distance_scan_routes_pairwise_row_sharding(
         self,

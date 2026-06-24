@@ -78,21 +78,6 @@ def scalar_pullback_seed(value):
     return always_true.astype(value.dtype)
 
 
-def strict_scalar_grad(fun, arg):
-    value, pullback = jax.vjp(fun, arg)
-    (gradient,) = pullback(scalar_pullback_seed(value))
-    return gradient
-
-
-def strict_scalar_value_and_grad(fun, arg, *args):
-    def _objective(first_arg):
-        return fun(first_arg, *args)
-
-    value, pullback = jax.vjp(_objective, arg)
-    (gradient,) = pullback(scalar_pullback_seed(value))
-    return host_scalar(value), gradient
-
-
 def explicit_cotangent_basis(length: int, index: int, *, dtype):
     basis = np.zeros(int(length), dtype=np.dtype(dtype))
     basis[int(index)] = 1.0

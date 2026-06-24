@@ -311,12 +311,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
 
             return bound
 
-        def _bind_live_curve(fun):
-            def bound(sdofs):
-                return fun(current_curve_dofs(), sdofs)
-
-            return bound
-
         def _bind_live_curve_vjp(fun):
             def bound(sdofs, v):
                 return fun(current_curve_dofs(), sdofs, v)
@@ -329,21 +323,11 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
             return self.gamma_pure(cdofs, sdofs, points)
 
         self.gamma_jax = jit(gamma_at_points)
-        self.gamma_impl_jax = jit(
-            lambda cdofs, sdofs, qpts: self.gamma_pure(cdofs, sdofs, qpts)
-        )
-        # Keep the bound one-arg adapters outside jit so they re-read live DOFs.
-        self.gammac_jax = _bind_live_surface(self.gamma_jax)
-        self.gammas_jax = _bind_live_curve(self.gamma_jax)
-        dgamma_by_dcoeff_kernel = jit(jacfwd(gamma_at_points, argnums=0))
         dgamma_by_dcoeff_vjp_kernel = _arg0_vjp_kernel(gamma_at_points)
-        dgamma_by_dsurf_kernel = jit(jacfwd(gamma_at_points, argnums=1))
         dgamma_by_dsurf_vjp_kernel = _arg1_vjp_kernel(gamma_at_points)
-        self.dgamma_by_dcoeff_jax = _bind_live_surface(dgamma_by_dcoeff_kernel)
         self.dgamma_by_dcoeff_vjp_jax = _bind_live_surface_vjp(
             dgamma_by_dcoeff_vjp_kernel
         )
-        self.dgamma_by_dsurf_jax = _bind_live_curve(dgamma_by_dsurf_kernel)
         self.dgamma_by_dsurf_vjp_jax = _bind_live_curve_vjp(dgamma_by_dsurf_vjp_kernel)
 
         self.gammadash_pure = jit(gammadash_on_surface)
@@ -352,17 +336,11 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
             return self.gammadash_pure(cdofs, sdofs, points)
 
         self.gammadash_jax = jit(gammadash_at_points)
-        self.gammacdash_jax = _bind_live_surface(self.gammadash_jax)
-        self.gammasdash_jax = _bind_live_curve(self.gammadash_jax)
-        dgammadash_by_dcoeff_kernel = jit(jacfwd(gammadash_at_points, argnums=0))
         dgammadash_by_dcoeff_vjp_kernel = _arg0_vjp_kernel(gammadash_at_points)
-        dgammadash_by_dsurf_kernel = jit(jacfwd(gammadash_at_points, argnums=1))
         dgammadash_by_dsurf_vjp_kernel = _arg1_vjp_kernel(gammadash_at_points)
-        self.dgammadash_by_dcoeff_jax = _bind_live_surface(dgammadash_by_dcoeff_kernel)
         self.dgammadash_by_dcoeff_vjp_jax = _bind_live_surface_vjp(
             dgammadash_by_dcoeff_vjp_kernel
         )
-        self.dgammadash_by_dsurf_jax = _bind_live_curve(dgammadash_by_dsurf_kernel)
         self.dgammadash_by_dsurf_vjp_jax = _bind_live_curve_vjp(
             dgammadash_by_dsurf_vjp_kernel
         )
@@ -379,22 +357,10 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
             return self.gammadashdash_pure(cdofs, sdofs, points)
 
         self.gammadashdash_jax = jit(gammadashdash_at_points)
-        self.gammacdashdash_jax = _bind_live_surface(self.gammadashdash_jax)
-        self.gammasdashdash_jax = _bind_live_curve(self.gammadashdash_jax)
-        dgammadashdash_by_dcoeff_kernel = jit(
-            jacfwd(gammadashdash_at_points, argnums=0)
-        )
         dgammadashdash_by_dcoeff_vjp_kernel = _arg0_vjp_kernel(gammadashdash_at_points)
-        dgammadashdash_by_dsurf_kernel = jit(jacfwd(gammadashdash_at_points, argnums=1))
         dgammadashdash_by_dsurf_vjp_kernel = _arg1_vjp_kernel(gammadashdash_at_points)
-        self.dgammadashdash_by_dcoeff_jax = _bind_live_surface(
-            dgammadashdash_by_dcoeff_kernel
-        )
         self.dgammadashdash_by_dcoeff_vjp_jax = _bind_live_surface_vjp(
             dgammadashdash_by_dcoeff_vjp_kernel
-        )
-        self.dgammadashdash_by_dsurf_jax = _bind_live_curve(
-            dgammadashdash_by_dsurf_kernel
         )
         self.dgammadashdash_by_dsurf_vjp_jax = _bind_live_curve_vjp(
             dgammadashdash_by_dsurf_vjp_kernel
@@ -416,15 +382,11 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
 
         self.gammadashdashdash_jax = jit(gammadashdashdash_at_points)
         self.gammacdashdashdash_jax = _bind_live_surface(self.gammadashdashdash_jax)
-        self.gammasdashdashdash_jax = _bind_live_curve(self.gammadashdashdash_jax)
         dgammadashdashdash_by_dcoeff_kernel = jit(
             jacfwd(gammadashdashdash_at_points, argnums=0)
         )
         dgammadashdashdash_by_dcoeff_vjp_kernel = _arg0_vjp_kernel(
             gammadashdashdash_at_points
-        )
-        dgammadashdashdash_by_dsurf_kernel = jit(
-            jacfwd(gammadashdashdash_at_points, argnums=1)
         )
         dgammadashdashdash_by_dsurf_vjp_kernel = _arg1_vjp_kernel(
             gammadashdashdash_at_points
@@ -434,9 +396,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
         )
         self.dgammadashdashdash_by_dcoeff_vjp_jax = _bind_live_surface_vjp(
             dgammadashdashdash_by_dcoeff_vjp_kernel
-        )
-        self.dgammadashdashdash_by_dsurf_jax = _bind_live_curve(
-            dgammadashdashdash_by_dsurf_kernel
         )
         self.dgammadashdashdash_by_dsurf_vjp_jax = _bind_live_curve_vjp(
             dgammadashdashdash_by_dsurf_vjp_kernel
@@ -450,9 +409,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
         self.dgamma_2d_by_dcoeff_jax = jit(
             lambda cdofs: jacfwd(self.gamma_2d_jax)(cdofs)
         )
-        self.dgamma_2d_by_dcoeff_vjp = jit(
-            lambda cdofs, v: vjp(self.gamma_2d_jax, cdofs)[1](v)[0]
-        )
 
         ## gammadash
         self.gammadash_2d_pure = jit(
@@ -463,9 +419,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
         self.gammadash_2d_jax = jit(lambda cdofs: self.gammadash_2d_pure(cdofs, points))
         self.dgammadash_2d_by_dcoeff_jax = jit(
             lambda cdofs: jacfwd(self.gammadash_2d_jax)(cdofs)
-        )
-        self.dgammadash_2d_by_dcoeff_vjp = jit(
-            lambda cdofs, v: vjp(self.gammadash_2d_jax, cdofs)[1](v)[0]
         )
 
         ## gammadashdash
@@ -479,9 +432,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
         )
         self.dgammadashdash_2d_by_dcoeff_jax = jit(
             lambda cdofs: jacfwd(self.gammadashdash_2d_jax)(cdofs)
-        )
-        self.dgammadashdash_2d_by_dcoeff_vjp = jit(
-            lambda cdofs, v: vjp(self.gammadashdash_2d_jax, cdofs)[1](v)[0]
         )
 
         # determine sign for normal
@@ -752,10 +702,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
         cdofs = _as_jax_float64(self.get_dofs())
         return self.gammadash_2d_jax(cdofs)
 
-    def gammadash_2d_impl(self, g2, quadpoints):
-        cdofs = self.get_dofs()
-        g2[:, :] = gammadash_2d_numpy(cdofs, quadpoints, self.order, self.G, self.H)
-
     def dgammadash_2d_by_dcoeff(self):
         cdofs = _as_jax_float64(self.get_dofs())
         return self.dgammadash_2d_by_dcoeff_jax(cdofs)
@@ -836,14 +782,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
     # =========================================================================
     # GAMMADASHDASH
     # -------------
-    def gammadashdash_2d(self):
-        cdofs = _as_jax_float64(self.get_dofs())
-        return self.gammadashdash_2d_jax(cdofs)
-
-    def gammadashdash_2d_impl(self, g2, quadpoints):
-        cdofs = self.get_dofs()
-        g2[:, :] = gammadashdash_2d_numpy(cdofs, quadpoints, self.order, self.G, self.H)
-
     def gammadashdash(self):
         g2 = gamma_2d_numpy(
             self.get_dofs(), self.quadpoints, self.order, self.G, self.H

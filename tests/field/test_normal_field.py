@@ -9,6 +9,7 @@ from monty.tempfile import ScratchDir
 from simsopt._core.util import DofLengthMismatchError
 from simsopt.field import NormalField, CoilNormalField, CoilSet, Coil, Current
 from simsopt.mhd import Spec
+import simsopt.mhd.spec as spec_module
 from simsopt.geo import SurfaceRZFourier
 
 try:
@@ -19,6 +20,8 @@ except ImportError:
 from . import TEST_DIR
 
 logger = logging.getLogger(__name__)
+_SPEC_RUNTIME_AVAILABLE = py_spec is not None and spec_module.spec is not None
+_SPEC_RUNTIME_SKIP_REASON = "SPEC python wrapper or py_spec not found"
 
 
 class NormalFieldTests(unittest.TestCase):
@@ -219,7 +222,7 @@ class NormalFieldTests(unittest.TestCase):
                 else:
                     self.assertTrue(normal_field.is_free(ii))
 
-    @unittest.skipIf(py_spec is None, "py_spec not found")
+    @unittest.skipIf(not _SPEC_RUNTIME_AVAILABLE, _SPEC_RUNTIME_SKIP_REASON)
     def test_from_spec_object(self):
         """
         test classmethod to instantiate from an existing SPEC object
@@ -239,7 +242,7 @@ class NormalFieldTests(unittest.TestCase):
             np.allclose(normal_field.local_full_x, normal_field_2.local_full_x)
         )
 
-    @unittest.skipIf(py_spec is None, "py_spec not found")
+    @unittest.skipIf(not _SPEC_RUNTIME_AVAILABLE, _SPEC_RUNTIME_SKIP_REASON)
     def test_fail_for_fixedb(self):
         """
         test if instantiation fails if spec is not freeboundary
@@ -353,7 +356,7 @@ class CoilNormalFieldTests(unittest.TestCase):
         coil_normal_field = CoilNormalField()
         self.assertIsNotNone(coil_normal_field)
 
-    @unittest.skipIf(py_spec is None, "py_spec not found")
+    @unittest.skipIf(not _SPEC_RUNTIME_AVAILABLE, _SPEC_RUNTIME_SKIP_REASON)
     def test_spec_coil_correspondence_on_converged_output(self):
         # Init from SPEC input file
         with ScratchDir("."):
@@ -398,7 +401,7 @@ class CoilNormalFieldTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             coil_normal_field.set_vns_vnc_asarray(coil_normal_field.vns, coil_normal_field.vnc)
 
-    @unittest.skipIf(py_spec is None, "py_spec not found")
+    @unittest.skipIf(not _SPEC_RUNTIME_AVAILABLE, _SPEC_RUNTIME_SKIP_REASON)
     def test_reduce_coilset(self):
         """
         test if the coilset can be reduced, and

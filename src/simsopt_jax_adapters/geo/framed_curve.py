@@ -330,19 +330,6 @@ class FrameRotationJAX(Optimizable):
             self.order,
         )
 
-    def jax_alpha(self, dofs: object, points: object) -> jax.Array:
-        return rotation_alpha(
-            _as_jax_float64(dofs),
-            _as_jax_float64(points),
-            self.order,
-        )
-
-    def jax_alphadash(self, dofs: object, points: object) -> jax.Array:
-        return rotation_alphadash(
-            _as_jax_float64(dofs),
-            _as_jax_float64(points),
-            self.order,
-        )
 
     def alpha(self, quadpoints: object) -> jax.Array:
         return self._rotation_value(rotation_alpha, quadpoints)

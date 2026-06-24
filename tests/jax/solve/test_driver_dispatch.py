@@ -6,6 +6,7 @@ import simsopt_jax.solve.dispatch as dispatch
 from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve import (
     Driver,
+    OptaxLBFGSOptions,
     SimsoptBFGSCallbackEvent,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
@@ -212,6 +213,24 @@ def test_simsopt_lbfgsb_default_maxcor_matches_ondevice_history_default(monkeypa
     assert SimsoptLBFGSBOptions().maxcor == 10
     assert captured["method"] == "lbfgs-ondevice"
     assert captured["options"]["maxcor"] == 10
+
+
+def test_optax_lbfgs_default_memory_size_matches_upstream_optax(monkeypatch):
+    captured = {}
+
+    def optax_minimize(_fn, _x0, *, driver, options, callback):
+        captured["driver"] = driver
+        captured["options"] = options
+        captured["callback"] = callback
+        return _fake_result()
+
+    monkeypatch.setattr(dispatch, "_run_optax_minimize", optax_minimize)
+
+    minimize(_value_and_grad, np.zeros(2), driver=Driver.OPTAX_LBFGS)
+
+    assert captured["driver"] is Driver.OPTAX_LBFGS
+    assert isinstance(captured["options"], OptaxLBFGSOptions)
+    assert captured["options"].memory_size == 10
 
 
 def test_simsopt_minimize_callback_adapter_emits_typed_event(monkeypatch):

@@ -1553,6 +1553,210 @@ def test_host_jax_single_stage_contract_uses_host_control():
     )
 
 
+def test_lbfgs_ondevice_production_warning_is_route_specific():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    warning = single_stage_example.single_stage_lbfgs_ondevice_production_warning(
+        optimizer_method="lbfgs-ondevice",
+        optimizer_backend="ondevice",
+        use_target_lane=True,
+    )
+
+    assert warning is not None
+    assert "lbfgs-ondevice remains experimental" in warning
+    assert (
+        single_stage_example.single_stage_lbfgs_ondevice_production_warning(
+            optimizer_method="lbfgs",
+            optimizer_backend="host-jax",
+            use_target_lane=False,
+        )
+        is None
+    )
+
+
+def _target_lane_invalid_step_entry(
+    *,
+    iteration=0,
+    requested_initial_step=1.0,
+    first_tested_alpha=1.0,
+    ls_status=-9,
+):
+    return {
+        "iteration": iteration,
+        "step_scale": requested_initial_step,
+        "line_search_failed": True,
+        "nonfinite_step": False,
+        "stalled_step": False,
+        "valid_curvature": True,
+        "trial_converged": False,
+        "ls_status": ls_status,
+        "requested_initial_step": requested_initial_step,
+        "first_tested_alpha": first_tested_alpha,
+        "best_finite_alpha": 0.0,
+        "returned_alpha": 0.0,
+        "failure_reason": "line_search_failed",
+        "armijo_margin": 0.0,
+        "curvature_margin": 0.0,
+    }
+
+
+def test_target_lane_zero_iteration_line_search_failure_anchor_is_specific():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    event = single_stage_example._build_target_lane_invalid_state_event(
+        phase="phase2",
+        **_target_lane_invalid_step_entry(),
+    )
+    anchor = single_stage_example.target_lane_zero_iteration_line_search_failure_anchor(
+        event
+    )
+
+    assert anchor == {
+        "iteration": 0,
+        "ls_status": -9,
+        "requested_initial_step": {"value": 1.0, "finite": True, "classification": None},
+        "first_tested_alpha": {"value": 1.0, "finite": True, "classification": None},
+        "failure_reason": "line_search_failed",
+    }
+
+    later_event = dict(event)
+    later_event["iteration"] = 1
+    assert (
+        single_stage_example.target_lane_zero_iteration_line_search_failure_anchor(
+            later_event
+        )
+        is None
+    )
+
+    anchor_counts = {}
+    assert (
+        single_stage_example.record_repeated_target_lane_line_search_failure_anchor(
+            anchor_counts,
+            [event, event],
+        )
+        is None
+    )
+    trigger = (
+        single_stage_example.record_repeated_target_lane_line_search_failure_anchor(
+            anchor_counts,
+            [event],
+        )
+    )
+    assert trigger["reason"] == "repeated_zero_iteration_line_search_failure"
+    assert trigger["repeated_count"] == 2
+
+
+def test_target_lane_retry_fail_fast_stops_repeated_zero_iteration_anchor(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    calls = []
+    anchor_state = {
+        "coil_dofs": np.asarray([1.0, 2.0], dtype=np.float64),
+        "sdofs": np.asarray([0.1, 0.2], dtype=np.float64),
+        "iota": 0.3,
+        "G": 1.4,
+        "J": 9.0,
+        "dJ": np.asarray([0.5, 0.25], dtype=np.float64),
+        "intersecting": False,
+        "self_intersection_check_available": True,
+        "hardware_constraint_status": {"success": True},
+    }
+    run_dict = {
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "sdofs": np.asarray([0.1, 0.2], dtype=np.float64),
+        "iota": 0.3,
+        "G": 1.4,
+        "J": 9.0,
+        "dJ": np.asarray([0.5, 0.25], dtype=np.float64),
+        "intersecting": False,
+        "self_intersection_check_available": True,
+        "hardware_constraint_status": {"success": True},
+        "latest_local_incumbent": anchor_state,
+        "latest_local_stage": "initial",
+        "best_local_incumbent": None,
+        "best_local_stage": None,
+    }
+
+    def fake_run_single_stage_optimizer(*_args, **_kwargs):
+        calls.append(np.asarray(_args[1], dtype=np.float64).copy())
+        return types.SimpleNamespace(
+            success=False,
+            nit=0,
+            nfev=9,
+            njev=9,
+            x=np.asarray(_args[1], dtype=np.float64).copy(),
+            fun=12.0,
+            jac=np.asarray([3.0, 4.0], dtype=np.float64),
+            status=2,
+            ls_status=-9,
+            message="line search failed",
+            invalid_step_log=[_target_lane_invalid_step_entry()],
+        )
+
+    events = []
+    invalid_state_events = []
+    monkeypatch.setattr(
+        single_stage_example,
+        "run_single_stage_optimizer",
+        fake_run_single_stage_optimizer,
+    )
+
+    result, retry_summary = (
+        single_stage_example.run_single_stage_target_lane_optimizer_with_retries(
+            lambda x: (0.0, np.zeros_like(x)),
+            np.asarray([4.0, 5.0], dtype=np.float64),
+            phase="phase2",
+            callback=None,
+            retry_callback=None,
+            result_state_sync=None,
+            contract=object(),
+            maxiter=10,
+            ftol=1.0e-9,
+            gtol=1.0e-9,
+            maxcor=10,
+            outer_maxls=20,
+            scalar_fun=None,
+            target_lane_initial_step_size=None,
+            failure_callback=None,
+            invalid_state_events=invalid_state_events,
+            run_dict=run_dict,
+            single_stage_search_policy=single_stage_example.SingleStageSearchPolicy(
+                donor_class="stage2_seed_only",
+                search_policy="repair_first",
+                adaptive_failure_penalty_weight=1.0,
+                invalid_step_retry_budget=4,
+            ),
+            progress_event_callback=lambda label, **fields: events.append(
+                (label, fields)
+            ),
+        )
+    )
+
+    assert len(calls) == 2
+    np.testing.assert_allclose(calls[0], [4.0, 5.0])
+    np.testing.assert_allclose(calls[1], [1.0, 2.0])
+    assert retry_summary["attempt_count"] == 1
+    assert retry_summary["fail_fast_triggered"] is True
+    assert retry_summary["fail_fast_reason"] == (
+        "repeated_zero_iteration_line_search_failure"
+    )
+    assert retry_summary["fail_fast_repeated_count"] == 2
+    assert result.line_search_fail_fast["repeated_count"] == 2
+    assert "line_search_fail_fast=repeated_zero_iteration_line_search_failure" in (
+        result.message
+    )
+    assert [event[0] for event in events if event[0].endswith("fail_fast_triggered")] == [
+        "phase2_line_search_fail_fast_triggered"
+    ]
+    assert len(invalid_state_events) == 2
+
+
 def test_single_stage_jax_boozer_options_preserve_host_jax_backend():
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
@@ -2056,6 +2260,188 @@ def test_cpu_resolved_warm_start_install_is_value_only_and_stales_next_solve():
     assert boozer_surface.need_to_run_code is True
 
 
+def test_target_lane_materializes_value_only_boozer_linearization():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _BoozerSurface:
+        def __init__(self):
+            self.need_to_run_code = False
+            self.traceable_install_called = False
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "linearization_kind": "value_only",
+                "adjoint_linear_solve_available": False,
+                "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+                "iota": np.asarray(0.5, dtype=np.float64),
+                "G": np.asarray(1.5, dtype=np.float64),
+                "weight_inv_modB": True,
+            }
+
+        def get_solved_runtime_state(self):
+            return types.SimpleNamespace(
+                sdofs=np.asarray(self.res["sdofs"], dtype=np.float64),
+                iota=np.asarray(self.res["iota"], dtype=np.float64),
+                G=np.asarray(self.res["G"], dtype=np.float64),
+            )
+
+        def install_traceable_hessian_linearization_for_value_only_state(self):
+            self.traceable_install_called = True
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "linearization_kind": "hessian",
+                "adjoint_linear_solve_available": False,
+                "sdofs": np.asarray([0.7, 0.8], dtype=np.float64),
+                "iota": np.asarray(0.9, dtype=np.float64),
+                "G": np.asarray(2.5, dtype=np.float64),
+                "weight_inv_modB": True,
+            }
+            return self.res
+
+        def run_code(self, iota, G, *, sdofs=None):
+            raise AssertionError("traceable materialization must not rerun Boozer")
+
+    boozer_surface = _BoozerSurface()
+    run_dict = {
+        "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+        "iota": 0.5,
+        "G": 1.5,
+        "J": 11.0,
+        "dJ": np.asarray([1.0, 2.0], dtype=np.float64),
+        "lscount": 9,
+        "target_lane_reporting_metrics": {"stale": True},
+        "target_lane_reporting_coil_dofs": np.asarray([3.0], dtype=np.float64),
+        "target_lane_reporting_include_distance_metrics": True,
+    }
+    events = []
+
+    materialized = single_stage_example._materialize_target_lane_boozer_linearization(
+        boozer_surface,
+        run_dict,
+        record_outer_optimizer_event=lambda label, **fields: events.append(
+            (label, fields)
+        ),
+    )
+
+    assert materialized is True
+    assert boozer_surface.traceable_install_called is True
+    np.testing.assert_allclose(run_dict["sdofs"], [0.7, 0.8])
+    assert run_dict["iota"] == pytest.approx(0.9)
+    assert run_dict["G"] == pytest.approx(2.5)
+    assert run_dict["J"] == pytest.approx(11.0)
+    np.testing.assert_allclose(run_dict["dJ"], [1.0, 2.0])
+    assert run_dict["lscount"] == 0
+    assert "target_lane_reporting_metrics" not in run_dict
+    assert "target_lane_reporting_coil_dofs" not in run_dict
+    assert "target_lane_reporting_include_distance_metrics" not in run_dict
+    assert [event[0] for event in events] == [
+        "target_lane_boozer_linearization_materialization_started",
+        "target_lane_boozer_linearization_materialization_returned",
+    ]
+    assert events[-1][1]["linearization_kind"] == "hessian"
+    assert events[-1][1]["adjoint_linear_solve_available"] is False
+
+
+def test_initial_target_lane_reporting_skips_pending_objective(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    calls = {"objective": 0}
+
+    def _fake_reporting_metrics_from_solution(
+        coil_dofs,
+        solved_state,
+        success,
+        *,
+        include_distance_metrics,
+    ):
+        assert include_distance_metrics is True
+        np.testing.assert_allclose(coil_dofs, [1.0, 2.0])
+        np.testing.assert_allclose(solved_state, [0.1, 0.2])
+        assert bool(success) is True
+        return {
+            "solver_success": True,
+            "curve_curve_min_dist": 1.0,
+            "curve_surface_min_dist": 1.0,
+            "surface_vessel_min_dist": 1.0,
+            "max_curvature": 1.0,
+        }
+
+    def _runtime_bundle_builder(*_args, **_kwargs):
+        def _objective(_coil_dofs):
+            calls["objective"] += 1
+            raise AssertionError(
+                "initial reporting must not evaluate pending objective"
+            )
+
+        return {
+            "reporting_metrics": lambda _coil_dofs, **_kwargs: {},
+            "reporting_metrics_from_solution": (
+                _fake_reporting_metrics_from_solution
+            ),
+            "objective": _objective,
+            "value_and_grad": lambda _coil_dofs: (0.0, np.zeros(2)),
+            "forward_result": lambda _coil_dofs: {
+                "success": True,
+                "finite": True,
+                "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+                "iota": np.asarray(0.5, dtype=np.float64),
+                "G": np.asarray(1.5, dtype=np.float64),
+                "x": np.asarray([0.1, 0.2], dtype=np.float64),
+            },
+        }
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "get_traceable_single_stage_runtime_bundle_builder",
+        lambda: _runtime_bundle_builder,
+    )
+    monkeypatch.setattr(single_stage_example, "CC_DIST", 0.05, raising=False)
+    monkeypatch.setattr(single_stage_example, "CS_DIST", 0.02, raising=False)
+    monkeypatch.setattr(single_stage_example, "SS_DIST", 0.04, raising=False)
+    monkeypatch.setattr(
+        single_stage_example,
+        "CURVATURE_THRESHOLD",
+        40.0,
+        raising=False,
+    )
+
+    events = []
+    sync = single_stage_example.build_single_stage_target_lane_accepted_step_sync(
+        object(),
+        object(),
+        0.5,
+        outer_objective_config=object(),
+        success_filter=None,
+        record_outer_optimizer_event=lambda label, **fields: events.append(
+            (label, fields)
+        ),
+    )
+    run_dict = {"initial_objective_pending": True}
+
+    accepted_step_summary = sync(
+        run_dict,
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        benchmark_mode=False,
+        update_run_state=False,
+    )
+
+    assert calls["objective"] == 0
+    assert accepted_step_summary["objective_value"] is None
+    assert run_dict["target_lane_reporting_metrics"]["solver_success"] is True
+    assert run_dict["target_lane_reporting_metrics"]["max_curvature"] == pytest.approx(
+        1.0
+    )
+    objective_events = [
+        fields for label, fields in events if label == "target_lane_reporting_objective_started"
+    ]
+    assert objective_events == [{"reused": False, "skipped": True}]
+
+
 def test_successful_cpu_candidate_seeds_pending_initial_objective():
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
@@ -2250,6 +2636,88 @@ def test_final_penalty_metrics_failed_host_jax_state_skips_solved_objectives(
     assert np.isnan(metrics["final_iota_penalty"])
     assert metrics["field_error"] == pytest.approx(0.123)
     assert metrics["final_iota"] == pytest.approx(-1.0e-4)
+
+
+def test_final_penalty_metrics_failed_native_state_skips_solved_objectives(
+    monkeypatch,
+):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        def volume(self):
+            return 0.049
+
+    class _NativeBoozerSurface:
+        surface = _Surface()
+        res = {"success": True, "G": -1.5, "iota": 0.12}
+
+    class _ForbiddenSolvedStateObjective:
+        def J(self):
+            raise AssertionError("failed final candidate objective must not run")
+
+    class _Penalty:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def J(self):
+            return self.value
+
+    class _DistancePenalty(_Penalty):
+        def shortest_distance(self):
+            return self.value
+
+    class _CurvaturePenalty(_Penalty):
+        class _Curve:
+            def kappa(self):
+                return np.asarray([2.0, 4.0], dtype=np.float64)
+
+        curve = _Curve()
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "norm_field_summary",
+        lambda _surface, _bs: (0.321, None, None, None, None, None),
+    )
+
+    metrics = single_stage_example.resolve_single_stage_final_penalty_metrics(
+        use_target_lane=False,
+        benchmark_mode=False,
+        skip_outer_optimizer=False,
+        boozer_surface=_NativeBoozerSurface(),
+        bs=object(),
+        iota_target=0.3,
+        coil_dofs=np.zeros(2, dtype=np.float64),
+        outer_objective_config=None,
+        success_filter=None,
+        curvelength=_Penalty(4.0),
+        j_non_qs=_ForbiddenSolvedStateObjective(),
+        j_boozer_residual=_ForbiddenSolvedStateObjective(),
+        j_iota=_ForbiddenSolvedStateObjective(),
+        j_curve_length=_Penalty(5.0),
+        j_curve_curve=_DistancePenalty(0.2),
+        j_curve_surface=_DistancePenalty(0.3),
+        j_surface_surface=_DistancePenalty(0.4),
+        j_curvature=_CurvaturePenalty(6.0),
+        cc_dist=0.1,
+        cs_dist=0.1,
+        ss_dist=0.1,
+        curvature_threshold=10.0,
+        run_dict={"last_candidate_failure": {"reject_class": "self_intersection"}},
+    )
+
+    assert metrics["solved_state_metrics_available"] is False
+    assert metrics["solved_state_metrics_unavailable_reason"] == (
+        "failed_boozer_solved_state"
+    )
+    assert np.isnan(metrics["final_non_qs"])
+    assert np.isnan(metrics["final_boozer_residual"])
+    assert np.isnan(metrics["final_iota_penalty"])
+    assert metrics["field_error"] == pytest.approx(0.321)
+    assert metrics["final_volume"] == pytest.approx(0.049)
+    assert metrics["final_iota"] == pytest.approx(0.12)
+    assert metrics["final_G"] == pytest.approx(-1.5)
 
 
 def test_final_candidate_failure_forces_optimizer_failure_verdict():

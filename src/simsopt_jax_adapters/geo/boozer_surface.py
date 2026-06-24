@@ -55,6 +55,7 @@ from simsopt_jax.backend import (
 from simsopt_jax.runtime.host_boundary import (
     host_all_finite as _host_all_finite,
     host_array as _host_numpy,
+    host_bool as _host_bool,
     host_inf_norm as _host_inf_norm,
     host_scalar as _host_scalar,
     host_tree as _hostify_tree,
@@ -199,6 +200,7 @@ EXACT_FACTORIZATION_BACKEND: str = "operator-gmres"
 
 
 __all__ = [
+    "BoozerHostSolveResult",
     "BoozerSurfaceJAX",
     "EXACT_FACTORIZATION_BACKEND",
     "SOLVE_QUALITY_EXACT_FIELDS",
@@ -1013,6 +1015,25 @@ class _BoozerAdjointRuntimeState:
         return self.linear_solve_factors
 
 
+@dataclass(frozen=True)
+class BoozerHostSolveResult:
+    """Host-owned Boozer solve result assembled from bounded kernel calls."""
+
+    solved_state: _BoozerSolvedRuntimeState
+    residual: object
+    jacobian: object
+    least_squares_state: Mapping[str, object]
+    linear_solve_solution: object
+    linear_solve_status: object
+    linearization_factors: Mapping[str, object]
+    convergence_metadata: Mapping[str, object]
+    failure_reason: str | None
+
+    @property
+    def success(self) -> bool:
+        return self.failure_reason is None
+
+
 def _surface_geometry_kind(surface) -> str:
     if isinstance(surface, SurfaceRZFourier):
         return "rzfourier"
@@ -1332,6 +1353,21 @@ def _grouped_coil_set_static_signature(coil_set_spec):
         )
         for group in coil_set_spec.groups
     )
+
+
+@dataclass(frozen=True)
+class _BoozerPenaltyKernelSignature:
+    """Static metadata that owns one host-jax penalty kernel bundle."""
+
+    optimize_G: bool
+    weight_inv_modB: bool
+    constraint_weight: float
+    traceable_surface_signature: tuple[object, ...]
+    coil_set_static_signature: tuple[object, ...] | None
+    backend_mode: str
+    jax_platform: str
+    linear_solve_tolerance: float
+    linear_solve_stab: float
 
 
 def _boozer_penalty_optimizer_state_to_vector(x, *, optimize_G):
@@ -2666,16 +2702,6 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
     return d_coil_arrays, coil_indices
 
 
-def _boozer_exact_coil_vjp_groups(lm, booz_surf, iota, G):
-    """Yield exact-solve coil VJPs one grouped coil block at a time."""
-    yield from _build_exact_group_vjp_callback(booz_surf, iota, G)(
-        lm,
-        booz_surf,
-        iota,
-        G,
-    )
-
-
 def _build_exact_group_vjp_callback(booz_surf, iota, G):
     """Build stable exact-solve group runners for repeated streaming VJPs."""
     sdofs = booz_surf._get_cached_surface_dofs()
@@ -3641,10 +3667,6 @@ def default_materialize_dense_linearization_for_backend(optimizer_backend):
     return True
 
 
-def _default_ls_optimizer_backend() -> str:
-    return get_backend_policy().default_optimizer_backend
-
-
 @dataclass(frozen=True)
 class _InnerDriverOptionConflict:
     option_name: str
@@ -3823,6 +3845,92 @@ class BoozerKernelBundle:
     linear_solve: Callable[[object, object, object], tuple[object, object]]
     factor_apply: Callable[[object, object, object], object]
     value_and_grad: Callable[[object, object], tuple[object, object]]
+
+
+def _solve_boozer_state_with_kernel_bundle(
+    bundle: BoozerKernelBundle,
+    x0,
+    *,
+    coil_set_spec,
+    optimize_G: bool,
+    weight_inv_modB: bool,
+    method: str,
+    tol,
+    maxiter,
+    options: Mapping[str, object],
+    progress_callback=None,
+) -> BoozerHostSolveResult:
+    result = host_jax_least_squares(
+        bundle.residual,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
+        progress_callback=progress_callback,
+        args=(coil_set_spec,),
+        state_fn=bundle.least_squares_state,
+        jacobian_block_fn=bundle.jacobian_block,
+    )
+    final_x = result.x
+    residual = bundle.residual(final_x, coil_set_spec)
+    jacobian = bundle.jacobian(final_x, coil_set_spec)
+    least_squares_state = _optimizer_jax._dense_lm_state_from_residual_jacobian(
+        residual,
+        jacobian,
+    )
+    linear_solve_solution, linear_solve_status = bundle.linear_solve(
+        final_x,
+        least_squares_state["grad"],
+        coil_set_spec,
+    )
+    sdofs, solved_iota, solved_G = _split_decision_vector_jax(
+        final_x,
+        optimize_G=optimize_G,
+        decision_split_mode="jvp",
+    )
+    nonlinear_success = _host_bool(result.success)
+    linear_solve_success = _host_bool(
+        _optimizer_jax._linear_solve_status_success(linear_solve_status)
+    )
+    failure_reason = None
+    if not nonlinear_success:
+        failure_reason = str(result.message)
+    elif not linear_solve_success:
+        failure_reason = "linear solve failed after host-controlled Boozer solve"
+
+    convergence_metadata = {
+        "method": method,
+        "success": nonlinear_success and linear_solve_success,
+        "nonlinear_success": nonlinear_success,
+        "linear_solve_success": linear_solve_success,
+        "fun": result.fun,
+        "nit": result.nit,
+        "status": result.status,
+        "message": result.message,
+        "linear_solve_residual": linear_solve_status.residual,
+        "linear_solve_residual_relative": linear_solve_status.residual_relative,
+        "linear_solve_iterations": linear_solve_status.iterations,
+    }
+    return BoozerHostSolveResult(
+        solved_state=_BoozerSolvedRuntimeState(
+            sdofs=sdofs,
+            iota=solved_iota,
+            G=solved_G,
+            weight_inv_modB=weight_inv_modB,
+        ),
+        residual=residual,
+        jacobian=jacobian,
+        least_squares_state=least_squares_state,
+        linear_solve_solution=linear_solve_solution,
+        linear_solve_status=linear_solve_status,
+        linearization_factors={
+            "residual_jacobian": least_squares_state["residual_jacobian"],
+            "hessian": least_squares_state["hessian"],
+        },
+        convergence_metadata=convergence_metadata,
+        failure_reason=failure_reason,
+    )
 
 
 def _reject_solver_option_incompatibilities(options):
@@ -4056,7 +4164,6 @@ class BoozerSurfaceJAX(Optimizable):
 
         # --- Extract immutable surface metadata once; keep DOFs cached locally ---
         self._surface_runtime_state = runtime_state
-        self._label_surface_runtime_state = label_runtime_state
         self._store_surface_dofs(surface.get_dofs())
         self._exact_mask_indices = None
         self.mpol = runtime_state.mpol
@@ -4174,6 +4281,39 @@ class BoozerSurfaceJAX(Optimizable):
         res_record = self._store_boozer_result("value_only", res)
         self.need_to_run_code = False
         return res_record
+
+    def install_traceable_hessian_linearization_for_value_only_state(
+        self,
+        *,
+        optimizer_method="resolved-warm-start-traceable-linearization",
+    ):
+        """Enable traceable target-lane Hessian solves for a trusted value state."""
+        if self.res is None or self.res.get("linearization_kind") != "value_only":
+            return self.res
+
+        solved_sdofs = _as_jax_float64(self.res["sdofs"])
+        solved_iota = _as_jax_float64(self.res["iota"])
+        solved_G = None if self.res["G"] is None else _as_jax_float64(self.res["G"])
+        self._set_surface_dofs(solved_sdofs)
+        solve_generation = _advance_solver_generation(self)
+        res = dict(self.res)
+        res.update(
+            {
+                "sdofs": solved_sdofs,
+                "iota": solved_iota,
+                "G": solved_G,
+                "adjoint_linear_solve_available": False,
+                "linearization_kind": "hessian",
+                "linear_solve_backend": "operator",
+                "dense_linear_solve_factors_available": False,
+                "linearization_residency": self.options["linearization_residency"],
+                "optimizer_method": str(optimizer_method),
+                "solve_generation": solve_generation,
+            }
+        )
+        self.res = res
+        self.need_to_run_code = False
+        return self.res
 
     def _linear_solve_tolerance_bounds(self):
         policy = get_backend_policy()
@@ -4759,20 +4899,6 @@ class BoozerSurfaceJAX(Optimizable):
             return _concat_jax_float64(sdofs, [iota, G])
         return _concat_jax_float64(sdofs, [iota])
 
-    def _make_penalty_optimizer_state(self, iota, G, *, sdofs=None):
-        if sdofs is None:
-            sdofs = self._get_surface_dofs()
-        if G is None:
-            return _BoozerPenaltyOptimizerState(
-                surface_dofs=_as_jax_float64(sdofs),
-                iota=_as_jax_float64(iota),
-            )
-        return _BoozerPenaltyOptimizerStateWithG(
-            surface_dofs=_as_jax_float64(sdofs),
-            iota=_as_jax_float64(iota),
-            G=_as_jax_float64(G),
-        )
-
     def _unpack_decision_vector(self, x, optimize_G):
         """Unpack decision vector → (sdofs, iota, G_or_None)."""
         sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
@@ -4877,30 +5003,6 @@ class BoozerSurfaceJAX(Optimizable):
             decision_split_mode=decision_split_mode,
             **self._traceable_surface_runtime_args(hostify=False),
         )
-
-    def _make_penalty_objective_host_jax_with(
-        self,
-        optimize_G,
-        weight_inv_modB,
-        constraint_weight=None,
-        coil_set_spec=None,
-        coil_arrays=None,
-    ):
-        bundle = self._get_penalty_kernel_bundle(
-            optimize_G,
-            weight_inv_modB,
-            constraint_weight,
-        )
-        resolved_coil_set_spec = _resolved_coil_set_spec(
-            self.coil_set_spec,
-            coil_arrays=coil_arrays,
-            coil_set_spec=coil_set_spec,
-        )
-
-        def objective(x):
-            return bundle.objective(x, resolved_coil_set_spec)
-
-        return objective
 
     def _make_penalty_value_and_grad_cpu_ordered_with(
         self,
@@ -5026,6 +5128,52 @@ class BoozerSurfaceJAX(Optimizable):
             bundle.least_squares_state,
             bundle.jacobian_block,
             (resolved_coil_set_spec,),
+        )
+
+    def solve_boozer_state(
+        self,
+        iota=0.0,
+        G=None,
+        *,
+        sdofs=None,
+        constraint_weight=None,
+        weight_inv_modB=None,
+        tol=None,
+        maxiter=None,
+    ) -> BoozerHostSolveResult:
+        """Solve LS Boozer state with host control and explicit kernel calls."""
+        if self.boozer_type != "ls":
+            raise RuntimeError(
+                "solve_boozer_state(...) is only available for LS Boozer solves."
+            )
+        self._validate_none_G_precondition(G)
+        self._refresh_coil_data()
+        resolved_weight_inv_modB = (
+            self.options["weight_inv_modB"]
+            if weight_inv_modB is None
+            else weight_inv_modB
+        )
+        optimize_G = G is not None
+        bundle = self._get_penalty_kernel_bundle(
+            optimize_G,
+            resolved_weight_inv_modB,
+            constraint_weight,
+        )
+        x0 = self._pack_decision_vector(iota, G, sdofs=sdofs)
+        method = "lm"
+        solve_tol = self.options["bfgs_tol"] if tol is None else tol
+        solve_maxiter = self.options["bfgs_maxiter"] if maxiter is None else maxiter
+        return _solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=self.coil_set_spec,
+            optimize_G=optimize_G,
+            weight_inv_modB=bool(resolved_weight_inv_modB),
+            method=method,
+            tol=solve_tol,
+            maxiter=solve_maxiter,
+            options=self._collect_least_squares_options(),
+            progress_callback=self._make_solver_progress_callback(method),
         )
 
     def _make_penalty_residual_with(
@@ -5473,6 +5621,28 @@ class BoozerSurfaceJAX(Optimizable):
             tuple(int(dim) for dim in mask_indices.shape),
         )
 
+    def _penalty_kernel_signature(
+        self,
+        *,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight,
+        linear_solve_tolerance,
+        linear_solve_stab,
+    ):
+        config = get_backend_config()
+        return _BoozerPenaltyKernelSignature(
+            optimize_G=bool(optimize_G),
+            weight_inv_modB=bool(weight_inv_modB),
+            constraint_weight=float(constraint_weight),
+            traceable_surface_signature=self._traceable_surface_signature(),
+            coil_set_static_signature=self._coil_set_static_signature,
+            backend_mode=str(config.mode),
+            jax_platform=str(config.jax_platform),
+            linear_solve_tolerance=float(linear_solve_tolerance),
+            linear_solve_stab=float(linear_solve_stab),
+        )
+
     def _reference_exact_cache_key(self, weight_inv_modB, mask_indices, coil_set_spec):
         return (
             bool(weight_inv_modB),
@@ -5559,10 +5729,14 @@ class BoozerSurfaceJAX(Optimizable):
         constraint_weight=None,
     ) -> BoozerKernelBundle:
         resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
-        key = self._traceable_penalty_cache_key(
-            optimize_G,
-            weight_inv_modB,
-            resolved_constraint_weight,
+        linear_solve_tol = self._linear_solve_tolerance()
+        linear_solve_stab = float(self.options.get("newton_stab", 0.0))
+        key = self._penalty_kernel_signature(
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            constraint_weight=resolved_constraint_weight,
+            linear_solve_tolerance=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
         )
         bundle = self._kernel_bundle_cache.get(key)
         if bundle is None:
@@ -5594,8 +5768,6 @@ class BoozerSurfaceJAX(Optimizable):
                 eye = jnp.eye(x_arr.shape[0], dtype=x_arr.dtype)
                 columns = jax.lax.map(jvp_column, eye, batch_size=8)
                 return jnp.moveaxis(columns, 0, -1)
-            linear_solve_tol = self._linear_solve_tolerance()
-            linear_solve_stab = float(self.options.get("newton_stab", 0.0))
 
             def least_squares_state_fn(x, coil_set_spec):
                 return _optimizer_jax._dense_lm_state_from_residual_jacobian(

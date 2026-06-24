@@ -34,7 +34,6 @@ from ._lbfgs import (
 from ._result_converters import (
     _private_bfgs_result_to_optimize_result,
     _private_lbfgs_result_to_optimize_result,
-    _scipy_result_is_continuable,
     _status_message_bfgs,
     _status_message_lbfgs,
 )

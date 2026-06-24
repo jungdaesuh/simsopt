@@ -11,6 +11,8 @@ import numpy as np
 
 from simsopt_jax.runtime.host_boundary import host_array
 
+from ._types import LBFGS_STATUS_CALLBACK_STOP, LBFGS_STATUS_NONFINITE
+
 
 START = 0
 NO_MSG = 0
@@ -58,6 +60,10 @@ NBD_UNBOUNDED = 0
 NBD_LOWER = 1
 NBD_BOTH = 2
 NBD_UPPER = 3
+
+LBFGSB_STEP_ENTRY_START = 0
+LBFGSB_STEP_ENTRY_SEARCH = 1
+LBFGSB_STEP_ENTRY_NEW_X_REENTRY = 2
 
 STATUS_MESSAGES = {
     START: "START",
@@ -140,6 +146,8 @@ class LbfgsbState(NamedTuple):
 class LbfgsbMacroStepResult(NamedTuple):
     state: LbfgsbState
     accepted_new_x: jax.Array
+    terminal: jax.Array
+    entry_kind: jax.Array
 
 
 class LbfgsbDcstepResult(NamedTuple):
@@ -355,6 +363,60 @@ def _lbfgsb_dnrm2(x) -> jax.Array:
 
 def _lbfgsb_eps(dtype) -> jax.Array:
     return jnp.asarray(np.finfo(np.dtype(dtype)).eps, dtype=dtype)
+
+
+def lbfgsb_two_loop_direction(state: LbfgsbState) -> jax.Array:
+    """Return the unconstrained L-BFGS direction from stored correction pairs."""
+    n, m = _lbfgsb_state_dimensions(state)
+    lws, lwy, lsy, *_ = _lbfgsb_workspace_offsets(n, m)
+    wa = state.workspace.wa
+    ws = wa[lws:lwy].reshape((m, n))
+    wy = wa[lwy:lsy].reshape((m, n))
+    head = state.workspace.isave[26]
+    col = state.workspace.isave[27]
+    theta = state.workspace.dsave[0]
+    dtype = state.x.dtype
+
+    positions = jnp.arange(m, dtype=jnp.int32)
+    history_indices = (head + positions) % m
+    active_history = positions < col
+    reverse_indices = history_indices[::-1]
+    reverse_active = active_history[::-1]
+
+    def right_product(direction, index_active):
+        index, active = index_active
+        s_i = ws[index]
+        y_i = wy[index]
+        s_dot_y = _lbfgsb_ddot(s_i, y_i)
+        safe_s_dot_y = jnp.where(active & (s_dot_y != 0.0), s_dot_y, 1.0)
+        rho = active.astype(dtype) / safe_s_dot_y
+        alpha = rho * _lbfgsb_ddot(s_i, direction)
+        return direction - alpha * y_i, alpha
+
+    direction, reverse_alphas = jax.lax.scan(
+        right_product,
+        -state.g,
+        (reverse_indices, reverse_active),
+    )
+    direction = direction / theta
+    alphas = reverse_alphas[::-1]
+
+    def left_product(direction, index_active_alpha):
+        index, active, alpha = index_active_alpha
+        s_i = ws[index]
+        y_i = wy[index]
+        s_dot_y = _lbfgsb_ddot(s_i, y_i)
+        safe_s_dot_y = jnp.where(active & (s_dot_y != 0.0), s_dot_y, 1.0)
+        rho = active.astype(dtype) / safe_s_dot_y
+        beta = rho * _lbfgsb_ddot(y_i, direction)
+        return direction + (alpha - beta) * s_i, None
+
+    direction, _ = jax.lax.scan(
+        left_product,
+        direction,
+        (history_indices, active_history, alphas),
+    )
+    return direction
 
 
 def lbfgsb_empty_workspace(
@@ -1339,6 +1401,147 @@ def _lbfgsb_setulb_line_search_abnormal(
     )
 
 
+def _lbfgsb_setulb_unconstrained_line_search(
+    state: LbfgsbState,
+    sbgnrm,
+    *,
+    nseg: jax.Array,
+    iword: jax.Array,
+) -> LbfgsbState:
+    n, m = _lbfgsb_state_dimensions(state)
+    dtype = state.x.dtype
+    _, _, _, _, _, _, _, lz, lr, ld, lt, lxp, _ = _lbfgsb_workspace_offsets(n, m)
+    wa = state.workspace.wa
+    iwa = state.workspace.iwa
+    isave = state.workspace.isave
+    dsave = state.workspace.dsave
+
+    prjctd, _, boxed, updatd = _lbfgsb_lsave_flags(state)
+
+    col = isave[27]
+    iteration = isave[29]
+    line_direction = lbfgsb_two_loop_direction(state)
+    z = state.x + line_direction
+    line_search_nfgv = jnp.where(
+        (state.workspace.task[0] == FG) & (state.workspace.task[1] == FG_START),
+        jnp.asarray(1, dtype=jnp.int32),
+        isave[33],
+    )
+    search = lbfgsb_lnsrlb(
+        state.l,
+        state.u,
+        state.nbd,
+        state.x,
+        state.f,
+        dsave[1],
+        dsave[10],
+        dsave[14],
+        state.g,
+        line_direction,
+        wa[lr:ld],
+        wa[lt:lxp],
+        z,
+        dsave[13],
+        dsave[3],
+        dsave[15],
+        jnp.asarray(0.0, dtype=dtype),
+        dsave[11],
+        iteration,
+        isave[35],
+        isave[24],
+        line_search_nfgv,
+        isave[34],
+        state.workspace.task[0],
+        state.workspace.task[1],
+        boxed,
+        jnp.asarray(False, dtype=jnp.bool_),
+        isave[42:44],
+        dsave[16:29],
+        state.workspace.ln_task[0],
+        state.workspace.ln_task[1],
+    )
+
+    free_index = jnp.arange(n, dtype=jnp.int32)
+    wa = wa.at[lz:lr].set(z)
+    wa = wa.at[lr:ld].set(search.r)
+    wa = wa.at[ld:lt].set(line_direction)
+    wa = wa.at[lt:lxp].set(search.t)
+
+    iwa = iwa.at[:n].set(free_index)
+    iwa = iwa.at[n : 2 * n].set(jnp.zeros((n,), dtype=jnp.int32))
+    iwa = iwa.at[2 * n : 3 * n].set(free_index)
+
+    isave = isave.at[24].set(search.iback)
+    isave = isave.at[32].set(nseg)
+    isave = isave.at[33].set(search.nfgv)
+    isave = isave.at[34].set(search.info)
+    isave = isave.at[35].set(search.ifun)
+    isave = isave.at[36].set(iword)
+    isave = isave.at[37].set(jnp.asarray(n, dtype=jnp.int32))
+    isave = isave.at[38].set(jnp.asarray(0, dtype=jnp.int32))
+    isave = isave.at[39].set(jnp.asarray(n, dtype=jnp.int32))
+    isave = isave.at[40].set(jnp.asarray(0, dtype=jnp.int32))
+    isave = isave.at[42:44].set(search.isave)
+
+    dsave = dsave.at[1].set(search.fold)
+    dsave = dsave.at[3].set(search.dnorm)
+    dsave = dsave.at[10].set(search.gd)
+    dsave = dsave.at[11].set(search.stpmx)
+    dsave = dsave.at[12].set(sbgnrm)
+    dsave = dsave.at[13].set(search.stp)
+    dsave = dsave.at[14].set(search.gdold)
+    dsave = dsave.at[15].set(search.dtd)
+    dsave = dsave.at[16:29].set(search.dsave)
+
+    workspace = state.workspace._replace(
+        wa=wa,
+        iwa=iwa,
+        task=_lbfgsb_task(search.task, search.task_msg),
+        ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
+        lsave=_lbfgsb_lsave(prjctd, False, boxed, updatd),
+        isave=isave,
+        dsave=dsave,
+    )
+    normal_state = state._replace(x=search.x, workspace=workspace)
+    line_search_stopped = _lbfgsb_line_search_stops_iteration(search, state.maxls)
+    restart_from_line_search = line_search_stopped & (col != 0)
+    refreshed_line_search_state = _lbfgsb_setulb_restart_after_line_search(
+        state,
+        wa,
+        iwa,
+        isave,
+        dsave,
+        search,
+        lr=lr,
+        ld=ld,
+        lt=lt,
+        lxp=lxp,
+        sbgnrm=sbgnrm,
+    )
+    return jax.lax.cond(
+        line_search_stopped & (col == 0),
+        lambda _: _lbfgsb_setulb_line_search_abnormal(
+            state,
+            wa,
+            isave,
+            dsave,
+            search,
+            lr=lr,
+            ld=ld,
+            lt=lt,
+            lxp=lxp,
+            sbgnrm=sbgnrm,
+        ),
+        lambda _: jax.lax.cond(
+            restart_from_line_search,
+            lambda _: refreshed_line_search_state,
+            lambda _: normal_state,
+            None,
+        ),
+        None,
+    )
+
+
 def _lbfgsb_setulb_new_x_convergence(
     state: LbfgsbState,
     task_msg: jax.Array,
@@ -1354,6 +1557,8 @@ def _lbfgsb_setulb_new_x_convergence(
 def _lbfgsb_setulb_new_x_next_iteration(
     state: LbfgsbState,
     sbgnrm: jax.Array,
+    *,
+    unconstrained_fast_path: bool = False,
 ) -> LbfgsbState:
     n, m = _lbfgsb_state_dimensions(state)
     dtype = state.x.dtype
@@ -1410,37 +1615,48 @@ def _lbfgsb_setulb_new_x_next_iteration(
             stp,
             dsave[15],
         )
-        form = lbfgsb_formt(wt, update.sy, update.ss, update.col, update.theta)
-        refresh = form.info != 0
-        next_col = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), update.col)
-        next_head = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), update.head)
-        next_theta = jnp.where(refresh, 1.0, update.theta)
-        next_iupdat = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), iupdat)
-        next_updatd = ~refresh
-        # SciPy 1.17.1 __lbfgsb.c:1030-1041 refreshes the L-BFGS memory and
-        # writes ``*task = RESTART; *task_msg = NO_MSG;`` before re-entering
-        # LINE222 when ``formt`` reports non-positive-definite Cholesky.
-        # Mirror that explicit task write so the post-refresh re-entry sees
-        # the same task signal that SciPy uses for case 5 (lnsrlb fail with
-        # ``col != 0``), which already routes through the same RESTART
-        # boundary in ``_lbfgsb_setulb_refreshed_memory_state``.
-        next_task_code = jnp.where(
-            refresh,
-            jnp.asarray(RESTART, dtype=jnp.int32),
-            state.workspace.task[0],
-        )
-        next_task_msg = jnp.where(
-            refresh,
-            jnp.asarray(NO_MSG, dtype=jnp.int32),
-            state.workspace.task[1],
-        )
+        if unconstrained_fast_path:
+            next_col = update.col
+            next_head = update.head
+            next_theta = update.theta
+            next_iupdat = iupdat
+            next_updatd = jnp.asarray(True, dtype=jnp.bool_)
+            next_task_code = state.workspace.task[0]
+            next_task_msg = state.workspace.task[1]
+            next_wt = wt
+        else:
+            form = lbfgsb_formt(wt, update.sy, update.ss, update.col, update.theta)
+            refresh = form.info != 0
+            next_col = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), update.col)
+            next_head = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), update.head)
+            next_theta = jnp.where(refresh, 1.0, update.theta)
+            next_iupdat = jnp.where(refresh, jnp.asarray(0, dtype=jnp.int32), iupdat)
+            next_updatd = ~refresh
+            # SciPy 1.17.1 __lbfgsb.c:1030-1041 refreshes the L-BFGS memory and
+            # writes ``*task = RESTART; *task_msg = NO_MSG;`` before re-entering
+            # LINE222 when ``formt`` reports non-positive-definite Cholesky.
+            # Mirror that explicit task write so the post-refresh re-entry sees
+            # the same task signal that SciPy uses for case 5 (lnsrlb fail with
+            # ``col != 0``), which already routes through the same RESTART
+            # boundary in ``_lbfgsb_setulb_refreshed_memory_state``.
+            next_task_code = jnp.where(
+                refresh,
+                jnp.asarray(RESTART, dtype=jnp.int32),
+                state.workspace.task[0],
+            )
+            next_task_msg = jnp.where(
+                refresh,
+                jnp.asarray(NO_MSG, dtype=jnp.int32),
+                state.workspace.task[1],
+            )
+            next_wt = form.wt
 
         next_wa = wa
         next_wa = next_wa.at[lws:lwy].set(update.ws.reshape((-1,)))
         next_wa = next_wa.at[lwy:lsy].set(update.wy.reshape((-1,)))
         next_wa = next_wa.at[lsy:lss].set(_lbfgsb_flatten_fortran_square(update.sy))
         next_wa = next_wa.at[lss:lwt].set(_lbfgsb_flatten_fortran_square(update.ss))
-        next_wa = next_wa.at[lwt:lwn].set(_lbfgsb_flatten_fortran_square(form.wt))
+        next_wa = next_wa.at[lwt:lwn].set(_lbfgsb_flatten_fortran_square(next_wt))
         next_wa = next_wa.at[lr:ld].set(gradient_delta)
         next_wa = next_wa.at[ld:lt].set(next_direction)
 
@@ -1464,6 +1680,27 @@ def _lbfgsb_setulb_new_x_next_iteration(
         return state._replace(workspace=workspace)
 
     updated_state = jax.lax.cond(skip_update, skip_update_branch, update_branch, None)
+    if unconstrained_fast_path:
+        has_history = updated_state.workspace.isave[27] > 0
+        return _lbfgsb_setulb_unconstrained_line_search(
+            updated_state,
+            sbgnrm,
+            nseg=jnp.where(
+                has_history,
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.where(
+                    sbgnrm > 0.0,
+                    jnp.asarray(1, dtype=jnp.int32),
+                    jnp.asarray(0, dtype=jnp.int32),
+                ),
+            ),
+            iword=jnp.where(
+                has_history,
+                jnp.asarray(0, dtype=jnp.int32),
+                jnp.asarray(-1, dtype=jnp.int32),
+            ),
+        )
+
     use_subspace_path = (updated_state.workspace.lsave[1] == 0) & (
         updated_state.workspace.isave[27] > 0
     )
@@ -1476,6 +1713,17 @@ def _lbfgsb_setulb_new_x_next_iteration(
 
 
 def _lbfgsb_setulb_new_x_reentry(state: LbfgsbState) -> LbfgsbState:
+    return _lbfgsb_setulb_new_x_reentry_impl(
+        state,
+        unconstrained_fast_path=False,
+    )
+
+
+def _lbfgsb_setulb_new_x_reentry_impl(
+    state: LbfgsbState,
+    *,
+    unconstrained_fast_path: bool,
+) -> LbfgsbState:
     dsave = state.workspace.dsave
     isave = state.workspace.isave
     sbgnrm = dsave[12]
@@ -1502,7 +1750,11 @@ def _lbfgsb_setulb_new_x_reentry(state: LbfgsbState) -> LbfgsbState:
                 jnp.asarray(CONV_F, dtype=jnp.int32),
                 reduction_info,
             ),
-            lambda _: _lbfgsb_setulb_new_x_next_iteration(state, sbgnrm),
+            lambda _: _lbfgsb_setulb_new_x_next_iteration(
+                state,
+                sbgnrm,
+                unconstrained_fast_path=unconstrained_fast_path,
+            ),
             None,
         ),
         None,
@@ -1521,17 +1773,34 @@ def _lbfgsb_setulb_fg_start_converged(
 
 
 def _lbfgsb_setulb_fg_start_reentry(
-    state: LbfgsbState, sbgnrm: jax.Array
+    state: LbfgsbState,
+    sbgnrm: jax.Array,
+    *,
+    unconstrained_fast_path: bool = False,
 ) -> LbfgsbState:
     task_is_fg_start = (state.workspace.task[0] == FG) & (
         state.workspace.task[1] == FG_START
     )
     converged = task_is_fg_start & (sbgnrm <= state.pgtol)
 
+    def line_search_branch(_):
+        if unconstrained_fast_path:
+            return _lbfgsb_setulb_unconstrained_line_search(
+                state,
+                sbgnrm,
+                nseg=jnp.where(
+                    sbgnrm > 0.0,
+                    jnp.asarray(1, dtype=jnp.int32),
+                    jnp.asarray(0, dtype=jnp.int32),
+                ),
+                iword=jnp.asarray(-1, dtype=jnp.int32),
+            )
+        return _lbfgsb_setulb_fg_start_line_search(state, sbgnrm)
+
     return jax.lax.cond(
         converged,
         lambda _: _lbfgsb_setulb_fg_start_converged(state, sbgnrm),
-        lambda _: _lbfgsb_setulb_fg_start_line_search(state, sbgnrm),
+        line_search_branch,
         None,
     )
 
@@ -1628,6 +1897,7 @@ def _lbfgsb_evaluate_value_and_grad(value_and_grad, state: LbfgsbState) -> Lbfgs
 
 
 def _lbfgsb_evaluate_if_requested(value_and_grad, state: LbfgsbState) -> LbfgsbState:
+    """Evaluate only on FG requests; accepted NEW_X values stay cached in state."""
     return jax.lax.cond(
         state.workspace.task[0] == FG,
         lambda state: _lbfgsb_evaluate_value_and_grad(value_and_grad, state),
@@ -1660,6 +1930,64 @@ def _lbfgsb_stop_after_new_x_limits(
     return state._replace(workspace=workspace)
 
 
+def lbfgsb_public_status_from_state(
+    state: LbfgsbState,
+    *,
+    maxiter: jax.Array,
+    maxfun: jax.Array,
+) -> jax.Array:
+    task0 = state.workspace.task[0]
+    task1 = state.workspace.task[1]
+    callback_stop = (task0 == STOP) & (task1 == STOP_CALLB)
+    limited = (state.nfev > maxfun) | (state.n_iterations >= maxiter)
+    nonfinite = (~jnp.isfinite(state.f)) | jnp.any(~jnp.isfinite(state.g))
+    nonfinite_status = jnp.asarray(LBFGS_STATUS_NONFINITE, dtype=task0.dtype)
+    callback_stop_status = jnp.asarray(
+        LBFGS_STATUS_CALLBACK_STOP,
+        dtype=task0.dtype,
+    )
+    zero = jnp.zeros_like(task0)
+    one = jnp.ones_like(task0)
+    return jnp.select(
+        [
+            callback_stop,
+            (task0 == ABNORMAL) & nonfinite,
+            task0 == CONVERGENCE,
+            limited,
+        ],
+        [callback_stop_status, nonfinite_status, zero, one],
+        default=one + one,
+    )
+
+
+def _lbfgsb_step_entry_kind(state: LbfgsbState) -> jax.Array:
+    task0 = state.workspace.task[0]
+    return jnp.select(
+        [task0 == START, task0 == NEW_X],
+        [
+            jnp.asarray(LBFGSB_STEP_ENTRY_START, dtype=task0.dtype),
+            jnp.asarray(LBFGSB_STEP_ENTRY_NEW_X_REENTRY, dtype=task0.dtype),
+        ],
+        default=jnp.asarray(LBFGSB_STEP_ENTRY_SEARCH, dtype=task0.dtype),
+    )
+
+
+def lbfgsb_macro_step_result(
+    state: LbfgsbState,
+    accepted_new_x: jax.Array,
+    *,
+    maxiter_array,
+    maxfun_array,
+) -> LbfgsbMacroStepResult:
+    task0 = state.workspace.task[0]
+    return LbfgsbMacroStepResult(
+        state=state,
+        accepted_new_x=accepted_new_x,
+        terminal=task0 >= CONVERGENCE,
+        entry_kind=_lbfgsb_step_entry_kind(state),
+    )
+
+
 def _lbfgsb_finish_transition(
     state: LbfgsbState,
     *,
@@ -1683,9 +2011,11 @@ def _lbfgsb_finish_transition(
         maxiter_array,
         maxfun_array,
     )
-    return LbfgsbMacroStepResult(
-        state=state,
-        accepted_new_x=accepted_new_x,
+    return lbfgsb_macro_step_result(
+        state,
+        accepted_new_x,
+        maxiter_array=maxiter_array,
+        maxfun_array=maxfun_array,
     )
 
 
@@ -1696,6 +2026,7 @@ def _lbfgsb_search_transition(
     maxiter_array,
     maxfun_array,
     accepted_step_callback=None,
+    unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     original_f = state.f
     sbgnrm = lbfgsb_projected_gradient_norm(
@@ -1709,14 +2040,30 @@ def _lbfgsb_search_transition(
     task1 = state.workspace.task[1]
 
     def restart_branch(state):
-        next_state = _lbfgsb_setulb_fg_start_line_search(state, sbgnrm)
+        if unconstrained_fast_path:
+            next_state = _lbfgsb_setulb_unconstrained_line_search(
+                state,
+                sbgnrm,
+                nseg=jnp.where(
+                    sbgnrm > 0.0,
+                    jnp.asarray(1, dtype=jnp.int32),
+                    jnp.asarray(0, dtype=jnp.int32),
+                ),
+                iword=jnp.asarray(-1, dtype=jnp.int32),
+            )
+        else:
+            next_state = _lbfgsb_setulb_fg_start_line_search(state, sbgnrm)
         return next_state._replace(f=original_f)
 
     def non_restart_branch(state):
         return jax.lax.cond(
             (task0 == FG) & (task1 == FG_LNSRCH),
             _lbfgsb_setulb_line_search_continue,
-            lambda state: _lbfgsb_setulb_fg_start_reentry(state, sbgnrm),
+            lambda state: _lbfgsb_setulb_fg_start_reentry(
+                state,
+                sbgnrm,
+                unconstrained_fast_path=unconstrained_fast_path,
+            ),
             state,
         )
 
@@ -1738,16 +2085,21 @@ def _lbfgsb_search_transition(
 def _lbfgsb_advance_loop(
     transition,
     state: LbfgsbState,
+    *,
+    maxiter_array,
+    maxfun_array,
 ) -> LbfgsbMacroStepResult:
     def continue_condition(result: LbfgsbMacroStepResult) -> jax.Array:
-        return (~result.accepted_new_x) & (result.state.workspace.task[0] < CONVERGENCE)
+        return (~result.accepted_new_x) & (~result.terminal)
 
     return jax.lax.while_loop(
         continue_condition,
         transition,
-        LbfgsbMacroStepResult(
-            state=state,
-            accepted_new_x=jnp.asarray(False, dtype=jnp.bool_),
+        lbfgsb_macro_step_result(
+            state,
+            jnp.asarray(False, dtype=jnp.bool_),
+            maxiter_array=maxiter_array,
+            maxfun_array=maxfun_array,
         ),
     )
 
@@ -1759,6 +2111,7 @@ def lbfgsb_advance_from_start_to_next_observable(
     maxiter: int,
     maxfun: int,
     accepted_step_callback=None,
+    unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
     maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
@@ -1772,8 +2125,11 @@ def lbfgsb_advance_from_start_to_next_observable(
             maxiter_array=maxiter_array,
             maxfun_array=maxfun_array,
             accepted_step_callback=accepted_step_callback,
+            unconstrained_fast_path=unconstrained_fast_path,
         ),
         started,
+        maxiter_array=maxiter_array,
+        maxfun_array=maxfun_array,
     )
 
 
@@ -1784,6 +2140,7 @@ def lbfgsb_advance_from_search_to_next_observable(
     maxiter: int,
     maxfun: int,
     accepted_step_callback=None,
+    unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
     maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
@@ -1795,8 +2152,11 @@ def lbfgsb_advance_from_search_to_next_observable(
             maxiter_array=maxiter_array,
             maxfun_array=maxfun_array,
             accepted_step_callback=accepted_step_callback,
+            unconstrained_fast_path=unconstrained_fast_path,
         ),
         state,
+        maxiter_array=maxiter_array,
+        maxfun_array=maxfun_array,
     )
 
 
@@ -1807,10 +2167,14 @@ def lbfgsb_reenter_new_x(
     maxiter: int,
     maxfun: int,
     accepted_step_callback=None,
+    unconstrained_fast_path: bool = False,
 ) -> LbfgsbMacroStepResult:
     maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
     maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
-    next_state = _lbfgsb_setulb_new_x_reentry(state)
+    next_state = _lbfgsb_setulb_new_x_reentry_impl(
+        state,
+        unconstrained_fast_path=unconstrained_fast_path,
+    )
     next_state = _lbfgsb_evaluate_if_requested(value_and_grad, next_state)
     return _lbfgsb_finish_transition(
         next_state,
@@ -1854,9 +2218,11 @@ def lbfgsb_advance_to_next_observable(
     accepted_step_callback=None,
 ) -> LbfgsbMacroStepResult:
     """Advance to the next accepted NEW_X event or terminal task."""
+    maxiter_array = jnp.asarray(maxiter, dtype=jnp.int32)
+    maxfun_array = jnp.asarray(maxfun, dtype=jnp.int32)
 
     def continue_condition(result: LbfgsbMacroStepResult) -> jax.Array:
-        return (~result.accepted_new_x) & (result.state.workspace.task[0] < CONVERGENCE)
+        return (~result.accepted_new_x) & (~result.terminal)
 
     def body(result: LbfgsbMacroStepResult) -> LbfgsbMacroStepResult:
         return lbfgsb_transition(
@@ -1870,9 +2236,11 @@ def lbfgsb_advance_to_next_observable(
     return jax.lax.while_loop(
         continue_condition,
         body,
-        LbfgsbMacroStepResult(
-            state=state,
-            accepted_new_x=jnp.asarray(False, dtype=jnp.bool_),
+        lbfgsb_macro_step_result(
+            state,
+            jnp.asarray(False, dtype=jnp.bool_),
+            maxiter_array=maxiter_array,
+            maxfun_array=maxfun_array,
         ),
     )
 

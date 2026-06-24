@@ -158,10 +158,6 @@ def _tree_trim(prefix_tree, size: int):
     return jax.tree.map(lambda leaf: _slice_prefix(leaf, size), prefix_tree)
 
 
-def _tree_concatenate(left, right):
-    return jax.tree.map(lambda x, y: jnp.concatenate((x, y), axis=0), left, right)
-
-
 def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
     return jax.tree.map(
         lambda leaf: _zeros(

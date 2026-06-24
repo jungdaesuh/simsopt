@@ -63,6 +63,7 @@ _LEGACY_TARGET_METHODS = {
 }
 _LEGACY_TARGET_SCIPY_CONTROL_METHODS = {
     "scipy_jax": "lbfgs-scipy-jax",
+    "scipy_jax_decomposed": "lbfgs-scipy-jax-decomposed",
     "scipy_jax_fullgraph": "lbfgs-scipy-jax-fullgraph",
 }
 

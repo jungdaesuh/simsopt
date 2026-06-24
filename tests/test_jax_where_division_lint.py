@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+while str(REPO_ROOT) in sys.path:
+    sys.path.remove(str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
+sys.modules.pop("scripts", None)
 
 from scripts import jax_where_division_lint as _LINT
 

@@ -13,7 +13,6 @@ from sympy.core.relational import LessThan
 
 
 ExpressionEvaluator = Callable[[jax.Array, jax.Array, jax.Array], jax.Array]
-ConditionEvaluator = Callable[[jax.Array, jax.Array, jax.Array], jax.Array]
 VectorEvaluator = Callable[[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]
 
 _R_SYMBOL, _Z_SYMBOL, _PHI_SYMBOL = sp.symbols("R Z phi")

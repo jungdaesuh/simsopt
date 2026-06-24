@@ -196,6 +196,7 @@ __all__ = [
     "make_traceable_objective",
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
+    "make_traceable_objective_solved_pair",
     "make_traceable_objective_value_and_grad",
     "make_traceable_solved_state_value_and_grad",
     "make_traceable_objective_profile_suite",
@@ -1013,13 +1014,6 @@ def _take_runtime_scalar(array, index):
     return jnp.reshape(
         _take_runtime_entries(array, np.array([int(index)], dtype=np.int32)),
         (),
-    )
-
-
-def _take_runtime_row(array, index):
-    return jnp.reshape(
-        _take_runtime_entries(array, np.array([int(index)], dtype=np.int32)),
-        array.shape[1:],
     )
 
 
@@ -2011,11 +2005,6 @@ def _solve_boozer_adjoint(adjoint_state, rhs):
     CPU/JAX adjoint vectors.
     """
     return _checked_boozer_linear_solve(adjoint_state, rhs, transpose=True)
-
-
-def _solve_boozer_forward(adjoint_state, rhs):
-    """Solve the forward inner linearization for one adjoint runtime state."""
-    return _checked_boozer_linear_solve(adjoint_state, rhs, transpose=False)
 
 
 def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
@@ -3110,6 +3099,7 @@ def compute_standard_surface_objective_gradients(
 # public builders and direct private helper imports used by downstream tests.
 from .surface_objectives_traceable import (
     TraceableObjectiveSeededValueAndGrad as TraceableObjectiveSeededValueAndGrad,
+    TraceableObjectiveSolvedPair as TraceableObjectiveSolvedPair,
     _TRACEABLE_EXACT_RESIDUAL_KEYS as _TRACEABLE_EXACT_RESIDUAL_KEYS,
     _TRACEABLE_INNER_OBJECTIVE_KEYS as _TRACEABLE_INNER_OBJECTIVE_KEYS,
     _TRACEABLE_LABEL_GEOMETRY_KEYS as _TRACEABLE_LABEL_GEOMETRY_KEYS,
@@ -3193,6 +3183,7 @@ from .surface_objectives_traceable import (
     make_traceable_objective_profile_suite as make_traceable_objective_profile_suite,
     make_traceable_objective_runtime_bundle as make_traceable_objective_runtime_bundle,
     make_traceable_objective_seeded_value_and_grad as make_traceable_objective_seeded_value_and_grad,
+    make_traceable_objective_solved_pair as make_traceable_objective_solved_pair,
     make_traceable_objective_value_and_grad as make_traceable_objective_value_and_grad,
     make_traceable_solved_state_value_and_grad as make_traceable_solved_state_value_and_grad,
     make_traceable_single_stage_alm_runtime_bundle as make_traceable_single_stage_alm_runtime_bundle,

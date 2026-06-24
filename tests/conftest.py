@@ -10,8 +10,10 @@ import gc
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_REPO_ROOT_STR = str(_REPO_ROOT)
+while _REPO_ROOT_STR in sys.path:
+    sys.path.remove(_REPO_ROOT_STR)
+sys.path.insert(0, _REPO_ROOT_STR)
 
 from repo_bootstrap import bootstrap_local_simsopt
 
@@ -84,6 +86,7 @@ _BACKEND_RUNTIME_ENV_VARS = (
 _JAX_RUNTIME_CONFIG_DEFAULTS = {
     "jax_enable_x64": True,
     "jax_debug_nans": False,
+    "jax_disable_jit": False,
     "jax_transfer_guard": None,
     "jax_platforms": None,
     "jax_compilation_cache_dir": None,
@@ -302,6 +305,13 @@ def _guard_backend_runtime_state():
 
 def _activate_backend_mode(monkeypatch, request, *, mode, strict):
     _require_jax()
+    lane = _PARITY_MODE_TO_LANE.get(mode)
+    if lane is not None and not _parity_lane_available(lane):
+        pytest.skip(
+            "CUDA GPU not available"
+            if lane == "gpu"
+            else "CPU JAX backend not available"
+        )
     invalidate_backend_cache()
     previous = get_backend_config()
     if mode == "jax_gpu_parity":
@@ -404,6 +414,29 @@ def parity_device(lane: str):
     return _parity_device_for_lane(_require_jax(), lane)
 
 
+def _parity_lane_available(lane: str) -> bool:
+    jax_module = _require_jax()
+    if lane not in {"cpu", "gpu"}:
+        raise ValueError(f"Unknown parity lane {lane!r}; expected 'cpu' or 'gpu'.")
+    return any(device.platform == lane for device in jax_module.devices())
+
+
+def _parity_unavailable_skip_mark(lane: str):
+    if _parity_lane_available(lane):
+        return ()
+    if lane == "gpu":
+        return pytest.mark.skip(reason="CUDA GPU not available")
+    return pytest.mark.skip(reason="CPU JAX backend not available")
+
+
+def parity_mode_case(mode: str, *values):
+    lane = _parity_lane_key(mode)
+    skip_mark = _parity_unavailable_skip_mark(lane)
+    if skip_mark:
+        return pytest.param(mode, *values, marks=skip_mark)
+    return (mode, *values)
+
+
 @contextmanager
 def parity_default_device(lane: str):
     jax_module = _require_jax()
@@ -489,7 +522,10 @@ def parity_acceptance_tolerance(tier: str, lane_or_mode: str) -> tuple[float, fl
 def parity_acceptance_modes(
     tier: str, *modes: str
 ) -> tuple[tuple[str, float, float], ...]:
-    return tuple((mode, *parity_acceptance_tolerance(tier, mode)) for mode in modes)
+    return tuple(
+        parity_mode_case(mode, *parity_acceptance_tolerance(tier, mode))
+        for mode in modes
+    )
 
 
 _STRICT_GPU_EXCLUDED_MARKERS = {

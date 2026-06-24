@@ -816,10 +816,6 @@ class SingleStageRuntimeSpecBiotSavartJAX(SpecBackedBiotSavartJAX):
         )
 
 
-def _is_legacy_curve_xyzfourier(curve) -> bool:
-    return isinstance(curve, CurveXYZFourier)
-
-
 def _supports_native_curve_geometry(curve):
     return supports_adapter_curve_spec(curve)
 
@@ -1337,7 +1333,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._unique_base_currents = []
         self._coil_descs = []  # list of (curve_idx, current_idx, rotmat_jax, scale)
         self._curve_order = 0
-        self._curve_dof_size = 0
         self._curve_quadpoints_jax = None
         self._introspect_coils()
         self._free_dof_layout_ready = True
@@ -1450,7 +1445,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._unique_base_currents = base_currents
         self._coil_descs = descs
         self._curve_order = orders.pop()
-        self._curve_dof_size = 3 * (2 * self._curve_order + 1)
         self._curve_quadpoints_jax = _curve_quadpoints_jax(base_curves[0])
 
     def _build_coil_dof_extraction_spec(self):
@@ -1771,13 +1765,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         """Build the immutable field-evaluation spec for the current points."""
         return make_field_eval_spec(self._points_jax)
 
-    def _base_curve_geometry(self, curve, geometry_cache=None):
-        gamma, gammadash, _ = self._base_curve_geometry_with_timings(
-            curve,
-            geometry_cache,
-        )
-        return gamma, gammadash
-
     def _base_curve_geometry_with_timings(self, curve, geometry_cache=None):
         cache_key = id(curve)
         if geometry_cache is not None and cache_key in geometry_cache:
@@ -1951,8 +1938,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             coil_indices=free_coil_set_spec.coil_index_lists(),
         )
 
-    B_cotangents = B_pullback_native
-
     def _pullback_to_derivative(self, pullback):
         return self.coil_cotangents_to_derivative(
             pullback.d_coil_arrays,
@@ -2002,8 +1987,6 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         r"""Return native grouped cotangents for ``A``."""
         return self._field_pullback_native(grouped_biot_savart_A_from_inputs, v)
 
-    A_cotangents = A_pullback_native
-
     def dA_by_dX_pullback_native(self, vgrad):
         r"""Return native grouped cotangents for ``dA/dX``."""
         return self._field_pullback_native(
@@ -2011,16 +1994,12 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             vgrad,
         )
 
-    dA_by_dX_cotangents = dA_by_dX_pullback_native
-
     def dB_by_dX_pullback_native(self, vgrad):
         r"""Return native grouped cotangents for ``dB/dX``."""
         return self._field_pullback_native(
             grouped_biot_savart_dB_by_dX_from_inputs,
             vgrad,
         )
-
-    dB_by_dX_cotangents = dB_by_dX_pullback_native
 
     def A_and_dA_pullback_native(self, v, vgrad):
         r"""Return separate native grouped cotangents for ``A`` and ``dA/dX``."""

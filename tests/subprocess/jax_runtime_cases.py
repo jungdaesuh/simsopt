@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
 import sys
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_DIR = _REPO_ROOT / "src"
@@ -25,6 +25,13 @@ _MUTABLE_OBJECTIVE_SMOKE_MAXITER = 5
 
 class SkippedCase(RuntimeError):
     pass
+
+
+class _CompileCountPayload(TypedDict, total=False):
+    compile_count: int
+    stepwise_compile_count: int
+    monolithic_compile_count: int
+    counts_by_fragment: dict[str, int]
 
 
 def _skip_case(reason: str) -> None:
@@ -188,13 +195,17 @@ class _CompileCounter(logging.Handler):
         super().__init__()
         self.fragments = fragments
         self.count = 0
+        self.counts_by_fragment = {fragment: 0 for fragment in fragments}
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if "Compiling jit(" in message and any(
-            fragment in message for fragment in self.fragments
-        ):
-            self.count += 1
+        if "Compiling jit(" not in message:
+            return
+        for fragment in self.fragments:
+            if fragment in message:
+                self.count += 1
+                self.counts_by_fragment[fragment] += 1
+                return
 
 
 def _assert_solver_compile_count(
@@ -202,7 +213,7 @@ def _assert_solver_compile_count(
     *,
     fragments: tuple[str, ...],
     expected_compile_count: int,
-) -> int:
+) -> dict[str, int]:
     logger = logging.getLogger("jax")
     old_level = logger.level
     handler = _CompileCounter(fragments)
@@ -214,31 +225,64 @@ def _assert_solver_compile_count(
             for _ in range(3):
                 run_once()
         assert handler.count == expected_compile_count, handler.count
-        return handler.count
+        return dict(handler.counts_by_fragment)
     finally:
         logger.removeHandler(handler)
         logger.setLevel(old_level)
 
 
-def _assert_run_solver_compiles_once(run_once) -> int:
-    return _assert_solver_compile_count(
+def _compile_count_payload(
+    counts_by_fragment: dict[str, int],
+) -> _CompileCountPayload:
+    return {
+        "compile_count": sum(counts_by_fragment.values()),
+        "stepwise_compile_count": sum(
+            counts_by_fragment[fragment]
+            for fragment in (
+                "lbfgs_private_value_and_grad)",
+                "lbfgs_private_initial_state_solver)",
+                "lbfgs_private_macro_step_solver)",
+                "lbfgs_private_result_payload_solver)",
+            )
+            if fragment in counts_by_fragment
+        ),
+        "monolithic_compile_count": counts_by_fragment.get(
+            "lbfgs_private_monolithic_mainlb_solver)", 0
+        ),
+    }
+
+
+def _assert_run_solver_compiles_once(run_once) -> _CompileCountPayload:
+    counts_by_fragment = _assert_solver_compile_count(
         run_once,
         fragments=("_run_solver)",),
         expected_compile_count=1,
     )
+    return {
+        "compile_count": counts_by_fragment["_run_solver)"],
+    }
 
 
-def _assert_lbfgs_private_step_kernels_compile_once_each(run_once) -> int:
-    return _assert_solver_compile_count(
+def _assert_lbfgs_private_step_kernels_compile_once_each(
+    run_once,
+) -> _CompileCountPayload:
+    counts_by_fragment = _assert_solver_compile_count(
         run_once,
         fragments=(
             "lbfgs_private_value_and_grad)",
             "lbfgs_private_initial_state_solver)",
             "lbfgs_private_macro_step_solver)",
             "lbfgs_private_result_payload_solver)",
+            "lbfgs_private_monolithic_mainlb_solver)",
         ),
         expected_compile_count=5,
     )
+    payload = _compile_count_payload(counts_by_fragment)
+    assert payload["monolithic_compile_count"] == 0, payload
+    return {
+        **payload,
+        "counts_by_fragment": counts_by_fragment,
+    }
 
 
 def _run_compile_count_case(method: OptimizerMethod) -> None:
@@ -265,16 +309,16 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
         assert result.success is True
 
     if method == "lbfgs-ondevice":
-        compile_count = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
+        compile_payload = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
     else:
-        compile_count = _assert_run_solver_compiles_once(run_once)
+        compile_payload = _assert_run_solver_compiles_once(run_once)
     print(
         json.dumps(
             {
                 "case": "compile-count",
                 "method": str(method),
-                "compile_count": compile_count,
                 "run_count": 3,
+                **compile_payload,
             },
             sort_keys=True,
         )
@@ -328,15 +372,15 @@ def _run_target_compile_count_case() -> None:
         )
         assert result.success is True
 
-    compile_count = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
+    compile_payload = _assert_lbfgs_private_step_kernels_compile_once_each(run_once)
     print(
         json.dumps(
             {
                 "case": "target-compile-count",
                 "method": "lbfgs-ondevice",
-                "compile_count": compile_count,
                 "run_count": 3,
                 "value_and_grad": True,
+                **compile_payload,
             },
             sort_keys=True,
         )

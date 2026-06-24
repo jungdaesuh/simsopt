@@ -323,6 +323,48 @@ def test_regularized_constrained_least_squares_jax_matches_cpu(W) -> None:
     )
 
 
+def test_regularization_weighted_basis_row_scales_scalar_and_vector_W() -> None:
+    Q = jnp.asarray(
+        np.array(
+            [
+                [1.0, -2.0],
+                [3.0, 4.0],
+                [-5.0, 6.0],
+                [7.0, -8.0],
+            ],
+            dtype=np.float64,
+        )
+    )
+    W_vector = jnp.asarray(np.array([0.2, 0.3, 0.4, 0.5], dtype=np.float64))
+    W_matrix = jnp.diag(W_vector)
+
+    scalar_weighted = wireframe_optimization_jax._regularization_weighted_basis(
+        0.25,
+        int(Q.shape[0]),
+        Q,
+    )
+    vector_weighted = wireframe_optimization_jax._regularization_weighted_basis(
+        W_vector,
+        int(Q.shape[0]),
+        Q,
+    )
+    matrix_weighted = wireframe_optimization_jax._regularization_weighted_basis(
+        W_matrix,
+        int(Q.shape[0]),
+        Q,
+    )
+
+    np.testing.assert_allclose(np.asarray(scalar_weighted), 0.25 * np.asarray(Q))
+    np.testing.assert_allclose(
+        np.asarray(vector_weighted),
+        np.asarray(W_vector)[:, None] * np.asarray(Q),
+    )
+    np.testing.assert_allclose(
+        np.asarray(matrix_weighted),
+        np.asarray(W_matrix) @ np.asarray(Q),
+    )
+
+
 def test_regularized_constrained_least_squares_jits_under_transfer_guard() -> None:
     A, b, C, d, _ = _least_squares_problem()
     W = jnp.asarray(np.array([0.2, 0.3, 0.4, 0.5], dtype=np.float64))

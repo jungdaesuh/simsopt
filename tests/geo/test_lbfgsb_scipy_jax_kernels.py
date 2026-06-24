@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 import jax
+import jax.numpy as jnp
+import pytest
 import scipy.linalg
 from scipy.optimize import _lbfgsb_py
 
@@ -2075,6 +2077,199 @@ def test_lbfgsb_cmprlb_matches_c_reference_for_unconstrained_path():
     assert int(actual.info) == expected_info
     np.testing.assert_array_equal(np.asarray(actual.r), expected_r)
     np.testing.assert_array_equal(np.asarray(actual.wa), expected_wa)
+
+
+def _curved_quadratic_value_and_grad(x):
+    matrix = jnp.asarray(
+        [
+            [4.0, 0.35, -0.1, 0.0],
+            [0.35, 2.5, 0.2, -0.15],
+            [-0.1, 0.2, 3.25, 0.3],
+            [0.0, -0.15, 0.3, 1.75],
+        ],
+        dtype=jnp.float64,
+    )
+    linear = jnp.asarray([0.25, -0.75, 0.5, -0.1], dtype=jnp.float64)
+    value = 0.5 * x @ (matrix @ x) + linear @ x
+    return value, matrix @ x + linear
+
+
+def _lbfgsb_state_after_accepted_steps(*, m: int, accepted_steps: int):
+    state = lbfgsb.lbfgsb_initial_state(
+        jnp.asarray([1.2, -1.5, 0.75, -0.4], dtype=jnp.float64),
+        m=m,
+        bounds=None,
+        ftol=0.0,
+        gtol=1e-12,
+        maxls=20,
+    )
+    entry_kind = lbfgsb.LBFGSB_STEP_ENTRY_START
+    for _accepted_step in range(accepted_steps):
+        result = None
+        for _route_attempt in range(20):
+            if entry_kind == lbfgsb.LBFGSB_STEP_ENTRY_START:
+                result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+                    _curved_quadratic_value_and_grad,
+                    state,
+                    maxiter=20,
+                    maxfun=100,
+                    unconstrained_fast_path=False,
+                )
+            elif entry_kind == lbfgsb.LBFGSB_STEP_ENTRY_NEW_X_REENTRY:
+                result = lbfgsb.lbfgsb_reenter_new_x(
+                    _curved_quadratic_value_and_grad,
+                    state,
+                    maxiter=20,
+                    maxfun=100,
+                    unconstrained_fast_path=False,
+                )
+            else:
+                result = lbfgsb.lbfgsb_advance_from_search_to_next_observable(
+                    _curved_quadratic_value_and_grad,
+                    state,
+                    maxiter=20,
+                    maxfun=100,
+                    unconstrained_fast_path=False,
+                )
+            state = result.state
+            if bool(np.asarray(result.accepted_new_x)) or bool(
+                np.asarray(result.terminal)
+            ):
+                break
+            task0 = int(np.asarray(state.workspace.task[0]))
+            entry_kind = (
+                lbfgsb.LBFGSB_STEP_ENTRY_NEW_X_REENTRY
+                if task0 == lbfgsb.NEW_X
+                else lbfgsb.LBFGSB_STEP_ENTRY_SEARCH
+            )
+        assert result is not None
+        assert bool(np.asarray(result.accepted_new_x))
+        assert not bool(np.asarray(result.terminal))
+        entry_kind = lbfgsb.LBFGSB_STEP_ENTRY_NEW_X_REENTRY
+    return state
+
+
+@pytest.mark.parametrize("m,accepted_steps", [(4, 0), (4, 1), (4, 2), (3, 4)])
+def test_lbfgsb_two_loop_fast_reentry_matches_bounded_geometry_reentry(
+    m,
+    accepted_steps,
+):
+    state = _lbfgsb_state_after_accepted_steps(m=m, accepted_steps=accepted_steps)
+    n, state_m = lbfgsb._lbfgsb_state_dimensions(state)
+    _, _, _, _, _, _, _, lz, lr, ld, lt, _, _ = lbfgsb._lbfgsb_workspace_offsets(
+        n,
+        state_m,
+    )
+
+    if accepted_steps == 0:
+        bounded_result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=False,
+        )
+        fast_result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=True,
+        )
+    else:
+        bounded_result = lbfgsb.lbfgsb_reenter_new_x(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=False,
+        )
+        fast_result = lbfgsb.lbfgsb_reenter_new_x(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=True,
+        )
+
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.workspace.wa[ld:lt]),
+        np.asarray(bounded_result.state.workspace.wa[ld:lt]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.workspace.wa[lz:lr]),
+        np.asarray(bounded_result.state.workspace.wa[lz:lr]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.x),
+        np.asarray(bounded_result.state.x),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.f),
+        np.asarray(bounded_result.state.f),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.g),
+        np.asarray(bounded_result.state.g),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert int(np.asarray(fast_result.state.nfev)) == int(
+        np.asarray(bounded_result.state.nfev)
+    )
+    assert int(np.asarray(fast_result.state.njev)) == int(
+        np.asarray(bounded_result.state.njev)
+    )
+    metadata_indices = jnp.asarray(
+        [24, 26, 27, 28, 29, 30, 32, 33, 34, 35, 36],
+        dtype=jnp.int32,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(fast_result.state.workspace.isave[metadata_indices]),
+        np.asarray(bounded_result.state.workspace.isave[metadata_indices]),
+    )
+
+
+@pytest.mark.parametrize("unconstrained_fast_path", [False, True])
+def test_lbfgsb_reenter_new_x_reuses_accepted_value_gradient_before_next_trial(
+    unconstrained_fast_path,
+):
+    state = _lbfgsb_state_after_accepted_steps(m=4, accepted_steps=1)
+    assert int(np.asarray(state.workspace.task[0])) == lbfgsb.NEW_X
+    accepted_x = state.x
+
+    def reject_accepted_point_value_and_grad(x):
+        value, gradient = _curved_quadratic_value_and_grad(x)
+        is_accepted_point = jnp.all(x == accepted_x)
+        poisoned_value = jnp.asarray(jnp.nan, dtype=value.dtype)
+        poisoned_gradient = jnp.full_like(gradient, jnp.nan)
+        return (
+            jnp.where(is_accepted_point, poisoned_value, value),
+            jnp.where(is_accepted_point, poisoned_gradient, gradient),
+        )
+
+    start_nfev = int(np.asarray(state.nfev))
+    start_njev = int(np.asarray(state.njev))
+    result = lbfgsb.lbfgsb_reenter_new_x(
+        reject_accepted_point_value_and_grad,
+        state,
+        maxiter=20,
+        maxfun=100,
+        unconstrained_fast_path=unconstrained_fast_path,
+    )
+
+    assert int(np.asarray(result.state.nfev)) == start_nfev + 1
+    assert int(np.asarray(result.state.njev)) == start_njev + 1
+    assert bool(np.asarray(jnp.isfinite(result.state.f)))
+    assert bool(np.asarray(jnp.all(jnp.isfinite(result.state.g))))
 
 
 def test_lbfgsb_cmprlb_is_jittable_for_fixed_workspace_shapes():

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
 TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS = frozenset(
-    {"scipy-jax", "scipy-jax-fullgraph"}
+    {"scipy-jax", "scipy-jax-decomposed", "scipy-jax-fullgraph"}
 )
 HOST_JAX_OUTER_OPTIMIZER_BACKEND = "host-jax"
 TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS = frozenset({"optax-lbfgs", "optimistix-lbfgs"})
@@ -30,6 +30,7 @@ _OUTER_OPTIMIZER_BACKEND_DISPLAY_ORDER = (
     "scipy",
     "ondevice",
     "scipy-jax",
+    "scipy-jax-decomposed",
     HOST_JAX_OUTER_OPTIMIZER_BACKEND,
     "scipy-jax-fullgraph",
     "optax-lbfgs",

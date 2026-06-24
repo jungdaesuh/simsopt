@@ -49,6 +49,8 @@ from simsopt_jax_adapters.geo.surface_objectives import (
     MajorRadiusJAX,
     PrincipalCurvatureJAX,
     QfmResidualJAX,
+    make_traceable_objective_solved_pair,
+    make_traceable_objective_value_and_grad,
 )
 from simsopt.geo.curveobjectives import cs_distance_pure
 from simsopt.geo.qfmsurface import QfmSurface
@@ -1358,6 +1360,100 @@ def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
         "gradient_objective_kwargs": True,
         "gradient_factors": True,
     }
+
+
+def test_solved_pair_matches_fused_value_and_grad():
+    """The decomposed (solve_fn, value_grad_from_solved) pair is a faithful
+    numerical split of the fused make_traceable_objective_value_and_grad.
+
+    Both factories are built from the same booz_jax/bs_jax/iota_target and share
+    one compiled-bundle state, so on the solve-success branch they must agree to
+    machine precision on both value and gradient.
+    """
+    from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+    from simsopt.geo import SurfaceXYZTensorFourier, Volume
+
+    # --- smallest real converging Boozer fixture (mpol=ntor=2, ncoils=2, nfp=2)
+    ncoils, nfp, stellsym = 2, 2, True
+    R0, R1, order = 1.0, 0.5, 3
+    base_curves = create_equally_spaced_curves(
+        ncoils, nfp, stellsym=stellsym, R0=R0, R1=R1, order=order
+    )
+    base_currents = [Current(1e5) for _ in range(ncoils)]
+    for c in base_currents:
+        c.fix_all()
+    coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+
+    mpol = ntor = 2
+    nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
+    surf = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp,
+        quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
+    )
+    surf.set_dofs(np.zeros_like(surf.get_dofs()))
+    s_rz = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=surf.quadpoints_phi,
+        quadpoints_theta=surf.quadpoints_theta,
+    )
+    s_rz.set_rc(0, 0, R0)
+    s_rz.set_rc(1, 0, 0.15)
+    s_rz.set_zs(1, 0, 0.15)
+    surf.least_squares_fit(s_rz.gamma())
+
+    bs_jax = BiotSavartJAX(coils)
+    vol = Volume(surf)
+    vol_target = vol.J()
+    mu0 = 4 * np.pi * 1e-7
+    G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
+    iota0 = 0.3
+    options = {
+        "verbose": False,
+        "bfgs_maxiter": 300,
+        "bfgs_tol": 1e-8,
+        "newton_maxiter": 20,
+        "newton_tol": 1e-9,
+        "optimizer_backend": "ondevice",
+        "weight_inv_modB": True,
+    }
+    booz_jax = BoozerSurfaceJAX(
+        bs_jax, surf, vol, vol_target, constraint_weight=1.0, options=options
+    )
+    res = booz_jax.run_code(iota0, G0)
+    assert res is not None and res.get("success", False), "Boozer solve did not converge"
+
+    # iota_target must match the solved surface; coil_dofs = baseline dofs the
+    # surface was solved at, so the forward solve succeeds and the success
+    # branches of the fused and pair paths coincide.
+    iota_target = jnp.asarray(booz_jax.res["iota"], dtype=jnp.float64)
+    coil_dofs = jnp.asarray(np.asarray(bs_jax.x).copy(), dtype=jnp.float64)
+
+    fused = make_traceable_objective_value_and_grad(booz_jax, bs_jax, iota_target)
+    pair = make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target)
+
+    fr = pair.solve_fn(coil_dofs)
+    assert bool(fr["success"]) is True
+
+    v2, g2 = pair.value_grad_from_solved(
+        coil_dofs, fr["x"], fr["linear_solve_factors"]
+    )
+    v1, g1 = fused(coil_dofs)
+
+    g1 = np.asarray(jax.device_get(g1))
+    g2 = np.asarray(jax.device_get(g2))
+    assert np.all(np.isfinite(g1)) and np.all(np.isfinite(g2))
+
+    np.testing.assert_allclose(
+        float(jax.device_get(v1)), float(jax.device_get(v2)), rtol=1e-10, atol=1e-12
+    )
+    np.testing.assert_allclose(g1, g2, rtol=1e-10, atol=1e-12)
 
 
 def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None:

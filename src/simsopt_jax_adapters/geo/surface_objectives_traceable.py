@@ -62,11 +62,13 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
 
 __all__ = [
     "TraceableObjectiveSeededValueAndGrad",
+    "TraceableObjectiveSolvedPair",
     "diagnose_traceable_objective_runtime",
     "make_traceable_objective",
     "make_traceable_objective_profile_suite",
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
+    "make_traceable_objective_solved_pair",
     "make_traceable_objective_value_and_grad",
     "make_traceable_solved_state_value_and_grad",
     "make_traceable_single_stage_alm_runtime_bundle",
@@ -1615,6 +1617,7 @@ def _get_cached_traceable_runtime_entry(
         "profile_suite": None,
         "optimizer_compiled_bundle": None,
         "optimizer_value_and_grad": None,
+        "optimizer_solved_pair": None,
         "seeded_compiled_bundle": None,
         "seeded_value_and_grad": None,
         "alm_runtime_bundles": {},
@@ -1789,6 +1792,37 @@ def _ensure_traceable_runtime_optimizer_value_and_grad(runtime_entry, booz_jax):
         )
         runtime_entry["optimizer_value_and_grad"] = optimizer_value_and_grad
     return optimizer_value_and_grad
+
+
+def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
+    """Materialize the host-driven (solve, value_grad_from_solved) pair on demand.
+
+    Both halves are built from the same ``optimizer_compiled_bundle`` state so the
+    forward result produced by ``solve_fn`` is exactly what
+    ``value_grad_from_solved`` consumes. This is the decomposed form of the fused
+    ``_ensure_traceable_runtime_optimizer_value_and_grad`` callable: instead of one
+    jit that runs the forward Boozer solve and the adjoint together, the host can
+    call the device forward-solve kernel, then a separate device value/adjoint
+    kernel from the solved state -- so the optimizer's per-step jit never encloses
+    the forward solve.
+    """
+    optimizer_solved_pair = runtime_entry.get("optimizer_solved_pair")
+    if optimizer_solved_pair is None:
+        optimizer_compiled_bundle = _ensure_traceable_runtime_optimizer_compiled_bundle(
+            runtime_entry,
+            booz_jax,
+        )
+        optimizer_solved_pair = TraceableObjectiveSolvedPair(
+            solve_fn=optimizer_compiled_bundle["compiled_forward_result_for"],
+            value_grad_from_solved=(
+                _build_traceable_solved_state_value_and_grad_from_state(
+                    booz_jax,
+                    optimizer_compiled_bundle["state"],
+                )
+            ),
+        )
+        runtime_entry["optimizer_solved_pair"] = optimizer_solved_pair
+    return optimizer_solved_pair
 
 
 def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
@@ -2994,6 +3028,65 @@ def make_traceable_solved_state_value_and_grad(
         success_filter=success_filter,
     )
     return runtime_entry["value_and_grad"]
+
+
+class TraceableObjectiveSolvedPair(NamedTuple):
+    """Decomposed outer objective: a forward solve plus a solved-state value/grad.
+
+    ``solve_fn(coil_dofs) -> forward_result`` runs the device-traceable forward
+    Boozer solve and returns the normalized forward-result mapping (keys include
+    ``"x"`` the solved decision vector, ``"linear_solve_factors"``, and
+    ``"success"``). ``value_grad_from_solved(coil_dofs, solved_x,
+    solved_linear_solve_factors) -> (value, grad)`` evaluates the objective and the
+    IFT adjoint gradient from an already-solved state, performing no forward solve.
+
+    Together they are a faithful split of the fused
+    :func:`make_traceable_objective_value_and_grad` callable -- both halves are
+    built from one shared compiled-bundle state, so ``forward_result["x"]`` /
+    ``forward_result["linear_solve_factors"]`` are exactly what
+    ``value_grad_from_solved`` consumes. A host driver that consumes this pair owns
+    the optimizer loop and line search, so the per-step jit never encloses the
+    forward solve (the macro-step breadth-exclusion gate).
+
+    Parity note: the fused callable gates on ``forward_result["success"]`` and
+    falls back to the baseline state for the gradient on solver failure. A host
+    driver MUST replicate that branch (inspect ``forward_result["success"]`` and
+    pick the baseline-vs-candidate solved state before calling
+    ``value_grad_from_solved``) to match the fused path's failure handling.
+    """
+
+    solve_fn: callable
+    value_grad_from_solved: callable
+
+
+def make_traceable_objective_solved_pair(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+):
+    """Build the decomposed ``(solve_fn, value_grad_from_solved)`` outer objective.
+
+    This is the host-driven counterpart to
+    :func:`make_traceable_objective_value_and_grad`: rather than a single fused
+    ``f(coil_dofs) -> (value, grad)`` whose jit encloses the forward Boozer solve,
+    it returns a :class:`TraceableObjectiveSolvedPair` whose two halves share one
+    compiled-bundle state. The optimizer can then run the forward solve and the
+    solved-state value/adjoint as separate device kernels under a host-owned loop.
+
+    See :class:`TraceableObjectiveSolvedPair` for the contract and the failure-mode
+    parity note the host driver must honor.
+    """
+    runtime_entry = _get_cached_traceable_runtime_entry(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    return _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax)
 
 
 def _make_traceable_forward_value_pipeline(compiled_forward_result_for):

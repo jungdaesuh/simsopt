@@ -307,15 +307,13 @@ class SquaredFluxJAX(Optimizable):
                 definition=definition,
             )
         )
-        self._normal_jax = self._flux_spec.normal
-        self._target_jax = self._flux_spec.target
 
         # Set evaluation points on the field adapter from the immutable spec.
         field.set_points_from_spec(field_eval_spec)
         self._field_points_version = field._points_version
         self._field_dof_layout_version = _strict_field_dof_layout_version(field)
-        # Surface DOFs are baked into ``_normal_jax`` / ``_target_jax`` and
-        # into the JIT-captured ``_flux_spec``. We capture a fingerprint here
+        # Surface DOFs are baked into the JIT-captured ``_flux_spec``.
+        # We capture a fingerprint here
         # so that any post-construction mutation of ``surface.x`` is detected
         # at the next ``J()`` / ``dJ()`` call instead of silently producing
         # stale results.
@@ -506,8 +504,6 @@ class SquaredFluxJAX(Optimizable):
         if partials:
             return value, partials_derivative
         return value, partials_derivative(self)
-
-    J_and_dJ = value_and_dJ
 
     def _value_and_dJ_native(self):
         """Combined value and gradient via end-to-end JAX value_and_grad."""

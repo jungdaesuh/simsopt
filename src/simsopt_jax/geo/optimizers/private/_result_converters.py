@@ -195,11 +195,3 @@ def _private_lbfgs_result_to_optimize_result(state):
     if hess_inv is not None:
         result_fields["hess_inv"] = hess_inv
     return OptimizeResult(**result_fields)
-
-
-def _scipy_result_is_continuable(result):
-    return (
-        np.isfinite(getattr(result, "fun", np.nan))
-        and np.all(np.isfinite(_as_host_numpy(result.x)))
-        and np.all(np.isfinite(_as_host_numpy(result.jac)))
-    )

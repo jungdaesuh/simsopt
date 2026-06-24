@@ -22,7 +22,7 @@ from simsopt_jax.core.qfm_solver import (
 )
 from simsopt.geo.qfmsurface import QfmSurface
 from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
-from .surface_objectives import QfmResidualJAX, _surface_spec_from_surface
+from .surface_objectives import _surface_spec_from_surface
 
 __all__ = ["QfmSurfaceJAX"]
 
@@ -58,7 +58,6 @@ class QfmSurfaceJAX:
         self.surface = surface
         self.label = label
         self.targetlabel = targetlabel
-        self.qfm = QfmResidualJAX(surface, biotsavart)
         self.name = str(id(self))
 
     def _label_contract(self) -> tuple[str, int]:
@@ -231,20 +230,6 @@ class QfmSurfaceJAX:
         )
         return self._penalty_result_dict(final_dofs, info)
 
-    def minimize_qfm_penalty_constraints_LBFGS(
-        self,
-        tol: float = 1e-3,
-        maxiter: int = 1000,
-        constraint_weight: float = 1.0,
-    ) -> dict[str, object]:
-        """Compatibility alias for the JAX BFGS penalty solve."""
-        return self.minimize_qfm_penalty_jax(
-            tol=tol,
-            maxiter=maxiter,
-            constraint_weight=constraint_weight,
-            optimizer="bfgs",
-        )
-
     def minimize_qfm_exact_jax(
         self,
         tol: float = 1e-3,
@@ -277,14 +262,6 @@ class QfmSurfaceJAX:
             label_coil_set_spec=label_coil_set_spec,
         )
         return self._augmented_result_dict(final_dofs, info)
-
-    def minimize_qfm_exact_constraints_SLSQP(
-        self,
-        tol: float = 1e-3,
-        maxiter: int = 1000,
-    ) -> dict[str, object]:
-        """Compatibility alias for the JAX augmented-Lagrangian exact path."""
-        return self.minimize_qfm_exact_jax(tol=tol, maxiter=maxiter, optimizer="bfgs")
 
     def minimize_qfm(
         self,

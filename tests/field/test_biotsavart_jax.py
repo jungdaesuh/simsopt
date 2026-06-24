@@ -31,7 +31,7 @@ from repo_bootstrap import bootstrap_local_simsopt
 
 bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
-from conftest import parity_acceptance_modes
+from conftest import parity_acceptance_modes, parity_mode_case
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 from simsopt_jax.backend import invalidate_backend_cache
@@ -1653,7 +1653,7 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         ("mode", "rtol", "atol"),
         [
             ("jax_cpu_parity", 1e-12, 1e-14),
-            ("jax_gpu_fast", 1e-11, 1e-13),
+            parity_mode_case("jax_gpu_fast", 1e-11, 1e-13),
         ],
     )
     def test_randomized_B_A_dB_dA_match_dense_reference(self, mode, rtol, atol):

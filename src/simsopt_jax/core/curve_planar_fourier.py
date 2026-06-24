@@ -93,7 +93,3 @@ def curveplanarfourier_pure(dofs, quadpoints, order):
     )
     rotation = _quaternion_rotation_matrix(quaternion)
     return base_curve @ rotation.T + center[None, :]
-
-
-def jaxplanarcurve_pure(dofs, quadpoints, order):
-    return curveplanarfourier_pure(dofs, quadpoints, order)

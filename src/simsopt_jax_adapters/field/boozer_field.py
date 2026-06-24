@@ -269,9 +269,6 @@ class BoozerRadialInterpolantJAX(Optimizable):
     def get_points(self) -> np.ndarray:
         return np.asarray(self._points)
 
-    def get_points_ref(self) -> jax.Array:
-        return self._points
-
     def clear_cached_properties(self):
         self._cache.clear()
         self._radial_columns_cache = None
@@ -563,9 +560,6 @@ class BoozerAnalyticJAX(Optimizable):
     def get_points(self) -> np.ndarray:
         return np.asarray(self._points)
 
-    def get_points_ref(self) -> jax.Array:
-        return self._points
-
     def clear_cached_properties(self):
         self._cache.clear()
 
@@ -795,9 +789,6 @@ class InterpolatedBoozerFieldJAX(Optimizable):
 
     def get_points(self) -> np.ndarray:
         return np.asarray(self._points)
-
-    def get_points_ref(self) -> jax.Array:
-        return self._points
 
     def clear_cached_properties(self):
         self._cache.clear()

@@ -14,19 +14,33 @@ import sys
 
 from _backend_test_helpers import (
     assert_arrays_on_device,
+    device_float64,
     enable_non_strict_jax_backend,
     enable_strict_jax_backend,
+    enable_strict_parity_backend,
     ensure_gpu_determinism_xla_flag,
+    host_array,
+    host_scalar,
+    parity_acceptance_tolerance,
+    parity_default_device,
     parity_device,
+    parity_rng,
     relative_error,
 )
 
 __all__ = [
     "assert_arrays_on_device",
+    "device_float64",
     "enable_non_strict_jax_backend",
     "enable_strict_jax_backend",
+    "enable_strict_parity_backend",
     "ensure_gpu_determinism_xla_flag",
+    "host_array",
+    "host_scalar",
+    "parity_acceptance_tolerance",
+    "parity_default_device",
     "parity_device",
+    "parity_rng",
     "relative_error",
 ]
 

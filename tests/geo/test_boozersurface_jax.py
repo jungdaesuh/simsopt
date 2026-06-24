@@ -1943,6 +1943,10 @@ class TestOptimizerAdapter:
         assert captured["driver"] is expected_driver
         assert type(captured["options"]).__name__ == expected_options_type
         assert captured["options"].maxiter == 3
+        if method == "optax-lbfgs-ondevice":
+            assert captured["options"].memory_size == 7
+        if method == "optimistix-lbfgs-ondevice":
+            assert captured["options"].history_length == 7
         if expected_maxls is not None:
             assert captured["options"].max_linesearch_steps == expected_maxls
         assert result.message == "ok"
@@ -3245,8 +3249,8 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert booz.options["optimizer_backend"] == "host-jax"
-        assert booz.options["least_squares_algorithm"] == "quasi-newton"
-        assert booz._resolve_optimizer_method() == "bfgs"
+        assert booz.options["least_squares_algorithm"] == "lm"
+        assert booz._resolve_optimizer_method() == "lm"
 
     def test_instantiation_applies_jax_default_before_private_ls_option_validation(
         self,
@@ -10036,33 +10040,31 @@ class TestUpstreamFactoryBoozerMatrix:
 
     def test_host_jax_kernel_bundle_reuses_compiled_kernels_same_shape(self):
         """host-jax kernels must compile once per static shape, not per x value."""
-        case = _build_upstream_boozer_penalty_case(
-            UPSTREAM_BOOZER_SURFACE_TYPES[0],
-            UPSTREAM_BOOZER_STELLSYM[0],
-            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
         )
-        bundle = case.jax_boozer._get_penalty_kernel_bundle(
-            case.optimize_G,
-            case.jax_boozer.options["weight_inv_modB"],
-            case.constraint_weight,
+        x0 = jnp.asarray(
+            np.concatenate((booz.surface.get_dofs(), [-0.3, 1.0])),
+            dtype=jnp.float64,
         )
-        coil_set_spec = case.jax_boozer.coil_set_spec
-        x0 = jnp.asarray(case.x, dtype=jnp.float64)
         x1 = x0 + jnp.asarray(1e-6, dtype=jnp.float64)
 
-        bundle.value_and_grad(x0, coil_set_spec)
+        bundle.value_and_grad(x0, booz.coil_set_spec)
         value_grad_cache = bundle.value_and_grad._cache_size()
-        bundle.residual(x0, coil_set_spec)
+        bundle.residual(x0, booz.coil_set_spec)
         residual_cache = bundle.residual._cache_size()
-        bundle.jacobian(x0, coil_set_spec)
+        bundle.jacobian(x0, booz.coil_set_spec)
         jacobian_cache = bundle.jacobian._cache_size()
-        bundle.factor_apply(x0, x0, coil_set_spec)
+        bundle.factor_apply(x0, x0, booz.coil_set_spec)
         factor_apply_cache = bundle.factor_apply._cache_size()
 
-        bundle.value_and_grad(x1, coil_set_spec)
-        bundle.residual(x1, coil_set_spec)
-        bundle.jacobian(x1, coil_set_spec)
-        bundle.factor_apply(x1, x1, coil_set_spec)
+        bundle.value_and_grad(x1, booz.coil_set_spec)
+        bundle.residual(x1, booz.coil_set_spec)
+        bundle.jacobian(x1, booz.coil_set_spec)
+        bundle.factor_apply(x1, x1, booz.coil_set_spec)
 
         assert value_grad_cache == 1
         assert residual_cache == 1
@@ -10190,8 +10192,27 @@ class TestUpstreamFactoryBoozerMatrix:
 
         assert refreshed_bundle is not bundle
 
+    def test_host_jax_kernel_bundle_rebuilds_on_solver_static_option_change(self):
+        """Solver options captured in kernels must split the bundle signature."""
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+
+        booz.options["newton_stab"] = 1e-4
+        refreshed_bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+
+        assert refreshed_bundle is not bundle
+
     def test_host_jax_kernel_bundle_compiles_once_per_static_signature(self):
         """New static signatures get one new executable per bounded kernel."""
+        jax.clear_caches()
         shape_cache_sizes = []
         for mpol in (1, 2):
             booz = _make_mock_boozer_surface(mpol=mpol, ntor=1)
@@ -10257,6 +10278,176 @@ class TestUpstreamFactoryBoozerMatrix:
         assert status1.success.shape == ()
         assert linear_solve_cache == 1
         assert bundle.linear_solve._cache_size() == linear_solve_cache
+
+    def test_solve_boozer_state_helper_uses_host_runner_and_staged_kernels(
+        self,
+        monkeypatch,
+    ):
+        """Host solve helper keeps iteration on host and final state in kernels."""
+        calls = []
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+        coil_set_spec = object()
+
+        def residual(x, dynamic_state):
+            calls.append(("residual", dynamic_state, tuple(np.asarray(x))))
+            return jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+
+        def jacobian(x, dynamic_state):
+            calls.append(("jacobian", dynamic_state, tuple(np.asarray(x))))
+            return jnp.asarray(
+                [[1.0, 0.0, 2.0, 0.0], [0.0, 3.0, 0.0, 4.0]],
+                dtype=jnp.float64,
+            )
+
+        def jacobian_block(x, tangent_block, dynamic_state):
+            calls.append(("jacobian_block", dynamic_state))
+            return jnp.asarray(tangent_block, dtype=jnp.float64).T[:2]
+
+        def least_squares_state(x, dynamic_state):
+            calls.append(("least_squares_state", dynamic_state))
+            return {
+                "residual": residual(x, dynamic_state),
+                "residual_jacobian": jacobian(x, dynamic_state),
+                "grad": jnp.zeros_like(x),
+                "hessian": jnp.eye(x.shape[0], dtype=x.dtype),
+                "fun": jnp.asarray(0.0, dtype=x.dtype),
+                "grad_norm_inf": jnp.asarray(0.0, dtype=x.dtype),
+            }
+
+        def linear_solve(x, rhs, dynamic_state):
+            calls.append(("linear_solve", dynamic_state, tuple(np.asarray(rhs))))
+            return rhs, _mock_linear_solve_status(True)
+
+        bundle = _bsj.BoozerKernelBundle(
+            objective=lambda x, dynamic_state: jnp.asarray(0.0, dtype=x.dtype),
+            residual=residual,
+            jacobian=jacobian,
+            jacobian_block=jacobian_block,
+            least_squares_state=least_squares_state,
+            linear_solve=linear_solve,
+            factor_apply=lambda x, vector, dynamic_state: vector,
+            value_and_grad=lambda x, dynamic_state: (
+                jnp.asarray(0.0, dtype=x.dtype),
+                jnp.zeros_like(x),
+            ),
+        )
+
+        def fake_host_jax_least_squares(
+            residual_fn,
+            initial_x,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback,
+            args,
+            state_fn,
+            jacobian_block_fn,
+        ):
+            calls.append(("runner", method, tol, maxiter, options, progress_callback))
+            assert residual_fn is residual
+            assert state_fn is least_squares_state
+            assert jacobian_block_fn is jacobian_block
+            assert args == (coil_set_spec,)
+            return types.SimpleNamespace(
+                x=initial_x,
+                success=True,
+                fun=jnp.asarray(0.5, dtype=initial_x.dtype),
+                nit=3,
+                status=0,
+                message="converged",
+            )
+
+        monkeypatch.setattr(_bsj, "host_jax_least_squares", fake_host_jax_least_squares)
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=coil_set_spec,
+            optimize_G=True,
+            weight_inv_modB=True,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={"materialize_dense_linearization": True},
+        )
+
+        assert result.success is True
+        assert result.failure_reason is None
+        assert result.solved_state.weight_inv_modB is True
+        assert result.linearization_factors["hessian"].shape == (4, 4)
+        assert result.convergence_metadata["nonlinear_success"] is True
+        assert result.convergence_metadata["linear_solve_success"] is True
+        assert [call[0] for call in calls] == [
+            "runner",
+            "residual",
+            "jacobian",
+            "linear_solve",
+        ]
+
+    def test_solve_boozer_state_helper_reports_linear_solve_failure(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+
+        def residual(x, dynamic_state):
+            return jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+
+        def jacobian(x, dynamic_state):
+            return jnp.asarray(
+                [[1.0, 0.0, 2.0, 0.0], [0.0, 3.0, 0.0, 4.0]],
+                dtype=jnp.float64,
+            )
+
+        def linear_solve(x, rhs, dynamic_state):
+            return rhs, _mock_linear_solve_status(False)
+
+        bundle = _bsj.BoozerKernelBundle(
+            objective=lambda x, dynamic_state: jnp.asarray(0.0, dtype=x.dtype),
+            residual=residual,
+            jacobian=jacobian,
+            jacobian_block=lambda x, tangent_block, dynamic_state: tangent_block.T[:2],
+            least_squares_state=lambda x, dynamic_state: {},
+            linear_solve=linear_solve,
+            factor_apply=lambda x, vector, dynamic_state: vector,
+            value_and_grad=lambda x, dynamic_state: (
+                jnp.asarray(0.0, dtype=x.dtype),
+                jnp.zeros_like(x),
+            ),
+        )
+
+        def fake_host_jax_least_squares(*args, **kwargs):
+            return types.SimpleNamespace(
+                x=x0,
+                success=True,
+                fun=jnp.asarray(0.5, dtype=x0.dtype),
+                nit=3,
+                status=0,
+                message="converged",
+            )
+
+        monkeypatch.setattr(_bsj, "host_jax_least_squares", fake_host_jax_least_squares)
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=object(),
+            optimize_G=True,
+            weight_inv_modB=False,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={},
+        )
+
+        assert result.success is False
+        assert result.failure_reason == (
+            "linear solve failed after host-controlled Boozer solve"
+        )
+        assert result.convergence_metadata["nonlinear_success"] is True
+        assert result.convergence_metadata["linear_solve_success"] is False
 
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
@@ -10963,6 +11154,43 @@ class TestBuildBoozerSurfaceRuntimeState:
 
         solved_state = booz.get_solved_runtime_state()
         _assert_runtime_state_schema(solved_state, _SOLVED_RUNTIME_STATE_FIELDS)
+        np.testing.assert_allclose(np.asarray(solved_state.sdofs), solved_dofs)
+        np.testing.assert_allclose(np.asarray(solved_state.iota), 0.23)
+        np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
+        with pytest.raises(RuntimeError, match="no valid adjoint state"):
+            booz.get_adjoint_runtime_state()
+
+    def test_value_only_state_can_install_traceable_hessian_linearization(self):
+        """Target-lane warm starts need operator linearization without public VJPs."""
+        s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
+        coils = _make_mock_coils()
+        bs = _MockBiotSavart(coils)
+        label = _PlumbingVolumeLabel(s)
+        solved_dofs = np.asarray(s.get_dofs(), dtype=np.float64)
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            s,
+            label,
+            targetlabel=0.1,
+            constraint_weight=1.0,
+        )
+        booz.install_value_only_solved_runtime_state(
+            sdofs=jnp.asarray(solved_dofs, dtype=jnp.float64),
+            iota=jnp.asarray(0.23, dtype=jnp.float64),
+            G=jnp.asarray(1.7, dtype=jnp.float64),
+        )
+        token_before = booz._traceable_solve_state_token
+
+        res = booz.install_traceable_hessian_linearization_for_value_only_state()
+
+        assert res["linearization_kind"] == "hessian"
+        assert res["linear_solve_backend"] == "operator"
+        assert res["dense_linear_solve_factors_available"] is False
+        assert res["adjoint_linear_solve_available"] is False
+        assert booz.need_to_run_code is False
+        assert booz._traceable_solve_state_token != token_before
+        solved_state = booz.get_solved_runtime_state()
         np.testing.assert_allclose(np.asarray(solved_state.sdofs), solved_dofs)
         np.testing.assert_allclose(np.asarray(solved_state.iota), 0.23)
         np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)

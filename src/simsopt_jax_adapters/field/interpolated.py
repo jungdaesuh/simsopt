@@ -168,7 +168,6 @@ class InterpolatedFieldJAX(MagneticField):
         self.extrapolate = bool(extrapolate)
         self.nfp = int(nfp)
         self.stellsym = bool(stellsym)
-        self._skip_callable = skip
         self._B_cyl_cache = None
         self._B_cyl_valid = False
         self._GradAbsB_cyl_cache = None

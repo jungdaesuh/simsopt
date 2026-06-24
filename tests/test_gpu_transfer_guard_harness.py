@@ -8,10 +8,15 @@ import sys
 
 import pytest
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+while str(REPO_ROOT) in sys.path:
+    sys.path.remove(str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
+sys.modules.pop("scripts", None)
+
 from scripts import jax_gpu_failed_stale_tests_signoff as _SIGNOFF
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 STALE_SIGNOFF_SCRIPT = REPO_ROOT / "scripts" / "jax_gpu_failed_stale_tests_signoff.py"
 GPU_PARITY_SCRIPT = REPO_ROOT / "scripts" / "run_gpu_parity.sh"
 FULL_SUITE_TRANSFER_GUARD_ENV_VARS = (
