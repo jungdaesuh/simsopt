@@ -234,6 +234,40 @@ class ValidateCliArgsTest(unittest.TestCase):
         )
         sse.validate_single_stage_finite_build_cli_args(args)  # must not raise
 
+    def test_alpha_warm_start_without_consumer_raises(self):
+        args = _finite_build_args(
+            single_stage_finite_build_field=True,
+            single_stage_pack_rotation_fold_weight=0.0,
+            single_stage_rotation_aware_curvature_cap=False,
+            single_stage_rotation_aware_alpha_warm_start=True,
+        )
+        with self.assertRaisesRegex(ValueError, "requires a freed pack .*alpha"):
+            sse.validate_single_stage_finite_build_cli_args(args)
+
+    def test_alpha_warm_start_with_fold_consumer_passes(self):
+        args = _finite_build_args(
+            single_stage_finite_build_field=True,
+            single_stage_pack_rotation_fold_weight=10.0,
+            single_stage_rotation_aware_alpha_warm_start=True,
+        )
+        sse.validate_single_stage_finite_build_cli_args(args)  # must not raise
+
+    def test_alpha_warm_start_with_cap_requires_fold_via_cap_rule(self):
+        # The rotation-aware cap cannot be the SOLE consumer that enables the
+        # warm-start: cap already requires fold > 0, so cap-without-fold raises the
+        # cap rule first (the warm-start guard's necessary condition is fold > 0).
+        args = _finite_build_args(
+            single_stage_finite_build_field=True,
+            single_stage_pack_rotation_fold_weight=0.0,
+            single_stage_rotation_aware_curvature_cap=True,
+            single_stage_rotation_aware_alpha_warm_start=True,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-rotation-aware-curvature-cap requires",
+        ):
+            sse.validate_single_stage_finite_build_cli_args(args)
+
     def test_all_levers_off_passes(self):
         sse.validate_single_stage_finite_build_cli_args(_finite_build_args())
 

@@ -1700,6 +1700,9 @@ def validate_single_stage_pack_rotation_field_cli_args(args) -> None:
     rotation_aware_cap = bool(
         getattr(args, "single_stage_rotation_aware_curvature_cap", False)
     )
+    rotation_aware_alpha_warm_start = bool(
+        getattr(args, "single_stage_rotation_aware_alpha_warm_start", False)
+    )
     if finite_build_field and not finite_build:
         raise ValueError("--single-stage-finite-build-field requires --finite-build.")
     if finite_build_field:
@@ -1726,6 +1729,16 @@ def validate_single_stage_pack_rotation_field_cli_args(args) -> None:
         raise ValueError(
             "--single-stage-rotation-aware-curvature-cap requires "
             "--single-stage-pack-rotation-fold-weight > 0."
+        )
+    if rotation_aware_alpha_warm_start and not fold_weight > 0.0:
+        # The alpha warm-start seeds the pack twist thin-side-into-bend, so it can
+        # only act when the pack rotation is freed. fold > 0 is the necessary
+        # condition that frees the alpha DOFs (the rotation-aware cap rule above
+        # already enforces fold > 0, so cap-without-fold raises there first).
+        raise ValueError(
+            "--single-stage-rotation-aware-alpha-warm-start requires a freed pack "
+            "rotation (--single-stage-pack-rotation-fold-weight > 0) so the alpha "
+            "DOFs exist."
         )
 
 
@@ -17286,6 +17299,13 @@ if __name__ == "__main__":
     SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_APPLIED = False
     SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_INV_M = None
     SINGLE_STAGE_ROTATION_AWARE_CURVATURE_EXCESS = None
+    # Rotation-aware alpha warm-start provenance (default off; the warm-start apply path
+    # ``rotation_aware_warm_start_alpha_dofs`` is not wired into this driver yet). The results-dict
+    # finalization reads these unconditionally, so they must be bound here next to the CURVATURE_CAP
+    # siblings. If the warm-start seed is ever applied, set APPLIED=True / MAX_ABS_DEG=<|alpha| peak,
+    # deg> at that apply site.
+    SINGLE_STAGE_ROTATION_AWARE_ALPHA_WARM_START_APPLIED = False
+    SINGLE_STAGE_ROTATION_AWARE_ALPHA_WARM_START_MAX_ABS_DEG = None
     if (
         SINGLE_STAGE_ROTATION_AWARE_CURVATURE_CAP_REQUESTED
         and Jfold is not None
