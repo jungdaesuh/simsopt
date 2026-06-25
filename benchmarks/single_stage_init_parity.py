@@ -1895,9 +1895,8 @@ def _require_supported_single_stage_seed_contract(args: argparse.Namespace) -> N
             "single_stage_init_parity high-resolution outer runs require "
             "--warm-start-run-dir from a validated continuation donor; "
             "--jax-runtime-seed-spec alone is only a runtime startup guess and "
-            "does not prove continuation-branch preservation. Build the donor with "
-            "examples/single_stage_optimization/SINGLE_STAGE/"
-            "run_single_stage_continuation.py. "
+            "does not prove continuation-branch preservation. Provide a donor "
+            "run directory from an external validated continuation workflow. "
             f"Got mpol={int(args.mpol)}, ntor={int(args.ntor)}, "
             f"maxiter={int(args.maxiter)}."
         )

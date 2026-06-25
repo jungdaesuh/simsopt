@@ -69,12 +69,10 @@ from benchmarks.single_stage_objective_eval import (  # noqa: E402
 )
 from benchmarks.single_stage_smoke_fixture import (  # noqa: E402
     DEFAULT_CONSTRAINT_WEIGHT,
+    DEFAULT_EQUILIBRIA_DIR,
 )
 from benchmarks.validation_ladder_contract import (  # noqa: E402
     parity_ladder_tolerances,
-)
-from examples.single_stage_optimization.equilibria_paths import (  # noqa: E402
-    DEFAULT_EQUILIBRIA_DIR,
 )
 
 # ``ru_maxrss`` is reported in KiB on Linux and in bytes on macOS.  The matrix runs

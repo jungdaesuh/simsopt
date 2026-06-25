@@ -10,11 +10,11 @@ from benchmarks.single_stage_smoke_defaults import (
     DEFAULT_PLASMA_SURF_FILENAME,
     DEFAULT_STAGE2_BS_PATH,
 )
-from examples.single_stage_optimization.equilibria_paths import (
-    DEFAULT_EQUILIBRIA_DIR,
-    resolve_equilibrium_path as _resolve_equilibrium_path,
-)
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
+DEFAULT_EQUILIBRIA_DIR = EXAMPLE_ROOT / "equilibria"
+WORKSPACE_EQUILIBRIA_DIR = REPO_ROOT.parent / "DATABASE" / "EQUILIBRIA"
 DEFAULT_SMOKE_NPHI = 31
 DEFAULT_SMOKE_NTHETA = 16
 DEFAULT_SMOKE_MPOL = 2
@@ -51,11 +51,17 @@ def resolve_equilibrium_path(
     equilibrium_path: str | Path | None = None,
 ) -> Path:
     """Resolve the equilibrium file for the real single-stage seed family."""
-    return _resolve_equilibrium_path(
-        plasma_surf_filename=plasma_surf_filename,
-        equilibria_dir=equilibria_dir,
-        equilibrium_path=equilibrium_path,
+    if equilibrium_path is not None:
+        return Path(equilibrium_path)
+
+    candidates = (
+        Path(equilibria_dir) / plasma_surf_filename,
+        WORKSPACE_EQUILIBRIA_DIR / plasma_surf_filename,
     )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def build_real_single_stage_init_fixture(
