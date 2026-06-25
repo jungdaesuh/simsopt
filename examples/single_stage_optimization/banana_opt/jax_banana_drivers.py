@@ -8,6 +8,7 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
+from ruamel.yaml import YAML
 from scipy.optimize import minimize
 
 from simsopt._core.derivative import derivative_dec
@@ -134,7 +135,13 @@ def ensure_writable_outputs(paths: BananaDriverPaths, *, overwrite: bool) -> Non
 def read_banana_dofs(path: str | Path | None) -> dict[str, float]:
     if path is None:
         return dict(DEFAULT_BANANA_DOFS)
-    rows = np.loadtxt(path, dtype=str, ndmin=2, comments="#")
+    dofs_path = Path(path)
+    if dofs_path.suffix in {".yaml", ".yml"}:
+        loaded = YAML(typ="safe").load(dofs_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise TypeError(f"Banana DOF YAML must contain a mapping: {dofs_path}")
+        return {str(key): float(value) for key, value in loaded.items()}
+    rows = np.loadtxt(dofs_path, dtype=str, ndmin=2, comments="#")
     return {str(key): float(value) for key, value in rows}
 
 

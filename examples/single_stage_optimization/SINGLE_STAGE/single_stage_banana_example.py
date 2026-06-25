@@ -240,6 +240,24 @@ def _run_dir_seed_paths(run_dir: Path) -> SeedPaths:
     )
 
 
+def _validate_seed_artifacts(seed_paths: SeedPaths) -> SeedPaths:
+    missing = [
+        path
+        for path in (
+            seed_paths.biotsavart,
+            seed_paths.surface,
+            seed_paths.boozersurface,
+        )
+        if path is not None and not path.exists()
+    ]
+    if missing:
+        joined = ", ".join(str(path) for path in missing)
+        raise FileNotFoundError(
+            f"Cannot compile single-stage seed spec; missing Stage 2 artifact(s): {joined}"
+        )
+    return seed_paths
+
+
 def _seed_paths_from_args(args: argparse.Namespace) -> SeedPaths | None:
     if args.stage2_bs_path is not None:
         return SeedPaths(None, None, Path(args.stage2_bs_path))
@@ -262,6 +280,7 @@ def _write_seed_spec(args: argparse.Namespace) -> None:
         if args.stage2_bs_path is not None
         else _run_dir_seed_paths(Path(args.warm_start_run_dir))
     )
+    seed_paths = _validate_seed_artifacts(seed_paths)
     write_json(
         Path(args.jax_runtime_seed_spec),
         {
