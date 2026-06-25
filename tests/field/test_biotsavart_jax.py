@@ -931,6 +931,73 @@ class TestBiotSavartJaxCppParity:
             atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
         )
 
+    def test_d2B_contracted_helper_matches_dense_hessian_contraction(self, monkeypatch):
+        """Private d2B contraction matches the C++ dense-Hessian oracle.
+
+        Oracle: C++ reference symbol ``simsoptpp::BiotSavart::d2B_by_dXdX``
+        accessed through ``simsopt.field.biotsavart.BiotSavart.d2B_by_dXdX``
+        (acceptable oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``).
+        Lane: ``derivative-heavy`` second-derivative tolerances from the
+        validation-ladder SSOT.
+        """
+        from simsopt_jax.core import biotsavart as core_bs
+
+        bs, points_np, gammas_np, gammadashs_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        points_np = points_np[:3]
+        bs.set_points(points_np)
+        cxx_d2B = bs.d2B_by_dXdX()
+        points = jnp.asarray(points_np, dtype=jnp.float64)
+        gammas = jnp.asarray(gammas_np, dtype=jnp.float64)
+        gammadashs = jnp.asarray(gammadashs_np, dtype=jnp.float64)
+        currents = jnp.asarray(currents_np, dtype=jnp.float64)
+        left_directions = jnp.asarray(
+            (
+                ((0.8, -0.1, 0.3), (-0.2, 0.5, 0.4)),
+                ((0.1, 0.9, -0.4), (0.6, -0.3, 0.2)),
+                ((-0.5, 0.7, 0.1), (0.3, 0.2, -0.8)),
+            ),
+            dtype=jnp.float64,
+        )
+        right_directions = jnp.asarray(
+            (
+                ((-0.3, 0.4, 0.7), (0.5, 0.1, -0.6)),
+                ((0.2, -0.8, 0.3), (-0.4, 0.6, 0.5)),
+                ((0.7, 0.2, -0.1), (-0.6, -0.2, 0.4)),
+            ),
+            dtype=jnp.float64,
+        )
+
+        for tuning in ((0, 0, 0), (3, 5, 2)):
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: tuning)
+            core_bs.invalidate_kernel_cache()
+            expected = jnp.einsum(
+                "pjkl,paj,pbk->pabl",
+                jnp.asarray(cxx_d2B, dtype=jnp.float64),
+                left_directions,
+                right_directions,
+                precision=jax.lax.Precision.HIGHEST,
+            )
+            actual = core_bs._biot_savart_d2B_by_dXdX_contract(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+                left_directions,
+                right_directions,
+            )
+            np.testing.assert_allclose(
+                np.asarray(actual),
+                np.asarray(expected),
+                rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+            )
+
+        assert core_bs._make_d2B_contracted_kernel.cache_info().currsize > 0
+        core_bs.invalidate_kernel_cache()
+        assert core_bs._make_d2B_contracted_kernel.cache_info().currsize == 0
+
 
 class TestBiotSavartJaxCppCoilCurrentParity:
     """Compare JAX coil-current ladder against the C++ simsoptpp lists.
@@ -1329,70 +1396,6 @@ class TestBiotSavartJaxChunkedSelfConsistency:
                 rtol=1e-12,
                 atol=1e-14,
             )
-
-    def test_d2B_contracted_helper_matches_dense_hessian_contraction(self, monkeypatch):
-        from simsopt_jax.core import biotsavart as core_bs
-
-        gammas, gammadashs, currents = _make_shifted_circular_coils(4, R=0.74, nquad=14)
-        points = jnp.asarray(
-            (
-                (0.18, -0.12, 0.07),
-                (-0.21, 0.16, -0.05),
-                (0.09, 0.20, 0.11),
-            ),
-            dtype=jnp.float64,
-        )
-        left_directions = jnp.asarray(
-            (
-                ((0.8, -0.1, 0.3), (-0.2, 0.5, 0.4)),
-                ((0.1, 0.9, -0.4), (0.6, -0.3, 0.2)),
-                ((-0.5, 0.7, 0.1), (0.3, 0.2, -0.8)),
-            ),
-            dtype=jnp.float64,
-        )
-        right_directions = jnp.asarray(
-            (
-                ((-0.3, 0.4, 0.7), (0.5, 0.1, -0.6)),
-                ((0.2, -0.8, 0.3), (-0.4, 0.6, 0.5)),
-                ((0.7, 0.2, -0.1), (-0.6, -0.2, 0.4)),
-            ),
-            dtype=jnp.float64,
-        )
-
-        for tuning in ((0, 0, 0), (3, 5, 2)):
-            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: tuning)
-            core_bs.invalidate_kernel_cache()
-            dense_d2B = core_bs.biot_savart_d2B_by_dXdX(
-                points,
-                gammas,
-                gammadashs,
-                currents,
-            )
-            expected = jnp.einsum(
-                "pjkl,paj,pbk->pabl",
-                dense_d2B,
-                left_directions,
-                right_directions,
-                precision=jax.lax.Precision.HIGHEST,
-            )
-            actual = core_bs._biot_savart_d2B_by_dXdX_contract(
-                points,
-                gammas,
-                gammadashs,
-                currents,
-                left_directions,
-                right_directions,
-            )
-            np.testing.assert_allclose(
-                np.asarray(actual),
-                np.asarray(expected),
-                rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
-                atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
-            )
-
-        assert core_bs._make_d2B_contracted_kernel.cache_info().currsize > 0
-        core_bs.invalidate_kernel_cache()
-        assert core_bs._make_d2B_contracted_kernel.cache_info().currsize == 0
 
     def test_kernel_factories_do_not_key_equivalent_kernels_by_platform(self):
         from simsopt_jax.core import biotsavart as core_bs

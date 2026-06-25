@@ -261,9 +261,9 @@ Tasks:
       Hessian API: `_biot_savart_d2B_by_dXdX_contract(...)` contracts
       point-aligned left/right directions through a private JVP-based kernel and
       is not exported from `__all__`.
-- [x] Compare against the dense result at derivative-heavy second-derivative
-      tolerances with
-      `TestBiotSavartJaxChunkedSelfConsistency::test_d2B_contracted_helper_matches_dense_hessian_contraction`.
+- [x] Compare against the C++ dense-Hessian oracle at derivative-heavy
+      second-derivative tolerances with
+      `TestBiotSavartJaxCppParity::test_d2B_contracted_helper_matches_dense_hessian_contraction`.
 
 Exit criteria:
 
@@ -478,10 +478,10 @@ mesh.
       public Hessian API unchanged, is cache-keyed on the existing
       coil/quadrature/point tuning tuple, and is cleared by
       `invalidate_kernel_cache()`.
-- [x] Phase 5 dense-oracle regression added and passed:
-      `TestBiotSavartJaxChunkedSelfConsistency::test_d2B_contracted_helper_matches_dense_hessian_contraction`.
+- [x] Phase 5 C++ dense-Hessian oracle regression added and passed:
+      `TestBiotSavartJaxCppParity::test_d2B_contracted_helper_matches_dense_hessian_contraction`.
       It compares the helper against
-      `einsum("pjkl,paj,pbk->pabl", dense_d2B, left, right)` under dense and
+      `einsum("pjkl,paj,pbk->pabl", cxx_d2B, left, right)` under dense and
       point-chunked tuning, using the validation-ladder second-derivative
       tolerances.
 - [x] Phase 5 measurement artifact captured:
