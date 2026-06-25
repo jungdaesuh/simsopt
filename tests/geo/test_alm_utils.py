@@ -1354,6 +1354,103 @@ class AlmDualUpdateTransitionTests(unittest.TestCase):
         self.assertEqual(result.update_stationarity_tol, 1.0e-2)
 
 
+class AlmRestoreBestFeasibleHardChannelTests(unittest.TestCase):
+    def test_restore_triggers_on_hard_infeasible_final_despite_surrogate_feasible(self):
+        """Restore must reclaim best_feasible when the final iterate is HARD-infeasible
+        even though its surrogate channel reads feasible. Guards the certified-feasibility
+        leak where the restore gate keyed on the surrogate instead of the hard channel.
+        Fails against the pre-fix behavior (surrogate violation 0.0 <= tol -> no restore).
+        """
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1.0e-2,
+            stationarity_tol=1.0e-2,
+        )
+        # Final iterate: surrogate channel feasible (feasibility_values=0) but the HARD
+        # channel is violated (hard_violation_values=0.5 > feasibility_tol). Its objective
+        # (1.0) is better than best_feasible (2.0), so the objective-based restore reason
+        # cannot fire -- only a hard-channel feasibility check triggers the restore.
+        final_eval = {
+            "total": 1.0,
+            "constraint_values": np.array([0.5]),
+            "feasibility_values": np.array([0.0]),
+            "dual_update_values": np.array([0.0]),
+            "hard_signed_constraint_values": np.array([0.5]),
+            "hard_violation_values": np.array([0.5]),
+            "surrogate_signed_constraint_values": np.array([0.0]),
+            "hard_dual_update_values": np.array([0.5]),
+        }
+        best_feasible = module.ALMFeasibleIncumbent(
+            x=np.array([1.0]),
+            evaluation={"total": 2.0},
+            multipliers=np.array([0.0]),
+            penalty=1.0,
+            inner_result=None,
+        )
+
+        restored = module._restore_alm_best_feasible_on_failure(
+            current_x=np.array([2.0]),
+            best_feasible=best_feasible,
+            settings=settings,
+            restore_incumbent_state_fn=None,
+            evaluation=final_eval,
+            multipliers_state=np.array([0.0]),
+            penalty_state=1.0,
+            inner_result=None,
+        )
+
+        self.assertTrue(restored.restored_best_feasible)
+        self.assertIn(
+            "final_iterate_infeasible", restored.restored_best_feasible_reason
+        )
+        # The hard-feasible incumbent is restored, not the hard-infeasible final iterate.
+        self.assertEqual(list(restored.x), [1.0])
+
+    def test_no_restore_when_final_is_hard_feasible_and_better(self):
+        """Control: a hard-feasible final iterate with a better objective is kept as-is,
+        confirming the restore gate is not unconditionally firing."""
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1.0e-2,
+            stationarity_tol=1.0e-2,
+        )
+        final_eval = {
+            "total": 1.0,
+            "constraint_values": np.array([0.0]),
+            "feasibility_values": np.array([0.0]),
+            "dual_update_values": np.array([0.0]),
+            "hard_signed_constraint_values": np.array([0.0]),
+            "hard_violation_values": np.array([0.0]),
+            "surrogate_signed_constraint_values": np.array([0.0]),
+            "hard_dual_update_values": np.array([0.0]),
+        }
+        best_feasible = module.ALMFeasibleIncumbent(
+            x=np.array([1.0]),
+            evaluation={"total": 2.0},
+            multipliers=np.array([0.0]),
+            penalty=1.0,
+            inner_result=None,
+        )
+
+        restored = module._restore_alm_best_feasible_on_failure(
+            current_x=np.array([2.0]),
+            best_feasible=best_feasible,
+            settings=settings,
+            restore_incumbent_state_fn=None,
+            evaluation=final_eval,
+            multipliers_state=np.array([0.0]),
+            penalty_state=1.0,
+            inner_result=None,
+        )
+
+        self.assertFalse(restored.restored_best_feasible)
+        self.assertEqual(list(restored.x), [2.0])
+
+
 class AlmPenaltyCapTerminationTests(unittest.TestCase):
     def test_handle_alm_penalty_cap_termination_forwards_all_keyword_arguments(self):
         module = load_alm_utils_module()
@@ -1396,10 +1493,6 @@ class AlmPenaltyCapTerminationTests(unittest.TestCase):
             "penalty_cap_reached_restored_best_feasible",
         )
         self.assertIs(captured["evaluation"], penalty_update_state.evaluation)
-        self.assertEqual(
-            captured["final_max_feasibility_violation"],
-            penalty_update_state.max_violation,
-        )
         # Message-prefix substring guards (catches accidental string drift)
         self.assertIn("ALM stopped after the requested penalty update", captured["message_prefix"])
         self.assertIn("1.000e+09", captured["message_prefix"])

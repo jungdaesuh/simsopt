@@ -3313,8 +3313,13 @@ def _restore_alm_best_feasible_on_failure(
     multipliers_state: np.ndarray,
     penalty_state: float,
     inner_result,
-    final_max_feasibility_violation: float,
 ) -> SimpleNamespace:
+    """Restore the best hard-feasible incumbent when the final iterate is
+    hard-infeasible or has a worse objective. Final-iterate feasibility is
+    judged on the HARD (certified) channel computed from ``evaluation``, never
+    the surrogate channel, which can read feasible while the design is
+    hard-infeasible.
+    """
     restored_best_feasible = False
     restored_best_feasible_reason = None
     restored_evaluation = evaluation
@@ -3325,7 +3330,13 @@ def _restore_alm_best_feasible_on_failure(
 
     restore_reasons: list[str] = []
     if best_feasible is not None:
-        if final_max_feasibility_violation > settings.feasibility_tol:
+        final_hard_max_violation = _constraint_routing_state(
+            evaluation,
+            multipliers_state,
+            penalty_state,
+            settings.feasibility_tol,
+        ).hard_max_violation
+        if final_hard_max_violation > settings.feasibility_tol:
             restore_reasons.append("final_iterate_infeasible")
         if (
             _incumbent_objective_value(restored_evaluation)
@@ -3372,7 +3383,6 @@ def _build_alm_failure_result_with_optional_restore(
     multipliers_state: np.ndarray,
     penalty_state: float,
     inner_result,
-    final_max_feasibility_violation: float,
     restored_message_prefix: str | None = None,
     restored_termination_reason: str | None = None,
 ) -> SimpleNamespace:
@@ -3385,7 +3395,6 @@ def _build_alm_failure_result_with_optional_restore(
         multipliers_state=multipliers_state,
         penalty_state=penalty_state,
         inner_result=inner_result,
-        final_max_feasibility_violation=final_max_feasibility_violation,
     )
     restored_routing_state = _constraint_routing_state(
         restored_state.evaluation,
@@ -3533,9 +3542,6 @@ def _handle_alm_penalty_cap_termination(
         multipliers_state=multipliers,
         penalty_state=penalty,
         inner_result=result,
-        final_max_feasibility_violation=(
-            penalty_transition.penalty_update_state.max_violation
-        ),
     )
 
 
@@ -4046,7 +4052,6 @@ def _emit_alm_stall_failure_step(
     termination_reason: str,
     message_prefix: str,
     inner_result: object | None,
-    max_feasibility_violation: float,
 ) -> _ALMContinuationStepResult:
     """Emit the snapshot for ``constraints_inactive_stall`` /
     ``signal_mismatch_stall`` arms and finalize the RETURN step result built
@@ -4077,7 +4082,6 @@ def _emit_alm_stall_failure_step(
             multipliers_state=state.multipliers,
             penalty_state=state.penalty,
             inner_result=inner_result,
-            final_max_feasibility_violation=max_feasibility_violation,
         ),
     )
 
@@ -4539,7 +4543,12 @@ def _run_alm_continuation_step(
         stationarity_norm,
     )
 
-    if max_feasibility_violation <= settings.feasibility_tol:
+    # Record best_feasible only on the HARD (certified) channel, never the
+    # surrogate channel: the surrogate can read smoothed-feasible while the
+    # design is hard-infeasible, and best_feasible is later graduated into
+    # phase 2 as a hardware-clean incumbent. Mirrors hard_feasible_strict used
+    # for the converged label.
+    if routing_state.hard_max_violation <= settings.feasibility_tol:
         improves_best_feasible = (
             state.best_feasible is None
             or _incumbent_objective_value(state.final_eval)
@@ -4739,7 +4748,6 @@ def _run_alm_continuation_step(
                     "further stationarity progress"
                 ),
                 inner_result=result,
-                max_feasibility_violation=max_feasibility_violation,
             )
 
     if _dual_update_gate_satisfied(
@@ -4910,7 +4918,6 @@ def _run_alm_continuation_step(
                         "signals repeated without corrective progress"
                     ),
                     inner_result=result,
-                    max_feasibility_violation=max_feasibility_violation,
                 )
             return _emit_alm_penalty_increase_arm(
                 state=state,
@@ -5000,7 +5007,6 @@ def _run_alm_continuation_step(
                     multipliers_state=state.multipliers,
                     penalty_state=state.penalty,
                     inner_result=result,
-                    final_max_feasibility_violation=max_feasibility_violation,
                 ),
             )
         if max_continuations_hit:
@@ -5319,7 +5325,6 @@ def _minimize_alm_impl(
             "(max outer iterations reached)"
         ),
         restored_termination_reason="max_outer_restored_best_feasible",
-        final_max_feasibility_violation=_extract_constraint_state(final_eval)[3],
     )
 
 
