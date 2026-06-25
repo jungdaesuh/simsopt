@@ -4753,11 +4753,13 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
     # Numerical-singularity guard: a backward-stable solve of a singular or
     # near-singular operator still yields a forward-garbage solution that the
     # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
-    # condition estimate (reusing the LU factors, so O(n^2) not a re-factorization)
-    # exceeds the LAPACK rank tolerance 1/(n*eps); a degenerate J^T then fails
-    # closed instead of silently returning a wrong adjoint, while the
-    # well-conditioned production J^T (cond ~ 1e3-1e6) passes with many orders of
-    # margin.
+    # condition estimate exceeds the LAPACK rank tolerance 1/(n*eps); a degenerate
+    # J^T then fails closed instead of silently returning a wrong adjoint, while
+    # the well-conditioned production J^T (cond ~ 1e3-1e6) passes with many orders
+    # of margin.  The cached ``lu_piv`` is reused under jit (Hager-Higham inner
+    # solves, O(n^2)); on the concrete/host path _dense_matrix_condition_estimate
+    # falls to np.linalg.cond (O(n^3)) -- still negligible vs the n-matvec
+    # assembler that already ran (<=0.3x its wall at n~2000).
     nonsingular = _dense_matrix_nonsingular(matrix, lu_piv=lu_piv)
     return solution, status._replace(
         success=(status.success | backward_error_success) & nonsingular

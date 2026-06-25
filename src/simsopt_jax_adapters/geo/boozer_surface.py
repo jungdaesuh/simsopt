@@ -3881,10 +3881,13 @@ def _reprobe_adjoint_availability_with_dense_lu(
     relative-residual gate cannot reach ``linear_solve_tol`` on that squared
     conditioning unless the surface is converged to ~machine precision, so a
     validly-but-loosely-converged surface is falsely flagged adjoint-unavailable
-    -- which blocks ``J()``/``dJ()`` even though ``dJ()``'s actual solver would
-    succeed.  When the dense-LU exact-adjoint opt-in is enabled, ``dJ()`` solves
-    the *un-squared*, well-conditioned ``J^T`` directly; mirror that solver here
-    so availability reflects the path ``dJ()`` will take.
+    -- which blocks ``J()``/``dJ()`` even though the un-squared adjoint solver
+    would succeed.  When the dense-LU exact-adjoint opt-in is enabled, the
+    exact-Jacobian ``dJ()`` path solves the *un-squared*, well-conditioned
+    ``J^T`` directly; mirror that solver here so availability reflects the path
+    ``dJ()`` takes when the dense-LU exact-Jacobian opt-in is active on an
+    exact-Jacobian linearization (not the squared-Hessian linearization this
+    LS-mode caller's own ``dJ()`` would otherwise use).
 
     Returns ``(solution, status, success, probe_backend)``.  Inert -- returns the
     eager result unchanged with ``probe_backend == "least-squares-hessian"`` --
