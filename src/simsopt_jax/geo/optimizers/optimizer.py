@@ -4490,6 +4490,32 @@ def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
+def _dense_matrix_nonsingular(matrix, *, lu_piv=None):
+    """Whether ``matrix`` is numerically nonsingular at the LAPACK rank
+    tolerance: its Hager-Higham 1-norm condition estimate is finite and below
+    ``1 / (n * eps)``.
+
+    A backward-error gate cannot distinguish a well-conditioned solve from a
+    backward-stable-but-forward-garbage solve of a (near-)singular operator
+    (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
+    the solve returns a finite wrong answer with a small residual).  This guard
+    lets a degenerate operator fail closed.  The forward-error *bound*
+    ``cond * residual_rel`` is too conservative for this purpose at large ``n``
+    (the 1-norm condition estimate inflates ~``n``-fold over the 2-norm
+    conditioning, tripping the bound's ``sqrt(eps)`` gate even on an accurate
+    solve), whereas the rank-tolerance reciprocal ``1 / (n * eps)`` (~1e12 at
+    ``n ~ 2000``) cleanly separates the well-conditioned production ``J^T``
+    (cond ~ 1e3-1e6) from a numerically singular one (cond >~ 1e15) with many
+    orders of margin on both sides.
+    """
+    matrix = jnp.asarray(matrix)
+    size = int(matrix.shape[0])
+    eps = float(np.finfo(matrix.dtype).eps)
+    condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
+    threshold = _device_scalar(1.0 / (size * eps), dtype=matrix.dtype)
+    return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+
+
 def _solve_square_vector_system_operator_only(
     matvec,
     rhs,
@@ -4679,7 +4705,14 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
         rhs,
         tol=tol,
     )
-    return solution, status._replace(success=status.success | backward_error_success)
+    # Numerical-singularity guard -- see the LU sibling: a backward-stable solve
+    # of a (near-)singular operator is still forward-garbage, which the
+    # backward-error gate cannot detect.  Fail closed when the condition estimate
+    # exceeds the LAPACK rank tolerance 1/(n*eps).
+    nonsingular = _dense_matrix_nonsingular(matrix)
+    return solution, status._replace(
+        success=(status.success | backward_error_success) & nonsingular
+    )
 
 
 def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
@@ -4717,7 +4750,18 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
         rhs,
         tol=tol,
     )
-    return solution, status._replace(success=status.success | backward_error_success)
+    # Numerical-singularity guard: a backward-stable solve of a singular or
+    # near-singular operator still yields a forward-garbage solution that the
+    # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
+    # condition estimate (reusing the LU factors, so O(n^2) not a re-factorization)
+    # exceeds the LAPACK rank tolerance 1/(n*eps); a degenerate J^T then fails
+    # closed instead of silently returning a wrong adjoint, while the
+    # well-conditioned production J^T (cond ~ 1e3-1e6) passes with many orders of
+    # margin.
+    nonsingular = _dense_matrix_nonsingular(matrix, lu_piv=lu_piv)
+    return solution, status._replace(
+        success=(status.success | backward_error_success) & nonsingular
+    )
 
 
 def _solve_square_array_system_operator_only(

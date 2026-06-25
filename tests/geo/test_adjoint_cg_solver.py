@@ -256,3 +256,44 @@ def test_dense_lu_status_reports_machine_precision_residual():
     )
     assert bool(status.success)
     assert float(np.asarray(status.residual_relative)) < 1e-10
+
+
+def test_dense_lu_status_fails_closed_on_singular_operator():
+    """A singular operator yields a backward-stable but forward-garbage solution;
+    the condition-estimate forward-error guard must fail it closed (success
+    False) instead of letting a wrong adjoint flow into the gradient."""
+    n = 12
+    rng = np.random.default_rng(9)
+    a = rng.standard_normal((n, n))
+    a[:, 0] = a[:, 1]  # exactly rank-deficient: column 0 == column 1
+    matrix = jnp.asarray(a)
+    rhs = jnp.asarray(rng.standard_normal(n))
+
+    def matvec(v):
+        return matrix @ v
+
+    _, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        matvec, rhs, tol=1e-12
+    )
+    assert not bool(status.success)
+
+
+def test_dense_lstsq_status_fails_closed_on_singular_operator():
+    """The lstsq sibling shares the forward-error guard: a singular operator
+    must fail closed there too."""
+    n = 12
+    rng = np.random.default_rng(13)
+    a = rng.standard_normal((n, n))
+    a[:, 2] = a[:, 3]  # exactly rank-deficient
+    matrix = jnp.asarray(a)
+    rhs = jnp.asarray(rng.standard_normal(n))
+
+    def matvec(v):
+        return matrix @ v
+
+    _, status = (
+        _optimizer._solve_dense_square_operator_least_squares_system_with_status(
+            matvec, rhs, tol=1e-12
+        )
+    )
+    assert not bool(status.success)
