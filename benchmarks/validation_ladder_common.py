@@ -102,7 +102,7 @@ _NVCC_RELEASE_RE = re.compile(r"release\s+([^,\s]+)")
 # the SAFE narrow GPU autotune cache only, NOT "all": the broad "all" mode can
 # force nvlink through a container CUDA toolkit vs the wheel-bundled NVIDIA libs
 # (the RunPod cu1290 block). Kept aligned with apply_jax_runtime_config
-# (src/simsopt_jax/backend/runtime.py) and prepare_cuda_gpu_lowres_tests.py.
+# (src/simsopt_jax/backend/runtime.py).
 _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
     _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR: "0",
     _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR: "-1",

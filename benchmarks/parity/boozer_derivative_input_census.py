@@ -1,12 +1,11 @@
 """Bit-identity census schema and helpers for Boozer derivative inputs.
 
-The strict CPU/JAX parity gate at
-``benchmarks/single_stage_init_parity.py:1905`` reports a divergent
-``boozer_solve.pre_newton_state`` whose magnitude (~4.5e-9) is the BFGS
-amplification of a tiny first-step gradient mismatch (~1.6e-15). This module
+The historical strict CPU/JAX parity gate reported divergent
+``boozer_solve.pre_newton_state`` values whose magnitude (~4.5e-9) was the BFGS
+amplification of tiny first-step gradient mismatches (~1.6e-15). This module
 captures the *raw derivative inputs* both backends feed into the Boozer
 residual, hashes the float64 bytes, and reports the first array where they
-differ — the ladder traced in
+differ -- the ladder traced in
 ``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md`` Phase 1.
 
 Diagnostic-only — not on the production import path.
