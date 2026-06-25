@@ -28,6 +28,7 @@ from benchmarks.single_stage_smoke_defaults import (
 )
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_CONSTRAINT_WEIGHT,
+    DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
     DEFAULT_NUM_TF_COILS,
     DEFAULT_SMOKE_MPOL,
@@ -36,9 +37,6 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_SMOKE_NTOR,
     DEFAULT_VOL_TARGET,
     build_real_single_stage_init_fixture,
-)
-from examples.single_stage_optimization.equilibria_paths import (
-    DEFAULT_EQUILIBRIA_DIR,
 )
 
 # ``main()`` selects the residual kind via ``boozer_type[stage]`` where
