@@ -476,6 +476,114 @@ class IotaProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class BandShearLoad:
+    """How a realized ι(r) profile sweeps the low-order rational ladder in a band.
+
+    Read off an existing :class:`IotaProfile` (no tracing). ``max_abs_shear`` is the
+    largest |Δι/Δlabel| over band-adjacent samples (None when fewer than two samples
+    fall in the band, so there is no pair to difference); ``low_order_count`` is the
+    number of in-band realized low-order (q ≤ cutoff) crossings, counted per bracket
+    (a conservative upper bound on distinct island chains — a profile pinned flat on
+    one rational contributes one count per on-resonance sample);
+    ``min_low_order_distance`` is how close the nearest in-band sample sits to any
+    such rational (None when the band holds no samples). Lower shear and count and
+    larger distance mean a flatter profile parked away from the dangerous resonances.
+    """
+
+    max_abs_shear: float | None
+    low_order_count: int
+    min_low_order_distance: float | None
+    in_band_sample_count: int
+
+
+def band_shear_load(
+    profile: IotaProfile,
+    *,
+    band: tuple[float, float],
+    max_low_order_denominator: int,
+) -> BandShearLoad:
+    """Summarize how ``profile`` sweeps low-order rationals inside a closed ι band.
+
+    ``band`` is the physical operating window ``(ι_lo, ι_hi)``; samples outside it
+    are ignored because the full-torus winding carries an integer charting offset
+    near the axis (an inner sample can read ι≈1.x) that is not physical edge shear.
+    Low-order resonances are reduced fractions p/q with 2 ≤ q ≤
+    ``max_low_order_denominator``. Crossings are taken from
+    :meth:`IotaProfile.all_rational_crossings` (every integer branch) and kept only
+    when the realized branch value ``crossing.iota`` falls in the band, so a near-axis
+    n+p/q branch outside the band is excluded rather than miscounted.
+    """
+
+    band_lower, band_upper = float(band[0]), float(band[1])
+    if not (isfinite(band_lower) and isfinite(band_upper)) or band_lower >= band_upper:
+        raise ValueError("band must satisfy finite lower < upper")
+    max_q = int(max_low_order_denominator)
+    if max_q < 2:
+        raise ValueError("max_low_order_denominator must be at least 2")
+
+    # Both the shear difference and all_rational_crossings' sign-change brackets
+    # presuppose radially-ordered samples (so "adjacent" means radially adjacent).
+    # sample_iota_profile already emits sorted samples; sort defensively here so a
+    # hand-built profile still yields order-independent shear and crossing counts.
+    ordered = IotaProfile(
+        axis_r=profile.axis_r,
+        axis_z=profile.axis_z,
+        samples=tuple(sorted(profile.samples, key=lambda sample: sample.radial_label)),
+    )
+
+    in_band = tuple(
+        sample
+        for sample in ordered.valid_samples()
+        if band_lower <= float(sample.iota) <= band_upper
+    )
+
+    max_abs_shear: float | None = None
+    for lower, upper in zip(in_band, in_band[1:]):
+        label_span = float(upper.radial_label) - float(lower.radial_label)
+        if label_span == 0.0:
+            continue
+        shear = abs(float(upper.iota) - float(lower.iota)) / label_span
+        max_abs_shear = shear if max_abs_shear is None else max(max_abs_shear, shear)
+
+    low_order_count = 0
+    for q in range(2, max_q + 1):
+        for p in range(1, q):
+            if gcd(p, q) != 1:
+                continue
+            for crossing in ordered.all_rational_crossings(p, q):
+                if band_lower <= float(crossing.iota) <= band_upper:
+                    low_order_count += 1
+
+    low_order_fractions = tuple(
+        p / q
+        for q in range(2, max_q + 1)
+        for p in range(1, q)
+        if gcd(p, q) == 1
+    )
+    min_low_order_distance: float | None = None
+    for sample in in_band:
+        iota = float(sample.iota)
+        # Distance to the nearest n+p/q resonance on ANY integer branch, so the
+        # measure is correct even when the band sits on a branch other than n=0.
+        nearest = min(
+            abs(iota - (round(iota - fraction) + fraction))
+            for fraction in low_order_fractions
+        )
+        min_low_order_distance = (
+            nearest
+            if min_low_order_distance is None
+            else min(min_low_order_distance, nearest)
+        )
+
+    return BandShearLoad(
+        max_abs_shear=max_abs_shear,
+        low_order_count=low_order_count,
+        min_low_order_distance=min_low_order_distance,
+        in_band_sample_count=len(in_band),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenRationalTarget:
     """Resolution of one requested rational against a measured ι profile.
 

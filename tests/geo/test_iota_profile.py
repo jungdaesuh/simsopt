@@ -30,8 +30,10 @@ from examples.single_stage_optimization.banana_opt.topology.iota_profile import 
     FREEZE_IN_DOMAIN,
     FREEZE_NO_CROSSING,
     MATCH_TOLERANCE_REFERENCE_DENOMINATOR,
+    BandShearLoad,
     IotaProfile,
     IotaProfileSample,
+    band_shear_load,
     freeze_probe_inputs,
     freeze_rational_targets,
     linear_radial_labels,
@@ -422,3 +424,93 @@ def test_default_tolerance_does_not_conflate_adjacent_rationals():
     assert crossing_49.radial_label <= 0.20
     assert crossing_37.radial_label == pytest.approx(0.30)
     assert crossing_49.radial_label < crossing_37.radial_label
+
+
+# The Plan-A symmetry-broken-current screen scores ι(r) only inside the physical
+# operating band [0.08, 0.30]; band_shear_load is the pure helper it minimizes.
+# A realistic device profile reads ι≈1.x near the axis (a full-torus charting
+# offset), so the band filter and the per-branch crossing filter are the
+# load-bearing logic these tests pin.
+_BAND = (0.08, 0.30)
+_MAX_LOW_Q = 7
+
+# Monotonic ι(r) like the device cascade: an out-of-band charting-offset sample
+# (ι=1.22) at the smallest label, then the physical band falling 0.26 -> 0.12.
+_BAND_CASCADE = (
+    (0.05, 1.22),
+    (0.10, 0.26),
+    (0.15, 0.18),
+    (0.20, 0.12),
+)
+
+
+def test_band_shear_load_excludes_charting_offset_branch():
+    profile = _profile_from_samples(_BAND_CASCADE)
+
+    # The 1/5 resonance is realized twice: the physical 0.2 (in band) and the
+    # charting-offset branch 1.2 (out of band). Only the in-band one must count.
+    fifths = profile.all_rational_crossings(1, 5)
+    assert {round(crossing.iota, 3) for crossing in fifths} == {0.200, 1.200}
+
+    load = band_shear_load(profile, band=_BAND, max_low_order_denominator=_MAX_LOW_Q)
+    assert isinstance(load, BandShearLoad)
+    # Only the three physical-band samples (0.26, 0.18, 0.12) are scored; the
+    # ι=1.22 charting sample and its steep approach (shear ~19) are excluded.
+    assert load.in_band_sample_count == 3
+    assert load.max_abs_shear == pytest.approx(1.6, abs=1.0e-9)
+    # Five low-order (q<=7) island chains swept in band: 1/7, 1/6, 1/5, 2/7, 1/4.
+    # The 1/5 charting branch at 1.2 is NOT among them.
+    assert load.low_order_count == 5
+    # Closest in-band sample to a low-order rational: 0.26 vs 1/4 -> 0.01.
+    assert load.min_low_order_distance == pytest.approx(0.01, abs=1.0e-9)
+
+
+def test_band_shear_load_no_in_band_samples_reports_none():
+    # Every sample sits above the band; there is nothing physical to score.
+    profile = _profile_from_samples(
+        ((0.05, 1.20), (0.10, 0.90), (0.15, 0.60), (0.20, 0.40))
+    )
+    load = band_shear_load(profile, band=_BAND, max_low_order_denominator=_MAX_LOW_Q)
+    assert load.in_band_sample_count == 0
+    assert load.max_abs_shear is None
+    assert load.min_low_order_distance is None
+    assert load.low_order_count == 0
+
+
+def test_band_shear_load_single_in_band_sample_has_no_shear():
+    # One in-band sample -> no adjacent pair -> shear undefined (None), but the
+    # distance to the nearest rational is still well defined.
+    profile = _profile_from_samples(((0.10, 0.50), (0.15, 0.25), (0.20, 0.05)))
+    load = band_shear_load(profile, band=_BAND, max_low_order_denominator=_MAX_LOW_Q)
+    assert load.in_band_sample_count == 1
+    assert load.max_abs_shear is None
+    # The lone in-band sample sits exactly on 1/4.
+    assert load.min_low_order_distance == pytest.approx(0.0, abs=1.0e-9)
+
+
+def test_band_shear_load_is_radial_order_independent():
+    # Results must not depend on sample storage order: the helper sorts radially
+    # before differencing (shear) and before scanning sign-change brackets
+    # (low_order_count). Feeding the same samples shuffled — an unsorted hand-built
+    # profile — must give identical results. Before the radial sort, the shear loop
+    # differenced storage-adjacent (non-radially-adjacent) samples and a negative
+    # label span could silently drop the steep edge, badly under-reporting shear.
+    ordered_load = band_shear_load(
+        _profile_from_samples(_BAND_CASCADE),
+        band=_BAND,
+        max_low_order_denominator=_MAX_LOW_Q,
+    )
+    shuffled = (_BAND_CASCADE[2], _BAND_CASCADE[0], _BAND_CASCADE[3], _BAND_CASCADE[1])
+    shuffled_load = band_shear_load(
+        _profile_from_samples(shuffled),
+        band=_BAND,
+        max_low_order_denominator=_MAX_LOW_Q,
+    )
+    assert shuffled_load.max_abs_shear == pytest.approx(
+        ordered_load.max_abs_shear, abs=1.0e-9
+    )
+    assert shuffled_load.low_order_count == ordered_load.low_order_count
+    assert shuffled_load.min_low_order_distance == pytest.approx(
+        ordered_load.min_low_order_distance, abs=1.0e-9
+    )
+    assert shuffled_load.in_band_sample_count == ordered_load.in_band_sample_count

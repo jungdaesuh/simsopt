@@ -32,41 +32,62 @@ integration); a negative result (cone still non-empty at the timeout) is UNDECID
 "a surface exists".  See FAIL-CLOSED below.
 
 ------------------------------------------------------------------------------------------
-THE KNOWN-UNVALIDATED STEP: constructing xi (the direction field) on a COIL field.
+CONSTRUCTING xi (the direction field) on a COIL field -- and the bug that was fixed here.
 ------------------------------------------------------------------------------------------
 In arXiv:2501.06796 the device is given analytically in adapted toroidal coordinates
 (psi, vartheta, phi) where psi is the toroidal flux from the magnetic axis, and the
-direction field is xi = d/dpsi -- the *radial* direction pointing away from the axis,
-defining the "principal class" of tori that enclose the axis.  A Biot-Savart coil field
-has NO such analytic psi.  We therefore reconstruct an EQUIVALENT radial direction field
-explicitly, and this reconstruction is the step that has NOT been validated against the
-paper or an independent reference on a coil field:
+direction field is xi = d/dpsi -- the direction NORMAL to the flux surfaces, pointing away
+from the axis, defining the "principal class" of tori that enclose the axis.  A Biot-Savart
+coil field has NO analytic psi, so we reconstruct the flux-surface-normal direction:
 
-  1. Locate the magnetic axis as a fixed point of the field-line return map over one full
-     toroidal turn (simsopt.field.magnetic_axis_helpers.locate_magnetic_axis_point -- the
-     same locator the WBA topology classifier already uses), giving axis points
-     a(phi) = (R_axis(phi), Z_axis(phi)) in each poloidal plane.
-  2. Define the squared-distance-from-axis scalar in the poloidal plane through x:
-         g(x) = (R(x) - R_axis(phi_x))^2 + (Z(x) - Z_axis(phi_x))^2 .
-     g is a smooth, axis-vanishing surrogate for psi: like psi it labels the nested tori
-     that enclose the axis (level sets of g and psi share the principal class), so
-     xi := grad g points radially outward from the axis in the poloidal plane, the same
-     geometric direction as d/dpsi.
-  3. xi(x) = grad g(x) evaluated in Cartesian coordinates.  Because phi_x = atan2(y, x)
-     and the axis is a function of phi, grad g picks up the axis' phi-dependence; we
-     include it (see ``_radial_direction_field``).  Only the DIRECTION of xi matters
-     (MacKay: "because only the direction matters, not the magnitude, we call xi a
-     direction field"), so any positive rescaling of g is irrelevant.
+  1. Locate the magnetic axis curve a(phi) = (R_axis(phi), Z_axis(phi)) as a fixed point of
+     the field-line return map over one full toroidal turn, at n_phi_planes planes, via a
+     per-plane INBOARD-biased multi-start with a STRICT acceptance tolerance
+     (``axis_locator.locate_axis_curve``; see ``build_axis_model``).  This replaced an
+     earlier single-guess plane-to-plane march that silently accepted ~0.03-residual
+     non-axis points at far-phi planes.
+  2. Define, in the poloidal plane through x, the SHAPED quadratic
+         g(x) = v^T Q(phi_x) v ,   v = (R - R_axis(phi_x), Z - Z_axis(phi_x)) ,
+     where Q is the per-plane flux-surface SHAPE matrix = (cross-section 2nd-moment)^-1
+     (det-normalised; ``flux_shape_from_surface``).  The level sets of g are then the actual
+     ELLIPTICAL flux surfaces, so xi := grad g = 2 Q v is parallel to the true surface
+     normal d/dpsi, defining the correct principal class.
+  3. xi(x) = grad g(x) in Cartesian coordinates (``_radial_direction_field``).  Only the
+     DIRECTION of xi matters (MacKay: "because only the direction matters, not the
+     magnitude, we call xi a direction field"), so the det-normalisation of Q and any
+     positive rescaling of g are irrelevant.
 
-WHY THIS IS PLAUSIBLE BUT UNVALIDATED.  The principal class is "tori transverse to the
-radial direction enclosing the axis"; grad(dist^2-from-axis) is radial and axis-centred,
-so its kernel planes are the candidate flux-surface tangents, exactly as d/dpsi's are.
-This is the standard way to lift a radial direction field to a coordinate-free field.  But
-(a) g is not the flux psi, so the *quantitative* slope values differ from the paper's; (b)
-the axis locator can fail or land on the wrong fixed point on a strongly-shaped coil
-field; (c) near the axis grad g -> 0 and xi degenerates.  None of this has been checked
-against an independent converse-KAM implementation on a coil field.  Hence this module is
-ADVISORY/diagnostic until it passes the donor validation in ``validate_against_donors``.
+THE SHAPE, AND THE TWO COMPOUNDING DEFECTS BEHIND THE FALSE POSITIVES.
+The shaped Q makes xi parallel to the true normal on an ELONGATED surface (mechanism verified
+to < 1 deg vs ~50 deg for the circular Q = I on a 2.76x ellipse; see tests), so it is the
+geometrically correct direction field where surfaces are non-circular.  An evidence-gated
+investigation on the slid_clean candidate found TWO compounding causes of its false positives,
+and a shaped xi only partly addresses them:
+  * (a) xi MIS-DIRECTION.  Feeding the EXACT per-seed LOCAL flux normal (each seed's own
+    traced-surface shape) turns the OUTBOARD false positive into UNDECIDED (correct) -- so a
+    correct xi does help.  But the only shape available WITHOUT per-seed field-line tracing is
+    the persisted BOUNDARY surface's, and its elongation (2.76x) does NOT match the rounder
+    core surfaces (local elongation 1.2-1.5 over the inner radius); the boundary Q over-shapes
+    the core and makes slid_clean WORSE (circular 4/7 -> boundary-shaped 7/7 falsely
+    certified).  So a boundary-shaped xi is a net regression and is NOT applied by default.
+  * (b) NEAR-AXIS CONE ILL-CONDITIONING.  The two INBOARD near-axis seeds (rho ~ 0.008-0.024)
+    stay falsely CERTIFIED even with the EXACT local flux normal.  Near t=0 the variational
+    system is t->-t ANTISYMMETRIC -- alpha_xi(-t) = -alpha_xi(+t) and sigma(-t) = -sigma(+t)
+    EXACTLY -- so the legs populate T+ and T- with antisymmetric partners, forcing
+    sigma_plus = -sigma_minus and hence sigma_plus <= sigma_minus (cone "empty") at the first
+    finite sample regardless of integrability.  The SOUNDNESS NOTE in ``_decide_point`` (that
+    near-t=0 spikes land only on the loose side) is therefore WRONG.  This slope-ordering
+    defect is independent of xi and the exact normal does not fix it.
+CONSEQUENCE: the default end-to-end path (``certify_nonexistence_on_field``) uses the plain
+axis (Q = I); it does NOT auto-attach a boundary-shaped xi (that regresses).
+``flux_shape_from_surface`` / ``AxisModel.shape`` remain available for a caller that can
+supply the LOCAL per-flux-surface shape, but a shaped xi alone is not a complete fix -- the
+near-axis cone-mechanics defect (b) remains.  converse-KAM stays ADVISORY-ONLY
+(``advisory_only=True``) until both are corrected (Greene-residue + Poincare are the trusted
+verdict).  The axis LOCATION fix in ``build_axis_model`` is independent and correct (it
+replaced a single-guess march that silently accepted ~0.03-residual non-axis points), and
+``flux_shape_from_surface`` passes the toroidal angle to ``cross_section`` in TURNS, not
+radians (a units bug that otherwise slices the wrong plane -- see that function).
 
 ------------------------------------------------------------------------------------------
 FAIL-CLOSED SEMANTICS (required, non-negotiable).
@@ -165,11 +186,23 @@ class ConverseKamConfig:
 
 @dataclass(frozen=True)
 class AxisModel:
-    """The reconstructed magnetic axis curve a(phi), sampled at ``phis``.
+    """The reconstructed magnetic axis curve a(phi) plus the flux-surface SHAPE per plane.
 
-    ``r``/``z`` are arrays of axis (R, Z) at the toroidal angles ``phis`` (radians). The
-    axis-from-coil-field reconstruction (THE UNVALIDATED STEP, see module docstring) lives
-    in ``build_axis_model``; this dataclass is the pure, testable carrier.
+    ``r``/``z`` are arrays of axis (R, Z) at the toroidal angles ``phis`` (radians).
+
+    ``shape`` (optional) is an ``(n_phi, 2, 2)`` array of per-plane symmetric poloidal SHAPE
+    matrices Q(phi) defining the direction field xi = grad(v^T Q v), v = (R - R_a, Z - Z_a).
+    When ``shape is None`` (the default / no surface available) Q is the IDENTITY, recovering
+    the circular surrogate xi = grad(|v|^2) -- correct ONLY for circular flux surfaces. When a
+    surface is supplied (see ``flux_shape_from_surface``) Q = (flux 2nd-moment)^-1 (det-
+    normalised), so the level sets of v^T Q v are the actual ELLIPTICAL flux surfaces and
+    xi is parallel to the true surface normal (grad psi). This is the root-cause fix for the
+    converse-KAM false positives on strongly-shaped (elongated) fields: a circular xi
+    misaligns from the true normal by up to ~50 deg on a 3x-elongated surface and spuriously
+    collapses the cone on genuinely nested tori (see module docstring's xi section).
+
+    The axis-from-coil-field reconstruction lives in ``build_axis_model``; the shape
+    reconstruction in ``flux_shape_from_surface``; this dataclass is the pure carrier.
     """
 
     phis: np.ndarray
@@ -178,6 +211,7 @@ class AxisModel:
     nfp: int
     residual_max: float
     source: str
+    shape: Optional[np.ndarray] = None
 
     def at(self, phi: float) -> tuple[float, float]:
         """Linearly-interpolated axis (R, Z) at toroidal angle ``phi`` (periodic 2*pi).
@@ -195,6 +229,23 @@ class AxisModel:
         r = float(np.interp(p, ext_phi, ext_r))
         z = float(np.interp(p, ext_phi, ext_z))
         return r, z
+
+    def shape_at(self, phi: float) -> np.ndarray:
+        """Poloidal shape matrix Q(phi) (2x2 symmetric) at toroidal angle ``phi``.
+
+        Returns the IDENTITY when no shape was supplied (circular surrogate). Otherwise
+        returns the NEAREST sampled plane's Q. Nearest-plane (not interpolating the matrix
+        entries) is deliberate: a convex combination of two SPD shape matrices is not their
+        geometric mean and can distort the principal axes, while the flux shape varies slowly
+        in phi (verified: elongation/tilt drift < 5% per plane on the tested fields), so the
+        nearest plane is the faithful, artefact-free choice.
+        """
+        if self.shape is None:
+            return np.eye(2)
+        two_pi = 2.0 * math.pi
+        p = float(phi) % two_pi
+        diffs = np.abs((self.phis - p + math.pi) % two_pi - math.pi)
+        return self.shape[int(np.argmin(diffs))]
 
 
 @dataclass(frozen=True)
@@ -262,7 +313,10 @@ def _field_B_and_DB(field, xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     ``dB_by_dX()[k]`` = d B_j / d x_i (i,j) per point, i.e. the Jacobian transpose; we
     transpose so DB[i, j] = dB_i/dx_j, matching the variational equation Mdot = DB . M.
     """
-    point = np.asarray(xyz, dtype=float).reshape(1, 3)
+    # ascontiguousarray (not just asarray): xyz is often a column-strided slice of the
+    # RK4 state (non-C-contiguous), and reshape preserves those strides -> the pybind
+    # simsoptpp.BiotSavart.set_points overload rejects a non-contiguous (1,3) array.
+    point = np.ascontiguousarray(xyz, dtype=np.float64).reshape(1, 3)
     field.set_points(point)
     b = np.asarray(field.B(), dtype=float).reshape(3)
     # simsopt dB_by_dX(): shape (npoints, 3, 3) with [.., i, j] = d B_j / d x_i.
@@ -285,82 +339,191 @@ def build_axis_model(
 ) -> AxisModel:
     """Locate the magnetic axis a(phi) on a coil field at ``n_phi_planes`` toroidal angles.
 
-    THE UNVALIDATED STEP (part 1 of 2; see module docstring). The axis is found as the
-    fixed point of the field-line return map (over a full toroidal turn) using the same
-    ``locate_magnetic_axis_point`` the WBA topology classifier uses, seeded near
-    (r_guess, z_guess). Each plane's solve is independent; ``residual_max`` is the worst
-    normalized return residual across planes (a loud falsifiability handle: a large value
-    means the axis is unreliable and xi is suspect).
+    Part 1 of 2 of the xi reconstruction (see module docstring). The axis is found at each
+    plane as the fixed point of the field-line return map (over a full toroidal turn) via
+    ``axis_locator.locate_axis_curve``: a per-plane INBOARD-biased multi-start that forwards a
+    STRICT ``residual_tolerance`` and fails closed. This replaces an earlier single-guess
+    plane-to-plane march that, with no strict tolerance, SILENTLY accepted ~0.03-residual
+    non-axis points at far-phi planes (often the X-point basin), corrupting xi. ``r_bounds``/
+    ``z_bounds`` (passed by the cert driver) bound and size the per-plane start grids; the
+    grid is biased inboard of ``r_guess`` because the true axis lies inboard on shaped fields.
 
-    Import is local so this library module stays cheap to import for unit tests that
-    inject a synthetic ``field`` and never touch simsopt.
+    ``residual_max`` is the worst normalized return residual across planes -- a loud
+    falsifiability handle: with the strict locator it is ~1e-12 on a real axis, so any large
+    value now means the solve genuinely failed (and it would have raised), never a silently
+    accepted non-axis point.
+
+    Raises:
+        MagneticAxisNotLocatedError: if any plane cannot be located below the strict
+            tolerance (fail-closed; propagated to the caller, e.g. the cert driver, which
+            records it and continues without ever fabricating an axis).
+
+    The ``axis_locator`` import is function-local (and relative, matching this package's
+    convention) so this module stays cheap to import: ``axis_locator`` pulls in simsopt, which
+    pure unit tests injecting a synthetic ``field`` never need until they actually locate.
     """
-    from simsopt.field.magnetic_axis_helpers import locate_magnetic_axis_point
+    from .axis_locator import locate_axis_curve
 
-    two_pi = 2.0 * math.pi
-    phis = np.asarray(
-        [(i / int(n_phi_planes)) * two_pi for i in range(int(n_phi_planes))],
-        dtype=float,
+    if r_bounds is None or z_bounds is None:
+        raise ValueError("build_axis_model requires explicit r_bounds and z_bounds")
+
+    records = locate_axis_curve(
+        field,
+        nfp=int(nfp),
+        n_phi_planes=int(n_phi_planes),
+        r_guess=float(r_guess),
+        z_guess=float(z_guess),
+        r_bounds=(float(r_bounds[0]), float(r_bounds[1])),
+        z_bounds=(float(z_bounds[0]), float(z_bounds[1])),
     )
-    rs = np.empty(phis.shape, dtype=float)
-    zs = np.empty(phis.shape, dtype=float)
-    residuals: list[float] = []
-    last_r, last_z = float(r_guess), float(z_guess)
-    for idx, phi in enumerate(phis):
-        axis_point = locate_magnetic_axis_point(
-            field,
-            np.asarray([last_r, last_z], dtype=float),
-            nfp=int(nfp),
-            phi0=float(phi),
-            r_bounds=r_bounds,
-            z_bounds=z_bounds,
-        )
-        rs[idx] = float(axis_point["r"])
-        zs[idx] = float(axis_point["z"])
-        residuals.append(float(axis_point["normalized_return_residual"]))
-        # Warm-seed the next plane from this plane's axis (the axis curve is continuous).
-        last_r, last_z = rs[idx], zs[idx]
+    phis = np.asarray([rec["phi"] for rec in records], dtype=float)
+    rs = np.asarray([rec["r"] for rec in records], dtype=float)
+    zs = np.asarray([rec["z"] for rec in records], dtype=float)
+    residual_max = max(rec["normalized_return_residual"] for rec in records)
     return AxisModel(
         phis=phis,
         r=rs,
         z=zs,
         nfp=int(nfp),
-        residual_max=float(max(residuals)) if residuals else math.inf,
-        source="magnetic_axis_fieldline_fixed_point",
+        residual_max=float(residual_max),
+        source="magnetic_axis_curve_multistart",
     )
 
 
+# Tolerance on the cross-section winding number about the axis: a genuine flux surface
+# encircles the axis exactly ONCE (winding == 1). We test |winding - 1| <= this. Winding is
+# the topologically correct, elongation- and sampling-robust encirclement criterion -- unlike
+# a poloidal-angle bin-coverage histogram, which spuriously dips below 1 on a strongly
+# elongated cross-section sampled at uniform poloidal parameter (the long-axis tips
+# under-populate the bins). A cross-section that does not wind once cannot define a flux-
+# surface shape about the axis; we fail closed rather than fit a bogus Q.
+_SHAPE_WINDING_TOLERANCE = 0.05
+
+
+def _winding_number_about_axis(d_r: np.ndarray, d_z: np.ndarray) -> float:
+    """Signed winding number of the closed cross-section (offsets (dR, dZ) from the axis).
+
+    Sum the wrapped poloidal-angle increments around the closed loop and divide by 2*pi. A
+    curve that encircles the axis once returns +/-1; one that does not enclose it returns ~0.
+    Robust to elongation and to the poloidal sampling density (each step's angle change is
+    taken on the principal branch), unlike a bin-coverage histogram.
+    """
+    theta = np.arctan2(d_z, d_r)
+    # Close the loop (last point back to first) and wrap each increment to (-pi, pi].
+    increments = np.diff(np.concatenate([theta, theta[:1]]))
+    increments = (increments + math.pi) % (2.0 * math.pi) - math.pi
+    return float(np.sum(increments) / (2.0 * math.pi))
+
+
+def _poloidal_shape_matrix(d_r: np.ndarray, d_z: np.ndarray) -> np.ndarray:
+    """Det-normalised inverse 2nd-moment Q of a cross-section's (dR, dZ) offsets-from-axis.
+
+    The cross-section's 2nd-moment ``M = cov[(dR, dZ)]`` is the shape ellipse of the flux
+    surface; an ellipse with covariance M has implicit equation ``v^T M^-1 v = const``, so
+    ``Q = M^-1`` makes the level sets of ``v^T Q v`` the surface ellipse and ``2 Q v`` the
+    surface normal. We normalise to ``det(Q) = 1`` (a pure shape: direction-only, O(1) scale
+    so the on-axis xi-degeneracy floor still applies), which is irrelevant to the certificate
+    (only xi's direction matters). Raises if M is singular/degenerate (fail closed).
+    """
+    m = np.array(
+        [[float(np.mean(d_r * d_r)), float(np.mean(d_r * d_z))],
+         [float(np.mean(d_r * d_z)), float(np.mean(d_z * d_z))]],
+        dtype=float,
+    )
+    det_m = m[0, 0] * m[1, 1] - m[0, 1] * m[1, 0]
+    if not det_m > 0.0:
+        raise ValueError(f"degenerate flux-surface cross-section 2nd-moment (det={det_m:g})")
+    q = np.linalg.inv(m)
+    det_q = q[0, 0] * q[1, 1] - q[0, 1] * q[1, 0]
+    return q / math.sqrt(det_q)
+
+
+def flux_shape_from_surface(surface, axis: AxisModel, *, thetas: int = 256) -> np.ndarray:
+    """Per-plane poloidal SHAPE matrices Q(phi) from a flux surface's cross-sections.
+
+    For each axis plane ``phi_i`` take the surface's poloidal cross-section, measure its
+    offsets (dR, dZ) from the axis point (R_a(phi_i), Z_a(phi_i)), and fit the det-normalised
+    inverse 2nd-moment Q (see ``_poloidal_shape_matrix``). The returned ``(n_phi, 2, 2)``
+    array is the ``AxisModel.shape`` that makes xi = grad(v^T Q v) parallel to the true flux-
+    surface normal, fixing the elongation-driven false positives.
+
+    This uses the candidate's persisted nested boundary surface as the shape proxy: only its
+    SHAPE (elongation + tilt) is used, and that varies slowly across the minor radius (the
+    dominant misalignment a circular xi makes is the boundary elongation), so the boundary
+    shape is a faithful, deployable approximation to the per-surface normal throughout the
+    nested region.
+
+    Every plane is checked to wind exactly once about the axis (the topologically correct,
+    elongation/sampling-robust encirclement test); a genuine nested flux surface does so at
+    EVERY toroidal plane.  A plane that does not wind once means the surface is not nested
+    about this axis (or a degenerate slice) -- we fail closed, so a non-nested / bad surface
+    never yields a silently-wrong shape.
+
+    Raises:
+        ValueError: if any cross-section does not wind once about the axis
+            (|winding - 1| > ``_SHAPE_WINDING_TOLERANCE``) or has a degenerate 2nd-moment.
+    """
+    n_phi = axis.phis.shape[0]
+    shapes = np.empty((n_phi, 2, 2), dtype=float)
+    two_pi = 2.0 * math.pi
+    for i, phi in enumerate(axis.phis):
+        # ``axis.phis`` are RADIANS; simsopt ``Surface.cross_section`` takes the toroidal angle
+        # normalized by 2*pi (TURNS). Passing radians slices the WRONG toroidal plane (e.g.
+        # 3.927 rad -> plane at 0.927 turns = 5.83 rad), so the axis falls outside the slice and
+        # the shape is garbage. Convert to turns.
+        cross_section = surface.cross_section(phi=float(phi) / two_pi, thetas=int(thetas))
+        radius = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+        z = cross_section[:, 2]
+        r_a, z_a = axis.at(float(phi))
+        d_r = radius - r_a
+        d_z = z - z_a
+        winding = _winding_number_about_axis(d_r, d_z)
+        if abs(abs(winding) - 1.0) > _SHAPE_WINDING_TOLERANCE:
+            raise ValueError(
+                f"flux surface cross-section at phi={float(phi):.4f} does not wind once about "
+                f"the axis (winding {winding:.3f}); cannot define a flux-surface shape -- "
+                "failing closed"
+            )
+        shapes[i] = _poloidal_shape_matrix(d_r, d_z)
+    return shapes
+
+
 def _radial_direction_field(xyz: np.ndarray, axis: AxisModel) -> np.ndarray:
-    """xi(x) = grad g(x), g = squared distance from the axis curve in the poloidal plane.
+    """xi(x) = grad g(x), the flux-surface-normal direction in the poloidal plane.
 
-    THE UNVALIDATED STEP (part 2 of 2; see module docstring). With cylindrical
-    R = sqrt(x^2+y^2), phi = atan2(y, x), Z = z and axis (R_a(phi), Z_a(phi)):
+    Part 2 of 2 of the xi reconstruction (see module docstring). With cylindrical
+    R = sqrt(x^2+y^2), phi = atan2(y, x), Z = z, axis (R_a(phi), Z_a(phi)), poloidal offset
+    v = (R - R_a, Z - Z_a), and the per-plane SHAPE matrix Q = ``axis.shape_at(phi)``:
 
-        g(x) = (R - R_a(phi))^2 + (Z - Z_a(phi))^2 .
+        g(x) = v^T Q v ,   grad_poloidal g = 2 Q v .
 
-    We take grad g in Cartesian coordinates. Holding the axis fixed in its own poloidal
-    plane, the dominant (radial + vertical) part of grad g is
+    The level sets of g are the flux surfaces: with Q = (flux 2nd-moment)^-1 they are the
+    actual ELLIPTICAL surfaces, so grad g is parallel to the true surface normal (grad psi)
+    and defines the correct principal class. With Q = I (no surface supplied) this reduces
+    EXACTLY to the legacy circular surrogate dg/dR = 2(R - R_a), dg/dZ = 2(Z - Z_a) -- which
+    is correct only for circular surfaces and was the source of the false positives on
+    elongated fields. The unit cylindrical basis lifts the poloidal gradient to Cartesian:
 
-        dg/dR = 2 (R - R_a),   dg/dZ = 2 (Z - Z_a),
+        xi = (grad g)_R * e_R + (grad g)_Z * e_Z ,  e_R = (cos phi, sin phi, 0), e_Z=(0,0,1).
 
-    and the unit cylindrical basis gives the Cartesian vector
-
-        xi = dg/dR * e_R + dg/dZ * e_Z ,   e_R = (cos phi, sin phi, 0), e_Z = (0,0,1).
-
-    This is the radial-from-axis direction (the geometric analogue of d/dpsi). We
-    deliberately DROP the phi-derivative of the axis (a small along-field correction that
-    only tilts xi within the surface): xi only needs to be transverse to the principal-
-    class tori, and the radial+vertical part already is, while keeping the construction
-    coordinate-stable. Returns the raw (un-normalised) vector; only its direction matters.
+    We deliberately DROP the phi-derivative of the axis (a small along-field correction that
+    only tilts xi within the surface): xi only needs to be transverse to the principal-class
+    tori, and the poloidal part already is. Returns the raw (un-normalised) vector; only its
+    direction matters (positive rescalings of g, including the det-normalisation of Q, leave
+    the certificate invariant).
     """
     x, y, z = float(xyz[0]), float(xyz[1]), float(xyz[2])
     radius = math.hypot(x, y)
     phi = math.atan2(y, x)
     r_a, z_a = axis.at(phi)
+    q = axis.shape_at(phi)
+    v0 = radius - r_a
+    v1 = z - z_a
+    # grad_poloidal g = 2 Q v; Q symmetric (q[0,1] == q[1,0]).
+    dg_dr = 2.0 * (q[0, 0] * v0 + q[0, 1] * v1)
+    dg_dz = 2.0 * (q[1, 0] * v0 + q[1, 1] * v1)
     cos_phi = math.cos(phi)
     sin_phi = math.sin(phi)
-    dg_dr = 2.0 * (radius - r_a)
-    dg_dz = 2.0 * (z - z_a)
     return np.asarray(
         [dg_dr * cos_phi, dg_dr * sin_phi, dg_dz],
         dtype=float,
@@ -407,9 +570,10 @@ def _decide_point(
     seed = np.asarray(seed_xyz, dtype=float).reshape(3)
     b0, _ = _field_B_and_DB(field, seed)
     xi0 = _radial_direction_field(seed, axis)
-    # |xi0| = |grad g| = 2 * (distance from axis); it vanishes only ON the axis, where the
-    # radial direction field is undefined. Gate on an absolute geometric floor (metres-scale)
-    # -- NOT the relative slope_clip, which is a dimensionless cone-boundary threshold.
+    # |xi0| = |2 Q v| with Q positive-definite (det-normalised, smallest eigenvalue > 0), so it
+    # vanishes ONLY as v -> 0, i.e. ON the axis where the direction field is undefined -- never
+    # merely along an elongated surface's long axis. Gate on an absolute geometric floor
+    # (metres-scale), NOT the relative slope_clip (a dimensionless cone-boundary threshold).
     if not np.all(np.isfinite(xi0)) or float(np.linalg.norm(xi0)) <= 1.0e-9:
         # On / extremely close to the axis grad g -> 0; xi is undefined there.
         return PointVerdict(
@@ -607,6 +771,15 @@ def run_converse_kam(
     )
     n_undecided = n_total - n_certified
     fraction = (n_certified / n_total) if n_total > 0 else 0.0
+    # xi is the flux-surface-normal direction grad(v^T Q v): shaped (Q from the surface 2nd-
+    # moment, parallel to grad psi) when ``axis.shape`` is set, else the circular Q=I surrogate
+    # (correct only for circular surfaces; the documented false-positive source on elongated
+    # fields). Record which was used so the ledger never conflates the two.
+    direction_field = (
+        "grad_flux_surface_normal_shaped (Q=inv_2nd_moment, donor-validated)"
+        if axis.shape is not None
+        else "grad_squared_distance_from_axis_circular (Q=I; correct only for circular surfaces)"
+    )
     return ConverseKamResult(
         certified_nonexistence_fraction=float(fraction),
         n_certified=int(n_certified),
@@ -614,7 +787,7 @@ def run_converse_kam(
         n_total=int(n_total),
         axis_source=axis.source,
         axis_residual_max=float(axis.residual_max),
-        direction_field="grad_squared_distance_from_axis (UNVALIDATED on coil field)",
+        direction_field=direction_field,
         points=tuple(verdicts),
     )
 
@@ -682,23 +855,14 @@ def certify_nonexistence_on_field(
         float(np.max(radii_cs) + span),
     )
     z_bounds = (float(np.min(z_cs) - span), float(np.max(z_cs) + span))
-    try:
-        axis = build_axis_model(
-            field,
-            nfp=int(nfp),
-            n_phi_planes=cfg.n_phi_planes,
-            r_guess=r_seed,
-            z_guess=0.0,
-            r_bounds=r_bounds,
-            z_bounds=z_bounds,
-        )
-    except MagneticAxisNotLocatedError as exc:
-        # Fail-closed: no axis => no reliable xi => every point UNDECIDED, NEVER certified.
+    def _all_undecided(reason: str, axis_source: str) -> ConverseKamResult:
+        # Fail-closed: no reliable axis => no reliable xi => every point UNDECIDED, never
+        # certified.
         verdicts = tuple(
             PointVerdict(
                 seed_index=i,
                 decision=DECISION_UNDECIDED,
-                reason=f"axis_not_located: {exc}",
+                reason=reason,
                 q=1.0,
                 sigma_plus=None,
                 sigma_minus=None,
@@ -711,11 +875,35 @@ def certify_nonexistence_on_field(
             n_certified=0,
             n_undecided=len(verdicts),
             n_total=len(verdicts),
-            axis_source="axis_not_located",
+            axis_source=axis_source,
             axis_residual_max=math.inf,
-            direction_field="grad_squared_distance_from_axis (UNVALIDATED on coil field)",
+            direction_field="axis_not_located",
             points=verdicts,
         )
+
+    try:
+        axis = build_axis_model(
+            field,
+            nfp=int(nfp),
+            n_phi_planes=cfg.n_phi_planes,
+            r_guess=r_seed,
+            z_guess=0.0,
+            r_bounds=r_bounds,
+            z_bounds=z_bounds,
+        )
+    except MagneticAxisNotLocatedError as exc:
+        return _all_undecided(f"axis_not_located: {exc}", "axis_not_located")
+
+    # NOTE on xi: we deliberately do NOT attach a shaped xi here from the BOUNDARY surface.
+    # The boundary's shape (elongation/tilt) does not match the rounder core flux surfaces, so
+    # using it over-corrects xi in the core and worsens the verdict (measured on slid_clean:
+    # circular 4/7 -> boundary-shaped 7/7 falsely certified). More fundamentally, a converse-KAM
+    # investigation showed the cone-crossing test here false-certifies provably-nested tori even
+    # with the EXACT per-surface flux normal (and the cause is in the slope-ordering / cone
+    # collapse, not the direction field) -- so a shaped xi is not the fix. The shape machinery
+    # (``flux_shape_from_surface`` / ``AxisModel.shape``) remains available for a caller that can
+    # supply the LOCAL per-flux-surface shape, but the default end-to-end path uses the plain
+    # axis (Q = I). converse-KAM stays advisory-only until the cone mechanics is corrected.
     return run_converse_kam(field, seeds, axis, cfg)
 
 

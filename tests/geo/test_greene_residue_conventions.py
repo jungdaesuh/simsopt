@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import dataclasses
 from fractions import Fraction
 import json
 import math
@@ -37,9 +38,11 @@ from examples.single_stage_optimization.banana_opt.topology.periodic_orbit impor
     BRANCH_STATUS_BRANCH_MISMATCH,
     BRANCH_STATUS_CONVERGED,
     BRANCH_STATUS_INTEGRATION_FAILED,
+    BRANCH_STATUS_NEWTON_STALLED,
     BRANCH_STATUS_OUTSIDE_RADIAL_WINDOW,
     BRANCH_STATUS_WRONG_WINDING,
     PeriodicOrbitDiscoveryError,
+    PeriodicOrbitResult,
     PeriodicOrbitSolverOptions,
     continue_periodic_orbit,
     discover_periodic_orbit,
@@ -1342,6 +1345,126 @@ def test_residue_probe_serializes_branch_integration_failure(monkeypatch):
     assert diagnostic["initial_guess_count"] == 8
     assert diagnostic["residue"] is None
     assert diagnostic["failure_message"] == "synthetic tangent integration failure"
+
+
+def test_residue_probe_withholds_residue_for_nonconverged_returned_result(monkeypatch):
+    """A returned-but-stalled branch must report NO residue/classification.
+
+    Reproduces the certificate fail-open seen in ``slid_clean``: when no seed
+    converges, ``discover_periodic_orbit`` returns the least-bad iterate (a real
+    ``PeriodicOrbitResult`` whose ``status`` is ``newton_stalled``) -- NOT a
+    discovery exception -- and that result still carries a ``residue_diagnostic``
+    computed from the non-fixed-point monodromy. The probe payload must withhold
+    that residue (and its O/X classification and traceM), because a residue from a
+    point that is not a period-q fixed point is not a real island-stability verdict.
+
+    Against the old behavior (residue serialized unconditionally) this fails:
+    ``diagnostic["residue"]`` is the stalled iterate's ~0.5 residue and
+    ``residue_classification`` its elliptic label. The audit diagnostics that ARE
+    defined off a fixed point (detM, winding, section_state, newton_residual,
+    branch_status) remain populated so the non-converged branch stays inspectable.
+    """
+
+    target = RationalTarget(
+        p=1,
+        q=1,
+        radial_label=0.2,
+        radial_window=(0.18, 0.23),
+        branches=(GREENE_BRANCH_O,),
+        fourier_m=1,
+        fourier_n=1,
+    )
+    chart = PoincareChart(axis_r=1.0, axis_z=0.0)
+    period = 2.0 * math.pi * float(target.q)
+    field = DrivenPeriodicOrbitField(
+        axis_r=chart.axis_r,
+        axis_z=chart.axis_z,
+        target=target,
+        orbit_radius=0.2,
+        phase0=0.0,
+        tangent_generator=(0.5 * math.pi / period)
+        * np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=float),
+    )
+    integrator_options = FieldlineIntegratorOptions(
+        rtol=1.0e-10,
+        atol=1.0e-12,
+        max_step=0.025,
+        samples_per_full_torus=96,
+    )
+    solver_options = PeriodicOrbitSolverOptions(
+        residual_tolerance=1.0e-9,
+        winding_tolerance=1.0e-6,
+        max_iterations=8,
+        max_step_norm=0.08,
+    )
+
+    # A genuine converged solve gives a real residue_diagnostic (~0.5, elliptic).
+    converged_result = solve_periodic_orbit(
+        field,
+        field.initial_orbit_state(),
+        target=target,
+        chart=chart,
+        branch=GREENE_BRANCH_O,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+    assert converged_result.converged
+    assert 0.0 < converged_result.residue_diagnostic.residue < 1.0
+    assert (
+        converged_result.residue_diagnostic.classification
+        == GREENE_RESIDUE_ELLIPTIC_O
+    )
+
+    # Flip ONLY the status to newton_stalled: a real, non-trivial residue_diagnostic
+    # now rides a non-converged result -- exactly the slid_clean producer's state.
+    stalled_result: PeriodicOrbitResult = dataclasses.replace(
+        converged_result,
+        status=BRANCH_STATUS_NEWTON_STALLED,
+    )
+    assert stalled_result.converged is False
+    assert stalled_result.residue_diagnostic.residue > 0.0
+
+    def return_stalled(
+        field,
+        initial_guesses,
+        *,
+        target,
+        chart,
+        branch,
+        integrator_options,
+        solver_options,
+    ):
+        return stalled_result
+
+    monkeypatch.setattr(
+        residue_diagnostics,
+        "discover_periodic_orbit",
+        return_stalled,
+    )
+
+    probe = residue_diagnostics.run_residue_probe(
+        field,
+        targets=(target,),
+        chart=chart,
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+        phase_angles=(0.0,),
+    )
+
+    diagnostic = probe["diagnostics"][0]
+    # Honest non-convergence is reported, not hidden.
+    assert diagnostic["branch_status"] == BRANCH_STATUS_NEWTON_STALLED
+    assert diagnostic["converged"] is False
+    assert probe["branch_status_counts"] == {BRANCH_STATUS_NEWTON_STALLED: 1}
+    # Fail-closed: no residue, no O/X verdict, no traceM from a non-fixed point.
+    assert diagnostic["residue"] is None
+    assert diagnostic["residue_classification"] is None
+    assert diagnostic["traceM"] is None
+    # Audit fields defined off any iterate stay populated for inspection.
+    assert diagnostic["detM"] is not None
+    assert diagnostic["winding"] is not None
+    assert diagnostic["section_state"] is not None
+    assert diagnostic["newton_residual"] is not None
 
 
 def test_residue_probe_radial_multistart_requires_target_radial_label():

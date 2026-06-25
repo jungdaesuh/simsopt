@@ -196,15 +196,42 @@ def poincare_chart_payload(chart: PoincareChart) -> dict[str, object]:
 
 
 def periodic_orbit_result_payload(result: PeriodicOrbitResult) -> dict[str, object]:
+    """Serialize one branch solve, withholding the residue unless it converged.
+
+    The Greene residue ``R = (2 - trM)/4`` and its O/X classification are only
+    meaningful when the period-``q`` fixed point was actually found:
+    ``solve_periodic_orbit`` computes them from the monodromy at the *last
+    iterate* (periodic_orbit.py:543,554), so a ``newton_stalled`` /
+    ``max_iterations`` result -- which ``discover_periodic_orbit`` still returns
+    as the least-bad candidate (periodic_orbit.py:359-368) -- carries a residue
+    of a point that is not a fixed point. Reporting it would let a non-converged
+    solve emit an O/X verdict (a fail-open this certificate cannot have).
+
+    So ``residue``, ``residue_classification``, and ``traceM`` (the residue's
+    direct input) are emitted only when ``result.converged``; otherwise they are
+    ``None``, exactly as ``periodic_orbit_failure_payload`` reports a discovery
+    failure. The non-residue iterate diagnostics (``detM``, ``winding``,
+    ``section_state``, ``newton_residual``, ``solver_iterations``, ...) are kept
+    so a non-converged branch is still auditable -- the withheld fields are the
+    ones whose value is *defined* only at a converged fixed point.
+    """
+
+    converged = bool(result.converged)
     return {
         "target_id": result.target.manifest_key(),
         "target": rational_target_payload(result.target),
         "branch": result.branch,
         "branch_status": result.status,
-        "converged": bool(result.converged),
-        "residue": float(result.residue_diagnostic.residue),
-        "residue_classification": result.residue_diagnostic.classification,
-        "traceM": float(result.residue_diagnostic.trace_m),
+        "converged": converged,
+        "residue": (
+            float(result.residue_diagnostic.residue) if converged else None
+        ),
+        "residue_classification": (
+            result.residue_diagnostic.classification if converged else None
+        ),
+        "traceM": (
+            float(result.residue_diagnostic.trace_m) if converged else None
+        ),
         "detM": float(result.tangent_result.det_m),
         "winding": float(result.winding),
         "raw_return_section_winding": float(

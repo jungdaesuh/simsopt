@@ -29,6 +29,8 @@ import math
 import numpy as np
 import pytest
 
+from dataclasses import replace
+
 from examples.single_stage_optimization.banana_opt.topology.converse_kam import (
     AxisModel,
     ConverseKamConfig,
@@ -42,6 +44,7 @@ from examples.single_stage_optimization.banana_opt.topology.converse_kam import 
     _radial_direction_field,
     _slope,
     certify_nonexistence_on_field,
+    flux_shape_from_surface,
     midplane_radial_seeds,
     run_converse_kam,
     validate_against_donors,
@@ -260,6 +263,43 @@ class _RingCrossSectionSurface:
         return np.column_stack(
             [radius * math.cos(phi), radius * math.sin(phi), z]
         )
+
+
+class _EllipticCrossSectionSurface:
+    """Surface stub whose poloidal cross-section is an ELONGATED ellipse about (R_a, 0).
+
+    ``cross_section`` is the ellipse R = R_a + a*cos(theta), Z = b*sin(theta) (semi-axes a in
+    R, b in Z; elongation b/a). This is the geometry that breaks the circular xi: its true
+    surface normal at angle theta is the direction (2(R-R_a)/a^2, 2 Z/b^2), which the circular
+    xi=grad|v|^2 misses by up to ~atan((b/a - a/b)/2) while the shaped xi=grad(v^T M^-1 v)
+    matches exactly. Used to lock the root-cause fix (``flux_shape_from_surface``).
+    """
+
+    def __init__(self, a=0.04, b=0.11, r_a=1.0, nfp=1):
+        self.a = float(a)
+        self.b = float(b)
+        self.r_a = float(r_a)
+        self.nfp = int(nfp)
+
+    def cross_section(self, phi=0.0, thetas=256):
+        theta = np.linspace(0.0, 2.0 * math.pi, int(thetas), endpoint=False)
+        radius = self.r_a + self.a * np.cos(theta)
+        z = self.b * np.sin(theta)
+        return np.column_stack([radius * math.cos(phi), radius * math.sin(phi), z])
+
+
+def _ellipse_true_normal(theta, a, b):
+    """Cartesian (phi=0) outward normal of the ellipse (R-R_a)^2/a^2 + Z^2/b^2 = const at the
+    boundary point with parameter ``theta``: grad of that quadratic = (2 cos(theta)/a, 2 sin
+    (theta)/b) up to scale (e_R=(1,0,0), e_Z=(0,0,1) on the phi=0 half-plane)."""
+    return np.array([2.0 * math.cos(theta) / a, 0.0, 2.0 * math.sin(theta) / b])
+
+
+def _angle_between(u, v):
+    """Unsigned angle (degrees) between two 3-vectors, mod direction (anti-parallel == 0)."""
+    cu = u / np.linalg.norm(u)
+    cv = v / np.linalg.norm(v)
+    return math.degrees(math.acos(abs(float(np.clip(np.dot(cu, cv), -1.0, 1.0)))))
 
 
 def _constant_axis(r_a=1.0, z_a=0.0, n_phi=8):
@@ -620,7 +660,7 @@ def test_certify_nonexistence_on_field_locates_axis_on_synthetic_field():
         config=ConverseKamConfig(n_seeds=6, **_RESONANT_CFG),
     )
 
-    assert result.axis_source == "magnetic_axis_fieldline_fixed_point"
+    assert result.axis_source == "magnetic_axis_curve_multistart"
     assert result.axis_residual_max < 1.0e-6
     assert result.certified_nonexistence_fraction == 0.0
     assert result.n_total == 6
@@ -680,3 +720,191 @@ def test_validate_against_donors_fails_a_chaotic_donor_that_does_not_certify():
 
     assert outcome.passed is False
     assert outcome.certified_fraction == 0.0
+
+
+# --- Shaped (flux-normal) xi vs the circular squared-distance surrogate ----------------------
+#
+# These tests lock the CORRECTNESS of the shaped direction field xi = grad(v^T Q v),
+# Q = (flux 2nd-moment)^-1: on an ELONGATED surface it is parallel to the true flux-surface
+# normal, where the circular surrogate xi = grad|v|^2 (Q = I) is off by tens of degrees.
+# IMPORTANT SCOPE: an evidence-gated investigation found this is NOT the cause of the
+# converse-KAM false positives on the slid_clean candidate -- the cone-crossing test there
+# certifies provably-nested tori even with the EXACT per-surface flux normal, because of a
+# t->-t antisymmetry in the cone mechanics (see the module docstring). So the shaped xi is the
+# geometrically correct direction field (a real, tested capability) but is NOT a fix for the
+# false positives, and the end-to-end path does not auto-apply it. These tests therefore lock
+# the xi/shape MATH (deterministic, exact), not an end-to-end certified-fraction flip.
+
+_REGRESSION_ELLIPSE = dict(a=0.04, b=0.11)  # elongation b/a = 2.75, matching the real candidate
+
+
+def test_circular_xi_misaligns_from_true_normal_on_elongated_surface():
+    # On a 2.75x-elongated flux surface the circular xi = grad|v|^2 is far from the true
+    # surface normal (the geometric deficiency the shaped Q corrects). (Anti-)parallel counts
+    # as aligned; the worst case is at the ~45 deg boundary points.
+    a, b = _REGRESSION_ELLIPSE["a"], _REGRESSION_ELLIPSE["b"]
+    axis = _constant_axis(r_a=1.0, z_a=0.0)  # shape is None -> circular xi
+    worst = 0.0
+    for theta in np.linspace(0.0, 2.0 * math.pi, 24, endpoint=False):
+        r = 1.0 + a * math.cos(theta)
+        z = b * math.sin(theta)
+        xi = _radial_direction_field(np.array([r, 0.0, z]), axis)
+        worst = max(worst, _angle_between(xi, _ellipse_true_normal(theta, a, b)))
+    # The circular surrogate is wrong by tens of degrees -- this is the defect.
+    assert worst > 20.0, f"expected large circular-xi misalignment, got {worst:.1f} deg"
+
+
+def test_flux_shape_from_surface_makes_xi_parallel_to_true_normal():
+    # THE FIX, isolated: with Q = flux_shape_from_surface(elongated surface) the SAME seeds
+    # give xi parallel to the true flux-surface normal everywhere (worst error < 1 deg),
+    # whereas the circular xi (same axis, shape=None) is off by > 20 deg. This is the exact
+    # before/after that the cone test depends on; if a future change regresses xi back toward
+    # circular, the shaped worst-angle assertion fails.
+    a, b = _REGRESSION_ELLIPSE["a"], _REGRESSION_ELLIPSE["b"]
+    surface = _EllipticCrossSectionSurface(a=a, b=b, r_a=1.0)
+    axis = _constant_axis(r_a=1.0, z_a=0.0)
+    shape = flux_shape_from_surface(surface, axis)
+    # Q is det-normalised (pure shape) and weights the SHORT semi-axis (R, a<b) more, so xi
+    # points predominantly across the narrow dimension -- the true-normal behaviour.
+    assert shape.shape == (axis.phis.shape[0], 2, 2)
+    np.testing.assert_allclose(np.linalg.det(shape[0]), 1.0, atol=1e-9)
+    axis_shaped = replace(axis, shape=shape)
+
+    worst_circular = 0.0
+    worst_shaped = 0.0
+    for theta in np.linspace(0.0, 2.0 * math.pi, 24, endpoint=False):
+        r = 1.0 + a * math.cos(theta)
+        z = b * math.sin(theta)
+        true_n = _ellipse_true_normal(theta, a, b)
+        worst_circular = max(
+            worst_circular, _angle_between(_radial_direction_field(np.array([r, 0.0, z]), axis), true_n)
+        )
+        worst_shaped = max(
+            worst_shaped, _angle_between(_radial_direction_field(np.array([r, 0.0, z]), axis_shaped), true_n)
+        )
+    assert worst_circular > 20.0  # the bug is present without the shape
+    assert worst_shaped < 1.0, f"shaped xi should match the true normal, worst {worst_shaped:.3f} deg"
+
+
+def test_identity_shape_reproduces_circular_xi_exactly():
+    # Backward-compatibility: an AxisModel with shape=None (every legacy/synthetic caller)
+    # gives EXACTLY the old circular xi dg/dR=2(R-R_a), dg/dZ=2(Z-Z_a). Guards the whole
+    # existing test corpus and the no-surface build_axis_model path from silent drift.
+    axis = _constant_axis(r_a=1.0, z_a=0.0)
+    assert axis.shape is None
+    np.testing.assert_array_equal(axis.shape_at(0.37), np.eye(2))
+    # Outboard point (R=1.3, Z=0.2, phi=0): legacy formula gives (0.6, 0, 0.4).
+    xi = _radial_direction_field(np.array([1.3, 0.0, 0.2]), axis)
+    np.testing.assert_allclose(xi, [0.6, 0.0, 0.4], atol=1e-12)
+
+
+def test_flux_shape_from_surface_fails_closed_on_non_encircling_cross_section():
+    # Fail-closed: a cross-section that does NOT wrap the axis cannot define a flux-surface
+    # shape, so flux_shape_from_surface must RAISE rather than fit a bogus Q (which would
+    # silently re-enable a wrong xi). Build a surface whose cross-section is a small arc far
+    # from the axis ray about (R_a, 0).
+    class _ArcSurface:
+        nfp = 1
+
+        def cross_section(self, phi=0.0, thetas=256):
+            # a short arc near R=1.5, Z~0 (does not encircle the axis at R_a=1.0)
+            t = np.linspace(-0.2, 0.2, int(thetas))
+            radius = 1.5 + 0.01 * np.cos(t)
+            z = 0.01 * np.sin(t)
+            return np.column_stack([radius * math.cos(phi), radius * math.sin(phi), z])
+
+    axis = _constant_axis(r_a=1.0, z_a=0.0)
+    # The first (every) plane is a non-encircling arc -> fail closed immediately.
+    with pytest.raises(ValueError, match="does not wind once about the axis"):
+        flux_shape_from_surface(_ArcSurface(), axis)
+
+
+def test_flux_shape_fails_closed_when_any_single_plane_does_not_wind():
+    # A genuine nested flux surface winds once about the axis at EVERY toroidal plane. If even
+    # one plane does not wind (a non-nested surface or a degenerate slice), flux_shape_from_
+    # surface must RAISE -- it must not silently substitute another plane's shape (the earlier
+    # "nearest-valid-plane fill" masked a units bug; with the correct phi units every real plane
+    # winds, so a non-winding plane is a true failure). Here plane 2 is a tiny arc off the axis,
+    # the rest are good ellipses; the call must fail closed naming that plane.
+    n_phi = 6
+    phis = np.array([(i / n_phi) * 2.0 * math.pi for i in range(n_phi)], dtype=float)
+    axis = AxisModel(
+        phis=phis, r=np.full(n_phi, 1.0), z=np.zeros(n_phi), nfp=1,
+        residual_max=0.0, source="test",
+    )
+    a, b, bad = 0.04, 0.11, 2
+
+    class _OneNonWindingPlaneSurface:
+        nfp = 1
+
+        def cross_section(self, phi=0.0, thetas=256):
+            theta = np.linspace(0.0, 2.0 * math.pi, int(thetas), endpoint=False)
+            # cross_section takes phi in TURNS; recover the plane index from the turn value.
+            idx = int(round((float(phi) % 1.0) * n_phi)) % n_phi
+            if idx == bad:
+                radius = 1.0 + 1.0e-4 * np.cos(theta)
+                z = 1.0e-4 * np.sin(theta) + 0.5  # shifted off the axis -> winding 0
+            else:
+                radius = 1.0 + a * np.cos(theta)
+                z = b * np.sin(theta)
+            return np.column_stack([radius * np.cos(phi), radius * np.sin(phi), z])
+
+    with pytest.raises(ValueError, match="does not wind once about the axis"):
+        flux_shape_from_surface(_OneNonWindingPlaneSurface(), axis)
+
+
+def test_flux_shape_slices_the_correct_toroidal_plane_simsopt_phi_units():
+    # REGRESSION for the cross_section UNITS BUG. simsopt's ``Surface.cross_section`` takes the
+    # toroidal angle as a FRACTION of 2*pi (turns), NOT radians; ``axis.phis`` are radians.
+    # flux_shape_from_surface must convert (phi/2*pi), else it slices the WRONG toroidal plane
+    # (e.g. 3.927 rad -> 0.927 turn = 5.83 rad) and builds Q from a mismatched plane. The
+    # earlier synthetic-stub tests miss this because their cross_section ignores the units
+    # convention; this uses a REAL simsopt surface whose elongation VARIES strongly with the
+    # cylindrical angle, so the correct-plane and wrong-plane shapes differ measurably.
+    # It FAILS on the radians version and PASSES on phi/(2*pi).
+    from simsopt.geo import SurfaceRZFourier
+
+    n_phi = 8
+    surface = SurfaceRZFourier(
+        nfp=1, stellsym=True, mpol=2, ntor=2,
+        quadpoints_phi=np.linspace(0.0, 1.0, 128, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 128, endpoint=False),
+    )
+    surface.set_rc(0, 0, 1.0)
+    surface.set_rc(1, 0, 0.15)
+    surface.set_zs(1, 0, 0.15)
+    # Strong n=1 modulation so the poloidal elongation swings widely between toroidal planes.
+    surface.set_zs(1, 1, 0.10)
+    surface.set_rc(1, 1, -0.06)
+    phis = np.array([(i / n_phi) * 2.0 * math.pi for i in range(n_phi)], dtype=float)
+    axis = AxisModel(
+        phis=phis, r=np.full(n_phi, 1.0), z=np.zeros(n_phi), nfp=1,
+        residual_max=0.0, source="test",
+    )
+
+    def elong_of_cross_section(phi_turns):
+        cs = surface.cross_section(phi=phi_turns, thetas=300)
+        d_r = np.sqrt(cs[:, 0] ** 2 + cs[:, 1] ** 2) - 1.0
+        d_z = cs[:, 2]
+        m = np.array([[np.mean(d_r * d_r), np.mean(d_r * d_z)],
+                      [np.mean(d_r * d_z), np.mean(d_z * d_z)]])
+        w = np.linalg.eigvalsh(m)
+        return math.sqrt(max(w) / min(w))
+
+    shape = flux_shape_from_surface(surface, axis)
+    # A det-normalised Q = M^-1 has eigenvalues lambda, 1/lambda, so the cross-section
+    # elongation sqrt(max/min eig of M) equals sqrt(max/min eig of Q).
+    for i, phi in enumerate(phis):
+        w = np.linalg.eigvalsh(shape[i])
+        q_elong = math.sqrt(max(w) / min(w))
+        correct = elong_of_cross_section(float(phi) / (2.0 * math.pi))  # turns: the right plane
+        wrong = elong_of_cross_section(float(phi))  # radians-as-turns: the bug's wrong plane
+        # Q must match the CORRECT plane's shape (units fix), not the wrong plane's.
+        assert abs(q_elong - correct) < 1.0e-3, (
+            f"plane {i}: Q elong {q_elong:.3f} != correct-plane elong {correct:.3f}"
+        )
+        if abs(correct - wrong) > 0.05:  # planes where the bug is observable
+            assert abs(q_elong - wrong) > 0.04, (
+                f"plane {i}: Q elong {q_elong:.3f} matches the WRONG (radians) plane "
+                f"{wrong:.3f} -- the cross_section units bug is present"
+            )

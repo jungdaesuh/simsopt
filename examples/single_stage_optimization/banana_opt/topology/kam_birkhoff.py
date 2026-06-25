@@ -70,6 +70,14 @@ KAM_FRACTION_SEMANTICS = "weighted_birkhoff_invariant_torus_fraction"
 KAM_CLASS_INVARIANT_TORUS = "invariant_torus"
 KAM_CLASS_ISLAND_CHAIN = "island_chain"
 KAM_CLASS_CHAOTIC = "chaotic"
+# Coherent WBA rotation number -- the two half-series agree to at least
+# island_digits_min digits, so the orbit winds about a well-defined rotation
+# number -- but short of the strict invariant_digits_min threshold at this return
+# count. A slowly-converging torus (low iota / near an island) needs more Poincare
+# returns to certify; it is NOT chaos. Non-terminal: excluded from the
+# classifiable denominator (absence of certification is not evidence of chaos),
+# reported separately, never counted as invariant.
+KAM_CLASS_UNDER_RESOLVED = "under_resolved"
 KAM_CLASS_INSUFFICIENT_RETURNS = "insufficient_returns"
 KAM_CLASS_INVALID_POLAR_REFERENCE = "invalid_poloidal_reference"
 KAM_CLASS_MISSING_MAGNETIC_AXIS = "missing_magnetic_axis"
@@ -81,6 +89,18 @@ KAM_CLASSIFIABLE_STATES = frozenset(
         KAM_CLASS_ISLAND_CHAIN,
         KAM_CLASS_CHAOTIC,
     )
+)
+
+# States representing a surviving line that was traced to the min-returns floor
+# and ASSIGNED a WBA verdict -- a terminal invariant/island/chaotic classification
+# OR a coherent-but-under-resolved rotation number. Used by the trace-coverage
+# (classifiability) floor in island_verdict_counts: such a line WAS reliably
+# judged, so it counts toward coverage. This DIFFERS from KAM_CLASSIFIABLE_STATES
+# (the invariant-fraction denominator), which excludes under_resolved because it
+# is not a terminal confinement verdict -- a slowly-converging confined torus is
+# fully judged (coverage) yet not certified invariant (confinement).
+KAM_COVERAGE_JUDGED_STATES = KAM_CLASSIFIABLE_STATES | frozenset(
+    (KAM_CLASS_UNDER_RESOLVED,)
 )
 
 WBA_EVALUATION_EVALUATED = "evaluated"
@@ -288,6 +308,14 @@ def classify_angle_series(
     elif matching_digits >= float(settings.invariant_digits_min):
         classification = KAM_CLASS_INVARIANT_TORUS
         reason = "weighted_birkhoff_average_converged"
+    elif matching_digits >= float(settings.island_digits_min):
+        # Coherent rotation number (half-series agree to >= island_digits_min
+        # digits) but short of the strict invariant threshold at this return
+        # count -- a slowly-converging torus (low iota / near an island) that
+        # needs more returns. Withheld from the invariant verdict, NOT mislabelled
+        # chaotic (which under-counts confinement).
+        classification = KAM_CLASS_UNDER_RESOLVED
+        reason = "weighted_birkhoff_average_under_resolved"
     else:
         classification = KAM_CLASS_CHAOTIC
         reason = "weighted_birkhoff_average_not_converged"
@@ -527,6 +555,7 @@ def summarize_seed_classifications(
         KAM_CLASS_INVARIANT_TORUS: 0,
         KAM_CLASS_ISLAND_CHAIN: 0,
         KAM_CLASS_CHAOTIC: 0,
+        KAM_CLASS_UNDER_RESOLVED: 0,
         KAM_CLASS_INSUFFICIENT_RETURNS: 0,
         KAM_CLASS_INVALID_POLAR_REFERENCE: 0,
         KAM_CLASS_MISSING_MAGNETIC_AXIS: 0,
@@ -537,10 +566,15 @@ def summarize_seed_classifications(
 
     survived_count = len(survived)
     classified_count = len(classified)
-    # Not-evaluated survivors: lines that survived the trace horizon but produced
-    # no valid rotation-number series (too few returns, invalid poloidal
-    # reference, or missing axis). Reported separately; never in the denominator.
-    not_evaluated_seed_count = survived_count - classified_count
+    under_resolved_count = int(counts[KAM_CLASS_UNDER_RESOLVED])
+    # Survivors split into three disjoint groups: classified (a terminal
+    # invariant/island/chaotic verdict -> the denominator), under-resolved (a
+    # coherent rotation number short of the invariant threshold -> needs more
+    # returns), and not-evaluated (no valid rotation-number series at all: too few
+    # returns, invalid poloidal reference, or missing axis). Both under-resolved
+    # and not-evaluated are reported separately and NEVER enter the denominator:
+    # absence of certification is not evidence of chaos.
+    not_evaluated_seed_count = survived_count - classified_count - under_resolved_count
     # Denominator = classifiable seeds, but a fraction is reported only when the
     # cross-section was actually traceable enough to support a confinement claim:
     # at least WBA_MIN_CLASSIFIABLE_SEEDS classifiable AND at least
@@ -610,6 +644,7 @@ def summarize_seed_classifications(
         "wba_seed_count": int(total),
         "wba_survived_seed_count": int(survived_count),
         "wba_classified_seed_count": int(classified_count),
+        "wba_under_resolved_seed_count": int(under_resolved_count),
         "wba_not_evaluated_seed_count": int(not_evaluated_seed_count),
         "wba_evaluation_state": evaluation_state,
         "wba_not_evaluated_reason": not_evaluated_reason,
@@ -675,12 +710,17 @@ def island_verdict_counts(
     """Tally per-line island + classifiability statistics for a strict verdict.
 
     Single pass over the per-line WBA payload (``wba_seed_classifications``).
-    A *surviving* line is any line not classified ``lost``; a surviving line is
-    *classifiable* only when it accumulated at least ``min_returns`` Poincare
-    returns (below that floor the WBA rotation number is unreliable, so the line
-    is treated as not-classifiable). Island lines are counted by the absence
-    test the certification verdict keys on -- the explicit ``island_chain``
-    label -- never by the presence of ``invariant_torus``.
+    A *surviving* line is any line not classified ``lost``. A surviving line is
+    *classifiable* (counts toward this trace-coverage floor) when it accumulated
+    at least ``min_returns`` Poincare returns AND was assigned a WBA verdict --
+    a terminal invariant/island/chaotic class OR a coherent ``under_resolved``
+    rotation number (``KAM_COVERAGE_JUDGED_STATES``). Below the returns floor the
+    rotation number is unreliable, so the line is not-classifiable. This coverage
+    floor is deliberately broader than the invariant-fraction denominator
+    (``KAM_CLASSIFIABLE_STATES``): a slowly-converging confined torus is fully
+    judged here, yet excluded from confinement certification there. Island lines
+    are counted by the absence test the certification verdict keys on -- the
+    explicit ``island_chain`` label -- never by the presence of ``invariant_torus``.
     """
 
     if int(min_returns) <= 0:
@@ -705,7 +745,7 @@ def island_verdict_counts(
         if classification != KAM_CLASS_LOST:
             surviving += 1
             if (
-                classification in KAM_CLASSIFIABLE_STATES
+                classification in KAM_COVERAGE_JUDGED_STATES
                 and _seed_entry_return_count(entry) >= int(min_returns)
             ):
                 classifiable += 1

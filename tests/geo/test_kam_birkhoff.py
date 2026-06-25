@@ -12,11 +12,13 @@ from examples.single_stage_optimization.banana_opt.topology.kam_birkhoff import 
     KAM_CLASS_ISLAND_CHAIN,
     KAM_CLASS_LOST,
     KAM_CLASS_MISSING_MAGNETIC_AXIS,
+    KAM_CLASS_UNDER_RESOLVED,
     WBA_FRACTION_DENOMINATOR_POLICY,
     SeedClassification,
     classify_angle_series,
     classifier_settings_payload,
     classify_return_points,
+    island_verdict_counts,
     normalized_wrapped_rotation_increments,
     poloidal_angle_series_has_consistent_winding,
     summarize_seed_classifications,
@@ -99,6 +101,141 @@ def test_weighted_birkhoff_standard_map_rejects_chaotic_orbit_above_breakup():
     assert result.classification == KAM_CLASS_CHAOTIC
     assert result.matching_digits is not None
     assert result.matching_digits < settings.island_digits_min
+
+
+def _two_rate_rotation_angles(omega1, delta, *, count):
+    # A coherent rotation whose first and second halves wind at omega1 and
+    # omega1+delta. classify_angle_series splits the series in half, so the two
+    # half-rotation-numbers differ by ~delta and matching_digits ~ -log10(delta):
+    # a controllable knob to land in any convergence band.
+    half = count // 2
+    increments = np.concatenate(
+        [np.full(half, float(omega1)), np.full(count - half, float(omega1) + float(delta))]
+    )
+    return 2.0 * np.pi * np.cumsum(increments)
+
+
+def test_weighted_birkhoff_slowly_converging_torus_is_under_resolved_not_chaotic():
+    # A coherent rotation number whose halves agree to ~5-6 digits -- short of the
+    # 8-digit invariant bar but far above the noise of real chaos -- must classify
+    # as under_resolved, NOT chaotic. (Before the under_resolved state this band
+    # fell into the `else` and was labelled chaotic, under-counting confinement;
+    # this test fails against that old behavior.)
+    settings = BirkhoffClassifierSettings(
+        min_returns=256,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    angles = _two_rate_rotation_angles(0.21134283, 3.0e-6, count=600)
+
+    result = classify_angle_series(angles, settings=settings)
+
+    assert result.classification == KAM_CLASS_UNDER_RESOLVED
+    assert result.classification != KAM_CLASS_CHAOTIC
+    assert result.matching_digits is not None
+    assert settings.island_digits_min <= result.matching_digits < settings.invariant_digits_min
+    assert result.rotation_number is not None
+
+
+def test_summarize_excludes_under_resolved_from_invariant_fraction_denominator():
+    # An under-resolved seed must NOT enter the classifiable denominator and must
+    # NOT count as invariant: it is reported separately. Before the under_resolved
+    # state it was labelled chaotic and DID enter the denominator, dragging the
+    # invariant fraction down (9/10 instead of 9/9 here).
+    settings = BirkhoffClassifierSettings(
+        min_returns=256,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    invariant = classify_angle_series(
+        _two_rate_rotation_angles(0.21134283, 1.0e-12, count=600), settings=settings
+    )
+    under = classify_angle_series(
+        _two_rate_rotation_angles(0.18473117, 3.0e-6, count=600), settings=settings
+    )
+    assert invariant.classification == KAM_CLASS_INVARIANT_TORUS
+    assert under.classification == KAM_CLASS_UNDER_RESOLVED
+
+    summary = summarize_seed_classifications([invariant] * 9 + [under])
+
+    assert summary["wba_classified_seed_count"] == 9
+    assert summary["wba_under_resolved_seed_count"] == 1
+    assert summary["wba_classification_counts"][KAM_CLASS_UNDER_RESOLVED] == 1
+    assert summary["invariant_torus_fraction"] == 1.0
+
+
+def test_island_verdict_counts_trace_coverage_floor_counts_under_resolved_as_judged():
+    # An under_resolved line was traced to >= min_returns and assigned a coherent
+    # rotation number -- it WAS judged, so it must count toward the trace-coverage
+    # (classifiability) floor, NOT drag it down. Regression for the review-caught
+    # defect: when under_resolved was excluded from the coverage set, a slowly-
+    # converging confined core wrongly lowered classifiable_fraction and could
+    # fail the strict confinement gate. Reverting KAM_COVERAGE_JUDGED_STATES ->
+    # KAM_CLASSIFIABLE_STATES drops the under_resolved line, giving 1/2 = 0.5 here.
+    settings = BirkhoffClassifierSettings(
+        min_returns=256,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    invariant = classify_angle_series(
+        _two_rate_rotation_angles(0.21134283, 1.0e-12, count=600), settings=settings
+    )
+    under = classify_angle_series(
+        _two_rate_rotation_angles(0.18473117, 3.0e-6, count=600), settings=settings
+    )
+    assert under.classification == KAM_CLASS_UNDER_RESOLVED
+
+    counts = island_verdict_counts([invariant, under], min_returns=256)
+
+    assert counts["surviving_seed_count"] == 2
+    assert counts["classifiable_seed_count"] == 2
+    assert counts["classifiable_fraction"] == 1.0
+
+
+def test_under_resolved_band_boundary_is_inclusive_at_island_digits_min():
+    # The under_resolved band is [island_digits_min, invariant_digits_min): the
+    # lower edge is inclusive. A half-split of ~1e-4 lands matching_digits exactly
+    # at 4.0 -> under_resolved; ~2e-4 drops just below -> chaotic. Locks the `>=`
+    # inclusivity at the island_digits_min boundary.
+    settings = BirkhoffClassifierSettings(
+        min_returns=256,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    at_floor = classify_angle_series(
+        _two_rate_rotation_angles(0.21134283, 1.0e-4, count=600), settings=settings
+    )
+    below_floor = classify_angle_series(
+        _two_rate_rotation_angles(0.21134283, 2.0e-4, count=600), settings=settings
+    )
+    assert at_floor.matching_digits >= settings.island_digits_min
+    assert at_floor.classification == KAM_CLASS_UNDER_RESOLVED
+    assert below_floor.matching_digits < settings.island_digits_min
+    assert below_floor.classification == KAM_CLASS_CHAOTIC
+
+
+def test_summarize_all_under_resolved_reports_no_classified_with_clean_accounting():
+    # An all-under_resolved cross-section: no terminal classification -> fraction
+    # None (fail-closed), and the disjoint accounting holds
+    # (survived = classified + under_resolved + not_evaluated = 0 + 4 + 0). Guards
+    # the not_evaluated = survived - classified - under_resolved arithmetic.
+    settings = BirkhoffClassifierSettings(
+        min_returns=256,
+        invariant_digits_min=8.0,
+        island_digits_min=4.0,
+    )
+    under = classify_angle_series(
+        _two_rate_rotation_angles(0.18473117, 3.0e-6, count=600), settings=settings
+    )
+    assert under.classification == KAM_CLASS_UNDER_RESOLVED
+
+    summary = summarize_seed_classifications([under] * 4)
+
+    assert summary["wba_survived_seed_count"] == 4
+    assert summary["wba_classified_seed_count"] == 0
+    assert summary["wba_under_resolved_seed_count"] == 4
+    assert summary["wba_not_evaluated_seed_count"] == 0
+    assert summary["invariant_torus_fraction"] is None
 
 
 def test_weighted_birkhoff_standard_map_sensitive_orbit_flips_across_breakup_region():
