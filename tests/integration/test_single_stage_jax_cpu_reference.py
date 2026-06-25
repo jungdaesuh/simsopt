@@ -28,12 +28,18 @@ SINGLE_STAGE_SCRIPT = (
 
 
 def _run_script(args: list[str]) -> subprocess.CompletedProcess:
+    result = _run_script_raw(args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result
+
+
+def _run_script_raw(args: list[str]) -> subprocess.CompletedProcess:
     env = {
         **os.environ,
         "PYTHONNOUSERSITE": "1",
         "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
     }
-    result = subprocess.run(
+    return subprocess.run(
         [sys.executable, str(SINGLE_STAGE_SCRIPT), *args],
         cwd=REPO_ROOT,
         env=env,
@@ -42,8 +48,6 @@ def _run_script(args: list[str]) -> subprocess.CompletedProcess:
         check=False,
         timeout=90,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    return result
 
 
 def test_single_stage_cli_exposes_seeded_soft_penalty_surface():
@@ -58,6 +62,13 @@ def test_single_stage_cli_exposes_seeded_soft_penalty_surface():
 
 def test_single_stage_seed_spec_compilation_writes_chainable_paths(tmp_path):
     stage2_run_dir = tmp_path / "stage2"
+    stage2_run_dir.mkdir()
+    for artifact_name in (
+        "biot_savart_opt.json",
+        "surf_opt.json",
+        "boozersurface_opt.json",
+    ):
+        (stage2_run_dir / artifact_name).write_text("{}\n", encoding="utf-8")
     seed_spec = tmp_path / "seed.json"
 
     _run_script(
@@ -83,6 +94,33 @@ def test_single_stage_seed_spec_compilation_writes_chainable_paths(tmp_path):
     assert payload["biotsavart"] == str(stage2_run_dir / "biot_savart_opt.json")
     assert payload["surface"] == str(stage2_run_dir / "surf_opt.json")
     assert payload["boozersurface"] == str(stage2_run_dir / "boozersurface_opt.json")
+
+
+def test_single_stage_seed_spec_compilation_rejects_missing_artifacts(tmp_path):
+    stage2_run_dir = tmp_path / "stage2"
+    seed_spec = tmp_path / "seed.json"
+
+    result = _run_script_raw(
+        [
+            "--compile-jax-runtime-seed-spec",
+            "--warm-start-run-dir",
+            str(stage2_run_dir),
+            "--jax-runtime-seed-spec",
+            str(seed_spec),
+            "--mpol",
+            "1",
+            "--ntor",
+            "1",
+            "--nphi",
+            "8",
+            "--ntheta",
+            "8",
+        ]
+    )
+
+    assert result.returncode != 0
+    assert "missing Stage 2 artifact" in result.stderr
+    assert not seed_spec.exists()
 
 
 def test_single_stage_defaults_match_reference_driver_contract():

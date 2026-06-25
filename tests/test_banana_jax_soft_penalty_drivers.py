@@ -22,6 +22,7 @@ from examples.single_stage_optimization.banana_opt.jax_banana_drivers import (  
     banana_base_curve,
     build_biotsavart,
     build_boozer_surface_copy,
+    read_banana_dofs,
 )
 from examples.single_stage_optimization.banana_opt.jax_banana_types import (  # noqa: E402
     BANANA_TARGETS,
@@ -114,6 +115,56 @@ def test_banana_driver_defaults_match_reference_contract():
     assert BANANA_TARGETS.width_min == pytest.approx(0.050)
     assert BANANA_TARGETS.global_curvature_radius_min == pytest.approx(0.010)
     assert BANANA_TARGETS.global_curvature_radius_exp_weight == pytest.approx(0.010)
+
+
+def test_read_banana_dofs_accepts_reference_yaml(tmp_path):
+    dofs_path = tmp_path / "banana_dofs.yaml"
+    dofs_path.write_text(
+        "\n".join(
+            (
+                "phic(0):    0.0600",
+                "phic(1):    0.0300",
+                "thetac(0):  0.5000",
+                "thetas(1):  0.1000",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert read_banana_dofs(dofs_path) == pytest.approx(
+        {
+            "phic(0)": 0.06,
+            "phic(1)": 0.03,
+            "thetac(0)": 0.5,
+            "thetas(1)": 0.1,
+        }
+    )
+
+
+def test_read_banana_dofs_keeps_table_format_contract(tmp_path):
+    dofs_path = tmp_path / "banana_dofs.txt"
+    dofs_path.write_text(
+        "\n".join(
+            (
+                "phic(0) 0.0600",
+                "phic(1) 0.0300",
+                "thetac(0) 0.5000",
+                "thetas(1) 0.1000",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert read_banana_dofs(dofs_path) == pytest.approx(
+        {
+            "phic(0)": 0.06,
+            "phic(1)": 0.03,
+            "thetac(0)": 0.5,
+            "thetas(1)": 0.1,
+        }
+    )
 
 
 def test_build_boozer_surface_copy_regrids_tensor_surface_seed():
