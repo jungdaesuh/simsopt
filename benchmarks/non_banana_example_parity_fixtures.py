@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
@@ -34,6 +34,7 @@ import simsopt_jax_adapters.field.biotsavart_backend as biotsavart_jax_backend
 import simsopt.geo as simsopt_geo
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax_adapters.field.force import B2Energy, LpCurveForce
+from simsopt_jax_adapters.geo.curve_specs import supports_adapter_curve_spec
 import simsopt.objectives as simsopt_objectives
 import simsopt_jax_adapters.objectives.flux as fluxobjective_jax
 
@@ -295,14 +296,7 @@ def _curve_supports_native_jax(curve) -> bool:
     Operates on a *base* curve obtained after unwrapping any RotatedCurve
     wrappers, exactly as BiotSavartJAX does internally.
     """
-    if callable(getattr(curve, "to_spec", None)):
-        return True
-    surface = getattr(curve, "surf", None)
-    return (
-        surface is not None
-        and getattr(curve, "surf_type", None) == "RZ_Fourier"
-        and callable(getattr(surface, "surface_spec", None))
-    )
+    return supports_adapter_curve_spec(curve)
 
 
 def _verify_jax_native_spec_contract(coils) -> Tuple[str, ...]:
@@ -322,7 +316,7 @@ def _verify_jax_native_spec_contract(coils) -> Tuple[str, ...]:
         if not _curve_supports_native_jax(base_curve):
             raise FixtureNotSupportedError(
                 f"Coil[{idx}] base curve type {type(base_curve).__name__} does "
-                "not expose an immutable native JAX spec (to_spec()); "
+                "not expose an adapter-owned immutable native JAX spec; "
                 "BiotSavartJAX cannot be constructed for this fixture."
             )
         cid = id(base_curve)
@@ -574,6 +568,69 @@ def _build_scalar_lane(
         Bdotn_mean=0.0,
         raw_arrays=dict(raw_arrays),
         timing={"setup_s": float(setup_seconds), "execute_s": float(execute_seconds)},
+    )
+
+
+def _active_curve_dof_basis(objective, ordered_curves) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Map an objective's active DOF vector into fixture-defined curve order."""
+    starts_by_id: dict[int, int] = {}
+    stop = 0
+    for opt in objective.unique_dof_lineage:
+        starts_by_id[id(opt)] = stop
+        stop += opt.local_dof_size
+
+    indices: list[int] = []
+    names: list[str] = []
+    for curve_idx, curve in enumerate(ordered_curves):
+        start = starts_by_id[id(curve)]
+        stop = start + curve.local_dof_size
+        indices.extend(range(start, stop))
+        names.extend(
+            f"finite_beta_base_curve[{curve_idx}]:{name}"
+            for name in curve.local_dof_names
+        )
+
+    if len(indices) != objective.dof_size:
+        raise FixtureNotSupportedError(
+            "finite-beta active-basis normalization expected only base-curve "
+            "free DOFs."
+        )
+
+    return np.asarray(indices, dtype=np.int64), tuple(names)
+
+
+def _restore_objective_dof_order(
+    canonical_dofs: np.ndarray,
+    canonical_to_objective: np.ndarray,
+) -> np.ndarray:
+    objective_dofs = np.empty_like(canonical_dofs, dtype=np.float64)
+    objective_dofs[canonical_to_objective] = np.asarray(
+        canonical_dofs,
+        dtype=np.float64,
+    )
+    return objective_dofs
+
+
+def _lane_with_active_curve_basis(
+    lane: LaneArtifact,
+    objective,
+    canonical_to_objective: np.ndarray,
+    active_dof_names: tuple[str, ...],
+) -> LaneArtifact:
+    active_dofs = artifact_host_array(objective.x, dtype=np.float64)[
+        canonical_to_objective
+    ]
+    gradient = _artifact_host_float_array(lane.raw_arrays["gradient"])[
+        canonical_to_objective
+    ]
+    raw_arrays = {**lane.raw_arrays, "gradient": gradient}
+    return replace(
+        lane,
+        gradient=gradient,
+        gradient_norm=float(np.linalg.norm(gradient)),
+        active_dof_names=active_dof_names,
+        active_dof_hash=_hash_array(active_dofs),
+        raw_arrays=raw_arrays,
     )
 
 
@@ -5760,15 +5817,39 @@ def _build_finite_beta_target_flux_fixed_state():
         objective_component_name="JF_total_jax",
     )
 
-    x0 = np.asarray(jf_full.x, dtype=np.float64).copy()
+    cpu_basis, canonical_active_names = _active_curve_dof_basis(jf_full, base_curves)
+    jax_basis, jax_active_names = _active_curve_dof_basis(
+        jf_full_jax,
+        base_curves_jax,
+    )
+    if jax_active_names != canonical_active_names:
+        raise FixtureNotSupportedError(
+            "finite-beta CPU/JAX active-basis names diverged after "
+            "fixture-defined curve-order normalization."
+        )
+
+    cpu_lane = _lane_with_active_curve_basis(
+        cpu_lane,
+        jf_full,
+        cpu_basis,
+        canonical_active_names,
+    )
+    jax_lane = _lane_with_active_curve_basis(
+        jax_lane,
+        jf_full_jax,
+        jax_basis,
+        canonical_active_names,
+    )
+
+    x0 = np.asarray(jf_full.x, dtype=np.float64)[cpu_basis].copy()
 
     def _cpu_native_J(dofs: np.ndarray) -> float:
         with _cpu_oracle_boundary():
-            jf_full.x = np.asarray(dofs, dtype=np.float64)
+            jf_full.x = _restore_objective_dof_order(dofs, cpu_basis)
             return _artifact_host_float(jf_full.J())
 
     def _jax_native_J(dofs: np.ndarray) -> float:
-        jf_full_jax.x = np.asarray(dofs, dtype=np.float64)
+        jf_full_jax.x = _restore_objective_dof_order(dofs, jax_basis)
         return _artifact_host_float(jf_full_jax.J())
 
     return FixtureBuild(
