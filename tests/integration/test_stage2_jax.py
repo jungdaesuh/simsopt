@@ -3577,6 +3577,88 @@ class TestStage2OptimizerContract:
         assert contract["runtime_contract"]["max_iterations"] == 7
         assert contract["runtime_contract"]["accepted_step_callback"] is False
 
+    def test_stage2_results_provenance_uses_checkout_root(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        captured = {}
+
+        def fake_runtime_provenance(**kwargs):
+            captured["repo_root"] = kwargs["repo_root"]
+            return {"repo_root": str(kwargs["repo_root"])}
+
+        monkeypatch.setattr(
+            stage2_script,
+            "build_runtime_provenance",
+            fake_runtime_provenance,
+        )
+
+        args = types.SimpleNamespace(
+            backend="jax",
+            optimizer_backend="scipy-jax",
+            least_squares_algorithm="quasi-newton",
+            constraint_method="penalty",
+            init_only=False,
+            skip_postprocess=True,
+            disable_accepted_step_callback=False,
+        )
+        with tempfile.TemporaryDirectory(prefix="stage2-provenance-root-") as temp_dir:
+            payload = stage2_script.build_stage2_results_envelope(
+                output_root=temp_dir,
+                plasma_surf_filename="fixture.nc",
+                file_loc="/tmp/fixture.nc",
+                nphi=16,
+                ntheta=8,
+                num_quadpoints=32,
+                order=2,
+                field_diagnostic_stride=0,
+                R0=0.915,
+                s=0.24,
+                banana_surf_radius=0.21,
+                theta_center=0.5,
+                phi_center=0.06,
+                theta_width=0.1,
+                phi_width=0.03,
+                LENGTH_WEIGHT=0.0005,
+                CC_WEIGHT=100.0,
+                CURVATURE_WEIGHT=0.0001,
+                SQUARED_FLUX_WEIGHT=1.0,
+                LENGTH_TARGET=0.95,
+                CC_THRESHOLD=0.05,
+                CURVATURE_THRESHOLD=40.0,
+                args=args,
+                MAXITER=7,
+            )
+
+        assert Path(captured["repo_root"]).resolve() == Path(
+            stage2_script.SIMSOPT_ROOT
+        ).resolve()
+        assert payload["artifacts"]["required"]["results.json"]["exists"] is False
+
+    def test_stage2_final_artifact_manifest_tracks_rejected_marker(self):
+        stage2_script = _load_stage2_script_module()
+        with tempfile.TemporaryDirectory(prefix="stage2-artifacts-") as temp_dir:
+            temp_path = Path(temp_dir)
+            stale_results_path = temp_path / "results.json"
+            stale_results_path.write_text("{}", encoding="utf-8")
+            (temp_path / "biot_savart_opt.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            (temp_path / "surf_opt.json").write_text("{}", encoding="utf-8")
+            (temp_path / "REJECTED.json").write_text("{}", encoding="utf-8")
+
+            stage2_script.remove_stage2_artifact(temp_dir, "results.json")
+            assert stale_results_path.exists() is False
+            artifacts = stage2_script.build_stage2_artifact_manifest(
+                temp_dir,
+                skip_postprocess=True,
+            )
+
+        assert artifacts["required"]["results.json"]["exists"] is False
+        assert artifacts["required"]["biot_savart_opt.json"]["exists"] is True
+        assert artifacts["required"]["surf_opt.json"]["exists"] is True
+        assert artifacts["optional"]["REJECTED.json"]["exists"] is True
+        assert artifacts["policy"]["skip_postprocess"] is True
+
     def test_parse_args_accepts_least_squares_algorithm_override(self, monkeypatch):
         stage2_script = _load_stage2_script_module()
         monkeypatch.setattr(
@@ -7040,7 +7122,7 @@ class TestStage2OptimizerContract:
                     "max_iterations": 0,
                 },
             },
-            "field_error": 0.0,
+            "FIELD_ERROR": 0.0,
             "FINAL_CURVE_LENGTH": 1.0,
             "FINAL_MEAN_ABS_RELBN": 0.0,
         }
@@ -7079,6 +7161,7 @@ class TestStage2OptimizerContract:
             stage2_script.write_stage2_results_json(
                 temp_dir,
                 results_with_diagnostics,
+                skip_postprocess=True,
                 optimizer_result=None,
                 optimizer_success=True,
                 final_objective=0.125,
@@ -7094,6 +7177,10 @@ class TestStage2OptimizerContract:
         )
         assert passing_reasons == []
         assert accepted_payload["OBJECTIVE_DIAGNOSTICS"] == passing_diagnostics
+        assert (
+            accepted_payload["artifacts"]["required"]["results.json"]["exists"] is True
+        )
+        assert accepted_payload["artifacts"]["policy"]["skip_postprocess"] is True
 
     def test_stage2_probe_payload_reuses_cached_raw_term_jacobian_helper(self):
         stage2_script = _load_stage2_script_module()

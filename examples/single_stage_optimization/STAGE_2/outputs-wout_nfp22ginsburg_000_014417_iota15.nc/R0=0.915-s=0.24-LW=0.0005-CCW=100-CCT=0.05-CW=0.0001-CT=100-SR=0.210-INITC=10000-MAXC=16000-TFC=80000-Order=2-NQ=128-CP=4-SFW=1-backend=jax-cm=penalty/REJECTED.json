@@ -3,15 +3,14 @@
   "rejection_reasons": [
     "optimizer_success_not_true",
     "optimizer_status_2",
-    "final_gradient_nonfinite",
-    "required_metric_nonfinite:field_error"
+    "final_gradient_nonfinite"
   ],
   "diagnostics": {
     "field_error": 0.05825298507687746,
     "final_objective": 0.0010977773729906762,
     "final_mean_abs_relBfinal_norm": 0.05825298507687746,
     "optimizer_timings": {
-      "cold_run_s": 6.655738957997528
+      "cold_run_s": 7.334949915995821
     }
   },
   "optimizer": {

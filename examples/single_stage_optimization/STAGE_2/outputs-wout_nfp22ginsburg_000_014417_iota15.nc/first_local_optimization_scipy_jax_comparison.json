@@ -2,9 +2,9 @@
   "schema_version": 1,
   "provenance": {
     "title": "Stage 2 banana coil optimization",
-    "generated_at_utc": "2026-06-25T10:39:00.278879Z",
-    "repo_root": "/Users/suhjungdae/code/columbia",
-    "repo_sha": "87fbe9338ef76d5ac1196135a33700e5325c2f4f",
+    "generated_at_utc": "2026-06-25T12:59:54.634472Z",
+    "repo_root": "/Users/suhjungdae/code/columbia/simopt-jax-clean-local",
+    "repo_sha": "8e3d2a784419b8551d3eac1a24bd68c9bedcd623",
     "script_path": "/Users/suhjungdae/code/columbia/simopt-jax-clean-local/examples/single_stage_optimization/STAGE_2/banana_coil_solver.py",
     "output_root": "/Users/suhjungdae/code/columbia/simopt-jax-clean-local/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty",
     "argv": [
@@ -52,7 +52,7 @@
     "required": {
       "results.json": {
         "path": "/Users/suhjungdae/code/columbia/simopt-jax-clean-local/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty/results.json",
-        "exists": true
+        "exists": false
       },
       "biot_savart_opt.json": {
         "path": "/Users/suhjungdae/code/columbia/simopt-jax-clean-local/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty/biot_savart_opt.json",
@@ -63,7 +63,12 @@
         "exists": true
       }
     },
-    "optional": {},
+    "optional": {
+      "REJECTED.json": {
+        "path": "/Users/suhjungdae/code/columbia/simopt-jax-clean-local/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty/REJECTED.json",
+        "exists": true
+      }
+    },
     "policy": {
       "skip_postprocess": true
     }
@@ -939,13 +944,12 @@
   "SELF_INTERSECTION_TOLERANCE": 4.433925340517763e-05,
   "SELF_INTERSECTION_PENALTY": 0.0,
   "OPTIMIZER_TIMINGS": {
-    "cold_run_s": 6.655738957997528
+    "cold_run_s": 7.334949915995821
   },
   "accepted_artifact": false,
   "accepted_result_rejection_reasons": [
     "optimizer_success_not_true",
     "optimizer_status_2",
-    "final_gradient_nonfinite",
-    "required_metric_nonfinite:field_error"
+    "final_gradient_nonfinite"
   ]
 }

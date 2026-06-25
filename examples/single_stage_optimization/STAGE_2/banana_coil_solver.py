@@ -154,7 +154,26 @@ _STAGE2_REQUIRED_ARTIFACT_FILENAMES = (
     "biot_savart_opt.json",
     "surf_opt.json",
 )
+_STAGE2_OPTIONAL_ARTIFACT_FILENAMES = ("REJECTED.json",)
 _SMOOTHING_EPS = float(np.finfo(float).eps)
+
+
+def build_stage2_artifact_manifest(output_root, *, skip_postprocess):
+    artifacts = build_artifact_manifest(
+        output_root,
+        required_files=_STAGE2_REQUIRED_ARTIFACT_FILENAMES,
+        optional_files=_STAGE2_OPTIONAL_ARTIFACT_FILENAMES,
+    )
+    artifacts["policy"] = {
+        "skip_postprocess": bool(skip_postprocess),
+    }
+    return artifacts
+
+
+def remove_stage2_artifact(output_dir, filename):
+    path = os.path.join(output_dir, filename)
+    if os.path.exists(path):
+        os.remove(path)
 
 
 @lru_cache(maxsize=32)
@@ -2700,7 +2719,7 @@ _STAGE2_ACCEPTED_METADATA_PATHS = (
 )
 
 _STAGE2_ACCEPTED_METRIC_PATHS = (
-    ("field_error",),
+    ("FIELD_ERROR",),
     ("FINAL_CURVE_LENGTH",),
     ("FINAL_MEAN_ABS_RELBN",),
 )
@@ -2780,6 +2799,7 @@ def write_stage2_results_json(
     output_dir,
     results,
     *,
+    skip_postprocess,
     optimizer_result,
     optimizer_success,
     final_objective,
@@ -2801,9 +2821,12 @@ def write_stage2_results_json(
         required_metric_paths=_STAGE2_ACCEPTED_METRIC_PATHS,
         required_metadata_paths=_STAGE2_ACCEPTED_METADATA_PATHS,
     )
-    with open(
-        os.path.join(output_dir, "results.json"), "w", encoding="utf-8"
-    ) as outfile:
+    result_path = os.path.join(output_dir, "results.json")
+    with open(result_path, "w", encoding="utf-8") as outfile:
+        accepted_payload["artifacts"] = build_stage2_artifact_manifest(
+            output_dir,
+            skip_postprocess=skip_postprocess,
+        )
         json.dump(accepted_payload, outfile, indent=2, allow_nan=False)
 
 
@@ -2938,19 +2961,15 @@ def build_stage2_results_envelope(
     args,
     MAXITER,
 ):
-    artifacts = build_artifact_manifest(
+    artifacts = build_stage2_artifact_manifest(
         output_root,
-        required_files=_STAGE2_REQUIRED_ARTIFACT_FILENAMES,
-        planned_files=("results.json",),
+        skip_postprocess=args.skip_postprocess,
     )
-    artifacts["policy"] = {
-        "skip_postprocess": bool(args.skip_postprocess),
-    }
     return {
         "schema_version": _STAGE2_RESULTS_SCHEMA_VERSION,
         "provenance": build_runtime_provenance(
             title="Stage 2 banana coil optimization",
-            repo_root=REPO_ROOT,
+            repo_root=SIMSOPT_ROOT,
             script_path=__file__,
             output_root=output_root,
             argv=sys.argv,
@@ -4379,25 +4398,36 @@ if __name__ == "__main__":
         final_objective=final_snapshot["J"],
         final_dofs=stage2_final_dofs,
     )
-    if args.comparison_results_json:
-        write_stage2_comparison_results_json(
-            args.comparison_results_json,
-            results,
-            rejection_reasons=rejection_reasons,
-        )
     if rejection_reasons:
+        remove_stage2_artifact(OUT_DIR_ITER, "results.json")
         write_stage2_rejected_marker(
             OUT_DIR_ITER,
             reasons=rejection_reasons,
             optimizer_result=res,
             diagnostics=stage2_rejected_diagnostics(results),
         )
+        results["artifacts"] = build_stage2_artifact_manifest(
+            OUT_DIR_ITER,
+            skip_postprocess=args.skip_postprocess,
+        )
     else:
+        remove_stage2_artifact(OUT_DIR_ITER, "REJECTED.json")
         write_stage2_results_json(
             OUT_DIR_ITER,
             results,
+            skip_postprocess=args.skip_postprocess,
             optimizer_result=res,
             optimizer_success=optimizer_success,
             final_objective=final_snapshot["J"],
             final_dofs=stage2_final_dofs,
+        )
+        results["artifacts"] = build_stage2_artifact_manifest(
+            OUT_DIR_ITER,
+            skip_postprocess=args.skip_postprocess,
+        )
+    if args.comparison_results_json:
+        write_stage2_comparison_results_json(
+            args.comparison_results_json,
+            results,
+            rejection_reasons=rejection_reasons,
         )
