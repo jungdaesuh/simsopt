@@ -3632,6 +3632,25 @@ _ADJOINT_LINEAR_SOLVER = (
 _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
 _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 
+# Opt-in dense direct factorization for the EXACT-Jacobian adjoint transpose
+# solve ``J^T λ = g``.  At high mode counts (m18: ``J`` is 2055x2055) the
+# UNPRECONDITIONED operator-GMRES path (``restart=64``/``maxiter=10`` = 640
+# matvecs) stagnates at ``residual_relative ~ 1`` because the Krylov subspace
+# never resolves the spectrum, and the monotonic-rejection refinement loop then
+# correctly rolls every non-improving correction back.  The un-squared exact
+# Boozer Jacobian is well-conditioned (kappa(J) ~ 5.6e3), so the lit-endorsed
+# fix for a small square system is a direct LU factorization plus one step of
+# iterative refinement (GMRES-IR with a direct preconditioner): it solves to
+# machine precision in O(n^3) where the matrix-free Krylov method stalls.  The
+# 34 MB dense ``J^T`` is far under the ``max_dense_jacobian_bytes`` policy at
+# m18, but the materialization stays guarded by that policy.  Read once at
+# import (selects a static trace-time branch); default OFF so the operator-GMRES
+# path remains the baseline for A/B comparison.
+_EXACT_ADJOINT_DENSE_LU = (
+    os.environ.get("SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0").strip().lower()
+    not in ("", "0", "false", "off", "no")
+)
+
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
@@ -4588,13 +4607,35 @@ def _apply_column_batched_operator(matvec, rhs):
     return jax.vmap(matvec, in_axes=1, out_axes=1)(rhs)
 
 
+def _dense_square_operator_matrix_bytes_allowed(rhs):
+    """Whether the ``n x n`` dense materialization (``n = rhs.shape[0]``) fits the
+    dense-Jacobian byte cap.  The operator dimension is ``rhs.shape[0]`` whether
+    ``rhs`` is a single vector or a column-batched ``(n, k)`` right-hand side."""
+    rhs = jnp.asarray(rhs)
+    dimension = int(rhs.shape[0])
+    matrix_bytes = dimension * dimension * np.dtype(rhs.dtype).itemsize
+    return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
+
+
 def _dense_square_operator_materialization_allowed(rhs):
     rhs = jnp.asarray(rhs)
     if rhs.ndim != 1:
         return False
-    dimension = int(rhs.shape[0])
-    matrix_bytes = dimension * dimension * np.dtype(rhs.dtype).itemsize
-    return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
+    return _dense_square_operator_matrix_bytes_allowed(rhs)
+
+
+def _dense_square_operator_lu_materialization_allowed(rhs):
+    """Dense-LU exact-adjoint gate: accept a single vector OR a column-batched
+    ``(n, k)`` right-hand side.  The dense ``J^T`` is ``n x n`` regardless of the
+    number of columns, so one factorization serves all ``k`` columns and
+    ``lu_solve`` solves the batched RHS in a single call.  This is what lets the
+    dense-LU path reach the production single-stage adjoint, whose fused
+    residual+iota+non-QS gradient solves a 2-D batched RHS (the per-objective
+    ``dJ()`` solves a single vector)."""
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim not in (1, 2):
+        return False
+    return _dense_square_operator_matrix_bytes_allowed(rhs)
 
 
 def _dense_square_operator_matrix(matvec, rhs):
@@ -4624,6 +4665,44 @@ def _dense_square_operator_matrix(matvec, rhs):
 def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
     matrix = _dense_square_operator_matrix(matvec, rhs)
     solution = jnp.linalg.lstsq(matrix, rhs, rcond=None)[0]
+    residual = rhs - matrix @ solution
+    status = _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(0),
+    )
+    backward_error_success = _dense_matrix_backward_error_success(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+    )
+    return solution, status._replace(success=status.success | backward_error_success)
+
+
+def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
+    """Direct LU solve of one square system from an operator matvec.
+
+    Materializes the dense square operator implied by ``matvec`` (reusing the
+    chunked, transfer-guard-clean ``_dense_square_operator_matrix`` assembler),
+    factorizes it once with ``lu_factor``, solves ``M x = rhs`` with ``lu_solve``
+    and then applies a single step of iterative refinement (resolve the residual
+    against the same factors, add the correction).  Returns the established
+    ``_LinearSolveStatus`` via ``_linear_solve_status`` so the gate logic is
+    unchanged.  Used for the exact-Jacobian adjoint transpose solve, where the
+    matrix is the small, well-conditioned ``J^T`` that operator-GMRES cannot
+    resolve.
+    """
+    matrix = _dense_square_operator_matrix(matvec, rhs)
+    lu_piv = jsp_linalg.lu_factor(matrix)
+    solution = jsp_linalg.lu_solve(lu_piv, rhs)
+    # One step of iterative refinement against the cached factors: resolves the
+    # rounding error of the direct solve back to the matrix's backward-error
+    # floor without a second factorization (O(n^2) per step).
+    correction = jsp_linalg.lu_solve(lu_piv, rhs - matrix @ solution)
+    solution = solution + correction
     residual = rhs - matrix @ solution
     status = _linear_solve_status(
         solution,
@@ -4898,6 +4977,22 @@ def _solve_jacobian_operator_with_status(
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
+    # Exact-Jacobian adjoint (``transpose``) opt-in: replace the stagnating
+    # operator-GMRES solve of the well-conditioned ``J^T λ = g`` system with a
+    # direct dense LU factorization plus one iterative-refinement step.  Scoped to
+    # the transpose (adjoint) solve and to a vector RHS whose materialized dense
+    # matrix fits the ``max_dense_jacobian_bytes`` policy; everything else keeps
+    # the operator-GMRES baseline so the flag A/B-compares cleanly.
+    if (
+        _EXACT_ADJOINT_DENSE_LU
+        and transpose
+        and _dense_square_operator_lu_materialization_allowed(rhs)
+    ):
+        return _solve_dense_square_operator_lu_system_with_status(
+            matvec,
+            rhs,
+            tol=tol,
+        )
     return _solve_square_array_system_operator_only(
         matvec,
         rhs,
