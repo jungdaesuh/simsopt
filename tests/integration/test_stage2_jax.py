@@ -1197,8 +1197,29 @@ class TestGradientParity:
         bs_jax = BiotSavartJAX(zero_current_coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
 
-        with pytest.raises(ObjectiveFailure, match="gradient is singular"):
-            jf_cpu.dJ()
+        # Gradient analogue of the singular zero-current boundary documented in
+        # ``test_singular_zero_current_objectives_boundary_is_documented``: with
+        # every coil at zero current |B| = 0, so the SquaredFlux gradient is a
+        # 0/0 form. The two backends resolve it *differently by design*, so this
+        # documents an intentional backend-specific contract, not parity:
+        #   * C++ ``SquaredFlux.dJ()`` performs the raw IEEE division with no
+        #     singular-point guard, returning a non-finite (in practice all-NaN)
+        #     gradient rather than raising.
+        #   * The JAX port guards the non-finite gradient
+        #     (``_raise_if_nonfinite_squared_flux_gradient`` in
+        #     ``simsopt_jax_adapters.objectives.flux``) and raises
+        #     ``ObjectiveFailure(... gradient is singular ...)`` -- a strictly
+        #     more robust contract than the C++ reference.
+        # Assert the non-finite contract the JAX guard itself tests
+        # (``np.all(np.isfinite)``) rather than the stricter all-NaN form, so the
+        # two backends are judged on a common predicate and the check is robust
+        # to any NaN-vs-inf resolution of the 0/0 (this also fails, not passes
+        # vacuously, on a degenerate empty gradient).
+        cpu_grad = np.asarray(jf_cpu.dJ())
+        assert not np.all(np.isfinite(cpu_grad)), (
+            f"C++ zero-current {definition} gradient should be non-finite "
+            f"(no singular guard), got {cpu_grad!r}"
+        )
         with pytest.raises(ObjectiveFailure, match="gradient is singular"):
             jf_jax.dJ()
 
