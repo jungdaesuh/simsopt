@@ -136,6 +136,25 @@ def _nonsymmetric_problem(n=12, seed=0):
     return matrix, matvec, rhs
 
 
+def _float32_forward_error_problem():
+    """Consistent nonnormal system in the fp32 old/new condition-threshold band."""
+    n = 16
+    rng = np.random.default_rng(15)
+    left, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    right, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    singular_values = np.geomspace(1.0, 1.0e-5, n)
+    matrix_np = (left @ np.diag(singular_values) @ right.T).astype(np.float32)
+    true_solution_np = rng.standard_normal(n).astype(np.float32)
+    rhs_np = (matrix_np @ true_solution_np).astype(np.float32)
+    matrix = jnp.asarray(matrix_np, dtype=jnp.float32)
+    rhs = jnp.asarray(rhs_np, dtype=jnp.float32)
+
+    def matvec(v):
+        return matrix @ v
+
+    return matrix, matvec, rhs, true_solution_np
+
+
 def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
     """The committed LU+IR solver matches an independent dense oracle on a
     non-symmetric operator (the regime where the GMRES baseline stagnates)."""
@@ -319,25 +338,32 @@ def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
     assert float(np.asarray(estimate)) > legacy_rank_threshold
     assert bool(status.success)
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
-    solution_relative_error = np.linalg.norm(np.asarray(solution) - expected) / np.linalg.norm(
-        expected
-    )
+    solution_relative_error = np.linalg.norm(
+        np.asarray(solution, dtype=np.float32) - expected
+    ) / np.linalg.norm(expected)
     assert solution_relative_error < 1.0e-4
 
-    singular = matrix.at[-1, -1].set(jnp.asarray(0.0, dtype=jnp.float32))
 
-    def singular_matvec(v):
-        return singular @ v
+def test_float32_dense_lu_rejects_nonnormal_forward_error_through_dispatch(
+    monkeypatch,
+):
+    """The exact-adjoint dispatch must reject fp32 solves with wrong forward error."""
+    matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
+    operator = {"matvec": matvec, "transpose_matvec": matvec}
+    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
 
-    with jax.transfer_guard("disallow"):
-        _singular_solution, singular_status = (
-            _optimizer._solve_dense_square_operator_lu_system_with_status(
-                singular_matvec,
-                rhs,
-                tol=1.0e-4,
-            )
-        )
-    assert not bool(singular_status.success)
+    solution, status = _optimizer._solve_jacobian_operator_with_status(
+        operator,
+        rhs,
+        transpose=True,
+        tol=1.0e-4,
+    )
+
+    relative_error = np.linalg.norm(
+        np.asarray(solution, dtype=np.float32) - true_solution
+    ) / np.linalg.norm(true_solution)
+    assert relative_error > 1.0e-4
+    assert not bool(status.success)
 
 
 def test_dense_lu_status_fails_closed_on_singular_operator():
