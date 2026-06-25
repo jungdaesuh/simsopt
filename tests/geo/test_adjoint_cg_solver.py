@@ -260,14 +260,20 @@ def test_dense_lu_status_reports_machine_precision_residual():
 
 def test_dense_lu_status_fails_closed_on_singular_operator():
     """A singular operator yields a backward-stable but forward-garbage solution;
-    the condition-estimate forward-error guard must fail it closed (success
-    False) instead of letting a wrong adjoint flow into the gradient."""
+    the condition-estimate guard must fail it closed (success False) instead of
+    letting a wrong adjoint flow into the gradient.
+
+    The rhs is CONSISTENT (a @ x_true), so the singular solve has a near-zero
+    residual and the backward-error gate alone would report success -- the
+    nonsingular guard is what must reject it.  This keeps the test load-bearing
+    (it fails if the guard is removed) rather than tautological.
+    """
     n = 12
     rng = np.random.default_rng(9)
     a = rng.standard_normal((n, n))
     a[:, 0] = a[:, 1]  # exactly rank-deficient: column 0 == column 1
     matrix = jnp.asarray(a)
-    rhs = jnp.asarray(rng.standard_normal(n))
+    rhs = jnp.asarray(a @ rng.standard_normal(n))  # consistent: residual ~ 0
 
     def matvec(v):
         return matrix @ v
@@ -279,14 +285,17 @@ def test_dense_lu_status_fails_closed_on_singular_operator():
 
 
 def test_dense_lstsq_status_fails_closed_on_singular_operator():
-    """The lstsq sibling shares the forward-error guard: a singular operator
-    must fail closed there too."""
+    """The lstsq sibling shares the guard: a singular operator must fail closed
+    there too.  CONSISTENT rhs (a @ x_true) keeps it load-bearing -- with an
+    inconsistent rhs the least-squares residual is large and the backward-error
+    gate already rejects it, which would make the test pass regardless of the
+    guard (tautological)."""
     n = 12
     rng = np.random.default_rng(13)
     a = rng.standard_normal((n, n))
     a[:, 2] = a[:, 3]  # exactly rank-deficient
     matrix = jnp.asarray(a)
-    rhs = jnp.asarray(rng.standard_normal(n))
+    rhs = jnp.asarray(a @ rng.standard_normal(n))  # consistent: residual ~ 0
 
     def matvec(v):
         return matrix @ v
