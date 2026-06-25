@@ -724,8 +724,8 @@ def test_cpp_cross_oracle_degree5_high_magnitude_cells() -> None:
     )
 
 
-def test_cpp_cross_oracle_nan_input_contract() -> None:
-    """NaN coordinates preserve caller buffers consistently in JAX and C++."""
+def test_cpp_cross_oracle_unsafe_input_contract() -> None:
+    """Unsafe coordinates preserve caller buffers consistently in JAX and C++."""
 
     dim = 3
     degree = 2
@@ -756,6 +756,9 @@ def test_cpp_cross_oracle_nan_input_contract() -> None:
             [np.nan, 2.0, 2.0],
             [2.0, np.nan, 2.0],
             [2.0, 2.0, np.nan],
+            [np.inf, 2.0, 2.0],
+            [2.0, -np.inf, 2.0],
+            [np.finfo(np.float64).max, 2.0, 2.0],
         ],
         dtype=np.float64,
     )
@@ -776,14 +779,20 @@ def test_cpp_cross_oracle_nan_input_contract() -> None:
         False,
     )
     strict_cpp_interpolant.interpolate_batch(poly)
-    with pytest.raises(
-        RuntimeError,
-        match="coordinates must be finite|is not representable as int64_t",
-    ):
-        strict_cpp_interpolant.evaluate_batch(
-            np.ascontiguousarray(xyz),
-            np.zeros_like(initial),
-        )
+    strict_inputs = [
+        np.asarray([[np.nan, 2.0, 2.0]], dtype=np.float64),
+        np.asarray([[np.inf, 2.0, 2.0]], dtype=np.float64),
+        np.asarray([[np.finfo(np.float64).max, 2.0, 2.0]], dtype=np.float64),
+    ]
+    for strict_xyz in strict_inputs:
+        with pytest.raises(
+            RuntimeError,
+            match="coordinates must be finite|is not representable as int",
+        ):
+            strict_cpp_interpolant.evaluate_batch(
+                np.ascontiguousarray(strict_xyz),
+                np.zeros((strict_xyz.shape[0], dim), dtype=np.float64),
+            )
 
 
 def test_estimate_error_returns_bracket_for_polynomial() -> None:
