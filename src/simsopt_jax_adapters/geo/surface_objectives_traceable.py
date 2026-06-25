@@ -533,6 +533,9 @@ def _traceable_solve_exact_linearization(
         rhs,
         transpose=transpose,
         tol=linear_solve_tol,
+        max_refinement_steps=(
+            _optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+        ),
     )
 
 

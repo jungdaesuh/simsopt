@@ -2830,6 +2830,105 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_square_operator_explicit_budget_reaches_second_correction(
+        self, monkeypatch
+    ):
+        rhs = jnp.asarray([1.0], dtype=jnp.float64)
+        residual_fraction = jnp.asarray(1.0e-4, dtype=jnp.float64)
+
+        def inexact_identity_solve(_matvec, solve_rhs, *, tol):
+            del _matvec, tol
+            solve_rhs = jnp.asarray(solve_rhs, dtype=jnp.float64)
+            solution = (1.0 - residual_fraction) * solve_rhs
+            residual = residual_fraction * solve_rhs
+            return solution, residual, jnp.asarray(1, dtype=jnp.int32)
+
+        monkeypatch.setattr(_opt, "_gmres_solve_array_system", inexact_identity_solve)
+
+        solution, status = _opt._solve_square_vector_system_operator_only(
+            lambda vector: vector,
+            rhs,
+            tol=1e-11,
+            max_refinement_steps=(
+                _opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            ),
+        )
+
+        np.testing.assert_allclose(np.asarray(solution), np.asarray(rhs), atol=1e-11)
+        assert bool(np.asarray(status.success))
+        assert float(np.asarray(status.residual_relative)) <= 1e-11
+        assert int(np.asarray(status.iterations)) == 3
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_square_operator_default_one_correction_reproduces_head_failure(
+        self, monkeypatch
+    ):
+        rhs = jnp.asarray([1.0], dtype=jnp.float64)
+        residual_fraction = jnp.asarray(1.0e-4, dtype=jnp.float64)
+
+        def inexact_identity_solve(_matvec, solve_rhs, *, tol):
+            del _matvec, tol
+            solve_rhs = jnp.asarray(solve_rhs, dtype=jnp.float64)
+            solution = (1.0 - residual_fraction) * solve_rhs
+            residual = residual_fraction * solve_rhs
+            return solution, residual, jnp.asarray(1, dtype=jnp.int32)
+
+        monkeypatch.setattr(_opt, "_gmres_solve_array_system", inexact_identity_solve)
+
+        solution, status = _opt._solve_square_vector_system_operator_only(
+            lambda vector: vector,
+            rhs,
+            tol=1e-11,
+        )
+
+        np.testing.assert_allclose(np.asarray(solution), np.asarray([0.99999999]))
+        assert not bool(np.asarray(status.success))
+        assert float(np.asarray(status.residual_relative)) > 1e-11
+        assert int(np.asarray(status.iterations)) == 2
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_square_operator_extra_correction_rejects_nonmonotonic_residual(
+        self, monkeypatch
+    ):
+        rhs = jnp.asarray([1.0], dtype=jnp.float64)
+
+        def staged_identity_solve(_matvec, solve_rhs, *, tol):
+            del _matvec, tol
+            solve_rhs = jnp.asarray(solve_rhs, dtype=jnp.float64)
+            rhs_norm = jnp.linalg.norm(solve_rhs)
+            solve_fraction = jnp.where(
+                rhs_norm < jnp.asarray(5.0e-4, dtype=jnp.float64),
+                jnp.asarray(20.0, dtype=jnp.float64),
+                jnp.where(
+                    rhs_norm < jnp.asarray(5.0e-1, dtype=jnp.float64),
+                    jnp.asarray(0.9, dtype=jnp.float64),
+                    jnp.asarray(0.999, dtype=jnp.float64),
+                ),
+            )
+            solution = solve_fraction * solve_rhs
+            residual = solve_rhs - solution
+            return solution, residual, jnp.asarray(1, dtype=jnp.int32)
+
+        monkeypatch.setattr(_opt, "_gmres_solve_array_system", staged_identity_solve)
+
+        solution, status = _opt._solve_square_vector_system_operator_only(
+            lambda vector: vector,
+            rhs,
+            tol=1e-11,
+            max_refinement_steps=(
+                _opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            ),
+        )
+
+        np.testing.assert_allclose(np.asarray(solution), np.asarray([0.9999]))
+        assert not bool(np.asarray(status.success))
+        assert float(np.asarray(status.residual_relative)) == pytest.approx(1.0e-4)
+        assert int(np.asarray(status.iterations)) == 3
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_hessian_least_squares_dense_status_runs_under_strict_transfer_guard(self):
         x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         rhs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)

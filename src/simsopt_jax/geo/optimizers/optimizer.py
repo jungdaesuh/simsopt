@@ -3625,6 +3625,13 @@ _ADJOINT_LINEAR_SOLVER = (
     os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower()
 )
 
+# Operator-only square solves historically performed one residual-correction
+# solve. Keep that default for LS/Hessian fallback callers; exact-jacobian
+# adjoints opt into the smallest Track-A extension that clears one additional
+# residual floor without exposing a public algorithm knob.
+_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
+_EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
+
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
@@ -4464,8 +4471,14 @@ def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
-def _solve_square_vector_system_operator_only(matvec, rhs, *, tol):
-    """Solve one square linear system with operator-only GMRES refinement."""
+def _solve_square_vector_system_operator_only(
+    matvec,
+    rhs,
+    *,
+    tol,
+    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+):
+    """Solve one square linear system with bounded operator-GMRES refinement."""
     effective_tol = _effective_linear_solve_tolerance(rhs, tol)
     solution, residual, info = _gmres_solve_array_system(
         matvec,
@@ -4480,38 +4493,90 @@ def _solve_square_vector_system_operator_only(matvec, rhs, *, tol):
         iterations=_linear_solve_iteration_count(info),
     )
 
-    def refine(_):
-        correction, correction_residual, correction_info = _gmres_solve_array_system(
-            matvec,
-            residual,
-            tol=effective_tol,
-        )
-        correction_finite = _linear_solve_finite(correction, correction_residual)
-        refined_solution = lax.cond(
-            correction_finite,
-            lambda _: solution + correction,
-            lambda _: solution,
-            operand=None,
-        )
-        refined_residual = rhs - matvec(refined_solution)
-        refined_iterations = _combine_linear_solve_iteration_counts(
-            _linear_solve_iteration_count(info),
-            _linear_solve_iteration_count(correction_info),
-        )
-        return refined_solution, refined_residual, refined_iterations
+    def refinement_step(carry, _unused):
+        solution, residual, status, can_refine, accept_first_correction = carry
 
-    solution, residual, iterations = lax.cond(
-        _linear_solve_finite(solution, residual) & (~status.success),
-        refine,
-        lambda _: (solution, residual, status.iterations),
-        operand=None,
-    )
-    status = _linear_solve_status(
-        solution,
-        residual,
-        rhs,
-        tol=tol,
-        iterations=iterations,
+        def refine(_):
+            correction, correction_residual, correction_info = _gmres_solve_array_system(
+                matvec,
+                residual,
+                tol=effective_tol,
+            )
+            correction_finite = _linear_solve_finite(correction, correction_residual)
+            refined_solution = lax.cond(
+                correction_finite,
+                lambda _: solution + correction,
+                lambda _: solution,
+                operand=None,
+            )
+            refined_residual = rhs - matvec(refined_solution)
+            refined_iterations = _combine_linear_solve_iteration_counts(
+                status.iterations,
+                _linear_solve_iteration_count(correction_info),
+            )
+            refined_status = _linear_solve_status(
+                refined_solution,
+                refined_residual,
+                rhs,
+                tol=tol,
+                iterations=refined_iterations,
+            )
+            residual_improved = (
+                refined_status.residual_relative <= status.residual_relative
+            )
+            accept_correction = correction_finite & (
+                accept_first_correction | residual_improved | refined_status.success
+            )
+            accepted_can_refine = (
+                accept_correction
+                & _linear_solve_finite(refined_solution, refined_residual)
+                & (~refined_status.success)
+            )
+            rejected_status = status._replace(iterations=refined_iterations)
+            return lax.cond(
+                accept_correction,
+                lambda _: (
+                    refined_solution,
+                    refined_residual,
+                    refined_status,
+                    accepted_can_refine,
+                    jnp.asarray(False),
+                ),
+                lambda _: (
+                    solution,
+                    residual,
+                    rejected_status,
+                    jnp.asarray(False),
+                    jnp.asarray(False),
+                ),
+                operand=None,
+            )
+
+        return lax.cond(
+            can_refine,
+            refine,
+            lambda _: (
+                solution,
+                residual,
+                status,
+                can_refine,
+                accept_first_correction,
+            ),
+            operand=None,
+        ), None
+
+    initial_can_refine = _linear_solve_finite(solution, residual) & (~status.success)
+    (solution, residual, status, _can_refine, _accept_first_correction), _ = lax.scan(
+        refinement_step,
+        (
+            solution,
+            residual,
+            status,
+            initial_can_refine,
+            jnp.asarray(True),
+        ),
+        xs=None,
+        length=int(max_refinement_steps),
     )
     return solution, status
 
@@ -4576,14 +4641,30 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
     return solution, status._replace(success=status.success | backward_error_success)
 
 
-def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
+def _solve_square_array_system_operator_only(
+    matvec,
+    rhs,
+    *,
+    tol,
+    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+):
     """Solve vector or column-batched square systems with operator-only GMRES."""
     rhs = jnp.asarray(rhs)
     if rhs.ndim == 1:
-        return _solve_square_vector_system_operator_only(matvec, rhs, tol=tol)
+        return _solve_square_vector_system_operator_only(
+            matvec,
+            rhs,
+            tol=tol,
+            max_refinement_steps=max_refinement_steps,
+        )
 
     def solve_column(column):
-        return _solve_square_vector_system_operator_only(matvec, column, tol=tol)
+        return _solve_square_vector_system_operator_only(
+            matvec,
+            column,
+            tol=tol,
+            max_refinement_steps=max_refinement_steps,
+        )
 
     solutions, column_statuses = jax.vmap(
         solve_column,
@@ -4777,9 +4858,15 @@ def _solve_jacobian_operator(
     *,
     transpose,
     tol,
+    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    solution, _ = _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
+    solution, _ = _solve_square_array_system_operator_only(
+        matvec,
+        rhs,
+        tol=tol,
+        max_refinement_steps=max_refinement_steps,
+    )
     return solution
 
 
@@ -4790,6 +4877,7 @@ def _solve_jacobian_system_with_status(
     *,
     transpose,
     tol,
+    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     operator = _jacobian_linear_operator(residual_fn, x)
     return _solve_jacobian_operator_with_status(
@@ -4797,6 +4885,7 @@ def _solve_jacobian_system_with_status(
         rhs,
         transpose=transpose,
         tol=tol,
+        max_refinement_steps=max_refinement_steps,
     )
 
 
@@ -4806,9 +4895,15 @@ def _solve_jacobian_operator_with_status(
     *,
     transpose,
     tol,
+    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    return _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
+    return _solve_square_array_system_operator_only(
+        matvec,
+        rhs,
+        tol=tol,
+        max_refinement_steps=max_refinement_steps,
+    )
 
 
 def newton_polish(

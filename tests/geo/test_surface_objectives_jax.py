@@ -1587,20 +1587,31 @@ def test_checked_boozer_linear_solve_uses_public_status_boundary(monkeypatch):
 
 def test_checked_boozer_linear_solve_raises_on_failed_status():
     rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    failed_status = _mock_linear_solve_status(False)._replace(
+        residual=jnp.asarray(2.5e-13, dtype=jnp.float64),
+        residual_relative=jnp.asarray(1.25e-13, dtype=jnp.float64),
+        iterations=jnp.asarray(7, dtype=jnp.int32),
+    )
     adjoint_state = types.SimpleNamespace(
         linearization_kind="hessian",
         solve_transpose_with_status=lambda vector: (
             3.0 * vector,
-            _mock_linear_solve_status(False),
+            failed_status,
         ),
     )
 
-    with pytest.raises(RuntimeError, match="Boozer adjoint linear solve failed"):
+    with pytest.raises(RuntimeError) as exc_info:
         surfaceobjectives_jax_module._checked_boozer_linear_solve(
             adjoint_state,
             rhs,
             transpose=True,
         )
+    message = str(exc_info.value)
+    assert "Boozer adjoint linear solve failed" in message
+    assert "hessian" in message
+    assert "residual=2.500000e-13" in message
+    assert "residual_relative=1.250000e-13" in message
+    assert "iterations=7" in message
 
 
 def test_direct_coil_value_helpers_keep_value_as_jax_scalar():
@@ -1738,9 +1749,11 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
         *,
         transpose,
         tol,
+        max_refinement_steps,
     ):
         calls["transpose"] = transpose
         calls["tol"] = tol
+        calls["max_refinement_steps"] = int(max_refinement_steps)
         np.testing.assert_allclose(np.asarray(x), np.asarray(solved_x))
         np.testing.assert_allclose(np.asarray(solve_rhs), np.asarray(rhs))
         np.testing.assert_allclose(
@@ -1766,7 +1779,13 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
         )
     )
 
-    assert calls == {"transpose": True, "tol": 1.0e-8}
+    assert calls == {
+        "transpose": True,
+        "tol": 1.0e-8,
+        "max_refinement_steps": (
+            surfaceobjectives_jax_module._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+        ),
+    }
     assert bool(np.asarray(success))
     np.testing.assert_allclose(np.asarray(solved), np.asarray(rhs + 1.0))
 
@@ -1856,9 +1875,11 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
         *,
         transpose,
         tol,
+        max_refinement_steps,
     ):
         calls["transpose"] = transpose
         calls["tol"] = tol
+        calls["max_refinement_steps"] = int(max_refinement_steps)
         np.testing.assert_allclose(np.asarray(x), np.asarray(baseline_x))
         np.testing.assert_allclose(np.asarray(rhs), np.asarray(-delta))
         np.testing.assert_allclose(
@@ -1893,7 +1914,13 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
         )
     )
 
-    assert calls == {"transpose": False, "tol": 1.0e-7}
+    assert calls == {
+        "transpose": False,
+        "tol": 1.0e-7,
+        "max_refinement_steps": (
+            surfaceobjectives_jax_module._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+        ),
+    }
     assert bool(np.asarray(success)) is True
     np.testing.assert_allclose(
         np.asarray(predicted),
@@ -1942,9 +1969,11 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
         *,
         transpose,
         tol,
+        max_refinement_steps,
     ):
         calls["transpose"] = transpose
         calls["tol"] = tol
+        calls["max_refinement_steps"] = int(max_refinement_steps)
         np.testing.assert_allclose(np.asarray(x), baseline_x_np)
         np.testing.assert_allclose(np.asarray(rhs), -forcing_np)
         np.testing.assert_allclose(
@@ -1976,7 +2005,13 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
         )
     )
 
-    assert calls == {"transpose": False, "tol": 1.0e-7}
+    assert calls == {
+        "transpose": False,
+        "tol": 1.0e-7,
+        "max_refinement_steps": (
+            surfaceobjectives_jax_module._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+        ),
+    }
     assert bool(np.asarray(success)) is True
     np.testing.assert_allclose(
         np.asarray(predicted),

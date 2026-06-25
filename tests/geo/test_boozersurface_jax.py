@@ -6720,11 +6720,16 @@ class TestBoozerSurfaceJAXClass:
             *,
             transpose,
             tol,
+            max_refinement_steps,
         ):
             assert operator is operator_builds[0]
             assert transpose is True
             tol_value = float(np.asarray(tol))
             assert tol_value == pytest.approx(booz._linear_solve_tolerance())
+            assert (
+                int(max_refinement_steps)
+                == _bsj._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            )
             return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
@@ -6880,8 +6885,17 @@ class TestBoozerSurfaceJAXClass:
             lambda _self, _mask: lambda x: x,
         )
 
-        def fake_operator_solve(_operator, rhs, *, transpose, tol):
-            operator_calls.append((bool(transpose), float(tol)))
+        def fake_operator_solve(
+            _operator,
+            rhs,
+            *,
+            transpose,
+            tol,
+            max_refinement_steps,
+        ):
+            operator_calls.append(
+                (bool(transpose), float(tol), int(max_refinement_steps))
+            )
             return rhs + 1.0, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
@@ -6899,6 +6913,10 @@ class TestBoozerSurfaceJAXClass:
         assert len(operator_calls) == 1
         assert operator_calls[0][0] is True
         assert operator_calls[0][1] == pytest.approx(booz._linear_solve_tolerance())
+        assert (
+            operator_calls[0][2]
+            == _bsj._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+        )
         assert bool(np.asarray(success)) is True
         np.testing.assert_allclose(np.asarray(solved), np.asarray(rhs + 1.0))
 
@@ -11264,12 +11282,12 @@ class TestBuildBoozerSurfaceRuntimeState:
         monkeypatch.setattr(
             _bsj._optimizer_jax,
             "_solve_jacobian_operator",
-            lambda _operator, rhs, *, transpose, tol: rhs,
+            lambda _operator, rhs, *, transpose, tol, max_refinement_steps: rhs,
         )
         monkeypatch.setattr(
             _bsj._optimizer_jax,
             "_solve_jacobian_operator_with_status",
-            lambda _operator, rhs, *, transpose, tol: (
+            lambda _operator, rhs, *, transpose, tol, max_refinement_steps: (
                 rhs,
                 _mock_linear_solve_status(True),
             ),

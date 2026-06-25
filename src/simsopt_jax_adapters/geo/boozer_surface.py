@@ -4654,6 +4654,9 @@ class BoozerSurfaceJAX(Optimizable):
                     rhs,
                     transpose=transpose,
                     tol=tol_host,
+                    max_refinement_steps=(
+                        _optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+                    ),
                 )
 
             def solve_jacobian_system(rhs, *, transpose):
@@ -4662,6 +4665,9 @@ class BoozerSurfaceJAX(Optimizable):
                     rhs,
                     transpose=transpose,
                     tol=tol_host,
+                    max_refinement_steps=(
+                        _optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+                    ),
                 )
 
             def solve_forward(rhs):

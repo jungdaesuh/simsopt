@@ -1998,13 +1998,25 @@ def _solve_boozer_adjoint(adjoint_state, rhs):
     """Solve the transposed inner linearization for one adjoint runtime state.
 
     The exact-adjoint runtime uses the operator-backed solve callbacks, whose
-    square-system path performs a residual refinement pass by default. Dense PLU
-    linearizations can be ill-conditioned enough that CPU LAPACK and JAX/XLA
-    triangular solves are not a direct vector-parity contract; parity checks
-    should compare residual success and objective behavior, not byte-identical
-    CPU/JAX adjoint vectors.
+    exact-jacobian branch opts into the Track-A residual-refinement budget while
+    the shared square-system default remains one correction for other callers.
+    Dense PLU linearizations can be ill-conditioned enough that CPU LAPACK and
+    JAX/XLA triangular solves are not a direct vector-parity contract; parity
+    checks should compare residual success and objective behavior, not
+    byte-identical CPU/JAX adjoint vectors.
     """
     return _checked_boozer_linear_solve(adjoint_state, rhs, transpose=True)
+
+
+def _linear_solve_status_failure_detail(status):
+    residual = float(_host_scalar(status.residual))
+    residual_relative = float(_host_scalar(status.residual_relative))
+    iterations = int(_host_scalar(status.iterations))
+    return (
+        f"residual={residual:.6e}, "
+        f"residual_relative={residual_relative:.6e}, "
+        f"iterations={iterations}"
+    )
 
 
 def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
@@ -2022,9 +2034,10 @@ def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
         )
     solution, status = solve_with_status(rhs)
     if not _host_bool(_optimizer_jax._linear_solve_status_success(status)):
+        status_detail = _linear_solve_status_failure_detail(status)
         raise RuntimeError(
             "Boozer adjoint linear solve failed on the JAX runtime-state path "
-            f"({adjoint_state.linearization_kind})."
+            f"({adjoint_state.linearization_kind}; {status_detail})."
         )
     return solution
 
