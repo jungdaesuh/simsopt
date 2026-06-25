@@ -810,6 +810,14 @@ def test_finite_beta_target_flux_reaches_pass_parity_with_cached_target():
         "sum_QuadraticPenalty_CurveLength_identity"
         in entry["lanes"]["jax_cpu"]["components"]
     )
+    active_dof_count = len(entry["dof_contract"]["active_dof_names_cpu"])
+    normalized_mask_hash = hashlib.sha256(
+        np.ones(active_dof_count, dtype=np.uint8).tobytes()
+    ).hexdigest()
+    assert entry["lanes"]["cpu_cpp"]["fixed_free_mask_hash"] == normalized_mask_hash
+    assert entry["lanes"]["jax_cpu"]["fixed_free_mask_hash"] == normalized_mask_hash
+    assert entry["dof_contract"]["fixed_free_mask_hash_cpu"] == normalized_mask_hash
+    assert entry["dof_contract"]["fixed_free_mask_hash_jax"] == normalized_mask_hash
 
 
 def test_strain_optimization_support_gate_reaches_pass_parity():
