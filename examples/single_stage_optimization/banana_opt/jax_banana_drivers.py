@@ -104,9 +104,9 @@ def output_paths(output_dir: str | Path, *, prefix: str) -> BananaDriverPaths:
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     return BananaDriverPaths(
-        biotsavart=root / f"{prefix}_biotsavart.json",
-        boozersurface=root / f"{prefix}_boozersurface.json",
-        surface=root / f"{prefix}_surface.json",
+        biotsavart=root / "biot_savart_opt.json",
+        boozersurface=root / "boozersurface_opt.json",
+        surface=root / "surf_opt.json",
         results=root / "results.json",
         log=root / f"{prefix}.log",
     )
@@ -231,23 +231,85 @@ def build_boozer_surface_copy(
     nphi: int,
     ntheta: int,
 ) -> SurfaceXYZTensorFourier:
-    source = resize_surface(
-        init_surface,
+    quadpoints_phi, quadpoints_theta = _boozer_quadpoints(
+        nfp=init_surface.nfp,
+        stellsym=init_surface.stellsym,
         mpol=mpol,
         ntor=ntor,
         nphi=nphi,
         ntheta=ntheta,
     )
+    if isinstance(init_surface, SurfaceRZFourier):
+        source = SurfaceRZFourier(
+            mpol=init_surface.mpol,
+            ntor=init_surface.ntor,
+            nfp=init_surface.nfp,
+            stellsym=init_surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    elif isinstance(init_surface, SurfaceXYZFourier):
+        source = SurfaceXYZFourier(
+            mpol=init_surface.mpol,
+            ntor=init_surface.ntor,
+            nfp=init_surface.nfp,
+            stellsym=init_surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    else:
+        source = SurfaceXYZTensorFourier(
+            mpol=init_surface.mpol,
+            ntor=init_surface.ntor,
+            nfp=init_surface.nfp,
+            stellsym=init_surface.stellsym,
+            clamped_dims=list(init_surface.clamped_dims),
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    source.set_dofs(init_surface.get_dofs())
     surface = SurfaceXYZTensorFourier(
-        mpol=source.mpol,
-        ntor=source.ntor,
+        mpol=mpol,
+        ntor=ntor,
         nfp=source.nfp,
         stellsym=source.stellsym,
-        quadpoints_phi=source.quadpoints_phi,
-        quadpoints_theta=source.quadpoints_theta,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
     )
     surface.least_squares_fit(source.gamma())
     return surface
+
+
+def _boozer_quadpoints(
+    *,
+    nfp: int,
+    stellsym: bool,
+    mpol: int,
+    ntor: int,
+    nphi: int,
+    ntheta: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if stellsym and nphi == 2 * ntor + 1 and ntheta == 2 * mpol + 1:
+        return (
+            np.linspace(0.0, 1.0 / nfp, nphi, endpoint=False),
+            np.linspace(0.0, 1.0, ntheta, endpoint=False),
+        )
+    if stellsym and nphi == 2 * ntor + 1 and ntheta == mpol + 1:
+        return (
+            np.linspace(0.0, 1.0 / nfp, nphi, endpoint=False),
+            np.linspace(0.0, 0.5, ntheta, endpoint=False),
+        )
+    if stellsym and nphi == ntor + 1 and ntheta == 2 * mpol + 1:
+        return (
+            np.linspace(0.0, 1.0 / (2.0 * nfp), nphi, endpoint=False),
+            np.linspace(0.0, 1.0, ntheta, endpoint=False),
+        )
+    quadpoints_phi, quadpoints_theta = Surface.get_quadpoints(
+        nphi=nphi,
+        ntheta=ntheta,
+        nfp=nfp,
+    )
+    return np.asarray(quadpoints_phi, dtype=float), np.asarray(quadpoints_theta, dtype=float)
 
 
 def soft_constraint_weight(weight: float) -> float | None:
@@ -453,54 +515,52 @@ def poloidal_extent_pure(
 
 
 @jax.jit
-def projected_ellipse_width_pure(
+def ellipse_width_pure(
     gamma: jax.Array,
     gammadash: jax.Array,
-    major_radius: float,
-    minor_radius: float,
-    z_position: float,
     scale: float,
     epsilon: float,
 ) -> jax.Array:
-    radius = jnp.linalg.norm(gamma[:, :2], axis=-1)
-    phi = jnp.arctan2(gamma[:, 1], gamma[:, 0])
-    theta = jnp.arctan2(gamma[:, 2] - z_position, -(radius - major_radius))
-    phi_ref = jnp.arctan2(jnp.mean(jnp.sin(phi)), jnp.mean(jnp.cos(phi)))
-    dphi = jnp.mod(phi - phi_ref + jnp.pi, 2.0 * jnp.pi) - jnp.pi
-    projected = jnp.stack([major_radius * dphi, minor_radius * theta], axis=-1)
     dl = jnp.linalg.norm(gammadash, axis=-1)
     weights = dl / jnp.sum(dl)
-    center = jnp.sum(weights[:, None] * projected, axis=0)
-    centered = projected - center
+    center = jnp.sum(weights[:, None] * gamma, axis=0)
+    centered = gamma - center
     cov = (weights[:, None] * centered).T @ centered
-    cov_xx = cov[0, 0]
-    cov_xy = 0.5 * (cov[0, 1] + cov[1, 0])
-    cov_yy = cov[1, 1]
-    trace = cov_xx + cov_yy
-    discriminant = jnp.maximum((cov_xx - cov_yy) ** 2 + 4.0 * cov_xy**2, 0.0)
-    lambda_minor = 0.5 * (trace - jnp.sqrt(discriminant))
-    return scale * jnp.sqrt(jnp.maximum(lambda_minor, epsilon))
+    eigvals = jnp.linalg.eigvalsh(cov)
+    return scale * jnp.sqrt(jnp.maximum(eigvals[1], epsilon))
 
 
-def self_distance_pure(
+@jax.jit
+def global_radius_curvature_pure(
     gamma: jax.Array,
     gammadash: jax.Array,
-    minimum_distance: float,
-    mask: jax.Array,
-    normalize: bool,
+    minimum_radius: float,
+    exp_weight: float,
 ) -> jax.Array:
-    dist_sq = jnp.sum((gamma[:, None, :] - gamma[None, :, :]) ** 2, axis=2)
-    safe_dist_sq = jnp.where(dist_sq > 0.0, dist_sq, 1.0)
-    distances = jnp.where(dist_sq > 0.0, jnp.sqrt(safe_dist_sq), 0.0)
-    arc_weights = (
-        jnp.linalg.norm(gammadash, axis=1)[:, None]
-        * jnp.linalg.norm(gammadash, axis=1)[None, :]
+    dl = jnp.linalg.norm(gammadash, axis=-1)
+    safe_dl = jnp.where(dl > 0.0, dl, 1.0)
+    tau = gammadash / safe_dl[:, None]
+
+    diff = gamma[None, :, :] - gamma[:, None, :]
+    dsq = jnp.sum(diff * diff, axis=-1)
+    safe_dsq = jnp.where(dsq > 0.0, dsq, 1.0)
+    dist = jnp.where(dsq > 0.0, jnp.sqrt(safe_dsq), 0.0)
+
+    dot_pj_tj = jnp.sum(diff * tau[None, :, :], axis=-1)
+    cos_safe = dot_pj_tj / jnp.where(dist > 0.0, dist, 1.0)
+    normal_ratio = 1.0 - cos_safe * cos_safe
+    safe_normal_ratio = jnp.where(normal_ratio > 0.0, normal_ratio, 1.0)
+    valid = (normal_ratio > 0.0) & (dist > 0.0)
+    contact_radius = jnp.where(
+        valid,
+        dist / safe_normal_ratio,
+        jnp.full_like(dist, 1.0e12),
     )
-    violation = jnp.maximum(minimum_distance - distances, 0.0) ** 2
-    total = 0.5 * jnp.sum(mask * arc_weights * violation)
-    if normalize:
-        return total / (gamma.shape[0] ** 2)
-    return total
+
+    barrier = jnp.exp(-(contact_radius - minimum_radius) / exp_weight)
+    weights = dl[:, None] * dl[None, :]
+    point_count = gamma.shape[0]
+    return jnp.sum(barrier * weights) / (point_count * point_count)
 
 
 class PoloidalExtentJAX(Optimizable):
@@ -569,39 +629,30 @@ class PoloidalExtentJAX(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class ProjectedEllipseWidthJAX(Optimizable):
-    """JAX scalar width of a CWS curve projected to winding-surface meters."""
+class EllipseWidthJAX(Optimizable):
+    """JAX scalar narrow in-plane width of a CWS curve in 3D meters."""
 
     def __init__(
         self,
         curve,
-        major_radius: float,
-        minor_radius: float,
         *,
-        z_position: float = 0.0,
         scale: float = 2.0 * np.sqrt(2.0),
         epsilon: float = 1.0e-20,
     ):
         self.curve = curve
-        self.major_radius = major_radius
-        self.minor_radius = minor_radius
-        self.z_position = z_position
         self.scale = scale
         self.epsilon = epsilon
-        self._grad_gamma = jax.jit(jax.grad(projected_ellipse_width_pure, argnums=0))
+        self._grad_gamma = jax.jit(jax.grad(ellipse_width_pure, argnums=0))
         self._grad_gammadash = jax.jit(
-            jax.grad(projected_ellipse_width_pure, argnums=1)
+            jax.grad(ellipse_width_pure, argnums=1)
         )
         super().__init__(depends_on=[curve])
 
     def J(self) -> float:
         return _as_float(
-            projected_ellipse_width_pure(
+            ellipse_width_pure(
                 jnp.asarray(self.curve.gamma()),
                 jnp.asarray(self.curve.gammadash()),
-                self.major_radius,
-                self.minor_radius,
-                self.z_position,
                 self.scale,
                 self.epsilon,
             )
@@ -614,18 +665,12 @@ class ProjectedEllipseWidthJAX(Optimizable):
         grad_gamma = self._grad_gamma(
             gamma,
             gammadash,
-            self.major_radius,
-            self.minor_radius,
-            self.z_position,
             self.scale,
             self.epsilon,
         )
         grad_gammadash = self._grad_gammadash(
             gamma,
             gammadash,
-            self.major_radius,
-            self.minor_radius,
-            self.z_position,
             self.scale,
             self.epsilon,
         )
@@ -636,59 +681,58 @@ class ProjectedEllipseWidthJAX(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class CurveSelfDistanceJAX(Optimizable):
-    """JAX self-distance hinge for non-neighboring quadpoint pairs."""
+class GlobalRadiusCurvatureJAX(Optimizable):
+    """JAX Gonzalez-Maddocks global-radius self-contact barrier."""
 
     def __init__(
         self,
         curve,
-        minimum_distance: float,
+        minimum_radius: float,
         *,
-        neighbor_skip: int = 3,
-        normalize: bool = False,
+        exp_weight: float = 0.010,
     ):
         self.curve = curve
-        self.minimum_distance = minimum_distance
-        self.neighbor_skip = neighbor_skip
-        self.normalize = normalize
-        point_count = len(curve.quadpoints)
-        if not (0 <= neighbor_skip < point_count // 2):
-            raise ValueError(
-                f"neighbor_skip={neighbor_skip} must satisfy 0 <= neighbor_skip < "
-                f"N/2 = {point_count // 2}"
-            )
-        indices = np.arange(point_count)
-        distance = np.abs(indices[:, None] - indices[None, :])
-        periodic_distance = np.minimum(distance, point_count - distance)
-        self._mask_np = (periodic_distance > neighbor_skip).astype(np.float64)
-        self._mask = jnp.asarray(self._mask_np)
-        self._forward = jax.jit(self_distance_pure, static_argnums=4)
-        self._grad_gamma = jax.jit(
-            jax.grad(self_distance_pure, argnums=0),
-            static_argnums=4,
-        )
+        self.minimum_radius = minimum_radius
+        self.exp_weight = exp_weight
+        self._grad_gamma = jax.jit(jax.grad(global_radius_curvature_pure, argnums=0))
         self._grad_gammadash = jax.jit(
-            jax.grad(self_distance_pure, argnums=1),
-            static_argnums=4,
+            jax.grad(global_radius_curvature_pure, argnums=1)
         )
         super().__init__(depends_on=[curve])
 
-    def shortest_self_distance(self) -> float:
+    def global_curvature_radii(self) -> np.ndarray:
         gamma = np.asarray(self.curve.gamma(), dtype=float)
-        distances = np.sqrt(
-            np.sum((gamma[:, None, :] - gamma[None, :, :]) ** 2, axis=2)
-        )
-        masked = np.where(self._mask_np > 0.0, distances, np.inf)
-        return float(np.min(masked))
+        gammadash = np.asarray(self.curve.gammadash(), dtype=float)
+        dl = np.linalg.norm(gammadash, axis=-1)
+        tau = gammadash / dl[:, None]
+        diff = gamma[None, :, :] - gamma[:, None, :]
+        dist_sq = np.sum(diff * diff, axis=-1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dist = np.sqrt(np.where(dist_sq > 0.0, dist_sq, 1.0))
+            projection = np.sum(diff * tau[None, :, :], axis=-1) / np.where(
+                dist > 0.0,
+                dist,
+                1.0,
+            )
+            normal_ratio = 1.0 - projection * projection
+            contact_radius = np.where(
+                (normal_ratio > 0.0) & (dist_sq > 0.0),
+                dist / np.where(normal_ratio > 0.0, normal_ratio, 1.0),
+                1.0e12,
+            )
+        np.fill_diagonal(contact_radius, 1.0e12)
+        return np.min(contact_radius, axis=1)
+
+    def shortest_radius(self) -> float:
+        return float(np.min(self.global_curvature_radii()))
 
     def J(self) -> float:
         return _as_float(
-            self._forward(
+            global_radius_curvature_pure(
                 jnp.asarray(self.curve.gamma()),
                 jnp.asarray(self.curve.gammadash()),
-                self.minimum_distance,
-                self._mask,
-                self.normalize,
+                self.minimum_radius,
+                self.exp_weight,
             )
         )
 
@@ -699,16 +743,14 @@ class CurveSelfDistanceJAX(Optimizable):
         grad_gamma = self._grad_gamma(
             gamma,
             gammadash,
-            self.minimum_distance,
-            self._mask,
-            self.normalize,
+            self.minimum_radius,
+            self.exp_weight,
         )
         grad_gammadash = self._grad_gammadash(
             gamma,
             gammadash,
-            self.minimum_distance,
-            self._mask,
-            self.normalize,
+            self.minimum_radius,
+            self.exp_weight,
         )
         return self.curve.dgamma_by_dcoeff_vjp(
             np.asarray(grad_gamma)
@@ -769,11 +811,12 @@ def banana_geometry_terms(
     curvature_weight: float,
     poloidal_weight: float,
     width_weight: float,
-    self_distance_weight: float,
+    global_curvature_radius_weight: float,
     current_weight: float,
     include_current_penalties: bool,
     include_min_length: bool,
     include_width: bool,
+    include_surface_distance: bool,
 ) -> list[WeightedTerm]:
     curves = banana_curves(biotsavart)
     base_curve = banana_base_curve(biotsavart)
@@ -812,12 +855,12 @@ def banana_geometry_terms(
             ),
         ),
         WeightedTerm(
-            "self_distance",
-            self_distance_weight,
-            CurveSelfDistanceJAX(
+            "global_curvature_radius",
+            global_curvature_radius_weight,
+            GlobalRadiusCurvatureJAX(
                 base_curve,
-                BANANA_TARGETS.self_distance_min,
-                neighbor_skip=max(3, int(1.5 * getattr(base_curve, "order", 3))),
+                BANANA_TARGETS.global_curvature_radius_min,
+                exp_weight=BANANA_TARGETS.global_curvature_radius_exp_weight,
             ),
         ),
     ]
@@ -833,7 +876,7 @@ def banana_geometry_terms(
                 ),
             )
         )
-    if surface is not None and csdist_weight != 0.0:
+    if include_surface_distance and surface is not None and csdist_weight != 0.0:
         terms.append(
             WeightedTerm(
                 "coil_surface_distance",
@@ -842,10 +885,8 @@ def banana_geometry_terms(
             )
         )
     if include_width:
-        width = ProjectedEllipseWidthJAX(
+        width = EllipseWidthJAX(
             base_curve,
-            HBT_BANANA_WS.major_radius,
-            HBT_BANANA_WS.minor_radius,
         )
         terms.append(
             WeightedTerm(
@@ -892,11 +933,12 @@ def build_stage2_objective(
             curvature_weight=weights.curvature,
             poloidal_weight=weights.poloidal,
             width_weight=weights.width,
-            self_distance_weight=weights.selfint,
+            global_curvature_radius_weight=weights.global_curvature_radius,
             current_weight=weights.currents,
             include_current_penalties=include_current_penalties,
             include_min_length=include_min_length,
             include_width=include_width,
+            include_surface_distance=False,
         )
     )
     return weighted_sum_objective(terms), terms
@@ -943,11 +985,12 @@ def build_single_stage_objective(
             curvature_weight=weights.curvature,
             poloidal_weight=weights.poloidal,
             width_weight=weights.width,
-            self_distance_weight=weights.selfint,
+            global_curvature_radius_weight=weights.global_curvature_radius,
             current_weight=weights.currents,
             include_current_penalties=include_current_penalties,
             include_min_length=include_min_length,
             include_width=include_width,
+            include_surface_distance=True,
         )
     )
     return weighted_sum_objective(terms), terms
@@ -972,22 +1015,20 @@ def banana_geometry_diagnostics(biotsavart: BiotSavart | BiotSavartJAX) -> dict[
         HBT_BANANA_WS.major_radius,
         np.deg2rad(BANANA_TARGETS.poloidal_deg),
     )
-    width = ProjectedEllipseWidthJAX(
+    width = EllipseWidthJAX(
         base_curve,
-        HBT_BANANA_WS.major_radius,
-        HBT_BANANA_WS.minor_radius,
     )
-    self_distance = CurveSelfDistanceJAX(
+    global_radius = GlobalRadiusCurvatureJAX(
         base_curve,
-        BANANA_TARGETS.self_distance_min,
-        neighbor_skip=max(3, int(1.5 * getattr(base_curve, "order", 3))),
+        BANANA_TARGETS.global_curvature_radius_min,
+        exp_weight=BANANA_TARGETS.global_curvature_radius_exp_weight,
     )
     return {
         "coil_length_m": float(CurveLengthJAX(base_curve).J()),
         "max_curvature_inv_m": float(np.max(np.asarray(base_curve.kappa(), dtype=float))),
         "poloidal_half_width_rad": poloidal.poloidal_half_width(),
-        "projected_width_m": float(width.J()),
-        "self_distance_m": self_distance.shortest_self_distance(),
+        "ellipse_width_m": float(width.J()),
+        "global_curvature_radius_m": global_radius.shortest_radius(),
         "tf_current_A": float(biotsavart.coils[TF_IDX].current.get_value()),
         "banana_current_A": float(biotsavart.coils[BANANA_IDX].current.get_value()),
     }

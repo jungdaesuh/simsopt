@@ -81,7 +81,7 @@ def _make_half_grid_fields(
     """Build a representative half-grid Fourier coefficient bundle.
 
     The coefficient magnitudes are small enough to keep ``B(theta,zeta) > 0``
-    almost surely (DC bias ~ 1.0, fluctuation magnitude ~ 0.05).
+    with high likelihood (DC bias ~ 1.0, fluctuation magnitude ~ 0.05).
     """
     rng = np.random.RandomState(seed)
     bundle: dict[str, np.ndarray] = {}

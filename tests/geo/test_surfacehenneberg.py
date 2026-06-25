@@ -253,7 +253,7 @@ class SurfaceHennebergTests(unittest.TestCase):
         """
         If we run VMEC using a given boundary shape, then convert the
         boundary to the Henneberg representation and convert back and
-        run VMEC again, the rotational transform should be almost
+        run VMEC again, the rotational transform should be nearly
         identical.
         """
         with ScratchDir("."):

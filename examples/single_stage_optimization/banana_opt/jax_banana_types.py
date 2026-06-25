@@ -113,13 +113,13 @@ class HardwareLimits:
 @dataclass(frozen=True)
 class Stage2Weights:
     sqflux: float = 1.0
-    length: float = 2.0e-3
+    length: float = 5.0e-2
     ccdist: float = 1.0e6
     csdist: float = 1.0e2
     curvature: float = 1.0e-2
     poloidal: float = 1.0e2
     width: float = 1.0e1
-    selfint: float = 1.0e1
+    global_curvature_radius: float = 1.0e3
     currents: float = 1.0e6
 
 
@@ -129,21 +129,22 @@ class SingleStageWeights:
     bres: float = 1.0e3
     iota: float = 1.0e4
     length: float = 5.0e-2
-    ccdist: float = 1.0e4
+    ccdist: float = 1.0e6
     csdist: float = 1.0e2
     curvature: float = 1.0e-2
     poloidal: float = 1.0e2
-    width: float = 1.0e2
-    selfint: float = 1.0e2
+    width: float = 1.0e1
+    global_curvature_radius: float = 1.0e3
     currents: float = 1.0e6
 
 
 @dataclass(frozen=True)
 class BananaTargets:
     poloidal_deg: float = 70.0
-    width_max: float = 0.17
-    width_min: float = 0.10
-    self_distance_min: float = 0.01
+    width_max: float = 0.197
+    width_min: float = 0.050
+    global_curvature_radius_min: float = 0.010
+    global_curvature_radius_exp_weight: float = 0.010
 
 
 @dataclass(frozen=True)
@@ -191,8 +192,8 @@ PROXY_IDX = N_TF + N_BANANA
 VF_IDX = N_TF + N_BANANA + N_PROXY
 N_COILS = VF_IDX + N_VF
 
-DEFAULT_BANANA_ORDER = 3
-DEFAULT_PROXY_RZ = (0.925, 0.0)
+DEFAULT_BANANA_ORDER = 4
+DEFAULT_PROXY_RZ = (HBT_BANANA_WS.major_radius, 0.0)
 DEFAULT_BANANA_DOFS = {
     "phic(0)": 0.0600,
     "phic(1)": 0.0300,

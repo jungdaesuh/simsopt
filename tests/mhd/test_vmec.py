@@ -222,7 +222,7 @@ class VmecTests(unittest.TestCase):
     def test_surface_4_ways(self):
         """
         If we initialize a Vmec object, the boundary surface object should
-        be (almost) the same as if we initialize a SurfaceRZFourier
+        be nearly the same as if we initialize a SurfaceRZFourier
         using SurfaceRZFourier.from_wout() or
         SurfaceRZFourier.from_vmec_input(). The possible difference is
         that mpol, ntor, and the quadrature points may be different.

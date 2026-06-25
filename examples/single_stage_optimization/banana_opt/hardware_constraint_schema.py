@@ -15,7 +15,7 @@ from .hardware_contracts import (
 )
 
 ConstraintKind = Literal["lower_bound", "upper_bound", "box_bound"]
-ConstraintTarget = Literal["penalty", "alm", "artifact"]
+ConstraintTarget = Literal["penalty", "artifact"]
 # Traversal policy is search-role metadata, not a universal mode dispatcher.
 # It buckets realized status reporting for every mode, while only the
 # penalty/box_bound/forbidden subset becomes a hard search-time bound.
@@ -36,42 +36,42 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         name="coil_coil_spacing",
         kind="lower_bound",
         threshold=COIL_COIL_MIN_DIST_M,
-        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        applies_to=frozenset({"penalty", "artifact"}),
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
         name="coil_surface_spacing",
         kind="lower_bound",
         threshold=COIL_PLASMA_MIN_DIST_M,
-        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        applies_to=frozenset({"penalty", "artifact"}),
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
         name="surface_vessel_spacing",
         kind="lower_bound",
         threshold=PLASMA_VESSEL_MIN_DIST_M,
-        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        applies_to=frozenset({"penalty", "artifact"}),
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
         name="max_curvature",
         kind="upper_bound",
         threshold=MAX_CURVATURE_INV_M,
-        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        applies_to=frozenset({"penalty", "artifact"}),
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
         name="coil_length",
         kind="upper_bound",
         threshold=COIL_LENGTH_TARGET_M,
-        applies_to=frozenset({"alm", "artifact"}),
+        applies_to=frozenset({"artifact"}),
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
         name="banana_current",
         kind="box_bound",
         threshold=BANANA_CURRENT_HARD_LIMIT_A,
-        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        applies_to=frozenset({"penalty", "artifact"}),
         traversal_policy="forbidden",
     ),
     HardwareConstraintSpec(
@@ -208,28 +208,6 @@ def build_hardware_constraint_artifact_payload_fields(
     return payload_fields
 
 
-def alm_constraint_name(spec: HardwareConstraintSpec) -> str:
-    if spec.kind == "lower_bound":
-        return spec.name
-    if spec.kind == "box_bound":
-        return f"{spec.name}_upper_bound"
-    if spec.name == "coil_length":
-        return "coil_length_upper_bound"
-    if spec.kind == "upper_bound":
-        return spec.name
-    raise ValueError(f"Unsupported hardware constraint kind {spec.kind!r}.")
-
-
-def hardware_constraint_alm_names(
-    *,
-    names: Collection[str] | None = None,
-) -> tuple[str, ...]:
-    return tuple(
-        alm_constraint_name(spec)
-        for spec in hardware_constraint_specs(applies_to="alm", names=names)
-    )
-
-
 def hardware_constraint_penalty_box_bound_names(
     *,
     names: Collection[str] | None = None,
@@ -238,8 +216,8 @@ def hardware_constraint_penalty_box_bound_names(
     """Return the schema subset that becomes a penalty-search runtime bound.
 
     This is intentionally narrower than the full hardware contract surface.
-    ALM inclusion comes from ``hardware_constraint_alm_names``; artifact and
-    final certification consume the schema through the status/payload builders.
+    Artifact and final certification consume the schema through the
+    status/payload builders.
     """
     return tuple(
         spec.name
