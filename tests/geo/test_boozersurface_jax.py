@@ -2220,6 +2220,7 @@ class TestOptimizerAdapter:
         """
         from simsopt_jax_adapters.geo.boozer_surface import (
             EXACT_FACTORIZATION_BACKEND,
+            _dense_residual_jacobian_condition_estimate_or_none,
             _ls_factorization_backend,
             _ls_hessian_symmetry_rel,
             _none_solve_quality_fields,
@@ -2235,6 +2236,27 @@ class TestOptimizerAdapter:
         assert _ls_hessian_symmetry_rel(symmetric) == 0.0
         with jax.transfer_guard("disallow"):
             assert _ls_hessian_symmetry_rel(symmetric) == 0.0
+
+        rectangular_jacobian = jnp.asarray(
+            [[3.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+        )
+        assert _dense_residual_jacobian_condition_estimate_or_none(
+            None
+        ) is None
+        assert _dense_residual_jacobian_condition_estimate_or_none(
+            jnp.ones((2,))
+        ) is None
+        condition_estimate = _dense_residual_jacobian_condition_estimate_or_none(
+            rectangular_jacobian
+        )
+        assert float(np.asarray(condition_estimate)) == pytest.approx(3.0)
+        with jax.transfer_guard("disallow"):
+            guarded_condition_estimate = (
+                _dense_residual_jacobian_condition_estimate_or_none(
+                    rectangular_jacobian
+                )
+            )
+        assert float(np.asarray(guarded_condition_estimate)) == pytest.approx(3.0)
 
         assert _ls_factorization_backend(None, optimizer_backend="scipy") is None
         H = jnp.asarray([[1.0, 0.0], [0.0, 1.0]])
@@ -2269,6 +2291,7 @@ class TestOptimizerAdapter:
             "ls_newton_step_abs_diff_rel",
             "ls_factorization_backend",
             "ls_condition_estimate",
+            "ls_residual_jacobian_condition_estimate",
         )
         assert SOLVE_QUALITY_EXACT_FIELDS == (
             "exact_jacobian_action_max_rel",
@@ -5323,6 +5346,9 @@ class TestBoozerSurfaceJAXClass:
             == booz.options["max_dense_linearization_bytes"]
         )
         assert res["optimizer_method"] == expected_method
+        assert float(
+            np.asarray(res["ls_residual_jacobian_condition_estimate"])
+        ) == pytest.approx(1.0)
         assert res["success"] is True
 
     def test_run_code_reference_lm_forwards_least_squares_options(self, monkeypatch):
@@ -8317,6 +8343,9 @@ class TestBoozerSurfaceJAXExactPath:
         _assert_result_record(result, _TRACEABLE_LS_RESULT_RECORD_TYPE)
         assert result["optimizer_method"] == expected_method
         assert bool(result["success"])
+        assert float(
+            np.asarray(result["ls_residual_jacobian_condition_estimate"])
+        ) == pytest.approx(1.0)
         if explicit_lm_options:
             _assert_explicit_lm_options_forwarded(captured, booz)
         else:

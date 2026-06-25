@@ -175,6 +175,7 @@ SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
     "ls_newton_step_abs_diff_rel",
     "ls_factorization_backend",
     "ls_condition_estimate",
+    "ls_residual_jacobian_condition_estimate",
 )
 
 
@@ -3433,6 +3434,22 @@ def _dense_condition_estimate_or_none(matrix, *, lu_piv=None):
     return float(estimate)
 
 
+def _dense_residual_jacobian_condition_estimate_or_none(jacobian):
+    """Return the dense LS residual-Jacobian kappa_2 estimate (or ``None``)."""
+    if jacobian is None:
+        return None
+    jacobian = jnp.asarray(jacobian)
+    if len(jacobian.shape) != 2:
+        return None
+    if jacobian.shape[0] == 0 or jacobian.shape[1] == 0:
+        return None
+    singular_values = jnp.linalg.svd(jacobian, compute_uv=False)
+    estimate = singular_values[0] / singular_values[-1]
+    if isinstance(estimate, (jax.core.Tracer, jax.Array)):
+        return estimate
+    return float(estimate)
+
+
 def _ls_factorization_backend(
     H,
     *,
@@ -5975,8 +5992,14 @@ class BoozerSurfaceJAX(Optimizable):
                 ],
                 args=(coil_set_spec,),
             )
+            ls_residual_jacobian_condition_estimate = (
+                _dense_residual_jacobian_condition_estimate_or_none(
+                    ls_state.get("residual_jacobian")
+                )
+            )
             x_ls = ls_state["x"]
         else:
+            ls_residual_jacobian_condition_estimate = None
             ls_obj_fn = self._make_penalty_objective_with(
                 optimize_G,
                 weight_inv_modB,
@@ -6062,6 +6085,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "optimizer_method": method,
                 **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
                 "ls_condition_estimate": None,
+                "ls_residual_jacobian_condition_estimate": (
+                    ls_residual_jacobian_condition_estimate
+                ),
                 "pre_newton_iter": ls_nit,
                 **_skipped_newton_polish_fields(
                     self.options["max_dense_linearization_bytes"],
@@ -6153,6 +6179,9 @@ class BoozerSurfaceJAX(Optimizable):
             **_ls_newton_reporting_fields(newton_result),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             "ls_condition_estimate": ls_condition_estimate,
+            "ls_residual_jacobian_condition_estimate": (
+                ls_residual_jacobian_condition_estimate
+            ),
             "newton_polish_policy": str(self.options["newton_polish_policy"]),
             "newton_polish_skipped": False,
         }
@@ -6399,6 +6428,9 @@ class BoozerSurfaceJAX(Optimizable):
             "ls_hessian_symmetry_rel": None,
             "ls_factorization_backend": None,
             "ls_condition_estimate": None,
+            "ls_residual_jacobian_condition_estimate": ls_res.get(
+                "ls_residual_jacobian_condition_estimate"
+            ),
             "pre_newton": pre_newton,
         }
         res_record = self._store_boozer_result("newton", res)
@@ -6556,6 +6588,11 @@ class BoozerSurfaceJAX(Optimizable):
                 optimize_G=optimize_G,
             )
         )
+        ls_residual_jacobian_condition_estimate = (
+            _dense_residual_jacobian_condition_estimate_or_none(
+                getattr(result, "residual_jacobian", None)
+            )
+        )
 
         resdict = {
             "fun": float(_host_scalar(result.fun)),
@@ -6577,6 +6614,9 @@ class BoozerSurfaceJAX(Optimizable):
             "scipy_initial_call": getattr(result, "scipy_initial_call", None),
             "scipy_callback_trace": getattr(result, "scipy_callback_trace", None),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+            "ls_residual_jacobian_condition_estimate": (
+                ls_residual_jacobian_condition_estimate
+            ),
         }
         res_record = self._store_boozer_result("lbfgs", resdict)
         self.need_to_run_code = False
@@ -6877,6 +6917,11 @@ class BoozerSurfaceJAX(Optimizable):
                 optimize_G,
             )
             self._set_surface_dofs(sdofs_final)
+            ls_residual_jacobian_condition_estimate = (
+                _dense_residual_jacobian_condition_estimate_or_none(
+                    result["jacobian"]
+                )
+            )
             resdict = {
                 "residual": result["residual"],
                 "gradient": result["gradient"],
@@ -6893,6 +6938,9 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
                 "optimizer_method": "manual",
                 **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+                "ls_residual_jacobian_condition_estimate": (
+                    ls_residual_jacobian_condition_estimate
+                ),
             }
             res_record = self._store_boozer_result("ls_manual", resdict)
             self.need_to_run_code = False
@@ -6972,6 +7020,11 @@ class BoozerSurfaceJAX(Optimizable):
             result.x, optimize_G
         )
         self._set_surface_dofs(sdofs_final)
+        ls_residual_jacobian_condition_estimate = (
+            _dense_residual_jacobian_condition_estimate_or_none(
+                result.residual_jacobian
+            )
+        )
         resdict = {
             "info": result,
             "residual": result.residual,
@@ -6989,6 +7042,9 @@ class BoozerSurfaceJAX(Optimizable):
             ),
             "optimizer_method": optimizer_method,
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+            "ls_residual_jacobian_condition_estimate": (
+                ls_residual_jacobian_condition_estimate
+            ),
         }
         res_record = self._store_boozer_result("ls_lm", resdict)
         self.need_to_run_code = False
@@ -7534,6 +7590,9 @@ class BoozerSurfaceJAX(Optimizable):
         )
         res["optimizer_method"] = ls_res["optimizer_method"]
         res["pre_newton"] = pre_newton
+        res["ls_residual_jacobian_condition_estimate"] = ls_res.get(
+            "ls_residual_jacobian_condition_estimate"
+        )
         res["newton_polish_policy"] = str(self.options["newton_polish_policy"])
         res["newton_polish_skipped"] = False
         self._emit_stage_callback(
