@@ -124,9 +124,8 @@ def _capture_runtime_environment() -> dict[str, Any]:
 def _load_objective_evaluation_events(progress_path: Path) -> list[dict[str, Any]]:
     """Filter outer-optimizer progress events to ``objective_evaluation``s.
 
-    Mirrors ``benchmarks/single_stage_init_parity.py::
-    _load_objective_evaluation_events_from_case`` so the same selector applies
-    here.
+    Reuses the historical outer-optimizer progress selector for
+    ``objective_evaluation`` events.
     """
     if not progress_path.exists():
         raise FileNotFoundError(

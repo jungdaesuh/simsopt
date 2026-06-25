@@ -11,9 +11,6 @@ from typing import Literal, TypedDict, cast
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_DIR = _REPO_ROOT / "src"
 _LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
-_SINGLE_STAGE_TRANSFER_GUARD_SNAPSHOT_PATH = (
-    _REPO_ROOT / "tests" / "test_files" / "single_stage_transfer_guard_snapshot.json"
-)
 _STRICT_CPU_PARITY_SKIP_REASON = (
     "strict CPU parity backend unavailable: private optimizer runtime not supported"
 )
@@ -61,7 +58,6 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
 import simsopt_jax.config as simsopt_config  # type: ignore[import-untyped]
 from simsopt.field import BiotSavart, Coil, Current  # type: ignore[import-untyped]
 from simsopt_jax_adapters.field.biotsavart_backend import (  # type: ignore[import-untyped]
@@ -407,121 +403,6 @@ def _assert_implicit_host_transfer_rejected(
         )
 
 
-def _build_single_stage_transfer_guard_runtime_fixture():
-    import simsopt_jax_adapters.geo.surface_objectives_traceable as surfaceobjectives_traceable_jax_module
-
-    from examples.single_stage_optimization.SINGLE_STAGE import (
-        single_stage_banana_example as single_stage_example,
-    )
-
-    snapshot = json.loads(_SINGLE_STAGE_TRANSFER_GUARD_SNAPSHOT_PATH.read_text())
-    surface_shape = snapshot["surface_shape"]
-    fixture = build_real_single_stage_init_fixture(
-        backend="jax",
-        nphi=int(surface_shape["nphi"]),
-        ntheta=int(surface_shape["ntheta"]),
-        mpol=int(surface_shape["mpol"]),
-        ntor=int(surface_shape["ntor"]),
-        boozer_surface_dofs_override=np.asarray(
-            snapshot["surface_dofs"],
-            dtype=np.float64,
-        ),
-        boozer_iota_override=float(snapshot["iota"]),
-        boozer_G_override=float(snapshot["G"]),
-    )
-    bs = fixture["bs"]
-    boozer_surface = fixture["boozer_surface"]
-    if not hasattr(bs, "coils"):
-        raise RuntimeError("single-stage transfer-guard fixture requires coil geometry")
-    if (
-        not hasattr(boozer_surface, "res")
-        or boozer_surface.res is None
-        or not boozer_surface.res.get("success", False)
-    ):
-        raise RuntimeError(
-            "single-stage transfer-guard fixture requires a solved Boozer state"
-        )
-
-    banana_curve = bs.coils[0].curve
-    length_target = single_stage_example.host_float(
-        single_stage_example.CurveLength(banana_curve).J()
-    )
-    vessel_surface = single_stage_example.SurfaceRZFourier(
-        nfp=boozer_surface.nfp,
-        stellsym=boozer_surface.stellsym,
-        mpol=1,
-        ntor=0,
-        quadpoints_phi=boozer_surface.surface.quadpoints_phi,
-        quadpoints_theta=boozer_surface.surface.quadpoints_theta,
-    )
-    vessel_surface.set_rc(0, 0, 1.2)
-    vessel_surface.set_rc(1, 0, 0.15)
-    vessel_surface.set_zs(1, 0, 0.15)
-
-    config = single_stage_example.build_traceable_single_stage_outer_objective_config(
-        boozer_surface,
-        bs,
-        banana_curve,
-        vessel_surface,
-        non_qs_weight=1.0,
-        residual_weight=1000.0,
-        iota_weight=100.0,
-        length_weight=5.0e-4,
-        length_target=length_target,
-        curve_curve_weight=100.0,
-        curve_curve_threshold=0.05,
-        curve_surface_weight=1.0,
-        curve_surface_threshold=0.02,
-        surface_vessel_weight=1000.0,
-        surface_vessel_threshold=0.04,
-        curvature_weight=0.1,
-        curvature_threshold=40.0,
-    )
-    success_filter = (
-        single_stage_example.build_single_stage_target_lane_hardware_success_filter(
-            boozer_surface,
-            bs,
-            banana_curve,
-            vessel_surface,
-            cc_dist=0.05,
-            cs_dist=0.02,
-            ss_dist=0.04,
-            curvature_threshold=40.0,
-        )
-    )
-    runtime_bundle = (
-        single_stage_example.get_traceable_single_stage_runtime_bundle_builder()(
-            boozer_surface,
-            bs,
-            fixture["iota_target"],
-            include_profile_suite=False,
-            include_host_wrappers=False,
-            outer_objective_config=config,
-            success_filter=success_filter,
-        )
-    )
-    compiled_bundle = (
-        surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
-            boozer_surface,
-            bs,
-            fixture["iota_target"],
-            outer_objective_config=config,
-            success_filter=success_filter,
-        )["compiled_bundle"]
-    )
-
-    cpu = jax.devices("cpu")[0]
-    coil_dofs_host = np.asarray(bs.x.copy(), dtype=np.float64)
-    coil_dofs_device = jax.device_put(coil_dofs_host, device=cpu)
-    return (
-        runtime_bundle,
-        compiled_bundle,
-        success_filter,
-        coil_dofs_device,
-        coil_dofs_host,
-    )
-
-
 def _host_scalar_float64(value) -> float:
     return float(jax.device_get(value))
 
@@ -551,55 +432,6 @@ def _assert_finite_array(value, *, expected_shape=None) -> np.ndarray:
         assert array.shape == expected_shape
     assert np.all(np.isfinite(array))
     return array
-
-
-def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
-    if not _configure_strict_cpu_parity_backend():
-        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
-        return
-
-    (
-        runtime_bundle,
-        compiled_bundle,
-        success_filter,
-        coil_dofs_device,
-        coil_dofs_host,
-    ) = _build_single_stage_transfer_guard_runtime_fixture()
-
-    objective_value = runtime_bundle["objective"](coil_dofs_device)
-    value_and_grad_value, value_and_grad_grad = runtime_bundle["value_and_grad"](
-        coil_dofs_device
-    )
-    objective_value_from_host = runtime_bundle["objective"](coil_dofs_host)
-
-    _assert_finite_scalar_matches_host(
-        objective_value,
-        objective_value_from_host,
-    )
-    _assert_finite_scalar(value_and_grad_value)
-    _assert_finite_array(
-        value_and_grad_grad,
-        expected_shape=coil_dofs_host.shape,
-    )
-    forward_result = compiled_bundle["compiled_forward_result_for"](coil_dofs_device)
-    solved_x_host = _host_array_float64(forward_result["x"])
-
-    _assert_implicit_host_transfer_rejected(
-        compiled_bundle["compiled_forward_result_for"],
-        coil_dofs_host,
-        case_name="single-stage compiled_forward_result_for",
-    )
-    _assert_implicit_host_transfer_rejected(
-        compiled_bundle["compiled_value_and_grad_for"],
-        coil_dofs_host,
-        case_name="single-stage compiled_value_and_grad_for",
-    )
-    _assert_implicit_host_transfer_rejected(
-        jax.jit(success_filter),
-        coil_dofs_host,
-        solved_x_host,
-        case_name="single-stage success_filter",
-    )
 
 
 class _ShiftedQuadratic:
@@ -1753,98 +1585,6 @@ def _run_closed_curve_self_intersection_summary_case() -> None:
     assert bool(violation)
 
 
-def _run_single_stage_surface_self_intersection_case() -> None:
-    gpu = _configure_strict_gpu_fast_backend()
-    if gpu is None:
-        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
-        return
-
-    from examples.single_stage_optimization.SINGLE_STAGE import (
-        single_stage_banana_example as single_stage_example,
-    )
-
-    crossing_surface = SurfaceRZFourier(
-        mpol=2,
-        ntor=2,
-        stellsym=True,
-        nfp=1,
-        quadpoints_phi=np.linspace(0.0, 1.0, 200, endpoint=False),
-        quadpoints_theta=np.linspace(0.0, 1.0, 200, endpoint=False),
-    )
-    crossing_surface.x = np.array(
-        [
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.1,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.1,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.1,
-        ],
-        dtype=np.float64,
-    )
-    surface = SurfaceXYZTensorFourier(
-        mpol=2,
-        ntor=2,
-        stellsym=True,
-        nfp=1,
-        quadpoints_phi=np.asarray(crossing_surface.quadpoints_phi, dtype=np.float64),
-        quadpoints_theta=np.asarray(
-            crossing_surface.quadpoints_theta,
-            dtype=np.float64,
-        ),
-    )
-    surface.least_squares_fit(crossing_surface.gamma())
-
-    cross_section = (
-        single_stage_example._surface_phi0_cross_section_from_supported_dofs(
-            jax.device_put(
-                np.asarray(surface.get_dofs(), dtype=np.float64), device=gpu
-            ),
-            jax.device_put(
-                np.asarray(surface.quadpoints_theta, dtype=np.float64),
-                device=gpu,
-            ),
-            jax.device_put(
-                single_stage_example.stellsym_scatter_indices(
-                    surface.mpol, surface.ntor
-                ),
-                device=gpu,
-            ),
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
-            surface_kind="xyztensorfourier",
-        )
-    )
-    assert cross_section.shape == (surface.quadpoints_theta.size, 3)
-
-    intersecting, available = single_stage_example.evaluate_surface_self_intersection(
-        surface
-    )
-    assert available is True
-    assert intersecting is True
-
-
 def _run_surface_xyztensorfourier_gamma_from_dofs_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
@@ -1879,39 +1619,6 @@ def _run_surface_xyztensorfourier_gamma_from_dofs_case() -> None:
 
     _assert_finite_array(eager_gamma, expected_shape=(2, 2, 3))
     _assert_finite_array(jitted_gamma, expected_shape=(2, 2, 3))
-
-
-def _run_project_surface_dofs_to_resolution_case() -> None:
-    _configure_transfer_guard_cpu_parity_backend()
-
-    from examples.single_stage_optimization.SINGLE_STAGE import (
-        single_stage_banana_example as single_stage_example,
-    )
-
-    surface = SurfaceRZFourier(
-        mpol=2,
-        ntor=1,
-        nfp=5,
-        stellsym=True,
-        quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
-        quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
-    )
-    source_dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
-    source_dofs[:] = np.linspace(0.03, 0.03 * source_dofs.size, source_dofs.size)
-    surface.set_dofs(source_dofs)
-
-    projected_dofs = single_stage_example.project_surface_dofs_to_resolution(
-        surface,
-        mpol=4,
-        ntor=3,
-        quadpoints_phi=np.linspace(0.0, 0.2, 6, endpoint=False),
-        quadpoints_theta=np.linspace(0.0, 1.0, 7, endpoint=False),
-    )
-
-    _assert_finite_array(
-        projected_dofs,
-        expected_shape=(len(single_stage_example.stellsym_scatter_indices(4, 3)),),
-    )
 
 
 def _run_coil_symmetry_spec_identity_default_case() -> None:

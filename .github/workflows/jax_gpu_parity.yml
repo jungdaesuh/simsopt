@@ -85,17 +85,6 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests/field/test_biotsavart_jax.py -v --tb=short
 
-      - name: Stage 2 value and gradient parity (real fixture)
-        id: stage2_parity
-        continue-on-error: true
-        run: |
-          mkdir -p benchmark_artifacts
-          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python benchmarks/stage2_value_gradient_parity.py \
-            --platform cuda \
-            --fixture real \
-            --output-json benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json
-
       - name: Boozer residual JAX
         id: boozer
         continue-on-error: true
@@ -110,17 +99,6 @@ jobs:
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
-
-      - name: Single-stage outer-loop proof
-        id: single_stage_outer_loop
-        continue-on-error: true
-        run: |
-          mkdir -p benchmark_artifacts
-          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python benchmarks/single_stage_outer_loop_probe.py \
-            --platform cuda \
-            --optimizer-backend ondevice \
-            --output-json benchmark_artifacts/single_stage_outer_loop_cuda.json
 
       - name: GPU reproducibility contract
         id: ci_contract
@@ -146,10 +124,8 @@ jobs:
           echo "| Import smoke | ${{ steps.smoke.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Biot-Savart parity | ${{ steps.bs_parity.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Biot-Savart unit | ${{ steps.bs_unit.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Stage 2 value/gradient parity | ${{ steps.stage2_parity.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Boozer residual | ${{ steps.boozer.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Single-stage outer-loop proof | ${{ steps.single_stage_outer_loop.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| GPU reproducibility contract | ${{ steps.ci_contract.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -162,10 +138,8 @@ jobs:
           if [ "${{ steps.smoke.outcome }}" != "success" ] || \
              [ "${{ steps.bs_parity.outcome }}" != "success" ] || \
              [ "${{ steps.bs_unit.outcome }}" != "success" ] || \
-             [ "${{ steps.stage2_parity.outcome }}" != "success" ] || \
              [ "${{ steps.boozer.outcome }}" != "success" ] || \
              [ "${{ steps.surface.outcome }}" != "success" ] || \
-             [ "${{ steps.single_stage_outer_loop.outcome }}" != "success" ] || \
              [ "${{ steps.ci_contract.outcome }}" != "success" ]; then
             echo "One or more GPU parity tests failed."
             exit 1
@@ -177,8 +151,6 @@ jobs:
         with:
           name: jax-gpu-parity-artifacts
           path: |
-            benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json
-            benchmark_artifacts/single_stage_outer_loop_cuda.json
             benchmark_artifacts/jax_ci_contract.json
             benchmark_artifacts/jax_ci_contract.md
 

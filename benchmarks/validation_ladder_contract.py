@@ -219,9 +219,7 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     # docs/parity_scientific_equivalence_contract_2026-05-09.md §2 + §9.
     # These lanes are reporting-only at Phase 0/1: the parity arbiter does
     # not yet enforce these thresholds, and the existing
-    # ``linear_solve_factors`` byte-parity probe and the pre-Newton hard
-    # gate ``_pre_newton_census_gate_failures`` in
-    # ``benchmarks/single_stage_init_parity.py`` remain authoritative.
+    # ``linear_solve_factors`` byte-parity probe remains authoritative.
     # ``*_condition_estimate_present`` is True because the JAX-native
     # Hager–Higham helper now populates dense compatibility solves.
     # Individual solve results may still emit ``None`` when their dense
