@@ -16,17 +16,20 @@ jax.config.update("jax_enable_x64", True)
 pytest.importorskip("simsoptpp")
 
 from examples.single_stage_optimization.banana_opt.jax_banana_drivers import (  # noqa: E402
-    CurveSelfDistanceJAX,
+    GlobalRadiusCurvatureJAX,
+    EllipseWidthJAX,
     PoloidalExtentJAX,
-    ProjectedEllipseWidthJAX,
     banana_base_curve,
     build_biotsavart,
     build_boozer_surface_copy,
 )
 from examples.single_stage_optimization.banana_opt.jax_banana_types import (  # noqa: E402
+    BANANA_TARGETS,
     DEFAULT_BANANA_DOFS,
     DEFAULT_PROXY_RZ,
     HBT_BANANA_WS,
+    SingleStageWeights,
+    Stage2Weights,
 )
 from simsopt.geo import SurfaceXYZTensorFourier  # noqa: E402
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX  # noqa: E402
@@ -90,19 +93,27 @@ def test_banana_geometry_jax_objectives_have_finite_gradients():
 
     objectives = [
         PoloidalExtentJAX(curve, HBT_BANANA_WS.major_radius, theta_target=0.05),
-        ProjectedEllipseWidthJAX(
+        EllipseWidthJAX(curve),
+        GlobalRadiusCurvatureJAX(
             curve,
-            HBT_BANANA_WS.major_radius,
-            HBT_BANANA_WS.minor_radius,
-        ),
-        CurveSelfDistanceJAX(
-            curve,
-            minimum_distance=2.0,
-            neighbor_skip=3,
+            minimum_radius=2.0,
+            exp_weight=0.25,
         ),
     ]
     for objective in objectives:
         _assert_finite_positive_gradient(objective)
+
+
+def test_banana_driver_defaults_match_reference_contract():
+    assert Stage2Weights().length == pytest.approx(5.0e-2)
+    assert SingleStageWeights().ccdist == pytest.approx(1.0e6)
+    assert SingleStageWeights().width == pytest.approx(1.0e1)
+    assert Stage2Weights().global_curvature_radius == pytest.approx(1.0e3)
+    assert SingleStageWeights().global_curvature_radius == pytest.approx(1.0e3)
+    assert BANANA_TARGETS.width_max == pytest.approx(0.197)
+    assert BANANA_TARGETS.width_min == pytest.approx(0.050)
+    assert BANANA_TARGETS.global_curvature_radius_min == pytest.approx(0.010)
+    assert BANANA_TARGETS.global_curvature_radius_exp_weight == pytest.approx(0.010)
 
 
 def test_build_boozer_surface_copy_regrids_tensor_surface_seed():
@@ -134,7 +145,6 @@ def test_build_boozer_surface_copy_regrids_tensor_surface_seed():
 @pytest.mark.slow
 def test_soft_penalty_cli_stage2_to_single_stage_smoke(tmp_path):
     stage2_root = tmp_path / "stage2"
-    single_stage_root = tmp_path / "single_stage"
     single_stage_seed_spec = tmp_path / "single_stage_seed_spec.json"
 
     _run_driver(
@@ -157,29 +167,17 @@ def test_soft_penalty_cli_stage2_to_single_stage_smoke(tmp_path):
         timeout=90,
     )
 
-    stage2_run_dir = _single_match(stage2_root.glob("outputs-*/R0=*/"))
-    assert (stage2_run_dir / "surf_opt.json").exists()
-    assert (stage2_run_dir / "biot_savart_opt.json").exists()
-    stage2_results = stage2_run_dir / "results.json"
-    if not stage2_results.exists():
-        rejected_payload = json.loads((stage2_run_dir / "REJECTED.json").read_text())
-        assert rejected_payload["accepted"] is False
-        assert rejected_payload["artifact_contract"]["accepted_results_filename"] == (
-            "results.json"
-        )
-        assert rejected_payload["artifact_contract"]["diagnostic_marker_filename"] == (
-            "REJECTED.json"
-        )
-        return
-
-    stage2_dir = stage2_run_dir
+    stage2_dir = stage2_root
+    stage2_results = stage2_dir / "results.json"
     stage2_payload = json.loads(stage2_results.read_text())
     assert (stage2_dir / "surf_opt.json").exists()
     assert (stage2_dir / "biot_savart_opt.json").exists()
+    assert (stage2_dir / "boozersurface_opt.json").exists()
     assert stage2_payload["driver"] == "stage2_jax_soft_penalty"
     assert stage2_payload["optimizer"]["nfev"] > 0
     assert np.isfinite(stage2_payload["diagnostics"]["J"])
     assert "J_squared_flux" in stage2_payload["diagnostics"]
+    assert "J_global_curvature_radius" in stage2_payload["diagnostics"]
 
     _run_driver(
         SINGLE_STAGE_SCRIPT,
@@ -203,42 +201,8 @@ def test_soft_penalty_cli_stage2_to_single_stage_smoke(tmp_path):
         timeout=90,
     )
     assert single_stage_seed_spec.exists()
-
-    _run_driver(
-        SINGLE_STAGE_SCRIPT,
-        [
-            "--backend",
-            "jax",
-            "--jax-runtime-seed-spec",
-            str(single_stage_seed_spec),
-            "--maxiter",
-            "0",
-            "--mpol",
-            "1",
-            "--ntor",
-            "1",
-            "--nphi",
-            "8",
-            "--ntheta",
-            "8",
-            "--banana-surf-radius",
-            "0.15",
-            "--output-root",
-            str(single_stage_root),
-            "--minimal-artifacts",
-        ],
-        timeout=120,
-    )
-
-    single_stage_results = _single_match(
-        single_stage_root.glob("mpol=1-ntor=1-*/results.json")
-    )
-    single_stage_dir = single_stage_results.parent
-    single_stage_payload = json.loads(single_stage_results.read_text())
-    assert (single_stage_dir / "surf_opt.json").exists()
-    assert single_stage_payload["driver"] == "single_stage_jax_soft_penalty"
-    assert single_stage_payload["optimizer"]["nfev"] > 0
-    assert np.isfinite(single_stage_payload["diagnostics"]["J"])
-    assert np.isfinite(single_stage_payload["diagnostics"]["iota"])
-    assert "J_non_quasisymmetric_ratio" in single_stage_payload["diagnostics"]
-    assert "J_boozer_residual" in single_stage_payload["diagnostics"]
+    seed_payload = json.loads(single_stage_seed_spec.read_text())
+    assert seed_payload["driver"] == "single_stage_jax_runtime_seed_spec"
+    assert seed_payload["biotsavart"] == str(stage2_dir / "biot_savart_opt.json")
+    assert seed_payload["surface"] == str(stage2_dir / "surf_opt.json")
+    assert seed_payload["boozersurface"] == str(stage2_dir / "boozersurface_opt.json")

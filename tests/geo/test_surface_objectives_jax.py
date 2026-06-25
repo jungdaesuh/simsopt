@@ -1052,7 +1052,7 @@ def test_surface_surface_signed_constraint_chunking_matches_dense_value_and_grad
     )
 
 
-def test_alm_smoothmin_chunked_vjps_respect_strict_transfer_guard(monkeypatch):
+def test_smoothmin_chunked_vjps_respect_strict_transfer_guard(monkeypatch):
     coil_gamma = jax.device_put(
         jnp.asarray(
             [
