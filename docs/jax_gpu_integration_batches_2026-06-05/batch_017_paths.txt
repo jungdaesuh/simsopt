@@ -1,0 +1,8 @@
+tests/jax/solve/test_options_typing.py
+tests/jax/solve/test_value_grad_contract.py
+tests/mhd/test_bootstrap_jax.py
+tests/mhd/test_boozer_jax.py
+tests/mhd/test_profiles_jax.py
+tests/mhd/test_vmec_compute_geometry_jax.py
+tests/mhd/test_vmec_diagnostics_jax.py
+tests/mhd/test_vmec_fieldlines_jax.py

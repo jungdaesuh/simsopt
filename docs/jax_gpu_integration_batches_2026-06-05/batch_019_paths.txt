@@ -1,0 +1,7 @@
+tests/solve/test_permanent_magnet_optimization_jax_item28.py
+tests/solve/test_pm_workflow_jax.py
+tests/solve/test_serial_jax.py
+tests/solve/test_wireframe_optimization_jax_item31.py
+tests/solve/test_wireframe_workflow_jax.py
+tests/test_backend_strict_jax_device_detection.py
+tests/test_banana_jax_soft_penalty_drivers.py

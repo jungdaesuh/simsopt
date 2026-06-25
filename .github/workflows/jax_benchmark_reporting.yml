@@ -1,0 +1,116 @@
+name: JAX Benchmark Reporting
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  stable-hardware-tier5:
+    name: Stable hardware Tier 5 benchmark report
+    runs-on: [self-hosted, stable-benchmarks]
+    env:
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_FILE: envs/jax.yml
+      SIMSOPT_BACKEND_MODE: jax_gpu_fast
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: log
+      JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/benchmark_artifacts/jax-compilation-cache/jax_gpu_fast-cuda
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision benchmark environment from recipe
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+          else
+            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      - name: Verify provisioned benchmark environment
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -c "import jax, simsopt; print(jax.__version__); print(simsopt.__file__)"
+
+      - name: Run Tier 5 performance characterization (fast lane)
+        id: tier5
+        continue-on-error: true
+        run: |
+          mkdir -p benchmark_artifacts "$JAX_COMPILATION_CACHE_DIR"
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python benchmarks/tier5_performance_characterization.py \
+            --platform cuda \
+            --optimizer-backend ondevice \
+            --benchmark-mode \
+            --maxiter 20 \
+            --output-json benchmark_artifacts/tier5_performance_characterization.json
+
+      - name: Run grouped-adjoint memory probe (dense-audit transfer guard)
+        id: grouped_memory
+        continue-on-error: true
+        env:
+          SIMSOPT_JAX_TRANSFER_GUARD: disallow
+          JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/benchmark_artifacts/jax-compilation-cache/jax_gpu_fast-dense-audit
+        run: |
+          mkdir -p benchmark_artifacts "$JAX_COMPILATION_CACHE_DIR"
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python benchmarks/grouped_adjoint_memory_probe.py \
+            --platform cuda \
+            --optimizer-backend ondevice \
+            --output-json benchmark_artifacts/grouped_adjoint_memory_probe.json \
+            --record-jax-compile-diagnostics \
+            --device-memory-profile-out benchmark_artifacts/grouped_adjoint_memory_profile.prof
+
+      - name: Render standardized benchmark report
+        if: always()
+        run: |
+          if [ -f benchmark_artifacts/tier5_performance_characterization.json ]; then
+            conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+              python benchmarks/render_benchmark_report.py \
+              --manifest-json benchmarks/manifests/stable_hardware_weekly_tier5.json \
+              --input-json benchmark_artifacts/tier5_performance_characterization.json \
+              --output-md benchmark_artifacts/stable_hardware_weekly_report.md
+          else
+            echo "Tier 5 JSON missing; skipping markdown render."
+          fi
+
+      - name: Publish benchmark artifact bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-stable-hardware-weekly-tier5
+          if-no-files-found: ignore
+          path: |
+            benchmark_artifacts/tier5_performance_characterization.json
+            benchmark_artifacts/grouped_adjoint_memory_probe.json
+            benchmark_artifacts/grouped_adjoint_memory_profile.prof
+            benchmark_artifacts/stable_hardware_weekly_report.md
+
+      - name: Append report to workflow summary
+        if: always()
+        run: |
+          echo "## Stable hardware weekly results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tier 5 performance characterization (fast lane) | ${{ steps.tier5.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Grouped-adjoint memory probe (dense-audit transfer guard) | ${{ steps.grouped_memory.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f benchmark_artifacts/stable_hardware_weekly_report.md ]; then
+            cat benchmark_artifacts/stable_hardware_weekly_report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail on benchmark gate regressions
+        if: always()
+        run: |
+          if [ "${{ steps.tier5.outcome }}" != "success" ] || \
+             [ "${{ steps.grouped_memory.outcome }}" != "success" ]; then
+            echo "Stable-hardware benchmark gates failed."
+            exit 1
+          fi

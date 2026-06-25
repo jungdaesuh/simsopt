@@ -1,5 +1,10 @@
+import os
+
 import jax
-jax.config.update('jax_platform_name', 'cpu')
+
+if "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
+    jax.config.update("jax_platform_name", "cpu")
+
 from jax import jit as jaxjit
 from .config import parameters
 

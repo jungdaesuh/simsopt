@@ -1,0 +1,179 @@
+"""JAX-backed public wrapper for :class:`simsopt.field.WireframeField`."""
+
+from __future__ import annotations
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+from simsopt_jax._array_contracts import require_nonnegative_int32_indices
+
+from simsopt_jax.core._math_utils import (
+    as_jax_int32 as _as_jax_int32,
+    as_runtime_array as _as_runtime_array,
+    runtime_host_dtype as _runtime_host_dtype,
+)
+from simsopt_jax.core.wireframe import (
+    wireframe_B,
+    wireframe_B_and_dB_by_dX,
+    wireframe_segment_B_contributions,
+    wireframe_segment_dB_by_dX_contributions,
+)
+from simsopt_jax.field.common import host_cache_array as _host_cache_array
+from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+from simsopt.field.magneticfield import MagneticField
+
+__all__ = ["WireframeFieldJAX"]
+
+
+def _snapshot_wireframe_arrays(wframe):
+    host_dtype = _runtime_host_dtype()
+    nodes = np.array(np.stack(wframe.nodes), dtype=host_dtype, order="C", copy=True)
+    segments = np.array(
+        require_nonnegative_int32_indices("wframe.segments", wframe.segments),
+        dtype=np.int32,
+        order="C",
+        copy=True,
+    )
+    seg_signs = np.array(wframe.seg_signs, dtype=host_dtype, order="C", copy=True)
+    currents = np.array(wframe.currents, dtype=host_dtype, order="C", copy=True)
+    return nodes, segments, seg_signs, currents
+
+
+@jax.jit
+def _wireframe_segment_B_contributions_jit(points, nodes, segments, seg_signs):
+    return wireframe_segment_B_contributions(points, nodes, segments, seg_signs)
+
+
+@jax.jit
+def _wireframe_segment_dB_by_dX_contributions_jit(points, nodes, segments, seg_signs):
+    return wireframe_segment_dB_by_dX_contributions(points, nodes, segments, seg_signs)
+
+
+class WireframeFieldJAX(MagneticField):
+    """JAX-backed magnetic field for a fixed-current toroidal wireframe.
+
+    This wrapper mirrors the public ``WireframeField`` field-evaluation
+    surface while keeping the upstream C++ class as the parity oracle.
+    The wireframe geometry and currents are snapshotted at construction,
+    matching the CPU wrapper's construction-time handoff to
+    ``simsoptpp.WireframeField``.
+    """
+
+    _simsopt_jax_native_field = False
+
+    def __init__(self, wframe):
+        MagneticField.__init__(self)
+        self.wireframe = wframe
+        self.nodes, self.segments, self.seg_signs, self.currents = (
+            _snapshot_wireframe_arrays(wframe)
+        )
+        self._n_segments = int(self.segments.shape[0])
+        self._nodes_device = _as_runtime_array(self.nodes)
+        self._segments_device = _as_jax_int32(self.segments)
+        self._seg_signs_device = _as_runtime_array(self.seg_signs)
+        self._currents_device = _as_runtime_array(self.currents)
+        self._dB_by_dcoilcurrents = None
+
+    def set_points_cart(self, xyz):
+        result = super().set_points_cart(xyz)
+        self._points_device = _as_runtime_array(
+            np.asarray(xyz, dtype=_runtime_host_dtype())
+        )
+        self._dB_by_dcoilcurrents = None
+        return result
+
+    def set_points_cyl(self, rphiz):
+        result = super().set_points_cyl(rphiz)
+        self._points_device = _as_runtime_array(
+            np.asarray(self.get_points_cart_ref(), dtype=_runtime_host_dtype())
+        )
+        self._dB_by_dcoilcurrents = None
+        return result
+
+    def _B_impl(self, B):
+        B[:] = _host_cache_array(
+            wireframe_B(
+                self._points_device,
+                self._nodes_device,
+                self._segments_device,
+                self._seg_signs_device,
+                self._currents_device,
+            ),
+            dtype=B.dtype,
+        )
+
+    def _dB_by_dX_impl(self, dB):
+        _, dB_jax = wireframe_B_and_dB_by_dX(
+            self._points_device,
+            self._nodes_device,
+            self._segments_device,
+            self._seg_signs_device,
+            self._currents_device,
+        )
+        dB[:] = _host_cache_array(dB_jax, dtype=dB.dtype)
+
+    def dB_by_dsegmentcurrents(self, compute_derivatives):
+        """Return unit-current segment field contributions.
+
+        ``compute_derivatives=0`` returns ``B_i`` arrays with shape
+        ``(n_points, 3)``. ``compute_derivatives=1`` returns ``dB_i`` arrays
+        with shape ``(n_points, 3, 3)``. Second spatial derivatives are not
+        implemented by the C++ oracle and are not claimed here.
+        """
+
+        assert compute_derivatives >= 0
+        if compute_derivatives > 1:
+            raise NotImplementedError(
+                "Second spatial derivatives are not implemented for WireframeField."
+            )
+        contribution_kernel = (
+            _wireframe_segment_B_contributions_jit
+            if compute_derivatives == 0
+            else _wireframe_segment_dB_by_dX_contributions_jit
+        )
+        contributions = _host_cache_array(
+            contribution_kernel(
+                self._points_device,
+                self._nodes_device,
+                self._segments_device,
+                self._seg_signs_device,
+            ),
+            dtype=_runtime_host_dtype(),
+        )
+        self._dB_by_dcoilcurrents = [
+            np.ascontiguousarray(contributions[i]) for i in range(self._n_segments)
+        ]
+        return self._dB_by_dcoilcurrents
+
+    def dBnormal_by_dsegmentcurrents_matrix(self, surface, area_weighted=False):
+        """Build the normal-field derivative matrix on a plasma surface."""
+
+        points = self.get_points_cart_ref()
+        n_points = len(points)
+
+        if not isinstance(surface, SurfaceRZFourier):
+            raise ValueError("Surface must be a SurfaceRZFourier object")
+
+        normal = np.asarray(surface.normal(), dtype=_runtime_host_dtype())
+        absn = np.linalg.norm(normal, axis=2)
+        unitn = normal * (1.0 / absn)[:, :, None]
+
+        if area_weighted:
+            fac = np.sqrt(absn / float(absn.size))
+        else:
+            fac = np.ones(absn.shape, dtype=_runtime_host_dtype())
+
+        contributions = _wireframe_segment_B_contributions_jit(
+            self._points_device,
+            self._nodes_device,
+            self._segments_device,
+            self._seg_signs_device,
+        )
+        unitn_flat = _as_runtime_array(np.reshape(unitn, (n_points, 3)))
+        fac_flat = _as_runtime_array(np.reshape(fac, (n_points,)))
+        matrix = jnp.einsum("spc,pc->ps", contributions, unitn_flat) * fac_flat[
+            :, None
+        ]
+        return np.ascontiguousarray(_host_cache_array(matrix, dtype=_runtime_host_dtype()))
