@@ -1,11 +1,21 @@
-"""Tests for the opt-in matrix-free CG adjoint solver (SIMSOPT_ADJOINT_LINEAR_SOLVER).
+"""Tests for the opt-in adjoint linear solvers in ``optimizer.py``.
 
-The inner-Boozer Gauss-Newton adjoint operator ``J^T J + stab I`` is symmetric
-positive-(semi)definite, so ``lineax`` Conjugate Gradients is a valid solver for
-it.  These tests verify the matrix-free CG path agrees with a direct solve and
-with the established dense ``lstsq`` path, and that
-``_solve_hessian_least_squares_system_with_status`` dispatches to CG when the
-module-level solver selector is ``"cg"``.
+Two opt-in adjoint paths are covered here:
+
+1. Matrix-free CG (``SIMSOPT_ADJOINT_LINEAR_SOLVER="cg"``): the inner-Boozer
+   Gauss-Newton adjoint operator ``J^T J + stab I`` is symmetric
+   positive-(semi)definite, so ``lineax`` Conjugate Gradients is valid.  These
+   tests verify the matrix-free CG path agrees with a direct solve and with the
+   established dense ``lstsq`` path, and that
+   ``_solve_hessian_least_squares_system_with_status`` dispatches to CG when the
+   module-level solver selector is ``"cg"``.
+
+2. Dense-LU exact-adjoint (``SIMSOPT_EXACT_ADJOINT_DENSE_LU=1``): direct LU
+   factorization of the un-squared, well-conditioned ``J^T`` for the
+   exact-Jacobian transpose solve (the GMRES baseline stagnates there).  These
+   tests verify the LU+IR solver against an independent ``np.linalg.solve``
+   oracle, the 1-D/2-D batched RHS contract, the dispatch gate
+   (flag-and-transpose only), and the numerical-singularity fail-closed guard.
 """
 
 import numpy as np
