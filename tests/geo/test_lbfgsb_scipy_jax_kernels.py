@@ -1,0 +1,2756 @@
+from __future__ import annotations
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+import pytest
+import scipy.linalg
+from scipy.optimize import _lbfgsb_py
+
+from simsopt_jax.geo.optimizers.private import _lbfgsb_scipy as lbfgsb
+
+
+def _masked_vector_dot(x, y):
+    products = x * y
+    return np.sum(np.where(products != 0.0, products, 0.0))
+
+
+def test_lbfgsb_ddot_matches_vectorized_masked_dot():
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=1000).astype(np.float64)
+    y = rng.normal(size=1000).astype(np.float64)
+    x[::3] *= 1.0e16
+    x[1::3] *= 1.0e-16
+    x[::97] = 0.0
+    expected = _masked_vector_dot(x, y)
+
+    actual = lbfgsb._lbfgsb_ddot(jax.device_put(x), jax.device_put(y))
+
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=1.0e-15, atol=0.0)
+
+
+def test_lbfgsb_ddot_has_no_elementwise_loop_or_cond_primitive():
+    x = jax.device_put(np.arange(8, dtype=np.float64))
+    y = jax.device_put(np.linspace(-1.0, 1.0, 8, dtype=np.float64))
+
+    jaxpr = jax.make_jaxpr(lbfgsb._lbfgsb_ddot)(x, y).jaxpr
+
+    primitive_names = {eqn.primitive.name for eqn in jaxpr.eqns}
+    assert "scan" not in primitive_names
+    assert "while" not in primitive_names
+    assert "cond" not in primitive_names
+    assert "reduce_sum" in primitive_names
+
+
+def _dcstep_reference(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax):
+    sgnd = dp * (dx / abs(dx))
+    if fp > fx:
+        theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
+        scale = max(abs(theta), abs(dx), abs(dp))
+        gamma = scale * np.sqrt((theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        if stp < stx:
+            gamma = -gamma
+        p = (gamma - dx) + theta
+        q = ((gamma - dx) + gamma) + dp
+        r = p / q
+        stpc = stx + r * (stp - stx)
+        stpq = stx + ((dx / ((fx - fp) / (stp - stx) + dx)) / 2.0) * (stp - stx)
+        if abs(stpc - stx) < abs(stpq - stx):
+            stpf = stpc
+        else:
+            stpf = stpc + (stpq - stpc) / 2.0
+        brackt = True
+    elif sgnd < 0.0:
+        theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
+        scale = max(abs(theta), abs(dx), abs(dp))
+        gamma = scale * np.sqrt((theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        if stp > stx:
+            gamma = -gamma
+        p = (gamma - dp) + theta
+        q = ((gamma - dp) + gamma) + dx
+        r = p / q
+        stpc = stp + r * (stx - stp)
+        stpq = stp + (dp / (dp - dx)) * (stx - stp)
+        if abs(stpc - stp) > abs(stpq - stp):
+            stpf = stpc
+        else:
+            stpf = stpq
+        brackt = True
+    elif abs(dp) < abs(dx):
+        theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
+        scale = max(abs(theta), abs(dx), abs(dp))
+        gamma = scale * np.sqrt(
+            max(0.0, (theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        )
+        if stp > stx:
+            gamma = -gamma
+        p = (gamma - dp) + theta
+        q = (gamma + (dx - dp)) + gamma
+        r = p / q
+        if (r < 0.0) and (gamma != 0.0):
+            stpc = stp + r * (stx - stp)
+        elif stp > stx:
+            stpc = stpmax
+        else:
+            stpc = stpmin
+        stpq = stp + (dp / (dp - dx)) * (stx - stp)
+        if brackt:
+            if abs(stpc - stp) < abs(stpq - stp):
+                stpf = stpc
+            else:
+                stpf = stpq
+            if stp > stx:
+                stpf = min(stp + 0.66 * (sty - stp), stpf)
+            else:
+                stpf = max(stp + 0.66 * (sty - stp), stpf)
+        else:
+            if abs(stpc - stp) > abs(stpq - stp):
+                stpf = stpc
+            else:
+                stpf = stpq
+            stpf = min(stpmax, stpf)
+            stpf = max(stpmin, stpf)
+    else:
+        if brackt:
+            theta = 3.0 * (fp - fy) / (sty - stp) + dy + dp
+            scale = max(abs(theta), abs(dy), abs(dp))
+            gamma = scale * np.sqrt((theta / scale) ** 2 - (dy / scale) * (dp / scale))
+            if stp > sty:
+                gamma = -gamma
+            p = (gamma - dp) + theta
+            q = ((gamma - dp) + gamma) + dy
+            r = p / q
+            stpf = stp + r * (sty - stp)
+        elif stp > stx:
+            stpf = stpmax
+        else:
+            stpf = stpmin
+
+    if fp > fx:
+        sty = stp
+        fy = fp
+        dy = dp
+    else:
+        if sgnd < 0.0:
+            sty = stx
+            fy = fx
+            dy = dx
+        stx = stp
+        fx = fp
+        dx = dp
+
+    return stx, fx, dx, sty, fy, dy, stpf, brackt
+
+
+def _matupd_reference(ws, wy, sy, ss, d, r, itail, iupdat, col, head, rr, dr, stp, dtd):
+    ws = np.asarray(ws, dtype=np.float64).copy()
+    wy = np.asarray(wy, dtype=np.float64).copy()
+    sy = np.asarray(sy, dtype=np.float64).copy()
+    ss = np.asarray(ss, dtype=np.float64).copy()
+    m = ws.shape[0]
+
+    if iupdat <= m:
+        col = iupdat
+        itail = (head + iupdat - 1) % m
+    else:
+        itail = (itail + 1) % m
+        head = (head + 1) % m
+
+    ws[itail, :] = d
+    wy[itail, :] = r
+    theta = rr / dr
+
+    if iupdat > m:
+        for j in range(1, col):
+            ss[:j, j - 1] = ss[1 : j + 1, j]
+            sy[j - 1 : col - 1, j - 1] = sy[j:col, j]
+
+    pointr = head
+    for j in range(col - 1):
+        sy[col - 1, j] = np.dot(d, wy[pointr])
+        ss[j, col - 1] = np.dot(ws[pointr], d)
+        pointr = (pointr + 1) % m
+
+    ss[col - 1, col - 1] = dtd if stp == 1.0 else stp * stp * dtd
+    sy[col - 1, col - 1] = dr
+    return ws, wy, sy, ss, itail, col, head, theta
+
+
+def _bmv_reference(sy, wt, col, v):
+    sy = np.asarray(sy, dtype=np.float64)
+    wt = np.asarray(wt, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    p = np.zeros_like(v, dtype=np.float64)
+    if col == 0:
+        return p, 0
+
+    p[col] = v[col]
+    for i in range(1, col):
+        ssum = 0.0
+        for k in range(i):
+            ssum += sy[i, k] * v[k] / sy[k, k]
+        p[col + i] = v[col + i] + ssum
+
+    factor = np.triu(wt[:col, :col])
+    singular = np.flatnonzero(np.diag(factor) == 0.0)
+    if singular.size:
+        return p, int(singular[0] + 1)
+
+    p[col : 2 * col] = scipy.linalg.solve_triangular(
+        factor,
+        p[col : 2 * col],
+        trans="T",
+        lower=False,
+        check_finite=False,
+    )
+
+    for i in range(col):
+        p[i] = v[i] / np.sqrt(sy[i, i])
+
+    p[col : 2 * col] = scipy.linalg.solve_triangular(
+        factor,
+        p[col : 2 * col],
+        trans="N",
+        lower=False,
+        check_finite=False,
+    )
+
+    for i in range(col):
+        p[i] = -p[i] / np.sqrt(sy[i, i])
+
+    for i in range(col):
+        ssum = 0.0
+        for k in range(i + 1, col):
+            ssum += sy[k, i] * p[col + k] / sy[i, i]
+        p[i] += ssum
+
+    return p, 0
+
+
+def _bmv_case(*, singular=False):
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    wt = np.array(
+        [
+            [2.0, 0.25, -0.5],
+            [0.0, 3.0, 0.75],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    if singular:
+        wt[1, 1] = 0.0
+    v = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    return sy, wt, v
+
+
+def _formt_reference(wt, sy, ss, col, theta):
+    wt = np.asarray(wt, dtype=np.float64).copy()
+    sy = np.asarray(sy, dtype=np.float64)
+    ss = np.asarray(ss, dtype=np.float64)
+
+    for j in range(col):
+        wt[0, j] = theta * ss[0, j]
+
+    for i in range(1, col):
+        for j in range(i, col):
+            ddum = 0.0
+            for k in range(i):
+                ddum += sy[i, k] * sy[j, k] / sy[k, k]
+            wt[i, j] = ddum + theta * ss[i, j]
+
+    t = np.triu(wt[:col, :col])
+    t = t + np.triu(t, k=1).T
+    wt[:col, :col] = np.linalg.cholesky(t).T
+    return wt, 0
+
+
+def _formk_reference(
+    nsub,
+    ind,
+    nenter,
+    ileave,
+    indx2,
+    iupdat,
+    updatd,
+    wn,
+    wn1,
+    ws,
+    wy,
+    sy,
+    theta,
+    col,
+    head,
+):
+    ind = np.asarray(ind, dtype=np.int32)
+    indx2 = np.asarray(indx2, dtype=np.int32)
+    wn = np.asarray(wn, dtype=np.float64).copy()
+    wn1 = np.asarray(wn1, dtype=np.float64).copy()
+    ws = np.asarray(ws, dtype=np.float64)
+    wy = np.asarray(wy, dtype=np.float64)
+    sy = np.asarray(sy, dtype=np.float64)
+    m = ws.shape[0]
+    n = ws.shape[1]
+
+    if updatd:
+        if iupdat > m:
+            for jy in range(m - 1):
+                js = m + jy
+                for offset in range(m - (jy + 1)):
+                    wn1[jy + offset, jy] = wn1[jy + 1 + offset, jy + 1]
+                    wn1[js + offset, js] = wn1[js + 1 + offset, js + 1]
+                for offset in range(m - 1):
+                    wn1[m + offset, jy] = wn1[m + 1 + offset, jy + 1]
+
+        pbegin = 0
+        pend = nsub
+        dbegin = nsub
+        dend = n
+        iy = col - 1
+        is_ = m + col - 1
+        ipntr = (head + col - 1) % m
+        jpntr = head
+
+        for jy in range(col):
+            js = m + jy
+            temp1 = 0.0
+            temp2 = 0.0
+            temp3 = 0.0
+            for k in range(pbegin, pend):
+                k1 = ind[k]
+                temp1 += wy[ipntr, k1] * wy[jpntr, k1]
+            for k in range(dbegin, dend):
+                k1 = ind[k]
+                temp2 += ws[ipntr, k1] * ws[jpntr, k1]
+                temp3 += ws[ipntr, k1] * wy[jpntr, k1]
+            wn1[iy, jy] = temp1
+            wn1[is_, js] = temp2
+            wn1[is_, jy] = temp3
+            jpntr = (jpntr + 1) % m
+
+        jy = col - 1
+        jpntr = (head + col - 1) % m
+        ipntr = head
+        for i in range(col):
+            is_ = m + i
+            temp3 = 0.0
+            for k in range(pbegin, pend):
+                k1 = ind[k]
+                temp3 += ws[ipntr, k1] * wy[jpntr, k1]
+            ipntr = (ipntr + 1) % m
+            wn1[is_, jy] = temp3
+
+        upcl = col - 1
+    else:
+        upcl = col
+
+    ipntr = head
+    for iy in range(upcl):
+        is_ = m + iy
+        jpntr = head
+        for jy in range(iy + 1):
+            js = m + jy
+            temp1 = 0.0
+            temp2 = 0.0
+            temp3 = 0.0
+            temp4 = 0.0
+            for k in range(nenter):
+                k1 = indx2[k]
+                temp1 += wy[ipntr, k1] * wy[jpntr, k1]
+                temp2 += ws[ipntr, k1] * ws[jpntr, k1]
+            for k in range(ileave, n):
+                k1 = indx2[k]
+                temp3 += wy[ipntr, k1] * wy[jpntr, k1]
+                temp4 += ws[ipntr, k1] * ws[jpntr, k1]
+            wn1[iy, jy] += temp1 - temp3
+            wn1[is_, js] += -temp2 + temp4
+            jpntr = (jpntr + 1) % m
+        ipntr = (ipntr + 1) % m
+
+    ipntr = head
+    for is_ in range(m, m + upcl):
+        jpntr = head
+        for jy in range(upcl):
+            temp1 = 0.0
+            temp3 = 0.0
+            for k in range(nenter):
+                k1 = indx2[k]
+                temp1 += ws[ipntr, k1] * wy[jpntr, k1]
+            for k in range(ileave, n):
+                k1 = indx2[k]
+                temp3 += ws[ipntr, k1] * wy[jpntr, k1]
+            if is_ <= jy + m:
+                wn1[is_, jy] += temp1 - temp3
+            else:
+                wn1[is_, jy] += -temp1 + temp3
+            jpntr = (jpntr + 1) % m
+        ipntr = (ipntr + 1) % m
+
+    for iy in range(col):
+        is_ = col + iy
+        is1 = m + iy
+        for jy in range(iy + 1):
+            js = col + jy
+            js1 = m + jy
+            wn[jy, iy] = wn1[iy, jy] / theta
+            wn[js, is_] = wn1[is1, js1] * theta
+        for jy in range(iy):
+            wn[jy, is_] = -wn1[is1, jy]
+        for jy in range(iy, col):
+            wn[jy, is_] = wn1[is1, jy]
+        wn[iy, iy] += sy[iy, iy]
+
+    first = np.triu(wn[:col, :col])
+    first = first + np.triu(first, k=1).T
+    try:
+        first_chol = np.linalg.cholesky(first).T
+    except np.linalg.LinAlgError:
+        return wn, wn1, -1
+    wn[:col, :col] = np.triu(first_chol)
+
+    wn[:col, col : 2 * col] = scipy.linalg.solve_triangular(
+        first_chol,
+        wn[:col, col : 2 * col],
+        trans="T",
+        lower=False,
+    )
+    for is_ in range(col, 2 * col):
+        for js in range(is_, 2 * col):
+            wn[is_, js] += np.dot(wn[:col, is_], wn[:col, js])
+
+    second = np.triu(wn[col : 2 * col, col : 2 * col])
+    second = second + np.triu(second, k=1).T
+    try:
+        second_chol = np.linalg.cholesky(second).T
+    except np.linalg.LinAlgError:
+        return wn, wn1, -2
+    wn[col : 2 * col, col : 2 * col] = np.triu(second_chol)
+    return wn, wn1, 0
+
+
+def _freev_reference(nfree, idx, idx2, iwhere, updatd, cnstnd, iteration):
+    idx = np.asarray(idx, dtype=np.int32).copy()
+    idx2 = np.asarray(idx2, dtype=np.int32).copy()
+    iwhere = np.asarray(iwhere, dtype=np.int32)
+    n = len(idx)
+    nenter = 0
+    ileave = n
+
+    if iteration > 0 and cnstnd:
+        for i in range(nfree):
+            k = idx[i]
+            if iwhere[k] > 0:
+                ileave -= 1
+                idx2[ileave] = k
+        for i in range(nfree, n):
+            k = idx[i]
+            if iwhere[k] <= 0:
+                idx2[nenter] = k
+                nenter += 1
+
+    next_nfree = 0
+    iact = n
+    next_idx = np.zeros_like(idx)
+    for i in range(n):
+        if iwhere[i] <= 0:
+            next_idx[next_nfree] = i
+            next_nfree += 1
+        else:
+            iact -= 1
+            next_idx[iact] = i
+
+    return (
+        next_nfree,
+        next_idx,
+        nenter,
+        ileave,
+        idx2,
+        ileave < n or nenter > 0 or updatd,
+    )
+
+
+def _hpsolb_reference(last, t, iorder, iheap):
+    t = np.asarray(t, dtype=np.float64).copy()
+    iorder = np.asarray(iorder, dtype=np.int32).copy()
+
+    if iheap == 0:
+        for k in range(2, last + 2):
+            ddum = t[k - 1]
+            indxin = iorder[k - 1]
+            i = k
+            while i > 1:
+                j = i // 2
+                if ddum < t[j - 1]:
+                    t[i - 1] = t[j - 1]
+                    iorder[i - 1] = iorder[j - 1]
+                    i = j
+                else:
+                    break
+            t[i - 1] = ddum
+            iorder[i - 1] = indxin
+
+    if last > 0:
+        i = 1
+        out = t[0]
+        indxout = iorder[0]
+        ddum = t[last]
+        indxin = iorder[last]
+        while True:
+            j = i + i
+            if j <= last:
+                if t[j] < t[j - 1]:
+                    j += 1
+                if t[j - 1] < ddum:
+                    t[i - 1] = t[j - 1]
+                    iorder[i - 1] = iorder[j - 1]
+                    i = j
+                else:
+                    break
+            else:
+                break
+        t[i - 1] = ddum
+        iorder[i - 1] = indxin
+        t[last] = out
+        iorder[last] = indxout
+
+    return t, iorder
+
+
+def _cmprlb_reference(
+    x, g, ws, wy, sy, wt, z, r, wa, index, theta, col, head, nfree, cnstnd
+):
+    x = np.asarray(x, dtype=np.float64)
+    g = np.asarray(g, dtype=np.float64)
+    ws = np.asarray(ws, dtype=np.float64)
+    wy = np.asarray(wy, dtype=np.float64)
+    sy = np.asarray(sy, dtype=np.float64)
+    wt = np.asarray(wt, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    r = np.asarray(r, dtype=np.float64).copy()
+    wa = np.asarray(wa, dtype=np.float64).copy()
+    index = np.asarray(index, dtype=np.int32)
+    m = ws.shape[0]
+
+    if (not cnstnd) and (col > 0):
+        r[:] = -g
+        return r, wa, 0
+
+    for i in range(nfree):
+        k = index[i]
+        r[i] = -theta * (z[k] - x[k]) - g[k]
+
+    p, info = _bmv_reference(sy, wt, col, wa[2 * m : 4 * m])
+    if info != 0:
+        return r, wa, -8
+    wa[: 2 * m] = p
+
+    pointr = head
+    for j in range(col):
+        a1 = wa[j]
+        a2 = theta * wa[col + j]
+        for i in range(nfree):
+            k = index[i]
+            r[i] += wy[pointr, k] * a1 + ws[pointr, k] * a2
+        pointr = (pointr + 1) % m
+
+    return r, wa, 0
+
+
+def _cauchy_reference(
+    x,
+    l,
+    u,
+    nbd,
+    g,
+    iorder,
+    iwhere,
+    t,
+    d,
+    xcp,
+    wy,
+    ws,
+    sy,
+    wt,
+    theta,
+    col,
+    head,
+    p,
+    c,
+    wbp,
+    v,
+    sbgnrm,
+):
+    x = np.asarray(x, dtype=np.float64)
+    l = np.asarray(l, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    nbd = np.asarray(nbd, dtype=np.int32)
+    g = np.asarray(g, dtype=np.float64)
+    iorder = np.asarray(iorder, dtype=np.int32).copy()
+    iwhere = np.asarray(iwhere, dtype=np.int32).copy()
+    t = np.asarray(t, dtype=np.float64).copy()
+    d = np.asarray(d, dtype=np.float64).copy()
+    xcp = np.asarray(xcp, dtype=np.float64).copy()
+    wy = np.asarray(wy, dtype=np.float64)
+    ws = np.asarray(ws, dtype=np.float64)
+    p = np.asarray(p, dtype=np.float64).copy()
+    c = np.asarray(c, dtype=np.float64).copy()
+    wbp = np.asarray(wbp, dtype=np.float64).copy()
+    v = np.asarray(v, dtype=np.float64).copy()
+    n = len(x)
+    m = ws.shape[0]
+    col2 = 2 * col
+
+    if sbgnrm <= 0.0:
+        xcp[:] = x
+        return iorder, iwhere, t, d, xcp, p, c, wbp, v, 0, 0
+
+    f1 = 0.0
+    bnded = True
+    nfree = n
+    nbreak = -1
+    ibkmin = 0
+    bkmin = 0.0
+    p[:col2] = 0.0
+
+    for i in range(n):
+        neggi = -g[i]
+        if iwhere[i] != 3 and iwhere[i] != -1:
+            tl = x[i] - l[i] if nbd[i] <= lbfgsb.NBD_BOTH else 0.0
+            tu = u[i] - x[i] if nbd[i] >= lbfgsb.NBD_BOTH else 0.0
+            xlower = nbd[i] <= lbfgsb.NBD_BOTH and tl <= 0.0
+            xupper = nbd[i] >= lbfgsb.NBD_BOTH and tu <= 0.0
+            iwhere[i] = 0
+            if xlower:
+                if neggi <= 0.0:
+                    iwhere[i] = 1
+            elif xupper:
+                if neggi >= 0.0:
+                    iwhere[i] = 2
+            elif abs(neggi) <= 0.0:
+                iwhere[i] = -3
+        pointr = head
+        if iwhere[i] != 0 and iwhere[i] != -1:
+            d[i] = 0.0
+        else:
+            d[i] = neggi
+            f1 -= neggi * neggi
+            for j in range(col):
+                p[j] += wy[pointr, i] * neggi
+                p[col + j] += ws[pointr, i] * neggi
+                pointr = (pointr + 1) % m
+            if nbd[i] <= lbfgsb.NBD_BOTH and nbd[i] != 0 and neggi < 0.0:
+                nbreak += 1
+                iorder[nbreak] = i
+                t[nbreak] = tl / (-neggi)
+                if nbreak == 0 or t[nbreak] < bkmin:
+                    bkmin = t[nbreak]
+                    ibkmin = nbreak
+            elif nbd[i] >= lbfgsb.NBD_BOTH and neggi > 0.0:
+                nbreak += 1
+                iorder[nbreak] = i
+                t[nbreak] = tu / neggi
+                if nbreak == 0 or t[nbreak] < bkmin:
+                    bkmin = t[nbreak]
+                    ibkmin = nbreak
+            else:
+                nfree -= 1
+                iorder[nfree] = i
+                if abs(neggi) > 0.0:
+                    bnded = False
+
+    if theta != 1.0:
+        p[col:col2] *= theta
+
+    xcp[:] = x
+    if nbreak == -1 and nfree == n:
+        return iorder, iwhere, t, d, xcp, p, c, wbp, v, 0, 0
+
+    c[:col2] = 0.0
+    f2 = -theta * f1
+    f2_org = f2
+    if col > 0:
+        bmv = _bmv_reference(sy, wt, col, p)
+        v[:] = bmv[0]
+        if bmv[1] != 0:
+            return iorder, iwhere, t, d, xcp, p, c, wbp, v, 0, bmv[1]
+        f2 -= np.dot(v[:col2], p[:col2])
+
+    dtm = -f1 / f2
+    tsum = 0.0
+    nseg = 1
+    if nbreak == -1:
+        dtm = max(dtm, 0.0)
+        tsum += dtm
+        xcp += tsum * d
+        if col > 0:
+            c[:col2] += dtm * p[:col2]
+        return iorder, iwhere, t, d, xcp, p, c, wbp, v, nseg, 0
+
+    nleft = nbreak
+    iteration = 0
+    tj = 0.0
+    while True:
+        tj0 = tj
+        if iteration == 0:
+            tj = bkmin
+            ibp = iorder[ibkmin]
+        else:
+            if iteration == 1 and ibkmin != nbreak:
+                t[ibkmin] = t[nbreak]
+                iorder[ibkmin] = iorder[nbreak]
+            t, iorder = _hpsolb_reference(nleft, t, iorder, iteration - 1)
+            tj = t[nleft]
+            ibp = iorder[nleft]
+
+        dt = tj - tj0
+        if dtm < dt:
+            break
+
+        tsum += dt
+        nleft -= 1
+        iteration += 1
+        dibp = d[ibp]
+        d[ibp] = 0.0
+        if dibp > 0.0:
+            zibp = u[ibp] - x[ibp]
+            xcp[ibp] = u[ibp]
+            iwhere[ibp] = 2
+        else:
+            zibp = l[ibp] - x[ibp]
+            xcp[ibp] = l[ibp]
+            iwhere[ibp] = 1
+
+        if nleft == -1 and nbreak == n:
+            dtm = dt
+            break
+
+        dibp2 = dibp**2
+        f1 = f1 + dt * f2 + dibp2 - theta * dibp * zibp
+        f2 = f2 - theta * dibp2
+        if col > 0:
+            c[:col2] += dt * p[:col2]
+            pointr = head
+            for j in range(col):
+                wbp[j] = wy[pointr, ibp]
+                wbp[col + j] = theta * ws[pointr, ibp]
+                pointr = (pointr + 1) % m
+            bmv = _bmv_reference(sy, wt, col, wbp)
+            v[:] = bmv[0]
+            if bmv[1] != 0:
+                return iorder, iwhere, t, d, xcp, p, c, wbp, v, nseg, bmv[1]
+            wmc = np.dot(c[:col2], v[:col2])
+            wmp = np.dot(p[:col2], v[:col2])
+            wmw = np.dot(wbp[:col2], v[:col2])
+            p[:col2] = p[:col2] - dibp * wbp[:col2]
+            f1 = f1 + dibp * wmc
+            f2 = f2 + dibp * 2.0 * wmp - dibp2 * wmw
+
+        f2 = max(np.finfo(np.float64).eps * f2_org, f2)
+        if nleft >= 0:
+            dtm = -f1 / f2
+        elif bnded:
+            dtm = 0.0
+            break
+        else:
+            dtm = -f1 / f2
+            break
+
+    dtm = max(dtm, 0.0)
+    tsum += dtm
+    xcp += tsum * d
+    if col > 0:
+        c[:col2] += dtm * p[:col2]
+    return iorder, iwhere, t, d, xcp, p, c, wbp, v, nseg, 0
+
+
+def _subsm_reference(
+    nsub,
+    ind,
+    l,
+    u,
+    nbd,
+    x,
+    d,
+    xp,
+    ws,
+    wy,
+    theta,
+    xx,
+    gg,
+    col,
+    head,
+    wv,
+    wn,
+):
+    ind = np.asarray(ind, dtype=np.int32)
+    l = np.asarray(l, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    nbd = np.asarray(nbd, dtype=np.int32)
+    x = np.asarray(x, dtype=np.float64).copy()
+    d = np.asarray(d, dtype=np.float64).copy()
+    xp = np.asarray(xp, dtype=np.float64).copy()
+    ws = np.asarray(ws, dtype=np.float64)
+    wy = np.asarray(wy, dtype=np.float64)
+    xx = np.asarray(xx, dtype=np.float64)
+    gg = np.asarray(gg, dtype=np.float64)
+    wv = np.asarray(wv, dtype=np.float64).copy()
+    wn = np.asarray(wn, dtype=np.float64)
+    m = ws.shape[0]
+    n = ws.shape[1]
+
+    if nsub <= 0:
+        return x, d, xp, 0, wv, 0
+
+    pointr = head
+    for i in range(col):
+        temp1 = 0.0
+        temp2 = 0.0
+        for j in range(nsub):
+            k = ind[j]
+            temp1 += wy[pointr, k] * d[j]
+            temp2 += ws[pointr, k] * d[j]
+        wv[i] = temp1
+        wv[col + i] = theta * temp2
+        pointr = (pointr + 1) % m
+
+    col2 = 2 * col
+    factor = np.triu(wn[:col2, :col2])
+    try:
+        wv[:col2] = scipy.linalg.solve_triangular(
+            factor,
+            wv[:col2],
+            trans="T",
+            lower=False,
+        )
+    except scipy.linalg.LinAlgError:
+        return x, d, xp, 0, wv, 1
+
+    wv[:col] = -wv[:col]
+
+    try:
+        wv[:col2] = scipy.linalg.solve_triangular(
+            factor,
+            wv[:col2],
+            trans="N",
+            lower=False,
+        )
+    except scipy.linalg.LinAlgError:
+        return x, d, xp, 0, wv, 1
+
+    pointr = head
+    for jy in range(col):
+        js = col + jy
+        for i in range(nsub):
+            k = ind[i]
+            d[i] += wy[pointr, k] * wv[jy] / theta + ws[pointr, k] * wv[js]
+        pointr = (pointr + 1) % m
+
+    d[:nsub] = d[:nsub] / theta
+    iword = 0
+    xp[:] = x
+
+    for i in range(nsub):
+        k = ind[i]
+        dk = d[i]
+        xk = x[k]
+        if nbd[k] == lbfgsb.NBD_LOWER:
+            x[k] = max(l[k], xk + dk)
+            if x[k] == l[k]:
+                iword = 1
+        elif nbd[k] == lbfgsb.NBD_BOTH:
+            xk = max(l[k], xk + dk)
+            x[k] = min(u[k], xk)
+            if x[k] == l[k] or x[k] == u[k]:
+                iword = 1
+        elif nbd[k] == lbfgsb.NBD_UPPER:
+            x[k] = min(u[k], xk + dk)
+            if x[k] == u[k]:
+                iword = 1
+        else:
+            x[k] = xk + dk
+
+    if iword == 0:
+        return x, d, xp, iword, wv, 0
+
+    dd_p = 0.0
+    for i in range(n):
+        dd_p += (x[i] - xx[i]) * gg[i]
+
+    if dd_p <= 0.0:
+        return x, d, xp, iword, wv, 0
+
+    x[:] = xp
+    alpha = 1.0
+    ibd = 0
+    for i in range(nsub):
+        k = ind[i]
+        dk = d[i]
+        temp1 = alpha
+        if nbd[k] != lbfgsb.NBD_UNBOUNDED:
+            if (dk < 0.0) and (nbd[k] <= lbfgsb.NBD_BOTH):
+                temp2 = l[k] - x[k]
+                if temp2 >= 0.0:
+                    temp1 = 0.0
+                elif dk * alpha < temp2:
+                    temp1 = temp2 / dk
+            elif (dk > 0.0) and (nbd[k] >= lbfgsb.NBD_BOTH):
+                temp2 = u[k] - x[k]
+                if temp2 <= 0.0:
+                    temp1 = 0.0
+                elif dk * alpha > temp2:
+                    temp1 = temp2 / dk
+            if temp1 < alpha:
+                alpha = temp1
+                ibd = i
+
+    if alpha < 1.0:
+        dk = d[ibd]
+        k = ind[ibd]
+        if dk > 0.0:
+            x[k] = u[k]
+            d[ibd] = 0.0
+        elif dk < 0.0:
+            x[k] = l[k]
+            d[ibd] = 0.0
+
+    for i in range(nsub):
+        k = ind[i]
+        x[k] = x[k] + alpha * d[i]
+
+    return x, d, xp, iword, wv, 0
+
+
+def _lnsrlb_args(
+    x,
+    g,
+    d,
+    *,
+    l=None,
+    u=None,
+    nbd=None,
+    f=1.0,
+    fold=0.0,
+    gd=0.0,
+    gdold=0.0,
+    r=None,
+    t=None,
+    z=None,
+    stp=0.0,
+    dnorm=0.0,
+    dtd=0.0,
+    xstep=0.0,
+    stpmx=0.0,
+    iteration=0,
+    ifun=0,
+    iback=0,
+    nfgv=0,
+    info=0,
+    task=lbfgsb.START,
+    task_msg=lbfgsb.NO_MSG,
+    boxed=False,
+    cnstnd=False,
+    isave=None,
+    dsave=None,
+    temp_task=lbfgsb.START,
+    temp_task_msg=lbfgsb.NO_MSG,
+):
+    zeros = np.zeros_like(x)
+    return (
+        np.full_like(x, -10.0) if l is None else l,
+        np.full_like(x, 10.0) if u is None else u,
+        np.zeros(len(x), dtype=np.int32) if nbd is None else nbd,
+        x,
+        f,
+        fold,
+        gd,
+        gdold,
+        g,
+        d,
+        zeros if r is None else r,
+        zeros if t is None else t,
+        x + d if z is None else z,
+        stp,
+        dnorm,
+        dtd,
+        xstep,
+        stpmx,
+        iteration,
+        ifun,
+        iback,
+        nfgv,
+        info,
+        task,
+        task_msg,
+        boxed,
+        cnstnd,
+        np.zeros(2, dtype=np.int32) if isave is None else isave,
+        np.zeros(13, dtype=np.float64) if dsave is None else dsave,
+        temp_task,
+        temp_task_msg,
+    )
+
+
+def _projected_gradient_norm_reference(l, u, nbd, x, g):
+    sbgnrm = np.float64(0.0)
+    for index, gi_value in enumerate(np.asarray(g, dtype=np.float64)):
+        gi = np.float64(gi_value)
+        if gi != gi:
+            return gi
+        if nbd[index] != lbfgsb.NBD_UNBOUNDED:
+            if gi < 0.0:
+                if nbd[index] >= lbfgsb.NBD_BOTH:
+                    gi = np.maximum(x[index] - u[index], gi)
+            elif nbd[index] <= lbfgsb.NBD_BOTH:
+                gi = np.minimum(x[index] - l[index], gi)
+        sbgnrm = np.maximum(sbgnrm, np.abs(gi))
+    return sbgnrm
+
+
+def _active_reference(l, u, nbd, x):
+    x = np.asarray(x, dtype=np.float64).copy()
+    iwhere = np.zeros_like(nbd, dtype=np.int32)
+    prjctd = False
+    cnstnd = False
+    boxed = True
+
+    for index in range(len(x)):
+        if nbd[index] > lbfgsb.NBD_UNBOUNDED:
+            if nbd[index] <= lbfgsb.NBD_BOTH and x[index] <= l[index]:
+                if x[index] < l[index]:
+                    prjctd = True
+                    x[index] = l[index]
+            elif nbd[index] >= lbfgsb.NBD_BOTH and x[index] >= u[index]:
+                if x[index] > u[index]:
+                    prjctd = True
+                    x[index] = u[index]
+
+    for index in range(len(x)):
+        if nbd[index] != lbfgsb.NBD_BOTH:
+            boxed = False
+        if nbd[index] == lbfgsb.NBD_UNBOUNDED:
+            iwhere[index] = -1
+        else:
+            cnstnd = True
+            if nbd[index] == lbfgsb.NBD_BOTH and u[index] - l[index] <= 0.0:
+                iwhere[index] = 3
+            else:
+                iwhere[index] = 0
+
+    return x, iwhere, prjctd, cnstnd, boxed
+
+
+def test_lbfgsb_status_tables_match_installed_scipy_wrapper():
+    assert lbfgsb.STATUS_MESSAGES == _lbfgsb_py.status_messages
+    assert lbfgsb.TASK_MESSAGES == _lbfgsb_py.task_messages
+    task = np.array([lbfgsb.CONVERGENCE, lbfgsb.CONV_GRAD], dtype=np.int32)
+    assert (
+        lbfgsb.lbfgsb_task_message(task)
+        == "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
+    )
+
+
+def test_lbfgsb_workspace_sizes_match_scipy_wrapper_formula():
+    n = 7
+    m = 13
+    assert lbfgsb.lbfgsb_workspace_size(n, m) == 2 * m * n + 5 * n + 11 * m * m + 8 * m
+    assert lbfgsb.lbfgsb_iwa_size(n) == 3 * n
+
+
+def test_lbfgsb_initial_state_uses_fixed_scipy_workspace_shapes_and_dtypes():
+    state = lbfgsb.lbfgsb_initial_state(
+        np.array([0.25, -0.5, 0.75], dtype=np.float64),
+        m=4,
+        bounds=[(None, None), (0.0, None), (0.0, 1.0)],
+        ftol=1e-12,
+        gtol=1e-8,
+        maxls=11,
+    )
+
+    assert state.m == 4
+    assert state.maxls == 11
+    np.testing.assert_array_equal(np.asarray(state.x), np.array([0.25, -0.5, 0.75]))
+    np.testing.assert_array_equal(np.asarray(state.l), np.array([0.0, 0.0, 0.0]))
+    np.testing.assert_array_equal(np.asarray(state.u), np.array([0.0, 0.0, 1.0]))
+    np.testing.assert_array_equal(
+        np.asarray(state.nbd),
+        np.array(
+            [lbfgsb.NBD_UNBOUNDED, lbfgsb.NBD_LOWER, lbfgsb.NBD_BOTH],
+            dtype=np.int32,
+        ),
+    )
+    assert state.workspace.wa.shape == (lbfgsb.lbfgsb_workspace_size(3, 4),)
+    assert state.workspace.iwa.shape == (lbfgsb.lbfgsb_iwa_size(3),)
+    assert state.workspace.task.shape == (2,)
+    assert state.workspace.ln_task.shape == (2,)
+    assert state.workspace.lsave.shape == (4,)
+    assert state.workspace.isave.shape == (44,)
+    assert state.workspace.dsave.shape == (29,)
+    assert np.asarray(state.workspace.wa).dtype == np.float64
+    assert np.asarray(state.workspace.iwa).dtype == np.int32
+    assert np.asarray(state.factr).dtype == np.float64
+    np.testing.assert_array_equal(np.asarray(state.factr), 1e-12 / np.finfo(float).eps)
+    np.testing.assert_array_equal(np.asarray(state.pgtol), 1e-8)
+
+
+def test_lbfgsb_initial_state_preserves_float32_runtime_dtype():
+    state = lbfgsb.lbfgsb_initial_state(
+        np.array([0.25, -0.5, 0.75], dtype=np.float32),
+        m=4,
+        bounds=[(None, None), (0.0, None), (0.0, 1.0)],
+        ftol=1e-6,
+        gtol=1e-5,
+        maxls=11,
+    )
+
+    assert np.asarray(state.x).dtype == np.float32
+    assert np.asarray(state.workspace.wa).dtype == np.float32
+    assert np.asarray(state.workspace.dsave).dtype == np.float32
+    assert np.asarray(state.factr).dtype == np.float32
+    np.testing.assert_allclose(
+        np.asarray(state.factr),
+        np.float32(1e-6) / np.finfo(np.float32).eps,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_lbfgsb_public_status_matches_scipy_wrapper_mapping():
+    assert lbfgsb.lbfgsb_public_status(lbfgsb.CONVERGENCE, 10, 2, 10, 2) == 0
+    assert lbfgsb.lbfgsb_public_status(lbfgsb.STOP, 11, 1, 10, 20) == 1
+    assert lbfgsb.lbfgsb_public_status(lbfgsb.STOP, 10, 20, 20, 20) == 1
+    assert lbfgsb.lbfgsb_public_status(lbfgsb.ABNORMAL, 2, 1, 20, 20) == 2
+
+
+def test_lbfgsb_projected_gradient_norm_matches_scipy_c_reference():
+    l = np.array([-1.0, 0.0, -0.5, 0.0, -2.0], dtype=np.float64)
+    u = np.array([1.0, 0.0, 0.5, 2.0, 4.0], dtype=np.float64)
+    nbd = np.array(
+        [
+            lbfgsb.NBD_UNBOUNDED,
+            lbfgsb.NBD_LOWER,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UPPER,
+            lbfgsb.NBD_BOTH,
+        ],
+        dtype=np.int32,
+    )
+    x = np.array([3.0, -0.25, 0.7, 2.5, -3.0], dtype=np.float64)
+    g = np.array([-4.0, 2.0, -8.0, -1.0, 9.0], dtype=np.float64)
+
+    actual = np.asarray(lbfgsb.lbfgsb_projected_gradient_norm(l, u, nbd, x, g))
+    expected = _projected_gradient_norm_reference(l, u, nbd, x, g)
+
+    assert actual.dtype == np.float64
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_lbfgsb_projected_gradient_norm_propagates_nan_gradient():
+    l = np.zeros(3, dtype=np.float64)
+    u = np.ones(3, dtype=np.float64)
+    nbd = np.full(3, lbfgsb.NBD_BOTH, dtype=np.int32)
+    x = np.full(3, 0.5, dtype=np.float64)
+    g = np.array([0.0, np.nan, 1.0], dtype=np.float64)
+
+    actual = np.asarray(lbfgsb.lbfgsb_projected_gradient_norm(l, u, nbd, x, g))
+
+    assert np.isnan(actual)
+
+
+def test_lbfgsb_active_matches_scipy_c_reference_for_all_nbd_classes():
+    l = np.array([-1.0, 0.0, -0.5, 0.0, 2.0], dtype=np.float64)
+    u = np.array([1.0, 0.0, 0.5, 2.0, 2.0], dtype=np.float64)
+    nbd = np.array(
+        [
+            lbfgsb.NBD_UNBOUNDED,
+            lbfgsb.NBD_LOWER,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UPPER,
+            lbfgsb.NBD_BOTH,
+        ],
+        dtype=np.int32,
+    )
+    x = np.array([3.0, -0.25, 0.7, 2.5, 1.0], dtype=np.float64)
+
+    expected_x, expected_iwhere, expected_prjctd, expected_cnstnd, expected_boxed = (
+        _active_reference(l, u, nbd, x)
+    )
+    actual = lbfgsb.lbfgsb_active(l, u, nbd, x)
+
+    np.testing.assert_array_equal(np.asarray(actual.x), expected_x)
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected_iwhere)
+    assert bool(actual.prjctd) is expected_prjctd
+    assert bool(actual.cnstnd) is expected_cnstnd
+    assert bool(actual.boxed) is expected_boxed
+
+
+def test_lbfgsb_bound_encoding_matches_scipy_nbd_semantics():
+    low, upper, nbd = lbfgsb.lbfgsb_encode_bounds(
+        [(None, None), (0.0, None), (0.0, 1.0), (None, 2.0)],
+        4,
+    )
+
+    np.testing.assert_array_equal(low, np.array([0.0, 0.0, 0.0, 0.0]))
+    np.testing.assert_array_equal(upper, np.array([0.0, 0.0, 1.0, 2.0]))
+    np.testing.assert_array_equal(
+        nbd,
+        np.array(
+            [
+                lbfgsb.NBD_UNBOUNDED,
+                lbfgsb.NBD_LOWER,
+                lbfgsb.NBD_BOTH,
+                lbfgsb.NBD_UPPER,
+            ],
+            dtype=np.int32,
+        ),
+    )
+
+
+def test_lbfgsb_bound_encoding_rejects_invalid_box_like_scipy():
+    with np.testing.assert_raises_regex(
+        ValueError,
+        "LBFGSB - one of the lower bounds is greater than an upper bound.",
+    ):
+        lbfgsb.lbfgsb_encode_bounds([(2.0, 1.0)], 1)
+
+
+def test_lbfgsb_dcstep_matches_c_reference_for_more_thuente_cases():
+    cases = (
+        (0.0, 1.0, -2.0, 0.0, 1.0, -2.0, 1.0, 2.0, -1.0, False, 0.0, 10.0),
+        (0.0, 1.0, -2.0, 0.0, 1.0, -2.0, 1.0, 0.5, 0.5, False, 0.0, 10.0),
+        (0.0, 1.0, -2.0, 2.0, 1.5, 1.0, 1.0, 0.5, -0.5, True, 0.0, 10.0),
+        (0.0, 1.0, -2.0, 2.0, 1.5, 1.0, 1.0, 0.5, -3.0, True, 0.0, 10.0),
+    )
+
+    for case in cases:
+        expected = _dcstep_reference(*case)
+        actual = lbfgsb.lbfgsb_dcstep(*case)
+        np.testing.assert_allclose(np.asarray(actual[:-1]), np.asarray(expected[:-1]))
+        assert bool(actual.brackt) is expected[-1]
+
+
+def test_lbfgsb_dcstep_is_jittable_with_fixed_scalar_carry():
+    dcstep_jit = jax.jit(lbfgsb.lbfgsb_dcstep)
+    actual = dcstep_jit(
+        0.0,
+        1.0,
+        -2.0,
+        0.0,
+        1.0,
+        -2.0,
+        1.0,
+        2.0,
+        -1.0,
+        False,
+        0.0,
+        10.0,
+    )
+    expected = _dcstep_reference(
+        0.0,
+        1.0,
+        -2.0,
+        0.0,
+        1.0,
+        -2.0,
+        1.0,
+        2.0,
+        -1.0,
+        False,
+        0.0,
+        10.0,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual[:-1]), np.asarray(expected[:-1]))
+    assert bool(actual.brackt) is expected[-1]
+
+
+def test_lbfgsb_dcsrch_runs_reverse_communication_on_quadratic():
+    def phi(alpha):
+        return (alpha - 2.0) ** 2, 2.0 * (alpha - 2.0)
+
+    isave = np.zeros(2, dtype=np.int32)
+    dsave = np.zeros(13, dtype=np.float64)
+    f0, g0 = phi(0.0)
+    first = lbfgsb.lbfgsb_dcsrch(
+        f0,
+        g0,
+        1.0,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        10.0,
+        lbfgsb.START,
+        lbfgsb.NO_MSG,
+        isave,
+        dsave,
+    )
+
+    assert int(first.task) == lbfgsb.FG
+    assert int(first.task_msg) == lbfgsb.NO_MSG
+    np.testing.assert_array_equal(np.asarray(first.stp), np.array(1.0))
+
+    f1, g1 = phi(float(first.stp))
+    second = lbfgsb.lbfgsb_dcsrch(
+        f1,
+        g1,
+        first.stp,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        10.0,
+        first.task,
+        first.task_msg,
+        first.isave,
+        first.dsave,
+    )
+
+    assert int(second.task) == lbfgsb.FG
+    assert int(second.task_msg) == lbfgsb.NO_MSG
+    np.testing.assert_allclose(np.asarray(second.stp), np.array(2.0))
+
+    f2, g2 = phi(float(second.stp))
+    final = lbfgsb.lbfgsb_dcsrch(
+        f2,
+        g2,
+        second.stp,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        10.0,
+        second.task,
+        second.task_msg,
+        second.isave,
+        second.dsave,
+    )
+
+    assert int(final.task) == lbfgsb.CONVERGENCE
+    np.testing.assert_allclose(np.asarray(final.stp), np.array(2.0))
+
+
+def test_lbfgsb_dcsrch_reports_scipy_error_task_for_invalid_start():
+    result = lbfgsb.lbfgsb_dcsrch(
+        1.0,
+        -1.0,
+        1.0,
+        -1.0,
+        0.1,
+        1e-16,
+        0.0,
+        10.0,
+        lbfgsb.START,
+        lbfgsb.NO_MSG,
+        np.zeros(2, dtype=np.int32),
+        np.zeros(13, dtype=np.float64),
+    )
+
+    assert int(result.task) == lbfgsb.ERROR
+    assert int(result.task_msg) == lbfgsb.ERROR_FTOL
+
+
+def test_lbfgsb_dcsrch_reports_scipy_warning_task_at_step_max():
+    first = lbfgsb.lbfgsb_dcsrch(
+        1.0,
+        -1.0,
+        1.0,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        1.0,
+        lbfgsb.START,
+        lbfgsb.NO_MSG,
+        np.zeros(2, dtype=np.int32),
+        np.zeros(13, dtype=np.float64),
+    )
+    result = lbfgsb.lbfgsb_dcsrch(
+        0.5,
+        -1.0,
+        first.stp,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        1.0,
+        first.task,
+        first.task_msg,
+        first.isave,
+        first.dsave,
+    )
+
+    assert int(result.task) == lbfgsb.WARNING
+    assert int(result.task_msg) == lbfgsb.WARN_STPMAX
+
+
+def test_lbfgsb_dcsrch_is_jittable_for_initial_reverse_communication_request():
+    dcsrch_jit = jax.jit(lbfgsb.lbfgsb_dcsrch)
+    result = dcsrch_jit(
+        4.0,
+        -4.0,
+        1.0,
+        1e-4,
+        0.1,
+        1e-16,
+        0.0,
+        10.0,
+        lbfgsb.START,
+        lbfgsb.NO_MSG,
+        np.zeros(2, dtype=np.int32),
+        np.zeros(13, dtype=np.float64),
+    )
+
+    assert int(result.task) == lbfgsb.FG
+    assert int(result.task_msg) == lbfgsb.NO_MSG
+    assert result.isave.shape == (2,)
+    assert result.dsave.shape == (13,)
+
+
+def test_lbfgsb_matupd_matches_c_reference_before_and_after_ring_wrap():
+    m = 3
+    n = 2
+    ws = np.arange(m * n, dtype=np.float64).reshape(m, n) / 10.0
+    wy = np.arange(m * n, 2 * m * n, dtype=np.float64).reshape(m, n) / 10.0
+    sy = np.arange(m * m, dtype=np.float64).reshape(m, m)
+    ss = np.arange(m * m, 2 * m * m, dtype=np.float64).reshape(m, m)
+    d = np.array([1.5, -2.0], dtype=np.float64)
+    r = np.array([3.0, 4.0], dtype=np.float64)
+
+    for iupdat, itail, col, head in ((2, 0, 1, 0), (4, 2, 3, 0)):
+        expected = _matupd_reference(
+            ws,
+            wy,
+            sy,
+            ss,
+            d,
+            r,
+            itail,
+            iupdat,
+            col,
+            head,
+            rr=18.0,
+            dr=6.0,
+            stp=0.5,
+            dtd=2.25,
+        )
+        actual = lbfgsb.lbfgsb_matupd(
+            ws,
+            wy,
+            sy,
+            ss,
+            d,
+            r,
+            itail,
+            iupdat,
+            col,
+            head,
+            rr=18.0,
+            dr=6.0,
+            stp=0.5,
+            dtd=2.25,
+        )
+        for actual_item, expected_item in zip(actual, expected, strict=True):
+            np.testing.assert_allclose(np.asarray(actual_item), expected_item)
+
+
+def test_lbfgsb_matupd_is_jittable_for_fixed_workspace_shapes():
+    matupd_jit = jax.jit(lbfgsb.lbfgsb_matupd)
+    m = 3
+    n = 2
+    actual = matupd_jit(
+        np.zeros((m, n), dtype=np.float64),
+        np.zeros((m, n), dtype=np.float64),
+        np.zeros((m, m), dtype=np.float64),
+        np.zeros((m, m), dtype=np.float64),
+        np.array([1.0, 2.0], dtype=np.float64),
+        np.array([3.0, 4.0], dtype=np.float64),
+        0,
+        1,
+        0,
+        0,
+        25.0,
+        5.0,
+        1.0,
+        5.0,
+    )
+
+    np.testing.assert_array_equal(np.asarray(actual.ws[0]), np.array([1.0, 2.0]))
+    np.testing.assert_array_equal(np.asarray(actual.wy[0]), np.array([3.0, 4.0]))
+    np.testing.assert_array_equal(np.asarray(actual.theta), np.array(5.0))
+
+
+def test_lbfgsb_bmv_matches_c_reference_for_full_and_partial_col():
+    sy, wt, v = _bmv_case()
+
+    for col in (1, 2, 3):
+        expected_p, expected_info = _bmv_reference(sy, wt, col, v)
+        actual = lbfgsb.lbfgsb_bmv(sy, wt, col, v)
+
+        assert int(actual.info) == expected_info
+        np.testing.assert_allclose(
+            np.asarray(actual.p[: 2 * col]), expected_p[: 2 * col]
+        )
+
+
+def test_lbfgsb_bmv_reports_info_for_singular_triangular_factor():
+    sy, wt, v = _bmv_case(singular=True)
+
+    expected_p, expected_info = _bmv_reference(sy, wt, 2, v)
+    actual = lbfgsb.lbfgsb_bmv(sy, wt, 2, v)
+
+    assert expected_info == 2
+    assert int(actual.info) == expected_info
+    np.testing.assert_allclose(np.asarray(actual.p[:4]), expected_p[:4])
+
+
+def test_lbfgsb_bmv_is_jittable_for_fixed_workspace_shapes():
+    bmv_jit = jax.jit(lbfgsb.lbfgsb_bmv)
+    sy, wt, v = _bmv_case()
+
+    actual = bmv_jit(sy, wt, 2, v)
+    expected_p, _ = _bmv_reference(sy, wt, 2, v)
+
+    np.testing.assert_allclose(np.asarray(actual.p[:4]), expected_p[:4])
+    assert int(actual.info) == 0
+
+
+def test_lbfgsb_formt_matches_c_reference_for_partial_col():
+    wt = np.zeros((3, 3), dtype=np.float64)
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    ss = np.array(
+        [
+            [2.0, -0.5, 1.25],
+            [0.0, 3.0, -0.75],
+            [0.0, 0.0, 5.0],
+        ],
+        dtype=np.float64,
+    )
+
+    for col in (1, 2, 3):
+        expected_wt, expected_info = _formt_reference(wt, sy, ss, col, theta=2.5)
+        actual = lbfgsb.lbfgsb_formt(wt, sy, ss, col, theta=2.5)
+
+        assert int(actual.info) == expected_info
+        np.testing.assert_allclose(
+            np.asarray(actual.wt[:col, :col]),
+            expected_wt[:col, :col],
+        )
+
+
+def test_lbfgsb_formt_is_jittable_for_fixed_workspace_shapes():
+    formt_jit = jax.jit(lbfgsb.lbfgsb_formt)
+    wt = np.zeros((3, 3), dtype=np.float64)
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    ss = np.array(
+        [
+            [2.0, -0.5, 1.25],
+            [0.0, 3.0, -0.75],
+            [0.0, 0.0, 5.0],
+        ],
+        dtype=np.float64,
+    )
+
+    actual = formt_jit(wt, sy, ss, 2, 2.5)
+    expected_wt, _ = _formt_reference(wt, sy, ss, 2, theta=2.5)
+
+    np.testing.assert_allclose(np.asarray(actual.wt[:2, :2]), expected_wt[:2, :2])
+    assert int(actual.info) == 0
+
+
+def _formk_case():
+    m = 3
+    ws = np.array(
+        [
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    wy = np.array(
+        [
+            [0.10, 0.00, 0.0, 0.0, 0.0],
+            [0.00, 0.20, 0.0, 0.0, 0.0],
+            [0.05, 0.10, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    sy = np.array(
+        [
+            [8.0, 0.0, 0.0],
+            [0.25, 9.0, 0.0],
+            [0.15, 0.35, 10.0],
+        ],
+        dtype=np.float64,
+    )
+    wn = np.zeros((2 * m, 2 * m), dtype=np.float64)
+    wn1 = np.zeros((2 * m, 2 * m), dtype=np.float64)
+    ind = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+    indx2 = np.array([1, 0, 2, 3, 4], dtype=np.int32)
+    return wn, wn1, ws, wy, sy, ind, indx2
+
+
+def test_lbfgsb_formk_matches_c_reference_for_updated_single_correction():
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=0,
+        ileave=5,
+        indx2=indx2,
+        iupdat=1,
+        updatd=True,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=1,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_formk_matches_c_reference_without_new_update():
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+    wn1[0, 0] = 0.01
+    wn1[3, 3] = 1.0
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=0,
+        ileave=5,
+        indx2=indx2,
+        iupdat=1,
+        updatd=False,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=1,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        False,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_formk_matches_c_reference_for_entering_and_leaving_sets():
+    wn, wn1, ws, wy, sy, ind, _ = _formk_case()
+    indx2 = np.array([1, 0, 2, 4, 3], dtype=np.int32)
+    wn1[0, 0] = 0.01
+    wn1[3, 3] = 1.0
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=1,
+        ileave=4,
+        indx2=indx2,
+        iupdat=1,
+        updatd=False,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=1,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        1,
+        4,
+        indx2,
+        1,
+        False,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    assert expected[1][0, 0] > wn1[0, 0]
+    assert expected[1][3, 3] > wn1[3, 3]
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_formk_matches_c_reference_after_memory_rollover():
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+    wn1 = np.tril(np.arange(36, dtype=np.float64).reshape(6, 6) / 200.0)
+
+    expected = _formk_reference(
+        nsub=2,
+        ind=ind,
+        nenter=0,
+        ileave=5,
+        indx2=indx2,
+        iupdat=4,
+        updatd=True,
+        wn=wn,
+        wn1=wn1,
+        ws=ws,
+        wy=wy,
+        sy=sy,
+        theta=2.5,
+        col=3,
+        head=1,
+    )
+    actual = lbfgsb.lbfgsb_formk(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        4,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        3,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2]
+
+
+def test_lbfgsb_formk_is_jittable_for_fixed_workspace_shapes():
+    formk_jit = jax.jit(lbfgsb.lbfgsb_formk)
+    wn, wn1, ws, wy, sy, ind, indx2 = _formk_case()
+
+    actual = formk_jit(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+    expected = _formk_reference(
+        2,
+        ind,
+        0,
+        5,
+        indx2,
+        1,
+        True,
+        wn,
+        wn1,
+        ws,
+        wy,
+        sy,
+        2.5,
+        1,
+        1,
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.wn), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.wn1), expected[1])
+    assert int(actual.info) == expected[2] == 0
+
+
+def test_lbfgsb_freev_matches_c_reference_for_entering_and_leaving_sets():
+    idx = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+    idx2 = np.full(5, -1, dtype=np.int32)
+    iwhere = np.array([-1, 2, 0, 0, 3], dtype=np.int32)
+
+    expected = _freev_reference(
+        nfree=3,
+        idx=idx,
+        idx2=idx2,
+        iwhere=iwhere,
+        updatd=False,
+        cnstnd=True,
+        iteration=2,
+    )
+    actual = lbfgsb.lbfgsb_freev(
+        3,
+        idx,
+        idx2,
+        iwhere,
+        False,
+        True,
+        2,
+    )
+
+    np.testing.assert_array_equal(np.asarray(actual.nfree), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.idx), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.nenter), expected[2])
+    np.testing.assert_array_equal(np.asarray(actual.ileave), expected[3])
+    np.testing.assert_array_equal(np.asarray(actual.idx2), expected[4])
+    assert bool(actual.wrk) is expected[5]
+
+
+def test_lbfgsb_freev_skips_enter_leave_count_on_initial_unconstrained_iteration():
+    idx = np.array([0, 1, 2, 3], dtype=np.int32)
+    idx2 = np.full(4, 7, dtype=np.int32)
+    iwhere = np.array([-1, 0, 2, 3], dtype=np.int32)
+
+    expected = _freev_reference(
+        nfree=2,
+        idx=idx,
+        idx2=idx2,
+        iwhere=iwhere,
+        updatd=True,
+        cnstnd=False,
+        iteration=0,
+    )
+    actual = lbfgsb.lbfgsb_freev(
+        2,
+        idx,
+        idx2,
+        iwhere,
+        True,
+        False,
+        0,
+    )
+
+    np.testing.assert_array_equal(np.asarray(actual.nfree), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.idx), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.nenter), expected[2])
+    np.testing.assert_array_equal(np.asarray(actual.ileave), expected[3])
+    np.testing.assert_array_equal(np.asarray(actual.idx2), expected[4])
+    assert bool(actual.wrk) is expected[5]
+
+
+def test_lbfgsb_freev_is_jittable_for_fixed_index_shapes():
+    freev_jit = jax.jit(lbfgsb.lbfgsb_freev)
+    idx = np.array([0, 1, 2, 3, 4], dtype=np.int32)
+    idx2 = np.full(5, -1, dtype=np.int32)
+    iwhere = np.array([-1, 2, 0, 0, 3], dtype=np.int32)
+
+    actual = freev_jit(3, idx, idx2, iwhere, False, True, 2)
+    expected = _freev_reference(3, idx, idx2, iwhere, False, True, 2)
+
+    np.testing.assert_array_equal(np.asarray(actual.nfree), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.idx), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.nenter), expected[2])
+    np.testing.assert_array_equal(np.asarray(actual.ileave), expected[3])
+    np.testing.assert_array_equal(np.asarray(actual.idx2), expected[4])
+    assert bool(actual.wrk) is expected[5]
+
+
+def test_lbfgsb_hpsolb_matches_scipy_heap_reference_initial_build():
+    t = np.array([4.0, 1.5, 3.0, 1.5, 2.0, 0.75], dtype=np.float64)
+    iorder = np.array([40, 15, 30, 16, 20, 7], dtype=np.int32)
+
+    expected_t, expected_iorder = _hpsolb_reference(5, t, iorder, iheap=0)
+    actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+
+    np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
+    np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
+
+
+def test_lbfgsb_hpsolb_matches_scipy_heap_reference_repeated_extract():
+    t = np.array([4.0, 1.5, 3.0, 1.5, 2.0, 0.75], dtype=np.float64)
+    iorder = np.array([40, 15, 30, 16, 20, 7], dtype=np.int32)
+
+    expected_t, expected_iorder = _hpsolb_reference(5, t, iorder, iheap=0)
+    actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+    for last in range(4, 0, -1):
+        expected_t, expected_iorder = _hpsolb_reference(
+            last,
+            expected_t,
+            expected_iorder,
+            iheap=1,
+        )
+        actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(
+            last,
+            actual_t,
+            actual_iorder,
+            1,
+        )
+
+    np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
+    np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
+
+
+def test_lbfgsb_hpsolb_is_jittable_with_dynamic_last_index():
+    hpsolb_jit = jax.jit(lbfgsb.lbfgsb_hpsolb)
+    t = np.array([2.0, 5.0, 1.0, 3.0], dtype=np.float64)
+    iorder = np.array([20, 50, 10, 30], dtype=np.int32)
+
+    actual_t, actual_iorder = hpsolb_jit(np.int32(3), t, iorder, np.int32(0))
+    expected_t, expected_iorder = _hpsolb_reference(3, t, iorder, iheap=0)
+
+    np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
+    np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
+
+
+def test_lbfgsb_cmprlb_matches_c_reference_for_constrained_free_subset():
+    m = 3
+    n = 5
+    x = np.array([0.5, -1.0, 0.25, 1.5, -0.75], dtype=np.float64)
+    g = np.array([1.25, -0.5, 2.0, -1.5, 0.75], dtype=np.float64)
+    ws = np.arange(m * n, dtype=np.float64).reshape(m, n) / 10.0 + 0.25
+    wy = np.arange(m * n, 2 * m * n, dtype=np.float64).reshape(m, n) / 20.0 - 0.3
+    sy = np.array(
+        [
+            [4.0, 0.0, 0.0],
+            [1.0, 9.0, 0.0],
+            [2.0, 3.0, 16.0],
+        ],
+        dtype=np.float64,
+    )
+    wt = np.array(
+        [
+            [2.0, 0.25, -0.5],
+            [0.0, 3.0, 0.75],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    z = np.array([0.25, -0.25, 0.75, 1.0, -1.25], dtype=np.float64)
+    r = np.full(n, 99.0, dtype=np.float64)
+    wa = np.arange(8 * m, dtype=np.float64) / 7.0 - 1.0
+    index = np.array([3, 0, 4, 1, 2], dtype=np.int32)
+
+    expected_r, expected_wa, expected_info = _cmprlb_reference(
+        x,
+        g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        wa,
+        index,
+        theta=2.5,
+        col=2,
+        head=1,
+        nfree=3,
+        cnstnd=True,
+    )
+    actual = lbfgsb.lbfgsb_cmprlb(
+        x,
+        g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        wa,
+        index,
+        theta=2.5,
+        col=2,
+        head=1,
+        nfree=3,
+        cnstnd=True,
+    )
+
+    assert int(actual.info) == expected_info
+    np.testing.assert_allclose(np.asarray(actual.r), expected_r)
+    np.testing.assert_allclose(np.asarray(actual.wa), expected_wa)
+
+
+def test_lbfgsb_cmprlb_matches_c_reference_for_unconstrained_path():
+    m = 2
+    x = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    g = np.array([3.0, -4.0, 5.0], dtype=np.float64)
+    zeros_mn = np.zeros((m, len(x)), dtype=np.float64)
+    zeros_mm = np.zeros((m, m), dtype=np.float64)
+    wa = np.arange(8 * m, dtype=np.float64)
+
+    expected_r, expected_wa, expected_info = _cmprlb_reference(
+        x,
+        g,
+        zeros_mn,
+        zeros_mn,
+        zeros_mm,
+        zeros_mm,
+        x,
+        np.zeros_like(x),
+        wa,
+        np.arange(len(x), dtype=np.int32),
+        theta=1.0,
+        col=1,
+        head=0,
+        nfree=len(x),
+        cnstnd=False,
+    )
+    actual = lbfgsb.lbfgsb_cmprlb(
+        x,
+        g,
+        zeros_mn,
+        zeros_mn,
+        zeros_mm,
+        zeros_mm,
+        x,
+        np.zeros_like(x),
+        wa,
+        np.arange(len(x), dtype=np.int32),
+        theta=1.0,
+        col=1,
+        head=0,
+        nfree=len(x),
+        cnstnd=False,
+    )
+
+    assert int(actual.info) == expected_info
+    np.testing.assert_array_equal(np.asarray(actual.r), expected_r)
+    np.testing.assert_array_equal(np.asarray(actual.wa), expected_wa)
+
+
+def _curved_quadratic_value_and_grad(x):
+    matrix = jnp.asarray(
+        [
+            [4.0, 0.35, -0.1, 0.0],
+            [0.35, 2.5, 0.2, -0.15],
+            [-0.1, 0.2, 3.25, 0.3],
+            [0.0, -0.15, 0.3, 1.75],
+        ],
+        dtype=jnp.float64,
+    )
+    linear = jnp.asarray([0.25, -0.75, 0.5, -0.1], dtype=jnp.float64)
+    value = 0.5 * x @ (matrix @ x) + linear @ x
+    return value, matrix @ x + linear
+
+
+def _lbfgsb_state_after_accepted_steps(*, m: int, accepted_steps: int):
+    state = lbfgsb.lbfgsb_initial_state(
+        jnp.asarray([1.2, -1.5, 0.75, -0.4], dtype=jnp.float64),
+        m=m,
+        bounds=None,
+        ftol=0.0,
+        gtol=1e-12,
+        maxls=20,
+    )
+    entry_kind = lbfgsb.LBFGSB_STEP_ENTRY_START
+    for _accepted_step in range(accepted_steps):
+        result = None
+        for _route_attempt in range(20):
+            if entry_kind == lbfgsb.LBFGSB_STEP_ENTRY_START:
+                result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+                    _curved_quadratic_value_and_grad,
+                    state,
+                    maxiter=20,
+                    maxfun=100,
+                    unconstrained_fast_path=False,
+                )
+            elif entry_kind == lbfgsb.LBFGSB_STEP_ENTRY_NEW_X_REENTRY:
+                result = lbfgsb.lbfgsb_reenter_new_x(
+                    _curved_quadratic_value_and_grad,
+                    state,
+                    maxiter=20,
+                    maxfun=100,
+                    unconstrained_fast_path=False,
+                )
+            else:
+                result = lbfgsb.lbfgsb_advance_from_search_to_next_observable(
+                    _curved_quadratic_value_and_grad,
+                    state,
+                    maxiter=20,
+                    maxfun=100,
+                    unconstrained_fast_path=False,
+                )
+            state = result.state
+            if bool(np.asarray(result.accepted_new_x)) or bool(
+                np.asarray(result.terminal)
+            ):
+                break
+            task0 = int(np.asarray(state.workspace.task[0]))
+            entry_kind = (
+                lbfgsb.LBFGSB_STEP_ENTRY_NEW_X_REENTRY
+                if task0 == lbfgsb.NEW_X
+                else lbfgsb.LBFGSB_STEP_ENTRY_SEARCH
+            )
+        assert result is not None
+        assert bool(np.asarray(result.accepted_new_x))
+        assert not bool(np.asarray(result.terminal))
+        entry_kind = lbfgsb.LBFGSB_STEP_ENTRY_NEW_X_REENTRY
+    return state
+
+
+@pytest.mark.parametrize("m,accepted_steps", [(4, 0), (4, 1), (4, 2), (3, 4)])
+def test_lbfgsb_two_loop_fast_reentry_matches_bounded_geometry_reentry(
+    m,
+    accepted_steps,
+):
+    state = _lbfgsb_state_after_accepted_steps(m=m, accepted_steps=accepted_steps)
+    n, state_m = lbfgsb._lbfgsb_state_dimensions(state)
+    _, _, _, _, _, _, _, lz, lr, ld, lt, _, _ = lbfgsb._lbfgsb_workspace_offsets(
+        n,
+        state_m,
+    )
+
+    if accepted_steps == 0:
+        bounded_result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=False,
+        )
+        fast_result = lbfgsb.lbfgsb_advance_from_start_to_next_observable(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=True,
+        )
+    else:
+        bounded_result = lbfgsb.lbfgsb_reenter_new_x(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=False,
+        )
+        fast_result = lbfgsb.lbfgsb_reenter_new_x(
+            _curved_quadratic_value_and_grad,
+            state,
+            maxiter=20,
+            maxfun=100,
+            unconstrained_fast_path=True,
+        )
+
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.workspace.wa[ld:lt]),
+        np.asarray(bounded_result.state.workspace.wa[ld:lt]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.workspace.wa[lz:lr]),
+        np.asarray(bounded_result.state.workspace.wa[lz:lr]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.x),
+        np.asarray(bounded_result.state.x),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.f),
+        np.asarray(bounded_result.state.f),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(fast_result.state.g),
+        np.asarray(bounded_result.state.g),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert int(np.asarray(fast_result.state.nfev)) == int(
+        np.asarray(bounded_result.state.nfev)
+    )
+    assert int(np.asarray(fast_result.state.njev)) == int(
+        np.asarray(bounded_result.state.njev)
+    )
+    metadata_indices = jnp.asarray(
+        [24, 26, 27, 28, 29, 30, 32, 33, 34, 35, 36],
+        dtype=jnp.int32,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(fast_result.state.workspace.isave[metadata_indices]),
+        np.asarray(bounded_result.state.workspace.isave[metadata_indices]),
+    )
+
+
+@pytest.mark.parametrize("unconstrained_fast_path", [False, True])
+def test_lbfgsb_reenter_new_x_reuses_accepted_value_gradient_before_next_trial(
+    unconstrained_fast_path,
+):
+    state = _lbfgsb_state_after_accepted_steps(m=4, accepted_steps=1)
+    assert int(np.asarray(state.workspace.task[0])) == lbfgsb.NEW_X
+    accepted_x = state.x
+
+    def reject_accepted_point_value_and_grad(x):
+        value, gradient = _curved_quadratic_value_and_grad(x)
+        is_accepted_point = jnp.all(x == accepted_x)
+        poisoned_value = jnp.asarray(jnp.nan, dtype=value.dtype)
+        poisoned_gradient = jnp.full_like(gradient, jnp.nan)
+        return (
+            jnp.where(is_accepted_point, poisoned_value, value),
+            jnp.where(is_accepted_point, poisoned_gradient, gradient),
+        )
+
+    start_nfev = int(np.asarray(state.nfev))
+    start_njev = int(np.asarray(state.njev))
+    result = lbfgsb.lbfgsb_reenter_new_x(
+        reject_accepted_point_value_and_grad,
+        state,
+        maxiter=20,
+        maxfun=100,
+        unconstrained_fast_path=unconstrained_fast_path,
+    )
+
+    assert int(np.asarray(result.state.nfev)) == start_nfev + 1
+    assert int(np.asarray(result.state.njev)) == start_njev + 1
+    assert bool(np.asarray(jnp.isfinite(result.state.f)))
+    assert bool(np.asarray(jnp.all(jnp.isfinite(result.state.g))))
+
+
+def test_lbfgsb_cmprlb_is_jittable_for_fixed_workspace_shapes():
+    cmprlb_jit = jax.jit(lbfgsb.lbfgsb_cmprlb)
+    m = 2
+    n = 3
+    x = np.array([0.5, -1.0, 0.25], dtype=np.float64)
+    g = np.array([1.25, -0.5, 2.0], dtype=np.float64)
+    ws = np.arange(m * n, dtype=np.float64).reshape(m, n) / 10.0 + 0.25
+    wy = np.arange(m * n, 2 * m * n, dtype=np.float64).reshape(m, n) / 20.0 - 0.3
+    sy = np.array([[4.0, 0.0], [1.0, 9.0]], dtype=np.float64)
+    wt = np.array([[2.0, 0.25], [0.0, 3.0]], dtype=np.float64)
+    z = np.array([0.25, -0.25, 0.75], dtype=np.float64)
+    r = np.full(n, 99.0, dtype=np.float64)
+    wa = np.arange(8 * m, dtype=np.float64) / 7.0 - 1.0
+    index = np.array([2, 0, 1], dtype=np.int32)
+
+    actual = cmprlb_jit(x, g, ws, wy, sy, wt, z, r, wa, index, 2.5, 2, 0, 2, True)
+    expected_r, expected_wa, expected_info = _cmprlb_reference(
+        x,
+        g,
+        ws,
+        wy,
+        sy,
+        wt,
+        z,
+        r,
+        wa,
+        index,
+        theta=2.5,
+        col=2,
+        head=0,
+        nfree=2,
+        cnstnd=True,
+    )
+
+    assert int(actual.info) == expected_info
+    np.testing.assert_allclose(np.asarray(actual.r), expected_r)
+    np.testing.assert_allclose(np.asarray(actual.wa), expected_wa)
+
+
+def _subsm_case(*, projected=False, positive_directional_derivative=False):
+    m = 2
+    n = 4
+    ind = np.array([0, 2, 3, 1], dtype=np.int32)
+    l = np.array([-1.0, -1.0, -0.5, -2.0], dtype=np.float64)
+    u = np.array([1.0, 1.0, 0.5, 2.0], dtype=np.float64)
+    nbd = np.array(
+        [
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UNBOUNDED,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UPPER,
+        ],
+        dtype=np.int32,
+    )
+    x = np.array([0.1, -0.2, 0.0, 0.3], dtype=np.float64)
+    d = np.array([0.2, -0.1, 0.05, 0.0], dtype=np.float64)
+    if projected:
+        x = np.array([0.9, -0.2, 0.0, 0.3], dtype=np.float64)
+        d = np.array([0.5, -0.1, 0.05, 0.0], dtype=np.float64)
+    xp = np.full(n, 99.0, dtype=np.float64)
+    ws = np.array(
+        [[0.25, -0.1, 0.0, 0.2], [-0.15, 0.05, 0.3, -0.25]],
+        dtype=np.float64,
+    )
+    wy = np.array(
+        [[0.1, 0.2, -0.05, 0.0], [0.05, -0.1, 0.15, 0.2]],
+        dtype=np.float64,
+    )
+    theta = np.float64(2.0)
+    xx = np.array([0.0, -0.2, 0.0, 0.3], dtype=np.float64)
+    gg = np.array([-1.0, 0.0, 0.25, -0.5], dtype=np.float64)
+    if positive_directional_derivative:
+        gg = np.array([1.0, 0.0, 0.25, -0.5], dtype=np.float64)
+    wv = np.zeros(2 * m, dtype=np.float64)
+    wn = np.eye(2 * m, dtype=np.float64)
+    return ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn
+
+
+def _cauchy_case(*, col=0, heap=False, unbounded=False, zero_gradient=False):
+    n = 4
+    m = 2
+    x = np.array([0.0, 0.2, -0.1, 0.3], dtype=np.float64)
+    l = np.array([-1.0, -0.5, -0.25, -1.0], dtype=np.float64)
+    u = np.array([1.0, 0.5, 0.25, 0.4], dtype=np.float64)
+    nbd = np.array(
+        [
+            lbfgsb.NBD_UNBOUNDED,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_BOTH,
+            lbfgsb.NBD_UPPER,
+        ],
+        dtype=np.int32,
+    )
+    g = np.array([0.4, -1.5, 0.75, -0.2], dtype=np.float64)
+    if unbounded:
+        nbd = np.zeros(n, dtype=np.int32)
+        iwhere = np.full(n, -1, dtype=np.int32)
+    else:
+        iwhere = np.array([-1, 0, 0, 0], dtype=np.int32)
+    if zero_gradient:
+        g = np.zeros(n, dtype=np.float64)
+    if heap:
+        x = np.array([0.0, 0.2, -0.1, 0.2], dtype=np.float64)
+        g = np.array([-2.0, -3.0, 2.0, -1.0], dtype=np.float64)
+        theta = np.float64(0.25)
+    else:
+        theta = np.float64(1.5 if col == 0 else 2.0)
+    iorder = np.full(n, -1, dtype=np.int32)
+    t = np.zeros(n, dtype=np.float64)
+    d = np.zeros(n, dtype=np.float64)
+    xcp = np.zeros(n, dtype=np.float64)
+    ws = np.array(
+        [[0.20, -0.10, 0.05, 0.00], [-0.05, 0.15, 0.00, 0.10]],
+        dtype=np.float64,
+    )
+    wy = np.array(
+        [[0.10, 0.00, 0.05, -0.10], [0.00, 0.20, -0.05, 0.05]],
+        dtype=np.float64,
+    )
+    sy = np.array([[4.0, 0.0], [0.25, 5.0]], dtype=np.float64)
+    wt = np.array([[2.0, 0.1], [0.0, 2.5]], dtype=np.float64)
+    p = np.zeros(2 * m, dtype=np.float64)
+    c = np.zeros(2 * m, dtype=np.float64)
+    wbp = np.zeros(2 * m, dtype=np.float64)
+    v = np.zeros(2 * m, dtype=np.float64)
+    sbgnrm = _projected_gradient_norm_reference(l, u, nbd, x, g)
+    return (
+        x,
+        l,
+        u,
+        nbd,
+        g,
+        iorder,
+        iwhere,
+        t,
+        d,
+        xcp,
+        wy,
+        ws,
+        sy,
+        wt,
+        theta,
+        col,
+        0,
+        p,
+        c,
+        wbp,
+        v,
+        sbgnrm,
+    )
+
+
+def test_lbfgsb_cauchy_matches_c_reference_for_zero_projected_gradient():
+    args = _cauchy_case(zero_gradient=True)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    assert int(actual.nseg) == expected[9] == 0
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_matches_c_reference_without_breakpoints():
+    args = _cauchy_case(col=0, unbounded=True)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.t), expected[2])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[3])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    np.testing.assert_allclose(np.asarray(actual.p), expected[5])
+    np.testing.assert_allclose(np.asarray(actual.c), expected[6])
+    np.testing.assert_allclose(np.asarray(actual.wbp), expected[7])
+    np.testing.assert_allclose(np.asarray(actual.v), expected[8])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_matches_c_reference_with_heap_ordered_breakpoints():
+    args = _cauchy_case(col=0, heap=True)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.t), expected[2])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[3])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_matches_c_reference_with_compact_memory():
+    args = _cauchy_case(col=1)
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    np.testing.assert_array_equal(np.asarray(actual.iorder), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.iwhere), expected[1])
+    np.testing.assert_allclose(np.asarray(actual.t), expected[2])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[3])
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    np.testing.assert_allclose(np.asarray(actual.p), expected[5])
+    np.testing.assert_allclose(np.asarray(actual.c), expected[6])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_cauchy_reports_info_from_singular_bmv():
+    args = list(_cauchy_case(col=1))
+    wt = args[13].copy()
+    wt[0, 0] = 0.0
+    args[13] = wt
+
+    expected = _cauchy_reference(*args)
+    actual = lbfgsb.lbfgsb_cauchy(*args)
+
+    assert expected[10] == 1
+    assert int(actual.info) == expected[10]
+    assert int(actual.nseg) == expected[9] == 0
+    np.testing.assert_allclose(np.asarray(actual.v), expected[8])
+
+
+def test_lbfgsb_cauchy_is_jittable_for_fixed_workspace_shapes():
+    cauchy_jit = jax.jit(lbfgsb.lbfgsb_cauchy)
+    args = _cauchy_case(col=1)
+    expected = _cauchy_reference(*args)
+    actual = cauchy_jit(*args)
+
+    np.testing.assert_allclose(np.asarray(actual.xcp), expected[4])
+    np.testing.assert_allclose(np.asarray(actual.c), expected[6])
+    assert int(actual.nseg) == expected[9]
+    assert int(actual.info) == expected[10] == 0
+
+
+def test_lbfgsb_subsm_matches_c_reference_for_in_box_step():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case()
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 0
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_subsm_matches_c_reference_for_projected_bound_step():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case(
+        projected=True
+    )
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 1
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_subsm_matches_c_reference_for_positive_derivative_safeguard():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case(
+        projected=True, positive_directional_derivative=True
+    )
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 0, 0, wv, wn
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 1
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_subsm_reports_info_for_singular_factor():
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case()
+    wn[0, 0] = 0.0
+
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 1, 0, wv, wn
+    )
+    actual = lbfgsb.lbfgsb_subsm(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 1, 0, wv, wn
+    )
+
+    np.testing.assert_array_equal(np.asarray(actual.x), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual.d), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual.xp), expected[2])
+    assert int(actual.iword) == expected[3] == 0
+    np.testing.assert_allclose(np.asarray(actual.wv), expected[4])
+    assert int(actual.info) == expected[5] == 1
+
+
+def test_lbfgsb_subsm_is_jittable_for_fixed_workspace_shapes():
+    subsm_jit = jax.jit(lbfgsb.lbfgsb_subsm)
+    ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, wv, wn = _subsm_case()
+    expected = _subsm_reference(
+        3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn
+    )
+    actual = subsm_jit(3, ind, l, u, nbd, x, d, xp, ws, wy, theta, xx, gg, 2, 0, wv, wn)
+
+    np.testing.assert_allclose(np.asarray(actual.x), expected[0])
+    np.testing.assert_allclose(np.asarray(actual.d), expected[1])
+    assert int(actual.iword) == expected[3] == 0
+    assert int(actual.info) == expected[5] == 0
+
+
+def test_lbfgsb_lnsrlb_initial_request_matches_scipy_wrapper_semantics():
+    x = np.array([0.25, -0.5], dtype=np.float64)
+    g = np.array([2.0, -1.0], dtype=np.float64)
+    d = np.array([-2.0, 1.0], dtype=np.float64)
+
+    actual = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(x, g, d, f=3.0),
+    )
+
+    expected_dnorm = np.linalg.norm(d)
+    expected_stp = 1.0 / expected_dnorm
+    np.testing.assert_allclose(np.asarray(actual.dnorm), expected_dnorm)
+    np.testing.assert_allclose(np.asarray(actual.dtd), expected_dnorm**2)
+    np.testing.assert_allclose(np.asarray(actual.stpmx), 1.0e10)
+    np.testing.assert_allclose(np.asarray(actual.stp), expected_stp)
+    np.testing.assert_allclose(np.asarray(actual.xstep), expected_stp * expected_dnorm)
+    np.testing.assert_allclose(np.asarray(actual.x), x + expected_stp * d)
+    np.testing.assert_array_equal(np.asarray(actual.t), x)
+    np.testing.assert_array_equal(np.asarray(actual.r), g)
+    np.testing.assert_allclose(np.asarray(actual.fold), 3.0)
+    np.testing.assert_allclose(np.asarray(actual.gd), np.dot(g, d))
+    np.testing.assert_allclose(np.asarray(actual.gdold), np.dot(g, d))
+    assert int(actual.ifun) == 1
+    assert int(actual.iback) == 0
+    assert int(actual.nfgv) == 1
+    assert int(actual.info) == 0
+    assert int(actual.task) == lbfgsb.FG
+    assert int(actual.task_msg) == lbfgsb.FG_LNSRCH
+    assert int(actual.temp_task) == lbfgsb.FG
+    assert int(actual.temp_task_msg) == lbfgsb.NO_MSG
+
+
+def test_lbfgsb_lnsrlb_continues_reverse_communication_state():
+    def phi(x):
+        return float((x[0] - 2.0) ** 2), np.array(
+            [2.0 * (x[0] - 2.0)], dtype=np.float64
+        )
+
+    l = np.array([-10.0], dtype=np.float64)
+    u = np.array([10.0], dtype=np.float64)
+    nbd = np.zeros(1, dtype=np.int32)
+    x = np.array([0.0], dtype=np.float64)
+    f, g = phi(x)
+    d = np.array([1.0], dtype=np.float64)
+
+    first = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(x, g, d, l=l, u=u, nbd=nbd, f=f),
+    )
+    f_next, g_next = phi(np.asarray(first.x))
+
+    second = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(
+            np.asarray(first.x),
+            g_next,
+            d,
+            l=l,
+            u=u,
+            nbd=nbd,
+            f=f_next,
+            fold=first.fold,
+            gd=first.gd,
+            gdold=first.gdold,
+            r=first.r,
+            t=first.t,
+            z=x + d,
+            stp=first.stp,
+            dnorm=first.dnorm,
+            dtd=first.dtd,
+            xstep=first.xstep,
+            stpmx=first.stpmx,
+            ifun=first.ifun,
+            iback=first.iback,
+            nfgv=first.nfgv,
+            info=first.info,
+            task=first.task,
+            task_msg=first.task_msg,
+            isave=first.isave,
+            dsave=first.dsave,
+            temp_task=first.temp_task,
+            temp_task_msg=first.temp_task_msg,
+        ),
+    )
+
+    np.testing.assert_array_equal(np.asarray(second.t), x)
+    np.testing.assert_array_equal(np.asarray(second.r), g)
+    np.testing.assert_allclose(np.asarray(second.fold), f)
+    np.testing.assert_allclose(np.asarray(second.gd), np.dot(g_next, d))
+    np.testing.assert_allclose(np.asarray(second.gdold), np.dot(g, d))
+    assert int(second.ifun) == 1
+    assert int(second.iback) == 0
+    assert int(second.nfgv) == 1
+    assert int(second.task) == lbfgsb.NEW_X
+    assert int(second.task_msg) == lbfgsb.NO_MSG
+    assert int(second.temp_task) == lbfgsb.CONVERGENCE
+
+
+def test_lbfgsb_lnsrlb_clamps_trial_step_to_bounds():
+    x = np.array([0.9, -0.9], dtype=np.float64)
+    g = np.array([-1.0, 1.0], dtype=np.float64)
+    d = np.array([2.0, -2.0], dtype=np.float64)
+    z = np.array([1.0, -1.0], dtype=np.float64)
+
+    actual = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(
+            x,
+            g,
+            d,
+            l=np.array([-1.0, -1.0], dtype=np.float64),
+            u=np.array([1.0, 1.0], dtype=np.float64),
+            nbd=np.full(2, lbfgsb.NBD_BOTH, dtype=np.int32),
+            z=z,
+            iteration=2,
+            boxed=True,
+            cnstnd=True,
+        ),
+    )
+
+    np.testing.assert_allclose(np.asarray(actual.stpmx), 0.05)
+    np.testing.assert_allclose(np.asarray(actual.stp), 1.0)
+    np.testing.assert_array_equal(np.asarray(actual.x), z)
+
+
+def test_lbfgsb_lnsrlb_reports_non_descent_direction_like_scipy():
+    x = np.array([0.0, 0.0], dtype=np.float64)
+    g = np.array([1.0, 2.0], dtype=np.float64)
+    d = np.array([1.0, 0.0], dtype=np.float64)
+
+    actual = lbfgsb.lbfgsb_lnsrlb(
+        *_lnsrlb_args(
+            x,
+            g,
+            d,
+            l=np.array([-1.0, -1.0], dtype=np.float64),
+            u=np.array([1.0, 1.0], dtype=np.float64),
+            z=np.zeros_like(x),
+        ),
+    )
+
+    assert int(actual.info) == -4
+    np.testing.assert_allclose(np.asarray(actual.gd), np.dot(g, d))
+    np.testing.assert_allclose(np.asarray(actual.gdold), np.dot(g, d))
+
+
+def test_lbfgsb_lnsrlb_is_jittable_for_fixed_workspace_shapes():
+    lnsrlb_jit = jax.jit(lbfgsb.lbfgsb_lnsrlb)
+    x = np.array([0.25, -0.5], dtype=np.float64)
+    g = np.array([2.0, -1.0], dtype=np.float64)
+    d = np.array([-2.0, 1.0], dtype=np.float64)
+
+    actual = lnsrlb_jit(
+        *_lnsrlb_args(x, g, d, f=3.0),
+    )
+
+    assert int(actual.task) == lbfgsb.FG
+    assert int(actual.task_msg) == lbfgsb.FG_LNSRCH

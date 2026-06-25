@@ -1,0 +1,875 @@
+"""Dependency-light ladder contract helpers shared by launchers and probes."""
+
+from __future__ import annotations
+
+from typing import Mapping, TypedDict, Union
+
+
+SHORT_RUN_SMOKE_MAXITER = 20
+TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = "tier3_single_stage_outer_loop"
+
+ParityToleranceValue = Union[float, bool, None]
+
+
+class SingleStageProofContract(TypedDict):
+    default_maxiter: int
+    min_iterations: int
+    require_objective_decrease: bool
+    required_outer_optimizer_method: str
+    required_result_keys: tuple[str, ...]
+
+
+def _outer_optimizer_backend_choices():
+    from simsopt_jax.geo._optimizer_backend_choices import (
+        VALID_OUTER_OPTIMIZER_BACKENDS,
+        render_invalid_optimizer_backend_message,
+    )
+
+    return VALID_OUTER_OPTIMIZER_BACKENDS, render_invalid_optimizer_backend_message
+
+
+OPTIMIZER_DRIFT_TOLERANCES: dict[str, dict[str, float | None]] = {
+    "tier1_stage2_value_gradient": {
+        "objective_rel_tol": 1e-10,
+        "gradient_rtol": 1e-9,
+        "gradient_atol": 1e-12,
+    },
+    "tier2_stage2_e2e": {
+        "final_objective_rel_tol_20_iter": 5e-4,
+        "final_objective_rel_tol_default": 1e-4,
+        "field_error_rel_tol": 1e-4,
+        "geometry_rel_tol_20_iter": None,
+        "geometry_rel_tol_default": 1e-6,
+    },
+    "tier3_single_stage_init": {
+        "final_iota_abs_tol": 1e-10,
+        "final_volume_rel_tol": 1e-10,
+        "field_error_rel_tol": 1e-8,
+        "surface_geometry_rel_tol": 1e-9,
+    },
+    "tier4_adjoint_fd": {
+        "adjoint_residual_rel_tol": 1e-10,
+        "recomposed_total_rel_tol": 1e-12,
+        "fixed_surface_fd_rel_tol": 1e-3,
+        "fixed_surface_fd_abs_tol": 1e-8,
+        "full_resolve_fd_rel_tol": 1e-2,
+        "full_resolve_fd_abs_tol": 1e-8,
+    },
+    "optimizer_state_parity": {
+        "x_rtol": 1e-6,
+        "x_atol": 1e-8,
+        "objective_rel_tol": 1e-6,
+        "gradient_rtol": 1e-6,
+        "gradient_atol": 1e-8,
+        "jac_norm_inf_abs_tol": 1e-8,
+    },
+}
+
+PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
+    "direct_kernel": {
+        "rtol": 1e-10,
+        "atol": 1e-12,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "vector_parity_required": True,
+    },
+    "relaxed_kernel": {
+        "rtol": 1e-6,
+        "atol": 1e-8,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "documents_reduction_order_drift": True,
+    },
+    "float32_smoke": {
+        "rtol": 1e-5,
+        "atol": 1e-6,
+        "objective_rtol": 1e-4,
+        "objective_atol": 1e-6,
+        "gradient_rtol": 1e-3,
+        "gradient_atol": 1e-5,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "runtime_dtype_float32": True,
+        "smoke_only": True,
+        "production_parity": False,
+        "gradient_diagnostic_only": True,
+    },
+    "ls_wrapper_gradient": {
+        "rtol": 1e-10,
+        "atol": 1e-12,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "vector_parity_required": True,
+    },
+    "derivative_heavy": {
+        "scalar_value_rtol": 1e-10,
+        "scalar_value_atol": 1e-12,
+        "first_derivative_rtol": 1e-8,
+        "first_derivative_atol": 1e-10,
+        "second_derivative_rtol": 1e-6,
+        "second_derivative_atol": 1e-8,
+        "requires_same_input": True,
+        "requires_direct_cpp_oracle": True,
+        "fd_validation_secondary": True,
+    },
+    "reporting_contract": {
+        "scalar_value_rtol": 1e-10,
+        "scalar_value_atol": 1e-12,
+        "distance_rtol": 1e-10,
+        "distance_atol": 1e-12,
+        "requires_same_state": True,
+        "host_materialization_allowed": True,
+    },
+    "direct_hessian_oracle": {
+        "second_derivative_rtol": 1e-8,
+        "second_derivative_atol": 1e-10,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "full_matrix_required": True,
+    },
+    "exact_well_conditioned_adjoint": {
+        "adjoint_rtol": 1e-6,
+        "adjoint_atol": 1e-8,
+        "gradient_rtol": 1e-6,
+        "gradient_atol": 1e-8,
+        "residual_rel_tol": 1e-10,
+        "requires_same_state": True,
+        "requires_well_conditioned_jacobian": True,
+        "vector_parity_required": True,
+    },
+    "exact_ill_conditioned_adjoint": {
+        "adjoint_rtol": None,
+        "adjoint_atol": None,
+        "gradient_rtol": None,
+        "gradient_atol": None,
+        "residual_rel_tol": 1e-10,
+        "requires_same_state": True,
+        "requires_well_conditioned_jacobian": False,
+        "operator_failure_allowed": True,
+        "vector_parity_required": False,
+        # Raw-vector parity is intentionally disabled because near-singular
+        # Jacobians admit infinitely many adjoints that satisfy the residual
+        # gate. Action-level (range-space) parity remains well-defined:
+        # project both adjoints onto ``U_well`` (the columns of ``U`` whose
+        # singular values exceed ``σ_max * 1e-8``) and compare there. The
+        # canonical action-level threshold is ``1e-6`` (one order looser
+        # than ``exact_well_conditioned_adjoint``) and is enforced by
+        # ``tests/geo/test_boozersurface_jax.py::``
+        # ``TestBoozerSurfaceJAXClass::``
+        # ``test_exact_ill_conditioned_operator_adjoint_action_level_parity``.
+        "action_level_rtol": 1e-6,
+    },
+    "branch_stable_resolve": {
+        "core_value_rtol": 1e-6,
+        "core_value_atol": 1e-7,
+        "derived_value_rtol": 5e-5,
+        "derived_value_atol": 1e-7,
+        "requires_branch_stable_state": True,
+        "branch_divergence_downgrades_to_health_only": True,
+    },
+    # Absolute cross-machine state-parity gate for the well-conditioned LS
+    # path, measured on the oversampled ``build_ls_parity_problem(ncoils=4,
+    # nphi=16, ntheta=8)`` fixture. ``sdofs_inf`` ranged from ``1.9e-14``
+    # to ``3.6e-12`` across two macOS hardware platforms running the same
+    # source tree; the ``1e-11`` ceiling provides ~2.7× headroom over the
+    # worst measured value. ``max_hessian_condition_number`` enforces that
+    # the fixture stays well-conditioned on **both** backends — the fixture
+    # is supposed to be well-conditioned and a κ regression on either side
+    # is itself a real signal. Canonical consumer:
+    # ``tests/integration/test_single_stage_jax_cpu_reference.py::``
+    # ``TestRunCodeLSParity::test_ls_solve_state_parity_production_scale``.
+    "ls_state_parity": {
+        "sdofs_inf_atol": 1e-11,
+        "gamma_inf_atol": 1e-11,
+        "G_abs_atol": 1e-12,
+        "iota_abs_atol": 1e-14,
+        "max_hessian_condition_number": 1e8,
+    },
+    "fd_gradient": {
+        "directional_fd_rtol": 1e-5,
+        "directional_fd_atol": 1e-7,
+        "directional_derivative_floor": 1e-12,
+        "central_fd_error_rate": 0.4,
+        "central_fd_min_stable_eps": 3,
+        "direction_seed": 1729,
+        "direction_count": 5,
+        "max_direction_rejection_fraction": 0.2,
+        "requires_branch_stable_state": True,
+        "compares_directional_derivative": True,
+    },
+    "gpu_runtime": {
+        "same_state_forward_rtol": 1e-10,
+        "same_state_forward_atol": 1e-12,
+        "same_state_gradient_rtol": 1e-8,
+        "same_state_gradient_atol": 1e-10,
+        "whole_solve_value_rtol": 1e-6,
+        "whole_solve_value_atol": 1e-7,
+        "requires_x64": True,
+        "requires_fixed_seed": True,
+        "requires_runtime_metadata": True,
+    },
+    "reduction_cpu_gpu": {
+        "rtol": 1e-12,
+        "atol": 1e-12,
+        "requires_x64": True,
+        "requires_cpu_gpu_devices": True,
+        "uses_cancellation_stress": True,
+    },
+    # Scientific-equivalence ladder lanes per
+    # docs/parity_scientific_equivalence_contract_2026-05-09.md §2 + §9.
+    # These lanes are reporting-only at Phase 0/1: the parity arbiter does
+    # not yet enforce these thresholds, and the existing
+    # ``linear_solve_factors`` byte-parity probe and the pre-Newton hard
+    # gate ``_pre_newton_census_gate_failures`` in
+    # ``benchmarks/single_stage_init_parity.py`` remain authoritative.
+    # ``*_condition_estimate_present`` is True because the JAX-native
+    # Hager–Higham helper now populates dense compatibility solves.
+    # Individual solve results may still emit ``None`` when their dense
+    # compatibility operator is intentionally unavailable.
+    "ls_solve_quality": {
+        "ls_hessian_symmetry_rel_tol": 1e-10,
+        "ls_hessian_action_max_rel_tol": 1e-8,
+        "ls_newton_linear_residual_rel_tol": 1e-8,
+        "ls_newton_step_abs_diff_rel_tol": 1e-8,
+        "ls_condition_estimate_present": True,
+        "requires_same_state": True,
+        "reporting_only": True,
+    },
+    "exact_solve_quality": {
+        "exact_jacobian_action_max_rel_tol": 1e-8,
+        "exact_newton_linear_residual_rel_tol": 1e-8,
+        "exact_refinement_correction_rel_tol": 1e-9,
+        "exact_adjoint_solve_residual_rel_tol": 1e-8,
+        "exact_condition_estimate_present": True,
+        "requires_same_state": True,
+        "reporting_only": True,
+    },
+    "pm_mwpgp_fixed_step": {
+        "rtol": 1e-9,
+        "atol": 1e-11,
+        "state_trace_rtol": 1e-9,
+        "state_trace_atol": 1e-11,
+        "optimality_atol": 1e-9,
+        "monotonicity_rtol": 1e-12,
+        "single_step_rtol": 1e-12,
+        "single_step_atol": 1e-14,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "vector_parity_required": True,
+    },
+    # Event-time tracing lane: adaptive RK + bracketed event localization
+    # accuracy contract. Loose tolerances reflect that floating-point step
+    # control and root bisection accumulate drift over a trajectory; the
+    # state-vector comparison after N integration steps cannot match the
+    # direct-kernel lane. Used by items 14 (RK path) and 16 (tracing
+    # wrappers).
+    "event_time_tracing": {
+        "state_vector_rtol": 1e-6,
+        "state_vector_atol": 1e-8,
+        "event_time_rtol": 1e-7,
+        "event_time_atol": 1e-9,
+        "step_count_max_ratio": 1.25,
+        "requires_branch_stable_state": True,
+        "requires_event_localization": True,
+        "requires_x64": True,
+    },
+}
+
+QUANTITY_TOLERANCE_BUCKETS: dict[str, str] = {
+    "field_B": "direct_kernel",
+    "field_GradAbsB": "direct_kernel",
+    "field_modB": "direct_kernel",
+    "surface_gamma": "direct_kernel",
+    "surface_unit_normal": "direct_kernel",
+    "Bdotn": "direct_kernel",
+    "objective_native_subtotal": "ls_wrapper_gradient",
+    "SquaredFlux": "ls_wrapper_gradient",
+    "SquaredFluxJAX": "ls_wrapper_gradient",
+    "gradient": "ls_wrapper_gradient",
+    "boozer_residual": "direct_kernel",
+    "area": "direct_kernel",
+    "volume": "direct_kernel",
+    "area_gradient": "derivative_heavy",
+    "volume_gradient": "derivative_heavy",
+    "qfm_residual": "direct_kernel",
+    "qfm_gradient": "derivative_heavy",
+    "pm_grid_payload": "direct_kernel",
+    "pm_moments": "direct_kernel",
+    "pm_residual": "direct_kernel",
+    "pm_proxy_residual": "direct_kernel",
+    "pm_objective": "direct_kernel",
+    "pm_proxy_objective": "direct_kernel",
+    "pm_history": "direct_kernel",
+    "pm_dipole_field_B": "direct_kernel",
+    "pm_proxy_dipole_field_B": "direct_kernel",
+    "pm_dipole_Bdotn": "direct_kernel",
+    "pm_proxy_dipole_Bdotn": "direct_kernel",
+    "wireframe_matrix": "direct_kernel",
+    "wireframe_current": "direct_kernel",
+    "wireframe_objective": "direct_kernel",
+    "wireframe_constraints": "direct_kernel",
+    "wireframe_field_B": "direct_kernel",
+    "wireframe_field_dB_by_dX": "derivative_heavy",
+    "wireframe_Bnormal": "direct_kernel",
+    "wireframe_gsco_flags": "direct_kernel",
+    "wireframe_gsco_history": "direct_kernel",
+    "wireframe_gsco_solution": "direct_kernel",
+    "trajectory_endpoint": "event_time_tracing",
+    "trajectory_t_final": "event_time_tracing",
+    "trajectory_status_code": "direct_kernel",
+    "phi_hit_xyz": "event_time_tracing",
+    "phi_hit_count": "direct_kernel",
+    "toroidal_flux": "direct_kernel",
+    "LpCurveForce": "direct_kernel",
+    "B2Energy": "direct_kernel",
+    "lp_curve_force_gradient": "derivative_heavy",
+    "b2_energy_gradient": "derivative_heavy",
+    "iota": "direct_kernel",
+    "major_radius": "direct_kernel",
+    "nq_symmetric_ratio": "direct_kernel",
+}
+FLOAT32_SMOKE_TOLERANCE_TIER = "float32_smoke"
+STRICT_RUNTIME_TOLERANCE_TIERS = frozenset(("cpu_reference", "parity", "fast"))
+FLOAT32_SMOKE_OBJECTIVE_QUANTITIES = frozenset(
+    {
+        "objective_native_subtotal",
+        "SquaredFlux",
+        "SquaredFluxJAX",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Reporting-only context (NOT a tolerance lane; does NOT gate)
+#
+# This dict augments gate FAILURE MESSAGES with empirical-baseline severity
+# context. The gate's pass/fail decision is unchanged. Per-layer thresholds
+# are populated by Slice DM-B once Phase 4 produces the first passing
+# strict-gate artifact (corpus is empty as of 2026-05-08).
+#
+# See docs/parity_dual_mode_contract_2026-05-08.md §2.3 for the design
+# rationale and §11 for the threshold-derivation methodology DM-B uses to
+# fill in `per_layer`.
+PARITY_LADDER_REPORTING_CONTEXT: dict[str, dict[str, object]] = {
+    "pre_newton_state_empirical": {
+        "threshold_kind": "empirical_per_layer",
+        "purpose": "report_severity",  # NOT "gate"
+        "source_artifacts": [],  # populated by DM-B from passing artifacts
+        "per_layer": {},  # empty skeleton; DM-B populates from corpus
+        "requires_byte_identity": False,
+    },
+}
+
+CI_REPRODUCIBILITY_CONTRACT: dict[str, float | int] = {
+    "gpu_reduction_order_max_ulp": 10,
+    "gpu_reduction_order_rel_tol": 1e-12,
+    "gpu_reduction_order_sample_size": 1000,
+    "gpu_reproducibility_seed": 1729,
+    "gpu_reproducibility_sample_size": 1000,
+    "tolerance_ratchet_factor": 10.0,
+}
+
+# Initial reduced-fixture ratchet for the grouped-adjoint memory probe.
+GROUPED_ADJOINT_MEMORY_BUDGETS: dict[str, dict[str, dict[str, float | None]]] = {
+    "real_single_stage_init": {
+        "cpu": {
+            "max_peak_rss_mb": 8192.0,
+            "max_peak_gpu_memory_mb": None,
+        },
+        "cuda": {
+            "max_peak_rss_mb": 8192.0,
+            "max_peak_gpu_memory_mb": 12288.0,
+        },
+    }
+}
+
+# Stage 2 floors mirror docs/source/jax_acceptance.rst.
+TIER5_PERFORMANCE_BUDGETS: dict[str, dict[str, dict[str, float | None]]] = {
+    "stable_hardware_weekly": {
+        "tier2_stage2_e2e": {
+            "min_outer_speedup_vs_cpu": 1.25,
+            "min_warm_speedup_vs_cpu": 1.25,
+            "max_compile_overhead_s": 60.0,
+        }
+    }
+}
+
+SINGLE_STAGE_PROOF_CONTRACTS: dict[str, SingleStageProofContract] = {
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG: {
+        "default_maxiter": 10,
+        "min_iterations": 10,
+        "require_objective_decrease": True,
+        "required_outer_optimizer_method": "lbfgs-scipy-jax",
+        "required_result_keys": (
+            "FINAL_IOTA",
+            "FINAL_VOLUME",
+            "FIELD_ERROR",
+            "MAX_CURVATURE",
+        ),
+    }
+}
+
+GPU_PROOF_PARITY_CONTRACTS: dict[str, dict[str, str]] = {
+    "stage2": {
+        "value_lane": "tier2_stage2_e2e",
+        "value_contract_key": "final_objective_rel_tol",
+        "gradient_lane": "tier1_stage2_value_gradient",
+        "gradient_contract_key": "gradient_rtol",
+    },
+    "single_stage": {
+        "value_lane": "tier3_single_stage_init",
+        "value_contract_key": "field_error_rel_tol",
+        "gradient_lane": "gpu_runtime",
+        "gradient_contract_key": "same_state_gradient_rtol",
+    },
+}
+
+
+# Schema for compile-timing evidence artifacts (e.g.
+# ``.artifacts/lm_minpack_port_plan_2026-05-16/track1_g5_local_cpu_compile_smoke.json``).
+# These JSON sidecars are evidence-class, not promotion-class: they document a
+# measured first-trace compile time without claiming a parity-ladder lane.
+# Each value declares which gate the measurement does and does not certify.
+EVIDENCE_ARTIFACT_COMPILE_SCOPES: dict[str, str] = {
+    "local_cpu_smoke_not_cuda_gate": (
+        "Local CPU cold-compile timing for a target-lane least-squares method. "
+        "Records elapsed seconds after ``jax.clear_caches()`` with explicit "
+        "result synchronization. Does NOT certify CUDA first-compile "
+        "performance — that gate is governed by ``docs/source/jax_acceptance.rst``."
+    ),
+}
+
+
+def evidence_artifact_compile_scope(scope: str) -> str:
+    """Return the documented meaning of a compile-timing evidence scope."""
+    scope_key = _normalize_contract_key(scope)
+    if scope_key not in EVIDENCE_ARTIFACT_COMPILE_SCOPES:
+        valid = ", ".join(sorted(EVIDENCE_ARTIFACT_COMPILE_SCOPES))
+        raise ValueError(
+            f"Unknown compile-scope marker {scope!r}. Expected one of: {valid}."
+        )
+    return EVIDENCE_ARTIFACT_COMPILE_SCOPES[scope_key]
+
+
+def _normalize_contract_key(value: str) -> str:
+    return str(value).strip().lower().replace("-", "_")
+
+
+def _normalize_platform_key(value: str) -> str:
+    platform_key = _normalize_contract_key(value)
+    if platform_key == "gpu":
+        return "cuda"
+    return platform_key
+
+
+def _float_contract_value(values: Mapping[str, object], key: str) -> float:
+    value = values[key]
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise TypeError(f"Contract key {key!r} must hold a numeric value.")
+    return float(value)
+
+
+def _optional_float_contract_value(
+    values: Mapping[str, object],
+    key: str,
+) -> float | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise TypeError(f"Contract key {key!r} must hold a numeric value or None.")
+    return float(value)
+
+
+def parity_ladder_tolerances(lane: str) -> dict[str, ParityToleranceValue]:
+    """Return the precision contract for a named parity-validation lane."""
+    lane_key = _normalize_contract_key(lane)
+    if lane_key not in PARITY_LADDER_TOLERANCES:
+        valid = ", ".join(sorted(PARITY_LADDER_TOLERANCES))
+        raise ValueError(
+            f"Unknown parity ladder lane {lane!r}. Expected one of: {valid}."
+        )
+    return dict(PARITY_LADDER_TOLERANCES[lane_key])
+
+
+def quantity_uses_gradient_tolerance(quantity: str) -> bool:
+    """Return whether a quantity selects the float32 gradient tolerance lane."""
+    return "gradient" in quantity.lower()
+
+
+def _quantity_uses_float32_objective_tolerance(quantity: str, bucket: str) -> bool:
+    quantity_lower = quantity.lower()
+    return (
+        quantity in FLOAT32_SMOKE_OBJECTIVE_QUANTITIES
+        or "objective" in quantity_lower
+        or (
+            bucket == "ls_wrapper_gradient"
+            and not quantity_uses_gradient_tolerance(quantity)
+        )
+    )
+
+
+def quantity_parity_tolerance(
+    quantity: str,
+    *,
+    runtime_tier: str,
+) -> tuple[str, float, float]:
+    """Return ``(bucket, rtol, atol)`` for a named parity quantity.
+
+    The mapping preserves the non-banana harness contract: strict runtime
+    tiers route through quantity buckets, while the float32 smoke tier
+    selects value/objective/gradient tolerances from its runtime lane.
+    """
+    bucket = QUANTITY_TOLERANCE_BUCKETS.get(quantity, "direct_kernel")
+    runtime_tier_key = _normalize_contract_key(runtime_tier)
+    if runtime_tier_key == FLOAT32_SMOKE_TOLERANCE_TIER:
+        tolerances = parity_ladder_tolerances(runtime_tier_key)
+        if quantity_uses_gradient_tolerance(quantity):
+            return (
+                runtime_tier_key,
+                _float_contract_value(tolerances, "gradient_rtol"),
+                _float_contract_value(tolerances, "gradient_atol"),
+            )
+        if _quantity_uses_float32_objective_tolerance(quantity, bucket):
+            return (
+                runtime_tier_key,
+                _float_contract_value(tolerances, "objective_rtol"),
+                _float_contract_value(tolerances, "objective_atol"),
+            )
+        return (
+            runtime_tier_key,
+            _float_contract_value(tolerances, "rtol"),
+            _float_contract_value(tolerances, "atol"),
+        )
+    if runtime_tier_key not in STRICT_RUNTIME_TOLERANCE_TIERS:
+        raise RuntimeError(
+            f"Unsupported runtime tolerance tier {runtime_tier!r} for "
+            "non-banana example parity harness."
+        )
+
+    tolerances = parity_ladder_tolerances(bucket)
+    if bucket == "event_time_tracing":
+        return (
+            bucket,
+            _float_contract_value(tolerances, "state_vector_rtol"),
+            _float_contract_value(tolerances, "state_vector_atol"),
+        )
+    if "first_derivative_rtol" in tolerances and "rtol" not in tolerances:
+        return (
+            bucket,
+            _float_contract_value(tolerances, "first_derivative_rtol"),
+            _float_contract_value(tolerances, "first_derivative_atol"),
+        )
+    return (
+        bucket,
+        _float_contract_value(tolerances, "rtol"),
+        _float_contract_value(tolerances, "atol"),
+    )
+
+
+def comparison_failure_gates_verdict(entry: Mapping[str, object]) -> bool:
+    """Return whether a failed comparison should fail the fixture verdict."""
+    return entry.get("verdict") == "fail" and entry.get("diagnostic_only") is not True
+
+
+def comparison_failure_is_diagnostic(entry: Mapping[str, object]) -> bool:
+    """Return whether a failed comparison is recorded as diagnostic-only."""
+    return entry.get("verdict") == "fail" and entry.get("diagnostic_only") is True
+
+
+def grouped_adjoint_memory_budget(
+    *,
+    fixture: str,
+    platform: str,
+) -> dict[str, float | None]:
+    fixture_key = _normalize_contract_key(fixture)
+    if fixture_key not in GROUPED_ADJOINT_MEMORY_BUDGETS:
+        valid = ", ".join(sorted(GROUPED_ADJOINT_MEMORY_BUDGETS))
+        raise ValueError(
+            f"Unknown grouped-adjoint fixture {fixture!r}. Expected one of: {valid}."
+        )
+    fixture_budgets = GROUPED_ADJOINT_MEMORY_BUDGETS[fixture_key]
+    platform_key = _normalize_platform_key(platform)
+    if platform_key == "auto":
+        platform_key = "cpu"
+    if platform_key not in fixture_budgets:
+        valid = ", ".join(sorted(fixture_budgets))
+        raise ValueError(
+            f"Unknown grouped-adjoint platform {platform!r} for fixture "
+            f"{fixture!r}. Expected one of: {valid}."
+        )
+    return dict(fixture_budgets[platform_key])
+
+
+def evaluate_grouped_adjoint_memory_budget(
+    metrics: dict[str, object],
+    budget: dict[str, float | None],
+) -> list[str]:
+    failures: list[str] = []
+    peak_rss_mb = _optional_float_contract_value(metrics, "peak_rss_mb")
+    max_peak_rss_mb = budget.get("max_peak_rss_mb")
+    if (
+        max_peak_rss_mb is not None
+        and peak_rss_mb is not None
+        and peak_rss_mb > max_peak_rss_mb
+    ):
+        failures.append(
+            "Grouped-adjoint memory probe peak RSS "
+            f"{peak_rss_mb:.2f} MB exceeded checked-in budget "
+            f"{max_peak_rss_mb:.2f} MB."
+        )
+    peak_gpu_memory_mb = _optional_float_contract_value(metrics, "peak_gpu_memory_mb")
+    max_peak_gpu_memory_mb = budget.get("max_peak_gpu_memory_mb")
+    if (
+        max_peak_gpu_memory_mb is not None
+        and peak_gpu_memory_mb is not None
+        and peak_gpu_memory_mb > max_peak_gpu_memory_mb
+    ):
+        failures.append(
+            "Grouped-adjoint memory probe peak GPU memory "
+            f"{peak_gpu_memory_mb:.2f} MB exceeded checked-in budget "
+            f"{max_peak_gpu_memory_mb:.2f} MB."
+        )
+    return failures
+
+
+def tier5_performance_budget(
+    *,
+    profile: str,
+) -> dict[str, dict[str, float | None]]:
+    profile_key = _normalize_contract_key(profile)
+    if profile_key not in TIER5_PERFORMANCE_BUDGETS:
+        valid = ", ".join(sorted(TIER5_PERFORMANCE_BUDGETS))
+        raise ValueError(
+            f"Unknown Tier 5 performance budget profile {profile!r}. "
+            f"Expected one of: {valid}."
+        )
+    return {
+        rung: dict(rung_budget)
+        for rung, rung_budget in TIER5_PERFORMANCE_BUDGETS[profile_key].items()
+    }
+
+
+def single_stage_proof_contract(
+    rung: str = TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+) -> dict[str, object]:
+    """Return the documented contract for reduced single-stage proof rungs."""
+    if rung not in SINGLE_STAGE_PROOF_CONTRACTS:
+        valid = ", ".join(sorted(SINGLE_STAGE_PROOF_CONTRACTS))
+        raise ValueError(
+            f"Unknown single-stage proof rung {rung!r}. Expected one of: {valid}."
+        )
+    contract = SINGLE_STAGE_PROOF_CONTRACTS[rung]
+    return {
+        "default_maxiter": contract["default_maxiter"],
+        "min_iterations": contract["min_iterations"],
+        "require_objective_decrease": contract["require_objective_decrease"],
+        "required_outer_optimizer_method": contract["required_outer_optimizer_method"],
+        "required_result_keys": tuple(contract["required_result_keys"]),
+    }
+
+
+def gpu_proof_parity_contract(
+    probe_kind: str,
+    *,
+    maxiter: int | None = None,
+) -> dict[str, float | str]:
+    """Return the explicit value/gradient tolerance schema for GPU proof."""
+    probe_key = _normalize_contract_key(probe_kind)
+    if probe_key not in GPU_PROOF_PARITY_CONTRACTS:
+        valid = ", ".join(sorted(GPU_PROOF_PARITY_CONTRACTS))
+        raise ValueError(
+            f"Unknown GPU proof parity probe kind {probe_kind!r}. "
+            f"Expected one of: {valid}."
+        )
+
+    contract: dict[str, float | str] = {
+        key: value for key, value in GPU_PROOF_PARITY_CONTRACTS[probe_key].items()
+    }
+    value_lane = str(contract["value_lane"])
+    value_contract_key = str(contract["value_contract_key"])
+    gradient_lane = str(contract["gradient_lane"])
+    gradient_contract_key = str(contract["gradient_contract_key"])
+
+    value_tolerances = optimizer_drift_tolerances(value_lane, maxiter=maxiter)
+    if gradient_lane in OPTIMIZER_DRIFT_TOLERANCES:
+        gradient_tolerances = optimizer_drift_tolerances(gradient_lane)
+    else:
+        gradient_tolerances = parity_ladder_tolerances(gradient_lane)
+
+    contract["value_rtol"] = _float_contract_value(
+        value_tolerances,
+        value_contract_key,
+    )
+    contract["gradient_rtol"] = _float_contract_value(
+        gradient_tolerances,
+        gradient_contract_key,
+    )
+    return contract
+
+
+def evaluate_tier5_performance_budget(
+    summary_by_name: dict[str, dict[str, object]],
+    budget: dict[str, dict[str, float | None]],
+) -> list[str]:
+    failures: list[str] = []
+    for rung_name, rung_budget in budget.items():
+        rung_summary = summary_by_name.get(rung_name)
+        if rung_summary is None:
+            failures.append(
+                f"Tier 5 performance budget references missing summary rung {rung_name!r}."
+            )
+            continue
+        min_outer_speedup = rung_budget.get("min_outer_speedup_vs_cpu")
+        outer_speedup = _optional_float_contract_value(
+            rung_summary,
+            "outer_speedup_vs_cpu",
+        )
+        if min_outer_speedup is not None:
+            if outer_speedup is None or outer_speedup < min_outer_speedup:
+                failures.append(
+                    f"{rung_name} outer first-run wall-clock speedup "
+                    f"{'n/a' if outer_speedup is None else f'{outer_speedup:.2f}x'} "
+                    f"fell below checked-in floor {min_outer_speedup:.2f}x."
+                )
+        min_warm_speedup = rung_budget.get("min_warm_speedup_vs_cpu")
+        warm_speedup = _optional_float_contract_value(
+            rung_summary,
+            "warm_speedup_vs_cpu",
+        )
+        if min_warm_speedup is not None:
+            if warm_speedup is None or warm_speedup < min_warm_speedup:
+                failures.append(
+                    f"{rung_name} warm steady-state speedup "
+                    f"{'n/a' if warm_speedup is None else f'{warm_speedup:.2f}x'} "
+                    f"fell below checked-in floor {min_warm_speedup:.2f}x."
+                )
+        max_compile_overhead = rung_budget.get("max_compile_overhead_s")
+        compile_overhead = _optional_float_contract_value(
+            rung_summary,
+            "lane_compile_overhead_s",
+        )
+        if max_compile_overhead is not None:
+            if compile_overhead is None or compile_overhead > max_compile_overhead:
+                failures.append(
+                    f"{rung_name} compile overhead "
+                    f"{'n/a' if compile_overhead is None else f'{compile_overhead:.2f}s'} "
+                    f"exceeded checked-in ceiling {max_compile_overhead:.2f}s."
+                )
+    return failures
+
+
+def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
+    """Map benchmark/probe options to the intended lane label."""
+    (
+        valid_outer_optimizer_backends,
+        render_invalid_optimizer_backend_message,
+    ) = _outer_optimizer_backend_choices()
+    if (
+        optimizer_backend is not None
+        and optimizer_backend not in valid_outer_optimizer_backends
+    ):
+        raise ValueError(render_invalid_optimizer_backend_message("outer"))
+    if optimizer_backend == "ondevice":
+        return "private-optimizer"
+    if optimizer_backend == "scipy-jax":
+        return "target-scipy-control"
+    if optimizer_backend == "host-jax":
+        return "host-jax-kernelized-control"
+    if optimizer_backend == "scipy-jax-fullgraph":
+        return "target-scipy-fullgraph-control"
+    if optimizer_backend == "optax-lbfgs":
+        return "target-optax-lbfgs"
+    if optimizer_backend == "optimistix-lbfgs":
+        return "target-optimistix-lbfgs"
+    return "trusted-public-reference"
+
+
+def short_run_geometry_rel_tolerance(
+    maxiter: int,
+    explicit_tol: float | None = None,
+) -> float | None:
+    """Return the end-state geometry gate for Stage 2 ladder runs."""
+    if explicit_tol is not None:
+        return float(explicit_tol)
+    if maxiter <= SHORT_RUN_SMOKE_MAXITER:
+        return None
+    return 1e-6
+
+
+def short_run_stage2_final_objective_rel_tolerance(maxiter: int) -> float:
+    """Return the Stage 2 endpoint-objective gate for a given iteration budget."""
+    if maxiter <= SHORT_RUN_SMOKE_MAXITER:
+        return 5e-4
+    return 1e-4
+
+
+def ci_reproducibility_contract() -> dict[str, float | int]:
+    """Return the JAX CI reproducibility contract for GPU parity lanes."""
+    return dict(CI_REPRODUCIBILITY_CONTRACT)
+
+
+def ratchet_rel_tol(
+    current_rel_tol: float,
+    achieved_rel_err: float,
+    *,
+    factor: float,
+) -> float:
+    """Tighten a relative tolerance gate to the requested ratchet factor."""
+    return min(float(current_rel_tol), float(factor) * float(achieved_rel_err))
+
+
+def parity_ladder_ratchet_rel_tol(
+    lane: str,
+    current_rel_tol: float,
+    achieved_rel_err: float,
+    *,
+    branch_divergent: bool = False,
+    factor: float | None = None,
+) -> float:
+    """Return the ratcheted tolerance allowed by a parity-ladder lane.
+
+    Lanes without vector parity, and branch-divergent branch-stable samples,
+    keep their current tolerance even if one run reports a smaller error.
+    """
+    tolerances = parity_ladder_tolerances(lane)
+    if branch_divergent or tolerances.get("vector_parity_required") is False:
+        return float(current_rel_tol)
+
+    ratchet_factor = (
+        CI_REPRODUCIBILITY_CONTRACT["tolerance_ratchet_factor"]
+        if factor is None
+        else factor
+    )
+    return ratchet_rel_tol(
+        current_rel_tol,
+        achieved_rel_err,
+        factor=float(ratchet_factor),
+    )
+
+
+def optimizer_drift_tolerances(
+    rung: str,
+    *,
+    maxiter: int | None = None,
+) -> dict[str, float | None]:
+    """Return the documented optimizer-replacement tolerances for a ladder rung."""
+    if rung not in OPTIMIZER_DRIFT_TOLERANCES:
+        valid = ", ".join(sorted(OPTIMIZER_DRIFT_TOLERANCES))
+        raise ValueError(
+            f"Unknown optimizer-drift rung {rung!r}. Expected one of: {valid}."
+        )
+    tolerances = dict(OPTIMIZER_DRIFT_TOLERANCES[rung])
+    if rung == "tier2_stage2_e2e":
+        tolerances.pop("final_objective_rel_tol_20_iter", None)
+        tolerances.pop("final_objective_rel_tol_default", None)
+        tolerances["final_objective_rel_tol"] = (
+            short_run_stage2_final_objective_rel_tolerance(
+                21 if maxiter is None else int(maxiter)
+            )
+        )
+        tolerances.pop("geometry_rel_tol_20_iter", None)
+        tolerances.pop("geometry_rel_tol_default", None)
+        tolerances["geometry_rel_tol"] = short_run_geometry_rel_tolerance(
+            21 if maxiter is None else int(maxiter)
+        )
+    return tolerances

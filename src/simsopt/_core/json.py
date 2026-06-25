@@ -76,6 +76,38 @@ def _load_redirect(redirect_file):
     return dict(redirect_dict)
 
 
+# Built-in class relocations introduced by the JAX-port refactor. Artifacts
+# serialized before a class moved carry its pre-refactor "@module"; these
+# defaults keep such artifacts loadable without a user-supplied ~/.simsopt.yaml.
+# Shape matches ``_load_redirect`` output: {old_module: {old_class: {"@module",
+# "@class"}}}. User ~/.simsopt.yaml entries override these per (module, class).
+_DEFAULT_REDIRECT = {
+    "simsopt.geo.curvecwsfourier": {
+        class_name: {
+            "@module": "simsopt_jax_adapters.geo.curvecwsfourier",
+            "@class": class_name,
+        }
+        for class_name in ("CurveCWSFourier", "CurveCWSFourierCPP")
+    },
+}
+
+
+def _merge_redirect(base, override):
+    """Merge ``override`` redirects onto ``base``; ``override`` wins per (module, class).
+
+    Leaf entries are copied so the merged table never aliases ``base``'s leaf
+    dicts (e.g. the ``_DEFAULT_REDIRECT`` module constant), keeping that constant
+    immutable regardless of how ``REDIRECT`` is later used.
+    """
+    merged = {
+        module: {cls: dict(entry) for cls, entry in classes.items()}
+        for module, classes in base.items()
+    }
+    for module, classes in override.items():
+        merged.setdefault(module, {}).update(classes)
+    return merged
+
+
 class GSONable:
     """
     This is a mix-in base class specifying an API for GSONable objects. GSON
@@ -114,8 +146,10 @@ class GSONable:
     old_module.old_class: new_module.new_class
     """
 
-    REDIRECT = _load_redirect(
-        os.path.join(os.path.expanduser("~"), ".simsopt.yaml"))
+    REDIRECT = _merge_redirect(
+        _DEFAULT_REDIRECT,
+        _load_redirect(os.path.join(os.path.expanduser("~"), ".simsopt.yaml")),
+    )
 
     def as_dict(self, serial_objs_dict):
         """
@@ -463,10 +497,9 @@ class GSONDecoder(json.JSONDecoder):
                 modname = d["@module"]
                 classname = d["@class"]
                 if classname in GSONable.REDIRECT.get(modname, {}):
-                    modname = GSONable.REDIRECT[modname][classname][
-                        "@module"]
-                    classname = GSONable.REDIRECT[modname][classname][
-                        "@class"]
+                    redirect = GSONable.REDIRECT[modname][classname]
+                    modname = redirect["@module"]
+                    classname = redirect["@class"]
             elif "@module" in d and "@callable" in d:
                 modname = d["@module"]
                 objname = d["@callable"]

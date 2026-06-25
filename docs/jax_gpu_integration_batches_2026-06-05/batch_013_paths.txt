@@ -1,0 +1,8 @@
+tests/jax/core/test_boozer_radial_interp_jax_item32.py
+tests/jax/core/test_bounded_scan.py
+tests/jax/core/test_dipole_field_item24.py
+tests/jax/core/test_dipole_field_jax_item24.py
+tests/jax/core/test_elliptic_helper.py
+tests/jax/core/test_elliptic_item12.py
+tests/jax/core/test_finite_difference.py
+tests/jax/core/test_kernel_numeric_helpers.py

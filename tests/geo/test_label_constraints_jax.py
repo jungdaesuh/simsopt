@@ -1,0 +1,372 @@
+"""
+Pure-JAX label constraint parity tests matching upstream C++ test suite.
+
+Section 8b of jax_gpu_remaining_todos.md.  These tests exercise
+``toroidal_flux_jax``, ``volume_jax`` (``surface_volume``), and
+``area_jax`` (``surface_area``) gradient correctness via central
+finite differences, matching the upstream tests in
+``tests/geo/test_surface_objectives.py``.
+
+Tests:
+1. Toroidal flux invariance across phi slices
+2. Toroidal flux gradient FD (Taylor test w.r.t. surface DOFs)
+3. Volume gradient FD (Taylor test w.r.t. surface DOFs)
+4. Area gradient FD (Taylor test w.r.t. surface DOFs)
+
+No simsoptpp dependency — all tests use pure JAX functions.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+import numpy as np
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+
+# ---------------------------------------------------------------------------
+# Add the src root to sys.path so simsopt subpackages (jax_core, backend)
+# resolve naturally without fragile importlib stubs.  The simsopt top-level
+# __init__.py guards its simsoptpp import behind try/except, so this is
+# safe in a pure-JAX environment.
+# ---------------------------------------------------------------------------
+_SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
+_src_root = str(_SRC.parent)  # .../src
+if _src_root not in sys.path:
+    sys.path.insert(0, _src_root)
+
+from simsopt_jax.geo.surface_fourier import (  # noqa: E402
+    stellsym_scatter_indices as _stellsym_scatter_indices,
+    surface_area as _surface_area,
+    surface_gamma_from_dofs as _surface_gamma_from_dofs,
+    surface_gammadash2_from_dofs as _surface_gammadash2_from_dofs,
+    surface_normal_from_dofs as _surface_normal_from_dofs,
+    surface_volume as _surface_volume,
+)
+from simsopt_jax.field.biotsavart import biot_savart_A as _biot_savart_A  # noqa: E402
+from simsopt_jax.geo.label_constraints import (  # noqa: E402
+    toroidal_flux_jax as _toroidal_flux_jax,
+)
+
+surface_gamma_from_dofs = _surface_gamma_from_dofs
+surface_gammadash2_from_dofs = _surface_gammadash2_from_dofs
+surface_normal_from_dofs = _surface_normal_from_dofs
+surface_volume = _surface_volume
+surface_area = _surface_area
+stellsym_scatter_indices = _stellsym_scatter_indices
+
+biot_savart_A = _biot_savart_A
+toroidal_flux_jax = _toroidal_flux_jax
+
+
+def _make_tf_coils(n_coils=16, R_center=1.0, r_coil=0.3, nquad=64, I=1e5):
+    """Create toroidal-field coils evenly distributed in toroidal angle.
+
+    Each coil is a circle in its poloidal plane that encircles the torus
+    cross-section, producing a toroidal magnetic field inside the torus.
+
+    Returns (gammas, gammadashs, currents).
+    """
+    twopi = 2 * np.pi
+    gammas_list = []
+    gds_list = []
+    for k in range(n_coils):
+        phi_k = twopi * k / n_coils
+        t = np.linspace(0, 1, nquad, endpoint=False)
+        R_t = R_center + r_coil * np.cos(twopi * t)
+        z_t = r_coil * np.sin(twopi * t)
+        gamma = np.stack([R_t * np.cos(phi_k), R_t * np.sin(phi_k), z_t], axis=-1)
+        dR = -r_coil * twopi * np.sin(twopi * t)
+        dz = r_coil * twopi * np.cos(twopi * t)
+        gd = np.stack([dR * np.cos(phi_k), dR * np.sin(phi_k), dz], axis=-1)
+        gammas_list.append(gamma)
+        gds_list.append(gd)
+
+    gammas = jnp.array(np.stack(gammas_list))  # (n_coils, nquad, 3)
+    gds = jnp.array(np.stack(gds_list))
+    currents = jnp.array([I] * n_coils)
+    return gammas, gds, currents
+
+
+def _make_torus_dofs(R=1.0, r=0.1, mpol=1, ntor=1, nfp=1, stellsym=False):
+    """Create surface DOFs for a near-circular-cross-section torus.
+
+    Returns (dofs, scatter_indices_or_None).
+    """
+    ncols = 2 * ntor + 1
+
+    # Build full coefficient matrices
+    xc = np.zeros((2 * mpol + 1, ncols))
+    yc = np.zeros((2 * mpol + 1, ncols))  # all-zero by symmetry; needed for DOF layout
+    zc = np.zeros((2 * mpol + 1, ncols))
+    xc[0, 0] = R  # constant × constant
+    xc[1, 0] = r  # cos(θ) × constant
+    zc[mpol + 1, 0] = r  # sin(θ) × constant
+
+    full = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+
+    if stellsym:
+        scatter_idx = stellsym_scatter_indices(mpol, ntor)
+        dofs = full[scatter_idx]
+        return dofs, scatter_idx
+    return full.copy(), None
+
+
+def _taylor_test_central(
+    f, grad_fn, x, epsilons=None, direction=None, atol=1e-9, rate=0.35
+):
+    """Central-FD Taylor test: |(f(x+εd) − f(x−εd))/(2ε) − df·d| → 0.
+
+    Central FD is O(ε²), so error should quarter when ε halves.
+    """
+    rng = np.random.RandomState(1)
+    if direction is None:
+        direction = jnp.array(rng.rand(*x.shape) - 0.5)
+    if epsilons is None:
+        epsilons = np.power(2.0, -np.arange(10, 20, dtype=float))
+
+    dfx = float(jnp.sum(grad_fn(x) * direction))
+
+    err_old = 1e9
+    for eps in epsilons:
+        fp = float(f(x + eps * direction))
+        fm = float(f(x - eps * direction))
+        fd_est = (fp - fm) / (2 * eps)
+        err = abs(fd_est - dfx)
+        assert err < max(atol, rate * err_old), (
+            f"Taylor convergence stalled: err={err:.2e}, "
+            f"prev={err_old:.2e}, ratio={err / err_old:.3f}"
+        )
+        err_old = err
+
+
+# ---------------------------------------------------------------------------
+# Shared surface + field configuration
+# ---------------------------------------------------------------------------
+
+_MPOL = 1
+_NTOR = 1
+_NFP = 1
+_NPHI = 15
+_NTHETA = 16
+_QP_PHI = jnp.linspace(0, 1, _NPHI, endpoint=False)
+_QP_THETA = jnp.linspace(0, 1, _NTHETA, endpoint=False)
+
+_TF_GAMMAS, _TF_GDS, _TF_CURRENTS = _make_tf_coils(
+    n_coils=16, R_center=1.0, r_coil=0.3, nquad=64, I=1e5
+)
+
+
+# ---------------------------------------------------------------------------
+# Test class
+# ---------------------------------------------------------------------------
+
+
+class TestLabelConstraintsParity:
+    """Parity tests matching upstream tests/geo/test_surface_objectives.py."""
+
+    def test_toroidal_flux_invariance(self):
+        """Toroidal flux is approximately constant across phi slices.
+
+        Matches ``test_toroidal_flux_is_constant``.
+        Uses 48 evenly-spaced TF coils for sub-1% field ripple
+        (ripple ~ exp(-π r_coil N / (2π R)) ≈ 0.07% for N=48).
+        """
+        mpol, ntor, nfp = 2, 1, 1
+        nphi, ntheta = 30, 32
+        qp_phi = jnp.linspace(0, 1, nphi, endpoint=False)
+        qp_theta = jnp.linspace(0, 1, ntheta, endpoint=False)
+
+        dofs, _ = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=mpol, ntor=ntor, nfp=nfp, stellsym=False
+        )
+        dofs = jnp.array(dofs)
+
+        gamma = surface_gamma_from_dofs(
+            dofs, qp_phi, qp_theta, mpol, ntor, nfp, stellsym=False
+        )
+        gd2 = surface_gammadash2_from_dofs(
+            dofs, qp_phi, qp_theta, mpol, ntor, nfp, stellsym=False
+        )
+
+        # Dense TF coil set for smooth toroidal field
+        tf_g, tf_gd, tf_I = _make_tf_coils(
+            n_coils=48, R_center=1.0, r_coil=0.3, nquad=32, I=1e5
+        )
+
+        A_all = biot_savart_A(gamma.reshape(-1, 3), tf_g, tf_gd, tf_I).reshape(
+            nphi, ntheta, 3
+        )
+        tf_list = np.array(
+            [float(toroidal_flux_jax(A_all[i], gd2[i], ntheta)) for i in range(nphi)]
+        )
+
+        mean_tf = np.mean(tf_list)
+        assert abs(mean_tf) > 1e-12, "Toroidal flux is zero — bad test config"
+        max_err = np.max(np.abs(mean_tf - tf_list)) / abs(mean_tf)
+        assert max_err < 1e-2, f"Toroidal flux varies {max_err:.4f} across phi"
+
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_toroidal_flux_gradient_fd(self, stellsym):
+        """dΦ_tor/d(surface DOFs) matches central finite differences.
+
+        Matches ``test_toroidal_flux_first_derivative``.
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=stellsym
+        )
+        dofs = jnp.array(dofs_np)
+
+        def f(d):
+            gamma = surface_gamma_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            gd2 = surface_gammadash2_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            pts = gamma[0]  # phi slice 0
+            A = biot_savart_A(pts, _TF_GAMMAS, _TF_GDS, _TF_CURRENTS)
+            return toroidal_flux_jax(A, gd2[0], _NTHETA)
+
+        grad_fn = jax.grad(f)
+        _taylor_test_central(f, grad_fn, dofs)
+
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_volume_gradient_fd(self, stellsym):
+        """dVolume/d(surface DOFs) matches central finite differences.
+
+        Matches ``test_parameter_derivatives_volume``.
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=stellsym
+        )
+        dofs = jnp.array(dofs_np)
+
+        def f(d):
+            gamma = surface_gamma_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            normal = surface_normal_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            return surface_volume(gamma, normal)
+
+        grad_fn = jax.grad(f)
+        _taylor_test_central(f, grad_fn, dofs)
+
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_area_gradient_fd(self, stellsym):
+        """dArea/d(surface DOFs) matches central finite differences.
+
+        Matches ``test_label_surface_derivative1(Area)``.
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=stellsym
+        )
+        dofs = jnp.array(dofs_np)
+
+        def f(d):
+            normal = surface_normal_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            return surface_area(normal)
+
+        grad_fn = jax.grad(f)
+        # Area's central-FD cancellation floor (~1e-9) sits just above the
+        # shared 1e-9 default; a real gradient error would be orders of
+        # magnitude larger, so 1e-8 keeps the meaningful-regime check intact.
+        _taylor_test_central(f, grad_fn, dofs, atol=1e-8)
+
+    # -------------------------------------------------------------------
+    # P7: ToroidalFlux Hessian Taylor test (2nd derivative w.r.t. surface DOFs)
+    # -------------------------------------------------------------------
+
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_toroidal_flux_hessian_taylor(self, stellsym):
+        """d²Φ_tor/d(surface DOFs)² matches one-sided FD of gradient.
+
+        Matches upstream ``test_toroidal_flux_second_derivative`` pattern
+        (taylor_test2).
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=stellsym
+        )
+        dofs = jnp.array(dofs_np)
+
+        def f(d):
+            gamma = surface_gamma_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            gd2 = surface_gammadash2_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            pts = gamma[0]
+            A = biot_savart_A(pts, _TF_GAMMAS, _TF_GDS, _TF_CURRENTS)
+            return toroidal_flux_jax(A, gd2[0], _NTHETA)
+
+        grad_fn = jax.grad(f)
+        hessian_fn = jax.hessian(f)
+
+        rng = np.random.RandomState(1)
+        d1 = jnp.array(rng.rand(*dofs.shape) - 0.5)
+        d2 = jnp.array(rng.rand(*dofs.shape) - 0.5)
+
+        H = hessian_fn(dofs)
+        d2f_exact = float(d2 @ H @ d1)
+        df0 = grad_fn(dofs)
+        df0_d1 = float(df0 @ d1)
+
+        epsilons = np.power(2.0, -np.arange(7, 20, dtype=float))
+        err_old = 1e9
+        for eps in epsilons:
+            df_perturbed_d1 = float(grad_fn(dofs + eps * d2) @ d1)
+            d2f_fd = (df_perturbed_d1 - df0_d1) / eps
+            err = abs(d2f_fd - d2f_exact)
+            assert err < 0.6 * err_old, (
+                f"Hessian Taylor stalled: err={err:.2e}, "
+                f"prev={err_old:.2e}, ratio={err / err_old:.3f}"
+            )
+            err_old = err
+
+    # -------------------------------------------------------------------
+    # P8: ToroidalFlux derivative w.r.t. coil DOFs Taylor test
+    # -------------------------------------------------------------------
+
+    def test_toroidal_flux_coil_dof_gradient_taylor(self):
+        """dΦ_tor/d(coil gammas) matches central FD.
+
+        Matches upstream ``test_toroidal_flux_partial_derivatives_wrt_coils``.
+        Surface geometry is fixed; coil positions are the free DOFs.
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=False
+        )
+        dofs = jnp.array(dofs_np)
+
+        # Fix surface geometry
+        gamma = surface_gamma_from_dofs(
+            dofs, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, False, None
+        )
+        gd2 = surface_gammadash2_from_dofs(
+            dofs, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, False, None
+        )
+        pts_fixed = gamma[0]  # phi slice 0
+        gd2_fixed = gd2[0]
+
+        # Flatten coil gammas as DOF vector
+        coil_dofs = _TF_GAMMAS.ravel()
+
+        def f(coil_gammas_flat):
+            gammas = coil_gammas_flat.reshape(_TF_GAMMAS.shape)
+            A = biot_savart_A(pts_fixed, gammas, _TF_GDS, _TF_CURRENTS)
+            return toroidal_flux_jax(A, gd2_fixed, _NTHETA)
+
+        grad_fn = jax.grad(f)
+        _taylor_test_central(f, grad_fn, coil_dofs)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

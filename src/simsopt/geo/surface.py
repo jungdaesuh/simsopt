@@ -21,6 +21,7 @@ except ImportError:
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.dev import SimsoptRequires
+from .._core.tracing_metadata import register_levelset_interpolant
 from .plotting import fix_matplotlib_3d
 from .._core.json import GSONable
 
@@ -950,6 +951,10 @@ class SurfaceClassifier():
         nr = int((self.rrange[1]-self.rrange[0])/h)
         nphi = int(2*np.pi/h)
         nz = int((self.zrange[1]-self.zrange[0])/h)
+        self._interpolation_degree = int(p)
+        self._interpolant_xrange = (rmin, rmax, nr)
+        self._interpolant_yrange = (0., 2*np.pi, nphi)
+        self._interpolant_zrange = (zmin, zmax, nz)
 
         def fbatch(rs, phis, zs):
             xyz = np.zeros((len(rs), 3))
@@ -962,6 +967,7 @@ class SurfaceClassifier():
         self.dist = sopp.RegularGridInterpolant3D(
             rule, [rmin, rmax, nr], [0., 2*np.pi, nphi], [zmin, zmax, nz], 1, True)
         self.dist.interpolate_batch(fbatch)
+        register_levelset_interpolant(self.dist, self)
 
     def evaluate_xyz(self, xyz):
         rphiz = np.zeros_like(xyz)

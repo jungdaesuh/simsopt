@@ -1,0 +1,110 @@
+"""JAX-backed drop-in for :class:`simsopt.field.Reiman`."""
+
+from __future__ import annotations
+
+import numpy as np
+import jax.numpy as jnp
+
+from simsopt._core.json import GSONDecoder
+from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
+from simsopt_jax.core.analytic_fields import (
+    ReimanSpec,
+    reiman_B,
+    reiman_dB,
+)
+from simsopt_jax.field.common import host_cache_array as _host_cache_array
+from simsopt_jax.field.common import points_device as _points_device
+from simsopt.field.magneticfield import MagneticField
+
+
+__all__ = ["ReimanJAX"]
+
+_ReimanSpecKey = tuple[float, float, tuple[int, ...], tuple[float, ...], int]
+
+
+class ReimanJAX(MagneticField):
+    """JAX-backed Reiman island-model field, drop-in for
+    :class:`simsopt.field.Reiman`.
+    """
+
+    _simsopt_jax_native_field = True
+
+    def __init__(self, iota0=0.15, iota1=0.38, k=None, epsilonk=None, m0=1):
+        MagneticField.__init__(self)
+        if k is None:
+            k = [6]
+        if epsilonk is None:
+            epsilonk = [0.01]
+        if len(k) != len(epsilonk):
+            raise ValueError(
+                f"k and epsilonk must have equal length; got {len(k)} and "
+                f"{len(epsilonk)}."
+            )
+        self.iota0 = float(iota0)
+        self.iota1 = float(iota1)
+        self.k = list(k)
+        self.epsilonk = list(epsilonk)
+        self.m0 = int(m0)
+        self._spec_key = self._spec_signature()
+        self._spec = self._build_spec_from_key(self._spec_key)
+
+    @staticmethod
+    def _build_spec_from_key(key: _ReimanSpecKey) -> ReimanSpec:
+        iota0, iota1, k_theta, epsilon, m0_symmetry = key
+        return ReimanSpec(
+            iota0=_as_jax_float64(iota0),
+            iota1=_as_jax_float64(iota1),
+            k_theta=k_theta,
+            epsilon=_as_jax_float64(epsilon),
+            m0_symmetry=m0_symmetry,
+        )
+
+    def _spec_signature(self) -> _ReimanSpecKey:
+        return (
+            float(self.iota0),
+            float(self.iota1),
+            tuple(int(v) for v in self.k),
+            tuple(float(v) for v in self.epsilonk),
+            int(self.m0),
+        )
+
+    def _current_spec(self) -> ReimanSpec:
+        key = self._spec_signature()
+        if key != self._spec_key:
+            self._spec_key = key
+            self._spec = self._build_spec_from_key(key)
+        return self._spec
+
+    def _B_impl(self, B):
+        points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
+        B[:] = _host_cache_array(
+            reiman_B(self._current_spec(), _points_device(points)), dtype=np.float64
+        )
+
+    def jax_B_at(self, point):
+        points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
+        return reiman_B(self._current_spec(), points)[0]
+
+    def jax_B_dB_at(self, point):
+        points = jnp.asarray(point, dtype=jnp.float64).reshape((1, 3))
+        spec = self._current_spec()
+        return reiman_B(spec, points)[0], reiman_dB(spec, points)[0]
+
+    def _dB_by_dX_impl(self, dB):
+        points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
+        dB[:] = _host_cache_array(
+            reiman_dB(self._current_spec(), _points_device(points)), dtype=np.float64
+        )
+
+    def as_dict(self, serial_objs_dict) -> dict:
+        d = super().as_dict(serial_objs_dict=serial_objs_dict)
+        d["points"] = self.get_points_cart()
+        return d
+
+    @classmethod
+    def from_dict(cls, d, serial_objs_dict, recon_objs):
+        field = cls(d["iota0"], d["iota1"], d["k"], d["epsilonk"], d["m0"])
+        decoder = GSONDecoder()
+        xyz = decoder.process_decoded(d["points"], serial_objs_dict, recon_objs)
+        field.set_points_cart(xyz)
+        return field

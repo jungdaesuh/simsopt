@@ -32,7 +32,7 @@ try:
 except ImportError:
     ObjectId = None
 
-from simsopt._core.json import GSONDecoder, GSONEncoder, GSONable, _load_redirect, jsanitize, SIMSON
+from simsopt._core.json import GSONDecoder, GSONEncoder, GSONable, _DEFAULT_REDIRECT, _load_redirect, _merge_redirect, jsanitize, SIMSON
 
 test_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test_files")
 
@@ -650,6 +650,67 @@ class JsonTest(unittest.TestCase):
         d["@class"] = "not_there"
         obj = json.loads(json.dumps(d), cls=GSONDecoder)
         self.assertEqual(type(obj), dict)
+
+    def test_redirect_across_modules_resolves_moved_class(self):
+        # Regression: a redirect whose target module differs from the source
+        # module must reconstruct the moved class. The prior implementation
+        # reassigned ``modname`` to the new module before the second REDIRECT
+        # lookup, raising KeyError whenever old_module != new_module -- exactly
+        # the real CurveCWSFourier relocation case. (``test_redirect`` above
+        # cannot catch this: its redirect target module equals the source.)
+        GSONable.REDIRECT["retired.legacy.location"] = {
+            "RetiredName": {"@class": "GoodGSONClass", "@module": "core.test_json"}
+        }
+        try:
+            d = {
+                "@class": "RetiredName",
+                "@module": "retired.legacy.location",
+                "a": 1,
+                "b": 1,
+                "c": 1,
+            }
+            obj = json.loads(json.dumps(d), cls=GSONDecoder)
+        finally:
+            GSONable.REDIRECT.pop("retired.legacy.location", None)
+        self.assertEqual(type(obj), GoodGSONClass)
+
+    def test_curvecwsfourier_relocation_seeded_by_default(self):
+        # The JAX-port relocation of CurveCWSFourier is redirected by default so
+        # artifacts serialized at the retired ``simsopt.geo.curvecwsfourier``
+        # path load without a user-supplied ~/.simsopt.yaml.
+        entry = GSONable.REDIRECT.get("simsopt.geo.curvecwsfourier", {})
+        for class_name in ("CurveCWSFourier", "CurveCWSFourierCPP"):
+            self.assertEqual(
+                entry.get(class_name),
+                {
+                    "@module": "simsopt_jax_adapters.geo.curvecwsfourier",
+                    "@class": class_name,
+                },
+            )
+
+    def test_merge_redirect_override_wins_without_aliasing_base(self):
+        # A user ~/.simsopt.yaml entry overrides the in-repo default per
+        # (module, class) while sibling defaults survive; and the merged table
+        # must never alias the base leaf dicts, so mutating REDIRECT can never
+        # corrupt the _DEFAULT_REDIRECT module constant. (The prior merge copied
+        # only the top two dict levels, leaving leaves shared by reference.)
+        base = {
+            "m": {
+                "A": {"@module": "m.new", "@class": "A"},
+                "B": {"@module": "m.new", "@class": "B"},
+            }
+        }
+        override = {"m": {"A": {"@module": "user.mod", "@class": "A2"}}}
+        merged = _merge_redirect(base, override)
+        self.assertEqual(merged["m"]["A"], {"@module": "user.mod", "@class": "A2"})
+        self.assertEqual(merged["m"]["B"], {"@module": "m.new", "@class": "B"})
+        merged["m"]["B"]["@module"] = "MUTATED"
+        self.assertEqual(base["m"]["B"]["@module"], "m.new")
+        # The production REDIRECT likewise does not alias the module constant.
+        self.assertIsNot(
+            GSONable.REDIRECT["simsopt.geo.curvecwsfourier"]["CurveCWSFourier"],
+            _DEFAULT_REDIRECT["simsopt.geo.curvecwsfourier"]["CurveCWSFourier"],
+        )
 
     def test_redirect_settings_file(self):
         data = _load_redirect(os.path.join(test_dir, "test_settings.yaml"))

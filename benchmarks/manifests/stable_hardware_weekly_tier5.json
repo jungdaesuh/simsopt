@@ -1,0 +1,82 @@
+{
+  "benchmark_id": "jax-stable-hardware-weekly-tier5",
+  "title": "Weekly JAX Tier 5 stable-hardware report",
+  "default_rollout_lane": "native_cpu",
+  "hardware_contract": {
+    "runner_labels": [
+      "self-hosted",
+      "stable-benchmarks"
+    ],
+    "platform": "cuda",
+    "expectation": "Use one dedicated stable-hardware runner or a homogeneous pinned pool.",
+    "notes": [
+      "Do not compare results across heterogeneous GPU generations in one report.",
+      "Treat missing or reprovisioned benchmark runners as a scheduling blocker, not a performance regression."
+    ]
+  },
+  "schedule": {
+    "cadence": "weekly",
+    "workflow": ".github/workflows/jax_benchmark_reporting.yml"
+  },
+  "runtime_contract": {
+    "backend_mode": "jax_gpu_fast",
+    "strict_backend": true,
+    "transfer_guard": "log",
+    "compilation_cache": "required_persistent"
+  },
+  "performance_budget": {
+    "profile": "stable_hardware_weekly",
+    "tier2_stage2_e2e": {
+      "min_outer_speedup_vs_cpu": 1.25,
+      "min_warm_speedup_vs_cpu": 1.25,
+      "max_compile_overhead_s": 60.0
+    }
+  },
+  "memory_budget": {
+    "fixture": "real-single-stage-init",
+    "platform": "cuda",
+    "max_peak_rss_mb": 8192.0,
+    "max_peak_gpu_memory_mb": 12288.0
+  },
+  "commands": [
+    {
+      "name": "tier5_performance_characterization",
+      "script": "benchmarks/tier5_performance_characterization.py",
+      "args": [
+        "--platform",
+        "cuda",
+        "--optimizer-backend",
+        "ondevice",
+        "--benchmark-mode",
+        "--maxiter",
+        "20",
+        "--output-json",
+        "benchmark_artifacts/tier5_performance_characterization.json"
+      ]
+    },
+    {
+      "name": "grouped_adjoint_memory_probe",
+      "script": "benchmarks/grouped_adjoint_memory_probe.py",
+      "env": {
+        "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_COMPILATION_CACHE_DIR": "benchmark_artifacts/jax-compilation-cache/jax_gpu_fast-dense-audit"
+      },
+      "args": [
+        "--platform",
+        "cuda",
+        "--optimizer-backend",
+        "ondevice",
+        "--output-json",
+        "benchmark_artifacts/grouped_adjoint_memory_probe.json",
+        "--record-jax-compile-diagnostics",
+        "--device-memory-profile-out",
+        "benchmark_artifacts/grouped_adjoint_memory_profile.prof"
+      ]
+    }
+  ],
+  "report": {
+    "template": "benchmarks/reports/STANDARD_REPORT_TEMPLATE.md",
+    "renderer": "benchmarks/render_benchmark_report.py",
+    "output_markdown": "benchmark_artifacts/stable_hardware_weekly_report.md"
+  }
+}

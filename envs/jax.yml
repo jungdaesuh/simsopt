@@ -1,0 +1,10 @@
+name: jax
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - cmake
+  - ninja
+  - c-compiler
+  - cxx-compiler
