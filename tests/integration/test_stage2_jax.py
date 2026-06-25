@@ -60,11 +60,18 @@ STAGE2_SCRIPT = (
 )
 _SINGLE_STAGE_EXAMPLE_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 _STAGE2_EQUILIBRIUM_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
+# Match only the STABLE invariant anchors of the target-backend rejection
+# message raised by ``resolve_target_optimizer_contract`` in
+# ``simsopt_jax.geo.optimizers.optimizer``.  The full enumerated backend list
+# (ondevice, scipy-jax, scipy-jax-decomposed, host-jax, ...) is volatile and
+# re-encoding it here is exactly what drifted out of sync with the source;
+# ``pytest.raises(match=...)`` runs ``re.search`` so we anchor on the
+# backend='jax'-requires prefix and the CPU/reference-only closing sentence and
+# bridge them with ``.*`` so future backend additions cannot re-break the test.
 _TARGET_BACKEND_REQUIREMENT = (
-    "the Stage 2 outer loop with backend='jax' requires "
-    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', "
-    "optimizer_backend='scipy-jax-fullgraph', optimizer_backend='optax-lbfgs', "
-    "or optimizer_backend='optimistix-lbfgs'"
+    r"with backend='jax' requires "
+    r".*"
+    r"The SciPy/reference optimizer lane is CPU/reference-only\."
 )
 _OPTIMIZER_BACKEND_CHOICES = render_invalid_optimizer_backend_message("outer")
 
@@ -1126,7 +1133,24 @@ class TestObjectiveValueParity:
 
         cpu_j = float(jf_cpu.J())
         jax_j = float(jf_jax.J())
-        assert np.isposinf(cpu_j), f"CPU zero-current J should be +inf, got {cpu_j}"
+        # Singular zero-current boundary: every coil carries zero current, so the
+        # coil field |B| = 0 at every quadrature point.  Both the ``normalized``
+        # (J = 0.5 Σ(B·n̂)²|n| / Σ|B|²|n|) and ``local`` (J = 0.5 Σ(B·n̂)²/|B|²·|n|)
+        # definitions divide by Σ|B|² / |B|², i.e. 0/0 at this configuration.  The
+        # two backends resolve that 0/0 *differently by design*, so this test
+        # documents an intentional, backend-specific singular boundary rather than
+        # asserting cross-backend parity (which is undefined at 0/0):
+        #   * C++ ``SquaredFlux`` performs the raw IEEE division and propagates the
+        #     0/0 as ``nan`` (no singular-point guard).
+        #   * The JAX port (``integral_BdotN_surface_sharded`` in
+        #     ``simsopt_jax.core.integral_bdotn``) explicitly guards the zero
+        #     denominator / zero-|B|² points with
+        #     ``jnp.where(denominator > 0.0, ..., jnp.inf)`` and returns ``+inf``
+        #     as a well-defined "objective undefined / infinitely bad" sentinel,
+        #     exactly as documented in that module's docstring.
+        # Parity is only required where the objective is well defined (|B| > 0);
+        # at the singular boundary each backend's documented sentinel is asserted.
+        assert np.isnan(cpu_j), f"CPU zero-current J should be nan, got {cpu_j}"
         assert np.isposinf(jax_j), f"JAX zero-current J should be +inf, got {jax_j}"
 
 

@@ -109,16 +109,28 @@ def compute_gradient_l2_metrics(gradient) -> tuple[float, bool]:
 
 
 def compute_derivative_l2_metrics(derivative, optim) -> tuple[float, bool]:
-    """Compute finite-ness and L2 norm without materializing the full gradient."""
-    from simsopt._core.derivative import _iter_local_free_derivative_blocks
+    """Compute finite-ness and L2 norm without materializing the full gradient.
 
+    This mirrors the free-dof accumulation in
+    :meth:`simsopt._core.derivative.Derivative.__call__` (``as_derivative=False``)
+    block by block, but reads ``derivative.data`` non-mutatingly: a missing
+    optimizable contributes a zero block instead of triggering the
+    ``OptimizableDefaultDict`` insertion that ``self.data[opt]`` would. The
+    concatenation of these per-lineage blocks is exactly ``derivative(optim)``,
+    so accumulating ``dot(block, block)`` yields ``norm(full_gradient) ** 2``.
+    """
+    data = derivative.data
     sq_norm = 0.0
     finite = True
-    for local_derivs in _iter_local_free_derivative_blocks(
-        derivative.data,
-        optim,
-        populate_missing=False,
-    ):
+    for k in optim.unique_dof_lineage:
+        if not np.any(k.dofs_free_status):
+            continue
+        local_derivs = np.zeros(k.local_dof_size)
+        for opt in k.dofs.dep_opts():
+            block = data.get(opt)
+            if block is None:
+                continue
+            local_derivs += block[opt.local_dofs_free_status]
         finite = finite and bool(np.all(np.isfinite(local_derivs)))
         sq_norm += float(np.dot(local_derivs, local_derivs))
     return float(np.sqrt(sq_norm)), finite

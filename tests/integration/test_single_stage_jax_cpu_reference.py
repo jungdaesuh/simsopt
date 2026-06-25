@@ -161,7 +161,6 @@ from simsopt_jax.core.curve_geometry import (  # noqa: E402
     _mapped_input_dofs,
 )
 from simsopt_jax.core._math_utils import as_jax_float64  # noqa: E402
-from simsopt_jax.core.curve_xyz_fourier import jaxfouriercurve_pure  # noqa: E402
 from simsopt_jax_adapters.geo.boozer_surface import (  # noqa: E402
     BoozerSurfaceJAX,
     _boozer_ls_coil_vjp,
@@ -196,7 +195,6 @@ from simsopt_jax_adapters.geo.surface_objectives import (  # noqa: E402
     make_traceable_single_stage_alm_runtime_bundle,
 )
 from simsopt_jax_adapters.geo.curve_specs import (  # noqa: E402
-    adapter_curve_dof_mode,
     curve_spec_from_adapter_curve,
 )
 from simsopt_jax.geo.boozer_residual import (  # noqa: E402
@@ -274,7 +272,11 @@ def _explicit_curve_spec(curve):
     if curve_type == "CurvePerturbed":
         base_dofs = np.asarray(curve.curve.get_dofs(), dtype=np.float64)
         return make_curve_perturbed_spec(
-            dofs=curve.get_dofs(),
+            # CurvePerturbed.get_dofs() is a pure-virtual on CurveBase; the
+            # perturbation sample carries no dofs, so the owner dof vector is the
+            # base curve's free dofs exposed through full_x (matching the
+            # production adapter ``_curve_perturbed_spec_from_curve``).
+            dofs=curve.full_x,
             quadpoints=curve.quadpoints,
             base_curve=_explicit_curve_spec(curve.curve),
             base_curve_map=_local_dof_map_spec(base_dofs, 0),
@@ -1552,35 +1554,31 @@ def _assert_curve_spec_pullback_matches_curve_methods(
     )
 
     coeff_cotangent, surface_cotangent = curve_pullback_from_spec(spec, dg, dgd)
-    curve_dofs = jnp.asarray(
-        curve.full_x
-        if adapter_curve_dof_mode(curve) == "full"
-        else curve.get_dofs(),
-        dtype=jnp.float64,
-    )
-    if hasattr(curve, "dgamma_by_dcoeff_vjp_jax") and hasattr(
-        curve,
-        "dgammadash_by_dcoeff_vjp_jax",
-    ):
-        coeff_expected = curve.dgamma_by_dcoeff_vjp_jax(
-            curve_dofs,
-            dg,
-        ) + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
-    else:
-        quadpoints = jnp.asarray(curve.quadpoints, dtype=jnp.float64)
-        tangents = jnp.ones_like(quadpoints)
+    # Native simsopt reference. ``dgamma_by_dcoeff_vjp``/``dgammadash_by_dcoeff_vjp``
+    # exist for every curve type and return a ``Derivative``; projecting onto
+    # ``curve`` yields the cotangent in the curve's FREE-dof basis (the
+    # ``Derivative.__call__`` contract masks each lineage block by
+    # ``local_dofs_free_status`` -- see simsopt._core.derivative).
+    coeff_reference = curve.dgamma_by_dcoeff_vjp(
+        np.asarray(dg)
+    ) + curve.dgammadash_by_dcoeff_vjp(np.asarray(dgd))
+    coeff_expected = coeff_reference(curve)
 
-        def outputs(dofs):
-            def gamma_kernel(qp):
-                return jaxfouriercurve_pure(dofs, qp, curve.order)
-
-            return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
-
-        _, pullback = jax.vjp(outputs, curve_dofs)
-        (coeff_expected,) = pullback((dg, dgd))
+    # The spec pullback returns the cotangent in ``spec.dofs`` basis, which spans
+    # ALL of the curve's dofs (free AND fixed): ``spec.dofs`` is ``full_x`` for
+    # full-mode curves (CurvePerturbed/CurveFilament) and the full local dof
+    # vector -- equal to ``full_x`` for these leaf curves -- for local-mode ones
+    # (see curve_specs.py). The native reference is in the free-dof basis, so
+    # project the port cotangent onto the free dofs; this keeps the comparison
+    # correct under fixed dofs rather than only when the fixture leaves every dof
+    # free. ``dofs_free_status`` is the full_x-aligned free mask, so for an
+    # all-free curve the projection is the identity.
+    coeff_port = np.asarray(coeff_cotangent)[
+        np.asarray(curve.dofs_free_status, dtype=bool)
+    ]
 
     np.testing.assert_allclose(
-        np.asarray(coeff_cotangent),
+        coeff_port,
         np.asarray(coeff_expected),
         rtol=1e-10,
         atol=1e-12,
