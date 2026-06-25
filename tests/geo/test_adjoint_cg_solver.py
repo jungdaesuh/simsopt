@@ -98,3 +98,161 @@ def test_hessian_least_squares_dispatches_to_cg(monkeypatch):
 def test_default_selector_does_not_use_cg():
     """The default selector keeps the established (non-CG) path."""
     assert _optimizer._ADJOINT_LINEAR_SOLVER != "cg"
+
+
+# --- Opt-in dense-LU exact-Boozer adjoint solver (SIMSOPT_EXACT_ADJOINT_DENSE_LU) ---
+# The exact-Jacobian adjoint solves the NON-normal ``J^T x = g`` system, which the
+# restarted operator-GMRES baseline stagnates on; the opt-in path materializes the
+# square ``J^T`` and solves it by direct LU + one iterative-refinement step.  These
+# tests exercise the committed solver and dispatch gate directly (the existing
+# adapter-gate tests patch this solver out, so they cannot detect a broken solver).
+
+
+def _nonsymmetric_problem(n=12, seed=0):
+    """A well-conditioned NON-symmetric matrix, its matvec, and a random rhs.
+
+    Diagonally dominant ``randn + n*I`` is asymmetric (so it exercises the
+    transpose path the dense-LU solver targets) yet well-conditioned, matching
+    the production exact-Boozer ``J^T`` regime (cond ~ 1e3).
+    """
+    rng = np.random.default_rng(seed)
+    a = rng.standard_normal((n, n)) + n * np.eye(n)
+    matrix = jnp.asarray(a)
+    rhs = jnp.asarray(rng.standard_normal(n))
+
+    def matvec(v):
+        return matrix @ v
+
+    return matrix, matvec, rhs
+
+
+def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
+    """The committed LU+IR solver matches an independent dense oracle on a
+    non-symmetric operator (the regime where the GMRES baseline stagnates)."""
+    matrix, matvec, rhs = _nonsymmetric_problem(seed=0)
+    solution, status = (
+        _optimizer._solve_dense_square_operator_lu_system_with_status(
+            matvec, rhs, tol=1e-12
+        )
+    )
+    expected = jnp.linalg.solve(matrix, rhs)
+    assert bool(status.success)
+    rel = float(
+        np.linalg.norm(np.asarray(solution) - np.asarray(expected))
+        / np.linalg.norm(np.asarray(expected))
+    )
+    assert rel < 1e-12, rel
+
+
+def test_dense_lu_solver_batched_rhs_column_parity():
+    """A 2-D ``(n, k)`` RHS is solved column-wise by one factorization; each
+    column equals the single-vector solve of that column and a dense oracle."""
+    matrix, matvec, _ = _nonsymmetric_problem(seed=1)
+    n = matrix.shape[0]
+    rng = np.random.default_rng(11)
+    rhs_batched = jnp.asarray(rng.standard_normal((n, 3)))
+    batched, status = (
+        _optimizer._solve_dense_square_operator_lu_system_with_status(
+            matvec, rhs_batched, tol=1e-12
+        )
+    )
+    assert bool(status.success)
+    expected = jnp.linalg.solve(matrix, rhs_batched)
+    np.testing.assert_allclose(
+        np.asarray(batched), np.asarray(expected), rtol=1e-10, atol=1e-12
+    )
+    for j in range(3):
+        column, _ = (
+            _optimizer._solve_dense_square_operator_lu_system_with_status(
+                matvec, rhs_batched[:, j], tol=1e-12
+            )
+        )
+        np.testing.assert_allclose(
+            np.asarray(batched[:, j]), np.asarray(column), rtol=1e-10, atol=1e-12
+        )
+
+
+def test_dense_lu_materialization_gate_shape_and_byte_contract():
+    """The LU materialization gate accepts 1-D and 2-D RHS, rejects 3-D, and
+    rejects a RHS whose ``n x n`` materialization exceeds the byte cap."""
+    allowed = _optimizer._dense_square_operator_lu_materialization_allowed
+    assert allowed(jnp.zeros(8))
+    assert allowed(jnp.zeros((8, 3)))
+    assert not allowed(jnp.zeros((8, 3, 2)))
+    # n = 40000 -> 40000^2 * 8 bytes = 12.8 GB, over any backend's dense cap.
+    assert not allowed(jnp.zeros(40000))
+
+
+def test_solve_jacobian_operator_gate_routes_lu_iff_flag_and_transpose(monkeypatch):
+    """The committed dispatch gate routes to the dense-LU helper iff the opt-in
+    flag is set AND transpose=True; flag-on + transpose=False must not take it."""
+    matrix, _, rhs = _nonsymmetric_problem(seed=2)
+    operator = {
+        "matvec": lambda v: matrix @ v,
+        "transpose_matvec": lambda v: matrix.T @ v,
+    }
+    calls = {"n": 0}
+    real_lu = _optimizer._solve_dense_square_operator_lu_system_with_status
+
+    def spy(*args, **kwargs):
+        calls["n"] += 1
+        return real_lu(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _optimizer, "_solve_dense_square_operator_lu_system_with_status", spy
+    )
+    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+
+    # flag ON + transpose=True -> dense-LU solving the transpose operator.
+    solution, status = _optimizer._solve_jacobian_operator_with_status(
+        operator, rhs, transpose=True, tol=1e-12
+    )
+    assert calls["n"] == 1
+    assert bool(status.success)
+    expected = jnp.linalg.solve(np.asarray(matrix).T, np.asarray(rhs))
+    np.testing.assert_allclose(
+        np.asarray(solution), np.asarray(expected), rtol=1e-10, atol=1e-12
+    )
+
+    # flag ON + transpose=False -> transpose-only gate must not take the LU branch.
+    calls["n"] = 0
+    _optimizer._solve_jacobian_operator_with_status(
+        operator, rhs, transpose=False, tol=1e-12
+    )
+    assert calls["n"] == 0
+
+
+def test_solve_jacobian_operator_default_flag_does_not_use_dense_lu(monkeypatch):
+    """The dense-LU branch is opt-in: at the default (flag off) the transpose
+    solve does not route to the dense-LU helper."""
+    assert _optimizer._EXACT_ADJOINT_DENSE_LU is False
+    matrix, _, rhs = _nonsymmetric_problem(seed=4)
+    operator = {
+        "matvec": lambda v: matrix @ v,
+        "transpose_matvec": lambda v: matrix.T @ v,
+    }
+    calls = {"n": 0}
+    real_lu = _optimizer._solve_dense_square_operator_lu_system_with_status
+
+    def spy(*args, **kwargs):
+        calls["n"] += 1
+        return real_lu(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _optimizer, "_solve_dense_square_operator_lu_system_with_status", spy
+    )
+    _optimizer._solve_jacobian_operator_with_status(
+        operator, rhs, transpose=True, tol=1e-12
+    )
+    assert calls["n"] == 0
+
+
+def test_dense_lu_status_reports_machine_precision_residual():
+    """On a well-conditioned operator the LU+IR status reports a
+    machine-precision relative residual and success."""
+    _, matvec, rhs = _nonsymmetric_problem(seed=5)
+    _, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        matvec, rhs, tol=1e-12
+    )
+    assert bool(status.success)
+    assert float(np.asarray(status.residual_relative)) < 1e-10
