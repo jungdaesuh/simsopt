@@ -99,6 +99,7 @@ __all__ = [
 
 
 _SpecClass = TypeVar("_SpecClass", bound=type)
+_JAX_SPEC_CLASS_REGISTRY: dict[tuple[str, str], type] = {}
 
 
 def _gson_encode_numpy_array(value: np.ndarray) -> dict[str, object]:
@@ -117,9 +118,12 @@ def _gson_encode_numpy_array(value: np.ndarray) -> dict[str, object]:
 
 
 def gson_encode_spec_value(value: object) -> object:
-    if is_dataclass(value) and type(value).__module__ == __name__:
+    if is_dataclass(value) and (
+        type(value).__module__,
+        type(value).__name__,
+    ) in _JAX_SPEC_CLASS_REGISTRY:
         payload: dict[str, object] = {
-            "@module": __name__,
+            "@module": type(value).__module__,
             "@class": type(value).__name__,
         }
         for field in fields(value):
@@ -154,12 +158,25 @@ def gson_decode_spec_value(value: object) -> object:
         classname = value.get("@class")
         if (module, classname) == ("numpy", "array"):
             return _gson_decode_numpy_array(value)
+        if isinstance(module, str) and isinstance(classname, str):
+            spec_cls = _JAX_SPEC_CLASS_REGISTRY.get((module, classname))
+            if spec_cls is not None:
+                data = {
+                    key: item for key, item in value.items() if not key.startswith("@")
+                }
+                return spec_cls.from_dict(data)
         if module == __name__ and isinstance(classname, str):
             spec_cls = globals().get(classname)
             if spec_cls is None or not hasattr(spec_cls, "from_dict"):
                 raise NotImplementedError(f"{module}.{classname}")
             data = {key: item for key, item in value.items() if not key.startswith("@")}
             return spec_cls.from_dict(data)
+        if (
+            isinstance(module, str)
+            and isinstance(classname, str)
+            and module.startswith("simsopt_jax.")
+        ):
+            raise NotImplementedError(f"{module}.{classname}")
         return {key: gson_decode_spec_value(item) for key, item in value.items()}
     return value
 
@@ -171,6 +188,9 @@ def _register_jax_spec(
 
     def _decorate(spec_cls: _SpecClass) -> _SpecClass:
         frozen_spec_cls = dataclass(frozen=True)(spec_cls)
+        _JAX_SPEC_CLASS_REGISTRY[
+            (frozen_spec_cls.__module__, frozen_spec_cls.__name__)
+        ] = frozen_spec_cls
 
         def _as_dict(self, serial_objs_dict=None):
             return gson_encode_spec_value(self)

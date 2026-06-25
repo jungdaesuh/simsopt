@@ -1254,6 +1254,36 @@ def _serialize_stage2_term_payload(entries):
     }
 
 
+def build_stage2_objective_diagnostics(
+    *,
+    backend,
+    optimizer_backend,
+    final_dofs,
+    final_snapshot,
+):
+    """Return accepted-artifact diagnostics for the final objective evaluation."""
+
+    dofs_array = host_array(final_dofs)
+    terms = final_snapshot.get("terms")
+    return {
+        "backend": str(backend),
+        "optimizer_backend": str(optimizer_backend),
+        "objective_source": str(final_snapshot.get("objective_source", "explicit")),
+        "simsopt_file": str(sys.modules["simsopt"].__file__),
+        "decision_vector_shape": [int(size) for size in dofs_array.shape],
+        "decision_vector_count": int(dofs_array.size),
+        "raw_terms": {}
+        if terms is None
+        else {name: float(entry["raw_J"]) for name, entry in terms.items()},
+        "weighted_terms": {}
+        if terms is None
+        else {name: float(entry["J"]) for name, entry in terms.items()},
+        "term_grad_norms": {}
+        if terms is None
+        else {name: float(entry["grad_norm"]) for name, entry in terms.items()},
+    }
+
+
 def _build_stage2_explicit_term_payload(context):
     squared_flux_grad = compute_stage2_term_gradient(context.Jf, context.JF)
     squared_flux = host_float(context.Jf.J())
@@ -1338,6 +1368,7 @@ def build_stage2_target_reporting_snapshot(target_objective_bundle, dofs):
     terms = _build_stage2_target_term_payload(target_objective_bundle, dofs64)
     snapshot = {
         "J": _stage2_artifact_host_float(lambda: value),
+        "objective_source": "target-objective",
         "Jf": _stage2_artifact_host_float(lambda: summary.Jf),
         "mean_abs_relBfinal_norm": _stage2_artifact_host_float(
             lambda: summary.mean_abs_relBfinal_norm
@@ -1706,6 +1737,7 @@ def evaluate_stage2_objective(
     diagnostics["coil_coil_distance"] = distance_state.coil_coil_distance
     snapshot = {
         "J": J,
+        "objective_source": "explicit",
         "Jf": squared_flux,
         "mean_abs_relBfinal_norm": host_float(diagnostics["mean_abs_relBfinal_norm"]),
         "curve_length": curve_length,
@@ -1713,6 +1745,7 @@ def evaluate_stage2_objective(
         "curvature": curvature,
         "grad_norm": float(np.linalg.norm(grad)),
         "distance_constraint_violated": distance_state.violated,
+        "terms": _serialize_stage2_term_payload(term_entries),
     }
     return snapshot, grad, diagnostics
 
@@ -2153,6 +2186,38 @@ def should_build_stage2_target_objective(
         least_squares_algorithm=least_squares_algorithm,
     )
     return isinstance(contract, TargetOptimizerContract)
+
+
+def build_stage2_trajectory_payload(
+    *,
+    backend,
+    optimizer_backend,
+    least_squares_algorithm,
+    evaluations,
+):
+    contract = resolve_stage2_optimizer_contract(
+        backend,
+        optimizer_backend,
+        least_squares_algorithm=least_squares_algorithm,
+    )
+    contract_payload = {
+        "kind": (
+            "target" if isinstance(contract, TargetOptimizerContract) else "reference"
+        ),
+        "method": stage2_optimizer_contract_method(contract),
+    }
+    if isinstance(contract, TargetOptimizerContract):
+        contract_payload["objective_route"] = contract.objective_route.value
+        contract_payload["use_least_squares_objective"] = bool(
+            contract.use_least_squares_objective
+        )
+    return {
+        "backend": backend,
+        "optimizer_backend": optimizer_backend,
+        "least_squares_algorithm": least_squares_algorithm,
+        "optimizer_contract": contract_payload,
+        "evaluations": evaluations or [],
+    }
 
 
 def resolve_stage2_target_lane_requirements(
@@ -2624,6 +2689,14 @@ _STAGE2_ACCEPTED_METADATA_PATHS = (
     ("provenance", "host_dtype"),
     ("provenance", "tolerance_tier"),
     ("problem_contract", "runtime_contract", "max_iterations"),
+    ("OBJECTIVE_DIAGNOSTICS", "backend"),
+    ("OBJECTIVE_DIAGNOSTICS", "optimizer_backend"),
+    ("OBJECTIVE_DIAGNOSTICS", "objective_source"),
+    ("OBJECTIVE_DIAGNOSTICS", "simsopt_file"),
+    ("OBJECTIVE_DIAGNOSTICS", "decision_vector_shape"),
+    ("OBJECTIVE_DIAGNOSTICS", "decision_vector_count"),
+    ("OBJECTIVE_DIAGNOSTICS", "raw_terms"),
+    ("OBJECTIVE_DIAGNOSTICS", "weighted_terms"),
 )
 
 _STAGE2_ACCEPTED_METRIC_PATHS = (
@@ -3532,7 +3605,12 @@ if __name__ == "__main__":
         if args.trajectory_json:
             write_json_file(
                 args.trajectory_json,
-                {"backend": args.backend, "evaluations": trajectory or []},
+                build_stage2_trajectory_payload(
+                    backend=args.backend,
+                    optimizer_backend=args.optimizer_backend,
+                    least_squares_algorithm=args.least_squares_algorithm,
+                    evaluations=trajectory,
+                ),
             )
         print(
             "Probe-only mode requested; exiting before optimization and post-processing."
@@ -3981,7 +4059,12 @@ if __name__ == "__main__":
     if args.trajectory_json:
         write_json_file(
             args.trajectory_json,
-            {"backend": args.backend, "evaluations": trajectory or []},
+            build_stage2_trajectory_payload(
+                backend=args.backend,
+                optimizer_backend=args.optimizer_backend,
+                least_squares_algorithm=args.least_squares_algorithm,
+                evaluations=trajectory,
+            ),
         )
         print(f"Wrote Stage 2 trajectory to {args.trajectory_json}")
 
@@ -4265,6 +4348,12 @@ if __name__ == "__main__":
             else float(best_feasible_partial.objective)
         ),
         "FINAL_DOFS": stage2_final_dofs.tolist(),
+        "OBJECTIVE_DIAGNOSTICS": build_stage2_objective_diagnostics(
+            backend=args.backend,
+            optimizer_backend=args.optimizer_backend,
+            final_dofs=stage2_final_dofs,
+            final_snapshot=final_snapshot,
+        ),
         "FINAL_OBJECTIVE": final_snapshot["J"],
         "OBJECTIVE_J": final_snapshot["J"],
         "FINAL_SQUARED_FLUX": final_snapshot["Jf"],

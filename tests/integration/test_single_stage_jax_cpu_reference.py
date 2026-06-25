@@ -197,6 +197,9 @@ from simsopt_jax_adapters.geo.surface_objectives import (  # noqa: E402
 from simsopt_jax_adapters.geo.curve_specs import (  # noqa: E402
     curve_spec_from_adapter_curve,
 )
+from examples.single_stage_optimization.banana_opt.jax_banana_specs import (  # noqa: E402
+    build_banana_single_stage_solved_state_target,
+)
 from simsopt_jax.geo.boozer_residual import (  # noqa: E402
     boozer_residual_scalar,
     boozer_residual_jacobian_composed,
@@ -7400,6 +7403,144 @@ class TestTraceableObjective:
             atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
             err_msg="Traceable objective dropped the offset iota penalty",
         )
+
+    def test_banana_solved_state_target_matches_single_stage_terms(
+        self,
+        monkeypatch,
+    ):
+        """The banana solved-state facade must consume explicit Boozer state."""
+        (
+            _coils,
+            _surf_cpu,
+            _surf_jax,
+            _bs_cpu,
+            bs_jax,
+            _booz_cpu,
+            booz_jax,
+            _vol_cpu,
+            iota0,
+            G0,
+        ) = _make_boozer_setup(
+            constraint_weight=1.0,
+            optimizer_backend="host-jax",
+        )
+        res = booz_jax.run_code(iota0, G0)
+        assert res is not None and res.get("success", False)
+
+        banana_curve = bs_jax.coils[0].curve
+        curves = [coil.curve for coil in bs_jax.coils]
+        length_target = single_stage_example.host_float(
+            single_stage_example.CurveLength(banana_curve).J()
+        )
+        vessel_surface = single_stage_example.SurfaceRZFourier(
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=booz_jax.surface.quadpoints_phi,
+            quadpoints_theta=booz_jax.surface.quadpoints_theta,
+        )
+        vessel_surface.set_rc(0, 0, 1.2)
+        vessel_surface.set_rc(1, 0, 0.15)
+        vessel_surface.set_zs(1, 0, 0.15)
+
+        config = (
+            single_stage_example.build_traceable_single_stage_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=5.0e-4,
+                length_target=length_target,
+                curve_curve_weight=100.0,
+                curve_curve_threshold=0.05,
+                curve_surface_weight=1.0,
+                curve_surface_threshold=0.02,
+                surface_vessel_weight=1000.0,
+                surface_vessel_threshold=0.04,
+                curvature_weight=0.1,
+                curvature_threshold=40.0,
+            )
+        )
+
+        iota_target = as_jax_float64(booz_jax.res["iota"])
+        solved_target = build_banana_single_stage_solved_state_target(
+            booz_jax,
+            bs_jax,
+            iota_target,
+            outer_objective_config=config,
+        )
+
+        _, IotasJAX, NonQuasiSymmetricRatioJAX = (
+            single_stage_example.get_jax_surface_objective_classes()
+        )
+        iota = single_stage_example.build_iota_objective(booz_jax, IotasJAX)
+        j_non_qs = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
+        j_boozer = single_stage_example.build_boozer_residual_objective(
+            booz_jax,
+            bs_jax,
+            single_stage_example.select_boozer_residual_class(
+                use_jax=True,
+                boozer_kind="ls",
+            ),
+        )
+        jf = (
+            j_non_qs
+            + 1000.0 * j_boozer
+            + 100.0 * QuadraticPenalty(iota, booz_jax.res["iota"])
+            + 5.0e-4
+            * QuadraticPenalty(
+                single_stage_example.CurveLength(banana_curve),
+                length_target,
+                "max",
+            )
+            + 100.0 * single_stage_example.CurveCurveDistance(curves, 0.05)
+            + 1.0
+            * single_stage_example.CurveSurfaceDistance(
+                curves,
+                booz_jax.surface,
+                0.02,
+            )
+            + 1000.0
+            * single_stage_example.SurfaceSurfaceDistance(
+                booz_jax.surface,
+                vessel_surface,
+                0.04,
+            )
+            + 0.1 * single_stage_example.LpCurveCurvature(banana_curve, 2, 40.0)
+        )
+        expected_value = jf.J()
+
+        def _reject_hidden_resolve(*_args, **_kwargs):
+            raise AssertionError(
+                "solved-state banana target must consume explicit Boozer state"
+            )
+
+        monkeypatch.setattr(booz_jax, "run_code", _reject_hidden_resolve)
+
+        solved_value, solved_grad = solved_target.value_and_grad(
+            solved_target.coil_dofs,
+            solved_target.solved_x,
+            solved_target.linear_solve_factors,
+        )
+
+        np.testing.assert_allclose(
+            float(solved_value),
+            expected_value,
+            rtol=1e-10,
+            atol=1e-8,
+            err_msg=(
+                "Explicit solved-state banana target no longer matches "
+                "single-stage JF"
+            ),
+        )
+        assert np.all(np.isfinite(np.asarray(solved_grad, dtype=float)))
+        assert np.asarray(solved_grad).shape == np.asarray(
+            solved_target.coil_dofs
+        ).shape
 
     def test_full_single_stage_outer_objective_matches_real_jf_value(self):
         """The full target-lane outer objective must match the real single-stage JF."""

@@ -47,6 +47,10 @@ from simsopt_jax_adapters.geo.curve_objectives import (
 )
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt_jax.backend import (
+    get_pairwise_penalty_chunk_size,
+    invalidate_backend_cache,
+)
 from simsopt_jax.core import (
     curve_dkappa_by_dcoeff_from_dofs,
     curve_dtorsion_by_dcoeff_from_dofs,
@@ -59,8 +63,11 @@ from simsopt_jax.core import (
     curve_torsion_from_dofs,
     curve_torsion_from_spec,
 )
+from simsopt_jax.core.banana import banana_curve_length_pure
 from simsopt_jax.core.curve_geometry import _curve_geometry_with_third_derivative_from_dofs
+from simsopt_jax.core.curve_kernels import curve_surface_distance_penalty_pure
 from simsopt_jax.core.framedcurve import frenet_frame
+from simsopt_jax_adapters.geo.curve_objectives import cs_distance_pure
 from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
 
 
@@ -68,6 +75,11 @@ _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _FD_GRADIENT = parity_ladder_tolerances("fd-gradient")
 _RTOL = _DIRECT_KERNEL["rtol"]
 _ATOL = _DIRECT_KERNEL["atol"]
+
+
+def _set_pairwise_penalty_chunk_size(monkeypatch, chunk_size: int) -> None:
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", str(chunk_size))
+    invalidate_backend_cache()
 
 
 def _build_nonplanar_curve(quadpoints=64):
@@ -487,6 +499,110 @@ def test_public_curve_objective_jax_wrappers_match_cpu_values_and_gradients():
     _assert_objective_matches_cpu(
         MeanSquaredCurvature(curve),
         MeanSquaredCurvatureJAX(curve),
+    )
+
+
+def test_banana_length_kernel_matches_curve_length_jax_normalization():
+    curve = _build_nonplanar_curve(quadpoints=17)
+    gammadash = jnp.asarray(curve.gammadash(), dtype=jnp.float64)
+
+    adapter_length = CurveLengthJAX(curve).J()
+    banana_length = banana_curve_length_pure(gammadash)
+    raw_incremental_sum = jnp.sum(jnp.linalg.norm(gammadash, axis=1))
+
+    np.testing.assert_allclose(
+        np.asarray(banana_length),
+        np.asarray(adapter_length),
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+    assert float(raw_incremental_sum) > 10.0 * float(adapter_length)
+
+
+def test_core_curve_surface_distance_kernel_matches_adapter_wrapper(monkeypatch):
+    curve_gamma = jnp.asarray(
+        [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        dtype=jnp.float64,
+    )
+    curve_gammadash = jnp.asarray(
+        [[1.0, 0.0, 0.0], [1.0, 0.2, 0.0], [1.0, 0.0, 0.1]],
+        dtype=jnp.float64,
+    )
+    surface_gamma = jnp.asarray(
+        [[0.0, 0.0, 0.02], [0.5, 0.0, 0.03], [1.0, 0.0, 0.04]],
+        dtype=jnp.float64,
+    )
+    surface_normal = jnp.asarray(
+        [[0.0, 0.0, 1.0], [0.0, 0.1, 1.0], [0.1, 0.0, 1.0]],
+        dtype=jnp.float64,
+    )
+    minimum_distance = 0.1
+
+    try:
+        _set_pairwise_penalty_chunk_size(monkeypatch, 0)
+        dense_value, dense_grad = jax.value_and_grad(
+            lambda curve_points: curve_surface_distance_penalty_pure(
+                curve_points,
+                curve_gammadash,
+                surface_gamma,
+                surface_normal,
+                minimum_distance,
+            )
+        )(
+            curve_gamma,
+        )
+
+        _set_pairwise_penalty_chunk_size(monkeypatch, 2)
+        assert get_pairwise_penalty_chunk_size() == 2
+        chunked_value, chunked_grad = jax.value_and_grad(
+            lambda curve_points: curve_surface_distance_penalty_pure(
+                curve_points,
+                curve_gammadash,
+                surface_gamma,
+                surface_normal,
+                minimum_distance,
+            )
+        )(
+            curve_gamma,
+        )
+        adapter_value, adapter_grad = jax.value_and_grad(
+            lambda curve_points: cs_distance_pure(
+                curve_points,
+                curve_gammadash,
+                surface_gamma,
+                surface_normal,
+                minimum_distance,
+            )
+        )(
+            curve_gamma,
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    np.testing.assert_allclose(
+        dense_value,
+        chunked_value,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        chunked_value,
+        adapter_value,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        dense_grad,
+        chunked_grad,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        chunked_grad,
+        adapter_grad,
+        rtol=1e-12,
+        atol=1e-12,
     )
 
 

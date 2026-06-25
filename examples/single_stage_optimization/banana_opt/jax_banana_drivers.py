@@ -38,6 +38,12 @@ from simsopt_jax_adapters.geo.surface_objectives import (
     IotasJAX,
     NonQuasiSymmetricRatioJAX,
 )
+from simsopt_jax.core.banana import (
+    banana_poloidal_extent_pure as poloidal_extent_pure,
+    banana_projected_ellipse_width_pure as projected_ellipse_width_pure,
+    banana_self_distance_mask,
+    banana_self_distance_pure as self_distance_pure,
+)
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 from simsopt.objectives import QuadraticPenalty
 
@@ -49,6 +55,7 @@ from .jax_banana_types import (
     HBT_TF,
     HBT_VF,
     HARDWARE_LIMITS,
+    KA_TO_A,
     N_BANANA,
     BananaDriverPaths,
     BoozerSolveState,
@@ -61,7 +68,6 @@ from .jax_banana_types import (
 
 
 MU0 = 4.0e-7 * np.pi
-KA_TO_A = 1.0e3
 
 
 def _as_float(value: object) -> float:
@@ -436,73 +442,6 @@ class CurrentMagnitude(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-@jax.jit
-def poloidal_extent_pure(
-    gamma: jax.Array,
-    gammadash: jax.Array,
-    major_radius: float,
-    z_position: float,
-    theta_target: float,
-    exponent: int,
-) -> jax.Array:
-    radius = jnp.linalg.norm(gamma[:, :2], axis=-1)
-    theta_in = jnp.arctan2(gamma[:, 2] - z_position, -(radius - major_radius))
-    arclength = jnp.linalg.norm(gammadash, axis=-1)
-    excess = jnp.maximum(jnp.abs(theta_in) - theta_target, 0.0)
-    return (1.0 / exponent) * jnp.mean((excess**exponent) * arclength)
-
-
-@jax.jit
-def projected_ellipse_width_pure(
-    gamma: jax.Array,
-    gammadash: jax.Array,
-    major_radius: float,
-    minor_radius: float,
-    z_position: float,
-    scale: float,
-    epsilon: float,
-) -> jax.Array:
-    radius = jnp.linalg.norm(gamma[:, :2], axis=-1)
-    phi = jnp.arctan2(gamma[:, 1], gamma[:, 0])
-    theta = jnp.arctan2(gamma[:, 2] - z_position, -(radius - major_radius))
-    phi_ref = jnp.arctan2(jnp.mean(jnp.sin(phi)), jnp.mean(jnp.cos(phi)))
-    dphi = jnp.mod(phi - phi_ref + jnp.pi, 2.0 * jnp.pi) - jnp.pi
-    projected = jnp.stack([major_radius * dphi, minor_radius * theta], axis=-1)
-    dl = jnp.linalg.norm(gammadash, axis=-1)
-    weights = dl / jnp.sum(dl)
-    center = jnp.sum(weights[:, None] * projected, axis=0)
-    centered = projected - center
-    cov = (weights[:, None] * centered).T @ centered
-    cov_xx = cov[0, 0]
-    cov_xy = 0.5 * (cov[0, 1] + cov[1, 0])
-    cov_yy = cov[1, 1]
-    trace = cov_xx + cov_yy
-    discriminant = jnp.maximum((cov_xx - cov_yy) ** 2 + 4.0 * cov_xy**2, 0.0)
-    lambda_minor = 0.5 * (trace - jnp.sqrt(discriminant))
-    return scale * jnp.sqrt(jnp.maximum(lambda_minor, epsilon))
-
-
-def self_distance_pure(
-    gamma: jax.Array,
-    gammadash: jax.Array,
-    minimum_distance: float,
-    mask: jax.Array,
-    normalize: bool,
-) -> jax.Array:
-    dist_sq = jnp.sum((gamma[:, None, :] - gamma[None, :, :]) ** 2, axis=2)
-    safe_dist_sq = jnp.where(dist_sq > 0.0, dist_sq, 1.0)
-    distances = jnp.where(dist_sq > 0.0, jnp.sqrt(safe_dist_sq), 0.0)
-    arc_weights = (
-        jnp.linalg.norm(gammadash, axis=1)[:, None]
-        * jnp.linalg.norm(gammadash, axis=1)[None, :]
-    )
-    violation = jnp.maximum(minimum_distance - distances, 0.0) ** 2
-    total = 0.5 * jnp.sum(mask * arc_weights * violation)
-    if normalize:
-        return total / (gamma.shape[0] ** 2)
-    return total
-
-
 class PoloidalExtentJAX(Optimizable):
     """JAX penalty for CWS banana-coil poloidal extent beyond a half-angle."""
 
@@ -657,10 +596,10 @@ class CurveSelfDistanceJAX(Optimizable):
                 f"neighbor_skip={neighbor_skip} must satisfy 0 <= neighbor_skip < "
                 f"N/2 = {point_count // 2}"
             )
-        indices = np.arange(point_count)
-        distance = np.abs(indices[:, None] - indices[None, :])
-        periodic_distance = np.minimum(distance, point_count - distance)
-        self._mask_np = (periodic_distance > neighbor_skip).astype(np.float64)
+        self._mask_np = np.asarray(
+            banana_self_distance_mask(point_count, neighbor_skip),
+            dtype=np.float64,
+        )
         self._mask = jnp.asarray(self._mask_np)
         self._forward = jax.jit(self_distance_pure, static_argnums=4)
         self._grad_gamma = jax.jit(

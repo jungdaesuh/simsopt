@@ -11,9 +11,12 @@ from . import mhd_reductions as _mhd_reductions
 from . import objectives_flux as _objectives_flux
 from . import reductions as _reductions
 from . import specs as _specs
+from . import banana as _banana
 from . import surface_fourier as _surface_fourier
 from . import surface_henneberg as _surface_henneberg
 from . import surface_rzfourier as _surface_rzfourier
+
+_JAX_CORE_SPEC_REGISTRATION_MODULES = (_banana,)
 
 _JAX_CORE_MODULES = (
     ("specs", _specs),

@@ -153,6 +153,8 @@ from simsopt_jax.core.specs import (
     GroupedCoilSetSpec,
     SurfaceRZFourierSpec,
 )
+from simsopt_jax.core.curve_geometry import curve_geometry_from_dofs
+from simsopt_jax.core.curve_kernels import kappa_pure
 from simsopt_jax.geo.optimizers.optimizer import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     private_optimizer_runtime_is_supported,
@@ -2748,6 +2750,72 @@ def banana_coil_jax_setup():
 class TestCurveCWSFourierCPPParity:
     """Parity checks for the shared CurveCWSFourierCPP CPU/JAX contract."""
 
+    def test_to_spec_geometry_matches_live_curvecwsfouriercpp(self):
+        """Frozen CWS RZ specs reproduce live CurveCWSFourierCPP geometry."""
+        quadpoints = np.linspace(0.0, 1.0, 64, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(8) / 8,
+            quadpoints_theta=np.arange(8) / 8,
+        )
+        surf.set_rc(0, 0, 0.976)
+        surf.set_rc(1, 0, 0.22)
+        surf.set_zs(1, 0, 0.22)
+
+        curve = CurveCWSFourierCPP(quadpoints, order=2, surf=surf, G=1, H=2)
+        curve.set("phic(0)", 0.06)
+        curve.set("thetac(0)", 0.5)
+        curve.set("phic(1)", 0.03)
+        curve.set("thetas(1)", 0.1)
+
+        spec = curve.to_spec()
+        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
+            spec,
+            spec.dofs,
+        )
+
+        np.testing.assert_allclose(np.asarray(spec.dofs), curve.get_dofs())
+        np.testing.assert_allclose(np.asarray(spec.quadpoints), quadpoints)
+        np.testing.assert_allclose(
+            np.asarray(surface_rz_fourier_dofs_from_spec(spec.surface)),
+            surf.get_dofs(),
+        )
+        gamma_2d = np.asarray(curve.gamma_2d())
+        np.testing.assert_allclose(
+            np.asarray(spec.surface.quadpoints_phi),
+            gamma_2d[:, 0],
+        )
+        np.testing.assert_allclose(
+            np.asarray(spec.surface.quadpoints_theta),
+            gamma_2d[:, 1],
+        )
+        assert spec.surface.nfp == surf.nfp
+        assert spec.surface.stellsym == surf.stellsym
+        assert spec.surface.mpol == surf.mpol
+        assert spec.surface.ntor == surf.ntor
+        assert spec.G == 1.0
+        assert spec.H == 2.0
+
+        np.testing.assert_allclose(np.asarray(gamma), curve.gamma(), atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(gammadash),
+            curve.gammadash(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(gammadashdash),
+            curve.gammadashdash(),
+            atol=1e-11,
+        )
+        np.testing.assert_allclose(
+            np.asarray(kappa_pure(gammadash, gammadashdash)),
+            curve.kappa(),
+            atol=1e-12,
+        )
+
     def test_direct_cpu_third_derivative_matches_jax_curve(
         self,
         banana_coil_cpp_setup,
@@ -3741,6 +3809,86 @@ class TestStage2OptimizerContract:
             )
             is expected
         )
+
+    def test_stage2_driver_same_seed_preserves_backend_meaning_across_objective_lanes(
+        self,
+    ):
+        stage2_script = _load_stage2_script_module()
+        seed_dofs = np.asarray([0.25, -0.5, 0.75], dtype=np.float64)
+
+        reference_contract = stage2_script.resolve_stage2_optimizer_contract(
+            "cpu",
+            "scipy",
+        )
+        target_contract = stage2_script.resolve_stage2_optimizer_contract(
+            "jax",
+            "ondevice",
+        )
+        target_bundle = types.SimpleNamespace(expected_dof_count=seed_dofs.size)
+        target_state = stage2_script.build_stage2_target_optimizer_state(
+            target_bundle,
+            seed_dofs,
+        )
+
+        assert isinstance(reference_contract, stage2_script.ReferenceOptimizerContract)
+        assert (
+            stage2_script.stage2_optimizer_contract_method(reference_contract)
+            == "lbfgs"
+        )
+        assert stage2_script.should_build_stage2_target_objective(
+            "cpu",
+            "scipy",
+        ) is False
+        np.testing.assert_allclose(
+            stage2_script.flatten_stage2_target_optimizer_state(seed_dofs),
+            seed_dofs,
+        )
+
+        assert isinstance(target_contract, TargetOptimizerContract)
+        assert target_contract.objective_route == TargetObjectiveRoute.ARRAY_NATIVE
+        assert (
+            stage2_script.stage2_optimizer_contract_method(target_contract)
+            == "lbfgs-ondevice"
+        )
+        assert stage2_script.should_build_stage2_target_objective(
+            "jax",
+            "ondevice",
+        ) is True
+        np.testing.assert_allclose(
+            stage2_script.flatten_stage2_target_optimizer_state(target_state),
+            seed_dofs,
+        )
+
+    def test_stage2_trajectory_payload_compares_solver_contracts_not_bit_identity(
+        self,
+    ):
+        stage2_script = _load_stage2_script_module()
+        evaluations = [{"J": 2.0}, {"J": 1.0}]
+
+        reference_payload = stage2_script.build_stage2_trajectory_payload(
+            backend="cpu",
+            optimizer_backend="scipy",
+            least_squares_algorithm="quasi-newton",
+            evaluations=evaluations,
+        )
+        target_payload = stage2_script.build_stage2_trajectory_payload(
+            backend="jax",
+            optimizer_backend="ondevice",
+            least_squares_algorithm="quasi-newton",
+            evaluations=evaluations,
+        )
+
+        assert reference_payload["evaluations"] == target_payload["evaluations"]
+        assert reference_payload["optimizer_contract"] == {
+            "kind": "reference",
+            "method": "lbfgs",
+        }
+        assert target_payload["optimizer_contract"] == {
+            "kind": "target",
+            "method": "lbfgs-ondevice",
+            "objective_route": "array_native",
+            "use_least_squares_objective": False,
+        }
 
     @pytest.mark.parametrize("optimizer_backend", ["scipy"])
     def test_target_objective_bundle_rejects_non_ondevice_jax_backend(
@@ -6141,6 +6289,76 @@ class TestStage2OptimizerContract:
         assert calls["maxiter"] == 20
         assert calls["options"]["maxcor"] == 7
 
+    def test_stage2_timed_optimizer_smoke_uses_compiled_value_and_grad_boundary(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        calls = {"evaluations": 0}
+
+        def scalar_objective(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return jnp.sum(jnp.square(x + jnp.asarray([1.0, -2.0])))
+
+        compiled_value_and_grad = jax.jit(jax.value_and_grad(scalar_objective))
+        expected_value, expected_grad = compiled_value_and_grad(
+            jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+        )
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback=None,
+            progress_callback=None,
+            failure_callback=None,
+        ):
+            assert fun is compiled_value_and_grad
+            assert value_and_grad is True
+            value, grad = fun(jnp.asarray(x0, dtype=jnp.float64))
+            calls["evaluations"] += 1
+            np.testing.assert_allclose(value, expected_value)
+            np.testing.assert_allclose(grad, expected_grad)
+            calls["method"] = method
+            calls["tol"] = tol
+            calls["maxiter"] = maxiter
+            calls["options"] = dict(options)
+            return types.SimpleNamespace(
+                x=np.asarray(x0, dtype=float),
+                nit=1,
+                success=True,
+                message="ok",
+            )
+
+        monkeypatch.setattr(
+            stage2_script,
+            "target_minimize",
+            fake_target_minimize,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract("jax", "ondevice")
+
+        result, elapsed_s = stage2_script.run_stage2_optimizer_timed(
+            value_and_grad_fun=compiled_value_and_grad,
+            dofs=np.asarray([0.25, -0.5], dtype=np.float64),
+            contract=contract,
+            maxiter=1,
+            ftol=0.0,
+            gtol=1e-12,
+        )
+
+        assert calls["evaluations"] == 1
+        assert calls["method"] == "lbfgs-ondevice"
+        assert calls["tol"] == pytest.approx(1e-12)
+        assert calls["maxiter"] == 1
+        assert calls["options"]["ftol"] == pytest.approx(0.0)
+        assert result.success is True
+        assert elapsed_s >= 0.0
+
     def test_stage2_run_optimizer_routes_lm_target_lane_through_target_least_squares(
         self,
         monkeypatch,
@@ -6760,6 +6978,123 @@ class TestStage2OptimizerContract:
             assert "terms" not in payload["composite"]
             assert "sharding_summaries" not in payload
 
+    def test_stage2_objective_diagnostics_records_backend_shape_and_terms(self):
+        stage2_script = _load_stage2_script_module()
+        final_dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        final_snapshot = {
+            "objective_source": "target-objective",
+            "terms": {
+                "squared_flux": {
+                    "weight": 1.0,
+                    "raw_J": 0.125,
+                    "J": 0.125,
+                    "dJ": [0.75, -0.25],
+                    "grad_norm": float(np.linalg.norm([0.75, -0.25])),
+                },
+                "curvature_penalty": {
+                    "weight": 0.5,
+                    "raw_J": 1.25,
+                    "J": 0.625,
+                    "dJ": [0.5, 1.0],
+                    "grad_norm": float(np.linalg.norm([0.5, 1.0])),
+                },
+            },
+        }
+
+        diagnostics = stage2_script.build_stage2_objective_diagnostics(
+            backend="jax",
+            optimizer_backend="scipy-jax",
+            final_dofs=final_dofs,
+            final_snapshot=final_snapshot,
+        )
+
+        assert diagnostics["backend"] == "jax"
+        assert diagnostics["optimizer_backend"] == "scipy-jax"
+        assert diagnostics["objective_source"] == "target-objective"
+        assert diagnostics["simsopt_file"].endswith("src/simsopt/__init__.py")
+        assert diagnostics["decision_vector_shape"] == [2]
+        assert diagnostics["decision_vector_count"] == 2
+        assert diagnostics["raw_terms"] == {
+            "squared_flux": pytest.approx(0.125),
+            "curvature_penalty": pytest.approx(1.25),
+        }
+        assert diagnostics["weighted_terms"] == {
+            "squared_flux": pytest.approx(0.125),
+            "curvature_penalty": pytest.approx(0.625),
+        }
+        assert diagnostics["term_grad_norms"]["squared_flux"] == pytest.approx(
+            float(np.linalg.norm([0.75, -0.25]))
+        )
+
+    def test_stage2_accepted_result_gate_requires_objective_diagnostics(self):
+        stage2_script = _load_stage2_script_module()
+        results = {
+            "provenance": {
+                "backend_mode": "native_cpu",
+                "runtime_dtype": "float64",
+                "host_dtype": "float64",
+                "tolerance_tier": "unit",
+            },
+            "problem_contract": {
+                "runtime_contract": {
+                    "max_iterations": 0,
+                },
+            },
+            "field_error": 0.0,
+            "FINAL_CURVE_LENGTH": 1.0,
+            "FINAL_MEAN_ABS_RELBN": 0.0,
+        }
+        passing_diagnostics = {
+            "backend": "jax",
+            "optimizer_backend": "scipy-jax",
+            "objective_source": "target-objective",
+            "simsopt_file": "/repo/src/simsopt/__init__.py",
+            "decision_vector_shape": [2],
+            "decision_vector_count": 2,
+            "raw_terms": {"squared_flux": 0.125},
+            "weighted_terms": {"squared_flux": 0.125},
+        }
+
+        missing_reasons = stage2_script.stage2_result_rejection_reasons(
+            results,
+            optimizer_result=None,
+            optimizer_success=True,
+            final_objective=0.125,
+            final_dofs=np.asarray([0.25, -0.5], dtype=np.float64),
+        )
+        results_with_diagnostics = {
+            **results,
+            "OBJECTIVE_DIAGNOSTICS": passing_diagnostics,
+        }
+        passing_reasons = stage2_script.stage2_result_rejection_reasons(
+            results_with_diagnostics,
+            optimizer_result=None,
+            optimizer_success=True,
+            final_objective=0.125,
+            final_dofs=np.asarray([0.25, -0.5], dtype=np.float64),
+        )
+        with tempfile.TemporaryDirectory(prefix="stage2-objective-diagnostics-") as (
+            temp_dir
+        ):
+            stage2_script.write_stage2_results_json(
+                temp_dir,
+                results_with_diagnostics,
+                optimizer_result=None,
+                optimizer_success=True,
+                final_objective=0.125,
+                final_dofs=np.asarray([0.25, -0.5], dtype=np.float64),
+            )
+            accepted_payload = json.loads(
+                (Path(temp_dir) / "results.json").read_text(encoding="utf-8")
+            )
+
+        assert (
+            "required_metadata_missing:OBJECTIVE_DIAGNOSTICS.backend"
+            in missing_reasons
+        )
+        assert passing_reasons == []
+        assert accepted_payload["OBJECTIVE_DIAGNOSTICS"] == passing_diagnostics
+
     def test_stage2_probe_payload_reuses_cached_raw_term_jacobian_helper(self):
         stage2_script = _load_stage2_script_module()
 
@@ -7129,5 +7464,13 @@ class TestStage2OptimizerContract:
 
         evaluations = payload["evaluations"]
         assert payload["backend"] == "jax"
+        assert payload["optimizer_backend"] == "ondevice"
+        assert payload["least_squares_algorithm"] == "quasi-newton"
+        assert payload["optimizer_contract"] == {
+            "kind": "target",
+            "method": "lbfgs-ondevice",
+            "objective_route": "array_native",
+            "use_least_squares_objective": False,
+        }
         assert len(evaluations) >= 2
         assert evaluations[0]["J"] >= evaluations[-1]["J"]

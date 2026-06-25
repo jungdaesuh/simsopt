@@ -1,0 +1,26 @@
+{
+  "accepted": false,
+  "rejection_reasons": [
+    "optimizer_success_not_true",
+    "optimizer_status_2",
+    "final_gradient_nonfinite",
+    "required_metric_nonfinite:field_error"
+  ],
+  "diagnostics": {
+    "field_error": 0.05825298507687746,
+    "final_objective": 0.0010977773729906762,
+    "final_mean_abs_relBfinal_norm": 0.05825298507687746,
+    "optimizer_timings": {
+      "cold_run_s": 6.655738957997528
+    }
+  },
+  "optimizer": {
+    "success": false,
+    "status": 2,
+    "message": "ABNORMAL: "
+  },
+  "artifact_contract": {
+    "accepted_results_filename": "results.json",
+    "diagnostic_marker_filename": "REJECTED.json"
+  }
+}

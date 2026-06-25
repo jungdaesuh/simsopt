@@ -1,8 +1,10 @@
+import subprocess
+import sys
 from dataclasses import replace
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import simsopt_jax.core.specs as specs_module
@@ -404,6 +406,47 @@ def test_register_jax_spec_helper_preserves_data_meta_partition():
     assert len(dynamic_leaves) == 1
     assert dynamic_treedef == treedef
     assert meta_treedef != treedef
+
+
+def test_core_specs_round_trip_through_registered_gson_payloads():
+    spec = _make_curve_spec()
+
+    payload = spec.as_dict()
+    restored = type(spec).from_dict(payload)
+
+    assert payload["@module"] == "simsopt_jax.core.specs"
+    assert payload["@class"] == "CurveXYZFourierSpec"
+    np.testing.assert_allclose(restored.dofs, spec.dofs)
+    np.testing.assert_allclose(restored.quadpoints, spec.quadpoints)
+    assert restored.order == spec.order
+
+
+def test_cross_module_spec_gson_decode_works_from_cold_core_import():
+    script = """
+from simsopt_jax.core.specs import gson_decode_spec_value
+payload = {
+    "@module": "simsopt_jax.core.banana",
+    "@class": "BananaDecisionSpec",
+    "current_dof_count": 1,
+    "curve_dof_count": 2,
+}
+decoded = gson_decode_spec_value(payload)
+if decoded.__class__.__module__ != "simsopt_jax.core.banana":
+    raise SystemExit(f"wrong module: {decoded.__class__.__module__}")
+if decoded.__class__.__name__ != "BananaDecisionSpec":
+    raise SystemExit(f"wrong class: {decoded.__class__.__name__}")
+if decoded.current_dof_count != 1 or decoded.curve_dof_count != 2:
+    raise SystemExit("wrong decoded fields")
+print(f"{decoded.__class__.__module__}.{decoded.__class__.__name__}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "simsopt_jax.core.banana.BananaDecisionSpec"
 
 
 def test_single_stage_runtime_spec_is_a_real_jittable_pytree():

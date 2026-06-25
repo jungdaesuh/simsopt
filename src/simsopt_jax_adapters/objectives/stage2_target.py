@@ -17,12 +17,16 @@ from simsopt_jax.runtime.host_boundary import (
     host_array as _shared_host_array,
     host_tree as _shared_host_tree,
 )
-from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _math_as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
     runtime_device_put,
 )
+from simsopt_jax.core.banana import (
+    banana_curvature_p_norm_from_kappa_pure,
+    banana_symmetry_geometry_from_arrays,
+)
+from simsopt_jax.core.curve_kernels import incremental_arclength_pure, kappa_pure
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
     grouped_field_sharding_summary,
@@ -51,7 +55,6 @@ from simsopt_jax.core.sharding import (
     summarize_array_sharding,
 )
 from simsopt_jax_adapters.geo.curve_objectives import (
-    Lp_curvature_pure,
     cc_distance_pure,
     curve_length_pure,
 )
@@ -499,6 +502,31 @@ def _banana_symmetry_runtime_inputs_from_coils(banana_coils):
     )
 
 
+def _validate_stage2_banana_owner_contract(banana_coils, banana_curve) -> None:
+    if len(banana_coils) == 0:
+        raise ValueError("Stage 2 target lane requires at least one banana coil")
+    first_curve, _first_rotmat, first_current, _first_scale = (
+        _unwrap_coil_curve_and_current_objects(
+            banana_coils[0].curve,
+            banana_coils[0].current,
+        )
+    )
+    if first_curve is not banana_curve:
+        raise ValueError("Stage 2 target lane banana_curve must be the shared owner")
+    current_value = np.asarray(first_current.get_value(), dtype=np.float64).reshape((-1,))
+    if current_value.size != 1:
+        raise ValueError("Stage 2 target lane supports one banana current DOF")
+    for coil in banana_coils[1:]:
+        curve, _rotmat, current, _scale = _unwrap_coil_curve_and_current_objects(
+            coil.curve,
+            coil.current,
+        )
+        if curve is not first_curve:
+            raise ValueError("Stage 2 target lane banana coils must share one curve")
+        if current is not first_current:
+            raise ValueError("Stage 2 target lane banana coils must share one current")
+
+
 class _SurfaceSpecProvider:
     def __init__(self, surface_spec):
         self._surface_spec = surface_spec
@@ -514,16 +542,12 @@ def _build_dynamic_curve_data(
     banana_current_scales,
     current_dof,
 ):
-    def _apply_one(rotmat, current_scale):
-        return (
-            base_gamma @ rotmat,
-            base_gammadash @ rotmat,
-            current_dof * current_scale,
-        )
-
-    return jax.vmap(_apply_one, in_axes=(0, 0))(
+    return banana_symmetry_geometry_from_arrays(
+        base_gamma,
+        base_gammadash,
         banana_rotmats,
         banana_current_scales,
+        current_dof,
     )
 
 
@@ -714,6 +738,7 @@ def build_stage2_target_objective(
     curvature_threshold = penalty_config.curvature_threshold
     curvature_p_norm = penalty_config.curvature_p_norm
 
+    _validate_stage2_banana_owner_contract(banana_coils, banana_curve)
     surface_spec = _surface_spec_from_surface(surface)
     field_eval_spec, flux_spec = fixed_surface_flux_specs_from_surface(
         _SurfaceSpecProvider(surface_spec),
@@ -916,12 +941,12 @@ def build_stage2_target_objective(
             dynamic_coil_spec,
         )
 
-        incremental_arclength = incremental_arclength_pure(base_gammadash)
-        curve_length = curve_length_pure(incremental_arclength)
-        max_curvature = jnp.max(kappa_pure(base_gammadash, base_gammadashdash))
+        base_kappa = kappa_pure(base_gammadash, base_gammadashdash)
+        curve_length = curve_length_pure(incremental_arclength_pure(base_gammadash))
+        max_curvature = jnp.max(base_kappa)
         length_excess = jnp.maximum(curve_length - length_target_jax, zero_jax)
-        curvature_penalty = Lp_curvature_pure(
-            kappa_pure(base_gammadash, base_gammadashdash),
+        curvature_penalty = banana_curvature_p_norm_from_kappa_pure(
+            base_kappa,
             base_gammadash,
             curvature_p_norm_jax,
             curvature_threshold_jax,
