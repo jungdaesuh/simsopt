@@ -4481,10 +4481,18 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
     return matrix_norm * inverse_norm
 
 
-def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
+def _dense_matrix_solve_forward_error_success(
+    matrix,
+    solution,
+    rhs,
+    *,
+    tol,
+    condition_estimate=None,
+):
     residual = rhs - matrix @ solution
     residual_rel = _relative_residual_1_norm(residual, rhs)
-    condition_estimate = _dense_matrix_condition_estimate(matrix)
+    if condition_estimate is None:
+        condition_estimate = _dense_matrix_condition_estimate(matrix)
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
@@ -4509,15 +4517,47 @@ def _dense_matrix_nonsingular(matrix, *, lu_piv=None):
     solve).  Float64 production solves use the LAPACK rank-tolerance reciprocal
     ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), which cleanly separates the
     well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
-    singular one (cond >~ 1e15).  Float32 smoke solves use a looser
-    ``1 / (sqrt(n) * eps)`` degeneracy threshold so moderately conditioned
-    operators fail closed only when they are truly outside smoke-lane precision.
+    singular one (cond >~ 1e15).  Float32 smoke solves use this as a broader
+    condition screen only; the dense solve must also pass the forward-error bound
+    before the final status is accepted.
     """
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
     condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
     threshold = _dense_matrix_nonsingular_threshold(size, matrix.dtype)
     return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+
+
+def _dense_matrix_solve_numerically_safe(
+    matrix,
+    solution,
+    rhs,
+    *,
+    tol,
+    lu_piv=None,
+    solve_dtype=None,
+):
+    matrix = jnp.asarray(matrix)
+    if solve_dtype is None:
+        solve_dtype = matrix.dtype
+    solve_dtype = np.dtype(solve_dtype)
+    size = int(matrix.shape[0])
+    condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
+    threshold = _dense_matrix_nonsingular_threshold(size, solve_dtype)
+    nonsingular = jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+    if solve_dtype != np.dtype(np.float32):
+        return nonsingular
+    matrix = jnp.asarray(matrix, dtype=solve_dtype)
+    solution = jnp.asarray(solution, dtype=solve_dtype)
+    rhs = jnp.asarray(rhs, dtype=solve_dtype)
+    forward_error_safe = _dense_matrix_solve_forward_error_success(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        condition_estimate=condition_estimate,
+    )
+    return nonsingular & forward_error_safe
 
 
 def _solve_square_vector_system_operator_only(
@@ -4693,6 +4733,7 @@ def _dense_square_operator_matrix(matvec, rhs):
 
 
 def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
+    rhs_dtype = jnp.asarray(rhs).dtype
     matrix = _dense_square_operator_matrix(matvec, rhs)
     solution = jnp.linalg.lstsq(matrix, rhs, rcond=None)[0]
     residual = rhs - matrix @ solution
@@ -4709,13 +4750,18 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
         rhs,
         tol=tol,
     )
-    # Numerical-singularity guard -- see the LU sibling: a backward-stable solve
+    # Numerical-safety guard -- see the LU sibling: a backward-stable solve
     # of a (near-)singular operator is still forward-garbage, which the
-    # backward-error gate cannot detect.  Fail closed when the condition estimate
-    # exceeds the dtype-specific degeneracy threshold.
-    nonsingular = _dense_matrix_nonsingular(matrix)
+    # backward-error gate cannot detect.
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        solve_dtype=rhs_dtype,
+    )
     return solution, status._replace(
-        success=(status.success | backward_error_success) & nonsingular
+        success=(status.success | backward_error_success) & solve_safe
     )
 
 
@@ -4732,6 +4778,7 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
     matrix is the small, well-conditioned ``J^T`` that operator-GMRES cannot
     resolve.
     """
+    rhs_dtype = jnp.asarray(rhs).dtype
     matrix = _dense_square_operator_matrix(matvec, rhs)
     lu_piv = jsp_linalg.lu_factor(matrix)
     solution = jsp_linalg.lu_solve(lu_piv, rhs)
@@ -4754,18 +4801,26 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
         rhs,
         tol=tol,
     )
-    # Numerical-singularity guard: a backward-stable solve of a singular or
+    # Numerical-safety guard: a backward-stable solve of a singular or
     # near-singular operator still yields a forward-garbage solution that the
     # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
-    # condition estimate exceeds the dtype-specific degeneracy threshold; a
-    # degenerate J^T then fails closed instead of silently returning a wrong
-    # adjoint, while the well-conditioned production J^T (cond ~ 1e3-1e6) passes
-    # with many orders of margin.  The cached ``lu_piv`` is reused by the
-    # Hager-Higham inner solves (O(n^2)), avoiding a second factorization and
-    # keeping the strict transfer-guard path on device.
-    nonsingular = _dense_matrix_nonsingular(matrix, lu_piv=lu_piv)
+    # condition estimate exceeds the dtype-specific degeneracy threshold; float32
+    # smoke solves that pass the broader threshold must also satisfy the forward
+    # error bound.  A degenerate J^T then fails closed instead of silently
+    # returning a wrong adjoint, while the well-conditioned production J^T
+    # (cond ~ 1e3-1e6) passes with many orders of margin.  The cached ``lu_piv``
+    # is reused by the Hager-Higham inner solves (O(n^2)), avoiding a second
+    # factorization and keeping the strict transfer-guard path on device.
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        lu_piv=lu_piv,
+        solve_dtype=rhs_dtype,
+    )
     return solution, status._replace(
-        success=(status.success | backward_error_success) & nonsingular
+        success=(status.success | backward_error_success) & solve_safe
     )
 
 
