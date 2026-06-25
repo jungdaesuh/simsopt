@@ -122,6 +122,39 @@ _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
 
 
+def _surface_paired_lin_kernel_args(surface, spec, dofs, phis, thetas):
+    if surface.__class__.__name__ == "SurfaceXYZFourier":
+        return (
+            jnp.asarray(dofs),
+            jnp.asarray(phis),
+            jnp.asarray(thetas),
+            surface.mpol,
+            surface.ntor,
+            surface.nfp,
+            surface.stellsym,
+            spec.scatter_indices,
+            spec.coeff_template,
+        )
+    return (
+        jnp.asarray(dofs),
+        jnp.asarray(phis),
+        jnp.asarray(thetas),
+        surface.mpol,
+        surface.ntor,
+        surface.nfp,
+        surface.stellsym,
+        spec.scatter_indices if surface.stellsym else None,
+    )
+
+
+def _phi_central_difference_from_paired_args(kernel, args, phis, epsilon):
+    forward_args = (args[0], jnp.asarray(phis + epsilon), *args[2:])
+    backward_args = (args[0], jnp.asarray(phis - epsilon), *args[2:])
+    return (np.asarray(kernel(*forward_args)) - np.asarray(kernel(*backward_args))) / (
+        2.0 * epsilon
+    )
+
+
 def test_split_flat_to_xyzc_keeps_nan_blocks_isolated():
     """NaNs in one coordinate coefficient block do not contaminate others."""
     xc, yc, zc = split_flat_to_xyzc(
@@ -1330,11 +1363,32 @@ class TestSurfaceFourierPairedPointParity:
         spec = _surface_spec(surface)
         phis = np.linspace(0.006, (1.0 / nfp) - 0.004, 9)
         thetas = np.linspace(0.021, 0.979, 9)
+        lower_args = _surface_paired_lin_kernel_args(
+            surface, spec, dofs, phis, thetas
+        )
+        gammadash1_lin_fn = (
+            surface_xyzfourier_gammadash1_lin_from_dofs
+            if surface_cls_name == "SurfaceXYZFourier"
+            else surface_gammadash1_lin_from_dofs
+        )
+        gammadash1dash1_fd = _phi_central_difference_from_paired_args(
+            gammadash1_lin_fn,
+            lower_args,
+            phis,
+            1.0e-6,
+        )
 
         for _case_name, spec_fn, dofs_fn in cases:
             expected = np.asarray(spec_fn(spec, phis, thetas))
             assert expected.shape == (phis.size, 3)
             assert np.all(np.isfinite(expected))
+            if _case_name == "gammadash1dash1_lin":
+                np.testing.assert_allclose(
+                    expected,
+                    gammadash1dash1_fd,
+                    rtol=2e-6,
+                    atol=2e-6,
+                )
             np.testing.assert_allclose(
                 np.asarray(dofs_fn(spec, dofs, phis, thetas)),
                 expected,

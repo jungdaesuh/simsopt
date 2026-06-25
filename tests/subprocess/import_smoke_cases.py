@@ -1651,6 +1651,7 @@ def case_import_jax_core_specs() -> None:
         CoilSymmetrySpec,
         CurveCWSFourierRZSpec,
         CurveFilamentSpec,
+        CURVE_FILAMENT_FRAME_KINDS,
         CurveHelicalSpec,
         CurvePlanarFourierSpec,
         CurveSpec,
@@ -1679,6 +1680,7 @@ def case_import_jax_core_specs() -> None:
     assert CoilSymmetrySpec is not None
     assert CurveCWSFourierRZSpec is not None
     assert CurveFilamentSpec is not None
+    assert CURVE_FILAMENT_FRAME_KINDS is not None
     assert CurveHelicalSpec is not None
     assert CurvePlanarFourierSpec is not None
     assert CurveSpec is not None
@@ -1709,10 +1711,12 @@ _EXPECTED_JAX_CORE_PUBLIC_EXPORTS = tuple(
 BiotSavartSpec build_filament_gamma_and_dash build_filament_gammas centroid_frame
 centroid_frame_dash compute_filament_offsets frenet_frame frenet_frame_dash
 rotated_centroid_frame rotated_centroid_frame_dash rotated_frenet_frame rotated_frenet_frame_dash
-rotation_alpha rotation_alphadash rotation_dcoeff rotationdash_dcoeff
-CoilSpec CoilGroupSpec CoilDofExtractionSpec CoilSetDofExtractionSpec
-CoilSymmetrySpec apply_coil_symmetry CurveCWSFourierRZSpec CurveFilamentSpec
-CurveHelicalSpec OrientedCurveXYZFourierSpec make_oriented_curve_xyzfourier_spec CurvePlanarFourierSpec
+rotated_surface_tangent_frame rotated_surface_tangent_frame_dash rotated_surface_tangent_frame_dashdash
+rotation_alpha rotation_alphadash rotation_dcoeff rotationdash_dcoeff surface_tangent_normal_direction
+torsion_pure_surface_tangent binormal_curvature_pure_surface_tangent
+	CoilSpec CoilGroupSpec CoilDofExtractionSpec CoilSetDofExtractionSpec
+	CoilSymmetrySpec apply_coil_symmetry CurveCWSFourierRZSpec CurveFilamentSpec
+	CURVE_FILAMENT_FRAME_KINDS CurveHelicalSpec OrientedCurveXYZFourierSpec make_oriented_curve_xyzfourier_spec CurvePlanarFourierSpec
 CurveSpec CurveSpecKind CurvePerturbedSpec CurrentValueSpec
 CurveRZFourierSpec CurveXYZFourierSpec CurveXYZFourierSymmetriesSpec FieldEvalSpec
 FrameRotationSpec FixedSurfaceFluxSpec GroupedCoilSetSpec OptimizableDofMapSpec

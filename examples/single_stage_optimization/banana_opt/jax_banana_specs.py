@@ -162,6 +162,15 @@ def _fixed_surface_flux_spec(surface: BananaSpecSurface, definition: str):
     return flux_spec
 
 
+def _require_zero_boozer_I(boozer_I: float) -> None:
+    if float(boozer_I) != 0.0:
+        raise ValueError(
+            "JAX banana single-stage solved-state target only supports "
+            "zero enclosed Boozer current (boozer_I == 0.0); finite-I Boozer "
+            "requires the G_eff = G + iota * I residual and adjoint chain-rule port."
+        )
+
+
 def build_banana_single_stage_solved_state_target(
     boozer_surface: BananaSpecBoozerSurface,
     biotsavart: BananaSpecBiotSavart,
@@ -169,6 +178,7 @@ def build_banana_single_stage_solved_state_target(
     *,
     outer_objective_config: object,
     success_filter: object = None,
+    boozer_I: float = 0.0,
 ) -> BananaSingleStageSolvedStateTarget:
     """Freeze the single-stage Boozer target lane behind explicit solved state.
 
@@ -179,6 +189,7 @@ def build_banana_single_stage_solved_state_target(
     state needed by the compiled value-and-gradient kernel.
     """
 
+    _require_zero_boozer_I(boozer_I)
     adjoint_state = boozer_surface.get_adjoint_runtime_state()
     solved_state = adjoint_state.solved_state
     solved_x = boozer_surface._pack_decision_vector(

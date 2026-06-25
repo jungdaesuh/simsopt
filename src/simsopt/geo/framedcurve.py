@@ -8,7 +8,9 @@ from .curve import Curve
 from .jit import jit
 
 __all__ = ['FramedCurve', 'FramedCurveFrenet', 'FramedCurveCentroid',
-           'FrameRotation', 'ZeroRotation', 'FramedCurve']
+           'FramedCurveSurfaceTangent',
+           'FrameRotation', 'ZeroRotation', 'FramedCurve',
+           'surface_tangent_normal_direction']
 
 
 class FramedCurve(sopp.Curve, Curve):
@@ -18,8 +20,8 @@ class FramedCurve(sopp.Curve, Curve):
         A FramedCurve defines an orthonormal basis around a Curve, 
         where one basis is taken to be the tangent along the Curve. 
         The frame is defined with respect to a reference frame,
-        either centroid or frenet. A rotation angle defines the rotation 
-        with respect to this reference frame. 
+        centroid, frenet, or surface_tangent. A rotation angle defines
+        the rotation with respect to this reference frame.
         """
         self.curve = curve
         sopp.Curve.__init__(self, curve.quadpoints)
@@ -376,12 +378,172 @@ class FramedCurveCentroid(FramedCurve):
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
 
+class FramedCurveSurfaceTangent(FramedCurve):
+    r"""
+    Reference frame whose normal follows a circular toroidal winding surface.
+
+    ``major_radius`` is the circular axis radius ``R0`` and ``midplane_z`` is
+    the circular axis height ``z0``. The surface minor radius is not needed:
+    the frame uses only the analytic outward normal direction from that axis
+    ring to each curve point.
+    """
+
+    def __init__(self, curve, major_radius, midplane_z=0.0, rotation=None):
+        FramedCurve.__init__(self, curve, rotation)
+        self.major_radius = float(major_radius)
+        self.midplane_z = float(midplane_z)
+        R0 = self.major_radius
+        z0 = self.midplane_z
+
+        self.torsion = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash: torsion_pure_surface_tangent(
+            gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0))
+        self.torsiongrad_vjp0 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.torsion(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0])
+        self.torsiongrad_vjp1 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.torsion(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0])
+        self.torsiongrad_vjp2 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.torsion(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0])
+        self.torsiongrad_vjp4 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.torsion(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0])
+        self.torsiongrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.torsion(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
+
+        self.binorm = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash: binormal_curvature_pure_surface_tangent(
+            gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0))
+        self.binormgrad_vjp0 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.binorm(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0])
+        self.binormgrad_vjp1 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.binorm(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0])
+        self.binormgrad_vjp2 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.binorm(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0])
+        self.binormgrad_vjp4 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.binorm(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0])
+        self.binormgrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
+            lambda g: self.binorm(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
+
+    def frame_torsion(self):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        alpha = self.rotation.alpha(self.curve.quadpoints)
+        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        return self.torsion(gamma, d1gamma, d2gamma, alpha, alphadash)
+
+    def frame_binormal_curvature(self):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        alpha = self.rotation.alpha(self.curve.quadpoints)
+        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        return self.binorm(gamma, d1gamma, d2gamma, alpha, alphadash)
+
+    def rotated_frame(self):
+        return rotated_surface_tangent_frame(
+            self.curve.gamma(), self.curve.gammadash(),
+            self.rotation.alpha(self.curve.quadpoints),
+            self.major_radius, self.midplane_z)
+
+    def rotated_frame_dash(self):
+        return rotated_surface_tangent_frame_dash(
+            self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
+            self.rotation.alpha(self.curve.quadpoints),
+            self.rotation.alphadash(self.curve.quadpoints),
+            self.major_radius, self.midplane_z)
+
+    def rotated_frame_dcoeff_vjp(self, v, dn, db, arg=0):
+        assert arg in [0, 1, 2, 3]
+        g = self.curve.gamma()
+        gd = self.curve.gammadash()
+        a = self.rotation.alpha(self.curve.quadpoints)
+        zero = np.zeros_like(v)
+        if arg == 0:
+            return rotated_surface_tangent_frame_dcoeff_vjp0(
+                g, gd, a, self.major_radius, self.midplane_z, (zero, dn*v, db*v))
+        if arg == 1:
+            return rotated_surface_tangent_frame_dcoeff_vjp1(
+                g, gd, a, self.major_radius, self.midplane_z, (zero, dn*v, db*v))
+        if arg == 2:
+            return None
+        if arg == 3:
+            return rotated_surface_tangent_frame_dcoeff_vjp3(
+                g, gd, a, self.major_radius, self.midplane_z, (zero, dn*v, db*v))
+
+    def rotated_frame_dash_dcoeff_vjp(self, v, dn, db, arg=0):
+        assert arg in [0, 1, 2, 3, 4, 5]
+        g = self.curve.gamma()
+        gd = self.curve.gammadash()
+        gdd = self.curve.gammadashdash()
+        a = self.rotation.alpha(self.curve.quadpoints)
+        ad = self.rotation.alphadash(self.curve.quadpoints)
+        zero = np.zeros_like(v)
+        if arg == 0:
+            return rotated_surface_tangent_frame_dash_dcoeff_vjp0(
+                g, gd, gdd, a, ad, self.major_radius, self.midplane_z,
+                (zero, dn*v, db*v))
+        if arg == 1:
+            return rotated_surface_tangent_frame_dash_dcoeff_vjp1(
+                g, gd, gdd, a, ad, self.major_radius, self.midplane_z,
+                (zero, dn*v, db*v))
+        if arg == 2:
+            return rotated_surface_tangent_frame_dash_dcoeff_vjp2(
+                g, gd, gdd, a, ad, self.major_radius, self.midplane_z,
+                (zero, dn*v, db*v))
+        if arg == 3:
+            return None
+        if arg == 4:
+            return rotated_surface_tangent_frame_dash_dcoeff_vjp4(
+                g, gd, gdd, a, ad, self.major_radius, self.midplane_z,
+                (zero, dn*v, db*v))
+        if arg == 5:
+            return rotated_surface_tangent_frame_dash_dcoeff_vjp5(
+                g, gd, gdd, a, ad, self.major_radius, self.midplane_z,
+                (zero, dn*v, db*v))
+
+    def dframe_binormal_curvature_by_dcoeff_vjp(self, v):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        alpha = self.rotation.alpha(self.curve.quadpoints)
+        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+
+        grad0 = self.binormgrad_vjp0(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad1 = self.binormgrad_vjp1(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad2 = self.binormgrad_vjp2(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad4 = self.binormgrad_vjp4(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad5 = self.binormgrad_vjp5(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+
+        return self.curve.dgamma_by_dcoeff_vjp(grad0) \
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2) \
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4) \
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+
+    def dframe_torsion_by_dcoeff_vjp(self, v):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        alpha = self.rotation.alpha(self.curve.quadpoints)
+        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+
+        grad0 = self.torsiongrad_vjp0(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad1 = self.torsiongrad_vjp1(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad2 = self.torsiongrad_vjp2(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad4 = self.torsiongrad_vjp4(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+        grad5 = self.torsiongrad_vjp5(gamma, d1gamma, d2gamma, alpha, alphadash, v)
+
+        return self.curve.dgamma_by_dcoeff_vjp(grad0) \
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2) \
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4) \
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+
+
 class FrameRotation(Optimizable):
 
     def __init__(self, quadpoints, order, scale=1., dofs=None):
         """
         Defines the rotation angle with respect to a reference orthonormal 
-        frame (either frenet or centroid). For example, can be used to 
+        frame (frenet, centroid, or surface_tangent). For example, can be used to
         define the rotation of a multifilament pack; alpha in Figure 1 of
         Singh et al, "Optimization of finite-build stellarator coils",
         Journal of Plasma Physics 86 (2020),
@@ -492,6 +654,68 @@ rotated_centroid_frame_dash_dcoeff_vjp4 = jit(
 rotated_centroid_frame_dash_dcoeff_vjp5 = jit(
     lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
         lambda ad: rotated_centroid_frame_dash(gamma, gammadash, gammadashdash, alpha, ad), alphadash)[1](v)[0])
+
+
+def surface_tangent_normal_direction(gamma, R0, z0):
+    """Outward normal of a circular torus axis ring at each curve point."""
+    rho = jnp.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2)
+    axis = jnp.stack([R0 * gamma[:, 0] / rho, R0 * gamma[:, 1] / rho,
+                      z0 * jnp.ones_like(rho)], axis=1)
+    delta = gamma - axis
+    return delta * (1./jnp.linalg.norm(delta, axis=1)[:, None])
+
+
+@jit
+def rotated_surface_tangent_frame(gamma, gammadash, alpha, R0, z0):
+    t = gammadash
+    t *= 1./jnp.linalg.norm(gammadash, axis=1)[:, None]
+    surface_normal = surface_tangent_normal_direction(gamma, R0, z0)
+    n = surface_normal - jnp.sum(surface_normal * t, axis=1)[:, None] * t
+    n *= 1./jnp.linalg.norm(n, axis=1)[:, None]
+    b = jnp.cross(t, n, axis=1)
+
+    nn = jnp.cos(alpha)[:, None] * n - jnp.sin(alpha)[:, None] * b
+    bb = jnp.sin(alpha)[:, None] * n + jnp.cos(alpha)[:, None] * b
+    return t, nn, bb
+
+
+rotated_surface_tangent_frame_dash = jit(
+    lambda gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0: jvp(
+        lambda g, gd, a: rotated_surface_tangent_frame(g, gd, a, R0, z0),
+        (gamma, gammadash, alpha),
+        (gammadash, gammadashdash, alphadash))[1])
+
+rotated_surface_tangent_frame_dcoeff_vjp0 = jit(
+    lambda gamma, gammadash, alpha, R0, z0, v: vjp(
+        lambda g: rotated_surface_tangent_frame(g, gammadash, alpha, R0, z0), gamma)[1](v)[0])
+
+rotated_surface_tangent_frame_dcoeff_vjp1 = jit(
+    lambda gamma, gammadash, alpha, R0, z0, v: vjp(
+        lambda gd: rotated_surface_tangent_frame(gamma, gd, alpha, R0, z0), gammadash)[1](v)[0])
+
+rotated_surface_tangent_frame_dcoeff_vjp3 = jit(
+    lambda gamma, gammadash, alpha, R0, z0, v: vjp(
+        lambda a: rotated_surface_tangent_frame(gamma, gammadash, a, R0, z0), alpha)[1](v)[0])
+
+rotated_surface_tangent_frame_dash_dcoeff_vjp0 = jit(
+    lambda gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0, v: vjp(
+        lambda g: rotated_surface_tangent_frame_dash(g, gammadash, gammadashdash, alpha, alphadash, R0, z0), gamma)[1](v)[0])
+
+rotated_surface_tangent_frame_dash_dcoeff_vjp1 = jit(
+    lambda gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0, v: vjp(
+        lambda gd: rotated_surface_tangent_frame_dash(gamma, gd, gammadashdash, alpha, alphadash, R0, z0), gammadash)[1](v)[0])
+
+rotated_surface_tangent_frame_dash_dcoeff_vjp2 = jit(
+    lambda gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0, v: vjp(
+        lambda gdd: rotated_surface_tangent_frame_dash(gamma, gammadash, gdd, alpha, alphadash, R0, z0), gammadashdash)[1](v)[0])
+
+rotated_surface_tangent_frame_dash_dcoeff_vjp4 = jit(
+    lambda gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0, v: vjp(
+        lambda a: rotated_surface_tangent_frame_dash(gamma, gammadash, gammadashdash, a, alphadash, R0, z0), alpha)[1](v)[0])
+
+rotated_surface_tangent_frame_dash_dcoeff_vjp5 = jit(
+    lambda gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0, v: vjp(
+        lambda ad: rotated_surface_tangent_frame_dash(gamma, gammadash, gammadashdash, alpha, ad, R0, z0), alphadash)[1](v)[0])
 
 
 @jit
@@ -645,6 +869,26 @@ def binormal_curvature_pure_centroid(gamma, gammadash, gammadashdash,
     _, _, b = rotated_centroid_frame(gamma, gammadash, alpha)
     tdash, _, _ = rotated_centroid_frame_dash(
         gamma, gammadash, gammadashdash, alpha, alphadash)
+
+    tdash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return inner(tdash, b)
+
+
+def torsion_pure_surface_tangent(gamma, gammadash, gammadashdash,
+                                 alpha, alphadash, R0, z0):
+    _, _, b = rotated_surface_tangent_frame(gamma, gammadash, alpha, R0, z0)
+    _, ndash, _ = rotated_surface_tangent_frame_dash(
+        gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0)
+
+    ndash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return inner(ndash, b)
+
+
+def binormal_curvature_pure_surface_tangent(gamma, gammadash, gammadashdash,
+                                            alpha, alphadash, R0, z0):
+    _, _, b = rotated_surface_tangent_frame(gamma, gammadash, alpha, R0, z0)
+    tdash, _, _ = rotated_surface_tangent_frame_dash(
+        gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0)
 
     tdash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
     return inner(tdash, b)

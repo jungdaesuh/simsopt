@@ -10,8 +10,9 @@ constructing ``Optimizable`` objects.
 The filament construction follows Singh et al. (2020),
 ``doi:10.1017/S0022377820000756``: each filament is the parent curve plus
 ``dn * normal + db * binormal`` (and its parameter derivative for
-``gammadash``). The normal/binormal vectors come from the rotated
-centroid or Frenet frame, depending on ``frame_kind``.
+``gammadash``). The normal/binormal vectors come from the selected
+rotated centroid, Frenet, or surface-tangent frame, depending on
+``frame_kind``.
 
 Conventions
 -----------
@@ -43,6 +44,8 @@ from .framedcurve import (
     rotated_centroid_frame_dash,
     rotated_frenet_frame,
     rotated_frenet_frame_dash,
+    rotated_surface_tangent_frame,
+    rotated_surface_tangent_frame_dash,
 )
 from .specs import CurveFilamentSpec
 
@@ -112,7 +115,7 @@ def _frame_geometry_from_spec(spec: CurveFilamentSpec, dofs: jax.Array):
             alpha,
             alphadash,
         )
-    else:
+    elif spec.frame_kind == "centroid":
         gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
             spec.base_curve, base_dofs
         )
@@ -127,6 +130,36 @@ def _frame_geometry_from_spec(spec: CurveFilamentSpec, dofs: jax.Array):
             gammadashdash,
             alpha,
             alphadash,
+        )
+    elif spec.frame_kind == "surface_tangent":
+        if spec.surface_major_radius is None:
+            raise ValueError(
+                "frame_kind='surface_tangent' requires surface_major_radius."
+            )
+        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
+            spec.base_curve, base_dofs
+        )
+        surface_midplane_z = 0.0 if spec.surface_midplane_z is None else spec.surface_midplane_z
+        _t, normal, binormal = rotated_surface_tangent_frame(
+            gamma,
+            gammadash,
+            alpha,
+            spec.surface_major_radius,
+            surface_midplane_z,
+        )
+        _td, normal_dash, binormal_dash = rotated_surface_tangent_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+            spec.surface_major_radius,
+            surface_midplane_z,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported CurveFilament frame_kind {spec.frame_kind!r}; expected "
+            "'centroid', 'frenet', or 'surface_tangent'."
         )
     return gamma, gammadash, normal, binormal, normal_dash, binormal_dash
 

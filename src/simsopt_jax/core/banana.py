@@ -1337,6 +1337,15 @@ def banana_local_value(
     spec: BananaObjectiveSpec,
     decision_vector: jax.Array,
 ) -> jax.Array:
+    """Return the frozen local banana objective subset.
+
+    This named subset covers the local Stage 2 geometry/current terms exposed by
+    ``banana_local_terms``. It is not the full production single-stage objective:
+    the self-envelope/global-radius term, fold geodesic-curvature assembly, and
+    ``PoloidalExtentFloor`` smooth-max floor remain outside this local facade.
+    Use the solved-state single-stage target lane when Boozer/iota/non-QS and
+    configured single-stage hardware terms are required.
+    """
     terms = banana_local_terms(spec, decision_vector)
     return (
         spec.squared_flux_weight * terms.squared_flux

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import examples.single_stage_optimization.banana_opt.jax_banana_specs as banana_specs_module
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from examples.single_stage_optimization.banana_opt.jax_banana_specs import (
+    build_banana_single_stage_solved_state_target,
     build_banana_local_objective_spec_from_biotsavart,
     build_banana_local_objective_spec_from_coils,
 )
@@ -131,6 +133,46 @@ class _HostBiotSavart:
     coils: list[_HostCoil]
 
 
+@dataclass(frozen=True)
+class _SolvedBoozerState:
+    iota: float
+    G: float
+    sdofs: np.ndarray
+
+
+@dataclass(frozen=True)
+class _AdjointRuntimeState:
+    solved_state: _SolvedBoozerState
+    linear_solve_factors: object
+
+
+@dataclass
+class _SolvedBoozerSurface:
+    adjoint_state: _AdjointRuntimeState
+
+    def get_adjoint_runtime_state(self) -> _AdjointRuntimeState:
+        return self.adjoint_state
+
+    def _pack_decision_vector(
+        self,
+        iota: object,
+        G: object,
+        *,
+        sdofs: object,
+    ) -> np.ndarray:
+        return np.concatenate(
+            (
+                np.asarray(sdofs, dtype=np.float64).reshape((-1,)),
+                np.asarray([iota, G], dtype=np.float64),
+            )
+        )
+
+
+@dataclass
+class _SolvedBiotSavart:
+    x: np.ndarray
+
+
 @dataclass
 class _HostSurface:
     surface_gamma: np.ndarray
@@ -172,6 +214,127 @@ def _make_banana_coils(
             _ScaledCurrent(current_owner, -16.0 * KA_TO_A),
         ),
     ]
+
+
+def _independent_poloidal_extent(
+    gamma: np.ndarray,
+    gammadash: np.ndarray,
+    *,
+    major_radius: float,
+    z_position: float,
+    theta_target: float,
+    exponent: int,
+) -> float:
+    radius = np.linalg.norm(gamma[:, :2], axis=-1)
+    theta = np.arctan2(gamma[:, 2] - z_position, -(radius - major_radius))
+    arclength = np.linalg.norm(gammadash, axis=-1)
+    excess = np.maximum(np.abs(theta) - theta_target, 0.0)
+    return float(np.mean((excess**exponent) * arclength) / exponent)
+
+
+def _independent_projected_ellipse_width(
+    gamma: np.ndarray,
+    gammadash: np.ndarray,
+    *,
+    major_radius: float,
+    minor_radius: float,
+    z_position: float,
+    scale: float,
+    epsilon: float,
+) -> float:
+    radius = np.linalg.norm(gamma[:, :2], axis=-1)
+    phi = np.arctan2(gamma[:, 1], gamma[:, 0])
+    theta = np.arctan2(gamma[:, 2] - z_position, -(radius - major_radius))
+    phi_ref = np.arctan2(np.mean(np.sin(phi)), np.mean(np.cos(phi)))
+    dphi = np.mod(phi - phi_ref + np.pi, 2.0 * np.pi) - np.pi
+    projected = np.stack((major_radius * dphi, minor_radius * theta), axis=-1)
+    dl = np.linalg.norm(gammadash, axis=-1)
+    weights = dl / np.sum(dl)
+    center = np.sum(weights[:, None] * projected, axis=0)
+    centered = projected - center
+    cov = (weights[:, None] * centered).T @ centered
+    cov_xx = cov[0, 0]
+    cov_xy = 0.5 * (cov[0, 1] + cov[1, 0])
+    cov_yy = cov[1, 1]
+    trace = cov_xx + cov_yy
+    discriminant = max((cov_xx - cov_yy) ** 2 + 4.0 * cov_xy**2, 0.0)
+    lambda_minor = 0.5 * (trace - np.sqrt(discriminant))
+    return float(scale * np.sqrt(max(lambda_minor, epsilon)))
+
+
+def _quadratic_penalty_value(value: float, threshold: float, mode: str) -> float:
+    diff = value - threshold
+    if mode == "max":
+        return float(0.5 * max(diff, 0.0) ** 2)
+    if mode == "min":
+        return float(0.5 * min(diff, 0.0) ** 2)
+    if mode == "identity":
+        return float(0.5 * diff**2)
+    raise AssertionError(f"unsupported penalty mode {mode!r}")
+
+
+def test_single_stage_solved_state_target_rejects_nonzero_boozer_I():
+    with pytest.raises(ValueError, match="zero enclosed Boozer current"):
+        build_banana_single_stage_solved_state_target(
+            object(),
+            object(),
+            0.1,
+            outer_objective_config={},
+            boozer_I=1.0e-9,
+        )
+
+
+def test_single_stage_solved_state_target_accepts_exact_zero_boozer_I(monkeypatch):
+    fake_value_and_grad = object()
+
+    def fake_make_traceable_solved_state_value_and_grad(
+        boozer_surface: object,
+        biotsavart: object,
+        iota_target: object,
+        *,
+        outer_objective_config: object,
+        success_filter: object = None,
+    ) -> object:
+        assert outer_objective_config == {"mode": "test"}
+        assert success_filter == "success-filter"
+        assert iota_target == 0.25
+        return fake_value_and_grad
+
+    monkeypatch.setattr(
+        banana_specs_module,
+        "make_traceable_solved_state_value_and_grad",
+        fake_make_traceable_solved_state_value_and_grad,
+    )
+    boozer_surface = _SolvedBoozerSurface(
+        _AdjointRuntimeState(
+            _SolvedBoozerState(
+                iota=0.25,
+                G=-2.5,
+                sdofs=np.asarray([0.1, 0.2], dtype=np.float64),
+            ),
+            linear_solve_factors="linear-factors",
+        )
+    )
+    biotsavart = _SolvedBiotSavart(
+        x=np.asarray([3.0, 4.0, 5.0], dtype=np.float64),
+    )
+
+    target = build_banana_single_stage_solved_state_target(
+        boozer_surface,
+        biotsavart,
+        0.25,
+        outer_objective_config={"mode": "test"},
+        success_filter="success-filter",
+        boozer_I=0.0,
+    )
+
+    assert target.value_and_grad is fake_value_and_grad
+    np.testing.assert_allclose(np.asarray(target.coil_dofs), biotsavart.x)
+    np.testing.assert_allclose(
+        np.asarray(target.solved_x),
+        np.asarray([0.1, 0.2, 0.25, -2.5], dtype=np.float64),
+    )
+    assert target.linear_solve_factors == "linear-factors"
 
 
 def test_build_banana_local_spec_from_coils_preserves_current_first_layout():
@@ -354,6 +517,7 @@ def test_banana_local_terms_match_driver_weighted_terms_for_canonical_biotsavart
         reason="Driver term parity requires SIMSOPT host coil objects.",
     )
     from examples.single_stage_optimization.banana_opt.jax_banana_drivers import (
+        banana_base_curve,
         banana_geometry_terms,
         build_biotsavart,
         weighted_sum_objective,
@@ -413,6 +577,52 @@ def test_banana_local_terms_match_driver_weighted_terms_for_canonical_biotsavart
     frozen_terms = banana_local_terms(
         spec,
         jnp.asarray(decision_vector, dtype=jnp.float64),
+    )
+    base_curve = banana_base_curve(BiotSavartJAX(biotsavart.coils))
+    base_gamma = np.asarray(base_curve.gamma(), dtype=np.float64)
+    base_gammadash = np.asarray(base_curve.gammadash(), dtype=np.float64)
+    independent_poloidal = _independent_poloidal_extent(
+        base_gamma,
+        base_gammadash,
+        major_radius=spec.poloidal_major_radius,
+        z_position=spec.poloidal_z_position,
+        theta_target=spec.poloidal_theta_target,
+        exponent=spec.poloidal_exponent,
+    )
+    independent_width = _independent_projected_ellipse_width(
+        base_gamma,
+        base_gammadash,
+        major_radius=spec.width_major_radius,
+        minor_radius=spec.width_minor_radius,
+        z_position=spec.width_z_position,
+        scale=spec.width_scale,
+        epsilon=spec.width_epsilon,
+    )
+    np.testing.assert_allclose(
+        driver_values["poloidal_extent"],
+        independent_poloidal,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        driver_values["width_max"],
+        _quadratic_penalty_value(
+            independent_width,
+            spec.width_max_threshold,
+            spec.width_max_mode,
+        ),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        driver_values["width_min"],
+        _quadratic_penalty_value(
+            independent_width,
+            spec.width_min_threshold,
+            spec.width_min_mode,
+        ),
+        rtol=1e-12,
+        atol=1e-12,
     )
     expected_terms = {
         "length_max": frozen_terms.length_max,

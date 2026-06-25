@@ -1,12 +1,13 @@
 """Pure JAX kernels for framed-curve reference frames.
 
-Wave R4 item 18: SSOT JAX port of the math kernels that build the Frenet
-and coil-centroid orthonormal frames along a closed curve, optionally
-rotated by an angle ``alpha`` along the curve parameter.
+Wave R4 item 18: SSOT JAX port of the math kernels that build Frenet,
+coil-centroid, and surface-tangent orthonormal frames along a closed curve,
+optionally rotated by an angle ``alpha`` along the curve parameter.
 
 The upstream Python implementation in
 ``simsopt.geo.framedcurve.rotated_centroid_frame`` and
-``rotated_frenet_frame`` is already a JAX-native gather-style kernel.
+``rotated_frenet_frame`` is already a JAX-native gather-style kernel; the
+surface-tangent family is ported from the sibling JAX reference formulas.
 This module re-expresses the same arithmetic line-by-line as a pure
 function package without the surrounding ``Optimizable`` graph, so the
 kernels are reusable from immutable specs, compose cleanly under
@@ -24,7 +25,8 @@ Conventions
   orthonormal triple at every quadrature point.
 * The unrotated ``frenet_frame`` / ``centroid_frame`` helpers fall out of
   the rotated variants at ``alpha = 0`` and are exposed as their own
-  pure functions for callers that do not need rotation support.
+  pure functions for callers that do not need rotation support; surface-tangent
+  callers use the rotated variant with explicit winding-surface metadata.
 
 The kernels operate on materialised JAX arrays (no SciPy / SciPy-like
 fallback). They are JIT-friendly: every operation is expressed in terms
@@ -33,6 +35,8 @@ control flow depends on dynamic input.
 """
 
 from __future__ import annotations
+
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -51,10 +55,16 @@ __all__ = [
     "rotated_centroid_frame_dash",
     "rotated_frenet_frame",
     "rotated_frenet_frame_dash",
+    "rotated_surface_tangent_frame",
+    "rotated_surface_tangent_frame_dash",
+    "rotated_surface_tangent_frame_dashdash",
     "rotation_alpha",
     "rotation_alphadash",
     "rotation_dcoeff",
     "rotationdash_dcoeff",
+    "surface_tangent_normal_direction",
+    "torsion_pure_surface_tangent",
+    "binormal_curvature_pure_surface_tangent",
 ]
 
 
@@ -132,6 +142,119 @@ def rotated_centroid_frame(
     alpha_jax = _as_jax_float64(alpha)
     nn, bb = _rotate_frame(n, b, alpha_jax)
     return t, nn, bb
+
+
+def surface_tangent_normal_direction(
+    gamma: jax.Array,
+    R0: float,
+    z0: float,
+) -> jax.Array:
+    """Return the circular-torus outward normal direction at each curve point."""
+    gamma_jax = _as_jax_float64(gamma)
+    rho = jnp.sqrt(gamma_jax[:, 0] ** 2 + gamma_jax[:, 1] ** 2)
+    axis = jnp.stack(
+        [
+            _as_jax_float64(R0) * gamma_jax[:, 0] / rho,
+            _as_jax_float64(R0) * gamma_jax[:, 1] / rho,
+            _as_jax_float64(z0) * jnp.ones_like(rho),
+        ],
+        axis=1,
+    )
+    delta = gamma_jax - axis
+    return delta / _row_norm(delta)
+
+
+@partial(jax.jit, static_argnames=("R0", "z0"))
+def rotated_surface_tangent_frame(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    alpha: jax.Array,
+    R0: float,
+    z0: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Return the surface-tangent frame ``(t, n, b)`` rotated by ``alpha``."""
+    gamma_jax = _as_jax_float64(gamma)
+    gammadash_jax = _as_jax_float64(gammadash)
+    alpha_jax = _as_jax_float64(alpha)
+    t = gammadash_jax / _row_norm(gammadash_jax)
+    surface_normal = surface_tangent_normal_direction(gamma_jax, R0, z0)
+    n_unnormed = surface_normal - _row_dot(surface_normal, t) * t
+    n = n_unnormed / _row_norm(n_unnormed)
+    b = jnp.cross(t, n, axis=1)
+    nn, bb = _rotate_frame(n, b, alpha_jax)
+    return t, nn, bb
+
+
+@partial(jax.jit, static_argnames=("R0", "z0"))
+def rotated_surface_tangent_frame_dash(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+    R0: float,
+    z0: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Return the parameter derivative of ``rotated_surface_tangent_frame``."""
+
+    def _frame(gamma_in, gammadash_in, alpha_in):
+        return rotated_surface_tangent_frame(gamma_in, gammadash_in, alpha_in, R0, z0)
+
+    primals = (
+        _as_jax_float64(gamma),
+        _as_jax_float64(gammadash),
+        _as_jax_float64(alpha),
+    )
+    tangents = (
+        _as_jax_float64(gammadash),
+        _as_jax_float64(gammadashdash),
+        _as_jax_float64(alphadash),
+    )
+    _, frame_dash = jax.jvp(_frame, primals, tangents)
+    return frame_dash
+
+
+@partial(jax.jit, static_argnames=("R0", "z0"))
+def rotated_surface_tangent_frame_dashdash(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    gammadashdashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+    alphadashdash: jax.Array,
+    R0: float,
+    z0: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Return the second parameter derivative of the surface-tangent frame."""
+
+    def _frame_dash(gamma_in, gammadash_in, gammadashdash_in, alpha_in, alphadash_in):
+        return rotated_surface_tangent_frame_dash(
+            gamma_in,
+            gammadash_in,
+            gammadashdash_in,
+            alpha_in,
+            alphadash_in,
+            R0,
+            z0,
+        )
+
+    primals = (
+        _as_jax_float64(gamma),
+        _as_jax_float64(gammadash),
+        _as_jax_float64(gammadashdash),
+        _as_jax_float64(alpha),
+        _as_jax_float64(alphadash),
+    )
+    tangents = (
+        _as_jax_float64(gammadash),
+        _as_jax_float64(gammadashdash),
+        _as_jax_float64(gammadashdashdash),
+        _as_jax_float64(alphadash),
+        _as_jax_float64(alphadashdash),
+    )
+    _, frame_dashdash = jax.jvp(_frame_dash, primals, tangents)
+    return frame_dashdash
 
 
 @jax.jit
@@ -299,6 +422,54 @@ def frenet_frame_dash(
         zero_alpha,
         zero_alpha,
     )
+
+
+def torsion_pure_surface_tangent(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+    R0: float,
+    z0: float,
+) -> jax.Array:
+    """Return frame torsion for the surface-tangent reference frame."""
+    _, _, b = rotated_surface_tangent_frame(gamma, gammadash, alpha, R0, z0)
+    _, ndash, _ = rotated_surface_tangent_frame_dash(
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
+        R0,
+        z0,
+    )
+    arc_length = jnp.linalg.norm(_as_jax_float64(gammadash), axis=1)[:, None]
+    return jnp.sum((ndash / arc_length) * b, axis=1)
+
+
+def binormal_curvature_pure_surface_tangent(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+    R0: float,
+    z0: float,
+) -> jax.Array:
+    """Return frame binormal curvature for the surface-tangent reference frame."""
+    _, _, b = rotated_surface_tangent_frame(gamma, gammadash, alpha, R0, z0)
+    tdash, _, _ = rotated_surface_tangent_frame_dash(
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
+        R0,
+        z0,
+    )
+    arc_length = jnp.linalg.norm(_as_jax_float64(gammadash), axis=1)[:, None]
+    return jnp.sum((tdash / arc_length) * b, axis=1)
 
 
 def _rotation_alpha_impl(dofs: jax.Array, points: jax.Array, order: int) -> jax.Array:

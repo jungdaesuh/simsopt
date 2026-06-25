@@ -25,6 +25,8 @@ from simsopt_jax.core.banana import (
     banana_local_value_and_grad,
     banana_pack_rotation_fold_pure,
     banana_pack_twist_strain_pure,
+    banana_poloidal_extent_pure,
+    banana_projected_ellipse_width_pure,
     banana_projected_reach_pure,
     banana_quadratic_penalty,
     banana_rotation_aware_curvature_excess_pure,
@@ -599,6 +601,90 @@ def test_self_distance_mask_and_penalty_match_dense_pair_formula():
 
     np.testing.assert_allclose(np.diag(np.asarray(mask)), np.zeros(4))
     np.testing.assert_allclose(penalty, np.array(0.0025))
+
+
+def test_poloidal_extent_matches_closed_form_theta_hinge():
+    major_radius = 2.0
+    z_position = 0.1
+    theta_target = np.pi / 4.0
+    exponent = 2
+    thetas = np.asarray([-np.pi / 2.0, 0.0, np.pi / 3.0], dtype=np.float64)
+    radius = major_radius - np.cos(thetas)
+    gamma = jnp.asarray(
+        np.column_stack(
+            [
+                radius,
+                np.zeros_like(radius),
+                z_position + np.sin(thetas),
+            ]
+        ),
+        dtype=jnp.float64,
+    )
+    gammadash = jnp.asarray(
+        np.tile(np.asarray([[1.0, 0.0, 0.0]], dtype=np.float64), (thetas.size, 1))
+    )
+
+    value = banana_poloidal_extent_pure(
+        gamma,
+        gammadash,
+        major_radius,
+        z_position,
+        theta_target,
+        exponent,
+    )
+
+    excess = np.maximum(np.abs(thetas) - theta_target, 0.0)
+    expected = np.mean(excess**exponent) / exponent
+    np.testing.assert_allclose(value, expected)
+
+
+def test_projected_ellipse_width_matches_closed_form_covariance_minor_axis():
+    major_radius = 2.0
+    minor_radius = 0.5
+    z_position = -0.2
+    phi_extent = 0.2
+    theta_extent = 0.3
+    scale = 4.0
+    epsilon = 1.0e-12
+    phis = np.asarray(
+        [-phi_extent, phi_extent, -phi_extent, phi_extent],
+        dtype=np.float64,
+    )
+    thetas = np.asarray(
+        [-theta_extent, -theta_extent, theta_extent, theta_extent],
+        dtype=np.float64,
+    )
+    radius = major_radius - np.cos(thetas)
+    gamma = jnp.asarray(
+        np.column_stack(
+            [
+                radius * np.cos(phis),
+                radius * np.sin(phis),
+                z_position + np.sin(thetas),
+            ]
+        ),
+        dtype=jnp.float64,
+    )
+    gammadash = jnp.asarray(
+        np.tile(np.asarray([[1.0, 0.0, 0.0]], dtype=np.float64), (phis.size, 1))
+    )
+
+    value = banana_projected_ellipse_width_pure(
+        gamma,
+        gammadash,
+        major_radius,
+        minor_radius,
+        z_position,
+        scale,
+        epsilon,
+    )
+
+    expected_minor_variance = min(
+        (major_radius * phi_extent) ** 2,
+        (minor_radius * theta_extent) ** 2,
+    )
+    expected = scale * np.sqrt(max(expected_minor_variance, epsilon))
+    np.testing.assert_allclose(value, expected, rtol=1.0e-12, atol=1.0e-12)
 
 
 def test_self_distance_dense_and_chunked_paths_match(monkeypatch):

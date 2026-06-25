@@ -99,3 +99,16 @@ def test_banana_required_non_cuda_cpp_lanes_are_cpu_jax_complete():
             f"{row['Coverage row']} names a C++ oracle but still carries a "
             f"carve-out: {row['Known carve-out']}"
         )
+
+
+def test_banana_local_value_subset_manifest_lists_omitted_terms():
+    manifest = MANIFEST.read_text(encoding="utf-8")
+
+    assert "banana_local_value" in manifest
+    assert "banana local frozen-spec subset" in manifest
+    for omitted_term in (
+        "self-envelope/global-radius",
+        "fold geodesic-curvature",
+        "PoloidalExtentFloor",
+    ):
+        assert omitted_term in manifest

@@ -35,6 +35,7 @@ from simsopt_jax.core import (
     make_surface_rzfourier_spec,
     make_surface_xyz_fourier_spec,
     make_surface_xyz_tensor_fourier_spec,
+    make_zero_rotation_spec,
     surface_spec_kind,
     surface_xyz_fourier_gamma_from_spec,
     surface_xyz_fourier_normal_from_spec,
@@ -218,6 +219,56 @@ def test_curve_spec_kind_rejects_unrelated_same_name_lookalike():
         TypeError, match="Unsupported curve spec type: CurveXYZFourierSpec"
     ):
         curve_spec_kind(impostor)
+
+
+def test_curve_filament_spec_validates_frame_kind_and_surface_metadata():
+    quadpoints = _make_curve_quadpoints()
+    base_curve = _make_curve_spec()
+    base_map = _make_identity_dof_map(base_curve.dofs.shape[0])
+    rotation = make_zero_rotation_spec(quadpoints=quadpoints)
+    rotation_map = make_optimizable_dof_map_spec(
+        template_full_dofs=np.empty(0, dtype=np.float64),
+        owner_segments=(),
+        input_mode="local",
+        input_start=0,
+        input_end=0,
+    )
+    kwargs = {
+        "dofs": np.array(base_curve.dofs),
+        "quadpoints": quadpoints,
+        "base_curve": base_curve,
+        "base_curve_map": base_map,
+        "rotation": rotation,
+        "rotation_map": rotation_map,
+        "dn": 0.1,
+        "db": -0.2,
+    }
+
+    with pytest.raises(ValueError, match="Unknown CurveFilament frame_kind"):
+        make_curve_filament_spec(frame_kind="unknown", **kwargs)
+
+    with pytest.raises(ValueError, match="requires surface_major_radius"):
+        make_curve_filament_spec(frame_kind="surface_tangent", **kwargs)
+
+    spec = make_curve_filament_spec(
+        frame_kind="surface_tangent",
+        surface_major_radius=1.25,
+        surface_midplane_z=-0.1,
+        **kwargs,
+    )
+
+    assert spec.frame_kind == "surface_tangent"
+    assert spec.surface_major_radius == pytest.approx(1.25)
+    assert spec.surface_midplane_z == pytest.approx(-0.1)
+
+    filament_cls = type(spec)
+    with pytest.raises(ValueError, match="Unknown CurveFilament frame_kind"):
+        filament_cls(frame_kind="unknown", **kwargs)
+
+    payload = spec.as_dict()
+    payload["surface_major_radius"] = None
+    with pytest.raises(ValueError, match="requires surface_major_radius"):
+        filament_cls.from_dict(payload)
 
 
 def test_surface_spec_kind_covers_supported_fixed_surface_variants():

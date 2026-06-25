@@ -2,9 +2,9 @@
 
 Wave R4 item 18: provide ``Optimizable`` adapters that mirror the public
 API of :class:`simsopt.geo.framedcurve.FramedCurveFrenet`,
-:class:`FramedCurveCentroid`, :class:`FrameRotation`, and
-:class:`ZeroRotation`, while routing hot paths through the JAX kernels
-in :mod:`simsopt_jax.core.framedcurve`.
+:class:`FramedCurveCentroid`, :class:`FramedCurveSurfaceTangent`,
+:class:`FrameRotation`, and :class:`ZeroRotation`, while routing hot paths
+through the JAX kernels in :mod:`simsopt_jax.core.framedcurve`.
 
 These wrappers follow the same adapter pattern used by
 ``BiotSavartJAX``: the CPU-derived parent curve participates in the
@@ -19,8 +19,9 @@ Conventions
 * ``FrameRotationJAX`` / ``ZeroRotationJAX`` carry the same DOFs as their
   upstream counterparts so a JAX-backed framed curve can be swapped into
   an existing pipeline that expects the ``FrameRotation`` interface.
-* ``FramedCurveFrenetJAX`` / ``FramedCurveCentroidJAX`` mirror the public
-  ``rotated_frame``, ``rotated_frame_dash``, ``frame_torsion``, and
+* ``FramedCurveFrenetJAX`` / ``FramedCurveCentroidJAX`` /
+  ``FramedCurveSurfaceTangentJAX`` mirror the public ``rotated_frame``,
+  ``rotated_frame_dash``, ``frame_torsion``, and
   ``frame_binormal_curvature`` methods.
 * All host-facing arrays are converted through
   :func:`simsopt_jax.core._math_utils.as_jax_float64`; outputs of the
@@ -38,14 +39,18 @@ from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.core.framedcurve import (
+    binormal_curvature_pure_surface_tangent,
     rotated_centroid_frame,
     rotated_centroid_frame_dash,
     rotated_frenet_frame,
     rotated_frenet_frame_dash,
+    rotated_surface_tangent_frame,
+    rotated_surface_tangent_frame_dash,
     rotation_alpha,
     rotation_alphadash,
     rotation_dcoeff,
     rotationdash_dcoeff,
+    torsion_pure_surface_tangent,
 )
 
 
@@ -54,6 +59,7 @@ __all__ = [
     "ZeroRotationJAX",
     "FramedCurveCentroidJAX",
     "FramedCurveFrenetJAX",
+    "FramedCurveSurfaceTangentJAX",
 ]
 
 
@@ -285,6 +291,66 @@ def _frenet_binormal_curvature_vjps(
         gammadash,
         gammadashdash,
         gammadashdashdash,
+        alpha,
+        alphadash,
+    )
+    return pullback(cotangent)
+
+
+def _surface_tangent_torsion_vjps(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+    R0: float,
+    z0: float,
+    v: object,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    cotangent = _as_jax_float64(v)
+    _, pullback = jax.vjp(
+        lambda g, gd, gdd, a, ad: torsion_pure_surface_tangent(
+            g,
+            gd,
+            gdd,
+            a,
+            ad,
+            R0,
+            z0,
+        ),
+        gamma,
+        gammadash,
+        gammadashdash,
+        alpha,
+        alphadash,
+    )
+    return pullback(cotangent)
+
+
+def _surface_tangent_binormal_curvature_vjps(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+    R0: float,
+    z0: float,
+    v: object,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    cotangent = _as_jax_float64(v)
+    _, pullback = jax.vjp(
+        lambda g, gd, gdd, a, ad: binormal_curvature_pure_surface_tangent(
+            g,
+            gd,
+            gdd,
+            a,
+            ad,
+            R0,
+            z0,
+        ),
+        gamma,
+        gammadash,
+        gammadashdash,
         alpha,
         alphadash,
     )
@@ -660,6 +726,157 @@ class FramedCurveCentroidJAX(_FramedCurveJAXBase):
         gamma, gammadash, gammadashdash, alpha, alphadash = self._scalar_inputs()
         grad0, grad1, grad2, grad4, grad5 = jax.vjp(
             rotated_centroid_frame_dash,
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+        )[1](_cotangent3(v0, v1, v2))
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4)
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+        )
+
+
+
+class FramedCurveSurfaceTangentJAX(_FramedCurveJAXBase):
+    """JAX-backed surface-tangent frame wrapper."""
+
+    def __init__(
+        self,
+        curve,
+        major_radius: float,
+        midplane_z: float = 0.0,
+        rotation=None,
+    ) -> None:
+        self.major_radius = float(major_radius)
+        self.midplane_z = float(midplane_z)
+        super().__init__(curve, rotation)
+
+    def _scalar_inputs(self):
+        return (
+            _as_jax_float64(self.curve.gamma()),
+            _as_jax_float64(self.curve.gammadash()),
+            _as_jax_float64(self.curve.gammadashdash()),
+            self._alpha(),
+            self._alphadash(),
+            self.major_radius,
+            self.midplane_z,
+        )
+
+    def rotated_frame(self) -> tuple[jax.Array, jax.Array, jax.Array]:
+        gamma, gammadash, _gammadashdash, alpha, _alphadash, R0, z0 = (
+            self._scalar_inputs()
+        )
+        return rotated_surface_tangent_frame(gamma, gammadash, alpha, R0, z0)
+
+    def rotated_frame_dash(self) -> tuple[jax.Array, jax.Array, jax.Array]:
+        gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0 = (
+            self._scalar_inputs()
+        )
+        return rotated_surface_tangent_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+            R0,
+            z0,
+        )
+
+    def frame_torsion(self) -> jax.Array:
+        return torsion_pure_surface_tangent(*self._scalar_inputs())
+
+    def frame_binormal_curvature(self) -> jax.Array:
+        return binormal_curvature_pure_surface_tangent(*self._scalar_inputs())
+
+    def dframe_torsion_by_dcoeff_vjp(self, v: object) -> Derivative:
+        gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0 = (
+            self._scalar_inputs()
+        )
+        grad0, grad1, grad2, grad4, grad5 = _surface_tangent_torsion_vjps(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+            R0,
+            z0,
+            v,
+        )
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4)
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+        )
+
+    def dframe_binormal_curvature_by_dcoeff_vjp(self, v: object) -> Derivative:
+        gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0 = (
+            self._scalar_inputs()
+        )
+        grad0, grad1, grad2, grad4, grad5 = _surface_tangent_binormal_curvature_vjps(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+            R0,
+            z0,
+            v,
+        )
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4)
+            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
+        )
+
+    def rotated_frame_dcoeff_vjp(
+        self,
+        v0: object,
+        v1: object,
+        v2: object,
+    ) -> Derivative:
+        gamma, gammadash, _gammadashdash, alpha, _alphadash, R0, z0 = (
+            self._scalar_inputs()
+        )
+        grad0, grad1, grad3 = jax.vjp(
+            lambda g, gd, a: rotated_surface_tangent_frame(g, gd, a, R0, z0),
+            gamma,
+            gammadash,
+            alpha,
+        )[1](_cotangent3(v0, v1, v2))
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(grad0)
+            + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad3)
+        )
+
+    def rotated_frame_dash_dcoeff_vjp(
+        self,
+        v0: object,
+        v1: object,
+        v2: object,
+    ) -> Derivative:
+        gamma, gammadash, gammadashdash, alpha, alphadash, R0, z0 = (
+            self._scalar_inputs()
+        )
+        grad0, grad1, grad2, grad4, grad5 = jax.vjp(
+            lambda g, gd, gdd, a, ad: rotated_surface_tangent_frame_dash(
+                g,
+                gd,
+                gdd,
+                a,
+                ad,
+                R0,
+                z0,
+            ),
             gamma,
             gammadash,
             gammadashdash,

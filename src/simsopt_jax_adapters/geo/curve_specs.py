@@ -10,7 +10,13 @@ from simsopt.geo.curveplanarfourier import CurvePlanarFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.finitebuild import CurveFilament
-from simsopt.geo.framedcurve import FrameRotation, FramedCurveFrenet, ZeroRotation
+from simsopt.geo.framedcurve import (
+    FrameRotation,
+    FramedCurveCentroid,
+    FramedCurveFrenet,
+    FramedCurveSurfaceTangent,
+    ZeroRotation,
+)
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt_jax.core import (
     curve_spec_from_curve as _pure_curve_spec_from_curve,
@@ -128,6 +134,9 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed):
 
 
 def _curve_filament_spec_from_curve(curve: CurveFilament):
+    frame_kind, surface_major_radius, surface_midplane_z = _frame_spec_from_framed_curve(
+        curve.framedcurve
+    )
     return make_curve_filament_spec(
         dofs=curve.full_x,
         quadpoints=curve.quadpoints,
@@ -135,9 +144,29 @@ def _curve_filament_spec_from_curve(curve: CurveFilament):
         base_curve_map=_optimizable_dof_map_spec(curve, curve.curve),
         rotation=_rotation_spec_from_curve(curve.rotation, curve.curve.quadpoints),
         rotation_map=_optimizable_dof_map_spec(curve, curve.rotation),
-        frame_kind="frenet" if isinstance(curve.framedcurve, FramedCurveFrenet) else "centroid",
+        frame_kind=frame_kind,
         dn=curve.dn,
         db=curve.db,
+        surface_major_radius=surface_major_radius,
+        surface_midplane_z=surface_midplane_z,
+    )
+
+
+def _frame_spec_from_framed_curve(framed_curve):
+    if isinstance(framed_curve, FramedCurveCentroid):
+        return "centroid", None, None
+    if isinstance(framed_curve, FramedCurveFrenet):
+        return "frenet", None, None
+    if isinstance(framed_curve, FramedCurveSurfaceTangent):
+        return (
+            "surface_tangent",
+            framed_curve.major_radius,
+            framed_curve.midplane_z,
+        )
+    raise NotImplementedError(
+        "CurveFilament JAX spec conversion supports FramedCurveCentroid, "
+        "FramedCurveFrenet, and FramedCurveSurfaceTangent, got "
+        f"{type(framed_curve).__name__}."
     )
 
 

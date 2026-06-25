@@ -25,6 +25,7 @@ from simsopt_jax.core.qfm_solver import (
     QfmPenaltySolveInfo,
     qfm_augmented_lagrangian_solve_jax,
     qfm_exact_kkt_residual_jax_from_dofs,
+    qfm_label_jax_from_dofs,
     qfm_penalty_jax_from_dofs,
     qfm_penalty_solve_jax,
     qfm_penalty_value_and_grad_jax_from_dofs,
@@ -217,6 +218,45 @@ def test_qfm_bfgs_curvature_floor_rejects_float32_boundary() -> None:
 
     assert bool(qfm_valid) is False
     assert bool(private_valid) is False
+
+
+def test_qfm_residual_degenerate_zero_surface_records_jax_zero_boundary() -> None:
+    """JAX keeps the zero-normal QFM residual finite at 0.0.
+
+    This is an explicit JAX boundary contract for the degenerate ``0 / 0``
+    surface case; native C++ may surface the same singular case as ``nan``.
+    """
+
+    biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    del biotsavart
+    spec = _surface_spec(surface)
+    zero_dofs = jnp.zeros_like(dofs)
+
+    value = qfm_residual_jax_from_dofs(spec, zero_dofs, coil_set_spec)
+
+    np.testing.assert_allclose(value, np.array(0.0), rtol=0.0, atol=0.0)
+    assert np.isfinite(float(value))
+
+
+@pytest.mark.parametrize("label", ["area", "volume", "toroidal_flux"])
+def test_qfm_label_degenerate_zero_surface_records_jax_zero_boundary(label: str) -> None:
+    """Degenerate label values are explicit finite JAX boundary contracts."""
+
+    biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    del biotsavart
+    spec = _surface_spec(surface)
+    zero_dofs = jnp.zeros_like(dofs)
+
+    value = qfm_label_jax_from_dofs(
+        spec,
+        zero_dofs,
+        coil_set_spec,
+        label=label,
+        toroidal_flux_idx=0,
+    )
+
+    np.testing.assert_allclose(value, np.array(0.0), rtol=0.0, atol=0.0)
+    assert np.isfinite(float(value))
 
 
 @pytest.mark.parametrize(

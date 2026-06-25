@@ -15,6 +15,7 @@ from simsopt.geo import (
     FrameRotation,
     FramedCurveCentroid,
     FramedCurveFrenet,
+    FramedCurveSurfaceTangent,
     ZeroRotation,
     create_multifilament_grid,
 )
@@ -47,6 +48,8 @@ _CURVE_DOFS = np.array(
     dtype=np.float64,
 )
 _ROTATION_DOFS = np.array([0.07, -0.03, 0.02], dtype=np.float64)
+_SURFACE_MAJOR_RADIUS = 0.82
+_SURFACE_MIDPLANE_Z = 0.17
 
 
 def _build_base_curve() -> CurvePlanarFourier:
@@ -71,7 +74,14 @@ def _build_framed_curve(
     rotation = _build_rotation(curve, rotation_kind)
     if frame_kind == "centroid":
         return FramedCurveCentroid(curve, rotation)
-    return FramedCurveFrenet(curve, rotation)
+    if frame_kind == "frenet":
+        return FramedCurveFrenet(curve, rotation)
+    return FramedCurveSurfaceTangent(
+        curve,
+        _SURFACE_MAJOR_RADIUS,
+        _SURFACE_MIDPLANE_Z,
+        rotation,
+    )
 
 
 def _local_dof_map(template_dofs: np.ndarray, owner_start: int):
@@ -134,6 +144,12 @@ def _curvefilament_spec(
         frame_kind=frame_kind,
         dn=dn,
         db=db,
+        surface_major_radius=(
+            _SURFACE_MAJOR_RADIUS if frame_kind == "surface_tangent" else None
+        ),
+        surface_midplane_z=(
+            _SURFACE_MIDPLANE_Z if frame_kind == "surface_tangent" else None
+        ),
     )
 
 
@@ -170,7 +186,7 @@ def _assert_live_and_spec_geometry_match(
     )
 
 
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
+@pytest.mark.parametrize("frame_kind", ("centroid", "frenet", "surface_tangent"))
 @pytest.mark.parametrize("rotation_order", (None, 1))
 def test_multifilament_grid_preserves_offsets_and_spec_geometry(
     frame_kind: str,
@@ -186,6 +202,8 @@ def test_multifilament_grid_preserves_offsets_and_spec_geometry(
         gapsize_b=0.03,
         rotation_order=rotation_order,
         frame=frame_kind,
+        surface_major_radius=_SURFACE_MAJOR_RADIUS,
+        surface_midplane_z=_SURFACE_MIDPLANE_Z,
     )
 
     expected_offsets = (
@@ -208,6 +226,9 @@ def test_multifilament_grid_preserves_offsets_and_spec_geometry(
         assert spec.frame_kind == frame_kind
         assert spec.dn == pytest.approx(dn)
         assert spec.db == pytest.approx(db)
+        if frame_kind == "surface_tangent":
+            assert spec.surface_major_radius == pytest.approx(_SURFACE_MAJOR_RADIUS)
+            assert spec.surface_midplane_z == pytest.approx(_SURFACE_MIDPLANE_Z)
         if rotation_order is None:
             assert isinstance(spec.rotation, ZeroRotationSpec)
         else:
@@ -232,7 +253,7 @@ def _central_fd_gradient(scalar_fn, dofs: np.ndarray, step: float) -> np.ndarray
     return grad
 
 
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
+@pytest.mark.parametrize("frame_kind", ("centroid", "frenet", "surface_tangent"))
 @pytest.mark.parametrize("rotation_kind", ("zero", "frame"))
 def test_curvefilament_jax_gamma_vjp_matches_central_fd(
     frame_kind: str,
@@ -268,7 +289,7 @@ def test_curvefilament_jax_gamma_vjp_matches_central_fd(
     np.testing.assert_allclose(jax_grad, fd_grad, rtol=_FD_RTOL, atol=_FD_ATOL)
 
 
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
+@pytest.mark.parametrize("frame_kind", ("centroid", "frenet", "surface_tangent"))
 @pytest.mark.parametrize("rotation_kind", ("zero", "frame"))
 def test_curvefilament_jax_gammadash_vjp_matches_central_fd(
     frame_kind: str,
@@ -304,7 +325,7 @@ def test_curvefilament_jax_gammadash_vjp_matches_central_fd(
     np.testing.assert_allclose(jax_grad, fd_grad, rtol=_FD_RTOL, atol=_FD_ATOL)
 
 
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
+@pytest.mark.parametrize("frame_kind", ("centroid", "frenet", "surface_tangent"))
 @pytest.mark.parametrize("rotation_kind", ("zero", "frame"))
 def test_curvefilament_spec_pullback_matches_central_fd(
     frame_kind: str,

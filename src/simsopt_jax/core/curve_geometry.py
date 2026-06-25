@@ -33,6 +33,8 @@ from .framedcurve import (
     rotated_centroid_frame_dash,
     rotated_frenet_frame,
     rotated_frenet_frame_dash,
+    rotated_surface_tangent_frame,
+    rotated_surface_tangent_frame_dash,
     rotation_alpha as jaxrotation_pure,
     rotation_alphadash as jaxrotationdash_pure,
 )
@@ -457,11 +459,33 @@ def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
                 gammadashdash,
                 alpha,
             )
-        else:
+        elif quad_spec.frame_kind == "centroid":
             _tangent, normal, binormal = rotated_centroid_frame(
                 gamma,
                 gammadash,
                 alpha,
+            )
+        elif quad_spec.frame_kind == "surface_tangent":
+            if quad_spec.surface_major_radius is None:
+                raise ValueError(
+                    "frame_kind='surface_tangent' requires surface_major_radius."
+                )
+            surface_midplane_z = (
+                0.0
+                if quad_spec.surface_midplane_z is None
+                else quad_spec.surface_midplane_z
+            )
+            _tangent, normal, binormal = rotated_surface_tangent_frame(
+                gamma,
+                gammadash,
+                alpha,
+                quad_spec.surface_major_radius,
+                surface_midplane_z,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported CurveFilament frame_kind {quad_spec.frame_kind!r}; "
+                "expected 'centroid', 'frenet', or 'surface_tangent'."
             )
         return gamma + quad_spec.dn * normal + quad_spec.db * binormal
 
@@ -498,7 +522,7 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
             alpha,
             alphadash,
         )
-    else:
+    elif spec.frame_kind == "centroid":
         gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
             spec.base_curve, base_dofs
         )
@@ -513,6 +537,36 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
             gammadashdash,
             alpha,
             alphadash,
+        )
+    elif spec.frame_kind == "surface_tangent":
+        if spec.surface_major_radius is None:
+            raise ValueError(
+                "frame_kind='surface_tangent' requires surface_major_radius."
+            )
+        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
+            spec.base_curve, base_dofs
+        )
+        surface_midplane_z = 0.0 if spec.surface_midplane_z is None else spec.surface_midplane_z
+        _tangent, normal, binormal = rotated_surface_tangent_frame(
+            gamma,
+            gammadash,
+            alpha,
+            spec.surface_major_radius,
+            surface_midplane_z,
+        )
+        _tangent_dash, normal_dash, binormal_dash = rotated_surface_tangent_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+            spec.surface_major_radius,
+            surface_midplane_z,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported CurveFilament frame_kind {spec.frame_kind!r}; expected "
+            "'centroid', 'frenet', or 'surface_tangent'."
         )
     dn = _runtime_scalar(spec.dn, reference=normal)
     db = _runtime_scalar(spec.db, reference=binormal)

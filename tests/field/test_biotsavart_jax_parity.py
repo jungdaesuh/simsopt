@@ -1,9 +1,11 @@
 """
-Pure-JAX Biot-Savart parity tests matching upstream C++ test suite.
+Pure-JAX Biot-Savart kernel self-consistency tests.
 
-Section 8a of jax_gpu_remaining_todos.md.  These tests exercise functions
-in ``biotsavart_jax.py`` that have upstream C++ equivalents in
-``tests/field/test_biotsavart.py`` but lacked JAX coverage.
+Section 8a of jax_gpu_remaining_todos.md. These tests exercise identities
+for functions in ``biotsavart_jax.py`` that have upstream C++ equivalents
+in ``tests/field/test_biotsavart.py`` but lacked JAX coverage. Direct
+``simsoptpp`` cross-boundary parity lives in
+``tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity``.
 
 Tests:
 1. Quadrature convergence (exponential decay of B and dB/dX error)
@@ -212,7 +214,7 @@ def _assert_current_linearity(quantity_fn, points, gammas, gammadashs, current):
 
 
 class TestBiotSavartParitySuite:
-    """Parity tests matching upstream tests/field/test_biotsavart.py."""
+    """Pure-JAX self-consistency tests mirroring upstream Biot-Savart scenarios."""
 
     def test_quadrature_convergence(self):
         """Multi-level quadrature refinement shows monotone error decay.

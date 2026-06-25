@@ -15,6 +15,7 @@ import simsoptpp as sopp
 
 from simsopt_jax.core.wireframe_workflow import (
     WireframeGSCOLiveParams,
+    _gsco_live_step,
     _wireframe_gsco_multistep_initial_state,
     find_wireframe_coil_sizes_jax,
     greedy_stellarator_coil_optimization_jax,
@@ -25,8 +26,8 @@ from simsopt_jax.core.wireframe_workflow import (
 )
 
 
-def _gsco_problem():
-    rng = np.random.default_rng(3104)
+def _gsco_problem_from_seed(seed: int):
+    rng = np.random.default_rng(seed)
     A = np.ascontiguousarray(rng.standard_normal(size=(5, 6)))
     b = np.ascontiguousarray(rng.standard_normal(size=(5, 1)))
     loops = np.ascontiguousarray(np.array([[0, 1, 2, 3], [2, 3, 4, 5]], dtype=np.int64))
@@ -46,6 +47,10 @@ def _gsco_problem():
     x_init = np.ascontiguousarray(np.zeros((6, 1), dtype=np.float64))
     loop_count_init = np.ascontiguousarray(np.zeros(2, dtype=np.int64))
     return A, b, loops, free_loops, segments, connections, x_init, loop_count_init
+
+
+def _gsco_problem():
+    return _gsco_problem_from_seed(3104)
 
 
 def _synthetic_gsco_problem(*, n_grid: int, n_loops: int, seed: int):
@@ -433,6 +438,64 @@ def test_gsco_live_loop_matches_cpp_host_loop_for_five_steps() -> None:
     )
 
     _assert_live_state_matches_cpp(actual, expected)
+
+
+def test_gsco_live_step_stops_on_non_degenerate_opposite_candidate_without_undo() -> (
+    None
+):
+    """Pin the JAX modulo opposite-candidate policy on a nonzero GSCO fixture."""
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem_from_seed(5)
+    )
+    params = _params(
+        A,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        default_current=0.2,
+        max_current=1.0,
+        max_loop_count=2,
+        lambda_s=0.05,
+    )
+    initial = wireframe_gsco_initial_state(
+        params,
+        jnp.asarray(b),
+        jnp.asarray(x_init),
+        jnp.asarray(loop_count_init),
+        history_capacity=4,
+    )
+
+    first = _gsco_live_step(
+        initial,
+        jnp.asarray(0, dtype=jnp.int32),
+        params,
+        wireframe_gsco_never_stop,
+    )
+    second = _gsco_live_step(
+        first,
+        jnp.asarray(1, dtype=jnp.int32),
+        params,
+        wireframe_gsco_never_stop,
+    )
+
+    assert np.any(A != 0.0)
+    assert np.any(b != 0.0)
+    assert bool(np.asarray(first.done)) is False
+    assert bool(np.asarray(second.done)) is True
+    assert int(np.asarray(first.history_length)) == 2
+    assert int(np.asarray(second.history_length)) == 2
+    assert int(np.asarray(first.opt_ind_prev)) == 1
+    np.testing.assert_array_equal(
+        np.asarray(first.loop_count), np.asarray([0, 1], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(second.loop_count), np.asarray(first.loop_count)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(second.loop_history)[:2], np.asarray([0, 1], dtype=np.int32)
+    )
+    np.testing.assert_allclose(np.asarray(second.curr_history)[:2], [0.0, 0.2])
 
 
 def test_gsco_live_loop_matches_cpp_host_loop_for_fifty_steps() -> None:

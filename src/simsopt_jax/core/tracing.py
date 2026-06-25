@@ -633,6 +633,15 @@ def _stopping_criterion_should_stop(
     )
 
 
+def _levelset_value(
+    criterion: LevelsetStoppingCriterion,
+    state: jax.Array,
+    dtype,
+) -> jax.Array:
+    position = state[:3].reshape(1, 3).astype(dtype)
+    return criterion.classifier_fn(position)[0]
+
+
 def _continuous_phi(
     x: jax.Array, y: jax.Array, phi_near: jax.Array, dtype: jnp.dtype
 ) -> jax.Array:
@@ -1103,6 +1112,7 @@ def _scan_angle_plane_events(
     max_hits_i32: jax.Array,
     state_at_fraction: Callable[[jax.Array], jax.Array],
     angle_at_state: Callable[[jax.Array, jax.Array], jax.Array],
+    max_event_time: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Record angle-plane crossings for fieldline, GC, Boozer, and full-orbit drivers."""
 
@@ -1136,15 +1146,16 @@ def _scan_angle_plane_events(
             _device_array(1.0e-15, dtype),
         )
         state_root = state_at_fraction(s_root)
+        hit_time = t + s_root * h_clamped
         hit_row = _event_row_from_state(
-            t + s_root * h_clamped,
+            hit_time,
             _as_device_array(i, dtype),
             state_root,
         )
         return _append_event_row(
             hits_carry,
             count_carry,
-            crossed,
+            jnp.logical_and(crossed, hit_time <= max_event_time),
             hit_row,
             max_hits_i32,
         )
@@ -1155,6 +1166,107 @@ def _scan_angle_plane_events(
         scan_one_target,
         (hits, count),
     )
+
+
+def _select_stopping_criteria_event(
+    *,
+    stopping_criteria: tuple,
+    status: jax.Array,
+    stop: jax.Array,
+    iter_count: jax.Array,
+    angle_current: jax.Array,
+    angle_initial: jax.Array,
+    t_event: jax.Array,
+    state: jax.Array,
+    dtype,
+    is_boozer_state: bool = False,
+    t_previous: jax.Array | None = None,
+    state_previous: jax.Array | None = None,
+    h_clamped: jax.Array | None = None,
+    max_root_iters: int = 0,
+    state_at_fraction: Callable[[jax.Array], jax.Array] | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Return the earliest firing stopping-criterion event in this accepted step."""
+
+    t_start = t_event if t_previous is None else t_previous
+    state_start = state if state_previous is None else state_previous
+    step_width = t_event - t_start if h_clamped is None else h_clamped
+    event_index_zero = _device_array(0.0, dtype)
+    best_time = t_event
+    best_status = status
+    best_row = _event_row_from_state(t_event, event_index_zero, state)
+    best_fires = _device_false()
+    for i, criterion in enumerate(stopping_criteria):
+        idx_val = _device_index(-1 - i)
+        idx_event = _device_array(float(-1 - i), dtype)
+        if (
+            isinstance(criterion, LevelsetStoppingCriterion)
+            and state_at_fraction is not None
+            and not is_boozer_state
+        ):
+            value_start = _levelset_value(criterion, state_start, dtype)
+            value_end = _levelset_value(criterion, state, dtype)
+            zero = _device_array(0.0, dtype)
+            starts_outside = value_start < zero
+            crosses_outside = jnp.logical_and(value_start >= zero, value_end < zero)
+
+            def value_at_fraction(s):
+                return _levelset_value(criterion, state_at_fraction(s), dtype)
+
+            s_root, _value_root, bracketed = bracket_root_jax(
+                value_at_fraction,
+                zero,
+                _device_array(1.0, dtype),
+                value_start,
+                value_end,
+                max_root_iters,
+                _device_array(1.0e-15, dtype),
+            )
+            s_event = jnp.where(starts_outside, zero, s_root)
+            s_event = jnp.where(
+                jnp.logical_and(crosses_outside, value_start == zero),
+                zero,
+                s_event,
+            )
+            s_event = jnp.where(
+                jnp.logical_and(crosses_outside, jnp.logical_not(bracketed)),
+                _device_array(1.0, dtype),
+                s_event,
+            )
+            candidate_time = t_start + s_event * step_width
+            candidate_state = state_at_fraction(s_event)
+            pred = jnp.logical_or(starts_outside, crosses_outside)
+        else:
+            pred = _stopping_criterion_should_stop(
+                criterion,
+                state[0],
+                state[1],
+                state[2],
+                iter_count,
+                angle_current,
+                angle_initial,
+                dtype,
+                is_boozer_state=is_boozer_state,
+            )
+            candidate_time = t_event
+            candidate_state = state
+
+        fires = jnp.logical_and(jnp.logical_not(stop), pred)
+        improves = jnp.logical_and(
+            fires,
+            jnp.logical_or(jnp.logical_not(best_fires), candidate_time < best_time),
+        )
+        candidate_row = _event_row_from_state(
+            candidate_time,
+            idx_event,
+            candidate_state,
+        )
+        best_time = jnp.where(improves, candidate_time, best_time)
+        best_status = jnp.where(improves, idx_val, best_status)
+        best_row = jnp.where(improves, candidate_row, best_row)
+        best_fires = jnp.logical_or(best_fires, fires)
+
+    return best_row, best_status, best_fires, best_time
 
 
 def _apply_stopping_criteria_events(
@@ -1172,37 +1284,40 @@ def _apply_stopping_criteria_events(
     dtype,
     max_hits_i32: jax.Array,
     is_boozer_state: bool = False,
+    t_previous: jax.Array | None = None,
+    state_previous: jax.Array | None = None,
+    h_clamped: jax.Array | None = None,
+    max_root_iters: int = 0,
+    state_at_fraction: Callable[[jax.Array], jax.Array] | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Append first-firing stopping-criterion events while preserving row layout."""
+    """Append the earliest firing stopping-criterion event in this accepted step."""
 
-    for i, criterion in enumerate(stopping_criteria):
-        pred = _stopping_criterion_should_stop(
-            criterion,
-            state[0],
-            state[1],
-            state[2],
-            iter_count,
-            angle_current,
-            angle_initial,
-            dtype,
-            is_boozer_state=is_boozer_state,
-        )
-        fires = jnp.logical_and(jnp.logical_not(stop), pred)
-        idx_val = _device_index(-1 - i)
-        hit_row = _event_row_from_state(
-            t_event,
-            _device_array(float(-1 - i), dtype),
-            state,
-        )
-        hits, count = _append_event_row(
-            hits,
-            count,
-            fires,
-            hit_row,
-            max_hits_i32,
-        )
-        status = jnp.where(fires, idx_val, status)
-        stop = jnp.logical_or(stop, fires)
+    best_row, best_status, best_fires, _best_time = _select_stopping_criteria_event(
+        stopping_criteria=stopping_criteria,
+        status=status,
+        stop=stop,
+        iter_count=iter_count,
+        angle_current=angle_current,
+        angle_initial=angle_initial,
+        t_event=t_event,
+        state=state,
+        dtype=dtype,
+        is_boozer_state=is_boozer_state,
+        t_previous=t_previous,
+        state_previous=state_previous,
+        h_clamped=h_clamped,
+        max_root_iters=max_root_iters,
+        state_at_fraction=state_at_fraction,
+    )
+    hits, count = _append_event_row(
+        hits,
+        count,
+        best_fires,
+        best_row,
+        max_hits_i32,
+    )
+    status = jnp.where(best_fires, best_status, status)
+    stop = jnp.logical_or(stop, best_fires)
     return hits, count, status, stop
 
 
@@ -1415,7 +1530,7 @@ def trace_fieldline(
             return y_sub
 
         def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in = args
+            hits_in, count_in, phi_last_in, phi_curr_in, stop_time_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -1433,14 +1548,8 @@ def trace_fieldline(
                 angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
                     state, angle_near, dtype
                 ),
+                max_event_time=stop_time_in,
             )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
-        )
 
         # ── Stopping criteria check on accepted state ──
         first_accepted_step = accepted_count == _device_index(0)
@@ -1450,20 +1559,16 @@ def trace_fieldline(
             phi_init,
         )
 
-        def apply_criteria(args):
+        def select_criteria(args):
             (
-                hits_in,
-                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            return _apply_stopping_criteria_events(
+            return _select_stopping_criteria_event(
                 stopping_criteria=stopping_criteria,
-                hits=hits_in,
-                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -1471,24 +1576,31 @@ def trace_fieldline(
                 angle_initial=phi_init_in,
                 t_event=t_next,
                 state=y_next,
+                t_previous=t,
+                state_previous=y,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                state_at_fraction=state_at_fraction,
                 dtype=dtype,
-                max_hits_i32=max_phi_hits_i32,
             )
 
         iter_count_post = step_count + _device_index(1)
 
         (
-            phi_hits_after,
-            phi_count_after,
-            status_after,
-            stop_after,
+            stop_row,
+            stop_status,
+            stop_fires,
+            stop_time,
         ) = jax.lax.cond(
             accepted,
-            apply_criteria,
-            lambda args: (args[0], args[1], args[2], args[3]),
+            select_criteria,
+            lambda args: (
+                _event_row_from_state(t_next, _device_array(0.0, dtype), y_next),
+                args[0],
+                _device_false(),
+                t_next,
+            ),
             operand=(
-                phi_hits_after,
-                phi_count_after,
                 status_event,
                 _device_false(),
                 iter_count_post,
@@ -1496,6 +1608,22 @@ def trace_fieldline(
                 phi_init_for_criteria,
             ),
         )
+
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted,
+            scan_phis,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current, stop_time),
+        )
+        phi_hits_after, phi_count_after = _append_event_row(
+            phi_hits_after,
+            phi_count_after,
+            stop_fires,
+            stop_row,
+            max_phi_hits_i32,
+        )
+        status_after = jnp.where(stop_fires, stop_status, status_event)
+        stop_after = stop_fires
         _, status_zero_i32, status_false = _lane_axis_carry_zeroes(y_next)
         status_after = status_after + status_zero_i32
         stop_after = stop_after | status_false
@@ -2071,7 +2199,7 @@ def trace_guiding_center(
             return y_sub
 
         def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in = args
+            hits_in, count_in, phi_last_in, phi_curr_in, stop_time_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -2089,14 +2217,8 @@ def trace_guiding_center(
                 angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
                     state, angle_near, dtype
                 ),
+                max_event_time=stop_time_in,
             )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
-        )
 
         first_accepted_step = accepted_count == _device_index(0)
         phi_init_for_criteria = jnp.where(
@@ -2105,20 +2227,16 @@ def trace_guiding_center(
             phi_init,
         )
 
-        def apply_criteria(args):
+        def select_criteria(args):
             (
-                hits_in,
-                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            return _apply_stopping_criteria_events(
+            return _select_stopping_criteria_event(
                 stopping_criteria=stopping_criteria,
-                hits=hits_in,
-                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -2126,24 +2244,31 @@ def trace_guiding_center(
                 angle_initial=phi_init_in,
                 t_event=t_next,
                 state=y_next,
+                t_previous=t,
+                state_previous=y,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                state_at_fraction=state_at_fraction,
                 dtype=dtype,
-                max_hits_i32=max_phi_hits_i32,
             )
 
         iter_count_post = step_count + _device_index(1)
 
         (
-            phi_hits_after,
-            phi_count_after,
-            status_after,
-            stop_after,
+            stop_row,
+            stop_status,
+            stop_fires,
+            stop_time,
         ) = jax.lax.cond(
             accepted,
-            apply_criteria,
-            lambda args: (args[0], args[1], args[2], args[3]),
+            select_criteria,
+            lambda args: (
+                _event_row_from_state(t_next, _device_array(0.0, dtype), y_next),
+                args[0],
+                _device_false(),
+                t_next,
+            ),
             operand=(
-                phi_hits_after,
-                phi_count_after,
                 status_event,
                 _device_false(),
                 iter_count_post,
@@ -2151,6 +2276,21 @@ def trace_guiding_center(
                 phi_init_for_criteria,
             ),
         )
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted,
+            scan_phis,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current, stop_time),
+        )
+        phi_hits_after, phi_count_after = _append_event_row(
+            phi_hits_after,
+            phi_count_after,
+            stop_fires,
+            stop_row,
+            max_phi_hits_i32,
+        )
+        status_after = jnp.where(stop_fires, stop_status, status_event)
+        stop_after = stop_fires
         _, status_zero_i32, status_false = _lane_axis_carry_zeroes(y_next)
         status_after = status_after + status_zero_i32
         stop_after = stop_after | status_false
@@ -3303,7 +3443,7 @@ def trace_guiding_center_boozer(
             return y_sub
 
         def scan_zetas(args):
-            hits_in, count_in, zeta_last_in, zeta_curr_in = args
+            hits_in, count_in, zeta_last_in, zeta_curr_in, stop_time_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -3321,14 +3461,8 @@ def trace_guiding_center_boozer(
                 angle_at_state=lambda state, angle_near: _continuous_angle(
                     state[2], angle_near, dtype
                 ),
+                max_event_time=stop_time_in,
             )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted_valid,
-            scan_zetas,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, zeta_last, zeta_current),
-        )
 
         # ── Stopping criteria check on accepted state ──
         first_valid_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
@@ -3338,20 +3472,16 @@ def trace_guiding_center_boozer(
             zeta_init,
         )
 
-        def apply_criteria(args):
+        def select_criteria(args):
             (
-                hits_in,
-                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 zeta_curr_in,
                 zeta_init_in,
             ) = args
-            return _apply_stopping_criteria_events(
+            return _select_stopping_criteria_event(
                 stopping_criteria=stopping_criteria,
-                hits=hits_in,
-                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -3360,24 +3490,26 @@ def trace_guiding_center_boozer(
                 t_event=t_next,
                 state=y_next,
                 dtype=dtype,
-                max_hits_i32=max_phi_hits_i32,
                 is_boozer_state=True,
             )
 
         iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
 
         (
-            phi_hits_after,
-            phi_count_after,
-            status_after,
-            stop_after,
+            stop_row,
+            stop_status,
+            stop_fires,
+            stop_time,
         ) = jax.lax.cond(
             accepted_valid,
-            apply_criteria,
-            lambda args: (args[0], args[1], args[2], args[3]),
+            select_criteria,
+            lambda args: (
+                _event_row_from_state(t_next, jnp.asarray(0.0, dtype=dtype), y_next),
+                args[0],
+                jnp.asarray(False),
+                t_next,
+            ),
             operand=(
-                phi_hits_after,
-                phi_count_after,
                 status_event,
                 jnp.asarray(False),
                 iter_count_post,
@@ -3385,6 +3517,27 @@ def trace_guiding_center_boozer(
                 zeta_init_for_criteria,
             ),
         )
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted_valid,
+            scan_zetas,
+            lambda args: (args[0], args[1]),
+            operand=(
+                phi_hits_in,
+                phi_hits_count_in,
+                zeta_last,
+                zeta_current,
+                stop_time,
+            ),
+        )
+        phi_hits_after, phi_count_after = _append_event_row(
+            phi_hits_after,
+            phi_count_after,
+            stop_fires,
+            stop_row,
+            max_phi_hits_i32,
+        )
+        status_after = jnp.where(stop_fires, stop_status, status_event)
+        stop_after = stop_fires
         status_after = jnp.where(
             axis_invalid,
             jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
@@ -4036,7 +4189,7 @@ def trace_fullorbit(
             return y_sub
 
         def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in = args
+            hits_in, count_in, phi_last_in, phi_curr_in, stop_time_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -4054,14 +4207,8 @@ def trace_fullorbit(
                 angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
                     state, angle_near, dtype
                 ),
+                max_event_time=stop_time_in,
             )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
-        )
 
         # ── Stopping criteria check on accepted state ──
         first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
@@ -4071,20 +4218,16 @@ def trace_fullorbit(
             phi_init,
         )
 
-        def apply_criteria(args):
+        def select_criteria(args):
             (
-                hits_in,
-                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            return _apply_stopping_criteria_events(
+            return _select_stopping_criteria_event(
                 stopping_criteria=stopping_criteria,
-                hits=hits_in,
-                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -4092,24 +4235,31 @@ def trace_fullorbit(
                 angle_initial=phi_init_in,
                 t_event=t_next,
                 state=y_next,
+                t_previous=t,
+                state_previous=y,
+                h_clamped=h_clamped,
+                max_root_iters=max_root_iters,
+                state_at_fraction=state_at_fraction,
                 dtype=dtype,
-                max_hits_i32=max_phi_hits_i32,
             )
 
         iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
 
         (
-            phi_hits_after,
-            phi_count_after,
-            status_after,
-            stop_after,
+            stop_row,
+            stop_status,
+            stop_fires,
+            stop_time,
         ) = jax.lax.cond(
             accepted,
-            apply_criteria,
-            lambda args: (args[0], args[1], args[2], args[3]),
+            select_criteria,
+            lambda args: (
+                _event_row_from_state(t_next, jnp.asarray(0.0, dtype=dtype), y_next),
+                args[0],
+                jnp.asarray(False),
+                t_next,
+            ),
             operand=(
-                phi_hits_after,
-                phi_count_after,
                 status_event,
                 jnp.asarray(False),
                 iter_count_post,
@@ -4117,6 +4267,21 @@ def trace_fullorbit(
                 phi_init_for_criteria,
             ),
         )
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted,
+            scan_phis,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current, stop_time),
+        )
+        phi_hits_after, phi_count_after = _append_event_row(
+            phi_hits_after,
+            phi_count_after,
+            stop_fires,
+            stop_row,
+            max_phi_hits_i32,
+        )
+        status_after = jnp.where(stop_fires, stop_status, status_event)
+        stop_after = stop_fires
         _, status_zero_i32, status_false = _lane_axis_carry_zeroes(y_next)
         status_after = status_after + status_zero_i32
         stop_after = stop_after | status_false

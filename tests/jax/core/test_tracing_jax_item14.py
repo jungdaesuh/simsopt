@@ -1506,7 +1506,7 @@ def test_trace_guiding_center_stops_after_exiting_classifier_cuboid_face():
     assert int(hit_rows[0, 1]) == -1
     assert live.shape[0] > 1
     assert np.all(live[:, 1] <= interp_spec.xmax)
-    assert hit_rows[0, 2] > interp_spec.xmax
+    assert initial_state[0] < hit_rows[0, 2] <= interp_spec.xmax
 
 
 def test_levelset_classifier_cpu_jax_phi_wraparound_boundary_parity():
@@ -1576,6 +1576,171 @@ def test_trace_fieldline_first_stopping_criterion_wins_same_step():
     assert int(result.status) == -1
     assert int(result.phi_hits_count) == 1
     np.testing.assert_allclose(float(result.phi_hits[0, 1]), -1.0, rtol=0.0, atol=0.0)
+
+
+def test_trace_fieldline_levelset_stop_localizes_within_accepted_step():
+    """Levelset stop rows use the within-step root, not the post-step endpoint."""
+
+    threshold = 5.0e-6
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    def classifier(points: jax.Array) -> jax.Array:
+        return jnp.asarray(threshold, dtype=points.dtype) - points[:, 0]
+
+    spec = FieldlineTracingSpec(
+        tmax=1.0,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        stopping_criteria=(LevelsetStoppingCriterion(classifier_fn=classifier),),
+    )
+
+    hit = np.asarray(result.phi_hits[0])
+    assert int(result.status) == -1
+    assert int(result.phi_hits_count) == 1
+    assert hit[0] < float(result.t_final)
+    np.testing.assert_allclose(hit[0], threshold, rtol=1.0e-9, atol=1.0e-12)
+    np.testing.assert_allclose(hit[2], threshold, rtol=1.0e-9, atol=1.0e-12)
+
+
+def test_trace_fieldline_levelset_start_outside_reports_previous_state():
+    """A start-of-step outside value fires at the previous accepted state."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    def outside_classifier(points: jax.Array) -> jax.Array:
+        return -jnp.ones((points.shape[0],), dtype=points.dtype)
+
+    spec = FieldlineTracingSpec(
+        tmax=1.0,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([0.25, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        stopping_criteria=(
+            LevelsetStoppingCriterion(classifier_fn=outside_classifier),
+        ),
+    )
+
+    hit = np.asarray(result.phi_hits[0])
+    assert int(result.status) == -1
+    assert int(result.phi_hits_count) == 1
+    np.testing.assert_allclose(hit[0], 0.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(hit[2:5], np.asarray([0.25, 0.0, 0.0]))
+
+
+def test_trace_fieldline_stopping_event_order_uses_earliest_time():
+    """A later criterion in tuple order wins when its localized event is earlier."""
+
+    threshold = 5.0e-6
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    def classifier(points: jax.Array) -> jax.Array:
+        return jnp.asarray(threshold, dtype=points.dtype) - points[:, 0]
+
+    spec = FieldlineTracingSpec(
+        tmax=1.0,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        stopping_criteria=(
+            IterStoppingCriterion(max_iter=0),
+            LevelsetStoppingCriterion(classifier_fn=classifier),
+        ),
+    )
+
+    hit = np.asarray(result.phi_hits[0])
+    assert int(result.status) == -2
+    assert int(result.phi_hits_count) == 1
+    np.testing.assert_allclose(hit[1], -2.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(hit[0], threshold, rtol=1.0e-9, atol=1.0e-12)
+
+
+def test_trace_fieldline_drops_phi_hits_after_localized_levelset_stop():
+    """Plane hits later than a localized stop in the same step are not recorded."""
+
+    stop_y = 5.0e-6
+    later_phi = 8.0e-6
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
+
+    def classifier(points: jax.Array) -> jax.Array:
+        return jnp.asarray(stop_y, dtype=points.dtype) - points[:, 1]
+
+    spec = FieldlineTracingSpec(
+        tmax=1.0,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        phis=jnp.asarray([later_phi], dtype=jnp.float64),
+        stopping_criteria=(LevelsetStoppingCriterion(classifier_fn=classifier),),
+    )
+
+    hit = np.asarray(result.phi_hits[0])
+    assert int(result.status) == -1
+    assert int(result.phi_hits_count) == 1
+    np.testing.assert_allclose(hit[1], -1.0, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(hit[0], stop_y, rtol=1.0e-9, atol=1.0e-12)
+    np.testing.assert_allclose(hit[3], stop_y, rtol=1.0e-9, atol=1.0e-12)
+
+
+def test_trace_fieldline_iter_stopping_matches_native_boundary():
+    """``max_iter=1`` fires after the second loop iteration, matching native."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    spec = FieldlineTracingSpec(
+        tmax=1.0,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+        max_steps=32,
+        max_phi_hits=4,
+        dtmax=1.0,
+    )
+    result = trace_fieldline(
+        spec,
+        jnp.asarray([0.0, 0.0, 0.0], dtype=jnp.float64),
+        field_fn,
+        stopping_criteria=(IterStoppingCriterion(max_iter=1),),
+    )
+
+    assert int(result.status) == -1
+    assert int(result.phi_hits_count) == 1
+    np.testing.assert_allclose(result.phi_hits[0, 0], 6.0e-5, rtol=0.0, atol=1.0e-12)
 
 
 def test_trace_fieldline_levelset_zero_does_not_stop():

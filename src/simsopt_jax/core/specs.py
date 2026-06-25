@@ -48,6 +48,7 @@ __all__ = [
     "CurveRZFourierSpec",
     "CurveXYZFourierSpec",
     "CurveXYZFourierSymmetriesSpec",
+    "CURVE_FILAMENT_FRAME_KINDS",
     "FieldEvalSpec",
     "FrameRotationSpec",
     "FixedSurfaceFluxSpec",
@@ -100,6 +101,8 @@ __all__ = [
 
 _SpecClass = TypeVar("_SpecClass", bound=type)
 _JAX_SPEC_CLASS_REGISTRY: dict[tuple[str, str], type] = {}
+CURVE_FILAMENT_FRAME_KINDS = ("centroid", "frenet", "surface_tangent")
+CurveFilamentFrameKind = Literal["centroid", "frenet", "surface_tangent"]
 
 
 def _gson_encode_numpy_array(value: np.ndarray) -> dict[str, object]:
@@ -730,7 +733,7 @@ class CurvePerturbedSpec:
         "rotation",
         "rotation_map",
     ),
-    meta_fields=("frame_kind", "dn", "db"),
+    meta_fields=("frame_kind", "dn", "db", "surface_major_radius", "surface_midplane_z"),
 )
 class CurveFilamentSpec:
     """Immutable wrapper payload for a finite-build filament curve."""
@@ -744,6 +747,19 @@ class CurveFilamentSpec:
     frame_kind: str
     dn: float
     db: float
+    surface_major_radius: float | None = None
+    surface_midplane_z: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.frame_kind not in CURVE_FILAMENT_FRAME_KINDS:
+            raise ValueError(
+                f"Unknown CurveFilament frame_kind {self.frame_kind!r}; expected "
+                f"one of {CURVE_FILAMENT_FRAME_KINDS!r}."
+            )
+        if self.frame_kind == "surface_tangent" and self.surface_major_radius is None:
+            raise ValueError(
+                "frame_kind='surface_tangent' requires surface_major_radius."
+            )
 
 
 CurveSpec = Union[
@@ -1264,7 +1280,19 @@ def make_curve_filament_spec(
     frame_kind: str,
     dn: float,
     db: float,
+    surface_major_radius: float | None = None,
+    surface_midplane_z: float | None = None,
 ) -> CurveFilamentSpec:
+    frame_kind_str = str(frame_kind)
+    if frame_kind_str not in CURVE_FILAMENT_FRAME_KINDS:
+        raise ValueError(
+            f"Unknown CurveFilament frame_kind {frame_kind_str!r}; expected one of "
+            f"{CURVE_FILAMENT_FRAME_KINDS!r}."
+        )
+    if frame_kind_str == "surface_tangent" and surface_major_radius is None:
+        raise ValueError(
+            "frame_kind='surface_tangent' requires surface_major_radius."
+        )
     return CurveFilamentSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),
@@ -1272,9 +1300,15 @@ def make_curve_filament_spec(
         base_curve_map=base_curve_map,
         rotation=rotation,
         rotation_map=rotation_map,
-        frame_kind=str(frame_kind),
+        frame_kind=frame_kind_str,
         dn=float(dn),
         db=float(db),
+        surface_major_radius=(
+            None if surface_major_radius is None else float(surface_major_radius)
+        ),
+        surface_midplane_z=(
+            None if surface_midplane_z is None else float(surface_midplane_z)
+        ),
     )
 
 

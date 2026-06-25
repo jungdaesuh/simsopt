@@ -82,6 +82,7 @@ The first implementation should therefore make the banana-specific JAX path narr
 4. Add the narrow Stage 2 objective kernel.
    - [x] Implement `banana_stage2_terms(spec, decision_vector)` returning named terms in a stable order. "Term" here is the per-`WeightedTerm` contribution *after* its `QuadraticPenalty` hinge (pre-weight), matching the live driver's term set (`length_max`/`length_min`, `width_max`/`width_min`, `poloidal`, curvature, `selfint`, `ccdist`, `csdist`, `tf_current_max`/`banana_current_max`, `sqflux`), so that the weighted sum reproduces `objective.J()`. Mirror the flag gates (`include_min_length`, `include_width`, `include_current_penalties`) so a config that disables a term is reproducible.
    - [x] Implement `banana_stage2_value(spec, decision_vector)` as the weighted scalar objective.
+   - [x] Stamp `banana_local_value` as the banana local frozen-spec subset, not as the full production single-stage objective. It covers the local Stage 2 geometry/current term family and intentionally omits the self-envelope/global-radius term, fold geodesic-curvature assembly, and `PoloidalExtentFloor` smooth-max floor that belong to the broader single-stage production objective.
    - [x] Implement or expose `banana_stage2_value_and_grad(spec, decision_vector)` using `jax.jit(jax.value_and_grad(...))`.
    - [x] Keep the host-facing wrapper thin: it should pass only the frozen spec and decision vector to compiled JAX code.
 

@@ -49,6 +49,7 @@ from simsopt_jax.core.framedcurve import (
     frenet_frame,
     rotated_centroid_frame,
     rotated_frenet_frame,
+    rotated_surface_tangent_frame,
 )
 
 
@@ -191,6 +192,8 @@ _ANALYTIC_RTOL = 1e-12
 _ANALYTIC_ATOL = 1e-12
 _ANALYTIC_NQUADPOINTS = 64
 _ANALYTIC_RADIUS = 1.7
+_SURFACE_MAJOR_RADIUS = 1.1
+_SURFACE_MIDPLANE_Z = -0.25
 
 
 def _planar_circle_arrays(
@@ -292,6 +295,36 @@ def _planar_circle_frenet_frame_analytic(
     return t, n, b
 
 
+def _planar_circle_surface_tangent_frame_analytic(
+    quadpoints: np.ndarray,
+    alpha: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Hand-derived rotated surface-tangent frame for a planar toroidal circle."""
+    two_pi = 2.0 * np.pi
+    angle = two_pi * quadpoints
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    zero = np.zeros_like(angle)
+    t = np.stack((-sin_a, cos_a, zero), axis=1)
+    radial_delta = _ANALYTIC_RADIUS - _SURFACE_MAJOR_RADIUS
+    vertical_delta = -_SURFACE_MIDPLANE_Z
+    normal_scale = np.sqrt(radial_delta**2 + vertical_delta**2)
+    n0 = np.stack(
+        (
+            (radial_delta / normal_scale) * cos_a,
+            (radial_delta / normal_scale) * sin_a,
+            np.full_like(angle, vertical_delta / normal_scale),
+        ),
+        axis=1,
+    )
+    b0 = np.cross(t, n0, axis=1)
+    cos_alpha = np.cos(alpha)[:, None]
+    sin_alpha = np.sin(alpha)[:, None]
+    n = cos_alpha * n0 - sin_alpha * b0
+    b = sin_alpha * n0 + cos_alpha * b0
+    return t, n, b
+
+
 def _analytic_alpha_profiles(
     quadpoints: np.ndarray,
 ) -> dict[str, np.ndarray]:
@@ -368,6 +401,28 @@ def test_rotated_frenet_frame_matches_planar_circle_analytic(alpha_kind: str):
     )
 
 
+@pytest.mark.parametrize("alpha_kind", ("zero", "constant", "varying"))
+def test_rotated_surface_tangent_frame_matches_planar_circle_analytic(alpha_kind: str):
+    """Surface-tangent frame agrees with a closed-form circular-torus oracle."""
+    quadpoints, gamma, gammadash, _ = _planar_circle_arrays(
+        _ANALYTIC_RADIUS, _ANALYTIC_NQUADPOINTS
+    )
+    alpha = _analytic_alpha_profiles(quadpoints)[alpha_kind]
+    expected = _planar_circle_surface_tangent_frame_analytic(quadpoints, alpha)
+    actual = rotated_surface_tangent_frame(
+        gamma,
+        gammadash,
+        alpha,
+        _SURFACE_MAJOR_RADIUS,
+        _SURFACE_MIDPLANE_Z,
+    )
+    _assert_frame_close_analytic(
+        f"rotated_surface_tangent_frame planar-circle alpha={alpha_kind}",
+        expected,
+        actual,
+    )
+
+
 def test_centroid_frame_matches_rotated_at_alpha_zero():
     """Unrotated centroid frame == rotated centroid frame at ``alpha = 0``.
 
@@ -409,7 +464,7 @@ def test_frenet_frame_matches_rotated_at_alpha_zero():
         _assert_orthonormal(f"frenet unrotated coil={coil_index}", unrotated)
 
 
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
+@pytest.mark.parametrize("frame_kind", ("centroid", "frenet", "surface_tangent"))
 def test_rotated_frame_is_orthonormal(frame_kind: str):
     """Rotated frames remain right-handed orthonormal at every quadpoint."""
     rng = np.random.default_rng(_PRODUCTION_RNG_SEED + 400)
@@ -421,9 +476,17 @@ def test_rotated_frame_is_orthonormal(frame_kind: str):
         gammadash = np.asarray(curve.gammadash(), dtype=np.float64)
         if frame_kind == "centroid":
             frame = rotated_centroid_frame(gamma, gammadash, alpha)
-        else:
+        elif frame_kind == "frenet":
             gammadashdash = np.asarray(curve.gammadashdash(), dtype=np.float64)
             frame = rotated_frenet_frame(gamma, gammadash, gammadashdash, alpha)
+        else:
+            frame = rotated_surface_tangent_frame(
+                gamma,
+                gammadash,
+                alpha,
+                _SURFACE_MAJOR_RADIUS,
+                _SURFACE_MIDPLANE_Z,
+            )
         _assert_orthonormal(
             f"{frame_kind} rotated varying alpha coil={coil_index}",
             frame,
@@ -472,3 +535,14 @@ def test_kernels_run_under_strict_transfer_guard():
         t_rf.block_until_ready()
         n_rf.block_until_ready()
         b_rf.block_until_ready()
+
+        t_rs, n_rs, b_rs = rotated_surface_tangent_frame(
+            gamma_dev,
+            gammadash_dev,
+            alpha_dev,
+            _SURFACE_MAJOR_RADIUS,
+            _SURFACE_MIDPLANE_Z,
+        )
+        t_rs.block_until_ready()
+        n_rs.block_until_ready()
+        b_rs.block_until_ready()

@@ -2,9 +2,9 @@
 
 Wave R4 item 18 wrapper closure: ``FrameRotationJAX``,
 ``ZeroRotationJAX``, ``FramedCurveFrenetJAX``, and
-``FramedCurveCentroidJAX`` sit alongside the C++/host
-``simsopt.geo.framedcurve`` classes and route hot paths through the
-JAX kernels in ``simsopt_jax.core.framedcurve``.
+``FramedCurveCentroidJAX`` / ``FramedCurveSurfaceTangentJAX`` sit
+alongside the C++/host ``simsopt.geo.framedcurve`` classes and route hot
+paths through the JAX kernels in ``simsopt_jax.core.framedcurve``.
 
 These tests pin the **Optimizable contract** of the wrappers:
 
@@ -45,6 +45,7 @@ from simsopt_jax_adapters.geo.framed_curve import (
     FrameRotationJAX,
     FramedCurveCentroidJAX,
     FramedCurveFrenetJAX,
+    FramedCurveSurfaceTangentJAX,
     ZeroRotationJAX,
 )
 from simsopt_jax.core.framedcurve import (
@@ -63,6 +64,9 @@ _CURVE_DOFS = np.array(
 )
 _ROTATION_ORDER = 2
 _ROTATION_DOFS = np.array([0.1, 0.2, -0.3, 0.05, -0.05], dtype=np.float64)
+_SURFACE_MAJOR_RADIUS = 0.75
+_SURFACE_MIDPLANE_Z = 0.13
+_CIRCLE_RADIUS = 1.35
 
 # ``h = 1e-5`` is the central-difference step size; ``rtol = 1e-5`` /
 # ``atol = 1e-7`` are the matching tolerances for a smooth scalar
@@ -90,12 +94,61 @@ def _build_nonplanar_curve() -> CurveXYZFourier:
     return curve
 
 
+def _build_planar_circle_xyz_curve() -> CurveXYZFourier:
+    curve = CurveXYZFourier(_NQUADPOINTS, order=1)
+    curve.set("xc(1)", _CIRCLE_RADIUS)
+    curve.set("ys(1)", _CIRCLE_RADIUS)
+    return curve
+
+
 def _build_rotation(curve, rotation_order):
     if rotation_order is None:
         return ZeroRotationJAX(curve.quadpoints)
     rotation = FrameRotationJAX(curve.quadpoints, rotation_order)
     rotation.x = np.array([0.0, 0.1, 0.3], dtype=np.float64)
     return rotation
+
+
+def _build_wrapper(wrapper_cls, curve, rotation):
+    if wrapper_cls is FramedCurveSurfaceTangentJAX:
+        return wrapper_cls(
+            curve,
+            _SURFACE_MAJOR_RADIUS,
+            _SURFACE_MIDPLANE_Z,
+            rotation,
+        )
+    return wrapper_cls(curve, rotation)
+
+
+def _surface_tangent_circle_frame_analytic(
+    quadpoints: np.ndarray,
+    alpha: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    two_pi = 2.0 * np.pi
+    angle = two_pi * quadpoints
+    cos_angle = np.cos(angle)
+    sin_angle = np.sin(angle)
+    zero = np.zeros_like(angle)
+    tangent = np.stack((-sin_angle, cos_angle, zero), axis=1)
+
+    radial_delta = _CIRCLE_RADIUS - _SURFACE_MAJOR_RADIUS
+    vertical_delta = -_SURFACE_MIDPLANE_Z
+    normal_scale = np.sqrt(radial_delta**2 + vertical_delta**2)
+    normal = np.stack(
+        (
+            (radial_delta / normal_scale) * cos_angle,
+            (radial_delta / normal_scale) * sin_angle,
+            np.full_like(angle, vertical_delta / normal_scale),
+        ),
+        axis=1,
+    )
+    binormal = np.cross(tangent, normal, axis=1)
+
+    cos_alpha = np.cos(alpha)[:, None]
+    sin_alpha = np.sin(alpha)[:, None]
+    rotated_normal = cos_alpha * normal - sin_alpha * binormal
+    rotated_binormal = sin_alpha * normal + cos_alpha * binormal
+    return tangent, rotated_normal, rotated_binormal
 
 
 def _assert_directional_fd_matches_gradient(objective) -> None:
@@ -137,11 +190,18 @@ def test_framed_curve_jax_dependency_graph():
     rotation.x = _ROTATION_DOFS.copy()
     frenet = FramedCurveFrenetJAX(curve, rotation)
     centroid = FramedCurveCentroidJAX(curve, ZeroRotationJAX(curve.quadpoints))
+    surface_tangent = FramedCurveSurfaceTangentJAX(
+        curve,
+        _SURFACE_MAJOR_RADIUS,
+        _SURFACE_MIDPLANE_Z,
+        ZeroRotationJAX(curve.quadpoints),
+    )
 
     # Direct curve + rotation dependencies must appear in the wrapper's tree.
     assert curve in frenet.parents
     assert rotation in frenet.parents
     assert curve in centroid.parents
+    assert curve in surface_tangent.parents
 
 
 def _centroid_torsion_from_rotation_dofs(
@@ -321,6 +381,7 @@ def test_framed_curve_centroid_jax_vjp_drives_public_strain_penalties():
     [
         FramedCurveCentroidJAX,
         FramedCurveFrenetJAX,
+        FramedCurveSurfaceTangentJAX,
     ],
 )
 @pytest.mark.parametrize("rotation_order", [None, 1])
@@ -330,7 +391,7 @@ def test_jax_torsional_strain_penalty_matches_directional_fd(
 ):
     curve = _build_nonplanar_curve()
     rotation = _build_rotation(curve, rotation_order)
-    framed_curve = wrapper_cls(curve, rotation)
+    framed_curve = _build_wrapper(wrapper_cls, curve, rotation)
     objective = LPTorsionalStrainPenalty(
         framed_curve,
         width=1e-3,
@@ -346,6 +407,7 @@ def test_jax_torsional_strain_penalty_matches_directional_fd(
     [
         FramedCurveCentroidJAX,
         FramedCurveFrenetJAX,
+        FramedCurveSurfaceTangentJAX,
     ],
 )
 @pytest.mark.parametrize("rotation_order", [None, 1])
@@ -355,7 +417,7 @@ def test_jax_binormal_curvature_strain_penalty_matches_directional_fd(
 ):
     curve = _build_nonplanar_curve()
     rotation = _build_rotation(curve, rotation_order)
-    framed_curve = wrapper_cls(curve, rotation)
+    framed_curve = _build_wrapper(wrapper_cls, curve, rotation)
     objective = LPBinormalCurvatureStrainPenalty(
         framed_curve,
         width=1e-3,
@@ -367,6 +429,31 @@ def test_jax_binormal_curvature_strain_penalty_matches_directional_fd(
         assert objective.J() < 1e-30
         return
     _assert_directional_fd_matches_gradient(objective)
+
+
+def test_framed_curve_surface_tangent_jax_matches_closed_form_circle_oracle():
+    """Oracle: closed-form circular-torus surface-tangent frame."""
+    curve = _build_planar_circle_xyz_curve()
+    rotation = ZeroRotationJAX(curve.quadpoints)
+    wrapper = FramedCurveSurfaceTangentJAX(
+        curve,
+        _SURFACE_MAJOR_RADIUS,
+        _SURFACE_MIDPLANE_Z,
+        rotation,
+    )
+
+    quadpoints = np.asarray(curve.quadpoints, dtype=np.float64)
+    expected = _surface_tangent_circle_frame_analytic(
+        quadpoints,
+        np.zeros_like(quadpoints),
+    )
+
+    for observed, expected_component in zip(
+        wrapper.rotated_frame(),
+        expected,
+        strict=True,
+    ):
+        np.testing.assert_allclose(observed, expected_component, rtol=1e-12, atol=1e-12)
 
 
 def test_framed_curve_jax_frame_twist_vjp_matches_curve_fd():
