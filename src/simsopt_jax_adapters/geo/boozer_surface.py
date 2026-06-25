@@ -3444,7 +3444,7 @@ def _dense_residual_jacobian_condition_estimate_or_none(jacobian):
     if jacobian.shape[0] == 0 or jacobian.shape[1] == 0:
         return None
     singular_values = jnp.linalg.svd(jacobian, compute_uv=False)
-    estimate = singular_values[0] / singular_values[-1]
+    estimate = jnp.max(singular_values) / jnp.min(singular_values)
     if isinstance(estimate, (jax.core.Tracer, jax.Array)):
         return estimate
     return float(estimate)
