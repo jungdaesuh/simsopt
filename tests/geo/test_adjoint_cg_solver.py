@@ -224,11 +224,23 @@ def test_solve_jacobian_operator_gate_routes_lu_iff_flag_and_transpose(monkeypat
         np.asarray(solution), np.asarray(expected), rtol=1e-10, atol=1e-12
     )
 
+    # The no-status adapter path is what AdjointSolveState.solve_transpose calls;
+    # it must share the same dispatch gate as the status-returning helper.
+    direct_solution = _optimizer._solve_jacobian_operator(
+        operator, rhs, transpose=True, tol=1e-12
+    )
+    assert calls["n"] == 2
+    np.testing.assert_allclose(
+        np.asarray(direct_solution), np.asarray(expected), rtol=1e-10, atol=1e-12
+    )
+
     # flag ON + transpose=False -> transpose-only gate must not take the LU branch.
     calls["n"] = 0
     _optimizer._solve_jacobian_operator_with_status(
         operator, rhs, transpose=False, tol=1e-12
     )
+    assert calls["n"] == 0
+    _optimizer._solve_jacobian_operator(operator, rhs, transpose=False, tol=1e-12)
     assert calls["n"] == 0
 
 
@@ -255,6 +267,8 @@ def test_solve_jacobian_operator_default_flag_does_not_use_dense_lu(monkeypatch)
         operator, rhs, transpose=True, tol=1e-12
     )
     assert calls["n"] == 0
+    _optimizer._solve_jacobian_operator(operator, rhs, transpose=True, tol=1e-12)
+    assert calls["n"] == 0
 
 
 def test_dense_lu_status_reports_machine_precision_residual():
@@ -266,6 +280,64 @@ def test_dense_lu_status_reports_machine_precision_residual():
     )
     assert bool(status.success)
     assert float(np.asarray(status.residual_relative)) < 1e-10
+
+
+def test_dense_condition_estimate_preserves_float32_under_transfer_guard():
+    """Float32 condition estimates stay dtype-stable and strict-transfer clean."""
+    matrix = jnp.diag(
+        jnp.asarray(np.geomspace(1.0, 1.0e-5, 32), dtype=jnp.float32)
+    )
+
+    with jax.transfer_guard("disallow"):
+        estimate = _optimizer._dense_matrix_condition_estimate(matrix)
+
+    assert estimate.dtype == jnp.float32
+    assert float(np.asarray(estimate)) == pytest.approx(1.0e5, rel=1.0e-5)
+
+
+def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
+    """A moderately conditioned float32 solve must not fail solely because
+    the fp64 rank-tolerance rule was applied with fp32 epsilon."""
+    n = 128
+    matrix = jnp.diag(
+        jnp.asarray(np.geomspace(1.0, 1.0e-5, n), dtype=jnp.float32)
+    )
+    legacy_rank_threshold = 1.0 / (n * np.finfo(np.float32).eps)
+    rhs = jnp.asarray(np.random.default_rng(21).standard_normal(n), dtype=jnp.float32)
+
+    def matvec(v):
+        return matrix @ v
+
+    with jax.transfer_guard("disallow"):
+        estimate = _optimizer._dense_matrix_condition_estimate(matrix)
+        solution, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+            matvec,
+            rhs,
+            tol=1.0e-4,
+        )
+
+    assert float(np.asarray(estimate)) > legacy_rank_threshold
+    assert bool(status.success)
+    expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
+    solution_relative_error = np.linalg.norm(np.asarray(solution) - expected) / np.linalg.norm(
+        expected
+    )
+    assert solution_relative_error < 1.0e-4
+
+    singular = matrix.at[-1, -1].set(jnp.asarray(0.0, dtype=jnp.float32))
+
+    def singular_matvec(v):
+        return singular @ v
+
+    with jax.transfer_guard("disallow"):
+        _singular_solution, singular_status = (
+            _optimizer._solve_dense_square_operator_lu_system_with_status(
+                singular_matvec,
+                rhs,
+                tol=1.0e-4,
+            )
+        )
+    assert not bool(singular_status.success)
 
 
 def test_dense_lu_status_fails_closed_on_singular_operator():

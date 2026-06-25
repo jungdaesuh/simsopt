@@ -948,7 +948,9 @@ def _require_native_cpu_reference_backend_for_trace_adapter(
 
 
 def _device_scalar(value, *, dtype=jnp.float64):
-    return runtime_device_put(value, dtype=dtype)
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return jnp.asarray(value, dtype=dtype)
+    return jnp.asarray(np.asarray(value, dtype=np.dtype(dtype)))
 
 
 def _device_int32(value):
@@ -4459,10 +4461,6 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
 
-    if not any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(matrix)):
-        matrix_host = np.asarray(jax.device_get(matrix))
-        return jnp.asarray(np.linalg.cond(matrix_host, p=1), dtype=matrix.dtype)
-
     if lu_piv is None:
         lu_piv = jsp_linalg.lu_factor(matrix)
     lu, piv = lu_piv
@@ -4490,10 +4488,15 @@ def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
+def _dense_matrix_nonsingular_threshold(size, dtype):
+    dtype = np.dtype(dtype)
+    eps = float(np.finfo(dtype).eps)
+    dimension_factor = np.sqrt(float(size)) if dtype == np.dtype(np.float32) else size
+    return _device_scalar(1.0 / (dimension_factor * eps), dtype=dtype)
+
+
 def _dense_matrix_nonsingular(matrix, *, lu_piv=None):
-    """Whether ``matrix`` is numerically nonsingular at the LAPACK rank
-    tolerance: its Hager-Higham 1-norm condition estimate is finite and below
-    ``1 / (n * eps)``.
+    """Whether ``matrix`` is numerically nonsingular for dense adjoint solves.
 
     A backward-error gate cannot distinguish a well-conditioned solve from a
     backward-stable-but-forward-garbage solve of a (near-)singular operator
@@ -4503,16 +4506,17 @@ def _dense_matrix_nonsingular(matrix, *, lu_piv=None):
     ``cond * residual_rel`` is too conservative for this purpose at large ``n``
     (the 1-norm condition estimate inflates ~``n``-fold over the 2-norm
     conditioning, tripping the bound's ``sqrt(eps)`` gate even on an accurate
-    solve), whereas the rank-tolerance reciprocal ``1 / (n * eps)`` (~1e12 at
-    ``n ~ 2000``) cleanly separates the well-conditioned production ``J^T``
-    (cond ~ 1e3-1e6) from a numerically singular one (cond >~ 1e15) with many
-    orders of margin on both sides.
+    solve).  Float64 production solves use the LAPACK rank-tolerance reciprocal
+    ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), which cleanly separates the
+    well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
+    singular one (cond >~ 1e15).  Float32 smoke solves use a looser
+    ``1 / (sqrt(n) * eps)`` degeneracy threshold so moderately conditioned
+    operators fail closed only when they are truly outside smoke-lane precision.
     """
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
-    eps = float(np.finfo(matrix.dtype).eps)
     condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
-    threshold = _device_scalar(1.0 / (size * eps), dtype=matrix.dtype)
+    threshold = _dense_matrix_nonsingular_threshold(size, matrix.dtype)
     return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
 
 
@@ -4708,7 +4712,7 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
     # Numerical-singularity guard -- see the LU sibling: a backward-stable solve
     # of a (near-)singular operator is still forward-garbage, which the
     # backward-error gate cannot detect.  Fail closed when the condition estimate
-    # exceeds the LAPACK rank tolerance 1/(n*eps).
+    # exceeds the dtype-specific degeneracy threshold.
     nonsingular = _dense_matrix_nonsingular(matrix)
     return solution, status._replace(
         success=(status.success | backward_error_success) & nonsingular
@@ -4753,13 +4757,12 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
     # Numerical-singularity guard: a backward-stable solve of a singular or
     # near-singular operator still yields a forward-garbage solution that the
     # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
-    # condition estimate exceeds the LAPACK rank tolerance 1/(n*eps); a degenerate
-    # J^T then fails closed instead of silently returning a wrong adjoint, while
-    # the well-conditioned production J^T (cond ~ 1e3-1e6) passes with many orders
-    # of margin.  The cached ``lu_piv`` is reused under jit (Hager-Higham inner
-    # solves, O(n^2)); on the concrete/host path _dense_matrix_condition_estimate
-    # falls to np.linalg.cond (O(n^3)) -- still negligible vs the n-matvec
-    # assembler that already ran (<=0.3x its wall at n~2000).
+    # condition estimate exceeds the dtype-specific degeneracy threshold; a
+    # degenerate J^T then fails closed instead of silently returning a wrong
+    # adjoint, while the well-conditioned production J^T (cond ~ 1e3-1e6) passes
+    # with many orders of margin.  The cached ``lu_piv`` is reused by the
+    # Hager-Higham inner solves (O(n^2)), avoiding a second factorization and
+    # keeping the strict transfer-guard path on device.
     nonsingular = _dense_matrix_nonsingular(matrix, lu_piv=lu_piv)
     return solution, status._replace(
         success=(status.success | backward_error_success) & nonsingular
@@ -4985,10 +4988,10 @@ def _solve_jacobian_operator(
     tol,
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
-    matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    solution, _ = _solve_square_array_system_operator_only(
-        matvec,
+    solution, _ = _solve_jacobian_operator_with_status(
+        operator,
         rhs,
+        transpose=transpose,
         tol=tol,
         max_refinement_steps=max_refinement_steps,
     )
@@ -5026,9 +5029,10 @@ def _solve_jacobian_operator_with_status(
     # Exact-Jacobian adjoint (``transpose``) opt-in: replace the stagnating
     # operator-GMRES solve of the well-conditioned ``J^T λ = g`` system with a
     # direct dense LU factorization plus one iterative-refinement step.  Scoped to
-    # the transpose (adjoint) solve and to a vector RHS whose materialized dense
-    # matrix fits the ``max_dense_jacobian_bytes`` policy; everything else keeps
-    # the operator-GMRES baseline so the flag A/B-compares cleanly.
+    # the transpose (adjoint) solve and to single-vector or column-batched RHS
+    # inputs whose materialized dense matrix fits the ``max_dense_jacobian_bytes``
+    # policy; everything else keeps the operator-GMRES baseline so the flag
+    # A/B-compares cleanly.
     if (
         _EXACT_ADJOINT_DENSE_LU
         and transpose

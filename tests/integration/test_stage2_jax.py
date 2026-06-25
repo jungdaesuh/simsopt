@@ -2,8 +2,10 @@
 Stage 2 JAX backend parity tests.
 
 Validates:
-1. SquaredFluxJAX.J() matches SquaredFlux.J() within 1e-12 relative error.
-2. SquaredFluxJAX.dJ() gradient matches CPU within 1e-11 relative error.
+1. SquaredFluxJAX.J() matches SquaredFlux.J() within 1e-12 relative error on
+   finite, non-singular configurations.
+2. SquaredFluxJAX.dJ() gradient matches CPU within 1e-11 relative error on
+   finite, non-singular configurations.
 3. Short L-BFGS-B run produces comparable field error and objective.
 
 All tests require ``simsoptpp`` for the CPU reference.
@@ -1078,7 +1080,7 @@ def coil_surf_setup():
 
 
 class TestObjectiveValueParity:
-    """SquaredFluxJAX.J() must match SquaredFlux.J()."""
+    """SquaredFluxJAX.J() must match SquaredFlux.J() away from singular inputs."""
 
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_j_parity(self, coil_surf_setup, definition):
@@ -1160,7 +1162,7 @@ class TestObjectiveValueParity:
 
 
 class TestGradientParity:
-    """SquaredFluxJAX.dJ() must match SquaredFlux.dJ()."""
+    """SquaredFluxJAX.dJ() must match SquaredFlux.dJ() away from singular inputs."""
 
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_gradient_parity(self, coil_surf_setup, definition):
