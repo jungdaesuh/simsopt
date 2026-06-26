@@ -9,7 +9,10 @@ import math
 import numpy as np
 import pytest
 
-from examples.single_stage_optimization.banana_opt.topology import residue_diagnostics
+from examples.single_stage_optimization.banana_opt.topology import (
+    residue_diagnostics,
+    residue_seed_builder,
+)
 from examples.single_stage_optimization.banana_opt.topology.fieldline_map import (
     FieldlineIntegratorOptions,
     LowToroidalFieldError,
@@ -3261,6 +3264,72 @@ def test_residue_seed_builder_discovers_validates_and_round_trips(tmp_path):
         assert objective.to_json_dict()["enabled"] is True
     finally:
         field.x = original_x
+
+
+def test_residue_seed_builder_skips_validation_errors_and_continues(monkeypatch):
+    field, target, chart, integrator_options, solver_options, _seed, _vid, _original_x, _direction = (
+        _biot_savart_residue_objective_inputs()
+    )
+    failing_candidate = residue_seed_builder.IslandCandidate(
+        target=target,
+        branch=GREENE_BRANCH_O,
+        section_state=(1.1, 0.05),
+        proxy_residue=0.9,
+        residue_classification=GREENE_RESIDUE_ELLIPTIC_O,
+        winding=target.expected_winding(),
+        island_width_proxy=0.9,
+    )
+    passing_candidate = dataclasses.replace(
+        failing_candidate,
+        section_state=(1.11, 0.04),
+        proxy_residue=0.1,
+        island_width_proxy=0.1,
+    )
+
+    def fake_validate_candidate(_field, candidate, **_kwargs):
+        if candidate is failing_candidate:
+            raise ValueError(
+                "Branch-resolved residue finite difference requires base branch "
+                "status converged, got bad_tangent_determinant"
+            )
+        return (
+            residue_seed_builder.ValidatedBranchSeed(
+                target=candidate.target,
+                branch=candidate.branch,
+                seed_section_state=candidate.section_state,
+                direct_residue=0.1,
+                proxy_residue=candidate.proxy_residue,
+                residue_difference=0.0,
+                residue_difference_tolerance=1.0e-3,
+                taylor_min_order=2.0,
+                taylor_diagnostic={"schema_version": "test"},
+                real_field=None,
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(
+        residue_seed_builder,
+        "_validate_candidate",
+        fake_validate_candidate,
+    )
+
+    manifests = residue_seed_builder.build_validated_residue_seeds(
+        field,
+        candidates=(failing_candidate, passing_candidate),
+        chart=chart,
+        validation_artifact_id="validation-error-continues",
+        integrator_options=integrator_options,
+        solver_options=solver_options,
+    )
+
+    assert [seed.seed_section_state for seed in manifests.validated] == [
+        passing_candidate.section_state
+    ]
+    assert len(manifests.skipped) == 1
+    assert manifests.skipped[0].target_id == failing_candidate.target.manifest_key()
+    assert manifests.skipped[0].branch == failing_candidate.branch
+    assert "bad_tangent_determinant" in manifests.skipped[0].reason
 
 
 def test_residue_objective_gradient_step_reduces_residue():

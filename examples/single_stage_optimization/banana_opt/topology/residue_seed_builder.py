@@ -235,20 +235,24 @@ def build_validated_residue_seeds(
     validated: list[ValidatedBranchSeed] = []
     skipped: list[SkippedBranch] = []
     for candidate in selected:
-        seed, reason = _validate_candidate(
-            biot_savart,
-            candidate,
-            chart=chart,
-            direction=direction_array,
-            taylor_probe_steps=taylor_probe_steps,
-            order_floor=order_floor,
-            difference_tolerance=difference_tolerance,
-            winding_tolerance=winding_tol,
-            integrator_options=integrator_options,
-            solver_options=solver_options,
-            r_satisfied=r_satisfied,
-            local_difference_step=local_difference_step,
-        )
+        try:
+            seed, reason = _validate_candidate(
+                biot_savart,
+                candidate,
+                chart=chart,
+                direction=direction_array,
+                taylor_probe_steps=taylor_probe_steps,
+                order_floor=order_floor,
+                difference_tolerance=difference_tolerance,
+                winding_tolerance=winding_tol,
+                integrator_options=integrator_options,
+                solver_options=solver_options,
+                r_satisfied=r_satisfied,
+                local_difference_step=local_difference_step,
+            )
+        except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
+            seed = None
+            reason = f"validation error: {error}"
         if seed is None:
             skipped.append(
                 SkippedBranch(
