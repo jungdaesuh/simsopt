@@ -4252,6 +4252,15 @@ def _linear_solve_status_success(status):
     return status.success
 
 
+def _linear_solve_solution_or_nan(solution, status):
+    return jax.lax.cond(
+        jnp.asarray(_linear_solve_status_success(status), dtype=jnp.bool_),
+        lambda value: value,
+        lambda value: jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), value),
+        solution,
+    )
+
+
 def _linear_solve_iteration_count(info):
     if info is None:
         return _device_int32(_LINEAR_SOLVE_ITERATIONS_UNKNOWN)
@@ -4450,13 +4459,13 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
 
     The Hager-Higham iteration evaluates ``A⁻¹`` and ``A⁻ᵀ`` repeatedly,
     so the inner solves consume cached ``(lu, piv)`` factors via
-    ``jsp_linalg.lu_solve``. When ``lu_piv`` is supplied (e.g., the
-    Phase-2 5-tuple ``(P, L, U, lu, piv)`` ``linear_solve_factors``
-    snapshot) no factorization runs at all; otherwise the helper
-    factorizes ``matrix`` once and shares those bytes across every
-    inner solve. The naïve ``jnp.linalg.solve`` form re-factorized for
-    every call, costing 10 × O(n³) per estimate instead of the present
-    O(n³) + 10 × O(n²).
+    ``jsp_linalg.lu_solve``. When ``lu_piv`` is supplied it must be exactly
+    the packed two-tuple returned by ``jsp_linalg.lu_factor``; callers holding
+    public ``(P, L, U, lu, piv)`` factors should pass ``factors[3:5]``. With
+    cached factors no factorization runs at all; otherwise the helper
+    factorizes ``matrix`` once and shares those bytes across every inner solve.
+    The naïve ``jnp.linalg.solve`` form re-factorized for every call, costing
+    10 × O(n³) per estimate instead of the present O(n³) + 10 × O(n²).
     """
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
@@ -4677,13 +4686,22 @@ def _apply_column_batched_operator(matvec, rhs):
     return jax.vmap(matvec, in_axes=1, out_axes=1)(rhs)
 
 
+def _dense_square_operator_matrix_dtype(rhs):
+    rhs_dtype = np.dtype(jnp.asarray(rhs).dtype)
+    if rhs_dtype.kind == "f":
+        return np.dtype(get_backend_policy().runtime_dtype)
+    return rhs_dtype
+
+
 def _dense_square_operator_matrix_bytes_allowed(rhs):
     """Whether the ``n x n`` dense materialization (``n = rhs.shape[0]``) fits the
     dense-Jacobian byte cap.  The operator dimension is ``rhs.shape[0]`` whether
     ``rhs`` is a single vector or a column-batched ``(n, k)`` right-hand side."""
     rhs = jnp.asarray(rhs)
     dimension = int(rhs.shape[0])
-    matrix_bytes = dimension * dimension * np.dtype(rhs.dtype).itemsize
+    matrix_bytes = dimension * dimension * _dense_square_operator_matrix_dtype(
+        rhs
+    ).itemsize
     return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
 
 
@@ -4711,11 +4729,12 @@ def _dense_square_operator_lu_materialization_allowed(rhs):
 def _dense_square_operator_matrix(matvec, rhs):
     rhs = jnp.asarray(rhs)
     dimension = int(rhs.shape[0])
+    matrix_dtype = _dense_square_operator_matrix_dtype(rhs)
     # ``jnp.eye`` in JAX 0.10 emits an implicit int64 H→D transfer that breaks
     # ``transfer_guard("disallow")`` contracts; route via explicit device_put.
     eye = _explicit_device_array(
-        np.eye(dimension, dtype=np.dtype(rhs.dtype)),
-        dtype=rhs.dtype,
+        np.eye(dimension, dtype=matrix_dtype),
+        dtype=matrix_dtype,
     )
     # Assemble the dense operator in bounded column batches via ``lax.map`` rather
     # than an unchunked ``vmap`` over all N identity columns.  ``eye`` is a
@@ -4735,6 +4754,7 @@ def _dense_square_operator_matrix(matvec, rhs):
 def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
     rhs_dtype = jnp.asarray(rhs).dtype
     matrix = _dense_square_operator_matrix(matvec, rhs)
+    rhs = jnp.asarray(rhs, dtype=matrix.dtype)
     solution = jnp.linalg.lstsq(matrix, rhs, rcond=None)[0]
     residual = rhs - matrix @ solution
     status = _linear_solve_status(
@@ -4780,6 +4800,7 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
     """
     rhs_dtype = jnp.asarray(rhs).dtype
     matrix = _dense_square_operator_matrix(matvec, rhs)
+    rhs = jnp.asarray(rhs, dtype=matrix.dtype)
     lu_piv = jsp_linalg.lu_factor(matrix)
     solution = jsp_linalg.lu_solve(lu_piv, rhs)
     # One step of iterative refinement against the cached factors: resolves the
@@ -5043,14 +5064,14 @@ def _solve_jacobian_operator(
     tol,
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
-    solution, _ = _solve_jacobian_operator_with_status(
+    solution, status = _solve_jacobian_operator_with_status(
         operator,
         rhs,
         transpose=transpose,
         tol=tol,
         max_refinement_steps=max_refinement_steps,
     )
-    return solution
+    return _linear_solve_solution_or_nan(solution, status)
 
 
 def _solve_jacobian_system_with_status(

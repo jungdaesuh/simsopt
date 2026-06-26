@@ -164,7 +164,7 @@ def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
             matvec, rhs, tol=1e-12
         )
     )
-    expected = jnp.linalg.solve(matrix, rhs)
+    expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
     assert bool(status.success)
     rel = float(
         np.linalg.norm(np.asarray(solution) - np.asarray(expected))
@@ -186,7 +186,7 @@ def test_dense_lu_solver_batched_rhs_column_parity():
         )
     )
     assert bool(status.success)
-    expected = jnp.linalg.solve(matrix, rhs_batched)
+    expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs_batched))
     np.testing.assert_allclose(
         np.asarray(batched), np.asarray(expected), rtol=1e-10, atol=1e-12
     )
@@ -238,7 +238,7 @@ def test_solve_jacobian_operator_gate_routes_lu_iff_flag_and_transpose(monkeypat
     )
     assert calls["n"] == 1
     assert bool(status.success)
-    expected = jnp.linalg.solve(np.asarray(matrix).T, np.asarray(rhs))
+    expected = np.linalg.solve(np.asarray(matrix).T, np.asarray(rhs))
     np.testing.assert_allclose(
         np.asarray(solution), np.asarray(expected), rtol=1e-10, atol=1e-12
     )
@@ -364,6 +364,35 @@ def test_float32_dense_lu_rejects_nonnormal_forward_error_through_dispatch(
     ) / np.linalg.norm(true_solution)
     assert relative_error > 1.0e-4
     assert not bool(status.success)
+
+
+def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
+    monkeypatch,
+):
+    """The solution-only exact-adjoint helper must not leak a failed LU vector."""
+    matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
+    operator = {"matvec": matvec, "transpose_matvec": matvec}
+    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+
+    status_solution, status = _optimizer._solve_jacobian_operator_with_status(
+        operator,
+        rhs,
+        transpose=True,
+        tol=1.0e-4,
+    )
+    direct_solution = _optimizer._solve_jacobian_operator(
+        operator,
+        rhs,
+        transpose=True,
+        tol=1.0e-4,
+    )
+
+    relative_error = np.linalg.norm(
+        np.asarray(status_solution, dtype=np.float32) - true_solution
+    ) / np.linalg.norm(true_solution)
+    assert relative_error > 1.0e-4
+    assert not bool(status.success)
+    assert np.all(np.isnan(np.asarray(direct_solution)))
 
 
 def test_dense_lu_status_fails_closed_on_singular_operator():

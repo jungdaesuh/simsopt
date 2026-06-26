@@ -5,8 +5,9 @@ Boozer solve fails on a validly-converged surface -- the squared Hessian
 (cond ``kappa(J)^2``) is too ill-conditioned to reach ``linear_solve_tol`` -- and
 the dense-LU exact-adjoint opt-in is enabled, ``_reprobe_adjoint_availability_
 with_dense_lu`` recovers availability via the un-squared ``J^T`` solver that
-``dJ()`` actually uses.  It must stay inert when the flag is off, must not mask a
-nonlinear-solve failure, and must skip a non-square Jacobian.
+the exact-Jacobian dense-LU opt-in path uses.  It must stay inert when the flag
+is off, must not mask a nonlinear-solve failure, and must skip a non-square
+Jacobian.
 """
 
 import numpy as np
@@ -60,7 +61,7 @@ def test_reprobe_recovers_availability_when_flag_on(monkeypatch):
     )
     assert success is True
     assert backend == "dense-lu-jacobian-transpose"
-    expected = jnp.linalg.solve(np.asarray(jac).T, np.asarray(grad))
+    expected = np.linalg.solve(np.asarray(jac).T, np.asarray(grad))
     np.testing.assert_allclose(
         np.asarray(solution), np.asarray(expected), rtol=1e-10, atol=1e-12
     )

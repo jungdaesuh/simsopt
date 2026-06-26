@@ -4474,12 +4474,21 @@ class BoozerSurfaceJAX(Optimizable):
 
                 return wrapped
 
+            def _solution_only(solver_with_status):
+                def wrapped(rhs):
+                    solution, _status = solver_with_status(rhs)
+                    return solution
+
+                return wrapped
+
             if solve_transpose is None:
                 solve_transpose = solve_forward
             if solve_transpose_with_status is None:
                 solve_transpose_with_status = solve_forward_with_status
             solve_forward_with_status = _with_nan_status(solve_forward_with_status)
             solve_transpose_with_status = _with_nan_status(solve_transpose_with_status)
+            solve_forward = _solution_only(solve_forward_with_status)
+            solve_transpose = _solution_only(solve_transpose_with_status)
             if linear_solve_factors is not None:
                 def stage_public_linear_solve_factor(factor):
                     factor_array = jnp.asarray(factor)
