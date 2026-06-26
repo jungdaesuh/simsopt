@@ -78,6 +78,7 @@ from banana_opt.coil_groups import (
     CoilGroupsManifest,
 )
 from banana_opt.edge_delivered_iota import (
+    DEFAULT_EDGE_TRACE_TURNS,
     EDGE_HELICITY_STATUS_UNKNOWN,
     EDGE_IOTA_MODE_OFF,
     EDGE_IOTA_MODE_REPORT,
@@ -905,7 +906,11 @@ def build_stage2_edge_iota_config(args) -> EdgeIotaConfig:
         ),
         sample_count=getattr(args, "stage2_edge_iota_sample_count", 6),
         helicity_sign=helicity_sign,
-        trace_turns=getattr(args, "stage2_edge_iota_trace_turns", 80),
+        trace_turns=getattr(
+            args,
+            "stage2_edge_iota_trace_turns",
+            DEFAULT_EDGE_TRACE_TURNS,
+        ),
         steps_per_turn=getattr(args, "stage2_edge_iota_steps_per_turn", 240),
         q_validation_rel_tol=getattr(
             args,
@@ -1683,7 +1688,12 @@ def parse_args():
     parser.add_argument(
         "--stage2-edge-iota-trace-turns",
         type=int,
-        default=int(os.environ.get("STAGE2_EDGE_IOTA_TRACE_TURNS", "80")),
+        default=int(
+            os.environ.get(
+                "STAGE2_EDGE_IOTA_TRACE_TURNS",
+                str(DEFAULT_EDGE_TRACE_TURNS),
+            )
+        ),
         help="Toroidal turns for tokamak and hybrid edge-iota traces.",
     )
     parser.add_argument(

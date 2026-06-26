@@ -1596,10 +1596,18 @@ class Stage2IotaReportingTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.stage2_edge_iota_mode, "report")
+        self.assertEqual(
+            args.stage2_edge_iota_trace_turns,
+            module.DEFAULT_EDGE_TRACE_TURNS,
+        )
         self.assertEqual(args.stage2_edge_iota_eqdsk, "/tmp/shot.eqdsk")
         self.assertEqual(
             module.build_stage2_edge_iota_config(args).edge_band,
             (0.75, 1.0),
+        )
+        self.assertEqual(
+            module.build_stage2_edge_iota_config(args).trace_turns,
+            module.DEFAULT_EDGE_TRACE_TURNS,
         )
 
     def test_stage2_edge_iota_report_mode_requires_explicit_inputs(self):
