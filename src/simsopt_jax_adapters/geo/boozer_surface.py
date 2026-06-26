@@ -4634,24 +4634,57 @@ class BoozerSurfaceJAX(Optimizable):
                 solved = P_host @ z
                 return jnp.asarray(solved, dtype=x.dtype)
 
+            # Acceptance is governed by the scale-invariant backward error
+            # (``status.success | backward_error_success``), matching the
+            # ``dense-plu-shared`` branch above. The bare relative-residual gate
+            # is scale-sensitive: on the kappa ~ 4e5 LS Hessian the adjoint
+            # transpose solve is backward-stable (eta ~ n*eps) yet its relative
+            # residual ||b - A x|| / ||b|| is amplified by ||A|| ||x|| / ||b||
+            # and false-rejects an accurate solve. The backward-error gate is
+            # condition-independent and fails closed only on genuinely
+            # singular/garbage solves.
             @_with_host_bridge_transfer_guard
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
+                rhs_device = jnp.asarray(rhs, dtype=x.dtype)
+                status = _optimizer_jax._dense_linear_solve_status(
                     apply_forward,
                     solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
+                    rhs_device,
                     tol=tol_host,
+                )
+                backward_error_success = (
+                    _optimizer_jax._dense_matrix_backward_error_success(
+                        jnp.asarray(H_host, dtype=x.dtype),
+                        solved,
+                        rhs_device,
+                        tol=tol_host,
+                    )
+                )
+                return solved, status._replace(
+                    success=status.success | backward_error_success
                 )
 
             @_with_host_bridge_transfer_guard
             def solve_transpose_with_status(rhs):
                 solved = solve_transpose(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
+                rhs_device = jnp.asarray(rhs, dtype=x.dtype)
+                status = _optimizer_jax._dense_linear_solve_status(
                     apply_transpose,
                     solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
+                    rhs_device,
                     tol=tol_host,
+                )
+                backward_error_success = (
+                    _optimizer_jax._dense_matrix_backward_error_success(
+                        jnp.asarray(H_host.T, dtype=x.dtype),
+                        solved,
+                        rhs_device,
+                        tol=tol_host,
+                    )
+                )
+                return solved, status._replace(
+                    success=status.success | backward_error_success
                 )
 
             return pack_callbacks(

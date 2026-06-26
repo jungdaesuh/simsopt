@@ -4222,11 +4222,50 @@ def _linear_solve_finite(solution, residual):
     return jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
 
 
+# Growth-factor margin on the ``n * eps`` LU backward-error bound used by
+# ``_effective_linear_solve_tolerance``. Keeps the acceptance gate a tiny
+# multiple of attainable backward-stability (so degenerate solves with
+# eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
+# solves of large, moderately ill-conditioned systems.
+_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
+
+
 def _effective_linear_solve_tolerance(rhs, tol):
     dtype = rhs.dtype
     policy = get_backend_policy()
     tol_value = _optimizer_scalar(tol, dtype=dtype)
-    tolerance_floor = _device_scalar(policy.linear_solve_tolerance_floor, dtype=dtype)
+    # Dimension-aware backward-error floor. A backward-stable dense LU solve of
+    # an n-by-n system has backward error
+    #   eta = ||b - A x|| / (||A|| ||x|| + ||b||) <~ c * n * eps
+    # (Higham, "Accuracy and Stability of Numerical Algorithms", 2nd ed.,
+    # Thm 9.4; the LU growth factor is absorbed into the constant ``c``). The
+    # fixed precision-independent 1e-14 policy floor sits *below* this attainable
+    # bound, so an accurate solve of a moderately ill-conditioned system -- e.g.
+    # the kappa ~ 4e5 least-squares Boozer Hessian (n ~ 2e3), whose adjoint
+    # transpose solve lands at residual_relative ~ 1e-12 -- is false-rejected
+    # even though the resulting gradient is correct to ~1e-7. Lift the floor to
+    # the textbook ``c * n * eps`` scale so the acceptance gate tracks attainable
+    # backward-stability instead of a fixed constant; ``c`` (the
+    # ``_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR`` growth-factor margin) is
+    # sized so the n ~ 2e3 production solve clears its ~1e-12 residual with ~30x
+    # headroom. With ``c = 64`` (float64) the dimension floor exceeds the 1e-14
+    # policy floor for every ``n >= 1`` (crossover at ``n ~ 0.7``), so it binds
+    # at all sizes and the 1e-14 floor is effectively superseded: even small
+    # ``n`` is loosened modestly (n=16 -> ~2.3e-13). A genuinely singular or
+    # garbage solve (eta ~ O(1)) still fails closed by many orders, and the
+    # numerical-singularity condition screen in ``_dense_matrix_solve_numerically_safe``
+    # is the independent guard against backward-stable-but-forward-garbage solves.
+    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    system_size = _device_scalar(rhs.shape[0], dtype=dtype)
+    dimension_floor = (
+        _device_scalar(_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR, dtype=dtype)
+        * system_size
+        * eps
+    )
+    tolerance_floor = jnp.maximum(
+        _device_scalar(policy.linear_solve_tolerance_floor, dtype=dtype),
+        dimension_floor,
+    )
     tolerance_cap = (
         _device_scalar(jnp.inf, dtype=dtype)
         if policy.linear_solve_tolerance_cap is None
@@ -4503,31 +4542,6 @@ def _dense_matrix_nonsingular_threshold(size, dtype):
     return _device_scalar(1.0 / (dimension_factor * eps), dtype=dtype)
 
 
-def _dense_matrix_nonsingular(matrix, *, lu_piv=None):
-    """Whether ``matrix`` is numerically nonsingular for dense adjoint solves.
-
-    A backward-error gate cannot distinguish a well-conditioned solve from a
-    backward-stable-but-forward-garbage solve of a (near-)singular operator
-    (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
-    the solve returns a finite wrong answer with a small residual).  This guard
-    lets a degenerate operator fail closed.  The forward-error *bound*
-    ``cond * residual_rel`` is too conservative for this purpose at large ``n``
-    (the 1-norm condition estimate inflates ~``n``-fold over the 2-norm
-    conditioning, tripping the bound's ``sqrt(eps)`` gate even on an accurate
-    solve).  Float64 production solves use the LAPACK rank-tolerance reciprocal
-    ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), which cleanly separates the
-    well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
-    singular one (cond >~ 1e15).  Float32 smoke solves use this as a broader
-    condition screen only; the dense solve must also pass the forward-error bound
-    before the final status is accepted.
-    """
-    matrix = jnp.asarray(matrix)
-    size = int(matrix.shape[0])
-    condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
-    threshold = _dense_matrix_nonsingular_threshold(size, matrix.dtype)
-    return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
-
-
 def _dense_matrix_solve_numerically_safe(
     matrix,
     solution,
@@ -4537,6 +4551,30 @@ def _dense_matrix_solve_numerically_safe(
     lu_piv=None,
     solve_dtype=None,
 ):
+    """Whether a dense adjoint solve is numerically trustworthy at ``solve_dtype``.
+
+    A backward-error gate cannot distinguish a well-conditioned solve from a
+    backward-stable-but-forward-garbage solve of a (near-)singular operator
+    (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
+    the solve returns a finite wrong answer with a small residual).  The
+    condition screen ``isfinite(cond) & (cond < threshold)`` lets a degenerate
+    operator fail closed: float64 production uses the LAPACK rank-tolerance
+    reciprocal ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), cleanly separating the
+    well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
+    singular one (cond >~ 1e15).
+
+    The forward-error *bound* ``cond * residual_rel`` is deliberately applied to
+    float32 only.  At large ``n`` (the float64 production regime) the 1-norm
+    condition estimate inflates ~``n``-fold over the 2-norm conditioning,
+    tripping the bound's ``sqrt(eps)`` gate even on an accurate solve, so it
+    would false-reject production.  Float32 smoke solves instead clear the
+    broader ``1 / (sqrt(n) * eps)`` condition screen, which admits moderately
+    conditioned operators that float32 precision cannot resolve to smoke
+    tolerance; those must additionally satisfy the forward-error bound before the
+    solve is accepted.  ``solve_dtype`` (the caller's rhs dtype) selects the lane
+    so the gate keys on the intended working precision even when the operator is
+    materialized at the runtime float64 policy dtype.
+    """
     matrix = jnp.asarray(matrix)
     if solve_dtype is None:
         solve_dtype = matrix.dtype
