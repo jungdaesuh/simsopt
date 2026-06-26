@@ -6828,7 +6828,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             _bsj.BoozerSurfaceJAX,
             "_make_exact_residual",
-            lambda self, _mask: lambda _x: _x,
+            lambda _self, _mask: lambda _x: _x,
         )
         operator_builds = []
 
@@ -6902,6 +6902,85 @@ class TestBoozerSurfaceJAXClass:
             rtol=0.0,
             atol=exact_lane["residual_rel_tol"],
         )
+
+    def test_get_adjoint_runtime_state_exact_jacobian_plain_transpose_masks_failed_status(
+        self, monkeypatch
+    ):
+        """Solution-only exact-Jacobian callbacks must not bypass failure status."""
+        booz = _make_mock_boozer_surface_exact()
+        booz.need_to_run_code = False
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
+            "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_compute_stellsym_mask_indices",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_make_exact_residual",
+            lambda _self, _mask: lambda _x: _x,
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_jacobian_linear_operator",
+            lambda _residual_fn, _x: {
+                "matvec": lambda vec: vec,
+                "transpose_matvec": lambda vec: vec,
+            },
+        )
+        status_calls = []
+
+        def forbidden_solution_only_solve(*_args, **_kwargs):
+            raise AssertionError("solution-only exact-Jacobian helper was called")
+
+        def failing_solve_with_status(
+            _operator,
+            rhs,
+            *,
+            transpose,
+            tol,
+            max_refinement_steps,
+        ):
+            del tol, max_refinement_steps
+            assert transpose is True
+            status_calls.append(np.asarray(rhs))
+            bad_solution = jnp.asarray([7.0, -9.0], dtype=rhs.dtype)
+            return bad_solution, _mock_linear_solve_status(False)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_jacobian_operator",
+            forbidden_solution_only_solve,
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_jacobian_operator_with_status",
+            failing_solve_with_status,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
+        solved = adjoint_state.solve_transpose(rhs)
+        solved_with_status, status = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert len(status_calls) == 2
+        np.testing.assert_allclose(status_calls[0], np.asarray(rhs))
+        np.testing.assert_allclose(status_calls[1], np.asarray(rhs))
+        assert np.all(np.isnan(np.asarray(solved)))
+        assert np.all(np.isnan(np.asarray(solved_with_status)))
+        assert bool(np.asarray(status.success)) is False
 
     @pytest.mark.parametrize(
         ("mode", "lane"),
@@ -10516,20 +10595,21 @@ class TestUpstreamFactoryBoozerMatrix:
     ):
         x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
         residual_values = jnp.asarray([1.0, -2.0, 0.5, -0.25], dtype=jnp.float64)
-        jacobian_matrix = jnp.eye(4, dtype=jnp.float64)
+        jacobian_matrix = jnp.asarray(
+            [
+                [2.0, -0.25, 0.0, 0.5],
+                [0.1, 1.5, -0.4, 0.0],
+                [0.0, 0.3, 1.75, -0.2],
+                [0.4, 0.0, 0.2, 1.25],
+            ],
+            dtype=jnp.float64,
+        )
         original_status = self._solve_boozer_state_gate_status(
             False,
             residual=9.0,
             residual_relative=9.0,
             iterations=11,
         )
-        dense_lu_status = self._solve_boozer_state_gate_status(
-            True,
-            residual=1e-13,
-            residual_relative=1e-13,
-            iterations=0,
-        )
-        dense_lu_solution = jnp.asarray([4.0, 3.0, 2.0, 1.0], dtype=jnp.float64)
         dense_lu_calls = []
         bundle, original_calls = self._solve_boozer_state_gate_bundle(
             residual_values,
@@ -10543,16 +10623,21 @@ class TestUpstreamFactoryBoozerMatrix:
             message="converged",
         )
         monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        real_dense_lu_system_with_status = (
+            _bsj._optimizer_jax._solve_dense_square_operator_lu_system_with_status
+        )
 
         def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
+            probe = jnp.asarray([1.0, -1.0, 0.5, 2.0], dtype=rhs.dtype)
             dense_lu_calls.append(
                 {
                     "rhs": np.asarray(rhs),
                     "tol": tol,
-                    "matvec": np.asarray(matvec(jnp.ones_like(rhs))),
+                    "probe": np.asarray(probe),
+                    "matvec_probe": np.asarray(matvec(probe)),
                 }
             )
-            return dense_lu_solution, dense_lu_status
+            return real_dense_lu_system_with_status(matvec, rhs, tol=tol)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -10574,15 +10659,34 @@ class TestUpstreamFactoryBoozerMatrix:
 
         assert result.success is True
         assert result.failure_reason is None
-        assert result.linear_solve_status is dense_lu_status
+        assert bool(np.asarray(result.linear_solve_status.success)) is True
+        assert int(np.asarray(result.linear_solve_status.iterations)) == 0
+        expected_rhs = np.asarray(jacobian_matrix).T @ np.asarray(residual_values)
+        expected_solution = np.linalg.solve(np.asarray(jacobian_matrix).T, expected_rhs)
         np.testing.assert_allclose(
             np.asarray(result.linear_solve_solution),
-            np.asarray(dense_lu_solution),
+            expected_solution,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        )
+        hessian_solution = np.linalg.solve(
+            np.asarray(jacobian_matrix).T @ np.asarray(jacobian_matrix),
+            expected_rhs,
+        )
+        assert not np.allclose(expected_solution, hessian_solution)
+        np.testing.assert_allclose(
+            np.asarray(result.linearization_factors["hessian"]),
+            np.asarray(jacobian_matrix).T @ np.asarray(jacobian_matrix),
+            rtol=1.0e-12,
+            atol=1.0e-12,
         )
         assert len(original_calls) == 1
         assert len(dense_lu_calls) == 1
-        np.testing.assert_allclose(dense_lu_calls[0]["rhs"], np.asarray(residual_values))
-        np.testing.assert_allclose(dense_lu_calls[0]["matvec"], np.ones(4))
+        np.testing.assert_allclose(dense_lu_calls[0]["rhs"], expected_rhs)
+        np.testing.assert_allclose(
+            dense_lu_calls[0]["matvec_probe"],
+            np.asarray(jacobian_matrix).T @ dense_lu_calls[0]["probe"],
+        )
         assert dense_lu_calls[0]["tol"] == 1e-10
         assert result.convergence_metadata["linear_solve_success"] is True
         assert (
@@ -10591,7 +10695,7 @@ class TestUpstreamFactoryBoozerMatrix:
         )
         assert float(
             np.asarray(result.convergence_metadata["linear_solve_residual_relative"])
-        ) == pytest.approx(1e-13)
+        ) < 1e-10
         assert int(
             np.asarray(result.convergence_metadata["linear_solve_iterations"])
         ) == 0
