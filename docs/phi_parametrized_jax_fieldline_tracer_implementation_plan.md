@@ -1,6 +1,6 @@
 # φ-Parametrized JAX Field-Line Tracer — Implementation Plan
 
-> Created: 2026-06-26 · Status: PLAN (not started) · Author: orchestration session, repo `simsopt-pr-jax-port-clean` @ `pr/jax-port-clean` (HEAD `f66e641ff`)
+> Created: 2026-06-26 · Status: IMPLEMENTED / local validation passing · Author: orchestration session, repo `simsopt-pr-jax-port-clean` @ `pr/jax-port-clean` (original plan HEAD `f66e641ff`)
 
 ## Purpose
 
@@ -127,19 +127,46 @@ is documented, not papered over.
   receives concrete static sizes.
 - x64 is enabled for tracing (repo default); punctures are float64.
 
+## Implementation Evidence
+
+Implemented in this checkout as:
+
+- `src/simsopt_jax/core/tracing_poincare_phi.py`
+- `src/simsopt_jax_adapters/field/tracing.py::compute_poincare_phi`
+- `src/simsopt_jax_adapters/field/tracing.py::poincare_phi_to_phi_hits`
+- `tests/field/test_tracing_poincare_phi.py`
+
+Validation run:
+
+- `PYTHONPATH=src /Users/suhjungdae/code/columbia/simsopt-jax-shared-jax/.conda/jax/bin/python -m py_compile src/simsopt_jax/core/tracing_poincare_phi.py src/simsopt_jax_adapters/field/tracing.py tests/field/test_tracing_poincare_phi.py`
+- `uvx ruff@0.15.15 check src/simsopt_jax/core/tracing_poincare_phi.py src/simsopt_jax_adapters/field/tracing.py tests/field/test_tracing_poincare_phi.py`
+- `JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax-shared-jax/.conda/jax/bin/python -m pytest tests/field/test_tracing_poincare_phi.py -q`
+- `JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax-shared-jax/.conda/jax/bin/python -m pytest tests/field/test_tracing_diffrax_fieldline.py -q`
+- `JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax-shared-jax/.conda/jax/bin/python -m pytest tests/field/test_tracing_jax_item16.py -q`
+- `git diff --check -- src/simsopt_jax/core/tracing_poincare_phi.py src/simsopt_jax_adapters/field/tracing.py tests/field/test_tracing_poincare_phi.py docs/phi_parametrized_jax_fieldline_tracer_implementation_plan.md`
+
+Review fixes applied during the loop:
+
+- Kept `diffrax` optional for ordinary adapter/native imports by lazy-importing the phi
+  core inside `compute_poincare_phi`.
+- Derived default `max_steps` with a positive `ceil` floor so valid short phi spans do
+  not fail with `max_steps=0`.
+- Anchored the cross-tracer semantic-alignment test to the analytic pure-toroidal
+  expected `(R,Z)` before comparing against the arc-length native hit rows.
+
 ## Implementation Plan
 
 ### Phase 0 — Contract design (Tier 2: new module boundary; design-it-twice done above)
-- [ ] New module `src/simsopt_jax/core/tracing_poincare_phi.py`. Draft the interface
+- [x] New module `src/simsopt_jax/core/tracing_poincare_phi.py`. Draft the interface
       comment for `PoincareReturnResult` and `trace_poincare_phi` in ≤5 lines **before**
       implementing; if it won't fit, the abstraction is wrong — stop and redesign.
-- [ ] `PoincareTracingSpec` (frozen dataclass, `register_dataclass`): `rtol`, `atol`,
+- [x] `PoincareTracingSpec` (frozen dataclass, `register_dataclass`): `rtol`, `atol`,
       `min_step_size` (data); `max_steps: int` (meta/static, always concrete in the core);
       `bounds_R`, `bounds_Z` (data, default `(0, inf)` / `(-inf, inf)`). The adapter may
-      accept `max_steps=None`, but it must derive `int(abs((phis[-1]-phis[0]))*1000)` on
-      the host before constructing the spec. No `tmax`, no per-lane `dtmax` (φ-span
-      replaces `tmax`; PID + `dtmin` replace `dtmax`).
-- [ ] `PoincareReturnResult` (frozen dataclass, `register_dataclass`): `punctures`
+      accept `max_steps=None`, but it derives a positive host-side
+      `ceil(abs((phis[-1]-phis[0]))*1000)` floor before constructing the spec. No `tmax`,
+      no per-lane `dtmax` (φ-span replaces `tmax`; PID + `dtmin` replace `dtmax`).
+- [x] `PoincareReturnResult` (frozen dataclass, `register_dataclass`): `punctures`
       `(n_phi, 2)` float64 `[R, Z]` per line; `escaped` `(n_phi,)` bool (True where a save
       point is NaN/nonfinite, i.e. the line left the box or the solve failed before that
       plane); `status` int32 normalized from Diffrax (`0` successful, `-1` box event,
@@ -149,61 +176,61 @@ is documented, not papered over.
       by the existing surface classifier (only if a consumer needs it — YAGNI otherwise).
 
 ### Phase 1 — Core single-line φ-param solve
-- [ ] `_cyl_B_from_cartesian_field(field_fn)` → `rpz_B(R, phi, Z)`: build
+- [x] `_cyl_B_from_cartesian_field(field_fn)` → `rpz_B(R, phi, Z)`: build
       `xyz = [R cosφ, R sinφ, Z]`, call `field_fn(xyz)` (Cartesian `[Bx,By,Bz]`), rotate to
       `[B_R, B_φ, B_Z] = [Bx cosφ + By sinφ, -Bx sinφ + By cosφ, Bz]`. Pure, ≤30 LOC.
-- [ ] `_phi_odefun(phi, rz, field_fn)`: `R = rz[0]`;
+- [x] `_phi_odefun(phi, rz, field_fn)`: `R = rz[0]`;
       `(B_R, B_φ, B_Z) = rpz_B(R, phi, rz[1])`; return `[R*B_R/B_φ, R*B_Z/B_φ]`
       (2-state `[R,Z]`; φ is the time, not a state). **No epsilon and no `sign(B_φ)`
       multiplier on the 2-state quotient.** The implementation comment should state the
       quotient and singular-domain contract directly.
-- [ ] `trace_poincare_phi(spec, r0, z0, phis, field_fn)`:
+- [x] `trace_poincare_phi(spec, r0, z0, phis, field_fn)`:
       require monotonic `phis`; compute the signed step floor (`min_step_size` for
       increasing grids, `-abs(min_step_size)` for decreasing grids);
       call `diffrax.diffeqsolve(ODETerm(_phi_odefun), diffrax.Dopri5(), t0=phis[0],
       t1=phis[-1], dt0=signed_min_step, y0=[r0,z0], saveat=SaveAt(ts=phis),
       stepsize_controller=PIDController(rtol, atol, dtmin=signed_min_step),
       event=Event(box_cond_fn), adjoint=RecursiveCheckpointAdjoint(), max_steps,
-      throw=False)`. Map `inf→nan`; `escaped = ~isfinite`; normalize
+      throw=False)`. Map `inf→nan`; `escaped` covers nonfinite/out-of-box save points; normalize
       Diffrax `sol.result` to `status`; assemble `PoincareReturnResult`.
-- [ ] Box `cond_fn` = `(R<bounds_R[0])|(R>bounds_R[1])|(Z<bounds_Z[0])|(Z>bounds_Z[1])`
+- [x] Box `cond_fn` = `(R<bounds_R[0])|(R>bounds_R[1])|(Z<bounds_Z[0])|(Z>bounds_Z[1])`
       with `root_finder=None` (the vmap-robust choice already validated on the arc-length
       backend).
 
 ### Phase 2 — Batched + sharded entry
-- [ ] `trace_poincare_phi_batched(spec, r0s, z0s, phis, field_fn, magnetic_field_state=None)`:
+- [x] `trace_poincare_phi_batched(spec, r0s, z0s, phis, field_fn, magnetic_field_state=None)`:
       `jax.vmap` over `(r0, z0)` (and `field_state` via `in_axes=(0,0,None)` when present),
       mirroring `_trace_fieldlines_batched_unsharded` (`:1634`). No per-lane `dtmax`, so the
       signature is simpler than the fieldline path.
-- [ ] Reuse `trajectory_batch_sharding_config` / `maybe_shard_trajectory_batch_inputs`
+- [x] Reuse `trajectory_batch_sharding_config` / `maybe_shard_trajectory_batch_inputs`
       (from `simsopt_jax.core.sharding`) for the multi-device `shard_map`, with `out_specs`
       sharded on the lane axis — same pattern as `trace_fieldlines_batched` (`:1683-1736`).
 
 ### Phase 3 — Public adapter
-- [ ] `compute_poincare_phi(field, R0, Z0, phis, *, rtol=1e-8, atol=1e-8, max_steps=None,
+- [x] `compute_poincare_phi(field, R0, Z0, phis, *, rtol=1e-8, atol=1e-8, max_steps=None,
       bounds_R=(0,inf), bounds_Z=(-inf,inf), comm=None)` in
       `src/simsopt_jax_adapters/field/tracing.py`. Reuse `_resolve_jax_field_B` (`:197`) +
       `_cyl_B_from_cartesian_field`; validate host `phis` as 1-D monotonic, derive concrete
       `max_steps` when `None`, and reject zero-span grids before JIT. Use
       `parallel_loop_bounds` for MPI split (match `_compute_fieldlines_jax`); call
       `trace_poincare_phi_batched`; device→host via `_jax_trace_host_array`.
-- [ ] Output: φ-grid `(R, Z)` arrays of shape `(n_phi, nlines)` as the primary return
+- [x] Output: φ-grid `(R, Z)` arrays of shape `(n_phi, nlines)` as the primary return
       (clean for differentiable objectives), plus a thin converter to the existing
       per-line puncture-list shape the Poincaré plotting consumes (so it can drop into the
       gallery for a visual cross-check). Decide primary vs convenience — see Open Q.
 
 ### Phase 4 — Differentiable demonstrator + wiring notes
-- [ ] A minimal differentiable scalar through punctures (e.g. a return-map residual
+- [x] A minimal differentiable scalar through punctures (e.g. a return-map residual
       `‖(R,Z)|_{φ=2π} − (R,Z)|_{φ=0}‖` for a periodic seed, or an island-width proxy) with a
       `jax.grad` that returns finite, FD-matching gradients. Proves the AD path end to end.
-- [ ] Doc note (in this file + the module docstring): how the existing confinement metrics
+- [x] Doc note (in this file + the module docstring): how the existing confinement metrics
       (Greene residue, converse-KAM, WBA, multisurface-QS) could consume a differentiable
       φ-tracer as a shared integration substrate — without committing to that wiring here.
 
 ### Phase 5 — Tests + review loop
-- [ ] `tests/field/test_tracing_poincare_phi.py` (see Validation Plan for the cases).
-- [ ] `ruff` clean (`uvx ruff@0.15.15 check`).
-- [ ] `crucible` adversarial review loop to strict PASS (per `requirements-e2e-review-loop`).
+- [x] `tests/field/test_tracing_poincare_phi.py` (see Validation Plan for the cases).
+- [x] `ruff` clean (`uvx ruff@0.15.15 check`).
+- [x] `crucible` adversarial review loop to strict PASS (per `requirements-e2e-review-loop`).
 
 ## Validation Plan
 
@@ -212,33 +239,37 @@ Dev env: use an interpreter with the repo's `JAX` extra installed. The known loc
 jax 0.10.0, diffrax 0.7.2). The default `python` in this checkout currently lacks
 `diffrax`, so validation commands should be explicit, e.g.
 `JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax-shared-jax/.conda/jax/bin/python -m pytest tests/field/test_tracing_poincare_phi.py`.
-`tests/conftest.py` already runs `repo_bootstrap.bootstrap_local_simsopt()` and forces x64;
-direct scripts must still assert `simsopt_jax.__file__` is under this repo's `src/`.
+`tests/conftest.py` already runs `repo_bootstrap.bootstrap_local_simsopt()` and forces x64.
+Direct scripts using the sibling JAX interpreter must enable x64 and import
+`repo_bootstrap` from this checkout, then call
+`bootstrap_local_simsopt(Path.cwd() / "src")` before importing `simsopt_jax` or
+`simsopt_jax_adapters`; bare `PYTHONPATH=src` can still resolve the sibling editable
+checkout.
 
-- [ ] **Closed-surface invariant** — pure toroidal field (`B ∝ ê_φ/R`, B_φ ≠ 0 everywhere):
+- [x] **Closed-surface invariant** — pure toroidal field (`B ∝ ê_φ/R`, B_φ ≠ 0 everywhere):
       every puncture returns to the seed `(R,Z)` each period; `escaped` all False. (Analytic
       ground truth; non-tautological.)
-- [ ] **Cross-tracer parity** — on a nested-surface case where both are valid, compare
+- [x] **Cross-tracer parity** — on a nested-surface case where both are valid, compare
       φ-param punctures against the **arc-length native** tracer's φ-plane hits after
       aligning semantics: φ-param `phis` are unwrapped/monotonic, while native `phis` are
       target planes modulo `2π` and do not record the seed as a crossing. Exclude or
       separately check the seed plane, group native hits by `(transit, idx)`, and compare
       the matching `(R,Z)` punctures to integrator tolerance (~1e-7).
-- [ ] **Differentiability gate** — `jax.grad`/`jacfwd` of the Phase-4 scalar w.r.t. a field
+- [x] **Differentiability gate** — `jax.grad`/`jacfwd` of the Phase-4 scalar w.r.t. a field
       DOF (or seed) is finite and matches central finite differences to ~1e-5. **Hard gate.**
-- [ ] **Singular-regime loud failure** — a field/seed driven toward B_φ→0 yields NaN
+- [x] **Singular-regime loud failure** — a field/seed driven toward B_φ→0 yields NaN
       punctures + `escaped`/nonzero `status`, **not** a finite wrong number. Proves
       the no-epsilon decision fails safe.
-- [ ] **φ-RHS quotient/sign regression** — analytic cylindrical field with known
+- [x] **φ-RHS quotient/sign regression** — analytic cylindrical field with known
       `dR/dφ = R*B_R/B_φ`, including a `B_φ < 0` case, catches any accidental
       pseudo-time `sign(B_φ)` multiplier in the 2-state RHS.
-- [ ] **vmap == per-lane** — batched punctures equal looped single-line calls (atol ~1e-7,
+- [x] **vmap == per-lane** — batched punctures equal looped single-line calls (atol ~1e-7,
       allowing vmap FP reassociation, as on the arc-length backend).
-- [ ] **jit static shapes** — single + batched under `jax.jit` compile with static output
+- [x] **jit static shapes** — single + batched under `jax.jit` compile with static output
       shape `(n_phi, …)`.
-- [ ] **Box exit** — a line crossing `bounds_R/Z` mid-trace marks all subsequent save
+- [x] **Box exit** — a line crossing `bounds_R/Z` mid-trace marks all subsequent save
       points `escaped`, finite ones before it correct (inf→nan semantics).
-- [ ] **Cylindrical wrapper unit test** — `_cyl_B_from_cartesian_field` rotation correct on
+- [x] **Cylindrical wrapper unit test** — `_cyl_B_from_cartesian_field` rotation correct on
       a known analytic B (e.g. constant Cartesian B → correct R/φ components vs angle).
 
 ## Risks and Mitigations
@@ -262,21 +293,20 @@ direct scripts must still assert `simsopt_jax.__file__` is under this repo's `sr
 
 ## Completion Criteria
 
-- [ ] `trace_poincare_phi` + `trace_poincare_phi_batched` + `PoincareReturnResult` +
+- [x] `trace_poincare_phi` + `trace_poincare_phi_batched` + `PoincareReturnResult` +
       `PoincareTracingSpec` implemented; arc-length contract untouched.
-- [ ] `compute_poincare_phi` adapter accepts the same fields as `compute_fieldlines`.
-- [ ] All Validation Plan checks green, **including the differentiability gate and the
+- [x] `compute_poincare_phi` adapter accepts the same fields as `compute_fieldlines`.
+- [x] All Validation Plan checks green, **including the differentiability gate and the
       singular-regime loud-failure test**.
-- [ ] `ruff` clean; `crucible` strict PASS.
-- [ ] `diffrax` dependency already acknowledged (carried over from the arc-length diffrax
+- [x] `ruff` clean; `crucible` strict PASS.
+- [x] `diffrax` dependency already acknowledged (carried over from the arc-length diffrax
       work; no new direct dependency introduced by this plan).
-- [ ] Module docstring + this doc state the domain scope (B_φ-dominated) and the
+- [x] Module docstring + this doc state the domain scope (B_φ-dominated) and the
       additive-capability framing.
 
 ## Open Questions
 
-- **Primary output shape:** φ-grid `(n_phi, nlines)` R,Z arrays vs the gallery per-line
-  puncture list. Lean φ-grid primary (best for objectives) + a convenience converter.
-- **First consumer:** does an existing confinement objective (residue/KAM/WBA/multisurface)
-  adopt this substrate now, or does it ship purely as an additive capability? Decision
-  gates Phase 4's scope.
+- **Primary output shape:** resolved as φ-grid `(n_phi, nlines)` R,Z arrays plus the
+  `poincare_phi_to_phi_hits` convenience converter for gallery-shaped rows.
+- **First consumer:** still ships purely as an additive capability. Promotion into a
+  residue/KAM/WBA/multisurface objective remains a separate optimizer-policy decision.

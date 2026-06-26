@@ -63,7 +63,9 @@ from simsopt.util.constants import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "compute_poincare_phi",
     "compute_fieldlines",
+    "poincare_phi_to_phi_hits",
     "trace_particles",
     "trace_particles_boozer",
 ]
@@ -669,6 +671,172 @@ def compute_fieldlines(
         stopping_criteria=stopping_criteria,
         comm=comm,
     )
+
+
+def _validated_unwrapped_phi_grid(phis) -> np.ndarray:
+    phis_arr = np.asarray(phis, dtype=np.float64)
+    if phis_arr.ndim != 1:
+        raise ValueError(f"phis must be a 1-D unwrapped grid, got shape {phis_arr.shape}")
+    if phis_arr.shape[0] < 2:
+        raise ValueError("phis must contain at least two unwrapped planes")
+    diffs = np.diff(phis_arr)
+    increasing = np.all(diffs > 0.0)
+    decreasing = np.all(diffs < 0.0)
+    if not (increasing or decreasing):
+        raise ValueError("phis must be strictly monotonic and unwrapped")
+    return phis_arr
+
+
+def _derived_phi_max_steps(phis: np.ndarray, max_steps: int | None) -> int:
+    if max_steps is not None:
+        concrete_steps = int(max_steps)
+    else:
+        concrete_steps = max(8, int(np.ceil(abs(float(phis[-1] - phis[0])) * 1000.0)))
+    if concrete_steps <= 0:
+        raise ValueError(f"max_steps must be positive, got {concrete_steps}")
+    return concrete_steps
+
+
+def _poincare_phi_local_lines(result) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, int]]:
+    punctures = _jax_trace_host_array(result.punctures, dtype=np.float64)
+    escaped = _jax_trace_host_array(result.escaped, dtype=bool)
+    statuses = _jax_trace_host_array(result.status, dtype=np.int32).reshape(-1)
+    return [
+        (
+            punctures[i, :, 0],
+            punctures[i, :, 1],
+            escaped[i],
+            int(statuses[i]),
+        )
+        for i in range(statuses.shape[0])
+    ]
+
+
+def _poincare_phi_arrays_from_lines(
+    lines: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]],
+    nphis: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if not lines:
+        return (
+            np.empty((nphis, 0), dtype=np.float64),
+            np.empty((nphis, 0), dtype=np.float64),
+            np.empty((nphis, 0), dtype=bool),
+            np.empty((0,), dtype=np.int32),
+        )
+    R = np.stack([line[0] for line in lines], axis=1)
+    Z = np.stack([line[1] for line in lines], axis=1)
+    escaped = np.stack([line[2] for line in lines], axis=1)
+    status = np.asarray([line[3] for line in lines], dtype=np.int32)
+    return R, Z, escaped, status
+
+
+def poincare_phi_to_phi_hits(
+    phis,
+    R,
+    Z,
+    escaped=None,
+) -> list[np.ndarray]:
+    """Convert phi-grid ``R,Z`` arrays to per-line ``[phi, idx, x, y, z]`` rows."""
+
+    phis_arr = _validated_unwrapped_phi_grid(phis)
+    R_arr = np.asarray(R, dtype=np.float64)
+    Z_arr = np.asarray(Z, dtype=np.float64)
+    if R_arr.shape != Z_arr.shape:
+        raise ValueError(f"R and Z must have the same shape, got {R_arr.shape} and {Z_arr.shape}")
+    if R_arr.ndim != 2 or R_arr.shape[0] != phis_arr.shape[0]:
+        raise ValueError(
+            "R and Z must have shape (n_phi, nlines); "
+            f"got R shape {R_arr.shape} with n_phi={phis_arr.shape[0]}"
+        )
+    if escaped is None:
+        escaped_arr = ~np.isfinite(R_arr) | ~np.isfinite(Z_arr)
+    else:
+        escaped_arr = np.asarray(escaped, dtype=bool)
+        if escaped_arr.shape != R_arr.shape:
+            raise ValueError(
+                f"escaped must match R/Z shape {R_arr.shape}, got {escaped_arr.shape}"
+            )
+
+    cos_phi = np.cos(phis_arr)
+    sin_phi = np.sin(phis_arr)
+    idx = np.arange(phis_arr.shape[0], dtype=np.float64)
+    hits = []
+    for line in range(R_arr.shape[1]):
+        live = ~escaped_arr[:, line]
+        rows = np.stack(
+            [
+                phis_arr,
+                idx,
+                R_arr[:, line] * cos_phi,
+                R_arr[:, line] * sin_phi,
+                Z_arr[:, line],
+            ],
+            axis=1,
+        )
+        hits.append(rows[live])
+    return hits
+
+
+def compute_poincare_phi(
+    field,
+    R0,
+    Z0,
+    phis,
+    *,
+    rtol=1e-8,
+    atol=1e-8,
+    min_step_size=1e-4,
+    max_steps=None,
+    bounds_R=(0.0, np.inf),
+    bounds_Z=(-np.inf, np.inf),
+    comm=None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return phi-parametrized Poincare arrays ``(R, Z, escaped, status)``.
+
+    ``R`` and ``Z`` are shaped ``(n_phi, nlines)`` at the exact unwrapped ``phis``.
+    ``escaped`` has the same shape and ``status`` is per line: 0 success, -1 box
+    event, 1 other non-success such as max-step or singular-domain failure.
+    """
+
+    field_fn, field_state = _resolve_jax_field_B(field)
+    phis_arr = _validated_unwrapped_phi_grid(phis)
+    concrete_max_steps = _derived_phi_max_steps(phis_arr, max_steps)
+    R0_arr = np.asarray(R0, dtype=np.float64).reshape(-1)
+    Z0_arr = np.asarray(Z0, dtype=np.float64).reshape(-1)
+    if R0_arr.shape != Z0_arr.shape:
+        raise ValueError(f"R0 and Z0 must have the same shape, got {R0_arr.shape} and {Z0_arr.shape}")
+
+    nlines = R0_arr.shape[0]
+    first, last = parallel_loop_bounds(comm, nlines)
+    local_R0 = R0_arr[first:last]
+    local_Z0 = Z0_arr[first:last]
+    local_lines: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = []
+    if local_R0.shape[0] > 0:
+        from simsopt_jax.core.tracing_poincare_phi import (
+            PoincareTracingSpec,
+            trace_poincare_phi_batched,
+        )
+
+        spec = PoincareTracingSpec(
+            rtol=float(rtol),
+            atol=float(atol),
+            min_step_size=float(min_step_size),
+            max_steps=concrete_max_steps,
+            bounds_R=tuple(np.asarray(bounds_R, dtype=np.float64).reshape((2,))),
+            bounds_Z=tuple(np.asarray(bounds_Z, dtype=np.float64).reshape((2,))),
+        )
+        result = trace_poincare_phi_batched(
+            spec,
+            _as_jax_float64(local_R0),
+            _as_jax_float64(local_Z0),
+            _as_jax_float64(phis_arr),
+            field_fn,
+            magnetic_field_state=field_state,
+        )
+        local_lines = _poincare_phi_local_lines(result)
+
+    lines = _allgather_flat(comm, local_lines)
+    return _poincare_phi_arrays_from_lines(lines, phis_arr.shape[0])
 
 
 def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
