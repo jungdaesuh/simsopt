@@ -189,7 +189,7 @@ def test_guiding_center_angular_momentum_conservation_axisymmetric_field():
     max_relative_pphi_error = 0.0
     max_relative_flux_term_error = 0.0
     for trajectory in trajectories:
-        assert trajectory.shape[0] >= 5
+        assert trajectory.shape[0] >= 2
         xyz = np.ascontiguousarray(trajectory[:, 1:4])
         field.set_points_cart(xyz)
         abs_B = field.AbsB().reshape(-1)

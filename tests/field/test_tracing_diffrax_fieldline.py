@@ -1,20 +1,19 @@
 """Tests for the optional diffrax fieldline backend (``integrator="dopri5_diffrax"``).
 
-The backend delegates adaptive Dopri5 stepping + event termination to diffrax while
-reusing the native crossing/stopping/output machinery, so it must satisfy the same
+The backend delegates adaptive Dopri5 stepping to diffrax while reusing the native
+crossing/stopping/output machinery, so it must satisfy the same
 ``FieldlineTracingResult`` contract as ``trace_fieldline`` (``dopri5_native``).
 
-Test design notes (these encode the *intended* divergences, not bugs):
-- Tight cross-backend equality is asserted ONLY on the no-stopping-criterion path
+Test design notes:
+- Tight cross-backend equality is asserted on the no-stopping-criterion path
   (both engines integrate the same ODE; they agree to integrator tolerance).
-- On a stopping exit the backends diverge by ~one adaptive step (native does not record
-  the firing step; diffrax records the step where the criterion is met). So stopping
-  tests assert the *status taxonomy* and the *geometry* (terminal state on the boundary
-  to loose tolerance), NOT bit-equality of the terminal state.
+- On a stopping exit the firing step is an ``idx < 0`` event row, not a live
+  trajectory row. Stopping tests assert the status taxonomy and event-row geometry.
 - The "did it fire" verdict is asserted from independent geometry (e.g. ``hypot(x,y)``),
   never by re-running the same predicate the backend uses (which would be tautological).
 """
 
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -46,17 +45,14 @@ from simsopt_jax.core.tracing import (
     MinToroidalFluxStoppingCriterion,
     MinZStoppingCriterion,
     ToroidalTransitStoppingCriterion,
-    _stopping_criterion_should_stop,
     trace_fieldline,
     trace_fieldlines_batched,
 )
-from simsopt_jax.core.tracing_diffrax import (
-    _criterion_event_margin,
-    _fired_index,
-    trace_fieldline_diffrax,
-)
+from simsopt_jax.core.tracing_diffrax import trace_fieldline_diffrax
 from simsopt_jax_adapters.field.tracing import (
     compute_fieldlines as adapter_compute_fieldlines,
+    trace_particles as adapter_trace_particles,
+    trace_particles_boozer as adapter_trace_particles_boozer,
 )
 
 _PHIS = jnp.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2])
@@ -84,6 +80,12 @@ def _field_downward(point):
     """Helix whose z DECREASES (drives a fieldline toward a MinZ boundary)."""
     x, y, _z = point[0], point[1], point[2]
     return jnp.array([-y + 0.05 * x, x + 0.05 * y, -0.30])
+
+
+def _discontinuous_x_field(point):
+    """Rejected-step-heavy field for the native iteration-count contract."""
+    speed = jnp.where(point[0] < 0.2, 1.0, -1.0)
+    return jnp.array([speed, 0.0, 0.0], dtype=jnp.float64)
 
 
 def _spec(integrator, **kw):
@@ -149,13 +151,17 @@ def test_geometric_criterion_fires_on_boundary(criterion, field, boundary_fn, ta
     rd = trace_fieldline(spec, y0, field, phis=_PHIS, stopping_criteria=(criterion,))
 
     assert int(rd.status) == -1, f"expected status -1, got {int(rd.status)}"
-    # terminal geometry on the boundary to step-granularity (NOT re-using the predicate)
-    assert abs(boundary_fn(_endpoint(rd)) - target) < 2e-2
     # the idx<0 stopping-criterion row is recorded in phi_hits (contract requires it)
     nd = int(rd.phi_hits_count)
-    idx_col = np.array(rd.phi_hits[:nd, 1])
+    hit_rows = np.array(rd.phi_hits[:nd])
+    idx_col = hit_rows[:, 1]
     assert (idx_col < 0).any(), f"missing idx<0 stop row; idx col = {idx_col}"
     assert int(idx_col[idx_col < 0][0]) == -1
+    stop_row = hit_rows[idx_col < 0][0]
+    np.testing.assert_allclose(float(rd.t_final), stop_row[0], rtol=0, atol=1e-12)
+    stop_state = np.concatenate([[stop_row[0]], stop_row[2:5]])
+    # terminal event geometry on the boundary to step-granularity
+    assert abs(boundary_fn(stop_state) - target) < 2e-2
 
 
 def test_levelset_criterion_fires():
@@ -174,22 +180,6 @@ def test_levelset_criterion_fires():
     assert (np.array(rd.phi_hits[:nd, 1]) < 0).any()
 
 
-def test_fired_index_credits_the_criterion_that_actually_crossed():
-    """With two near-coincident boundaries, credit the one with margin <= 0, not the
-    near one whose margin is still positive (regression for a firing-index slack bug).
-
-    Unit-level (not end-to-end) on purpose: the boundaries are ~5e-7 apart, far below the
-    grid jitter of a full trace, so an end-to-end test here would be flaky.
-    """
-    # MaxZ(idx0) boundary 5e-7 ABOVE z=0.5 -> margin +5e-7 (NOT fired);
-    # MaxR(idx1) boundary below r=1.01    -> margin -0.01   (fired).
-    crit = (MaxZStoppingCriterion(crit_z=0.5 + 5e-7), MaxRStoppingCriterion(crit_r=1.0))
-    x, y, z = jnp.array(1.01), jnp.array(0.0), jnp.array(0.5)
-    any_fired, index = _fired_index(crit, x, y, z, jnp.float64)
-    assert bool(any_fired)
-    assert int(index) == 1, f"expected idx 1 (MaxR crossed), got {int(index)} (MaxZ did not)"
-
-
 def test_phi_hits_overflow_signalled_by_count():
     """phi_hits_count tallies ALL crossings even when the fixed buffer is smaller."""
     y0 = jnp.array([1.0, 0.0, 0.0])
@@ -199,8 +189,8 @@ def test_phi_hits_overflow_signalled_by_count():
     assert tuple(rd.phi_hits.shape) == (4, 5)  # buffer stays bounded
 
 
-def test_seed_already_outside_stops_at_seed():
-    """A criterion satisfied AT the seed stops at the seed (diffrax can't fire on step 1)."""
+def test_seed_already_outside_records_first_accepted_stop_event():
+    """A criterion satisfied at the seed follows the native post-step contract."""
     crit = MaxZStoppingCriterion(crit_z=0.5)
     y0 = jnp.array([1.0, 0.0, 1.0])  # z0=1.0 already >= 0.5
     rd = trace_fieldline(
@@ -208,8 +198,12 @@ def test_seed_already_outside_stops_at_seed():
     )
     assert int(rd.status) == -1
     assert int(rd.steps_taken) == 0
-    assert float(rd.t_final) == 0.0
+    assert float(rd.t_final) > 0.0
     np.testing.assert_allclose(_endpoint(rd), [0.0, 1.0, 0.0, 1.0], atol=1e-12)
+    hit_rows = np.asarray(rd.phi_hits)[: int(rd.phi_hits_count)]
+    assert hit_rows.shape == (1, 5)
+    assert int(hit_rows[0, 1]) == -1
+    np.testing.assert_allclose(float(rd.t_final), hit_rows[0, 0], rtol=0, atol=1e-12)
 
 
 # ── Batched / vmap correctness (the production path) ──
@@ -258,18 +252,74 @@ def test_unknown_integrator_raises():
 
 
 @pytest.mark.parametrize(
+    ("criterion", "field", "tmax"),
+    [
+        (ToroidalTransitStoppingCriterion(max_transits=0.1), _pure_toroidal_field, 2.0),
+    ],
+)
+def test_transit_criterion_is_supported_by_diffrax(criterion, field, tmax):
+    rd = trace_fieldline_diffrax(
+        _spec("dopri5_diffrax", tmax=tmax, max_steps=4000),
+        jnp.array([1.0, 0.0, 0.0]),
+        field,
+        stopping_criteria=(criterion,),
+    )
+    assert int(rd.status) == -1
+    hit_rows = np.asarray(rd.phi_hits)[: int(rd.phi_hits_count)]
+    assert hit_rows.shape[0] == 1
+    assert int(hit_rows[0, 1]) == -1
+
+
+def test_direct_diffrax_rejects_iteration_criterion():
+    with pytest.raises(NotImplementedError, match="IterStoppingCriterion"):
+        trace_fieldline_diffrax(
+            _spec("dopri5_diffrax"),
+            jnp.array([1.0, 0.0, 0.0]),
+            _helix_field,
+            stopping_criteria=(IterStoppingCriterion(max_iter=0),),
+        )
+
+
+def test_default_diffrax_falls_back_to_native_for_iteration_criterion():
+    crit = (IterStoppingCriterion(max_iter=50),)
+    y0 = jnp.array([0.0, 0.0, 0.0])
+    common = dict(tmax=1.0, rtol=1e-12, atol=1e-12, max_steps=400)
+    native = trace_fieldline(
+        FieldlineTracingSpec(integrator="dopri5_native", **common),
+        y0,
+        _discontinuous_x_field,
+        stopping_criteria=crit,
+    )
+    default = trace_fieldline(
+        FieldlineTracingSpec(**common),
+        y0,
+        _discontinuous_x_field,
+        stopping_criteria=crit,
+    )
+
+    assert int(default.status) == int(native.status) == -1
+    assert int(default.steps_taken) == int(native.steps_taken)
+    np.testing.assert_allclose(float(default.t_final), float(native.t_final), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(default.phi_hits), np.asarray(native.phi_hits))
+
+
+@pytest.mark.parametrize(
     "criterion",
     [
-        IterStoppingCriterion(max_iter=5),
-        ToroidalTransitStoppingCriterion(max_transits=3.0),
         MinToroidalFluxStoppingCriterion(min_s=0.1),
         MaxToroidalFluxStoppingCriterion(max_s=0.9),
     ],
 )
-def test_unsupported_criterion_raises(criterion):
-    with pytest.raises(NotImplementedError, match="dopri5_native"):
-        trace_fieldline_diffrax(_spec("dopri5_diffrax"), jnp.array([1.0, 0.0, 0.0]),
-                                _helix_field, stopping_criteria=(criterion,))
+def test_cartesian_flux_criteria_remain_inactive(criterion):
+    rd = trace_fieldline_diffrax(
+        _spec("dopri5_diffrax", tmax=1.0),
+        jnp.array([1.0, 0.0, 0.0]),
+        _helix_field,
+        stopping_criteria=(criterion,),
+    )
+    assert int(rd.status) == 0
+    hit_rows = np.asarray(rd.phi_hits)[: int(rd.phi_hits_count)]
+    assert not (hit_rows[:, 1] < 0).any()
 
 
 def test_phis_none_records_no_crossings():
@@ -284,40 +334,6 @@ def test_nonpositive_size_guards(bad):
     spec = _spec("dopri5_diffrax", **{bad: 0})
     with pytest.raises(ValueError, match=bad):
         trace_fieldline_diffrax(spec, jnp.array([1.0, 0.0, 0.0]), _helix_field)
-
-
-# ── SSOT guard: the diffrax margin and the native predicate must agree (B6) ──
-
-
-@pytest.mark.parametrize(
-    "criterion",
-    [
-        MinRStoppingCriterion(crit_r=0.9),
-        MaxRStoppingCriterion(crit_r=1.1),
-        MinZStoppingCriterion(crit_z=-0.2),
-        MaxZStoppingCriterion(crit_z=0.2),
-    ],
-)
-def test_event_margin_matches_native_predicate(criterion):
-    """sign(margin) <= 0  ⟺  native ``_stopping_criterion_should_stop``.
-
-    The continuous diffrax margin and the boolean native predicate are two encodings
-    of the same firing condition; this pins them so a future edit to one cannot drift
-    from the other silently.
-    """
-    rng = np.random.default_rng(0)
-    pts = rng.uniform(-1.5, 1.5, size=(200, 3))
-    dummy_iter = jnp.array(0, dtype=jnp.int32)
-    dummy_phi = jnp.array(0.0)
-    for p in pts:
-        x, y, z = (jnp.array(v) for v in p)
-        margin = _criterion_event_margin(criterion, x, y, z, jnp.float64)
-        predicate = _stopping_criterion_should_stop(
-            criterion, x, y, z, dummy_iter, dummy_phi, dummy_phi, jnp.float64
-        )
-        assert bool(margin <= 0.0) == bool(predicate), (
-            f"margin/predicate disagree at {p} for {type(criterion).__name__}"
-        )
 
 
 def test_native_tracing_import_does_not_require_diffrax():
@@ -376,3 +392,12 @@ def test_adapter_max_steps_param_controls_trace_length():
     _, hits_big = adapter_compute_fieldlines(field, R0, Z0, max_steps=3000, **kw)
     # max_steps=200 truncates well before tmax; 3000 reaches it -> strictly more crossings
     assert len(hits_big[0]) > len(hits_small[0]), (len(hits_small[0]), len(hits_big[0]))
+
+
+def test_particle_wrapper_integrator_preserves_existing_positional_order():
+    """Adding ``integrator`` must not shift existing positional particle args."""
+    particle_params = list(inspect.signature(adapter_trace_particles).parameters)
+    assert particle_params.index("integrator") > particle_params.index("phase_angle")
+
+    boozer_params = list(inspect.signature(adapter_trace_particles_boozer).parameters)
+    assert boozer_params.index("integrator") > boozer_params.index("forget_exact_path")

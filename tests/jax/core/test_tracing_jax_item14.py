@@ -743,8 +743,14 @@ def test_trace_guiding_centers_boozer_batched_unpacks_lax_map_inputs():
     )
 
 
-def test_trace_guiding_centers_boozer_batched_uses_device_zetas_under_strict_transfer_guard():
-    """Boozer batch tracing must not host-materialize device ``zetas``."""
+def test_trace_guiding_centers_boozer_batched_default_diffrax_keeps_device_zetas_on_device():
+    """Default Diffrax Boozer tracing must not device-to-host materialize ``zetas``.
+
+    Diffrax 0.7.2 stages internal enum constants during compilation, so the
+    stronger full ``transfer_guard("disallow")`` check is kept on the native
+    fallback below. This default-path check targets the zeta residency contract
+    directly by forbidding device-to-host transfers.
+    """
 
     boozer_field = _analytic_boozer_field_for_batch_tests()
     spec = GuidingCenterTracingSpec(
@@ -754,6 +760,49 @@ def test_trace_guiding_centers_boozer_batched_uses_device_zetas_under_strict_tra
         max_steps=16,
         dtmax=0.005,
         max_phi_hits=4,
+    )
+    y0s = jnp.asarray(
+        [
+            [0.12, 0.1, 0.2, 0.8],
+            [0.18, -0.2, 0.3, 0.6],
+        ],
+        dtype=jnp.float64,
+    )
+    dtmaxs = jnp.asarray([0.005, 0.004], dtype=jnp.float64)
+    mus = jnp.zeros((2,), dtype=jnp.float64)
+    zetas = jnp.asarray([0.25], dtype=jnp.float64)
+
+    with jax.transfer_guard_device_to_host("disallow"):
+        result = trace_guiding_centers_boozer_batched(
+            spec,
+            y0s,
+            dtmaxs,
+            mus,
+            boozer_field,
+            m=1.0,
+            q=1.0,
+            mode="vacuum",
+            zetas=zetas,
+        )
+        result.trajectory.block_until_ready()
+        result.phi_hits_count.block_until_ready()
+
+    assert np.asarray(result.trajectory).shape == (2, spec.max_steps + 1, 5)
+    assert np.asarray(result.phi_hits_count).shape == (2,)
+
+
+def test_trace_guiding_centers_boozer_batched_native_fallback_under_strict_transfer_guard():
+    """The native fallback remains clean under full transfer-guard disallow."""
+
+    boozer_field = _analytic_boozer_field_for_batch_tests()
+    spec = GuidingCenterTracingSpec(
+        tmax=0.02,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=16,
+        dtmax=0.005,
+        max_phi_hits=4,
+        integrator="dopri5_native",
     )
     y0s = jnp.asarray(
         [

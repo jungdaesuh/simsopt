@@ -404,11 +404,14 @@ class FieldlineTracingSpec:
         detected event, so ``phi_hits_count > max_phi_hits`` is an
         overflow signal; the buffer stores the recorded prefix.
     integrator
-        Integration engine: ``"dopri5_native"`` (default; the in-repo
-        hand-rolled adaptive Dopri5 driver) or ``"dopri5_diffrax"`` (the
-        optional diffrax-backed backend, requires the ``diffrax`` extra).
-        Both honour this same contract; only the stepping/event engine
-        differs. Static field — part of the JIT signature.
+        Integration engine: ``"dopri5_diffrax"`` (default; the
+        diffrax-backed adaptive Dopri5 driver) or ``"dopri5_native"`` (the
+        in-repo hand-rolled fallback/parity driver). Both honour this
+        same contract; only the stepping/event engine differs. Static
+        field — part of the JIT signature. Criteria whose native
+        semantics depend on rejected adaptive attempts, currently
+        :class:`IterStoppingCriterion`, route to the native fallback even
+        when this selector is ``"dopri5_diffrax"``.
     """
 
     tmax: float
@@ -418,7 +421,7 @@ class FieldlineTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
-    integrator: Literal["dopri5_native", "dopri5_diffrax"] = "dopri5_native"
+    integrator: Literal["dopri5_native", "dopri5_diffrax"] = "dopri5_diffrax"
 
 
 jax.tree_util.register_dataclass(
@@ -437,16 +440,20 @@ class FieldlineTracingResult:
 
     - ``trajectory`` — ``(max_steps + 1, 4)`` float64 array. Columns are
       ``(t, x, y, z)``. Rows ``[0 : steps_taken + 1]`` are populated
-      with accepted states; subsequent rows are padded with the final
-      accepted state.
+      with accepted live states. Subsequent rows are constant-padded
+      with the final result state.
     - ``mask`` — ``(max_steps + 1,)`` bool array. ``True`` for rows that
       correspond to genuine accepted steps; ``False`` for padding.
-    - ``steps_taken`` — int32 scalar; count of *accepted* steps the loop
-      executed. Note that this excludes the initial-state row.
+    - ``steps_taken`` — int32 scalar; count of accepted live trajectory
+      steps recorded. Note that this excludes the initial-state row and
+      also excludes a stopping-criterion firing row.
     - ``status`` — int32 scalar. ``0`` for normal exit (``t >= tmax``),
       ``1`` for max-step-cap exhaustion before reaching ``tmax``,
       ``-1 - i`` when stopping criterion ``i`` fired.
-    - ``t_final`` — float64 scalar; ``trajectory[steps_taken, 0]``.
+    - ``t_final`` — float64 scalar. On normal or step-budget exits this
+      is ``trajectory[steps_taken, 0]``; on stopping-criterion exits it is
+      the stop-event row time in ``phi_hits`` and may be later than the
+      last live trajectory row.
     - ``phi_hits`` — ``(max_phi_hits, 5)`` float64 array. Columns are
       ``[t_hit, idx, x, y, z]``. ``idx >= 0`` denotes a phi-plane
       crossing for ``phis[int(idx)]``; ``idx < 0`` denotes stopping
@@ -640,13 +647,12 @@ def _stopping_criterion_should_stop(
     )
 
 
-def _levelset_value(
-    criterion: LevelsetStoppingCriterion,
-    state: jax.Array,
-    dtype,
-) -> jax.Array:
-    position = state[:3].reshape(1, 3).astype(dtype)
-    return criterion.classifier_fn(position)[0]
+def _diffrax_requires_native_fallback(stopping_criteria: tuple) -> bool:
+    """Criteria whose native contract depends on rejected-step accounting."""
+
+    return any(
+        isinstance(criterion, IterStoppingCriterion) for criterion in stopping_criteria
+    )
 
 
 def _continuous_phi(
@@ -1119,7 +1125,6 @@ def _scan_angle_plane_events(
     max_hits_i32: jax.Array,
     state_at_fraction: Callable[[jax.Array], jax.Array],
     angle_at_state: Callable[[jax.Array, jax.Array], jax.Array],
-    max_event_time: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Record angle-plane crossings for fieldline, GC, Boozer, and full-orbit drivers."""
 
@@ -1153,16 +1158,15 @@ def _scan_angle_plane_events(
             _device_array(1.0e-15, dtype),
         )
         state_root = state_at_fraction(s_root)
-        hit_time = t + s_root * h_clamped
         hit_row = _event_row_from_state(
-            hit_time,
+            t + s_root * h_clamped,
             _as_device_array(i, dtype),
             state_root,
         )
         return _append_event_row(
             hits_carry,
             count_carry,
-            jnp.logical_and(crossed, hit_time <= max_event_time),
+            crossed,
             hit_row,
             max_hits_i32,
         )
@@ -1173,107 +1177,6 @@ def _scan_angle_plane_events(
         scan_one_target,
         (hits, count),
     )
-
-
-def _select_stopping_criteria_event(
-    *,
-    stopping_criteria: tuple,
-    status: jax.Array,
-    stop: jax.Array,
-    iter_count: jax.Array,
-    angle_current: jax.Array,
-    angle_initial: jax.Array,
-    t_event: jax.Array,
-    state: jax.Array,
-    dtype,
-    is_boozer_state: bool = False,
-    t_previous: jax.Array | None = None,
-    state_previous: jax.Array | None = None,
-    h_clamped: jax.Array | None = None,
-    max_root_iters: int = 0,
-    state_at_fraction: Callable[[jax.Array], jax.Array] | None = None,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Return the earliest firing stopping-criterion event in this accepted step."""
-
-    t_start = t_event if t_previous is None else t_previous
-    state_start = state if state_previous is None else state_previous
-    step_width = t_event - t_start if h_clamped is None else h_clamped
-    event_index_zero = _device_array(0.0, dtype)
-    best_time = t_event
-    best_status = status
-    best_row = _event_row_from_state(t_event, event_index_zero, state)
-    best_fires = _device_false()
-    for i, criterion in enumerate(stopping_criteria):
-        idx_val = _device_index(-1 - i)
-        idx_event = _device_array(float(-1 - i), dtype)
-        if (
-            isinstance(criterion, LevelsetStoppingCriterion)
-            and state_at_fraction is not None
-            and not is_boozer_state
-        ):
-            value_start = _levelset_value(criterion, state_start, dtype)
-            value_end = _levelset_value(criterion, state, dtype)
-            zero = _device_array(0.0, dtype)
-            starts_outside = value_start < zero
-            crosses_outside = jnp.logical_and(value_start >= zero, value_end < zero)
-
-            def value_at_fraction(s):
-                return _levelset_value(criterion, state_at_fraction(s), dtype)
-
-            s_root, _value_root, bracketed = bracket_root_jax(
-                value_at_fraction,
-                zero,
-                _device_array(1.0, dtype),
-                value_start,
-                value_end,
-                max_root_iters,
-                _device_array(1.0e-15, dtype),
-            )
-            s_event = jnp.where(starts_outside, zero, s_root)
-            s_event = jnp.where(
-                jnp.logical_and(crosses_outside, value_start == zero),
-                zero,
-                s_event,
-            )
-            s_event = jnp.where(
-                jnp.logical_and(crosses_outside, jnp.logical_not(bracketed)),
-                _device_array(1.0, dtype),
-                s_event,
-            )
-            candidate_time = t_start + s_event * step_width
-            candidate_state = state_at_fraction(s_event)
-            pred = jnp.logical_or(starts_outside, crosses_outside)
-        else:
-            pred = _stopping_criterion_should_stop(
-                criterion,
-                state[0],
-                state[1],
-                state[2],
-                iter_count,
-                angle_current,
-                angle_initial,
-                dtype,
-                is_boozer_state=is_boozer_state,
-            )
-            candidate_time = t_event
-            candidate_state = state
-
-        fires = jnp.logical_and(jnp.logical_not(stop), pred)
-        improves = jnp.logical_and(
-            fires,
-            jnp.logical_or(jnp.logical_not(best_fires), candidate_time < best_time),
-        )
-        candidate_row = _event_row_from_state(
-            candidate_time,
-            idx_event,
-            candidate_state,
-        )
-        best_time = jnp.where(improves, candidate_time, best_time)
-        best_status = jnp.where(improves, idx_val, best_status)
-        best_row = jnp.where(improves, candidate_row, best_row)
-        best_fires = jnp.logical_or(best_fires, fires)
-
-    return best_row, best_status, best_fires, best_time
 
 
 def _apply_stopping_criteria_events(
@@ -1291,40 +1194,37 @@ def _apply_stopping_criteria_events(
     dtype,
     max_hits_i32: jax.Array,
     is_boozer_state: bool = False,
-    t_previous: jax.Array | None = None,
-    state_previous: jax.Array | None = None,
-    h_clamped: jax.Array | None = None,
-    max_root_iters: int = 0,
-    state_at_fraction: Callable[[jax.Array], jax.Array] | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Append the earliest firing stopping-criterion event in this accepted step."""
+    """Append first-firing stopping-criterion events while preserving row layout."""
 
-    best_row, best_status, best_fires, _best_time = _select_stopping_criteria_event(
-        stopping_criteria=stopping_criteria,
-        status=status,
-        stop=stop,
-        iter_count=iter_count,
-        angle_current=angle_current,
-        angle_initial=angle_initial,
-        t_event=t_event,
-        state=state,
-        dtype=dtype,
-        is_boozer_state=is_boozer_state,
-        t_previous=t_previous,
-        state_previous=state_previous,
-        h_clamped=h_clamped,
-        max_root_iters=max_root_iters,
-        state_at_fraction=state_at_fraction,
-    )
-    hits, count = _append_event_row(
-        hits,
-        count,
-        best_fires,
-        best_row,
-        max_hits_i32,
-    )
-    status = jnp.where(best_fires, best_status, status)
-    stop = jnp.logical_or(stop, best_fires)
+    for i, criterion in enumerate(stopping_criteria):
+        pred = _stopping_criterion_should_stop(
+            criterion,
+            state[0],
+            state[1],
+            state[2],
+            iter_count,
+            angle_current,
+            angle_initial,
+            dtype,
+            is_boozer_state=is_boozer_state,
+        )
+        fires = jnp.logical_and(jnp.logical_not(stop), pred)
+        idx_val = _device_index(-1 - i)
+        hit_row = _event_row_from_state(
+            t_event,
+            _device_array(float(-1 - i), dtype),
+            state,
+        )
+        hits, count = _append_event_row(
+            hits,
+            count,
+            fires,
+            hit_row,
+            max_hits_i32,
+        )
+        status = jnp.where(fires, idx_val, status)
+        stop = jnp.logical_or(stop, fires)
     return hits, count, status, stop
 
 
@@ -1375,7 +1275,11 @@ def trace_fieldline(
         buffer.
     """
 
-    if spec.integrator == "dopri5_diffrax":
+    stopping_criteria = tuple(stopping_criteria)
+
+    if spec.integrator == "dopri5_diffrax" and not _diffrax_requires_native_fallback(
+        stopping_criteria
+    ):
         # Optional diffrax backend, imported lazily so ``diffrax`` stays an
         # optional dependency (native path needs no diffrax) and to avoid a
         # tracing <-> tracing_diffrax import cycle.
@@ -1384,7 +1288,7 @@ def trace_fieldline(
         return trace_fieldline_diffrax(
             spec, y0, magnetic_field_fn, phis=phis, stopping_criteria=stopping_criteria
         )
-    if spec.integrator != "dopri5_native":
+    if spec.integrator not in ("dopri5_native", "dopri5_diffrax"):
         raise ValueError(
             f"Unknown integrator {spec.integrator!r}; "
             "expected 'dopri5_native' or 'dopri5_diffrax'"
@@ -1552,7 +1456,7 @@ def trace_fieldline(
             return y_sub
 
         def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in, stop_time_in = args
+            hits_in, count_in, phi_last_in, phi_curr_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -1570,8 +1474,14 @@ def trace_fieldline(
                 angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
                     state, angle_near, dtype
                 ),
-                max_event_time=stop_time_in,
             )
+
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted,
+            scan_phis,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
+        )
 
         # ── Stopping criteria check on accepted state ──
         first_accepted_step = accepted_count == _device_index(0)
@@ -1581,16 +1491,20 @@ def trace_fieldline(
             phi_init,
         )
 
-        def select_criteria(args):
+        def apply_criteria(args):
             (
+                hits_in,
+                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            return _select_stopping_criteria_event(
+            return _apply_stopping_criteria_events(
                 stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -1598,31 +1512,24 @@ def trace_fieldline(
                 angle_initial=phi_init_in,
                 t_event=t_next,
                 state=y_next,
-                t_previous=t,
-                state_previous=y,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                state_at_fraction=state_at_fraction,
                 dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
             )
 
         iter_count_post = step_count + _device_index(1)
 
         (
-            stop_row,
-            stop_status,
-            stop_fires,
-            stop_time,
+            phi_hits_after,
+            phi_count_after,
+            status_after,
+            stop_after,
         ) = jax.lax.cond(
             accepted,
-            select_criteria,
-            lambda args: (
-                _event_row_from_state(t_next, _device_array(0.0, dtype), y_next),
-                args[0],
-                _device_false(),
-                t_next,
-            ),
+            apply_criteria,
+            lambda args: (args[0], args[1], args[2], args[3]),
             operand=(
+                phi_hits_after,
+                phi_count_after,
                 status_event,
                 _device_false(),
                 iter_count_post,
@@ -1630,22 +1537,6 @@ def trace_fieldline(
                 phi_init_for_criteria,
             ),
         )
-
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current, stop_time),
-        )
-        phi_hits_after, phi_count_after = _append_event_row(
-            phi_hits_after,
-            phi_count_after,
-            stop_fires,
-            stop_row,
-            max_phi_hits_i32,
-        )
-        status_after = jnp.where(stop_fires, stop_status, status_event)
-        stop_after = stop_fires
         _, status_zero_i32, status_false = _lane_axis_carry_zeroes(y_next)
         status_after = status_after + status_zero_i32
         stop_after = stop_after | status_false
@@ -1886,6 +1777,11 @@ class GuidingCenterTracingSpec:
     trajectory carry has shape ``(max_steps + 1, 5)`` (columns
     ``(t, x, y, z, v_par)``). The ``phi_hits`` buffer has shape
     ``(max_phi_hits, 6)`` — extra trailing column carries ``v_par``.
+    ``integrator`` selects ``"dopri5_diffrax"`` (default) or
+    ``"dopri5_native"`` (fallback/parity reference); it is static JIT
+    metadata. Criteria whose native semantics depend on rejected adaptive
+    attempts, currently :class:`IterStoppingCriterion`, route to the
+    native fallback even when this selector is ``"dopri5_diffrax"``.
     """
 
     tmax: float
@@ -1895,12 +1791,13 @@ class GuidingCenterTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
+    integrator: Literal["dopri5_native", "dopri5_diffrax"] = "dopri5_diffrax"
 
 
 jax.tree_util.register_dataclass(
     GuidingCenterTracingSpec,
     data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
+    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "integrator"],
 )
 
 
@@ -1910,16 +1807,20 @@ class GuidingCenterTracingResult:
 
     - ``trajectory`` — ``(max_steps + 1, 5)`` float64 array. Columns are
       ``(t, x, y, z, v_par)``. Rows ``[0 : steps_taken + 1]`` are
-      populated with accepted states; subsequent rows are padded with
-      the final accepted state.
+      populated with accepted live states. Subsequent rows are
+      constant-padded with the final result state.
     - ``mask`` — ``(max_steps + 1,)`` bool array. ``True`` for rows that
       correspond to genuine accepted steps; ``False`` for padding.
-    - ``steps_taken`` — int32 scalar; count of *accepted* steps the loop
-      executed. Excludes the initial-state row.
+    - ``steps_taken`` — int32 scalar; count of accepted live trajectory
+      steps recorded. Excludes the initial-state row and also excludes a
+      stopping-criterion firing row.
     - ``status`` — int32 scalar. ``0`` for normal exit (``t >= tmax``),
       ``1`` for max-step-cap exhaustion before reaching ``tmax``,
       ``-1 - i`` when stopping criterion ``i`` fired.
-    - ``t_final`` — float64 scalar; ``trajectory[steps_taken, 0]``.
+    - ``t_final`` — float64 scalar. On normal or step-budget exits this
+      is ``trajectory[steps_taken, 0]``; on stopping-criterion exits it is
+      the stop-event row time in ``phi_hits`` and may be later than the
+      last live trajectory row.
     - ``phi_hits`` — ``(max_phi_hits, 6)`` float64 array. Columns are
       ``[t_hit, idx, x, y, z, v_par]``. ``idx >= 0`` denotes a phi-plane
       crossing for ``phis[int(idx)]``; ``idx < 0`` denotes stopping
@@ -2062,6 +1963,29 @@ def trace_guiding_center(
         count, an exit status, ``t_final``, and the phi-crossing
         buffer.
     """
+
+    stopping_criteria = tuple(stopping_criteria)
+
+    if spec.integrator == "dopri5_diffrax" and not _diffrax_requires_native_fallback(
+        stopping_criteria
+    ):
+        from .tracing_diffrax import trace_guiding_center_diffrax
+
+        return trace_guiding_center_diffrax(
+            spec,
+            y0,
+            magnetic_field_fn,
+            m=m,
+            q=q,
+            mu=mu,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+    if spec.integrator not in ("dopri5_native", "dopri5_diffrax"):
+        raise ValueError(
+            f"Unknown integrator {spec.integrator!r}; "
+            "expected 'dopri5_native' or 'dopri5_diffrax'"
+        )
 
     dtype = jnp.float64
     y0_arr = _as_device_array(y0, dtype).reshape((4,))
@@ -2221,7 +2145,7 @@ def trace_guiding_center(
             return y_sub
 
         def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in, stop_time_in = args
+            hits_in, count_in, phi_last_in, phi_curr_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -2239,8 +2163,14 @@ def trace_guiding_center(
                 angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
                     state, angle_near, dtype
                 ),
-                max_event_time=stop_time_in,
             )
+
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted,
+            scan_phis,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
+        )
 
         first_accepted_step = accepted_count == _device_index(0)
         phi_init_for_criteria = jnp.where(
@@ -2249,16 +2179,20 @@ def trace_guiding_center(
             phi_init,
         )
 
-        def select_criteria(args):
+        def apply_criteria(args):
             (
+                hits_in,
+                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            return _select_stopping_criteria_event(
+            return _apply_stopping_criteria_events(
                 stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -2266,31 +2200,24 @@ def trace_guiding_center(
                 angle_initial=phi_init_in,
                 t_event=t_next,
                 state=y_next,
-                t_previous=t,
-                state_previous=y,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                state_at_fraction=state_at_fraction,
                 dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
             )
 
         iter_count_post = step_count + _device_index(1)
 
         (
-            stop_row,
-            stop_status,
-            stop_fires,
-            stop_time,
+            phi_hits_after,
+            phi_count_after,
+            status_after,
+            stop_after,
         ) = jax.lax.cond(
             accepted,
-            select_criteria,
-            lambda args: (
-                _event_row_from_state(t_next, _device_array(0.0, dtype), y_next),
-                args[0],
-                _device_false(),
-                t_next,
-            ),
+            apply_criteria,
+            lambda args: (args[0], args[1], args[2], args[3]),
             operand=(
+                phi_hits_after,
+                phi_count_after,
                 status_event,
                 _device_false(),
                 iter_count_post,
@@ -2298,21 +2225,6 @@ def trace_guiding_center(
                 phi_init_for_criteria,
             ),
         )
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current, stop_time),
-        )
-        phi_hits_after, phi_count_after = _append_event_row(
-            phi_hits_after,
-            phi_count_after,
-            stop_fires,
-            stop_row,
-            max_phi_hits_i32,
-        )
-        status_after = jnp.where(stop_fires, stop_status, status_event)
-        stop_after = stop_fires
         _, status_zero_i32, status_false = _lane_axis_carry_zeroes(y_next)
         status_after = status_after + status_zero_i32
         stop_after = stop_after | status_false
@@ -3280,6 +3192,30 @@ def trace_guiding_center_boozer(
         are ``[t_hit, idx, s, theta, zeta, v_par]``.
     """
 
+    stopping_criteria = tuple(stopping_criteria)
+
+    if spec.integrator == "dopri5_diffrax" and not _diffrax_requires_native_fallback(
+        stopping_criteria
+    ):
+        from .tracing_diffrax import trace_guiding_center_boozer_diffrax
+
+        return trace_guiding_center_boozer_diffrax(
+            spec,
+            y0,
+            boozer_field,
+            m=m,
+            q=q,
+            mu=mu,
+            mode=mode,
+            zetas=zetas,
+            stopping_criteria=stopping_criteria,
+        )
+    if spec.integrator not in ("dopri5_native", "dopri5_diffrax"):
+        raise ValueError(
+            f"Unknown integrator {spec.integrator!r}; "
+            "expected 'dopri5_native' or 'dopri5_diffrax'"
+        )
+
     dtype = jnp.float64
     y0_arr = jnp.asarray(y0, dtype=dtype).reshape((4,))
     tmax = jnp.asarray(spec.tmax, dtype=dtype)
@@ -3465,7 +3401,7 @@ def trace_guiding_center_boozer(
             return y_sub
 
         def scan_zetas(args):
-            hits_in, count_in, zeta_last_in, zeta_curr_in, stop_time_in = args
+            hits_in, count_in, zeta_last_in, zeta_curr_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -3483,8 +3419,14 @@ def trace_guiding_center_boozer(
                 angle_at_state=lambda state, angle_near: _continuous_angle(
                     state[2], angle_near, dtype
                 ),
-                max_event_time=stop_time_in,
             )
+
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted_valid,
+            scan_zetas,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, zeta_last, zeta_current),
+        )
 
         # ── Stopping criteria check on accepted state ──
         first_valid_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
@@ -3494,16 +3436,20 @@ def trace_guiding_center_boozer(
             zeta_init,
         )
 
-        def select_criteria(args):
+        def apply_criteria(args):
             (
+                hits_in,
+                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 zeta_curr_in,
                 zeta_init_in,
             ) = args
-            return _select_stopping_criteria_event(
+            return _apply_stopping_criteria_events(
                 stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -3512,26 +3458,24 @@ def trace_guiding_center_boozer(
                 t_event=t_next,
                 state=y_next,
                 dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
                 is_boozer_state=True,
             )
 
         iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
 
         (
-            stop_row,
-            stop_status,
-            stop_fires,
-            stop_time,
+            phi_hits_after,
+            phi_count_after,
+            status_after,
+            stop_after,
         ) = jax.lax.cond(
             accepted_valid,
-            select_criteria,
-            lambda args: (
-                _event_row_from_state(t_next, jnp.asarray(0.0, dtype=dtype), y_next),
-                args[0],
-                jnp.asarray(False),
-                t_next,
-            ),
+            apply_criteria,
+            lambda args: (args[0], args[1], args[2], args[3]),
             operand=(
+                phi_hits_after,
+                phi_count_after,
                 status_event,
                 jnp.asarray(False),
                 iter_count_post,
@@ -3539,27 +3483,6 @@ def trace_guiding_center_boozer(
                 zeta_init_for_criteria,
             ),
         )
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted_valid,
-            scan_zetas,
-            lambda args: (args[0], args[1]),
-            operand=(
-                phi_hits_in,
-                phi_hits_count_in,
-                zeta_last,
-                zeta_current,
-                stop_time,
-            ),
-        )
-        phi_hits_after, phi_count_after = _append_event_row(
-            phi_hits_after,
-            phi_count_after,
-            stop_fires,
-            stop_row,
-            max_phi_hits_i32,
-        )
-        status_after = jnp.where(stop_fires, stop_status, status_event)
-        stop_after = stop_fires
         status_after = jnp.where(
             axis_invalid,
             jnp.asarray(_BOOZER_AXIS_STATUS, dtype=jnp.int32),
@@ -3885,6 +3808,11 @@ class FullorbitTracingSpec:
     ``(max_phi_hits, 8)`` and records phi-plane Poincaré crossings and
     stopping-criterion fires (columns ``[t_hit, idx, x, y, z, vx, vy,
     vz]``); see :class:`FullorbitTracingResult` for the row layout.
+    ``integrator`` selects ``"dopri5_diffrax"`` (default) or
+    ``"dopri5_native"`` (fallback/parity reference); it is static JIT
+    metadata. Criteria whose native semantics depend on rejected adaptive
+    attempts, currently :class:`IterStoppingCriterion`, route to the
+    native fallback even when this selector is ``"dopri5_diffrax"``.
     """
 
     tmax: float
@@ -3894,12 +3822,13 @@ class FullorbitTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
+    integrator: Literal["dopri5_native", "dopri5_diffrax"] = "dopri5_diffrax"
 
 
 jax.tree_util.register_dataclass(
     FullorbitTracingSpec,
     data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
+    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "integrator"],
 )
 
 
@@ -3909,16 +3838,20 @@ class FullorbitTracingResult:
 
     - ``trajectory`` — ``(max_steps + 1, 7)`` float64 array. Columns are
       ``(t, x, y, z, vx, vy, vz)``. Rows ``[0 : steps_taken + 1]`` are
-      populated with accepted states; subsequent rows are padded with
-      the final accepted state.
+      populated with accepted live states. Subsequent rows are
+      constant-padded with the final result state.
     - ``mask`` — ``(max_steps + 1,)`` bool array. ``True`` for rows that
       correspond to genuine accepted steps; ``False`` for padding.
-    - ``steps_taken`` — int32 scalar; count of *accepted* steps the loop
-      executed. Excludes the initial-state row.
+    - ``steps_taken`` — int32 scalar; count of accepted live trajectory
+      steps recorded. Excludes the initial-state row and also excludes a
+      stopping-criterion firing row.
     - ``status`` — int32 scalar. ``0`` for normal exit (``t >= tmax``),
       ``1`` for max-step-cap exhaustion before reaching ``tmax``,
       ``-1 - i`` when stopping criterion ``i`` fired.
-    - ``t_final`` — float64 scalar; ``trajectory[steps_taken, 0]``.
+    - ``t_final`` — float64 scalar. On normal or step-budget exits this
+      is ``trajectory[steps_taken, 0]``; on stopping-criterion exits it is
+      the stop-event row time in ``phi_hits`` and may be later than the
+      last live trajectory row.
     - ``phi_hits`` — ``(max_phi_hits, 8)`` float64 array. Columns are
       ``[t_hit, idx, x, y, z, vx, vy, vz]``. ``idx >= 0`` denotes a
       phi-plane crossing for ``phis[int(idx)]``; ``idx < 0`` denotes
@@ -4054,6 +3987,28 @@ def trace_fullorbit(
         count, an exit status, ``t_final``, and the phi-crossing
         buffer.
     """
+
+    stopping_criteria = tuple(stopping_criteria)
+
+    if spec.integrator == "dopri5_diffrax" and not _diffrax_requires_native_fallback(
+        stopping_criteria
+    ):
+        from .tracing_diffrax import trace_fullorbit_diffrax
+
+        return trace_fullorbit_diffrax(
+            spec,
+            y0,
+            magnetic_field_fn,
+            m=m,
+            q=q,
+            phis=phis,
+            stopping_criteria=stopping_criteria,
+        )
+    if spec.integrator not in ("dopri5_native", "dopri5_diffrax"):
+        raise ValueError(
+            f"Unknown integrator {spec.integrator!r}; "
+            "expected 'dopri5_native' or 'dopri5_diffrax'"
+        )
 
     dtype = jnp.float64
     y0_arr = jnp.asarray(y0, dtype=dtype).reshape((6,))
@@ -4211,7 +4166,7 @@ def trace_fullorbit(
             return y_sub
 
         def scan_phis(args):
-            hits_in, count_in, phi_last_in, phi_curr_in, stop_time_in = args
+            hits_in, count_in, phi_last_in, phi_curr_in = args
             return _scan_angle_plane_events(
                 hits=hits_in,
                 count=count_in,
@@ -4229,8 +4184,14 @@ def trace_fullorbit(
                 angle_at_state=lambda state, angle_near: _continuous_phi_from_state(
                     state, angle_near, dtype
                 ),
-                max_event_time=stop_time_in,
             )
+
+        phi_hits_after, phi_count_after = jax.lax.cond(
+            accepted,
+            scan_phis,
+            lambda args: (args[0], args[1]),
+            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current),
+        )
 
         # ── Stopping criteria check on accepted state ──
         first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
@@ -4240,16 +4201,20 @@ def trace_fullorbit(
             phi_init,
         )
 
-        def select_criteria(args):
+        def apply_criteria(args):
             (
+                hits_in,
+                count_in,
                 status_in,
                 stop_in,
                 iter_count_in,
                 phi_curr_in,
                 phi_init_in,
             ) = args
-            return _select_stopping_criteria_event(
+            return _apply_stopping_criteria_events(
                 stopping_criteria=stopping_criteria,
+                hits=hits_in,
+                count=count_in,
                 status=status_in,
                 stop=stop_in,
                 iter_count=iter_count_in,
@@ -4257,31 +4222,24 @@ def trace_fullorbit(
                 angle_initial=phi_init_in,
                 t_event=t_next,
                 state=y_next,
-                t_previous=t,
-                state_previous=y,
-                h_clamped=h_clamped,
-                max_root_iters=max_root_iters,
-                state_at_fraction=state_at_fraction,
                 dtype=dtype,
+                max_hits_i32=max_phi_hits_i32,
             )
 
         iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
 
         (
-            stop_row,
-            stop_status,
-            stop_fires,
-            stop_time,
+            phi_hits_after,
+            phi_count_after,
+            status_after,
+            stop_after,
         ) = jax.lax.cond(
             accepted,
-            select_criteria,
-            lambda args: (
-                _event_row_from_state(t_next, jnp.asarray(0.0, dtype=dtype), y_next),
-                args[0],
-                jnp.asarray(False),
-                t_next,
-            ),
+            apply_criteria,
+            lambda args: (args[0], args[1], args[2], args[3]),
             operand=(
+                phi_hits_after,
+                phi_count_after,
                 status_event,
                 jnp.asarray(False),
                 iter_count_post,
@@ -4289,21 +4247,6 @@ def trace_fullorbit(
                 phi_init_for_criteria,
             ),
         )
-        phi_hits_after, phi_count_after = jax.lax.cond(
-            accepted,
-            scan_phis,
-            lambda args: (args[0], args[1]),
-            operand=(phi_hits_in, phi_hits_count_in, phi_last, phi_current, stop_time),
-        )
-        phi_hits_after, phi_count_after = _append_event_row(
-            phi_hits_after,
-            phi_count_after,
-            stop_fires,
-            stop_row,
-            max_phi_hits_i32,
-        )
-        status_after = jnp.where(stop_fires, stop_status, status_event)
-        stop_after = stop_fires
         _, status_zero_i32, status_false = _lane_axis_carry_zeroes(y_next)
         status_after = status_after + status_zero_i32
         stop_after = stop_after | status_false

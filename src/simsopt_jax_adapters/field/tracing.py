@@ -268,6 +268,7 @@ def trace_particles_boozer(
     stopping_criteria=[],
     mode="gc_vac",
     forget_exact_path=False,
+    integrator="dopri5_diffrax",
 ):
     """Trace Boozer-coordinate particles with the JAX tracing backend."""
     nparticles = stz_inits.shape[0]
@@ -289,6 +290,7 @@ def trace_particles_boozer(
         zetas=zetas,
         stopping_criteria=stopping_criteria,
         mode=mode,
+        integrator=integrator,
         forget_exact_path=forget_exact_path,
     )
 
@@ -307,7 +309,8 @@ def _trace_particles_boozer_jax(
     zetas,
     stopping_criteria,
     mode,
-    forget_exact_path,
+    integrator="dopri5_diffrax",
+    forget_exact_path=False,
 ):
     """JAX backend for Boozer-coordinate guiding-center tracing."""
     if not isinstance(field, (BoozerRadialInterpolantJAX, InterpolatedBoozerFieldJAX)):
@@ -362,6 +365,7 @@ def _trace_particles_boozer_jax(
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            integrator=integrator,
         )
         result = trace_guiding_centers_boozer_batched(
             spec,
@@ -415,6 +419,7 @@ def trace_particles(
     mode="gc_vac",
     forget_exact_path=False,
     phase_angle=0,
+    integrator="dopri5_diffrax",
 ):
     """Trace particles with the JAX tracing backend."""
     nparticles = xyz_inits.shape[0]
@@ -436,6 +441,7 @@ def trace_particles(
             comm=comm,
             phis=phis,
             stopping_criteria=stopping_criteria,
+            integrator=integrator,
             forget_exact_path=forget_exact_path,
             phase_angle=phase_angle,
         )
@@ -452,6 +458,7 @@ def trace_particles(
         phis=phis,
         stopping_criteria=stopping_criteria,
         mode=mode,
+        integrator=integrator,
         forget_exact_path=forget_exact_path,
     )
 
@@ -470,7 +477,8 @@ def _trace_particles_jax_guiding_center_vacuum(
     phis,
     stopping_criteria,
     mode,
-    forget_exact_path,
+    integrator="dopri5_diffrax",
+    forget_exact_path=False,
 ):
     """JAX backend for Cartesian vacuum guiding-center tracing."""
     if mode != "gc_vac":
@@ -518,6 +526,7 @@ def _trace_particles_jax_guiding_center_vacuum(
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            integrator=integrator,
         )
         y0s = np.column_stack([local_xyz, local_speed_par])
         result = trace_guiding_centers_batched(
@@ -570,8 +579,9 @@ def _trace_particles_jax_fullorbit_vacuum(
     comm,
     phis,
     stopping_criteria,
-    forget_exact_path,
-    phase_angle,
+    integrator="dopri5_diffrax",
+    forget_exact_path=False,
+    phase_angle=0,
 ):
     """JAX backend for Cartesian full-orbit tracing."""
     field_fn, field_state = _resolve_jax_field_B(field)
@@ -612,6 +622,7 @@ def _trace_particles_jax_fullorbit_vacuum(
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            integrator=integrator,
         )
         result = trace_fullorbits_batched(
             spec,
@@ -658,15 +669,15 @@ def compute_fieldlines(
     phis=[],
     stopping_criteria=[],
     comm=None,
-    integrator="dopri5_native",
+    integrator="dopri5_diffrax",
     max_steps=4000,
     max_phi_hits=4096,
 ):
     """Compute fieldlines with the JAX tracing backend.
 
-    ``integrator`` selects the integration engine: ``"dopri5_native"`` (default; the
-    in-repo adaptive Dopri5 driver) or ``"dopri5_diffrax"`` (the optional diffrax
-    backend, requires the ``diffrax`` extra). The default preserves existing behaviour.
+    ``integrator`` selects the integration engine: ``"dopri5_diffrax"`` (default; the
+    diffrax-backed adaptive Dopri5 driver) or ``"dopri5_native"`` (the in-repo
+    fallback/parity driver, which does not import diffrax).
 
     ``max_steps`` caps the accepted integration steps per line; the JAX tracer
     pre-allocates a fixed ``(max_steps + 1, 4)`` trajectory per line, so it also bounds
@@ -971,7 +982,7 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
 
 def _compute_fieldlines_jax(
     field, R0, Z0, tmax, tol, phis, stopping_criteria, comm,
-    integrator="dopri5_native", max_steps=4000, max_phi_hits=4096,
+    integrator="dopri5_diffrax", max_steps=4000, max_phi_hits=4096,
 ):
     """JAX backend for fieldline tracing."""
     field_fn, field_state = _resolve_jax_field_B(field)
