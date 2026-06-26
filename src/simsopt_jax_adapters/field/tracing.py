@@ -658,8 +658,24 @@ def compute_fieldlines(
     phis=[],
     stopping_criteria=[],
     comm=None,
+    integrator="dopri5_native",
+    max_steps=4000,
+    max_phi_hits=4096,
 ):
-    """Compute fieldlines with the JAX tracing backend."""
+    """Compute fieldlines with the JAX tracing backend.
+
+    ``integrator`` selects the integration engine: ``"dopri5_native"`` (default; the
+    in-repo adaptive Dopri5 driver) or ``"dopri5_diffrax"`` (the optional diffrax
+    backend, requires the ``diffrax`` extra). The default preserves existing behaviour.
+
+    ``max_steps`` caps the accepted integration steps per line; the JAX tracer
+    pre-allocates a fixed ``(max_steps + 1, 4)`` trajectory per line, so it also bounds
+    device memory. ``max_phi_hits`` sizes the per-line phi-crossing buffer. Both are
+    JAX-specific (the C++ tracer allocates dynamically) and default to the historical
+    values. Raise them for long/dense traces — a dense Poincare plot needs tens of
+    thousands of steps per line (each toroidal transit is ~tens of accepted steps at
+    ``tol=1e-7``), at the cost of more device memory.
+    """
     assert len(R0) == len(Z0)
     return _compute_fieldlines_jax(
         field,
@@ -670,6 +686,9 @@ def compute_fieldlines(
         phis=phis,
         stopping_criteria=stopping_criteria,
         comm=comm,
+        integrator=integrator,
+        max_steps=max_steps,
+        max_phi_hits=max_phi_hits,
     )
 
 
@@ -950,7 +969,10 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
     return tuple(translated)
 
 
-def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, comm):
+def _compute_fieldlines_jax(
+    field, R0, Z0, tmax, tol, phis, stopping_criteria, comm,
+    integrator="dopri5_native", max_steps=4000, max_phi_hits=4096,
+):
     """JAX backend for fieldline tracing."""
     field_fn, field_state = _resolve_jax_field_B(field)
 
@@ -960,8 +982,6 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
     else:
         phis_arr = None
 
-    max_steps = 4000
-    max_phi_hits = 4096
     nlines = len(R0)
     res_tys = []
     res_phi_hits = []
@@ -994,6 +1014,7 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            integrator=integrator,
         )
         result = trace_fieldlines_batched(
             spec,

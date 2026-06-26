@@ -67,7 +67,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Callable, NamedTuple
+from typing import Callable, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -403,6 +403,12 @@ class FieldlineTracingSpec:
         guiding-centre driver). ``phi_hits_count`` counts every
         detected event, so ``phi_hits_count > max_phi_hits`` is an
         overflow signal; the buffer stores the recorded prefix.
+    integrator
+        Integration engine: ``"dopri5_native"`` (default; the in-repo
+        hand-rolled adaptive Dopri5 driver) or ``"dopri5_diffrax"`` (the
+        optional diffrax-backed backend, requires the ``diffrax`` extra).
+        Both honour this same contract; only the stepping/event engine
+        differs. Static field — part of the JIT signature.
     """
 
     tmax: float
@@ -412,12 +418,13 @@ class FieldlineTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
+    integrator: Literal["dopri5_native", "dopri5_diffrax"] = "dopri5_native"
 
 
 jax.tree_util.register_dataclass(
     FieldlineTracingSpec,
     data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
+    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "integrator"],
 )
 
 
@@ -1367,6 +1374,21 @@ def trace_fieldline(
         count, an exit status, ``t_final``, and the phi-crossing
         buffer.
     """
+
+    if spec.integrator == "dopri5_diffrax":
+        # Optional diffrax backend, imported lazily so ``diffrax`` stays an
+        # optional dependency (native path needs no diffrax) and to avoid a
+        # tracing <-> tracing_diffrax import cycle.
+        from .tracing_diffrax import trace_fieldline_diffrax
+
+        return trace_fieldline_diffrax(
+            spec, y0, magnetic_field_fn, phis=phis, stopping_criteria=stopping_criteria
+        )
+    if spec.integrator != "dopri5_native":
+        raise ValueError(
+            f"Unknown integrator {spec.integrator!r}; "
+            "expected 'dopri5_native' or 'dopri5_diffrax'"
+        )
 
     dtype = jnp.float64
     y0_arr = _as_device_array(y0, dtype).reshape((3,))
