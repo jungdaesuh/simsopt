@@ -7,6 +7,12 @@
 > External-docs check: official JAX docs confirm that `jax_enable_x64` controls 64-bit defaults and
 > availability (`jax-ml/jax` `docs/default_dtypes.md`), and that benchmark/runtime claims must account
 > for device transfer, JIT compilation, and `block_until_ready()` timing (`docs/benchmarking.md`).
+> Optimizer-docs check: official SciPy L-BFGS-B docs define `ftol` as relative objective decrease,
+> `gtol` as projected-gradient tolerance, and `maxls=20` as the default line-search step cap; Optax
+> docs expose L-BFGS as a JAX gradient transformation with line searches such as
+> `scale_by_zoom_linesearch`; COIN-OR Ipopt docs describe Ipopt as an interior-point filter-line-search
+> NLP solver. These checks support keeping the current SciPy-driver diagnosis separate from optimizer
+> library-swap proposals.
 > Status: PLAN (no fixes applied yet).
 
 ## Purpose
@@ -21,7 +27,8 @@ blocker. This file is the SSOT for fixing those.
 ## Goals
 
 - [ ] A real **converged** single-stage result on GPU: J monotonically decreasing, SciPy
-      `status == 0`, ≥1 accepted L-BFGS step, `||grad||` decreasing, iota → target.
+      `status == 0`, ≥1 accepted L-BFGS step, projected `||grad||` decreasing toward `gtol`,
+      iota → target.
 - [ ] The production single-stage gradient (operator/lstsq adjoint) **FD-certified at production
       scale** (mpol 8–10, κ≈3.9e5).
 - [ ] Full-space lanes (`scipy-jax-decomposed` / `-fullgraph`) converge from feasible-but-marginal
@@ -36,6 +43,9 @@ blocker. This file is the SSOT for fixing those.
   /adjoint) — verified machine-precision-faithful and broadly used (30 files); out of scope.
 - Switching optimizer **library** (Optax / on-device / IPOPT) — the issue is not SciPy; the same
   SciPy L-BFGS-B converges on the reduced lane. A library swap would change the symptom, not the cause.
+  Current repo docs/source keep `ondevice` as a SciPy-compatible L-BFGS-B state machine, keep
+  `optax-lbfgs-ondevice` as a separate Optax gradient-transformation lane rather than a SciPy
+  L-BFGS-B parity oracle, and Ipopt would require a constrained-NLP formulation/Jacobian path.
 - Global multi-modality / local-minima search — separate concern, handled by continuation + multistart.
 - fp32-on-GPU single-stage adjoint — physically unobtainable (κ·eps_f32), tracked elsewhere.
 
@@ -92,8 +102,10 @@ blocker. This file is the SSOT for fixing those.
    - [ ] Re-run the rejected single-stage config with `--record-objective-evaluation-trace`
          (and without `--compact-objective-evaluation-trace` if replay-grade vectors are needed) →
          inspect `${OUT_DIR_ITER}/outer_optimizer_progress.json` objective-evaluation events for the
-         21 outer trial `(x, f, g)` tuples. `record_scipy_callback_trace` / `result.scipy_callback_trace`
-         is Boozer/adapter metadata, not the outer single-stage line-search trace.
+         21 outer trial `(x, f, g)` tuples, and preserve the SciPy `message`/low-level `task` text that
+         identifies `ABNORMAL_TERMINATION_IN_LNSRCH`; `status=2` alone is not the line-search proof.
+         `record_scipy_callback_trace` / `result.scipy_callback_trace` is Boozer/adapter metadata, not
+         the outer single-stage line-search trace.
    - [ ] Classify: all-finite + tiny-decrease/flat-plateau → 1a/1b confirmed (expected); any NaN →
          re-open the adjoint-NaN path (3). (Pre-registered prediction: finite + plateau.)
 2. Calibrate δJ for the seed (closes A2).
@@ -191,8 +203,9 @@ blocker. This file is the SSOT for fixing those.
 ## Validation Plan
 
 - [ ] **Convergence table** (the primary acceptance artifact), from the run progress JSON:
-      | outer iter | J | ‖grad‖∞ | accepted? | status |
-      Pass = J monotone ↓, ≥1 accepted step, `status==0`, `‖grad‖` ↓ to `gtol`.
+      | outer iter | J | ‖proj g‖∞ / ‖g‖∞ | accepted? | status |
+      Pass = J monotone ↓, ≥1 accepted step, `status==0`, reported projected-gradient norm ↓ to
+      `gtol`.
 - [ ] **A/B control**: same seed pre-fix (`status=2, nfev=21, 0 accepted`) vs post-fix (`status=0`).
 - [ ] **Phase-3 proof**: on a constraint-marginal seed, the accepted-step gradient is
       point-dependent (differs from the frozen `baseline_coil_gradient`).
