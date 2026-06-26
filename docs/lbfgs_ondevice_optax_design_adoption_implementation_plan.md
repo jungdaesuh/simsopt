@@ -12,7 +12,8 @@ the expensive objective into the optimizer graph (the welded path OOM'd at
 / callback-stop parity.
 
 This plan supports execution and review of that change set. It supersedes the
-informal "Stage 1/3" framing discussed in session, corrected against current code.
+informal "Stage 1/3" framing discussed in session and must be kept current
+against the live checkout before implementation work is declared complete.
 
 ## Goals
 
@@ -49,23 +50,26 @@ informal "Stage 1/3" framing discussed in session, corrected against current cod
 
 ## Current Context
 
-Verified against current HEAD this session (file:line):
+Verified against the current working tree in this review (file:line references
+may drift as the plan is implemented):
 
 - **Default run mode is `stepwise`, not monolithic.** `optimizer.py:6067` and
   `:6111` both default `run_mode=options.get("lbfgs_run_mode", "stepwise")`.
   Monolithic is explicitly gated at `_lbfgs.py:736`
   (`if run_mode == _LBFGS_RUN_MODE_MONOLITHIC_DEBUG`).
-- **Stepwise host loop reads workspace internals.** `_lbfgsb_stepwise_host_status`
-  does `host_int(state.workspace.task[0])` and derives a 2-field
-  `_LbfgsbStepwiseHostStatus(terminal, entry_kind)` (`_LbfgsbStepwiseHostStatus`
-  at `_lbfgs.py:53`, helper at `:576`); `_lbfgsb_stepwise_driver` (`:592`) loops
-  `while not host_status.terminal` (`:603`, re-read at `:628`).
-- **Macro-step kernels already return a structured result.**
-  `LbfgsbMacroStepResult(state, accepted_new_x)` at `_lbfgsb_scipy.py:140`;
-  returned by `lbfgsb_advance_from_start_to_next_observable` (:1755),
-  `lbfgsb_advance_from_search_to_next_observable` (:1780), `lbfgsb_reenter_new_x`
-  (:1803). Terminal predicate used internally:
-  `result.state.workspace.task[0] < CONVERGENCE` (:1743, :1859).
+- **Stepwise host loop now routes on an explicit macro-step observable.**
+  `_lbfgsb_stepwise_host_status` reads only `step_result.entry_kind` and
+  `step_result.terminal`, and `_lbfgsb_stepwise_driver` is seeded with an explicit
+  initial entry route (`START` for normal starts, `SEARCH` for seeded
+  `initial_value_and_grad`). The host loop no longer reads
+  `state.workspace.task` for routing; `workspace.task` remains kernel/result
+  payload state.
+- **Macro-step kernels return the compact observable.**
+  `LbfgsbMacroStepResult` now carries `state`, `accepted_new_x`, `terminal`,
+  `entry_kind`, `status`, `nfev`, `njev`, `f`, and `proj_grad_norm`.
+  `lbfgsb_macro_step_result` populates the observable and the macro-step
+  `lax.while_loop` conditions use `result.terminal`, not
+  `result.state.workspace.task[0]`.
 - **On-device convergence math already exists.** `_lbfgsb_setulb_new_x_reentry`
   (`_lbfgsb_scipy.py:1478`): `gradient_converged = sbgnrm <= state.pgtol` (:1482),
   `reduction_converged` (:1484).
@@ -98,6 +102,34 @@ Verified against current HEAD this session (file:line):
   (kernel-level parity), `tests/test_lbfgs_ondevice_compile_shape.py` +
   `benchmarks/lbfgs_ondevice_compile_shape.py` (stepwise vs monolithic compile
   counts / graph-shape), `tests/geo/test_optimizer_jax_reference.py`.
+
+## Requirements Review Status
+
+Reviewed against the current working tree. The document remains a forward plan:
+Stage 1's host-routing slice is implemented locally, while Stage 2, Stage 3, full
+CPU regression, and CUDA/A100 evidence remain open.
+
+- **Stage 1 host routing is implemented in the current working tree.**
+  `LbfgsbMacroStepResult` carries the compact observable; the host driver routes
+  on `entry_kind`/`terminal`; and the focused source plus runtime tests cover the
+  no-host-`workspace.task` boundary and observable fidelity.
+- **Stage 2 is not implemented.** `_lbfgsb_evaluate_value_and_grad` still calls
+  `value_and_grad(state.x)` for every `FG` request. The existing
+  `initial_value_and_grad` support seeds the first evaluation only; it is not an
+  Optax-style reusable line-search/outer-step cache.
+- **Stage 3 is not implemented.** There is no `lbfgsb_two_loop_direction`
+  function in the private JAX L-BFGS-B path, and the unconstrained public lane
+  still compiles through the L-BFGS-B Cauchy/subspace machinery.
+- **Donation is an investigation, not a current requirement.** The live test
+  `test_lbfgsb_step_kernel_omits_partial_state_donation` asserts
+  `donate_argnums is None`; adding donation first requires proving the full
+  macro-step carry is single-owner and updating that test deliberately.
+- **Current local validation is CPU-only.** Local checks passed for `py_compile`,
+  `ruff`, `tests/geo/test_lbfgsb_scipy_jax_kernels.py`, the compile-shape unit,
+  and a focused L-BFGS selector covering the explicit observable, host-boundary
+  source gate, callback-stop, maxfun, maxls, and hess-inverse rollover. No
+  CUDA/A100 artifact is available for this review, so GPU claims remain
+  design-level until a CUDA validation artifact is produced.
 
 ## Rationale
 
@@ -134,9 +166,10 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
 - No production caller depends on reading `state.workspace.task` *through* the
   stepwise driver's host status beyond terminal/entry-kind routing. *(Grep for
   external `workspace.task` access in Validation.)*
-- Tests run under the repo's JAX env with `JAX_ENABLE_X64=True` (float64 required
-  by the L-BFGS-B port; base py3.13 fails the `simsoptpp` import — use the
-  project's py3.11 JAX conda env).
+- Tests run under a repo JAX env with `JAX_ENABLE_X64=True` and `simsoptpp`
+  importable (float64 required by the L-BFGS-B port). Current local validation
+  used `/opt/homebrew/Caskroom/miniforge/base/bin/python` on Python 3.13. Do not
+  hard-code a py3.11 path until the CI/runtime convention is confirmed.
 - The compile-shape benchmark's stepwise/monolithic counters
   (`optimizer_control_monolithic_full_run_compile`) are the agreed metric for the
   graph-breadth regression check.
@@ -144,26 +177,26 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
 ## Implementation Plan
 
 1. **Stage 1 — Explicit compact step observable (host routing contract)**
-   - [ ] Extend `LbfgsbMacroStepResult` (`_lbfgsb_scipy.py:140`) with explicit
+   - [x] Extend `LbfgsbMacroStepResult` (`_lbfgsb_scipy.py:140`) with explicit
          observable fields: `terminal: bool`, `status: int32` (public status, not
          raw warnflag), `entry_kind`/next-routing hint, `nfev`, `njev`, `f`, and
          `proj_grad_norm` (reuse `dsave[12]`/`sbgnrm`). Populate them where the
          macro-step result is constructed (`:1686`, `:1748`, and the
          `continue_condition` sites `:1743`, `:1859`).
-   - [ ] Add a small pure helper `lbfgsb_macro_step_observable(state)` (or fold
-         into the result) computing `terminal = task[0] >= CONVERGENCE`,
+   - [x] Add a small pure helper `lbfgsb_macro_step_result(...)` computing
+         `terminal = task[0] >= CONVERGENCE`,
          `entry_kind`, and the public status via the same logic as
          `_lbfgsb_public_status` (`_lbfgs.py:404`) so host and kernel agree.
-   - [ ] Rewrite `_lbfgsb_stepwise_host_status` (`_lbfgs.py:576`) /
+   - [x] Rewrite `_lbfgsb_stepwise_host_status` (`_lbfgs.py:576`) /
          `_lbfgsb_stepwise_driver` (`:592`, loop `:603`) to route on the returned
-         observable fields
-         instead of `host_int(state.workspace.task[0])`. The host must read only
-         the explicit observable (one small struct), never `workspace.task`
-         directly.
-   - [ ] Preserve the callback path exactly: keep `accepted_step_callback`,
+         observable fields instead of
+         `host_array(state.workspace.task, dtype=np.int32)[0]` or any other host
+         read of `workspace.task`. The host must read only the explicit
+         observable (one small struct), never `workspace.task` directly.
+   - [x] Preserve the callback path exactly: keep `accepted_step_callback`,
          `try/except StopIteration` (`:623`), and `callback_stop_state` (`:626`).
          Drive the callback off `step_result.accepted_new_x` as today.
-   - [ ] Keep `_LBFGSResults` / `OptimizeResult` conversion unchanged; only the
+   - [x] Keep `_LBFGSResults` / `OptimizeResult` conversion unchanged; only the
          host↔kernel routing payload changes.
 
 2. **Stage 2 — Value/grad reuse (Optax `value_and_grad_from_state` analog)**
@@ -190,28 +223,36 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
          identical — only the direction computation is swapped.
 
 4. **Cross-cutting**
-   - [ ] Add `donate_argnums` for the macro-step carry where safe (state is
-         single-consumer per host iteration) to avoid buffer copies.
+   - [ ] Investigate `donate_argnums` for the macro-step carry where safe (state
+         is single-consumer per host iteration). Promote it to an implementation
+         requirement only after a test proves no partial-state aliasing hazard;
+         the current test suite intentionally asserts no donation.
    - [ ] Confirm float64 invariants preserved throughout (no silent x32 demotion).
    - [ ] Update `optimizer.py` docstrings (~:71–:89) to describe the explicit
          observable contract and the unconstrained fast path.
 
 ## Validation Plan
 
-- [ ] **SciPy result parity (Stage 1, gate):** run
+- [x] **SciPy result parity (Stage 1, gate):** run
       `tests/geo/test_lbfgsb_scipy_jax_kernels.py` and the optimizer reference
       `tests/geo/test_optimizer_jax_reference.py`; `x`, `fun`, `jac`, `nit`,
       `nfev`, `njev`, `status`, `success`, `message` must match the prior lane.
-      `PYTHONPATH=src JAX_ENABLE_X64=True <repo-jax-py3.11>/bin/python -m pytest
+      `PYTHONPATH=src JAX_ENABLE_X64=True <repo-jax-python> -m pytest
       tests/geo/test_lbfgsb_scipy_jax_kernels.py tests/geo/test_optimizer_jax_reference.py -q`
-- [ ] **Callback-stop parity (Stage 1):** a test where a user callback raises
+- [x] **Callback-stop parity (Stage 1):** a test where a user callback raises
       `StopIteration` returns `status == 99` with the current best `x` (mirror the
       `a8957b8ea` parity assertion). Confirm against `scipy.optimize.minimize`
       L-BFGS-B with the same callback.
-- [ ] **Nonfinite parity (Stage 1):** NaN/Inf in `f`/`g` still yields `status == 6`.
-- [ ] **No host access to `workspace.task` outside the kernel (Stage 1):**
-      `grep -rn "workspace.task" src/simsopt_jax/geo/optimizers/` shows no host
+- [x] **Nonfinite parity (Stage 1):** NaN/Inf in `f`/`g` still yields `status == 6`.
+- [x] **No host access to `workspace.task` outside the kernel (Stage 1):**
+      `rg -n "workspace\\.task" src/simsopt_jax/geo/optimizers/` shows no host
       driver reads after the refactor (only kernel-internal use).
+- [x] **Transfer-guard boundary smoke (Stage 1):** run the focused
+      `lbfgs_stepwise_driver_host_reads_use_host_boundary_helpers` source gate
+      plus the callback-stop fixture under `jax.transfer_guard("disallow")`.
+      The same focused selector also covers maxfun, maxls, and hess-inverse
+      parity. This catches the rejected `state.workspace.task[0]`
+      host-scalar-indexing variant.
 - [ ] **Direction parity (Stage 3, gate):** new test asserting
       `lbfgsb_two_loop_direction` and the L-BFGS-B `cmprlb`→`subsm` direction agree
       to ~1e-10 (float64) on randomized unconstrained `(s,y)` histories of varying
@@ -225,8 +266,47 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
       Extend `tests/test_lbfgs_ondevice_compile_shape.py` with the assertion.
 - [ ] **Eval-count check (Stage 2):** `nfev`/`njev` do not regress on the
       reference fixtures.
-- [ ] **Full CPU regression:** project unit suite green under the py3.11 JAX env
+- [ ] **Full CPU regression:** project unit suite green under `<repo-jax-python>`
       (`JAX_ENABLE_X64=True`, CPU).
+
+Current local validation evidence for the Stage 1 slice:
+
+- `PYTHONPATH=src /opt/homebrew/Caskroom/miniforge/base/bin/python -m py_compile
+  src/simsopt_jax/geo/optimizers/private/_lbfgs.py
+  src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py
+  tests/geo/test_boozersurface_jax_private.py` passed.
+- `PYTHONPATH=src /opt/homebrew/Caskroom/miniforge/base/bin/python -m ruff check
+  src/simsopt_jax/geo/optimizers/private/_lbfgs.py
+  src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py
+  tests/geo/test_boozersurface_jax_private.py` passed.
+- Focused private L-BFGS selector covering explicit observable, host-boundary
+  source gate, seeded transition, callback-stop, maxfun, maxls, and hess-inverse
+  rollover: `7 passed, 106 deselected`.
+- Nonfinite selector:
+  `2 passed, 111 deselected`.
+- `tests/geo/test_lbfgsb_scipy_jax_kernels.py`:
+  `55 passed`.
+- `tests/geo/test_optimizer_jax_reference.py`:
+  `4 passed`.
+- `tests/test_lbfgs_ondevice_compile_shape.py`:
+  `1 passed`.
+
+Additional current validation evidence from the requirements review loop:
+
+- `PYTHONPATH=src /opt/homebrew/Caskroom/miniforge/base/bin/python -m py_compile
+  tests/subprocess/jax_runtime_cases.py tests/test_jax_import_smoke.py
+  tests/geo/test_boozersurface_jax_private.py` passed.
+- `PYTHONPATH=src /opt/homebrew/Caskroom/miniforge/base/bin/python -m ruff check
+  tests/subprocess/jax_runtime_cases.py tests/test_jax_import_smoke.py
+  tests/geo/test_boozersurface_jax_private.py` passed.
+- Focused diagnostic/Optax-distinct selector:
+  `2 passed, 111 deselected`.
+- Focused subprocess compile-count selector:
+  `3 passed, 92 deselected`.
+- The compile-count subprocess payload now reports both
+  `stepwise_compile_count` and `monolithic_compile_count`, and the smoke asserts
+  `monolithic_compile_count == 0` for public and target value/grad
+  `lbfgs-ondevice` compile-reuse cases.
 
 ## Risks and Mitigations
 
@@ -254,9 +334,9 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
 
 ## Completion Criteria
 
-- [ ] Stepwise host driver routes solely on the explicit step observable; no
+- [x] Stepwise host driver routes solely on the explicit step observable; no
       `workspace.task` host reads remain.
-- [ ] SciPy `OptimizeResult`, callback-stop (99), and nonfinite (6) parity tests
+- [x] SciPy `OptimizeResult`, callback-stop (99), and nonfinite (6) parity tests
       pass unchanged.
 - [ ] Unconstrained lane uses the two-loop direction, passes direction-parity and
       end-to-end result-parity tests, and shows a measured graph-breadth /
@@ -264,6 +344,8 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
 - [ ] Value/grad reuse lands with non-regressing `nfev`/`njev` (or is gated off in
       the strict parity lane).
 - [ ] Full CPU regression suite green; `optimizer.py` docstrings updated.
+- [ ] CUDA/A100 validation artifact captured before making GPU-performance or
+      GPU-memory claims beyond design-level reasoning.
 
 ## Open Questions
 
@@ -272,5 +354,5 @@ reading) is explicitly rejected: the repo already has that path and it OOMs.
 - Do we want an optional on-device convergence predicate (true Optax
   `continuing_criterion`) as a Stage 4 follow-on for cheap-objective lanes, or is
   the explicit-observable host loop sufficient? Owner: maintainer decision.
-- Confirm the canonical test interpreter/env path for CI (py3.11 JAX env) to lock
-  the Validation commands. Owner: needs repo-convention confirmation.
+- Confirm the canonical test interpreter/env path for CI (`<repo-jax-python>`) to
+  lock the Validation commands. Owner: needs repo-convention confirmation.
