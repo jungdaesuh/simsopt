@@ -18,6 +18,10 @@ from banana_opt.edge_delivered_iota import (  # noqa: E402
     EDGE_HELICITY_STATUS_CO,
     EDGE_HELICITY_STATUS_COUNTER,
     EDGE_HELICITY_STATUS_UNKNOWN,
+    EDGE_IOTA_PROMOTION_BLOCK_DIRECT_CAD,
+    EDGE_IOTA_PROMOTION_BLOCK_EDGE_P10,
+    EDGE_IOTA_PROMOTION_BLOCK_EDGE_STATUS,
+    EDGE_IOTA_PROMOTION_BLOCK_HARDWARE,
     EDGE_IOTA_MODE_OFF,
     EDGE_IOTA_MODE_REPORT,
     EDGE_IOTA_STATUS_FAIL,
@@ -31,6 +35,7 @@ from banana_opt.edge_delivered_iota import (  # noqa: E402
     edge_iota_missing_payload,
     edge_iota_report_payload,
     edge_radial_labels,
+    evaluate_edge_iota_promotion_gate,
     evaluate_edge_iota_profile,
     load_lcfs_boundary,
     profile_json_payload,
@@ -257,6 +262,99 @@ class EdgeDeliveredIotaContractTests(unittest.TestCase):
         self.assertEqual(profile.edge_helicity_status, EDGE_HELICITY_STATUS_COUNTER)
         self.assertEqual(profile.edge_iota_status, EDGE_IOTA_STATUS_FAIL)
         self.assertAlmostEqual(profile.edge_delta_abs_iota_min, 0.15)
+
+    def test_phase6_promotion_gate_requires_edge_hardware_and_direct_cad(self):
+        profile = build_edge_iota_profile(
+            [
+                EdgeIotaSample.from_iotas(
+                    radius_label="s075",
+                    r_over_a=0.75,
+                    seed_point=(1.0, 0.0),
+                    iota_tokamak=0.30,
+                    iota_hybrid=0.43,
+                    edge_width=0.01,
+                ),
+                EdgeIotaSample.from_iotas(
+                    radius_label="s100",
+                    r_over_a=1.0,
+                    seed_point=(1.1, 0.0),
+                    iota_tokamak=0.28,
+                    iota_hybrid=0.41,
+                    edge_width=0.02,
+                ),
+            ],
+            helicity_sign=1,
+            width_max=0.03,
+        )
+
+        decision = evaluate_edge_iota_promotion_gate(
+            profile,
+            hardware_constraints_ok=True,
+            direct_cad_contact_oracle_ok=True,
+            width_max=0.03,
+        )
+
+        self.assertTrue(decision.promotion_ready)
+        self.assertEqual(decision.blocking_reasons, ())
+        self.assertTrue(decision.to_json_dict()["promotion_ready"])
+
+    def test_phase6_promotion_gate_rejects_proxy_only_hardware_evidence(self):
+        profile = build_edge_iota_profile(
+            [
+                EdgeIotaSample.from_iotas(
+                    radius_label="s090",
+                    r_over_a=0.90,
+                    seed_point=(1.0, 0.0),
+                    iota_tokamak=0.30,
+                    iota_hybrid=0.43,
+                )
+            ],
+            helicity_sign=1,
+        )
+
+        decision = evaluate_edge_iota_promotion_gate(
+            profile,
+            hardware_constraints_ok=True,
+            direct_cad_contact_oracle_ok=False,
+            sdf_proxy_clearance_ok=True,
+        )
+
+        self.assertFalse(decision.promotion_ready)
+        self.assertEqual(
+            decision.blocking_reasons,
+            (EDGE_IOTA_PROMOTION_BLOCK_DIRECT_CAD,),
+        )
+        self.assertTrue(decision.sdf_proxy_clearance_ok)
+
+    def test_phase6_promotion_gate_reports_edge_and_hardware_blocks(self):
+        profile = build_edge_iota_profile(
+            [
+                EdgeIotaSample.from_iotas(
+                    radius_label="s090",
+                    r_over_a=0.90,
+                    seed_point=(1.0, 0.0),
+                    iota_tokamak=0.30,
+                    iota_hybrid=0.31,
+                )
+            ],
+            helicity_sign=1,
+        )
+
+        decision = evaluate_edge_iota_promotion_gate(
+            profile,
+            hardware_constraints_ok=False,
+            direct_cad_contact_oracle_ok=True,
+        )
+
+        self.assertFalse(decision.promotion_ready)
+        self.assertEqual(
+            decision.blocking_reasons,
+            (
+                EDGE_IOTA_PROMOTION_BLOCK_EDGE_STATUS,
+                EDGE_IOTA_PROMOTION_BLOCK_EDGE_P10,
+                EDGE_IOTA_PROMOTION_BLOCK_HARDWARE,
+            ),
+        )
 
     def test_current_champion_fixture_is_edge_delivered_iota_failing(self):
         champion_like_samples = [

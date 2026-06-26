@@ -27,6 +27,14 @@ EDGE_IOTA_MODE_REPORT = "report"
 EDGE_IOTA_MODE_SOFT = "soft"
 EDGE_IOTA_ACTIVE_MODES = {EDGE_IOTA_MODE_REPORT, EDGE_IOTA_MODE_SOFT}
 
+EDGE_IOTA_PROMOTION_BLOCK_EDGE_STATUS = "edge_iota_status"
+EDGE_IOTA_PROMOTION_BLOCK_EDGE_P10 = "edge_delta_abs_iota_p10"
+EDGE_IOTA_PROMOTION_BLOCK_EDGE_HELICITY = "edge_helicity_status"
+EDGE_IOTA_PROMOTION_BLOCK_EDGE_SURVIVAL = "edge_surface_survival_fraction"
+EDGE_IOTA_PROMOTION_BLOCK_EDGE_WIDTH = "edge_width_max"
+EDGE_IOTA_PROMOTION_BLOCK_HARDWARE = "hardware_constraints"
+EDGE_IOTA_PROMOTION_BLOCK_DIRECT_CAD = "direct_cad_contact_oracle"
+
 DEFAULT_EDGE_BAND = (0.75, 1.0)
 DEFAULT_EDGE_SAMPLE_COUNT = 6
 DEFAULT_EDGE_TRACE_TURNS = 120
@@ -298,6 +306,21 @@ class EdgeIotaProfile:
         payload = self.scalar_payload()
         payload["samples"] = [sample.to_json_dict() for sample in self.samples]
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeIotaPromotionDecision:
+    """Fail-closed Phase 6 promotion decision for edge-delivered iota."""
+
+    promotion_ready: bool
+    blocking_reasons: tuple[str, ...]
+    edge_iota_status: str
+    hardware_constraints_ok: bool
+    direct_cad_contact_oracle_ok: bool
+    sdf_proxy_clearance_ok: bool | None = None
+
+    def to_json_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,6 +706,51 @@ def build_edge_iota_profile(
         edge_width_max=edge_width_max,
         edge_iota_status=edge_status,
         edge_helicity_status=helicity_status,
+    )
+
+
+def evaluate_edge_iota_promotion_gate(
+    profile: EdgeIotaProfile,
+    *,
+    hardware_constraints_ok: bool,
+    direct_cad_contact_oracle_ok: bool,
+    target_min: float = DEFAULT_EDGE_DELTA_ABS_IOTA_TARGET_MIN,
+    survival_fraction_min: float = DEFAULT_EDGE_SURVIVAL_FRACTION_MIN,
+    width_max: float | None = None,
+    sdf_proxy_clearance_ok: bool | None = None,
+) -> EdgeIotaPromotionDecision:
+    """Combine edge-iota, hardware, and direct CAD/contact promotion gates.
+
+    SDF/proxy clearance is accepted as recorded steering evidence only; it never
+    substitutes for the direct CAD/contact oracle required for promotion.
+    """
+
+    blocking_reasons: list[str] = []
+    if profile.edge_iota_status != EDGE_IOTA_STATUS_PASS:
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_EDGE_STATUS)
+    if profile.edge_delta_abs_iota_p10 is None or (
+        float(profile.edge_delta_abs_iota_p10) < float(target_min)
+    ):
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_EDGE_P10)
+    if profile.edge_helicity_status != EDGE_HELICITY_STATUS_CO:
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_EDGE_HELICITY)
+    if float(profile.edge_surface_survival_fraction) < float(survival_fraction_min):
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_EDGE_SURVIVAL)
+    if width_max is not None and (
+        profile.edge_width_max is None or float(profile.edge_width_max) > float(width_max)
+    ):
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_EDGE_WIDTH)
+    if not bool(hardware_constraints_ok):
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_HARDWARE)
+    if not bool(direct_cad_contact_oracle_ok):
+        blocking_reasons.append(EDGE_IOTA_PROMOTION_BLOCK_DIRECT_CAD)
+    return EdgeIotaPromotionDecision(
+        promotion_ready=len(blocking_reasons) == 0,
+        blocking_reasons=tuple(blocking_reasons),
+        edge_iota_status=profile.edge_iota_status,
+        hardware_constraints_ok=bool(hardware_constraints_ok),
+        direct_cad_contact_oracle_ok=bool(direct_cad_contact_oracle_ok),
+        sdf_proxy_clearance_ok=sdf_proxy_clearance_ok,
     )
 
 

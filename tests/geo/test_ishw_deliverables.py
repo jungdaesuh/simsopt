@@ -71,6 +71,70 @@ def load_stage2_module():
     return load_module(STAGE2_ENTRYPOINT_PATH, "banana_coil_solver")
 
 
+def _eqdsk_float_block(values):
+    lines = []
+    for offset in range(0, len(values), 5):
+        lines.append("".join(f"{value:16.9E}" for value in values[offset : offset + 5]))
+    return lines
+
+
+def _write_stage2_edge_synthetic_eqdsk(path: Path) -> None:
+    nw = 5
+    nh = 5
+    rleft = 0.70
+    rdim = 0.40
+    zmid = 0.0
+    zdim = 0.40
+    raxis = 0.90
+    zaxis = 0.0
+    r_grid = [rleft + rdim * index / (nw - 1) for index in range(nw)]
+    z_grid = [zmid - zdim / 2.0 + zdim * index / (nh - 1) for index in range(nh)]
+    psirz = [
+        (r_value - raxis) ** 2 + (z_value - zaxis) ** 2
+        for z_value in z_grid
+        for r_value in r_grid
+    ]
+    boundary = [
+        (1.05, 0.0),
+        (0.90, 0.15),
+        (0.75, 0.0),
+        (0.90, -0.15),
+    ]
+    limiter = [(0.70, -0.20), (1.10, -0.20), (1.10, 0.20), (0.70, 0.20)]
+    scalars = [
+        rdim,
+        zdim,
+        raxis,
+        rleft,
+        zmid,
+        raxis,
+        zaxis,
+        0.0,
+        0.04,
+        0.35,
+        14265.0,
+        0.0,
+        0.0,
+        raxis,
+        0.0,
+        zaxis,
+        0.0,
+        0.04,
+        0.0,
+        0.0,
+    ]
+    profile_values = [0.315] * nw + [0.0] * (3 * nw) + psirz + [2.0] * nw
+    rz_values = []
+    for r_value, z_value in [*boundary, *limiter]:
+        rz_values.extend([r_value, z_value])
+    payload = [f"TEST EQDSK    0 {nw:3d} {nh:3d}"]
+    payload.extend(_eqdsk_float_block(scalars))
+    payload.extend(_eqdsk_float_block(profile_values))
+    payload.append(f"{len(boundary):5d}{len(limiter):5d}")
+    payload.extend(_eqdsk_float_block(rz_values))
+    path.write_text("\n".join(payload) + "\n", encoding="utf-8")
+
+
 def load_hardware_contracts_module():
     return importlib.import_module("banana_opt.hardware_contracts")
 
@@ -1751,6 +1815,94 @@ class Stage2IotaReportingTests(unittest.TestCase):
             artifact_mock.call_args.kwargs["config"].edge_band,
             (0.75, 1.0),
         )
+
+    def test_stage2_edge_iota_profile_artifact_builder_writes_validated_profile(self):
+        module = load_stage2_module()
+        edge_module = importlib.import_module("banana_opt.edge_delivered_iota")
+        bs, stage2_results, _, _ = BananaCurrentChainScalingTests._build_banana_partitions(
+            11000.0
+        )
+        stage2_results = {
+            **stage2_results,
+            "COIL_GROUPS": [
+                {"role": "tf", "start": 0, "count": 20},
+                {"role": "banana", "start": 20, "count": 10},
+                {"role": "proxy", "start": 30, "count": 0},
+                {"role": "vf", "start": 30, "count": 0},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            eqdsk_path = tmpdir_path / "synthetic.eqdsk"
+            lcfs_path = tmpdir_path / "lcfs.json"
+            _write_stage2_edge_synthetic_eqdsk(eqdsk_path)
+            lcfs_path.write_text(
+                json.dumps(
+                    {
+                        "R_m": [1.05, 0.90, 0.75, 0.90],
+                        "Z_m": [0.00, 0.15, 0.00, -0.15],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = edge_module.EdgeIotaConfig(
+                eqdsk_path=str(eqdsk_path),
+                lcfs_path=str(lcfs_path),
+                edge_band=(0.75, 1.0),
+                sample_count=2,
+                helicity_sign=1,
+                trace_turns=4,
+                steps_per_turn=8,
+                edge_delta_abs_iota_target_min=0.10,
+                coil_partition={
+                    "banana_source": "stage2_artifact_coil_groups",
+                    "tf_source": "eqdsk",
+                },
+            )
+            trace_results = [
+                edge_module.TraceIotaResult(
+                    iota=0.5,
+                    hits_rz_m=((1.0125, 0.0), (1.01, 0.01)),
+                ),
+                edge_module.TraceIotaResult(
+                    iota=0.5,
+                    hits_rz_m=((1.05, 0.0), (1.04, 0.01)),
+                ),
+                edge_module.TraceIotaResult(
+                    iota=0.30,
+                    hits_rz_m=((1.0125, 0.0), (1.01, 0.01)),
+                ),
+                edge_module.TraceIotaResult(
+                    iota=0.43,
+                    hits_rz_m=((1.0125, 0.0), (1.02, 0.01)),
+                ),
+                edge_module.TraceIotaResult(
+                    iota=0.28,
+                    hits_rz_m=((1.05, 0.0), (1.04, 0.01)),
+                ),
+                edge_module.TraceIotaResult(
+                    iota=0.41,
+                    hits_rz_m=((1.05, 0.0), (1.03, 0.01)),
+                ),
+            ]
+
+            with patch.object(edge_module, "trace_iota", side_effect=trace_results):
+                profile, profile_path = module.build_stage2_edge_iota_profile_artifact(
+                    config=config,
+                    stage2_bs_artifact_path=tmpdir_path / "biot_savart_opt.json",
+                    stage2_results_payload=stage2_results,
+                    stage2_biot_savart=bs,
+                )
+
+            payload = json.loads(Path(profile_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(profile.edge_iota_status, "pass")
+        self.assertEqual(payload["EDGE_IOTA_STATUS"], "pass")
+        self.assertEqual(payload["config"]["coil_partition"]["tf_source"], "eqdsk")
+        self.assertTrue(payload["tokamak_q_validation"]["passed"])
+        self.assertEqual(payload["eqdsk"]["q_edge"], 2.0)
+        self.assertAlmostEqual(payload["samples"][0]["delta_abs_iota"], 0.13)
 
     def test_stage2_iota_report_payload_reuses_bootability_schema_without_recovery_fields(
         self,
