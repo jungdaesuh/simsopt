@@ -466,6 +466,8 @@ def evaluate_single_stage_hardware_constraints(
     length_target=None,
     poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    poloidal_extent_floor_rad=None,
+    poloidal_extent_floor_weight=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -586,6 +588,11 @@ def evaluate_single_stage_hardware_constraints(
         "length_min_target": _optional_float(length_min_target),
         "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
         "poloidal_extent_threshold_rad": _optional_float(poloidal_extent_threshold_rad),
+        # Poloidal-extent FLOOR (soft objective, default off). Echoed for snapshot
+        # provenance; not added to the violation set because the floor is steered by
+        # the objective term, not gated as a hard hardware constraint.
+        "poloidal_extent_floor_rad": _optional_float(poloidal_extent_floor_rad),
+        "poloidal_extent_floor_weight": _optional_float(poloidal_extent_floor_weight),
         "tf_current_A": _optional_float(tf_current_A),
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),
@@ -709,6 +716,8 @@ def evaluate_single_stage_search_hardware_snapshot(
     length_target=None,
     poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    poloidal_extent_floor_rad=None,
+    poloidal_extent_floor_weight=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -931,6 +940,13 @@ def evaluate_single_stage_search_hardware_snapshot(
             "poloidal_extent_threshold_rad": _optional_float(
                 poloidal_extent_threshold_rad
             ),
+            # Poloidal-extent FLOOR (soft objective, default off): echoed for
+            # provenance; deliberately NOT in threshold_overrides above, so it does
+            # not become a hard search constraint (steered by the objective term).
+            "poloidal_extent_floor_rad": _optional_float(poloidal_extent_floor_rad),
+            "poloidal_extent_floor_weight": _optional_float(
+                poloidal_extent_floor_weight
+            ),
             "coil_width": _optional_float(coil_width),
             "width_min_threshold": _optional_float(width_min_threshold),
             "width_max_threshold": _optional_float(width_max_threshold),
@@ -1048,6 +1064,8 @@ def evaluate_single_stage_hardware_snapshot(
     length_target=None,
     poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    poloidal_extent_floor_rad=None,
+    poloidal_extent_floor_weight=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -1095,6 +1113,8 @@ def evaluate_single_stage_hardware_snapshot(
         length_target=length_target,
         poloidal_extent_rad=poloidal_extent_rad,
         poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        poloidal_extent_floor_rad=poloidal_extent_floor_rad,
+        poloidal_extent_floor_weight=poloidal_extent_floor_weight,
         tf_current_A=tf_current_A,
         tf_current_limit_A=tf_current_limit_A,
         banana_current_A=banana_current_A,
@@ -1544,6 +1564,7 @@ def evaluate_topology_gate(
     tmax,
     tol,
     survival_threshold,
+    topology_seed_mode="midplane_radial_sweep",
     score_topology_fn=_score_topology,
 ):
     assert_topology_field_allowed(
@@ -1563,6 +1584,7 @@ def evaluate_topology_gate(
         tol=tol,
         nphis=1,
         inset_fraction=0.05,
+        seed_mode=topology_seed_mode,
         field_policy="never",
         compute_transport_diagnostics=False,
         compute_invariant_torus_classification=False,

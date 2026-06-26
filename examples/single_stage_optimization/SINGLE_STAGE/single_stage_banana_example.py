@@ -83,6 +83,9 @@ from alm_utils import (
 )
 from plotting_utils import norm_field_plot, cross_section_plot
 from topology_scorer import (
+    SEED_MODE_CHOICES,
+    SEED_MODE_EXTENDED_SURFACE,
+    SEED_MODE_MIDPLANE,
     safe_score_topology as _safe_score_topology_impl,
     topology_transport_diagnostics_not_evaluated as _topology_transport_diagnostics_not_evaluated,
 )
@@ -399,6 +402,7 @@ from banana_opt.single_stage_geometry import (
     broken_topology_gate_status,
     collect_surface_run_metadata,
     disabled_topology_gate_status,
+    cross_sections_are_nested,
     evaluate_single_stage_hardware_constraints as _evaluate_single_stage_hardware_constraints,
     evaluate_single_stage_hardware_snapshot,
     evaluate_single_stage_search_hardware_snapshot,
@@ -488,6 +492,7 @@ from banana_opt.surface_mode_contracts import (
     PUBLISHED_MULTISURFACE,
     PUBLISHED_PRESET_CHOICES,
     PUBLISHED_PRESET_DEFAULT_V1,
+    PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE,
     SINGLE_SURFACE,
     SURFACE_MODE_CHOICES,
     SurfaceModeContract,
@@ -518,6 +523,17 @@ DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
 DEFAULT_CURVATURE_TRAVERSAL_BAND = 0.0
 DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
+SINGLE_STAGE_LANE_DEFAULT = "default"
+SINGLE_STAGE_LANE_EDGE_DELIVERED_IOTA = PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE
+SINGLE_STAGE_LANE_CHOICES = (
+    SINGLE_STAGE_LANE_DEFAULT,
+    SINGLE_STAGE_LANE_EDGE_DELIVERED_IOTA,
+)
+EDGE_DELIVERED_IOTA_LANE_PROFILE_WEIGHT = 1.0
+EDGE_DELIVERED_IOTA_LANE_PROFILE_SURFACE_WEIGHTS = (0.25, 0.5, 1.0, 4.0)
+EDGE_DELIVERED_IOTA_LANE_WINDING_SURFACE_FREE_MP = 1
+EDGE_DELIVERED_IOTA_LANE_WINDING_SURFACE_FREE_NT = 1
+DEFAULT_TOPOLOGY_SEED_EXTEND_DISTANCE_M = 0.05
 SEED_ARTIFACT_ROLE_STAGE2 = "stage2"
 SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME = "single_stage_resume"
 CURVATURE_P_NORM = 4
@@ -1538,6 +1554,154 @@ def parse_published_surface_fractions(raw_value):
     return tuple(float(token) for token in tokens)
 
 
+def parse_single_stage_iota_profile_surface_weights(raw_value):
+    if raw_value in {None, ""}:
+        return None
+    tokens = [token.strip() for token in str(raw_value).split(",") if token.strip()]
+    if not tokens:
+        raise ValueError(
+            "--single-stage-iota-profile-surface-weights must list at least one "
+            "positive weight"
+        )
+    weights = tuple(float(token) for token in tokens)
+    if any(weight <= 0.0 for weight in weights):
+        raise ValueError(
+            "--single-stage-iota-profile-surface-weights must contain only "
+            "positive weights"
+        )
+    return weights
+
+
+def format_single_stage_iota_profile_surface_weights(weights):
+    return ",".join(f"{float(weight):.12g}" for weight in weights)
+
+
+def edge_delivered_iota_lane_profile_surface_weights(surface_count):
+    count = int(surface_count)
+    if count <= 0:
+        raise ValueError("edge_delivered_iota_lane requires at least one surface.")
+    base_weights = EDGE_DELIVERED_IOTA_LANE_PROFILE_SURFACE_WEIGHTS
+    if count == len(base_weights):
+        return base_weights
+    if count == 1:
+        return (float(base_weights[-1]),)
+    base_positions = np.linspace(0.0, 1.0, len(base_weights))
+    target_positions = np.linspace(0.0, 1.0, count)
+    interpolated_weights = np.interp(
+        target_positions,
+        base_positions,
+        base_weights,
+    )
+    return tuple(float(value) for value in interpolated_weights)
+
+
+def _cli_option_supplied(argv, option_strings):
+    supplied = set()
+    for token in argv:
+        for option in option_strings:
+            if token == option or token.startswith(option + "="):
+                supplied.add(option)
+    return bool(supplied)
+
+
+def _config_source_supplied(argv, environment, *, options, env_names):
+    return _cli_option_supplied(argv, options) or any(
+        name in environment for name in env_names
+    )
+
+
+def apply_single_stage_lane_preset(args, *, argv=None, environment=None):
+    lane = getattr(args, "single_stage_lane", SINGLE_STAGE_LANE_DEFAULT)
+    if lane == SINGLE_STAGE_LANE_DEFAULT:
+        return args
+    if lane != SINGLE_STAGE_LANE_EDGE_DELIVERED_IOTA:
+        raise ValueError(
+            f"Unsupported single-stage lane {lane!r}; expected one of "
+            f"{SINGLE_STAGE_LANE_CHOICES!r}."
+        )
+    resolved_argv = list(sys.argv[1:] if argv is None else argv)
+    resolved_environment = os.environ if environment is None else environment
+
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--surface-mode",),
+        env_names=("SURFACE_MODE",),
+    ):
+        args.surface_mode = PUBLISHED_MULTISURFACE
+    surface_stack_supplied = _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--published-surface-preset", "--published-surface-fractions"),
+        env_names=("PUBLISHED_SURFACE_PRESET", "PUBLISHED_SURFACE_FRACTIONS"),
+    )
+    if not surface_stack_supplied:
+        args.published_surface_preset = PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE
+        args.published_surface_fractions = None
+    lane_surface_fractions = parse_published_surface_fractions(
+        getattr(args, "published_surface_fractions", None)
+    )
+    lane_surface_count = (
+        len(EDGE_DELIVERED_IOTA_LANE_PROFILE_SURFACE_WEIGHTS)
+        if lane_surface_fractions is None
+        else len(lane_surface_fractions)
+    )
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--single-stage-iota-profile-weight",),
+        env_names=("IOTA_PROFILE_WEIGHT",),
+    ):
+        args.iota_profile_weight = EDGE_DELIVERED_IOTA_LANE_PROFILE_WEIGHT
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--single-stage-iota-profile-surface-weights",),
+        env_names=("IOTA_PROFILE_SURFACE_WEIGHTS",),
+    ):
+        args.iota_profile_surface_weights = (
+            format_single_stage_iota_profile_surface_weights(
+                edge_delivered_iota_lane_profile_surface_weights(lane_surface_count)
+            )
+        )
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--topology-seed-mode",),
+        env_names=("TOPOLOGY_SEED_MODE",),
+    ):
+        args.topology_seed_mode = SEED_MODE_EXTENDED_SURFACE
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--winding-surface-free-mpol",),
+        env_names=("WINDING_SURFACE_FREE_MPOL",),
+    ):
+        args.winding_surface_free_mpol = EDGE_DELIVERED_IOTA_LANE_WINDING_SURFACE_FREE_MP
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--winding-surface-free-ntor",),
+        env_names=("WINDING_SURFACE_FREE_NTOR",),
+    ):
+        args.winding_surface_free_ntor = EDGE_DELIVERED_IOTA_LANE_WINDING_SURFACE_FREE_NT
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--winding-surface-free-r0",),
+        env_names=("WINDING_SURFACE_FREE_R0",),
+    ):
+        args.winding_surface_free_r0 = True
+    if not _config_source_supplied(
+        resolved_argv,
+        resolved_environment,
+        options=("--winding-surface-free-minor",),
+        env_names=("WINDING_SURFACE_FREE_MINOR",),
+    ):
+        args.winding_surface_free_minor = True
+    return args
+
+
 def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
     should_warn = (
         bool(warn_on_legacy_mapping)
@@ -2119,6 +2283,18 @@ def parse_args():
     parser.add_argument("--mpol", type=int, default=int(os.environ.get("MPOL", "8")))
     parser.add_argument("--ntor", type=int, default=int(os.environ.get("NTOR", "6")))
     parser.add_argument(
+        "--single-stage-lane",
+        choices=SINGLE_STAGE_LANE_CHOICES,
+        default=os.environ.get("SINGLE_STAGE_LANE", SINGLE_STAGE_LANE_DEFAULT),
+        help=(
+            "Named single-stage preset. 'default' preserves existing CLI behavior. "
+            "'edge_delivered_iota_lane' enables the edge-weighted published "
+            "multisurface stack, iota-profile weights, edge-started topology "
+            "seeds, and low-order winding-surface search DOFs unless explicitly "
+            "overridden."
+        ),
+    )
+    parser.add_argument(
         "--single-stage-goal-mode",
         choices=["target", "frontier"],
         default=os.environ.get("SINGLE_STAGE_GOAL_MODE", "target"),
@@ -2536,6 +2712,21 @@ def parse_args():
             "instead of collapsing iota->0 along the optimizer gradient direction -- the fix that "
             "unblocks multisurface optimization (every trial step was otherwise rejected for "
             "non-nesting)."
+        ),
+    )
+    parser.add_argument(
+        "--published-surface-build-mode",
+        choices=["ls", "exact"],
+        default="ls",
+        help=(
+            "Solver for the INITIAL published_multisurface family build (distinct from "
+            "--multisurface-resolve-mode, which is the per-eval re-solve). 'ls' (default) builds "
+            "the family with the BoozerLS volume-contraction continuation, byte-for-byte legacy. "
+            "'exact' builds each shell with exact-Newton (constraint_weight=None) seeded from the "
+            "stage-2 LCFS / previous shell -- root-finds the Boozer residual instead of minimizing "
+            "the penalty, so it does not slide iota->0 when the 'ls' continuation collapses on a "
+            "chaotic-edge seed (e.g. slid_clean at vol 0.045). Pair with "
+            "--multisurface-resolve-mode exact_twin for an end-to-end exact pipeline."
         ),
     )
     parser.add_argument(
@@ -3528,6 +3719,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-iota-profile-surface-weights",
+        dest="iota_profile_surface_weights",
+        default=os.environ.get("IOTA_PROFILE_SURFACE_WEIGHTS"),
+        help=(
+            "Optional comma-separated per-surface weights for the iota-PROFILE "
+            "shortfall term. The edge_delivered_iota_lane preset supplies "
+            "outer-heavy weights; default None keeps the existing equal-weight "
+            "profile objective behavior."
+        ),
+    )
+    parser.add_argument(
         "--single-stage-surface-nesting-weight",
         dest="surface_nesting_weight",
         type=float,
@@ -4213,6 +4415,30 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--topology-seed-mode",
+        choices=SEED_MODE_CHOICES,
+        default=os.environ.get("TOPOLOGY_SEED_MODE", SEED_MODE_MIDPLANE),
+        help=(
+            "Seed placement for topology scorer/gates. The default midplane "
+            "radial sweep preserves existing behavior; edge_delivered_iota_lane "
+            "selects the extended-surface radial sweep unless overridden."
+        ),
+    )
+    parser.add_argument(
+        "--topology-seed-extend-distance",
+        type=float,
+        default=float(
+            os.environ.get(
+                "TOPOLOGY_SEED_EXTEND_DISTANCE",
+                str(DEFAULT_TOPOLOGY_SEED_EXTEND_DISTANCE_M),
+            )
+        ),
+        help=(
+            "Outward normal extension distance used by the extended-surface "
+            "topology seed mode."
+        ),
+    )
+    parser.add_argument(
         "--residue-objective-weight",
         type=float,
         default=float(
@@ -4516,6 +4742,29 @@ def parse_args():
         help="RNG seed for basin-hopping (-1 = random). Set for reproducibility.",
     )
     args = parser.parse_args()
+    apply_single_stage_lane_preset(args)
+    if args.single_stage_lane == SINGLE_STAGE_LANE_EDGE_DELIVERED_IOTA:
+        if args.surface_mode != PUBLISHED_MULTISURFACE:
+            parser.error(
+                "--single-stage-lane=edge_delivered_iota_lane requires "
+                "--surface-mode=published_multisurface."
+            )
+        if (
+            args.published_surface_fractions is None
+            and args.published_surface_preset
+            != PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE
+        ):
+            parser.error(
+                "--single-stage-lane=edge_delivered_iota_lane requires "
+                "--published-surface-preset=edge_delivered_iota_lane unless "
+                "--published-surface-fractions is explicitly supplied."
+            )
+    parse_single_stage_iota_profile_surface_weights(args.iota_profile_surface_weights)
+    if (
+        not np.isfinite(args.topology_seed_extend_distance)
+        or args.topology_seed_extend_distance <= 0.0
+    ):
+        parser.error("--topology-seed-extend-distance must be positive and finite.")
     if args.iota_target is None:
         args.iota_target = (
             DEFAULT_FRONTIER_SINGLE_STAGE_IOTA_TARGET
@@ -4991,6 +5240,20 @@ def _require_published_volume_order(surface_data):
         )
 
 
+def _require_published_surface_nesting(surface_data):
+    for inner_entry, outer_entry in zip(surface_data[:-1], surface_data[1:]):
+        nested, bad_phis = cross_sections_are_nested(
+            inner_entry["boozer_surface"].surface,
+            outer_entry["boozer_surface"].surface,
+        )
+        if not nested:
+            raise RuntimeError(
+                "published_multisurface solved surfaces must be strictly nested "
+                f"inner-to-outer; {inner_entry['name']} is not nested inside "
+                f"{outer_entry['name']} at phi={bad_phis}."
+            )
+
+
 def _require_published_surface_data_postconditions(surface_data):
     actual_names = [entry["name"] for entry in surface_data]
     expected_names = list(_published_surface_names(len(surface_data)))
@@ -5001,6 +5264,15 @@ def _require_published_surface_data_postconditions(surface_data):
         )
     _require_published_volume_order(surface_data)
     _require_published_G_consistency(surface_data)
+    # The least-squares family is a throwaway warm-start when MULTISURFACE_RESOLVE_MODE == "exact_twin":
+    # the exact-Newton handoff re-solves each shell to the nearest Boozer surface and re-validates the
+    # resulting twins for nesting at the twin stage. The LS solve and the exact-Newton solve converge to
+    # different surfaces, so a non-nested LS family can re-solve to strictly-nested twins; gating the LS
+    # family on nesting here would reject a valid exact_twin config before the handoff that fixes it.
+    # Defer the nesting check to the twin stage in exact_twin mode; ls mode uses the LS family per-eval,
+    # so it must nest here. (Names / volume-order / G validate the LS structure in both modes.)
+    if globals().get("MULTISURFACE_RESOLVE_MODE", "ls") != "exact_twin":
+        _require_published_surface_nesting(surface_data)
 
 
 def _required_published_seed_iota_from_results(stage2_results):
@@ -5235,12 +5507,22 @@ def initialize_published_surface_data_from_stage2_seed(
     # min_surfaces is pinned to the full requested stack so build_boozer_surface_family
     # raises (all-or-nothing) if any shell fails.
     effective_min_surfaces = min_surfaces if allow_truncation else len(surface_configs)
+    # Opt-in exact-Newton family build: constraint_weight=None routes
+    # attempt_initialize_boozer_surface to solve_residual_equation_exactly_newton
+    # (root-find) instead of the BoozerLS penalty min, which slides iota->0 and
+    # leaves the stack non-nested on a chaotic-edge seed (slid_clean @ vol 0.045,
+    # cert 54992710). Default 'ls' preserves the legacy continuation byte-for-byte.
+    family_constraint_weight = (
+        None
+        if globals().get("PUBLISHED_SURFACE_BUILD_MODE", "ls") == "exact"
+        else constraint_weight
+    )
     ordered_surface_data, provenance = build_boozer_surface_family(
         ordered_configs,
         mpol=mpol,
         ntor=ntor,
         bs=bs,
-        constraint_weight=constraint_weight,
+        constraint_weight=family_constraint_weight,
         boozer_I=boozer_I,
         nfp=nfp,
         outer_seed=outer_seed,
@@ -5277,13 +5559,14 @@ def initialize_published_surface_data_from_stage2_seed(
         )
         # Re-validate the re-solved twins. The postconditions above ran on the least-squares
         # family BEFORE the in-place exact-twin handoff; exact Newton converges to the NEAREST
-        # Boozer surface, so a twin's solved volume/G can drift off the validated LS values. Re-run
-        # the name-agnostic stack invariants on the twin-replaced stack so a volume-crossed (non-
-        # nested) or shared-G-inconsistent stack fails loud here, instead of silently seeding the
-        # optimizer warm-start with an invalid family. (Names are unchanged by the handoff, so the
-        # inner0-based name postcondition does not need re-running.)
+        # Boozer surface, so a twin's solved volume, geometry, or G can drift off the validated LS
+        # values. Re-run the name-agnostic stack invariants on the twin-replaced stack so a volume-
+        # crossed, non-nested, or shared-G-inconsistent stack fails loud here, instead of silently
+        # seeding the optimizer warm-start with an invalid family. (Names are unchanged by the
+        # handoff, so the inner0-based name postcondition does not need re-running.)
         _require_published_volume_order(ordered_surface_data)
         _require_published_G_consistency(ordered_surface_data)
+        _require_published_surface_nesting(ordered_surface_data)
     return ordered_surface_data, []
 
 
@@ -5723,7 +6006,15 @@ def update_single_stage_alm_smoothing_from_history(history_entry):
     )
 
 
-def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
+def evaluate_topology_gate(
+    surface,
+    bfield,
+    nfieldlines,
+    tmax,
+    tol,
+    survival_threshold,
+    topology_seed_mode=SEED_MODE_MIDPLANE,
+):
     return _evaluate_topology_gate_impl(
         surface,
         bfield,
@@ -5731,6 +6022,7 @@ def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_thr
         tmax,
         tol,
         survival_threshold,
+        topology_seed_mode=topology_seed_mode,
     )
 
 
@@ -5876,7 +6168,13 @@ def _format_topology_error(error):
 
 
 def safe_evaluate_topology_gate(
-    surface, bfield, nfieldlines, tmax, tol, survival_threshold
+    surface,
+    bfield,
+    nfieldlines,
+    tmax,
+    tol,
+    survival_threshold,
+    topology_seed_mode=SEED_MODE_MIDPLANE,
 ):
     try:
         return evaluate_topology_gate(
@@ -5886,6 +6184,7 @@ def safe_evaluate_topology_gate(
             tmax,
             tol,
             survival_threshold,
+            topology_seed_mode=topology_seed_mode,
         )
     except Exception as error:
         return broken_topology_gate_status(
@@ -6445,6 +6744,8 @@ def maybe_record_topology_score(
         tmax=TOPOLOGY_SCORER_TMAX,
         wba_min_returns=TOPOLOGY_SCORER_MIN_RETURNS,
         field_policy=TOPOLOGY_SCORER_FIELD_POLICY,
+        seed_mode=TOPOLOGY_SEED_MODE,
+        seed_extend_distance=TOPOLOGY_SEED_EXTEND_DISTANCE,
         **confinement_surrogate_kwargs(),
     )
     checkpoint_objective_total = (
@@ -7355,6 +7656,7 @@ class RunIdentityConfig:
     alm_boozer_threshold: float | None
     alm_iota_penalty_threshold: float | None
     alm_length_penalty_threshold: float | None
+    single_stage_lane: str | None
     single_stage_goal_mode: str | None
     frontier_kam_min: float | None
     vol_target: float
@@ -7476,6 +7778,7 @@ class RunIdentityConfig:
     iota_profile_weight: float = 0.0
     volume_profile_weight: float = 0.0
     iota_profile_slope_target: float = 0.0
+    iota_profile_surface_weights: tuple[float, ...] | None = None
     surface_nesting_weight: float = 0.0
     surface_nesting_clearance: float = 0.0
     residue_objective_weight: float = 0.0
@@ -7488,6 +7791,8 @@ class RunIdentityConfig:
     residue_promotion_gate_samples: int = DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES
     residue_promotion_gate_radius: float = DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS
     residue_promotion_gate_seed: int = DEFAULT_RESIDUE_PROMOTION_GATE_SEED
+    topology_seed_mode: str = SEED_MODE_MIDPLANE
+    topology_seed_extend_distance: float = DEFAULT_TOPOLOGY_SEED_EXTEND_DISTANCE_M
 
 
 @dataclass(frozen=True)
@@ -8043,6 +8348,12 @@ def make_run_identity_config(
         alm_length_penalty_threshold=getattr(
             args, "alm_length_penalty_threshold", None
         ),
+        single_stage_lane=(
+            None
+            if getattr(args, "single_stage_lane", SINGLE_STAGE_LANE_DEFAULT)
+            == SINGLE_STAGE_LANE_DEFAULT
+            else str(args.single_stage_lane)
+        ),
         single_stage_goal_mode=(
             # Preserve legacy run fingerprints for explicit/implicit target-mode equivalence.
             args.single_stage_goal_mode
@@ -8333,6 +8644,9 @@ def make_run_identity_config(
         iota_profile_slope_target=float(
             getattr(args, "iota_profile_slope", 0.0)
         ),
+        iota_profile_surface_weights=parse_single_stage_iota_profile_surface_weights(
+            getattr(args, "iota_profile_surface_weights", None)
+        ),
         surface_nesting_weight=float(getattr(args, "surface_nesting_weight", 0.0)),
         surface_nesting_clearance=float(
             getattr(args, "surface_nesting_clearance", 0.0)
@@ -8386,12 +8700,40 @@ def make_run_identity_config(
                 DEFAULT_RESIDUE_PROMOTION_GATE_SEED,
             )
         ),
+        topology_seed_mode=str(getattr(args, "topology_seed_mode", SEED_MODE_MIDPLANE)),
+        topology_seed_extend_distance=float(
+            getattr(
+                args,
+                "topology_seed_extend_distance",
+                DEFAULT_TOPOLOGY_SEED_EXTEND_DISTANCE_M,
+            )
+        ),
     )
 
 
 def build_run_identity_config(config):
     values = []
     for field, value in zip(fields(config), astuple(config)):
+        if (
+            field.name == "single_stage_lane"
+            and value in {None, SINGLE_STAGE_LANE_DEFAULT}
+        ):
+            continue
+        if (
+            field.name == "iota_profile_surface_weights"
+            and value is None
+        ):
+            continue
+        if (
+            field.name == "topology_seed_mode"
+            and value == SEED_MODE_MIDPLANE
+        ):
+            continue
+        if (
+            field.name == "topology_seed_extend_distance"
+            and config.topology_seed_mode == SEED_MODE_MIDPLANE
+        ):
+            continue
         if (
             field.name == "single_stage_banana_current_coordinate_scaling"
             and value == BANANA_CURRENT_COORDINATE_SCALING_NONE
@@ -8790,6 +9132,7 @@ def evaluate_search_topology_gate(
         TOPOLOGY_GATE_TMAX,
         TOPOLOGY_GATE_TOL,
         TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+        topology_seed_mode=TOPOLOGY_SEED_MODE,
     )
 
 
@@ -9606,6 +9949,7 @@ def build_single_stage_objective_bundle(
     IOTA_PROFILE_WEIGHT=0.0,
     VOLUME_PROFILE_WEIGHT=0.0,
     IOTA_PROFILE_SLOPE_TARGET=0.0,
+    IOTA_PROFILE_SURFACE_WEIGHTS=None,
     RATIONAL_IOTA_AVOIDANCE_WEIGHT=0.0,
     RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR=(
         RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
@@ -9968,6 +10312,7 @@ def build_single_stage_objective_bundle(
             [float(entry["seed_label"]) for entry in surface_data],
             iota_target,
             IOTA_PROFILE_SLOPE_TARGET,
+            weights=IOTA_PROFILE_SURFACE_WEIGHTS,
         )
     else:
         JIotaProfile = None
@@ -16173,6 +16518,8 @@ TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
 TOPOLOGY_SCORER_MIN_RETURNS = 256
 TOPOLOGY_SCORER_FIELD_POLICY = "auto"
+TOPOLOGY_SEED_MODE = SEED_MODE_MIDPLANE
+TOPOLOGY_SEED_EXTEND_DISTANCE = DEFAULT_TOPOLOGY_SEED_EXTEND_DISTANCE_M
 CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
 FRONTIER_INVARIANT_TORUS_MIN = _default_frontier_invariant_torus_min_impl()
 FRONTIER_KAM_MIN = FRONTIER_INVARIANT_TORUS_MIN
@@ -16489,6 +16836,8 @@ if __name__ == "__main__":
     TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
     TOPOLOGY_SCORER_MIN_RETURNS = args.topology_scorer_min_returns
     TOPOLOGY_SCORER_FIELD_POLICY = args.topology_scorer_field_policy
+    TOPOLOGY_SEED_MODE = args.topology_seed_mode
+    TOPOLOGY_SEED_EXTEND_DISTANCE = args.topology_seed_extend_distance
     CONFINEMENT_OBJECTIVE_WEIGHT = args.confinement_objective_weight
     FRONTIER_INVARIANT_TORUS_MIN = args.frontier_invariant_torus_min
     FRONTIER_KAM_MIN = args.frontier_kam_min
@@ -16590,6 +16939,7 @@ if __name__ == "__main__":
     args.curvature_threshold = float(SINGLE_STAGE_EFFECTIVE_CURVATURE_THRESHOLD)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     MULTISURFACE_RESOLVE_MODE = args.multisurface_resolve_mode
+    PUBLISHED_SURFACE_BUILD_MODE = args.published_surface_build_mode
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
     TOPOLOGY_GATE_TMAX = args.topology_gate_tmax
@@ -17356,6 +17706,9 @@ if __name__ == "__main__":
     IOTA_PROFILE_WEIGHT = float(args.iota_profile_weight)
     VOLUME_PROFILE_WEIGHT = float(args.volume_profile_weight)
     IOTA_PROFILE_SLOPE_TARGET = float(args.iota_profile_slope)
+    IOTA_PROFILE_SURFACE_WEIGHTS = parse_single_stage_iota_profile_surface_weights(
+        args.iota_profile_surface_weights
+    )
     # Soft surface-nesting barrier for weighted-sum (penalty) mode (opt-in, default
     # weight 0 -> the barrier is never folded, weighted-sum objective byte-identical
     # with prior runs). Inert unless BOTH weight and clearance are positive.
@@ -17537,6 +17890,7 @@ if __name__ == "__main__":
             IOTA_PROFILE_WEIGHT=IOTA_PROFILE_WEIGHT,
             VOLUME_PROFILE_WEIGHT=VOLUME_PROFILE_WEIGHT,
             IOTA_PROFILE_SLOPE_TARGET=IOTA_PROFILE_SLOPE_TARGET,
+            IOTA_PROFILE_SURFACE_WEIGHTS=IOTA_PROFILE_SURFACE_WEIGHTS,
             RATIONAL_IOTA_AVOIDANCE_WEIGHT=RATIONAL_IOTA_AVOIDANCE_WEIGHT,
             RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR=(
                 RATIONAL_IOTA_AVOIDANCE_MAX_DENOMINATOR
@@ -19168,6 +19522,12 @@ if __name__ == "__main__":
         "NUM_SURFACES": effective_num_surfaces,
         "INNER_SURFACE_RATIO": effective_inner_surface_ratio,
         **surface_mode_metadata,
+        "SINGLE_STAGE_LANE": args.single_stage_lane,
+        "SINGLE_STAGE_IOTA_PROFILE_SURFACE_WEIGHTS": (
+            None
+            if IOTA_PROFILE_SURFACE_WEIGHTS is None
+            else [float(value) for value in IOTA_PROFILE_SURFACE_WEIGHTS]
+        ),
         "SURFACE_GAP_THRESHOLD": SURFACE_GAP_THRESHOLD,
         "MULTISURFACE_RAMP_ITERATIONS": MULTISURFACE_RAMP_ITERATIONS,
         "INNER_SURFACE_INITIAL_WEIGHT": INNER_SURFACE_INITIAL_WEIGHT,
@@ -19552,6 +19912,9 @@ if __name__ == "__main__":
         "TOPOLOGY_SCORER_NFIELDLINES": TOPOLOGY_SCORER_NFIELDLINES,
         "TOPOLOGY_SCORER_TMAX": TOPOLOGY_SCORER_TMAX,
         "TOPOLOGY_SCORER_MIN_RETURNS": TOPOLOGY_SCORER_MIN_RETURNS,
+        "TOPOLOGY_SCORER_FIELD_POLICY": TOPOLOGY_SCORER_FIELD_POLICY,
+        "TOPOLOGY_SEED_MODE": TOPOLOGY_SEED_MODE,
+        "TOPOLOGY_SEED_EXTEND_DISTANCE": TOPOLOGY_SEED_EXTEND_DISTANCE,
         "CONFINEMENT_OBJECTIVE_WEIGHT": CONFINEMENT_OBJECTIVE_WEIGHT,
         "CONFINEMENT_SURROGATE_WORST_K": CONFINEMENT_SURROGATE_WORST_K,
         "CONFINEMENT_SURROGATE_EARLY_THRESHOLD": CONFINEMENT_SURROGATE_EARLY_THRESHOLD,

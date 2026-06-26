@@ -73,6 +73,25 @@ from banana_opt.coil_order_upgrade import (
     realized_cws_winding_radii,
     upgrade_loaded_seed_biot_savart_order,
 )
+from banana_opt.coil_groups import (
+    COIL_GROUP_ROLE_BANANA,
+    CoilGroupsManifest,
+)
+from banana_opt.edge_delivered_iota import (
+    EDGE_HELICITY_STATUS_UNKNOWN,
+    EDGE_IOTA_MODE_OFF,
+    EDGE_IOTA_MODE_REPORT,
+    EDGE_IOTA_MODE_SOFT,
+    EdgeIotaConfig,
+    edge_iota_config_hash,
+    edge_iota_report_payload,
+    evaluate_edge_iota_profile,
+    load_lcfs_boundary,
+    read_eqdsk,
+    validate_edge_iota_config,
+    validate_tokamak_iota_against_q,
+    write_profile_json,
+)
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import (
     run_basin_hopping,
@@ -855,6 +874,80 @@ def validate_stage2_iota_cli_args(args) -> None:
         )
 
 
+def parse_stage2_edge_iota_radial_band(value: str) -> tuple[float, float]:
+    parts = str(value).split(",")
+    if len(parts) != 2:
+        raise ValueError("--stage2-edge-iota-radial-band must be 'lower,upper'.")
+    return (float(parts[0]), float(parts[1]))
+
+
+def parse_stage2_edge_iota_helicity(value: str) -> int:
+    normalized = str(value).strip().lower()
+    if normalized in {"+1", "1", "co", "co-helicity", "co_helicity"}:
+        return 1
+    if normalized in {"-1", "counter", "counter-helicity", "counter_helicity"}:
+        return -1
+    raise ValueError("--stage2-edge-iota-helicity must be +1/co or -1/counter.")
+
+
+def build_stage2_edge_iota_config(args) -> EdgeIotaConfig:
+    helicity_value = getattr(args, "stage2_edge_iota_helicity", None)
+    helicity_sign = (
+        1
+        if helicity_value in {None, ""}
+        else parse_stage2_edge_iota_helicity(helicity_value)
+    )
+    return EdgeIotaConfig(
+        eqdsk_path=getattr(args, "stage2_edge_iota_eqdsk", None),
+        lcfs_path=getattr(args, "stage2_edge_iota_lcfs", None),
+        edge_band=parse_stage2_edge_iota_radial_band(
+            getattr(args, "stage2_edge_iota_radial_band", "0.75,1.0")
+        ),
+        sample_count=getattr(args, "stage2_edge_iota_sample_count", 6),
+        helicity_sign=helicity_sign,
+        trace_turns=getattr(args, "stage2_edge_iota_trace_turns", 80),
+        steps_per_turn=getattr(args, "stage2_edge_iota_steps_per_turn", 240),
+        q_validation_rel_tol=getattr(
+            args,
+            "stage2_edge_iota_q_validation_rel_tol",
+            0.002,
+        ),
+        edge_delta_abs_iota_target_min=getattr(
+            args,
+            "stage2_edge_iota_target_min",
+            0.10,
+        ),
+        edge_survival_fraction_min=getattr(
+            args,
+            "stage2_edge_iota_survival_fraction_min",
+            1.0,
+        ),
+        edge_width_max=getattr(args, "stage2_edge_iota_width_max", None),
+        coil_partition={
+            "banana_source": "stage2_artifact_coil_groups",
+            "tf_source": "eqdsk",
+        },
+    )
+
+
+def validate_stage2_edge_iota_cli_args(args) -> None:
+    mode = getattr(args, "stage2_edge_iota_mode", EDGE_IOTA_MODE_OFF)
+    if mode == EDGE_IOTA_MODE_OFF:
+        return
+    helicity_value = getattr(args, "stage2_edge_iota_helicity", None)
+    if helicity_value in {None, ""}:
+        raise ValueError(
+            f"--stage2-edge-iota-mode={mode} requires --stage2-edge-iota-helicity."
+        )
+    config = build_stage2_edge_iota_config(args)
+    validate_edge_iota_config(config, mode)
+    if mode == EDGE_IOTA_MODE_SOFT:
+        raise ValueError(
+            "--stage2-edge-iota-mode=soft is not implemented yet; use report "
+            "mode until the non-gradient routing story is explicit."
+        )
+
+
 def validate_s_hel_objective_cli_args(args) -> None:
     if not getattr(args, "enable_s_hel_objective", False):
         return
@@ -1544,6 +1637,82 @@ def parse_args():
         type=int,
         default=int(os.environ.get("STAGE2_IOTA_NTOR", str(DEFAULT_STAGE2_IOTA_NTOR))),
         help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-mode",
+        choices=(EDGE_IOTA_MODE_OFF, EDGE_IOTA_MODE_REPORT, EDGE_IOTA_MODE_SOFT),
+        default=os.environ.get("STAGE2_EDGE_IOTA_MODE", EDGE_IOTA_MODE_OFF),
+        help=(
+            "Post-run fixed-boundary edge-delivered-iota oracle. 'off' is "
+            "behavior-neutral. 'report' writes EDGE_* summary fields and a "
+            "profile JSON. 'soft' is reserved for future non-gradient routing."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-eqdsk",
+        default=os.environ.get("STAGE2_EDGE_IOTA_EQDSK"),
+        help="Explicit G-EQDSK path for the edge-delivered-iota report oracle.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-lcfs",
+        default=os.environ.get("STAGE2_EDGE_IOTA_LCFS"),
+        help="Explicit LCFS JSON path for edge-band normalization.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-radial-band",
+        default=os.environ.get("STAGE2_EDGE_IOTA_RADIAL_BAND", "0.75,1.0"),
+        help="Comma-separated r/a edge band sampled by the edge-iota report.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-sample-count",
+        type=int,
+        default=int(os.environ.get("STAGE2_EDGE_IOTA_SAMPLE_COUNT", "6")),
+        help="Number of radial samples in --stage2-edge-iota-radial-band.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-target-min",
+        type=float,
+        default=float(os.environ.get("STAGE2_EDGE_IOTA_TARGET_MIN", "0.10")),
+        help="Promotion-facing minimum p10 edge |iota| magnitude lift.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-helicity",
+        default=os.environ.get("STAGE2_EDGE_IOTA_HELICITY"),
+        help="Explicit co-helicity sign: +1/co or -1/counter.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-trace-turns",
+        type=int,
+        default=int(os.environ.get("STAGE2_EDGE_IOTA_TRACE_TURNS", "80")),
+        help="Toroidal turns for tokamak and hybrid edge-iota traces.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-steps-per-turn",
+        type=int,
+        default=int(os.environ.get("STAGE2_EDGE_IOTA_STEPS_PER_TURN", "240")),
+        help="Field-line integration samples per toroidal turn.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-q-validation-rel-tol",
+        type=float,
+        default=float(os.environ.get("STAGE2_EDGE_IOTA_Q_VALIDATION_REL_TOL", "0.002")),
+        help="Relative tolerance for tokamak-only trace validation against 1/q.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-survival-fraction-min",
+        type=float,
+        default=float(os.environ.get("STAGE2_EDGE_IOTA_SURVIVAL_FRACTION_MIN", "1.0")),
+        help="Required surviving fraction across the configured edge band.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-width-max",
+        type=float,
+        default=(
+            None
+            if os.environ.get("STAGE2_EDGE_IOTA_WIDTH_MAX") is None
+            else float(os.environ["STAGE2_EDGE_IOTA_WIDTH_MAX"])
+        ),
+        help="Optional maximum edge width/chaos indicator for a passing report.",
     )
     parser.add_argument(
         "--enable-topology-bridge-diagnostics",
@@ -2260,6 +2429,7 @@ def parse_args():
         validate_banana_current_cli_args(args)
         validate_stage2_tf_current_cli_args(args)
         validate_stage2_iota_cli_args(args)
+        validate_stage2_edge_iota_cli_args(args)
         validate_s_hel_objective_cli_args(args)
         validate_finite_build_cli_args(args)
         validate_stage2_vessel_keepout_cli_args(args)
@@ -2733,6 +2903,168 @@ def build_stage2_iota_report_payload(
     return payload
 
 
+def _stage2_edge_iota_empty_payload() -> dict[str, object]:
+    return {
+        "EDGE_IOTA_STATUS": None,
+        "EDGE_IOTA_PROFILE_JSON": None,
+        "EDGE_DELTA_ABS_IOTA_MIN": None,
+        "EDGE_DELTA_ABS_IOTA_P10": None,
+        "EDGE_DELTA_ABS_IOTA_MEAN": None,
+        "EDGE_DELTA_SIGNED_IOTA_MIN": None,
+        "EDGE_DELTA_SIGNED_IOTA_MEAN": None,
+        "EDGE_SURFACE_SURVIVAL_FRACTION": None,
+        "EDGE_WIDTH_MAX": None,
+        "EDGE_HELICITY_STATUS": EDGE_HELICITY_STATUS_UNKNOWN,
+    }
+
+
+def _stage2_edge_iota_config_payload(
+    *,
+    args,
+    mode: str,
+    config: EdgeIotaConfig,
+) -> dict[str, object]:
+    explicit_helicity = getattr(args, "stage2_edge_iota_helicity", None)
+    return {
+        "EDGE_IOTA_MODE": mode,
+        "EDGE_IOTA_EQDSK": config.eqdsk_path,
+        "EDGE_IOTA_LCFS": config.lcfs_path,
+        "EDGE_IOTA_RADIAL_BAND": [
+            float(config.edge_band[0]),
+            float(config.edge_band[1]),
+        ],
+        "EDGE_IOTA_TARGET_MIN": float(config.edge_delta_abs_iota_target_min),
+        "EDGE_IOTA_HELICITY": (
+            None
+            if explicit_helicity in {None, ""}
+            else int(config.helicity_sign)
+        ),
+        "EDGE_IOTA_CONFIG_HASH": (
+            None if mode == EDGE_IOTA_MODE_OFF else edge_iota_config_hash(config)
+        ),
+    }
+
+
+def _biot_savart_cylindrical_field(biot_savart):
+    def field(R_m: float, phi_rad: float, Z_m: float) -> tuple[float, float, float]:
+        cos_phi = np.cos(float(phi_rad))
+        sin_phi = np.sin(float(phi_rad))
+        point = np.ascontiguousarray(
+            [[float(R_m) * cos_phi, float(R_m) * sin_phi, float(Z_m)]],
+            dtype=float,
+        )
+        biot_savart.set_points(point)
+        Bx, By, Bz = biot_savart.B()[0]
+        return (
+            float(Bx * cos_phi + By * sin_phi),
+            float(-Bx * sin_phi + By * cos_phi),
+            float(Bz),
+        )
+
+    return field
+
+
+def _sum_cylindrical_fields(base_field, added_field):
+    def field(R_m: float, phi_rad: float, Z_m: float) -> tuple[float, float, float]:
+        base_r, base_phi, base_z = base_field(R_m, phi_rad, Z_m)
+        added_r, added_phi, added_z = added_field(R_m, phi_rad, Z_m)
+        return (base_r + added_r, base_phi + added_phi, base_z + added_z)
+
+    return field
+
+
+def _stage2_edge_iota_banana_biot_savart(stage2_biot_savart, stage2_results_payload):
+    manifest = CoilGroupsManifest.from_json_payload(
+        stage2_results_payload["COIL_GROUPS"]
+    )
+    banana_group = manifest.by_role(COIL_GROUP_ROLE_BANANA)
+    if banana_group is None or banana_group.count == 0:
+        raise ValueError("Stage 2 edge-iota report requires banana coil-group metadata.")
+    coils = list(stage2_biot_savart.coils)
+    return BiotSavart(coils[banana_group.start : banana_group.stop])
+
+
+def build_stage2_edge_iota_profile_artifact(
+    *,
+    config: EdgeIotaConfig,
+    stage2_bs_artifact_path,
+    stage2_results_payload,
+    stage2_biot_savart,
+):
+    eqdsk = read_eqdsk(config.eqdsk_path)
+    lcfs = load_lcfs_boundary(config.lcfs_path)
+    minor_radius_m = lcfs.minor_radius_from_axis(float(eqdsk.rmaxis))
+    tokamak_field = eqdsk.build_axisymmetric_field()
+    validation = validate_tokamak_iota_against_q(
+        tokamak_field,
+        edge_band=config.edge_band,
+        sample_count=config.sample_count,
+        minor_radius_m=minor_radius_m,
+        relative_tolerance=config.q_validation_rel_tol,
+        turns=config.trace_turns,
+        steps_per_turn=config.steps_per_turn,
+    )
+    if not validation.passed:
+        raise ValueError(
+            "Stage 2 edge-iota tokamak-only trace failed EQDSK q-profile validation."
+        )
+    banana_biot_savart = _stage2_edge_iota_banana_biot_savart(
+        stage2_biot_savart,
+        stage2_results_payload,
+    )
+    banana_field = _biot_savart_cylindrical_field(banana_biot_savart)
+    hybrid_field = _sum_cylindrical_fields(tokamak_field, banana_field)
+    profile = evaluate_edge_iota_profile(
+        tokamak_field=tokamak_field,
+        hybrid_field=hybrid_field,
+        axis_r_m=float(eqdsk.rmaxis),
+        axis_z_m=float(eqdsk.zmaxis),
+        minor_radius_m=minor_radius_m,
+        config=config,
+        lcfs_boundary=lcfs,
+    )
+    profile_json_path = Path(stage2_bs_artifact_path).with_name("edge_iota_profile.json")
+    write_profile_json(
+        profile,
+        profile_json_path,
+        config=config,
+        eqdsk=eqdsk,
+        validation=validation,
+    )
+    return profile, str(profile_json_path)
+
+
+def build_stage2_edge_iota_report_payload(
+    *,
+    args,
+    stage2_bs_artifact_path,
+    stage2_results_payload,
+    stage2_biot_savart,
+) -> dict[str, object]:
+    mode = getattr(args, "stage2_edge_iota_mode", EDGE_IOTA_MODE_OFF)
+    if mode == EDGE_IOTA_MODE_OFF:
+        return {
+            "EDGE_IOTA_MODE": EDGE_IOTA_MODE_OFF,
+            "EDGE_IOTA_EQDSK": getattr(args, "stage2_edge_iota_eqdsk", None),
+            "EDGE_IOTA_LCFS": getattr(args, "stage2_edge_iota_lcfs", None),
+            "EDGE_IOTA_RADIAL_BAND": None,
+            "EDGE_IOTA_TARGET_MIN": None,
+            "EDGE_IOTA_HELICITY": None,
+            "EDGE_IOTA_CONFIG_HASH": None,
+            **_stage2_edge_iota_empty_payload(),
+        }
+    config = build_stage2_edge_iota_config(args)
+    payload = _stage2_edge_iota_config_payload(args=args, mode=mode, config=config)
+    profile, profile_json_path = build_stage2_edge_iota_profile_artifact(
+        config=config,
+        stage2_bs_artifact_path=stage2_bs_artifact_path,
+        stage2_results_payload=stage2_results_payload,
+        stage2_biot_savart=stage2_biot_savart,
+    )
+    payload.update(edge_iota_report_payload(profile, profile_json_path=profile_json_path))
+    return payload
+
+
 def stage2_warm_start_boozer_surface_path(stage2_bs_artifact_path):
     artifact_path = Path(stage2_bs_artifact_path)
     variant = artifact_path.stem.removeprefix("biot_savart_opt")
@@ -2796,6 +3128,14 @@ def materialize_stage2_artifact_results(
             stage2_results_payload=results,
             stage2_iota_runtime=stage2_iota_runtime,
             stage2_seed_surf_path=warm_start_surface_path,
+        )
+    )
+    results.update(
+        build_stage2_edge_iota_report_payload(
+            args=args,
+            stage2_bs_artifact_path=stage2_bs_artifact_path,
+            stage2_results_payload=results,
+            stage2_biot_savart=new_bs,
         )
     )
     return results
@@ -3920,6 +4260,7 @@ def main(parsed_args=None):
     args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
     validate_stage2_iota_cli_args(args)
+    validate_stage2_edge_iota_cli_args(args)
     validate_winding_surface_shape_cli_args(args)
     validate_stage2_buildability_objective_cli_args(args)
     if parsed_args is not None:

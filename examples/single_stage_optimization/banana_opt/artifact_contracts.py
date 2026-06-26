@@ -14,6 +14,10 @@ from .current_contracts import (
     resolve_boozer_current_convention,
     resolve_effective_current_mode,
 )
+from .edge_delivered_iota import (
+    EDGE_HELICITY_STATUS_UNKNOWN,
+    EDGE_IOTA_MODE_OFF,
+)
 from .finite_current_profiles import (
     FINITE_CURRENT_PROFILES,
     JHALPERN30_FINITE_CURRENT_MODE,
@@ -145,6 +149,31 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
             upgraded_results.get("STAGE2_IOTA_CONSTRAINT_WEIGHT")
         )
     )
+
+
+def _upgrade_legacy_edge_iota_report_metadata(upgraded_results: dict) -> None:
+    defaults = {
+        "EDGE_IOTA_MODE": EDGE_IOTA_MODE_OFF,
+        "EDGE_IOTA_EQDSK": None,
+        "EDGE_IOTA_LCFS": None,
+        "EDGE_IOTA_RADIAL_BAND": None,
+        "EDGE_IOTA_TARGET_MIN": None,
+        "EDGE_IOTA_HELICITY": None,
+        "EDGE_IOTA_CONFIG_HASH": None,
+        "EDGE_IOTA_STATUS": None,
+        "EDGE_IOTA_PROFILE_JSON": None,
+        "EDGE_DELTA_ABS_IOTA_MIN": None,
+        "EDGE_DELTA_ABS_IOTA_P10": None,
+        "EDGE_DELTA_ABS_IOTA_MEAN": None,
+        "EDGE_DELTA_SIGNED_IOTA_MIN": None,
+        "EDGE_DELTA_SIGNED_IOTA_MEAN": None,
+        "EDGE_SURFACE_SURVIVAL_FRACTION": None,
+        "EDGE_WIDTH_MAX": None,
+        "EDGE_HELICITY_STATUS": EDGE_HELICITY_STATUS_UNKNOWN,
+    }
+    for key, value in defaults.items():
+        if upgraded_results.get(key) is None:
+            upgraded_results[key] = value
 
 
 def _backfill_unprefixed_count_from_stage2(
@@ -326,6 +355,7 @@ def upgrade_legacy_stage2_artifact_results(
     _upgrade_legacy_stage2_hardware_contract_metadata(upgraded_results)
     _upgrade_legacy_bootability_recovery_metadata(upgraded_results)
     _upgrade_legacy_stage2_iota_report_metadata(upgraded_results)
+    _upgrade_legacy_edge_iota_report_metadata(upgraded_results)
     _upgrade_legacy_finite_current_metadata(upgraded_results)
     _upgrade_legacy_wout_convention_metadata(upgraded_results)
     _upgrade_legacy_constraint_contract_metadata(upgraded_results)

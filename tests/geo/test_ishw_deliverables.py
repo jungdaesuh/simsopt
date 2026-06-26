@@ -1573,6 +1573,177 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 ]
             )
 
+    def test_stage2_edge_iota_parser_accepts_report_mode_with_explicit_inputs(self):
+        module = load_stage2_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--stage2-edge-iota-mode",
+                "report",
+                "--stage2-edge-iota-eqdsk",
+                "/tmp/shot.eqdsk",
+                "--stage2-edge-iota-lcfs",
+                "/tmp/lcfs.json",
+                "--stage2-edge-iota-radial-band",
+                "0.75,1.0",
+                "--stage2-edge-iota-helicity",
+                "+1",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.stage2_edge_iota_mode, "report")
+        self.assertEqual(args.stage2_edge_iota_eqdsk, "/tmp/shot.eqdsk")
+        self.assertEqual(
+            module.build_stage2_edge_iota_config(args).edge_band,
+            (0.75, 1.0),
+        )
+
+    def test_stage2_edge_iota_report_mode_requires_explicit_inputs(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(
+            stage2_edge_iota_mode="report",
+            stage2_edge_iota_eqdsk=None,
+            stage2_edge_iota_lcfs=None,
+            stage2_edge_iota_radial_band="0.75,1.0",
+            stage2_edge_iota_sample_count=6,
+            stage2_edge_iota_target_min=0.10,
+            stage2_edge_iota_helicity="+1",
+            stage2_edge_iota_trace_turns=80,
+            stage2_edge_iota_steps_per_turn=240,
+            stage2_edge_iota_q_validation_rel_tol=0.002,
+            stage2_edge_iota_survival_fraction_min=1.0,
+            stage2_edge_iota_width_max=None,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--stage2-edge-iota-eqdsk, --stage2-edge-iota-lcfs",
+        ):
+            module.validate_stage2_edge_iota_cli_args(args)
+
+    def test_stage2_edge_iota_report_mode_requires_explicit_helicity(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(
+            stage2_edge_iota_mode="report",
+            stage2_edge_iota_eqdsk="/tmp/shot.eqdsk",
+            stage2_edge_iota_lcfs="/tmp/lcfs.json",
+            stage2_edge_iota_radial_band="0.75,1.0",
+            stage2_edge_iota_sample_count=6,
+            stage2_edge_iota_target_min=0.10,
+            stage2_edge_iota_helicity=None,
+            stage2_edge_iota_trace_turns=80,
+            stage2_edge_iota_steps_per_turn=240,
+            stage2_edge_iota_q_validation_rel_tol=0.002,
+            stage2_edge_iota_survival_fraction_min=1.0,
+            stage2_edge_iota_width_max=None,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires --stage2-edge-iota-helicity",
+        ):
+            module.validate_stage2_edge_iota_cli_args(args)
+
+    def test_stage2_edge_iota_soft_mode_rejected_until_routing_exists(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(
+            stage2_edge_iota_mode="soft",
+            stage2_edge_iota_eqdsk="/tmp/shot.eqdsk",
+            stage2_edge_iota_lcfs="/tmp/lcfs.json",
+            stage2_edge_iota_radial_band="0.75,1.0",
+            stage2_edge_iota_sample_count=6,
+            stage2_edge_iota_target_min=0.10,
+            stage2_edge_iota_helicity="+1",
+            stage2_edge_iota_trace_turns=80,
+            stage2_edge_iota_steps_per_turn=240,
+            stage2_edge_iota_q_validation_rel_tol=0.002,
+            stage2_edge_iota_survival_fraction_min=1.0,
+            stage2_edge_iota_width_max=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "soft is not implemented yet"):
+            module.validate_stage2_edge_iota_cli_args(args)
+
+    def test_stage2_edge_iota_off_payload_is_behavior_neutral(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(stage2_edge_iota_mode="off")
+
+        payload = module.build_stage2_edge_iota_report_payload(
+            args=args,
+            stage2_bs_artifact_path="/tmp/stage2/biot_savart_opt.json",
+            stage2_results_payload={},
+            stage2_biot_savart=object(),
+        )
+
+        self.assertEqual(payload["EDGE_IOTA_MODE"], "off")
+        self.assertIsNone(payload["EDGE_IOTA_STATUS"])
+        self.assertIsNone(payload["EDGE_IOTA_PROFILE_JSON"])
+        self.assertIsNone(payload["EDGE_IOTA_CONFIG_HASH"])
+        self.assertEqual(payload["EDGE_HELICITY_STATUS"], "unknown")
+
+    def test_stage2_edge_iota_report_payload_writes_profile_reference(self):
+        module = load_stage2_module()
+        edge_module = importlib.import_module("banana_opt.edge_delivered_iota")
+        profile = edge_module.build_edge_iota_profile(
+            [
+                edge_module.EdgeIotaSample.from_iotas(
+                    radius_label="edge",
+                    r_over_a=0.90,
+                    seed_point=(1.0, 0.0),
+                    iota_tokamak=0.30,
+                    iota_hybrid=0.42,
+                )
+            ],
+            helicity_sign=1,
+        )
+        args = SimpleNamespace(
+            stage2_edge_iota_mode="report",
+            stage2_edge_iota_eqdsk="/tmp/shot.eqdsk",
+            stage2_edge_iota_lcfs="/tmp/lcfs.json",
+            stage2_edge_iota_radial_band="0.75,1.0",
+            stage2_edge_iota_sample_count=6,
+            stage2_edge_iota_target_min=0.10,
+            stage2_edge_iota_helicity="+1",
+            stage2_edge_iota_trace_turns=80,
+            stage2_edge_iota_steps_per_turn=240,
+            stage2_edge_iota_q_validation_rel_tol=0.002,
+            stage2_edge_iota_survival_fraction_min=1.0,
+            stage2_edge_iota_width_max=None,
+        )
+
+        with patch.object(
+            module,
+            "build_stage2_edge_iota_profile_artifact",
+            return_value=(profile, "/tmp/stage2/edge_iota_profile.json"),
+        ) as artifact_mock:
+            payload = module.build_stage2_edge_iota_report_payload(
+                args=args,
+                stage2_bs_artifact_path="/tmp/stage2/biot_savart_opt.json",
+                stage2_results_payload={"COIL_GROUPS": []},
+                stage2_biot_savart=object(),
+            )
+
+        self.assertEqual(payload["EDGE_IOTA_MODE"], "report")
+        self.assertEqual(
+            payload["EDGE_IOTA_PROFILE_JSON"],
+            "/tmp/stage2/edge_iota_profile.json",
+        )
+        self.assertEqual(payload["EDGE_IOTA_STATUS"], "pass")
+        self.assertEqual(payload["EDGE_IOTA_HELICITY"], 1)
+        self.assertIsNotNone(payload["EDGE_IOTA_CONFIG_HASH"])
+        self.assertEqual(
+            artifact_mock.call_args.kwargs["config"].edge_band,
+            (0.75, 1.0),
+        )
+
     def test_stage2_iota_report_payload_reuses_bootability_schema_without_recovery_fields(
         self,
     ):

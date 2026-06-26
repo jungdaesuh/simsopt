@@ -526,6 +526,11 @@ class ArtifactContractsLegacyUpgradeTests(unittest.TestCase):
         self.assertIsNone(upgraded["CONSTRAINT_PROFILE"])
         self.assertIsNone(upgraded["EFFECTIVE_VALUES"])
         self.assertIsNone(upgraded["OVERRIDE_REASON"])
+        self.assertEqual(upgraded["EDGE_IOTA_MODE"], "off")
+        self.assertIsNone(upgraded["EDGE_IOTA_STATUS"])
+        self.assertIsNone(upgraded["EDGE_IOTA_PROFILE_JSON"])
+        self.assertIsNone(upgraded["EDGE_DELTA_ABS_IOTA_P10"])
+        self.assertEqual(upgraded["EDGE_HELICITY_STATUS"], "unknown")
 
     def test_legacy_upgrade_preserves_prior_constraint_metadata(self):
         module = load_artifact_contracts_module()

@@ -62,6 +62,7 @@ assert PLATEAU_CLASS_INVARIANT_TORUS == KAM_CLASS_INVARIANT_TORUS
 
 SEED_MODE_MIDPLANE = "midplane_radial_sweep"
 SEED_MODE_EXTENDED_SURFACE = "extended_surface_radial_sweep"
+SEED_MODE_CHOICES = (SEED_MODE_MIDPLANE, SEED_MODE_EXTENDED_SURFACE)
 
 # Provenance marker recorded in the emitted wba_settings.known_limitations when
 # the scorer ran the radial ω-plateau reconciliation: the bare single-surface
@@ -194,6 +195,43 @@ def build_extended_surface_seed_contract(
         radii,
         min_key="r_min_seed",
         max_key="r_max_seed",
+    )
+
+
+def topology_seed_radii_and_contract(
+    surface,
+    nfieldlines,
+    *,
+    seed_mode=SEED_MODE_MIDPLANE,
+    inset_fraction=0.05,
+    extend_distance=0.05,
+):
+    resolved_seed_mode = str(seed_mode)
+    if resolved_seed_mode == SEED_MODE_MIDPLANE:
+        radii = midplane_seed_radii(
+            surface,
+            nfieldlines,
+            inset_fraction=inset_fraction,
+        )
+        return radii, build_midplane_seed_contract(
+            nfieldlines,
+            inset_fraction,
+            radii,
+        )
+    if resolved_seed_mode == SEED_MODE_EXTENDED_SURFACE:
+        radii = extended_surface_seed_radii(
+            surface,
+            nfieldlines,
+            extend_distance=extend_distance,
+        )
+        return radii, build_extended_surface_seed_contract(
+            nfieldlines,
+            extend_distance,
+            radii,
+        )
+    raise ValueError(
+        f"Unsupported topology seed mode {resolved_seed_mode!r}; "
+        f"expected one of {SEED_MODE_CHOICES!r}."
     )
 
 
@@ -1561,6 +1599,8 @@ def score_topology(
     surrogate_early_weight=0.2,
     kam_width_ratio=0.25,
     inset_fraction=0.05,
+    seed_mode=SEED_MODE_MIDPLANE,
+    seed_extend_distance=0.05,
     field_policy=None,
     interpolation_grid=None,
     compute_transport_diagnostics=True,
@@ -1571,7 +1611,8 @@ def score_topology(
 ):
     """Score field-line confinement on a Boozer surface.
 
-    Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
+    Seeding defaults to a midplane radial sweep (phi=0, Z=0). Callers can select
+    an extended-surface radial sweep for edge-started lanes. Returns a dict with
     survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
     and invariant_torus_fraction (a WBA convergence-rate classifier, or None
     when the magnetic axis is not available/located or no survived seed has
@@ -1603,7 +1644,13 @@ def score_topology(
         include_surface_exit=True,
         max_iterations=topology_iteration_limit(tmax),
     )
-    radii = midplane_seed_radii(surface, nfieldlines, inset_fraction=inset_fraction)
+    radii, seed_contract = topology_seed_radii_and_contract(
+        surface,
+        nfieldlines,
+        seed_mode=seed_mode,
+        inset_fraction=inset_fraction,
+        extend_distance=seed_extend_distance,
+    )
     traced_field, field_model = prepare_topology_field(
         surface,
         bfield,
@@ -1621,7 +1668,6 @@ def score_topology(
             "skipped_by_caller"
         )
 
-    seed_contract = build_midplane_seed_contract(nfieldlines, inset_fraction, radii)
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         traced_field,
         radii,
@@ -1770,6 +1816,17 @@ def safe_score_topology(
         )
     except Exception as error:
         resolved_field_policy = kwargs.get("field_policy") or "auto"
+        seed_mode = kwargs.get("seed_mode", SEED_MODE_MIDPLANE)
+        if seed_mode == SEED_MODE_EXTENDED_SURFACE:
+            seed_contract = build_extended_surface_seed_contract(
+                nfieldlines,
+                kwargs.get("seed_extend_distance", 0.05),
+            )
+        else:
+            seed_contract = build_midplane_seed_contract(
+                nfieldlines,
+                kwargs.get("inset_fraction", 0.05),
+            )
         field_model = {
             "policy": str(resolved_field_policy),
             "selected_mode": "native",
@@ -1790,10 +1847,7 @@ def safe_score_topology(
                     0.0,
                 ),
                 kam_width_ratio=kwargs.get("kam_width_ratio", 0.25),
-                seed_contract=build_midplane_seed_contract(
-                    nfieldlines,
-                    kwargs.get("inset_fraction", 0.05),
-                ),
+                seed_contract=seed_contract,
                 field_model=field_model,
                 transport_diagnostics=topology_transport_diagnostics_not_evaluated(
                     "topology_score_failed_before_transport_metrics"

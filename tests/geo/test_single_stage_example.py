@@ -2102,6 +2102,7 @@ class SingleStageExampleTests(unittest.TestCase):
             2.0,
             1e-7,
             0.75,
+            topology_seed_mode=module.SEED_MODE_MIDPLANE,
         )
 
     def test_evaluate_topology_gate_marks_iteration_limit_as_broken(self):
@@ -2516,6 +2517,32 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertAlmostEqual(contract["r_min_seed"], 0.75)
         self.assertAlmostEqual(contract["r_max_seed"], 1.25)
+
+    def test_topology_seed_selector_uses_extended_surface_contract(self):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            def copy(self):
+                return self
+
+            def extend_via_normal(self, distance):
+                self.distance = float(distance)
+
+            def gamma(self):
+                distance = getattr(self, "distance", 0.0)
+                radii = np.array([1.0 - distance, 1.0 + distance], dtype=float)
+                return np.array([[[radii[0], 0.0, 0.0], [radii[1], 0.0, 0.0]]])
+
+        radii, contract = topology_module.topology_seed_radii_and_contract(
+            _Surface(),
+            4,
+            seed_mode=topology_module.SEED_MODE_EXTENDED_SURFACE,
+            extend_distance=0.07,
+        )
+
+        self.assertEqual(contract["mode"], "extended_surface_radial_sweep")
+        self.assertEqual(radii.shape, (4,))
+        self.assertAlmostEqual(contract["extend_distance"], 0.07)
 
     def test_extended_surface_seed_radii_clones_real_surface_xyztensorfourier(self):
         topology_module = load_topology_scorer_module()
@@ -3676,6 +3703,26 @@ class SingleStageExampleTests(unittest.TestCase):
             [0.06, 0.08, 0.10],
         )
 
+    def test_edge_delivered_iota_preset_resolves_edge_surface_stack(self):
+        module = self.load_module()
+
+        contract = module.resolve_surface_mode_contract(
+            SimpleNamespace(
+                surface_mode=module.PUBLISHED_MULTISURFACE,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+                published_surface_preset=(
+                    module.PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE
+                ),
+            ),
+            warn_on_legacy_mapping=False,
+        )
+
+        np.testing.assert_allclose(
+            contract.label_fractions,
+            [0.70, 0.85, 0.95, 1.0],
+        )
+
     def test_published_stage2_seed_initializes_outer_to_inner_and_returns_storage_order(
         self,
     ):
@@ -3790,6 +3837,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "contract_surface_to_target_volume",
                 side_effect=fake_contract_surface_to_target_volume,
             ),
+            patch.object(module, "cross_sections_are_nested", return_value=(True, [])),
         ):
             surface_data, warm_paths = module.initialize_surface_data_for_contract(
                 surface_configs,
@@ -4541,6 +4589,11 @@ class SingleStageExampleTests(unittest.TestCase):
                     module,
                     "initialize_boozer_surface",
                     side_effect=fake_initialize_boozer_surface,
+                ),
+                patch.object(
+                    module,
+                    "cross_sections_are_nested",
+                    return_value=(True, []),
                 ),
             ):
                 return module.initialize_surface_data_for_contract(
@@ -15440,6 +15493,7 @@ class RunIdentityTests(unittest.TestCase):
             refinement_maxiter=100,
             refinement_chunk_maxiter=20,
             refinement_max_stalled_chunks=2,
+            single_stage_lane="default",
             single_stage_goal_mode="target",
             cc_dist=0.05,
             cc_weight=100.0,
@@ -15512,6 +15566,8 @@ class RunIdentityTests(unittest.TestCase):
             topology_scorer_nfieldlines=12,
             topology_scorer_tmax=50.0,
             topology_scorer_min_returns=256,
+            topology_seed_mode="midplane_radial_sweep",
+            topology_seed_extend_distance=0.05,
             confinement_objective_weight=0.0,
             confinement_surrogate_worst_k=3,
             confinement_surrogate_early_threshold=0.2,
@@ -15520,6 +15576,10 @@ class RunIdentityTests(unittest.TestCase):
             confinement_surrogate_early_weight=0.2,
             magnetic_well_weight=0.0,
             magnetic_well_target=0.0,
+            iota_profile_weight=0.0,
+            iota_profile_surface_weights=None,
+            volume_profile_weight=0.0,
+            iota_profile_slope=0.0,
             winding_surface_free_mpol=0,
             winding_surface_free_ntor=0,
             winding_surface_free_r0=False,
@@ -15637,6 +15697,10 @@ class RunIdentityTests(unittest.TestCase):
                     "residue_objective_replay_config",
                     "magnetic_well_weight",
                     "magnetic_well_target",
+                    "single_stage_lane",
+                    "iota_profile_surface_weights",
+                    "topology_seed_mode",
+                    "topology_seed_extend_distance",
                     "lcfs_constraint_mode",
                     "banana_surf_major_radius",
                     "winding_surface_free_mpol",
@@ -15879,6 +15943,46 @@ class RunIdentityTests(unittest.TestCase):
         frontier_config = self._build_identity(module, frontier_args)
 
         self.assertNotEqual(target_config, frontier_config)
+
+    def test_run_identity_changes_when_edge_iota_lane_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        edge_args = self._make_identity_args()
+        edge_args.single_stage_lane = "edge_delivered_iota_lane"
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, edge_args),
+        )
+
+    def test_run_identity_changes_when_iota_profile_surface_weights_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.iota_profile_surface_weights = "0.25,0.5,1.0,4.0"
+
+        weighted_config = self._make_identity_config(module, weighted_args)
+
+        self.assertEqual(
+            weighted_config.iota_profile_surface_weights,
+            (0.25, 0.5, 1.0, 4.0),
+        )
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            module.build_run_identity_config(weighted_config),
+        )
+
+    def test_run_identity_changes_when_topology_seed_mode_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        edge_seed_args = self._make_identity_args()
+        edge_seed_args.topology_seed_mode = "extended_surface_radial_sweep"
+        edge_seed_args.topology_seed_extend_distance = 0.07
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, edge_seed_args),
+        )
 
     def test_run_identity_changes_when_constraint_method_changes(self):
         module = load_single_stage_example_module()
@@ -17367,6 +17471,59 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.magnetic_well_weight, 5.0)
         self.assertEqual(args.magnetic_well_target, -0.05)
+
+    def test_single_stage_parse_args_edge_iota_lane_sets_defaults(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-lane",
+                "edge_delivered_iota_lane",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_lane, "edge_delivered_iota_lane")
+        self.assertEqual(args.surface_mode, module.PUBLISHED_MULTISURFACE)
+        self.assertEqual(
+            args.published_surface_preset,
+            module.PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE,
+        )
+        self.assertEqual(args.iota_profile_weight, 1.0)
+        self.assertEqual(args.iota_profile_surface_weights, "0.25,0.5,1,4")
+        self.assertEqual(args.topology_seed_mode, module.SEED_MODE_EXTENDED_SURFACE)
+        self.assertEqual(args.winding_surface_free_mpol, 1)
+        self.assertEqual(args.winding_surface_free_ntor, 1)
+        self.assertTrue(args.winding_surface_free_r0)
+        self.assertTrue(args.winding_surface_free_minor)
+
+    def test_edge_iota_lane_weights_match_explicit_surface_fractions(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-lane",
+                "edge_delivered_iota_lane",
+                "--published-surface-fractions",
+                "0.75,1.0",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.published_surface_fractions, "0.75,1.0")
+        self.assertEqual(args.iota_profile_surface_weights, "0.25,4")
+        self.assertEqual(
+            module.parse_single_stage_iota_profile_surface_weights(
+                args.iota_profile_surface_weights
+            ),
+            (0.25, 4.0),
+        )
 
     def test_single_stage_parse_args_uses_measured_lbfgsb_maxcor_default(self):
         module = load_single_stage_example_module()

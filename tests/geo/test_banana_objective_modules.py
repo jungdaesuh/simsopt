@@ -8351,7 +8351,7 @@ class IotaShearShortfallTests(_ModuleTestCase):
         term.x = x0
         np.testing.assert_allclose(analytic, fd, atol=1.0e-7)
 
-    def test_shear_shortfall_gradient_rewards_more_shear(self):
+    def test_edge_iota_shear_shortfall_gradient_rewards_more_shear(self):
         # With spread < 0 (axis > edge), increasing |spread| (more shear) must
         # LOWER the penalty. Give each surface a single +iota dof so the sign of
         # d(penalty)/d(iota) is read directly: raising axis-iota grows the gap
@@ -8374,7 +8374,7 @@ class IotaShearShortfallTests(_ModuleTestCase):
             self.module.build_single_stage_shear_objective([], self.SHEAR_TARGET)
         )
 
-    def test_builder_uses_innermost_and_outermost_surfaces(self):
+    def test_edge_iota_builder_uses_innermost_and_outermost_surfaces(self):
         # The builder must pick surface_iota_terms[0] (axis) and [-1] (edge),
         # ignoring any intermediate surfaces, and reproduce the direct term.
         axis, edge = self._axis_edge_terms()
@@ -8430,7 +8430,7 @@ class IotaShearShortfallTests(_ModuleTestCase):
         built = self.module.build_single_stage_noble_iota_pull_objective(edge)
         self.assertIsInstance(built, self.module.NobleIotaPull)
 
-    def test_iota_pin_value_and_gradient_inside_window(self):
+    def test_edge_iota_pin_value_and_gradient_inside_window(self):
         edge = _LinearIotaLeaf(0.087, [2.0, -1.0])
         term = self.module.IotaPinQuadratic(edge, target=0.086, window=0.003)
 
@@ -8438,14 +8438,14 @@ class IotaShearShortfallTests(_ModuleTestCase):
         self.assertAlmostEqual(term.J(), 0.5 * offset**2)
         np.testing.assert_allclose(term.dJ(), offset * np.array([2.0, -1.0]))
 
-    def test_iota_pin_zero_outside_window(self):
+    def test_edge_iota_pin_zero_outside_window(self):
         edge = _LinearIotaLeaf(0.091, [2.0, -1.0])
         term = self.module.IotaPinQuadratic(edge, target=0.086, window=0.003)
 
         self.assertEqual(term.J(), 0.0)
         np.testing.assert_allclose(term.dJ(), [0.0, 0.0])
 
-    def test_iota_pin_rejects_invalid_target_and_window(self):
+    def test_edge_iota_pin_rejects_invalid_target_and_window(self):
         edge = _LinearIotaLeaf(0.086, [1.0])
 
         for target in (float("nan"), float("inf")):
@@ -8458,7 +8458,7 @@ class IotaShearShortfallTests(_ModuleTestCase):
                 with self.assertRaisesRegex(ValueError, "positive finite window"):
                     self.module.IotaPinQuadratic(edge, window=window)
 
-    def test_iota_pin_builder_noops_without_iota_term(self):
+    def test_edge_iota_pin_builder_noops_without_iota_term(self):
         self.assertIsNone(self.module.build_single_stage_iota_pin_objective(None))
         edge = _LinearIotaLeaf(0.086, [1.0])
         built = self.module.build_single_stage_iota_pin_objective(edge)

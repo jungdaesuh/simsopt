@@ -138,6 +138,28 @@ class IotaProfileBuilderFastTests(unittest.TestCase):
         )
         _assert_exact_directional_gradient(obj)
 
+    def test_custom_weights_emphasize_outer_surface_penalty(self):
+        t0 = _LinearLeafTerm(0.10, [0.5])
+        t1 = _LinearLeafTerm(0.20, [0.5])
+        equal = build_single_stage_iota_profile_objective(
+            [t0, t1],
+            surface_labels=[0.5, 1.0],
+            iota_edge_target=0.10,
+            iota_slope_target=0.0,
+            weights=[1.0, 1.0],
+        )
+        edge_weighted = build_single_stage_iota_profile_objective(
+            [t0, t1],
+            surface_labels=[0.5, 1.0],
+            iota_edge_target=0.10,
+            iota_slope_target=0.0,
+            weights=[1.0, 3.0],
+        )
+
+        self.assertIsNotNone(equal)
+        self.assertIsNotNone(edge_weighted)
+        self.assertAlmostEqual(edge_weighted.J(), 1.5 * equal.J())
+
     def test_none_for_single_surface(self):
         t0 = _LinearLeafTerm(0.2, [1.0])
         self.assertIsNone(
