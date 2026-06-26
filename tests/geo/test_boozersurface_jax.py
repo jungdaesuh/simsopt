@@ -6257,6 +6257,78 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(H.T @ np.asarray(solved), np.asarray(rhs))
         assert bool(np.asarray(success)) is True
 
+    def test_scipy_plu_status_accepts_backward_error_success(self, monkeypatch):
+        """Scipy PLU runtime status must match the shared dense backward-error gate."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.need_to_run_code = False
+        P = jnp.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=jnp.float64)
+        L = jnp.asarray([[1.0, 0.0], [0.25, 1.0]], dtype=jnp.float64)
+        U = jnp.asarray([[4.0, 1.0], [0.0, 2.5]], dtype=jnp.float64)
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "PLU": (P, L, U),
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+        rejected_status = _opt._LinearSolveStatus(
+            success=jnp.asarray(False),
+            residual=jnp.asarray(1.0, dtype=jnp.float64),
+            residual_relative=jnp.asarray(1.0, dtype=jnp.float64),
+            iterations=jnp.asarray(0, dtype=jnp.int32),
+        )
+        status_rhs = []
+        backward_error_matrices = []
+
+        def dense_linear_solve_status(_matvec, _solution, rhs, *, tol):
+            del tol
+            status_rhs.append(np.asarray(rhs))
+            return rejected_status
+
+        def backward_error_success(matrix, _solution, _rhs, *, tol):
+            del tol
+            backward_error_matrices.append(np.asarray(matrix))
+            return jnp.asarray(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_dense_linear_solve_status",
+            dense_linear_solve_status,
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_dense_matrix_backward_error_success",
+            backward_error_success,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        forward, forward_status = adjoint_state.solve_forward_with_status(rhs)
+        transpose, transpose_status = adjoint_state.solve_transpose_with_status(rhs)
+        H = np.asarray(P) @ np.asarray(L) @ np.asarray(U)
+
+        assert bool(np.asarray(forward_status.success)) is True
+        assert bool(np.asarray(transpose_status.success)) is True
+        assert float(np.asarray(forward_status.residual_relative)) == pytest.approx(1.0)
+        assert float(np.asarray(transpose_status.residual_relative)) == pytest.approx(
+            1.0
+        )
+        np.testing.assert_allclose(H @ np.asarray(forward), np.asarray(rhs))
+        np.testing.assert_allclose(H.T @ np.asarray(transpose), np.asarray(rhs))
+        assert len(status_rhs) == 2
+        np.testing.assert_allclose(status_rhs[0], np.asarray(rhs))
+        np.testing.assert_allclose(status_rhs[1], np.asarray(rhs))
+        assert len(backward_error_matrices) == 2
+        np.testing.assert_allclose(backward_error_matrices[0], H)
+        np.testing.assert_allclose(backward_error_matrices[1], H.T)
+
     def test_scipy_plu_runtime_callbacks_allow_host_bridge_under_strict_guard(self):
         """The explicit scipy PLU callback bridge must mark its host transfers."""
         booz = _make_mock_boozer_surface()
@@ -6494,6 +6566,40 @@ class TestBoozerSurfaceJAXClass:
         booz.options["newton_tol"] = 1.0e-6
 
         assert booz._linear_solve_tolerance() == pytest.approx(1.0e-11)
+
+    def test_effective_linear_solve_tolerance_lifts_large_float64_floor(
+        self, request
+    ):
+        from simsopt_jax.backend import get_backend_config, set_backend
+
+        previous_backend = get_backend_config()
+        request.addfinalizer(lambda: _restore_backend_config(previous_backend))
+        set_backend("jax_cpu_parity", configure_runtime=False)
+        small_rhs = jnp.ones((16,), dtype=jnp.float64)
+        large_rhs = jnp.ones((1024,), dtype=jnp.float64)
+
+        small_tol = _opt._effective_linear_solve_tolerance(small_rhs, 1.0e-16)
+        large_tol = _opt._effective_linear_solve_tolerance(large_rhs, 1.0e-16)
+        eps = np.finfo(np.float64).eps
+        factor = _opt._DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR
+        expected_small = factor * small_rhs.shape[0] * eps
+        expected_large = factor * large_rhs.shape[0] * eps
+
+        # ``factor * n * eps`` exceeds the 1e-14 policy floor for every n >= 1
+        # (crossover at n ~ 0.7), so the dimension-aware floor binds at *both*
+        # sizes -- the policy floor never wins for float64.  Pin each to its
+        # textbook value with a tight relative tolerance (the bare default
+        # ``approx`` abs tolerance of 1e-12 is larger than these floors and would
+        # pass vacuously), and assert the small case is already lifted above the
+        # legacy 1e-14 floor.
+        assert float(np.asarray(small_tol)) == pytest.approx(
+            expected_small, rel=1.0e-9, abs=0.0
+        )
+        assert float(np.asarray(large_tol)) == pytest.approx(
+            expected_large, rel=1.0e-9, abs=0.0
+        )
+        assert float(np.asarray(small_tol)) > 1.0e-14
+        assert float(np.asarray(large_tol)) > float(np.asarray(small_tol))
 
     def test_get_adjoint_runtime_state_hessian_apply_uses_column_batched_rhs(
         self, monkeypatch
@@ -10325,6 +10431,418 @@ class TestUpstreamFactoryBoozerMatrix:
         assert status1.success.shape == ()
         assert linear_solve_cache == 1
         assert bundle.linear_solve._cache_size() == linear_solve_cache
+
+    @staticmethod
+    def _solve_boozer_state_gate_status(
+        success,
+        *,
+        residual,
+        residual_relative,
+        iterations,
+    ):
+        return _opt._LinearSolveStatus(
+            success=jnp.asarray(success),
+            residual=jnp.asarray(residual, dtype=jnp.float64),
+            residual_relative=jnp.asarray(residual_relative, dtype=jnp.float64),
+            iterations=jnp.asarray(iterations, dtype=jnp.int32),
+        )
+
+    @staticmethod
+    def _patch_solve_boozer_state_host_runner(
+        monkeypatch,
+        x0,
+        *,
+        success,
+        message,
+    ):
+        def fake_host_jax_least_squares(*args, **kwargs):
+            del args, kwargs
+            return types.SimpleNamespace(
+                x=x0,
+                success=success,
+                fun=jnp.asarray(0.5, dtype=x0.dtype),
+                nit=3,
+                status=0 if success else 1,
+                message=message,
+            )
+
+        monkeypatch.setattr(_bsj, "host_jax_least_squares", fake_host_jax_least_squares)
+
+    @staticmethod
+    def _solve_boozer_state_gate_bundle(
+        residual_values,
+        jacobian_matrix,
+        original_status,
+    ):
+        calls = []
+
+        def residual(x, dynamic_state):
+            del x, dynamic_state
+            return residual_values
+
+        def jacobian(x, dynamic_state):
+            del x, dynamic_state
+            return jacobian_matrix
+
+        def linear_solve(x, rhs, dynamic_state):
+            del x, dynamic_state
+            calls.append(np.asarray(rhs))
+            return rhs, original_status
+
+        return (
+            _bsj.BoozerKernelBundle(
+                objective=lambda x, dynamic_state: jnp.asarray(0.0, dtype=x.dtype),
+                residual=residual,
+                jacobian=jacobian,
+                jacobian_block=(
+                    lambda x, tangent_block, dynamic_state: tangent_block.T[
+                        : residual_values.shape[0]
+                    ]
+                ),
+                least_squares_state=lambda x, dynamic_state: {},
+                linear_solve=linear_solve,
+                factor_apply=lambda x, vector, dynamic_state: vector,
+                value_and_grad=lambda x, dynamic_state: (
+                    jnp.asarray(0.0, dtype=x.dtype),
+                    jnp.zeros_like(x),
+                ),
+            ),
+            calls,
+        )
+
+    def test_solve_boozer_state_helper_dense_lu_gate_replaces_status_metadata(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+        residual_values = jnp.asarray([1.0, -2.0, 0.5, -0.25], dtype=jnp.float64)
+        jacobian_matrix = jnp.eye(4, dtype=jnp.float64)
+        original_status = self._solve_boozer_state_gate_status(
+            False,
+            residual=9.0,
+            residual_relative=9.0,
+            iterations=11,
+        )
+        dense_lu_status = self._solve_boozer_state_gate_status(
+            True,
+            residual=1e-13,
+            residual_relative=1e-13,
+            iterations=0,
+        )
+        dense_lu_solution = jnp.asarray([4.0, 3.0, 2.0, 1.0], dtype=jnp.float64)
+        dense_lu_calls = []
+        bundle, original_calls = self._solve_boozer_state_gate_bundle(
+            residual_values,
+            jacobian_matrix,
+            original_status,
+        )
+        self._patch_solve_boozer_state_host_runner(
+            monkeypatch,
+            x0,
+            success=True,
+            message="converged",
+        )
+        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+
+        def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
+            dense_lu_calls.append(
+                {
+                    "rhs": np.asarray(rhs),
+                    "tol": tol,
+                    "matvec": np.asarray(matvec(jnp.ones_like(rhs))),
+                }
+            )
+            return dense_lu_solution, dense_lu_status
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_dense_square_operator_lu_system_with_status",
+            fake_dense_lu_system_with_status,
+        )
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=object(),
+            optimize_G=True,
+            weight_inv_modB=False,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={},
+        )
+
+        assert result.success is True
+        assert result.failure_reason is None
+        assert result.linear_solve_status is dense_lu_status
+        np.testing.assert_allclose(
+            np.asarray(result.linear_solve_solution),
+            np.asarray(dense_lu_solution),
+        )
+        assert len(original_calls) == 1
+        assert len(dense_lu_calls) == 1
+        np.testing.assert_allclose(dense_lu_calls[0]["rhs"], np.asarray(residual_values))
+        np.testing.assert_allclose(dense_lu_calls[0]["matvec"], np.ones(4))
+        assert dense_lu_calls[0]["tol"] == 1e-10
+        assert result.convergence_metadata["linear_solve_success"] is True
+        assert (
+            result.convergence_metadata["linear_solve_probe_backend"]
+            == "dense-lu-jacobian-transpose"
+        )
+        assert float(
+            np.asarray(result.convergence_metadata["linear_solve_residual_relative"])
+        ) == pytest.approx(1e-13)
+        assert int(
+            np.asarray(result.convergence_metadata["linear_solve_iterations"])
+        ) == 0
+
+    def test_solve_boozer_state_helper_dense_lu_gate_does_not_mask_nonlinear_failure(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+        residual_values = jnp.asarray([1.0, -2.0, 0.5, -0.25], dtype=jnp.float64)
+        original_status = self._solve_boozer_state_gate_status(
+            False,
+            residual=9.0,
+            residual_relative=9.0,
+            iterations=11,
+        )
+        bundle, _ = self._solve_boozer_state_gate_bundle(
+            residual_values,
+            jnp.eye(4, dtype=jnp.float64),
+            original_status,
+        )
+        self._patch_solve_boozer_state_host_runner(
+            monkeypatch,
+            x0,
+            success=False,
+            message="nonlinear failed",
+        )
+        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        dense_lu_calls = []
+
+        def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
+            del matvec, rhs, tol
+            dense_lu_calls.append(True)
+            return jnp.zeros_like(x0), _mock_linear_solve_status(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_dense_square_operator_lu_system_with_status",
+            fake_dense_lu_system_with_status,
+        )
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=object(),
+            optimize_G=True,
+            weight_inv_modB=False,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={},
+        )
+
+        assert result.success is False
+        assert result.failure_reason == "nonlinear failed"
+        assert dense_lu_calls == []
+        assert result.convergence_metadata["nonlinear_success"] is False
+        assert result.convergence_metadata["linear_solve_success"] is False
+        assert (
+            result.convergence_metadata["linear_solve_probe_backend"]
+            == "least-squares-hessian"
+        )
+
+    def test_solve_boozer_state_helper_dense_lu_gate_requires_square_jacobian(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+        residual_values = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        original_status = self._solve_boozer_state_gate_status(
+            False,
+            residual=9.0,
+            residual_relative=9.0,
+            iterations=11,
+        )
+        bundle, _ = self._solve_boozer_state_gate_bundle(
+            residual_values,
+            jnp.asarray(
+                [[1.0, 0.0, 2.0, 0.0], [0.0, 3.0, 0.0, 4.0]],
+                dtype=jnp.float64,
+            ),
+            original_status,
+        )
+        self._patch_solve_boozer_state_host_runner(
+            monkeypatch,
+            x0,
+            success=True,
+            message="converged",
+        )
+        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        dense_lu_calls = []
+
+        def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
+            del matvec, rhs, tol
+            dense_lu_calls.append(True)
+            return jnp.zeros_like(x0), _mock_linear_solve_status(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_dense_square_operator_lu_system_with_status",
+            fake_dense_lu_system_with_status,
+        )
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=object(),
+            optimize_G=True,
+            weight_inv_modB=False,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={},
+        )
+
+        assert result.success is False
+        assert result.linear_solve_status is original_status
+        assert dense_lu_calls == []
+        assert result.convergence_metadata["linear_solve_success"] is False
+        assert (
+            result.convergence_metadata["linear_solve_probe_backend"]
+            == "least-squares-hessian"
+        )
+
+    def test_solve_boozer_state_helper_dense_lu_gate_obeys_materialization_policy(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+        residual_values = jnp.asarray([1.0, -2.0, 0.5, -0.25], dtype=jnp.float64)
+        original_status = self._solve_boozer_state_gate_status(
+            False,
+            residual=9.0,
+            residual_relative=9.0,
+            iterations=11,
+        )
+        bundle, _ = self._solve_boozer_state_gate_bundle(
+            residual_values,
+            jnp.eye(4, dtype=jnp.float64),
+            original_status,
+        )
+        self._patch_solve_boozer_state_host_runner(
+            monkeypatch,
+            x0,
+            success=True,
+            message="converged",
+        )
+        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        policy_calls = []
+        dense_lu_calls = []
+
+        def fake_materialization_allowed(rhs):
+            policy_calls.append(np.asarray(rhs))
+            return False
+
+        def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
+            del matvec, rhs, tol
+            dense_lu_calls.append(True)
+            return jnp.zeros_like(x0), _mock_linear_solve_status(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_dense_square_operator_lu_materialization_allowed",
+            fake_materialization_allowed,
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_dense_square_operator_lu_system_with_status",
+            fake_dense_lu_system_with_status,
+        )
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=object(),
+            optimize_G=True,
+            weight_inv_modB=False,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={},
+        )
+
+        assert result.success is False
+        assert result.linear_solve_status is original_status
+        assert len(policy_calls) == 1
+        np.testing.assert_allclose(policy_calls[0], np.asarray(residual_values))
+        assert dense_lu_calls == []
+        assert result.convergence_metadata["linear_solve_success"] is False
+        assert (
+            result.convergence_metadata["linear_solve_probe_backend"]
+            == "least-squares-hessian"
+        )
+
+    def test_solve_boozer_state_helper_dense_lu_gate_requires_opt_in(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.asarray([1.0, 2.0, -0.3, 1.5], dtype=jnp.float64)
+        residual_values = jnp.asarray([1.0, -2.0, 0.5, -0.25], dtype=jnp.float64)
+        original_status = self._solve_boozer_state_gate_status(
+            False,
+            residual=9.0,
+            residual_relative=9.0,
+            iterations=11,
+        )
+        bundle, _ = self._solve_boozer_state_gate_bundle(
+            residual_values,
+            jnp.eye(4, dtype=jnp.float64),
+            original_status,
+        )
+        self._patch_solve_boozer_state_host_runner(
+            monkeypatch,
+            x0,
+            success=True,
+            message="converged",
+        )
+        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", False)
+        dense_lu_calls = []
+
+        def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
+            del matvec, rhs, tol
+            dense_lu_calls.append(True)
+            return jnp.zeros_like(x0), _mock_linear_solve_status(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_dense_square_operator_lu_system_with_status",
+            fake_dense_lu_system_with_status,
+        )
+
+        result = _bsj._solve_boozer_state_with_kernel_bundle(
+            bundle,
+            x0,
+            coil_set_spec=object(),
+            optimize_G=True,
+            weight_inv_modB=False,
+            method="lm",
+            tol=1e-10,
+            maxiter=8,
+            options={},
+        )
+
+        assert result.success is False
+        assert result.linear_solve_status is original_status
+        assert dense_lu_calls == []
+        assert result.convergence_metadata["linear_solve_success"] is False
+        assert (
+            result.convergence_metadata["linear_solve_probe_backend"]
+            == "least-squares-hessian"
+        )
 
     def test_solve_boozer_state_helper_uses_host_runner_and_staged_kernels(
         self,

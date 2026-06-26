@@ -630,6 +630,7 @@ def _lane_with_active_curve_basis(
         gradient_norm=float(np.linalg.norm(gradient)),
         active_dof_names=active_dof_names,
         active_dof_hash=_hash_array(active_dofs),
+        fixed_free_mask_hash=_hash_mask(np.ones_like(active_dofs, dtype=bool)),
         raw_arrays=raw_arrays,
     )
 

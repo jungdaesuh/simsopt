@@ -948,7 +948,9 @@ def _require_native_cpu_reference_backend_for_trace_adapter(
 
 
 def _device_scalar(value, *, dtype=jnp.float64):
-    return runtime_device_put(value, dtype=dtype)
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return jnp.asarray(value, dtype=dtype)
+    return jnp.asarray(np.asarray(value, dtype=np.dtype(dtype)))
 
 
 def _device_int32(value):
@@ -3632,6 +3634,25 @@ _ADJOINT_LINEAR_SOLVER = (
 _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
 _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 
+# Opt-in dense direct factorization for the EXACT-Jacobian adjoint transpose
+# solve ``J^T λ = g``.  At high mode counts (m18: ``J`` is 2055x2055) the
+# UNPRECONDITIONED operator-GMRES path (``restart=64``/``maxiter=10`` = 640
+# matvecs) stagnates at ``residual_relative ~ 1`` because the Krylov subspace
+# never resolves the spectrum, and the monotonic-rejection refinement loop then
+# correctly rolls every non-improving correction back.  The un-squared exact
+# Boozer Jacobian is well-conditioned (kappa(J) ~ 5.6e3), so the lit-endorsed
+# fix for a small square system is a direct LU factorization plus one step of
+# iterative refinement (GMRES-IR with a direct preconditioner): it solves to
+# machine precision in O(n^3) where the matrix-free Krylov method stalls.  The
+# 34 MB dense ``J^T`` is far under the ``max_dense_jacobian_bytes`` policy at
+# m18, but the materialization stays guarded by that policy.  Read once at
+# import (selects a static trace-time branch); default OFF so the operator-GMRES
+# path remains the baseline for A/B comparison.
+_EXACT_ADJOINT_DENSE_LU = (
+    os.environ.get("SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0").strip().lower()
+    not in ("", "0", "false", "off", "no")
+)
+
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
@@ -4201,11 +4222,50 @@ def _linear_solve_finite(solution, residual):
     return jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
 
 
+# Growth-factor margin on the ``n * eps`` LU backward-error bound used by
+# ``_effective_linear_solve_tolerance``. Keeps the acceptance gate a tiny
+# multiple of attainable backward-stability (so degenerate solves with
+# eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
+# solves of large, moderately ill-conditioned systems.
+_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
+
+
 def _effective_linear_solve_tolerance(rhs, tol):
     dtype = rhs.dtype
     policy = get_backend_policy()
     tol_value = _optimizer_scalar(tol, dtype=dtype)
-    tolerance_floor = _device_scalar(policy.linear_solve_tolerance_floor, dtype=dtype)
+    # Dimension-aware backward-error floor. A backward-stable dense LU solve of
+    # an n-by-n system has backward error
+    #   eta = ||b - A x|| / (||A|| ||x|| + ||b||) <~ c * n * eps
+    # (Higham, "Accuracy and Stability of Numerical Algorithms", 2nd ed.,
+    # Thm 9.4; the LU growth factor is absorbed into the constant ``c``). The
+    # fixed precision-independent 1e-14 policy floor sits *below* this attainable
+    # bound, so an accurate solve of a moderately ill-conditioned system -- e.g.
+    # the kappa ~ 4e5 least-squares Boozer Hessian (n ~ 2e3), whose adjoint
+    # transpose solve lands at residual_relative ~ 1e-12 -- is false-rejected
+    # even though the resulting gradient is correct to ~1e-7. Lift the floor to
+    # the textbook ``c * n * eps`` scale so the acceptance gate tracks attainable
+    # backward-stability instead of a fixed constant; ``c`` (the
+    # ``_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR`` growth-factor margin) is
+    # sized so the n ~ 2e3 production solve clears its ~1e-12 residual with ~30x
+    # headroom. With ``c = 64`` (float64) the dimension floor exceeds the 1e-14
+    # policy floor for every ``n >= 1`` (crossover at ``n ~ 0.7``), so it binds
+    # at all sizes and the 1e-14 floor is effectively superseded: even small
+    # ``n`` is loosened modestly (n=16 -> ~2.3e-13). A genuinely singular or
+    # garbage solve (eta ~ O(1)) still fails closed by many orders, and the
+    # numerical-singularity condition screen in ``_dense_matrix_solve_numerically_safe``
+    # is the independent guard against backward-stable-but-forward-garbage solves.
+    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    system_size = _device_scalar(rhs.shape[0], dtype=dtype)
+    dimension_floor = (
+        _device_scalar(_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR, dtype=dtype)
+        * system_size
+        * eps
+    )
+    tolerance_floor = jnp.maximum(
+        _device_scalar(policy.linear_solve_tolerance_floor, dtype=dtype),
+        dimension_floor,
+    )
     tolerance_cap = (
         _device_scalar(jnp.inf, dtype=dtype)
         if policy.linear_solve_tolerance_cap is None
@@ -4440,10 +4500,6 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
 
-    if not any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(matrix)):
-        matrix_host = np.asarray(jax.device_get(matrix))
-        return jnp.asarray(np.linalg.cond(matrix_host, p=1), dtype=matrix.dtype)
-
     if lu_piv is None:
         lu_piv = jsp_linalg.lu_factor(matrix)
     lu, piv = lu_piv
@@ -4464,11 +4520,82 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
     return matrix_norm * inverse_norm
 
 
-def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
+def _dense_matrix_solve_forward_error_success(
+    matrix,
+    solution,
+    rhs,
+    *,
+    tol,
+    condition_estimate=None,
+):
     residual = rhs - matrix @ solution
     residual_rel = _relative_residual_1_norm(residual, rhs)
-    condition_estimate = _dense_matrix_condition_estimate(matrix)
+    if condition_estimate is None:
+        condition_estimate = _dense_matrix_condition_estimate(matrix)
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
+
+
+def _dense_matrix_nonsingular_threshold(size, dtype):
+    dtype = np.dtype(dtype)
+    eps = float(np.finfo(dtype).eps)
+    dimension_factor = np.sqrt(float(size)) if dtype == np.dtype(np.float32) else size
+    return _device_scalar(1.0 / (dimension_factor * eps), dtype=dtype)
+
+
+def _dense_matrix_solve_numerically_safe(
+    matrix,
+    solution,
+    rhs,
+    *,
+    tol,
+    lu_piv=None,
+    solve_dtype=None,
+):
+    """Whether a dense adjoint solve is numerically trustworthy at ``solve_dtype``.
+
+    A backward-error gate cannot distinguish a well-conditioned solve from a
+    backward-stable-but-forward-garbage solve of a (near-)singular operator
+    (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
+    the solve returns a finite wrong answer with a small residual).  The
+    condition screen ``isfinite(cond) & (cond < threshold)`` lets a degenerate
+    operator fail closed: float64 production uses the LAPACK rank-tolerance
+    reciprocal ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), cleanly separating the
+    well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
+    singular one (cond >~ 1e15).
+
+    The forward-error *bound* ``cond * residual_rel`` is deliberately applied to
+    float32 only.  At large ``n`` (the float64 production regime) the 1-norm
+    condition estimate inflates ~``n``-fold over the 2-norm conditioning,
+    tripping the bound's ``sqrt(eps)`` gate even on an accurate solve, so it
+    would false-reject production.  Float32 smoke solves instead clear the
+    broader ``1 / (sqrt(n) * eps)`` condition screen, which admits moderately
+    conditioned operators that float32 precision cannot resolve to smoke
+    tolerance; those must additionally satisfy the forward-error bound before the
+    solve is accepted.  ``solve_dtype`` (the caller's rhs dtype) selects the lane
+    so the gate keys on the intended working precision even when the operator is
+    materialized at the runtime float64 policy dtype.
+    """
+    matrix = jnp.asarray(matrix)
+    if solve_dtype is None:
+        solve_dtype = matrix.dtype
+    solve_dtype = np.dtype(solve_dtype)
+    size = int(matrix.shape[0])
+    condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
+    threshold = _dense_matrix_nonsingular_threshold(size, solve_dtype)
+    nonsingular = jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+    if solve_dtype != np.dtype(np.float32):
+        return nonsingular
+    matrix = jnp.asarray(matrix, dtype=solve_dtype)
+    solution = jnp.asarray(solution, dtype=solve_dtype)
+    rhs = jnp.asarray(rhs, dtype=solve_dtype)
+    forward_error_safe = _dense_matrix_solve_forward_error_success(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        condition_estimate=condition_estimate,
+    )
+    return nonsingular & forward_error_safe
 
 
 def _solve_square_vector_system_operator_only(
@@ -4588,13 +4715,35 @@ def _apply_column_batched_operator(matvec, rhs):
     return jax.vmap(matvec, in_axes=1, out_axes=1)(rhs)
 
 
+def _dense_square_operator_matrix_bytes_allowed(rhs):
+    """Whether the ``n x n`` dense materialization (``n = rhs.shape[0]``) fits the
+    dense-Jacobian byte cap.  The operator dimension is ``rhs.shape[0]`` whether
+    ``rhs`` is a single vector or a column-batched ``(n, k)`` right-hand side."""
+    rhs = jnp.asarray(rhs)
+    dimension = int(rhs.shape[0])
+    matrix_bytes = dimension * dimension * np.dtype(rhs.dtype).itemsize
+    return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
+
+
 def _dense_square_operator_materialization_allowed(rhs):
     rhs = jnp.asarray(rhs)
     if rhs.ndim != 1:
         return False
-    dimension = int(rhs.shape[0])
-    matrix_bytes = dimension * dimension * np.dtype(rhs.dtype).itemsize
-    return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
+    return _dense_square_operator_matrix_bytes_allowed(rhs)
+
+
+def _dense_square_operator_lu_materialization_allowed(rhs):
+    """Dense-LU exact-adjoint gate: accept a single vector OR a column-batched
+    ``(n, k)`` right-hand side.  The dense ``J^T`` is ``n x n`` regardless of the
+    number of columns, so one factorization serves all ``k`` columns and
+    ``lu_solve`` solves the batched RHS in a single call.  This is what lets the
+    dense-LU path reach the production single-stage adjoint, whose fused
+    residual+iota+non-QS gradient solves a 2-D batched RHS (the per-objective
+    ``dJ()`` solves a single vector)."""
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim not in (1, 2):
+        return False
+    return _dense_square_operator_matrix_bytes_allowed(rhs)
 
 
 def _dense_square_operator_matrix(matvec, rhs):
@@ -4622,6 +4771,7 @@ def _dense_square_operator_matrix(matvec, rhs):
 
 
 def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
+    rhs_dtype = jnp.asarray(rhs).dtype
     matrix = _dense_square_operator_matrix(matvec, rhs)
     solution = jnp.linalg.lstsq(matrix, rhs, rcond=None)[0]
     residual = rhs - matrix @ solution
@@ -4638,7 +4788,78 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
         rhs,
         tol=tol,
     )
-    return solution, status._replace(success=status.success | backward_error_success)
+    # Numerical-safety guard -- see the LU sibling: a backward-stable solve
+    # of a (near-)singular operator is still forward-garbage, which the
+    # backward-error gate cannot detect.
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        solve_dtype=rhs_dtype,
+    )
+    return solution, status._replace(
+        success=(status.success | backward_error_success) & solve_safe
+    )
+
+
+def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
+    """Direct LU solve of one square system from an operator matvec.
+
+    Materializes the dense square operator implied by ``matvec`` (reusing the
+    chunked, transfer-guard-clean ``_dense_square_operator_matrix`` assembler),
+    factorizes it once with ``lu_factor``, solves ``M x = rhs`` with ``lu_solve``
+    and then applies a single step of iterative refinement (resolve the residual
+    against the same factors, add the correction).  Returns the established
+    ``_LinearSolveStatus`` via ``_linear_solve_status`` so the gate logic is
+    unchanged.  Used for the exact-Jacobian adjoint transpose solve, where the
+    matrix is the small, well-conditioned ``J^T`` that operator-GMRES cannot
+    resolve.
+    """
+    rhs_dtype = jnp.asarray(rhs).dtype
+    matrix = _dense_square_operator_matrix(matvec, rhs)
+    lu_piv = jsp_linalg.lu_factor(matrix)
+    solution = jsp_linalg.lu_solve(lu_piv, rhs)
+    # One step of iterative refinement against the cached factors: resolves the
+    # rounding error of the direct solve back to the matrix's backward-error
+    # floor without a second factorization (O(n^2) per step).
+    correction = jsp_linalg.lu_solve(lu_piv, rhs - matrix @ solution)
+    solution = solution + correction
+    residual = rhs - matrix @ solution
+    status = _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(0),
+    )
+    backward_error_success = _dense_matrix_backward_error_success(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+    )
+    # Numerical-safety guard: a backward-stable solve of a singular or
+    # near-singular operator still yields a forward-garbage solution that the
+    # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
+    # condition estimate exceeds the dtype-specific degeneracy threshold; float32
+    # smoke solves that pass the broader threshold must also satisfy the forward
+    # error bound.  A degenerate J^T then fails closed instead of silently
+    # returning a wrong adjoint, while the well-conditioned production J^T
+    # (cond ~ 1e3-1e6) passes with many orders of margin.  The cached ``lu_piv``
+    # is reused by the Hager-Higham inner solves (O(n^2)), avoiding a second
+    # factorization and keeping the strict transfer-guard path on device.
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        lu_piv=lu_piv,
+        solve_dtype=rhs_dtype,
+    )
+    return solution, status._replace(
+        success=(status.success | backward_error_success) & solve_safe
+    )
 
 
 def _solve_square_array_system_operator_only(
@@ -4860,10 +5081,10 @@ def _solve_jacobian_operator(
     tol,
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
-    matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    solution, _ = _solve_square_array_system_operator_only(
-        matvec,
+    solution, _ = _solve_jacobian_operator_with_status(
+        operator,
         rhs,
+        transpose=transpose,
         tol=tol,
         max_refinement_steps=max_refinement_steps,
     )
@@ -4898,6 +5119,23 @@ def _solve_jacobian_operator_with_status(
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
+    # Exact-Jacobian adjoint (``transpose``) opt-in: replace the stagnating
+    # operator-GMRES solve of the well-conditioned ``J^T λ = g`` system with a
+    # direct dense LU factorization plus one iterative-refinement step.  Scoped to
+    # the transpose (adjoint) solve and to single-vector or column-batched RHS
+    # inputs whose materialized dense matrix fits the ``max_dense_jacobian_bytes``
+    # policy; everything else keeps the operator-GMRES baseline so the flag
+    # A/B-compares cleanly.
+    if (
+        _EXACT_ADJOINT_DENSE_LU
+        and transpose
+        and _dense_square_operator_lu_materialization_allowed(rhs)
+    ):
+        return _solve_dense_square_operator_lu_system_with_status(
+            matvec,
+            rhs,
+            tol=tol,
+        )
     return _solve_square_array_system_operator_only(
         matvec,
         rhs,

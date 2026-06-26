@@ -3864,6 +3864,64 @@ class BoozerKernelBundle:
     value_and_grad: Callable[[object, object], tuple[object, object]]
 
 
+def _reprobe_adjoint_availability_with_dense_lu(
+    *,
+    jacobian,
+    grad,
+    tol,
+    eager_solution,
+    eager_status,
+    eager_success,
+    nonlinear_success,
+):
+    """Re-probe Boozer adjoint availability via the dense-LU exact-adjoint solver.
+
+    The eager availability probe in the host-controlled solve uses the
+    least-squares *Hessian* (``J^T J``, condition number ``kappa(J)^2``); its
+    relative-residual gate cannot reach ``linear_solve_tol`` on that squared
+    conditioning unless the surface is converged to ~machine precision, so a
+    validly-but-loosely-converged surface is falsely flagged adjoint-unavailable
+    -- which blocks ``J()``/``dJ()`` even though the un-squared adjoint solver
+    would succeed.  When the dense-LU exact-adjoint opt-in is enabled, the
+    exact-Jacobian ``dJ()`` path solves the *un-squared*, well-conditioned
+    ``J^T`` directly; mirror that solver here so availability reflects the path
+    ``dJ()`` takes when the dense-LU exact-Jacobian opt-in is active on an
+    exact-Jacobian linearization (not the squared-Hessian linearization this
+    LS-mode caller's own ``dJ()`` would otherwise use).
+
+    Returns ``(solution, status, success, probe_backend)``.  Inert -- returns the
+    eager result unchanged with ``probe_backend == "least-squares-hessian"`` --
+    unless the dense-LU opt-in is enabled, the eager probe failed while the
+    nonlinear solve converged, the Jacobian is square, the RHS materialization is
+    allowed, AND the un-squared dense-LU re-probe itself succeeds.  Gated on
+    ``nonlinear_success`` so it never masks a nonlinear-solve failure.  The flag
+    is default-OFF, so this is inert unless the dense-LU path is selected.
+    """
+    if not (
+        not eager_success
+        and nonlinear_success
+        and _optimizer_jax._EXACT_ADJOINT_DENSE_LU
+    ):
+        return eager_solution, eager_status, eager_success, "least-squares-hessian"
+    jacobian_matrix = jnp.asarray(jacobian)
+    if not (
+        jacobian_matrix.ndim == 2
+        and jacobian_matrix.shape[0] == jacobian_matrix.shape[1]
+        and _optimizer_jax._dense_square_operator_lu_materialization_allowed(grad)
+    ):
+        return eager_solution, eager_status, eager_success, "least-squares-hessian"
+    dense_lu_solution, dense_lu_status = (
+        _optimizer_jax._solve_dense_square_operator_lu_system_with_status(
+            lambda v: jacobian_matrix.T @ v,
+            grad,
+            tol=tol,
+        )
+    )
+    if not _host_bool(_optimizer_jax._linear_solve_status_success(dense_lu_status)):
+        return eager_solution, eager_status, eager_success, "least-squares-hessian"
+    return dense_lu_solution, dense_lu_status, True, "dense-lu-jacobian-transpose"
+
+
 def _solve_boozer_state_with_kernel_bundle(
     bundle: BoozerKernelBundle,
     x0,
@@ -3910,6 +3968,20 @@ def _solve_boozer_state_with_kernel_bundle(
     linear_solve_success = _host_bool(
         _optimizer_jax._linear_solve_status_success(linear_solve_status)
     )
+    (
+        linear_solve_solution,
+        linear_solve_status,
+        linear_solve_success,
+        linear_solve_probe_backend,
+    ) = _reprobe_adjoint_availability_with_dense_lu(
+        jacobian=jacobian,
+        grad=least_squares_state["grad"],
+        tol=tol,
+        eager_solution=linear_solve_solution,
+        eager_status=linear_solve_status,
+        eager_success=linear_solve_success,
+        nonlinear_success=nonlinear_success,
+    )
     failure_reason = None
     if not nonlinear_success:
         failure_reason = str(result.message)
@@ -3921,6 +3993,7 @@ def _solve_boozer_state_with_kernel_bundle(
         "success": nonlinear_success and linear_solve_success,
         "nonlinear_success": nonlinear_success,
         "linear_solve_success": linear_solve_success,
+        "linear_solve_probe_backend": linear_solve_probe_backend,
         "fun": result.fun,
         "nit": result.nit,
         "status": result.status,
@@ -4561,24 +4634,57 @@ class BoozerSurfaceJAX(Optimizable):
                 solved = P_host @ z
                 return jnp.asarray(solved, dtype=x.dtype)
 
+            # Acceptance is governed by the scale-invariant backward error
+            # (``status.success | backward_error_success``), matching the
+            # ``dense-plu-shared`` branch above. The bare relative-residual gate
+            # is scale-sensitive: on the kappa ~ 4e5 LS Hessian the adjoint
+            # transpose solve is backward-stable (eta ~ n*eps) yet its relative
+            # residual ||b - A x|| / ||b|| is amplified by ||A|| ||x|| / ||b||
+            # and false-rejects an accurate solve. The backward-error gate is
+            # condition-independent and fails closed only on genuinely
+            # singular/garbage solves.
             @_with_host_bridge_transfer_guard
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
+                rhs_device = jnp.asarray(rhs, dtype=x.dtype)
+                status = _optimizer_jax._dense_linear_solve_status(
                     apply_forward,
                     solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
+                    rhs_device,
                     tol=tol_host,
+                )
+                backward_error_success = (
+                    _optimizer_jax._dense_matrix_backward_error_success(
+                        jnp.asarray(H_host, dtype=x.dtype),
+                        solved,
+                        rhs_device,
+                        tol=tol_host,
+                    )
+                )
+                return solved, status._replace(
+                    success=status.success | backward_error_success
                 )
 
             @_with_host_bridge_transfer_guard
             def solve_transpose_with_status(rhs):
                 solved = solve_transpose(rhs)
-                return solved, _optimizer_jax._dense_linear_solve_status(
+                rhs_device = jnp.asarray(rhs, dtype=x.dtype)
+                status = _optimizer_jax._dense_linear_solve_status(
                     apply_transpose,
                     solved,
-                    jnp.asarray(rhs, dtype=x.dtype),
+                    rhs_device,
                     tol=tol_host,
+                )
+                backward_error_success = (
+                    _optimizer_jax._dense_matrix_backward_error_success(
+                        jnp.asarray(H_host.T, dtype=x.dtype),
+                        solved,
+                        rhs_device,
+                        tol=tol_host,
+                    )
+                )
+                return solved, status._replace(
+                    success=status.success | backward_error_success
                 )
 
             return pack_callbacks(
