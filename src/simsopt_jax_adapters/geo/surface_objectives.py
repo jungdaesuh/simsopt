@@ -161,9 +161,7 @@ def _surface_spec_from_surface(surface):
             stellsym=surface.stellsym,
             mpol=surface.mpol,
             ntor=surface.ntor,
-            clamped_dims=tuple(
-                getattr(surface, "clamped_dims", (False, False, False))
-            ),
+            clamped_dims=tuple(getattr(surface, "clamped_dims", (False, False, False))),
         )
     raise NotImplementedError(
         "JAX surface objective adapters require an explicit spec builder for "
@@ -178,6 +176,7 @@ def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
     gamma1 = gamma1.reshape((-1, 3))
     gamma2 = gamma2.reshape((-1, 3))
     return pairwise_thresholded_mean_square_distance_pure(gamma1, gamma2, mdist)
+
 
 __all__ = [
     "AreaJAX",
@@ -300,6 +299,7 @@ class SurfaceSurfaceDistance(Optimizable):
             }
         )
 
+
 _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "optimizer_backend",
     "least_squares_algorithm",
@@ -314,8 +314,6 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "materialize_dense_linearization",
     "max_dense_linearization_bytes",
 )
-
-_TRACEABLE_ADJOINT_FAIL_GRAD_SENTINEL = np.nan
 
 
 def _traceable_diag_progress(message):
@@ -1032,7 +1030,8 @@ def _runtime_float64_scalar(value, *, reference):
 
 
 def _traceable_adjoint_fail_gradient_like(gradient):
-    return jnp.full_like(gradient, _TRACEABLE_ADJOINT_FAIL_GRAD_SENTINEL)
+    zero = gradient - gradient
+    return zero / zero
 
 
 def _traceable_rejected_objective_value(value, reference_value):

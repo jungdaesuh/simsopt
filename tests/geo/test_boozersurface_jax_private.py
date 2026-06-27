@@ -105,11 +105,10 @@ def test_private_lbfgs_workspace_bytes_reports_bounded_state_size():
     maxcor = 4
     dtype = np.dtype(np.float64)
     expected = (
-        (_private_lbfgs.lbfgsb.lbfgsb_workspace_size(n, maxcor) + 29)
-        * dtype.itemsize
-        + (_private_lbfgs.lbfgsb.lbfgsb_iwa_size(n) + 2 + 2 + 4 + 44)
-        * np.dtype(np.int32).itemsize
-    )
+        _private_lbfgs.lbfgsb.lbfgsb_workspace_size(n, maxcor) + 29
+    ) * dtype.itemsize + (
+        _private_lbfgs.lbfgsb.lbfgsb_iwa_size(n) + 2 + 2 + 4 + 44
+    ) * np.dtype(np.int32).itemsize
 
     assert _private_lbfgs._lbfgsb_workspace_bytes(n, maxcor, dtype) == expected
 
@@ -144,8 +143,7 @@ def test_lbfgs_ondevice_fast_path_selection_is_bounds_derived():
     assert _private_lbfgs._LBFGSB_PRIVATE_BOUNDS is None
     assert _private_lbfgs._lbfgsb_unconstrained_fast_path_enabled(None) is True
     assert (
-        _private_lbfgs._lbfgsb_unconstrained_fast_path_enabled([(None, None)])
-        is False
+        _private_lbfgs._lbfgsb_unconstrained_fast_path_enabled([(None, None)]) is False
     )
     assert "unconstrained_fast_path=True" not in kernel_source
     assert "unconstrained_fast_path=unconstrained_fast_path" in kernel_source
@@ -1114,6 +1112,7 @@ class TestOptimizerAdapterPrivate:
         monkeypatch,
     ):
         """Post-loop gradient refresh must not turn a failed iterate into success."""
+
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
@@ -1891,6 +1890,7 @@ class TestLBFGSMethodPrivate:
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_does_not_call_custom_host_core(self, monkeypatch):
         """lbfgs-ondevice must run the SciPy-compatible JAX state machine."""
+
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
@@ -2130,9 +2130,15 @@ class TestLBFGSMethodPrivate:
         def fail_bounded_geometry(*_args, **_kwargs):
             raise AssertionError("unconstrained lbfgs-ondevice traced bounded geometry")
 
-        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_cauchy", fail_bounded_geometry)
-        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_formk", fail_bounded_geometry)
-        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_subsm", fail_bounded_geometry)
+        monkeypatch.setattr(
+            _private_lbfgs.lbfgsb, "lbfgsb_cauchy", fail_bounded_geometry
+        )
+        monkeypatch.setattr(
+            _private_lbfgs.lbfgsb, "lbfgsb_formk", fail_bounded_geometry
+        )
+        monkeypatch.setattr(
+            _private_lbfgs.lbfgsb, "lbfgsb_subsm", fail_bounded_geometry
+        )
 
         matrix = jnp.asarray(
             [[3.0, 0.25], [0.25, 1.75]],
@@ -2830,6 +2836,27 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_square_operator_zero_rhs_returns_successful_zero_solution(self):
+        rhs = jnp.zeros(2, dtype=jnp.float64)
+        matrix = jnp.asarray(
+            [[2.0, 0.25], [-0.5, 3.0]],
+            dtype=jnp.float64,
+        )
+
+        solution, status = _opt._solve_square_vector_system_operator_only(
+            lambda vector: matrix @ vector,
+            rhs,
+            tol=1e-12,
+        )
+
+        np.testing.assert_allclose(np.asarray(solution), np.zeros(2), atol=0.0)
+        assert bool(np.asarray(status.success))
+        assert float(np.asarray(status.residual)) == pytest.approx(0.0)
+        assert float(np.asarray(status.residual_relative)) == pytest.approx(0.0)
+        assert int(np.asarray(status.iterations)) == 0
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_square_operator_explicit_budget_reaches_second_correction(
         self, monkeypatch
     ):
@@ -2849,9 +2876,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             lambda vector: vector,
             rhs,
             tol=1e-11,
-            max_refinement_steps=(
-                _opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
-            ),
+            max_refinement_steps=(_opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS),
         )
 
         np.testing.assert_allclose(np.asarray(solution), np.asarray(rhs), atol=1e-11)
@@ -2917,9 +2942,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             lambda vector: vector,
             rhs,
             tol=1e-11,
-            max_refinement_steps=(
-                _opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
-            ),
+            max_refinement_steps=(_opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS),
         )
 
         np.testing.assert_allclose(np.asarray(solution), np.asarray([0.9999]))

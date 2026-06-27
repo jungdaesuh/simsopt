@@ -127,15 +127,25 @@ def _element_count_runtime(array: jax.Array) -> jax.Array:
 
 
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
-    return jax.lax.slice_in_dim(array, int(start), int(end), axis=0)
+    start = int(start)
+    end = int(end)
+    selector = np.zeros((end - start, int(array.shape[0])), dtype=float)
+    selector[np.arange(end - start), np.arange(start, end)] = 1.0
+    return _as_explicit_runtime_array(selector, reference=array) @ array
 
 
 def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
     start = int(start)
-    stop = start + values.shape[0]
-    head = jax.lax.slice_in_dim(array, 0, start, axis=0)
-    tail = jax.lax.slice_in_dim(array, stop, array.shape[0], axis=0)
-    return jnp.concatenate([head, values, tail], axis=0)
+    stop = start + int(values.shape[0])
+    update_matrix = np.zeros((int(array.shape[0]), int(values.shape[0])), dtype=float)
+    update_matrix[np.arange(start, stop), np.arange(int(values.shape[0]))] = 1.0
+    update_mask = np.sum(update_matrix, axis=1)
+    runtime_update_matrix = _as_explicit_runtime_array(update_matrix, reference=array)
+    runtime_update_mask = _as_explicit_runtime_array(update_mask, reference=array)
+    return (
+        array * (_runtime_scalar(1.0, reference=array) - runtime_update_mask)
+        + runtime_update_matrix @ values
+    )
 
 
 def curve_spec_from_curve(curve):
@@ -546,7 +556,9 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
         gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
             spec.base_curve, base_dofs
         )
-        surface_midplane_z = 0.0 if spec.surface_midplane_z is None else spec.surface_midplane_z
+        surface_midplane_z = (
+            0.0 if spec.surface_midplane_z is None else spec.surface_midplane_z
+        )
         _tangent, normal, binormal = rotated_surface_tangent_frame(
             gamma,
             gammadash,

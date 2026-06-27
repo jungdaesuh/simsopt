@@ -431,6 +431,37 @@ def test_float64_dense_status_fails_closed_on_near_singular_forward_error(solver
     assert not bool(status.success)
 
 
+def test_dense_lstsq_accepts_condition_unsafe_tiny_solution():
+    """Tiny roundoff-scale adjoints should not become NaN solely from conditioning."""
+    matrix = jnp.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 0.0],
+        ],
+        dtype=jnp.float64,
+    )
+    rhs = jnp.asarray([1.0e-12, 0.0], dtype=jnp.float64)
+
+    def matvec(vector):
+        return matrix @ vector
+
+    solution, status = (
+        _optimizer._solve_dense_square_operator_least_squares_system_with_status(
+            matvec,
+            rhs,
+            tol=1.0e-10,
+        )
+    )
+
+    assert bool(status.success)
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.asarray([1.0e-12, 0.0], dtype=np.float64),
+        rtol=1.0e-12,
+        atol=1.0e-24,
+    )
+
+
 def test_dense_lu_status_fails_closed_on_singular_operator():
     """A singular operator yields a backward-stable but forward-garbage solution;
     the condition-estimate guard must fail it closed (success False) instead of

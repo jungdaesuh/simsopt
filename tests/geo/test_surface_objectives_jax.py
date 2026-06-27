@@ -2185,7 +2185,9 @@ def test_traceable_plu_unpack_rejects_unsupported_factor_arity():
         )
 
 
-def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch):
+def test_traceable_hessian_plu_solve_rejects_when_numerical_safety_gate_fails(
+    monkeypatch,
+):
     matrix = jnp.asarray(
         [
             [3.0, 0.25],
@@ -2195,18 +2197,12 @@ def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch
     )
     rhs = jnp.asarray([0.2, -0.6], dtype=jnp.float64)
     linear_solve_factors = jax.scipy.linalg.lu(matrix)
-    residual_norm_calls = {"count": 0}
-    original_relative_residual_1_norm = optimizer_jax_module._relative_residual_1_norm
+    safety_gate_calls = {"count": 0}
 
-    def relative_residual_1_norm(residual, current_rhs):
-        residual_norm_calls["count"] += 1
-        return original_relative_residual_1_norm(residual, current_rhs)
+    def solve_numerically_safe(*_args, **_kwargs):
+        safety_gate_calls["count"] += 1
+        return jnp.asarray(False)
 
-    monkeypatch.setattr(
-        optimizer_jax_module,
-        "_forward_error_success",
-        lambda *_args, **_kwargs: jnp.asarray(False),
-    )
     monkeypatch.setattr(
         optimizer_jax_module,
         "_dense_matrix_backward_error_success",
@@ -2214,11 +2210,11 @@ def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch
     )
     monkeypatch.setattr(
         optimizer_jax_module,
-        "_relative_residual_1_norm",
-        relative_residual_1_norm,
+        "_dense_matrix_solve_numerically_safe",
+        solve_numerically_safe,
     )
 
-    _solution, success = (
+    _solution, status = (
         surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
             object(),
             jnp.zeros_like(rhs),
@@ -2233,8 +2229,61 @@ def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch
         )
     )
 
-    assert bool(np.asarray(success)) is False
-    assert residual_norm_calls["count"] == 1
+    assert not bool(
+        np.asarray(optimizer_jax_module._linear_solve_status_success(status))
+    )
+    assert safety_gate_calls["count"] == 1
+
+
+def test_traceable_hessian_plu_solve_accepts_residual_success_without_forward_error(
+    monkeypatch,
+):
+    matrix = jnp.asarray(
+        [
+            [3.0, 0.25],
+            [-0.5, 2.0],
+        ],
+        dtype=jnp.float64,
+    )
+    rhs = jnp.asarray([0.2e-12, -0.6e-12], dtype=jnp.float64)
+    linear_solve_factors = jax.scipy.linalg.lu(matrix)
+
+    def forward_error_success(*_args, **_kwargs):
+        raise AssertionError("traceable PLU acceptance must not require forward error")
+
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_forward_error_success",
+        forward_error_success,
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_dense_matrix_backward_error_success",
+        lambda *_args, **_kwargs: jnp.asarray(False),
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_dense_matrix_solve_numerically_safe",
+        lambda *_args, **_kwargs: jnp.asarray(True),
+    )
+
+    solution, status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+            object(),
+            jnp.zeros_like(rhs),
+            rhs,
+            coil_set_spec=None,
+            objective_kwargs={},
+            linear_solve_factors=linear_solve_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            transpose=False,
+        )
+    )
+
+    assert np.all(np.isfinite(np.asarray(solution)))
+    assert bool(np.asarray(optimizer_jax_module._linear_solve_status_success(status)))
 
 
 def test_traceable_hessian_plu_solve_accepts_backward_error_success(monkeypatch):
@@ -5140,6 +5189,164 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
 
     value, grad = seeded.optimizer_initial_value_and_grad
     _assert_primal_value_with_nonfinite_gradient(value, grad, 1.25)
+
+
+def test_traceable_gradient_uses_zero_adjoint_for_exact_zero_rhs(monkeypatch):
+    coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    solved_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+    def scalar_objective_fn(
+        x_inner,
+        current_coil_dofs,
+        _coil_set_spec,
+        *,
+        objective_kwargs,
+    ):
+        del x_inner, _coil_set_spec, objective_kwargs
+        return jnp.dot(current_coil_dofs, current_coil_dofs)
+
+    def solve_linearization(*_args, **kwargs):
+        rhs = kwargs["rhs"] if "rhs" in kwargs else _args[2]
+        adjoint = jnp.full_like(rhs, 1.0e6)
+        status = optimizer_jax_module._linear_solve_status(
+            adjoint,
+            jnp.zeros_like(rhs),
+            rhs,
+            tol=1.0e-10,
+            iterations=1,
+        )._replace(success=jnp.asarray(True))
+        return adjoint, status
+
+    def directional_inner_stationarity(_x_inner, tangent, coil_set_spec, **_kwargs):
+        return jnp.dot(tangent[: coil_set_spec.shape[0]], coil_set_spec)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_linearization",
+        solve_linearization,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_directional_inner_stationarity",
+        directional_inner_stationarity,
+    )
+
+    direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            scalar_objective_fn=scalar_objective_fn,
+        )
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(direct_grad),
+        np.asarray([2.0, -4.0]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(np.asarray(implicit_grad), np.zeros(2), atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(total_grad),
+        np.asarray([2.0, -4.0]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert bool(np.asarray(linear_solve_success))
+
+
+def test_traceable_gradient_solves_nonzero_adjoint_rhs_below_tolerance(monkeypatch):
+    coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    solved_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+    def scalar_objective_fn(
+        x_inner,
+        current_coil_dofs,
+        _coil_set_spec,
+        *,
+        objective_kwargs,
+    ):
+        del objective_kwargs
+        tiny_x_dependence = jnp.asarray(1.0e-12, dtype=jnp.float64) * jnp.sum(x_inner)
+        return jnp.dot(current_coil_dofs, current_coil_dofs) + tiny_x_dependence
+
+    def solve_linearization(*_args, **kwargs):
+        rhs = kwargs["rhs"] if "rhs" in kwargs else _args[2]
+        adjoint = jnp.full_like(rhs, 1.0e6)
+        status = optimizer_jax_module._linear_solve_status(
+            adjoint,
+            jnp.zeros_like(rhs),
+            rhs,
+            tol=1.0e-10,
+            iterations=1,
+        )._replace(success=jnp.asarray(True))
+        return adjoint, status
+
+    def directional_inner_stationarity(_x_inner, tangent, coil_set_spec, **_kwargs):
+        return jnp.dot(tangent[: coil_set_spec.shape[0]], coil_set_spec)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_linearization",
+        solve_linearization,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_directional_inner_stationarity",
+        directional_inner_stationarity,
+    )
+
+    direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs={},
+            scalar_objective_fn=scalar_objective_fn,
+        )
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(direct_grad),
+        np.asarray([2.0, -4.0]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(implicit_grad),
+        np.asarray([1.0e6, 1.0e6]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(total_grad),
+        np.asarray([2.0 - 1.0e6, -4.0 - 1.0e6]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert bool(np.asarray(linear_solve_success))
 
 
 def test_traceable_seeded_value_and_grad_builds_general_only_bundle(monkeypatch):

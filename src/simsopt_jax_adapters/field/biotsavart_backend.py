@@ -9,7 +9,7 @@ This module does **not** inherit from ``sopp.BiotSavart`` or
 M0 rewrite contract (adapter pattern, §5).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from functools import partial
 import time
 
@@ -89,11 +89,40 @@ from simsopt_jax_adapters.geo.curve_specs import (
 )
 
 _new_coil_dof_state_token = make_state_token_factory()
+_SPEC_CACHE_KEY_SCALAR_TYPES = (str, int, float, bool, type(None))
 
 
 def _device_zero_like(value: object) -> jax.Array:
     array = _as_jax_float64(value)
     return array - array
+
+
+def _array_cache_key(value: object) -> tuple[str, tuple[int, ...], bytes]:
+    array = np.asarray(value)
+    return str(array.dtype), tuple(int(axis) for axis in array.shape), array.tobytes()
+
+
+def _spec_cache_key(value: object) -> object:
+    if isinstance(value, _SPEC_CACHE_KEY_SCALAR_TYPES):
+        return value
+    if isinstance(value, np.ndarray):
+        return _array_cache_key(value)
+    if isinstance(value, jax.Array):
+        return _array_cache_key(value)
+    if is_dataclass(value):
+        return (
+            type(value).__module__,
+            type(value).__name__,
+            tuple(
+                (field.name, _spec_cache_key(getattr(value, field.name)))
+                for field in fields(value)
+            ),
+        )
+    if isinstance(value, tuple):
+        return tuple(_spec_cache_key(item) for item in value)
+    if isinstance(value, list):
+        return tuple(_spec_cache_key(item) for item in value)
+    raise TypeError(f"Unsupported spec cache key value: {type(value).__name__}")
 
 
 __all__ = [
@@ -376,7 +405,24 @@ class SpecBackedCurrent:
             self._owner.coil_dof_extraction_spec(),
             self._owner.x,
         )[self._coil_index]
-        return host_float(coil_spec.current.value[0]) * float(coil_spec.symmetry.scale)
+        return host_float(coil_spec.current.value[0])
+
+
+class SpecBackedScaledCurrent:
+    """Scaled current wrapper matching the host ``ScaledCurrent`` graph shape."""
+
+    def __init__(self, current_to_scale: SpecBackedCurrent, scale: float) -> None:
+        self.current_to_scale = current_to_scale
+        self.scale = float(scale)
+        lower = np.asarray(current_to_scale.local_lower_bounds, dtype=np.float64)
+        upper = np.asarray(current_to_scale.local_upper_bounds, dtype=np.float64)
+        scaled_lower = lower * self.scale
+        scaled_upper = upper * self.scale
+        self.local_lower_bounds = np.minimum(scaled_lower, scaled_upper)
+        self.local_upper_bounds = np.maximum(scaled_lower, scaled_upper)
+
+    def get_value(self) -> float:
+        return float(self.current_to_scale.get_value()) * self.scale
 
 
 class SpecBackedCurve(Optimizable):
@@ -509,6 +555,61 @@ class SpecBackedCurve(Optimizable):
         _kappa, pullback = jax.vjp(kappa_from_dofs, curve_spec.dofs)
         (coeff_cotangent,) = pullback(_as_jax_float64(v))
         return self._owner_derivative_from_curve_cotangent(coeff_cotangent)
+
+
+class SpecBackedRotatedCurve(Optimizable):
+    """Rotated curve wrapper matching the host ``RotatedCurve`` graph shape."""
+
+    return_fn_map = {}
+
+    def __init__(self, curve: SpecBackedCurve, rotmat: object) -> None:
+        self.curve = curve
+        self.rotmat = host_array(rotmat, dtype=np.float64)
+        self.quadpoints = curve.quadpoints
+        Optimizable.__init__(
+            self,
+            x0=np.asarray([], dtype=np.float64),
+            depends_on=[curve],
+        )
+
+    def _rotate(self, values: object) -> np.ndarray:
+        return host_array(
+            _as_jax_float64(values) @ _as_jax_float64(self.rotmat),
+            dtype=np.float64,
+        )
+
+    def gamma(self) -> np.ndarray:
+        return self._rotate(self.curve.gamma())
+
+    def gammadash(self) -> np.ndarray:
+        return self._rotate(self.curve.gammadash())
+
+    def gammadashdash(self) -> np.ndarray:
+        return self._rotate(self.curve.gammadashdash())
+
+    def incremental_arclength(self) -> np.ndarray:
+        return self.curve.incremental_arclength()
+
+    def kappa(self) -> np.ndarray:
+        return self.curve.kappa()
+
+    def get_dofs(self) -> jax.Array:
+        return self.curve.get_dofs()
+
+    def to_spec(self) -> CurveSpec:
+        return self.curve.to_spec()
+
+    def dgamma_by_dcoeff_vjp(self, v: object) -> Derivative:
+        return self.curve.dgamma_by_dcoeff_vjp(_as_jax_float64(v) @ self.rotmat.T)
+
+    def dgammadash_by_dcoeff_vjp(self, v: object) -> Derivative:
+        return self.curve.dgammadash_by_dcoeff_vjp(_as_jax_float64(v) @ self.rotmat.T)
+
+    def dincremental_arclength_by_dcoeff_vjp(self, v: object) -> Derivative:
+        return self.curve.dincremental_arclength_by_dcoeff_vjp(v)
+
+    def dkappa_by_dcoeff_vjp(self, v: object) -> Derivative:
+        return self.curve.dkappa_by_dcoeff_vjp(v)
 
 
 def _set_biot_savart_points(field, points):
@@ -649,17 +750,22 @@ class SpecBackedCoil:
         owner,
         coil_index: int,
         extraction_spec: CoilDofExtractionSpec,
+        base_curve: SpecBackedCurve,
+        base_current: SpecBackedCurrent,
     ) -> None:
         self._owner = owner
         self._coil_index = int(coil_index)
-        self.curve = SpecBackedCurve(
-            coil_spec.curve,
-            coil_spec.symmetry,
-            owner=owner,
-            coil_index=coil_index,
-            extraction_spec=extraction_spec,
+        del extraction_spec
+        self.curve = (
+            SpecBackedRotatedCurve(base_curve, coil_spec.symmetry.rotmat)
+            if coil_spec.symmetry.has_rotation
+            else base_curve
         )
-        self.current = SpecBackedCurrent(owner=owner, coil_index=coil_index)
+        self.current = (
+            SpecBackedScaledCurrent(base_current, coil_spec.symmetry.scale)
+            if float(coil_spec.symmetry.scale) != 1.0
+            else base_current
+        )
 
     def to_spec(self) -> CoilSpec:
         return coil_specs_from_dof_extraction_spec(
@@ -702,21 +808,55 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             self._coil_dof_extraction_spec,
             coil_dofs,
         )
-        return tuple(
-            SpecBackedCoil(
-                coil_spec,
-                owner=self,
-                coil_index=coil_index,
-                extraction_spec=extraction_spec,
+        curve_views: dict[object, SpecBackedCurve] = {}
+        current_views: dict[object, SpecBackedCurrent] = {}
+        coils = []
+        for coil_index, (extraction_spec, coil_spec) in enumerate(
+            zip(
+                self._coil_dof_extraction_spec.coils,
+                coil_specs,
+                strict=True,
             )
-            for coil_index, (extraction_spec, coil_spec) in enumerate(
-                zip(
-                    self._coil_dof_extraction_spec.coils,
-                    coil_specs,
-                    strict=True,
+        ):
+            curve_key = (
+                _spec_cache_key(extraction_spec.curve),
+                _spec_cache_key(extraction_spec.curve_map),
+                _spec_cache_key(extraction_spec.surface_map),
+                extraction_spec.surface_output_index,
+            )
+            if curve_key not in curve_views:
+                curve_views[curve_key] = SpecBackedCurve(
+                    coil_spec.curve,
+                    CoilSymmetrySpec(
+                        rotmat=coil_spec.symmetry.rotmat,
+                        scale=1.0,
+                        has_rotation=False,
+                    ),
+                    owner=self,
+                    coil_index=coil_index,
+                    extraction_spec=extraction_spec,
+                )
+            current_key = (
+                _spec_cache_key(extraction_spec.current_map),
+                _spec_cache_key(coil_spec.current),
+                None if extraction_spec.current_map.owner_segments else coil_index,
+            )
+            if current_key not in current_views:
+                current_views[current_key] = SpecBackedCurrent(
+                    owner=self,
+                    coil_index=coil_index,
+                )
+            coils.append(
+                SpecBackedCoil(
+                    coil_spec,
+                    owner=self,
+                    coil_index=coil_index,
+                    extraction_spec=extraction_spec,
+                    base_curve=curve_views[curve_key],
+                    base_current=current_views[current_key],
                 )
             )
-        )
+        return tuple(coils)
 
     @property
     def x(self) -> jax.Array:

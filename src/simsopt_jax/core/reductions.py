@@ -49,29 +49,12 @@ def _pairwise_reduce_axis0(array):
     return reduced
 
 
-def _slice_axis_entry(array, *, axis: int, index: int):
-    sliced = lax.slice_in_dim(array, index, index + 1, axis=axis)
-    return jnp.squeeze(sliced, axis=axis)
-
-
 def pairwise_sum_axis(array, *, axis: int):
     """Reduce ``array`` along ``axis`` using a fixed binary addition tree."""
     axis_index = axis if axis >= 0 else array.ndim + axis
     axis_size = array.shape[axis_index]
     if axis_size == 0:
         return jnp.sum(array, axis=axis_index)
-    if axis_size <= 4:
-        first_pair = _slice_axis_entry(array, axis=axis_index, index=0)
-        if axis_size == 1:
-            return first_pair
-        first_pair = first_pair + _slice_axis_entry(array, axis=axis_index, index=1)
-        if axis_size == 2:
-            return first_pair
-        second_pair = _slice_axis_entry(array, axis=axis_index, index=2)
-        if axis_size == 3:
-            return first_pair + second_pair
-        second_pair = second_pair + _slice_axis_entry(array, axis=axis_index, index=3)
-        return first_pair + second_pair
 
     reduced = jnp.moveaxis(array, axis_index, 0)
     reduced = _pad_axis(reduced, axis=0, padded_size=_next_power_of_two(axis_size))

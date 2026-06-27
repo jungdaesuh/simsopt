@@ -60,6 +60,7 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
     gamma2 = _as_jax_float64(gamma2).reshape((-1, 3))
     return pairwise_min_distance_pure(gamma1, gamma2)
 
+
 __all__ = [
     "TraceableObjectiveSeededValueAndGrad",
     "TraceableObjectiveSolvedPair",
@@ -470,25 +471,6 @@ def _traceable_solve_plu_linearization(
         transpose=transpose,
     )
     residual_norm = jnp.linalg.norm(residual)
-    residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
-    # The Boozer LS Hessian is symmetric by construction (J^T J is symmetric
-    # for any J). Therefore κ_1(matrix) == κ_1(matrix.T) and we can estimate
-    # the condition number using either orientation without distinguishing
-    # forward and adjoint paths. Both the LS lane and the forward warm-start
-    # solve reach this function with the same symmetric matrix. Handing the
-    # native ``matrix`` plus its ``(lu, piv)`` factors to the condition
-    # estimator lets Hager-Higham reuse the cached factors via
-    # ``jsp_linalg.lu_solve`` (10 × O(n²)) instead of refactorizing
-    # ``matrix`` 10 times (10 × O(n³)).
-    condition_estimate = _optimizer_jax._dense_matrix_condition_estimate(
-        matrix,
-        lu_piv=lu_piv,
-    )
-    forward_error_success = _optimizer_jax._forward_error_success(
-        residual_rel,
-        condition_estimate,
-        tol=linear_solve_tol,
-    )
     status = _optimizer_jax._linear_solve_status(
         solution,
         residual,
@@ -502,11 +484,30 @@ def _traceable_solve_plu_linearization(
         rhs,
         tol=linear_solve_tol,
     )
+    # The Boozer LS Hessian is symmetric (J^T J), so the native matrix is the
+    # right condition-screen input for both forward and adjoint paths. Pass the
+    # cached LU factors so Hager-Higham condition estimation stays O(n^2).
+    solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+        matrix,
+        solution,
+        rhs,
+        tol=linear_solve_tol,
+        lu_piv=lu_piv,
+        solve_dtype=rhs.dtype,
+    )
+    small_solution_success = _optimizer_jax._dense_matrix_solve_small_solution_success(
+        solution,
+        rhs,
+        tol=linear_solve_tol,
+    )
     success = (
         jnp.all(jnp.isfinite(solution))
         & jnp.all(jnp.isfinite(residual))
         & jnp.isfinite(residual_norm)
-        & ((status.success & forward_error_success) | backward_error_success)
+        & (
+            ((status.success | backward_error_success) & solve_safe)
+            | (status.success & small_solution_success)
+        )
     )
     return solution, status._replace(success=success)
 
@@ -925,6 +926,11 @@ def _traceable_total_gradient_with_status(
     return total_grad, linear_solve_success
 
 
+def _traceable_adjoint_rhs_exactly_zero(rhs):
+    rhs = jnp.asarray(rhs)
+    return jnp.all(rhs == 0)
+
+
 def _traceable_objective_gradient_parts(
     booz_jax,
     coil_set_spec_from_dofs,
@@ -996,20 +1002,32 @@ def _traceable_objective_gradient_parts(
             lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
             solved_x,
         )
-        adjoint, linear_solve_status = _traceable_solve_linearization(
-            booz_jax,
-            solved_x,
-            dJ_dx,
-            coil_set_spec,
-            objective_kwargs,
-            linear_solve_factors=solved_linear_solve_factors,
-            linearization_kind=linearization_kind,
-            linear_solve_tol=linear_solve_tol,
-            linear_solve_stab=linear_solve_stab,
-            transpose=True,
-        )
-        linear_solve_success = _optimizer_jax._linear_solve_status_success(
-            linear_solve_status
+
+        def negligible_adjoint_rhs(_):
+            return _runtime_zeros_like(solved_x), _runtime_bool(True)
+
+        def solve_adjoint_rhs(_):
+            adjoint_value, linear_solve_status = _traceable_solve_linearization(
+                booz_jax,
+                solved_x,
+                dJ_dx,
+                coil_set_spec,
+                objective_kwargs,
+                linear_solve_factors=solved_linear_solve_factors,
+                linearization_kind=linearization_kind,
+                linear_solve_tol=linear_solve_tol,
+                linear_solve_stab=linear_solve_stab,
+                transpose=True,
+            )
+            return adjoint_value, _optimizer_jax._linear_solve_status_success(
+                linear_solve_status
+            )
+
+        adjoint, linear_solve_success = lax.cond(
+            _traceable_adjoint_rhs_exactly_zero(dJ_dx),
+            negligible_adjoint_rhs,
+            solve_adjoint_rhs,
+            operand=None,
         )
 
     if not depends_on_coil_dofs:
@@ -3063,10 +3081,11 @@ class TraceableObjectiveSolvedPair(NamedTuple):
 
     ``solve_fn(coil_dofs) -> forward_result`` runs the device-traceable forward
     Boozer solve and returns the normalized forward-result mapping (keys include
-    ``"x"`` the solved decision vector, ``"linear_solve_factors"``, and
-    ``"success"``). ``value_grad_from_solved(coil_dofs, solved_x,
-    solved_linear_solve_factors) -> (value, grad)`` evaluates the objective and the
-    IFT adjoint gradient from an already-solved state, performing no forward solve.
+    ``"x"`` the solved decision vector, ``"linear_solve_factors"``, ``"success"``,
+    and ``"primal_success"``). ``value_grad_from_solved(coil_dofs, solved_x,
+    solved_linear_solve_factors) -> (value, grad)`` evaluates the objective and
+    the IFT adjoint gradient from an already-solved state, performing no forward
+    solve.
 
     Together they are a faithful split of the fused
     :func:`make_traceable_objective_value_and_grad` callable -- both halves are
@@ -3076,11 +3095,11 @@ class TraceableObjectiveSolvedPair(NamedTuple):
     the optimizer loop and line search, so the per-step jit never encloses the
     forward solve (the macro-step breadth-exclusion gate).
 
-    Parity note: the fused callable gates on ``forward_result["success"]`` and
-    falls back to the baseline state for the gradient on solver failure. A host
-    driver MUST replicate that branch (inspect ``forward_result["success"]`` and
-    pick the baseline-vs-candidate solved state before calling
-    ``value_grad_from_solved``) to match the fused path's failure handling.
+    Parity note: the fused callable accepts a candidate gradient when
+    ``forward_result["success"]`` is true, also accepts it when a success-filter
+    rejected a primal-successful solve, and falls back to the baseline gradient
+    only when ``forward_result["primal_success"]`` is false. A host driver MUST
+    replicate that branch to match the fused path's failure handling.
     """
 
     solve_fn: callable

@@ -4248,6 +4248,11 @@ def _linear_solve_finite(solution, residual):
 # eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
 # solves of large, moderately ill-conditioned systems.
 _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
+# A condition-unsafe dense solve can still be harmless when the residual gate
+# passes and the returned adjoint is itself numerically negligible. This keeps
+# tiny roundoff RHS values from poisoning gradients with NaNs without accepting
+# O(1) forward-garbage solutions from near-singular systems.
+_DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR = 100.0
 # Float64 dense solves still need a condition cap below the theoretical
 # ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
 # system can have machine-small residual but a 1e-4-scale wrong solution at
@@ -4570,6 +4575,17 @@ def _dense_matrix_solve_forward_error_success(
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
+def _dense_matrix_solve_small_solution_success(solution, rhs, *, tol):
+    solution = jnp.asarray(solution)
+    rhs = jnp.asarray(rhs)
+    solution_inf_norm = jnp.linalg.norm(solution, ord=np.inf)
+    threshold = _device_scalar(
+        _DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR,
+        dtype=rhs.dtype,
+    ) * _effective_linear_solve_tolerance(rhs, tol)
+    return jnp.all(jnp.isfinite(solution)) & (solution_inf_norm <= threshold)
+
+
 def _dense_matrix_nonsingular_threshold(size, dtype):
     dtype = np.dtype(dtype)
     eps = float(np.finfo(dtype).eps)
@@ -4645,6 +4661,43 @@ def _solve_square_vector_system_operator_only(
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     """Solve one square linear system with bounded operator-GMRES refinement."""
+    rhs = jnp.asarray(rhs)
+
+    def zero_rhs_solution(_unused):
+        solution = jnp.zeros_like(rhs)
+        residual = jnp.zeros_like(rhs)
+        status = _linear_solve_status(
+            solution,
+            residual,
+            rhs,
+            tol=tol,
+            iterations=_device_int32(0),
+        )
+        return solution, status
+
+    def nonzero_rhs_solution(_unused):
+        return _solve_square_vector_system_operator_only_nonzero_rhs(
+            matvec,
+            rhs,
+            tol=tol,
+            max_refinement_steps=max_refinement_steps,
+        )
+
+    return lax.cond(
+        jnp.all(rhs == jnp.zeros((), dtype=rhs.dtype)),
+        zero_rhs_solution,
+        nonzero_rhs_solution,
+        operand=None,
+    )
+
+
+def _solve_square_vector_system_operator_only_nonzero_rhs(
+    matvec,
+    rhs,
+    *,
+    tol,
+    max_refinement_steps,
+):
     effective_tol = _effective_linear_solve_tolerance(rhs, tol)
     solution, residual, info = _gmres_solve_array_system(
         matvec,
@@ -4850,8 +4903,16 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
         tol=tol,
         solve_dtype=rhs_dtype,
     )
+    small_solution_success = _dense_matrix_solve_small_solution_success(
+        solution,
+        rhs,
+        tol=tol,
+    )
     return solution, status._replace(
-        success=(status.success | backward_error_success) & solve_safe
+        success=(
+            ((status.success | backward_error_success) & solve_safe)
+            | (status.success & small_solution_success)
+        )
     )
 
 
@@ -4910,8 +4971,16 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
         lu_piv=lu_piv,
         solve_dtype=rhs_dtype,
     )
+    small_solution_success = _dense_matrix_solve_small_solution_success(
+        solution,
+        rhs,
+        tol=tol,
+    )
     return solution, status._replace(
-        success=(status.success | backward_error_success) & solve_safe
+        success=(
+            ((status.success | backward_error_success) & solve_safe)
+            | (status.success & small_solution_success)
+        )
     )
 
 
