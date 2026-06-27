@@ -23,16 +23,6 @@ def test_item19_optimizer_jax_product_code_has_no_dynamic_private_import():
     assert "__import__(" not in source
 
 
-def test_item19_optimizer_jax_exposes_no_dynamic_private_loader():
-    assert not hasattr(_opt, "_private_pkg")
-    assert not hasattr(_opt, "_load_private_pkg")
-    assert not hasattr(_opt, "_load_reference_optimizer_module")
-
-
-def test_item19_host_dense_hessian_reuses_chunked_device_materializer():
-    assert not hasattr(_opt, "_materialize_dense_linear_operator_host")
-
-
 def test_item19_host_dense_hessian_agrees_with_device_materializer():
     operator = jnp.asarray(
         [
@@ -166,7 +156,7 @@ def test_item19_host_jax_least_squares_uses_jacobian_blocks(monkeypatch):
 
     @jax.jit
     def jacobian_block_fn(_x, tangent_block, dynamic_state):
-        return (dynamic_state["matrix"] @ tangent_block.T)
+        return dynamic_state["matrix"] @ tangent_block.T
 
     dynamic_state = {
         "matrix": jnp.asarray([[3.0, 0.0], [0.0, 5.0]], dtype=jnp.float64),

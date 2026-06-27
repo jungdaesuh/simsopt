@@ -155,14 +155,31 @@ def _float32_forward_error_problem():
     return matrix, matvec, rhs, true_solution_np
 
 
+def _float64_near_singular_forward_error_problem():
+    """Consistent float64 system whose residual hides a bad forward solution."""
+    n = 8
+    rng = np.random.default_rng(10)
+    left, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    right, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    singular_values = np.geomspace(1.0, 1.0e-13, n)
+    matrix_np = left @ np.diag(singular_values) @ right.T
+    true_solution_np = rng.standard_normal(n)
+    rhs_np = matrix_np @ true_solution_np
+    matrix = jnp.asarray(matrix_np, dtype=jnp.float64)
+    rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+
+    def matvec(v):
+        return matrix @ v
+
+    return matrix, matvec, rhs, true_solution_np
+
+
 def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
     """The committed LU+IR solver matches an independent dense oracle on a
     non-symmetric operator (the regime where the GMRES baseline stagnates)."""
     matrix, matvec, rhs = _nonsymmetric_problem(seed=0)
-    solution, status = (
-        _optimizer._solve_dense_square_operator_lu_system_with_status(
-            matvec, rhs, tol=1e-12
-        )
+    solution, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        matvec, rhs, tol=1e-12
     )
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
     assert bool(status.success)
@@ -180,10 +197,8 @@ def test_dense_lu_solver_batched_rhs_column_parity():
     n = matrix.shape[0]
     rng = np.random.default_rng(11)
     rhs_batched = jnp.asarray(rng.standard_normal((n, 3)))
-    batched, status = (
-        _optimizer._solve_dense_square_operator_lu_system_with_status(
-            matvec, rhs_batched, tol=1e-12
-        )
+    batched, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        matvec, rhs_batched, tol=1e-12
     )
     assert bool(status.success)
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs_batched))
@@ -191,10 +206,8 @@ def test_dense_lu_solver_batched_rhs_column_parity():
         np.asarray(batched), np.asarray(expected), rtol=1e-10, atol=1e-12
     )
     for j in range(3):
-        column, _ = (
-            _optimizer._solve_dense_square_operator_lu_system_with_status(
-                matvec, rhs_batched[:, j], tol=1e-12
-            )
+        column, _ = _optimizer._solve_dense_square_operator_lu_system_with_status(
+            matvec, rhs_batched[:, j], tol=1e-12
         )
         np.testing.assert_allclose(
             np.asarray(batched[:, j]), np.asarray(column), rtol=1e-10, atol=1e-12
@@ -303,9 +316,7 @@ def test_dense_lu_status_reports_machine_precision_residual():
 
 def test_dense_condition_estimate_preserves_float32_under_transfer_guard():
     """Float32 condition estimates stay dtype-stable and strict-transfer clean."""
-    matrix = jnp.diag(
-        jnp.asarray(np.geomspace(1.0, 1.0e-5, 32), dtype=jnp.float32)
-    )
+    matrix = jnp.diag(jnp.asarray(np.geomspace(1.0, 1.0e-5, 32), dtype=jnp.float32))
 
     with jax.transfer_guard("disallow"):
         estimate = _optimizer._dense_matrix_condition_estimate(matrix)
@@ -318,9 +329,7 @@ def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
     """A moderately conditioned float32 solve must not fail solely because
     the fp64 rank-tolerance rule was applied with fp32 epsilon."""
     n = 128
-    matrix = jnp.diag(
-        jnp.asarray(np.geomspace(1.0, 1.0e-5, n), dtype=jnp.float32)
-    )
+    matrix = jnp.diag(jnp.asarray(np.geomspace(1.0, 1.0e-5, n), dtype=jnp.float32))
     legacy_rank_threshold = 1.0 / (n * np.finfo(np.float32).eps)
     rhs = jnp.asarray(np.random.default_rng(21).standard_normal(n), dtype=jnp.float32)
 
@@ -329,10 +338,12 @@ def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
 
     with jax.transfer_guard("disallow"):
         estimate = _optimizer._dense_matrix_condition_estimate(matrix)
-        solution, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
-            matvec,
-            rhs,
-            tol=1.0e-4,
+        solution, status = (
+            _optimizer._solve_dense_square_operator_lu_system_with_status(
+                matvec,
+                rhs,
+                tol=1.0e-4,
+            )
         )
 
     assert float(np.asarray(estimate)) > legacy_rank_threshold
@@ -393,6 +404,31 @@ def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
     assert relative_error > 1.0e-4
     assert not bool(status.success)
     assert np.all(np.isnan(np.asarray(direct_solution)))
+
+
+@pytest.mark.parametrize(
+    "solver",
+    (
+        _optimizer._solve_dense_square_operator_lu_system_with_status,
+        _optimizer._solve_dense_square_operator_least_squares_system_with_status,
+    ),
+    ids=("lu", "lstsq"),
+)
+def test_float64_dense_status_fails_closed_on_near_singular_forward_error(solver):
+    """Tiny residual is not enough when float64 conditioning destroys the solution."""
+    matrix, matvec, rhs, true_solution = _float64_near_singular_forward_error_problem()
+
+    solution, status = solver(matvec, rhs, tol=1.0e-12)
+
+    condition_estimate = float(
+        np.asarray(_optimizer._dense_matrix_condition_estimate(matrix))
+    )
+    relative_error = np.linalg.norm(
+        np.asarray(solution) - true_solution
+    ) / np.linalg.norm(true_solution)
+    assert condition_estimate > 1.0e12
+    assert relative_error > 1.0e-4
+    assert not bool(status.success)
 
 
 def test_dense_lu_status_fails_closed_on_singular_operator():

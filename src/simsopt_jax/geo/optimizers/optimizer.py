@@ -3648,10 +3648,9 @@ _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 # m18, but the materialization stays guarded by that policy.  Read once at
 # import (selects a static trace-time branch); default OFF so the operator-GMRES
 # path remains the baseline for A/B comparison.
-_EXACT_ADJOINT_DENSE_LU = (
-    os.environ.get("SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0").strip().lower()
-    not in ("", "0", "false", "off", "no")
-)
+_EXACT_ADJOINT_DENSE_LU = os.environ.get(
+    "SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0"
+).strip().lower() not in ("", "0", "false", "off", "no")
 
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
@@ -3664,7 +3663,11 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
     # BiotSavart JVP). Mirrors the chunked dense Boozer-Jacobian fix in
     # simsopt_jax_adapters/geo/boozer_surface.py (commit dcd70a2ae); without it the
     # dense linearization OOMs under XLA preallocation.
-    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye, batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
+    cols = lax.map(
+        lambda basis: linear_operator_fn(x, basis),
+        eye,
+        batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE,
+    )
     return jnp.swapaxes(cols, 0, 1)
 
 
@@ -3699,7 +3702,24 @@ def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
 
 
 def _materialize_dense_hessian_host(hvp_fn, x, *, symmetrize=True):
-    return _materialize_dense_hessian(hvp_fn, x, symmetrize=symmetrize)
+    x_array = jnp.asarray(x)
+    dtype = np.dtype(x_array.dtype)
+    dimension = int(x_array.shape[0])
+    dense_host = np.empty((dimension, dimension), dtype=dtype)
+    basis = np.zeros(dimension, dtype=dtype)
+    for column_index in range(dimension):
+        basis[column_index] = 1
+        basis_vector = jnp.asarray(basis, dtype=x_array.dtype)
+        column = np.asarray(
+            jax.device_get(hvp_fn(x_array, basis_vector)),
+            dtype=dtype,
+        )
+        dense_host[:, column_index] = column
+        basis[column_index] = 0
+    if not bool(symmetrize):
+        return jnp.asarray(dense_host, dtype=x_array.dtype)
+    upper = np.triu(dense_host)
+    return jnp.asarray(upper + np.triu(dense_host, 1).T, dtype=x_array.dtype)
 
 
 def _materialize_dense_jacobian(jvp_fn, x):
@@ -4228,6 +4248,12 @@ def _linear_solve_finite(solution, residual):
 # eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
 # solves of large, moderately ill-conditioned systems.
 _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
+# Float64 dense solves still need a condition cap below the theoretical
+# ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
+# system can have machine-small residual but a 1e-4-scale wrong solution at
+# condition estimates around 2e13. Production Boozer adjoint estimates are
+# documented at least two orders below this cap.
+_FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE = 1.0e12
 
 
 def _effective_linear_solve_tolerance(rhs, tol):
@@ -4548,7 +4574,10 @@ def _dense_matrix_nonsingular_threshold(size, dtype):
     dtype = np.dtype(dtype)
     eps = float(np.finfo(dtype).eps)
     dimension_factor = np.sqrt(float(size)) if dtype == np.dtype(np.float32) else size
-    return _device_scalar(1.0 / (dimension_factor * eps), dtype=dtype)
+    threshold = 1.0 / (dimension_factor * eps)
+    if dtype == np.dtype(np.float64):
+        threshold = min(threshold, _FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE)
+    return _device_scalar(threshold, dtype=dtype)
 
 
 def _dense_matrix_solve_numerically_safe(
@@ -4567,10 +4596,11 @@ def _dense_matrix_solve_numerically_safe(
     (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
     the solve returns a finite wrong answer with a small residual).  The
     condition screen ``isfinite(cond) & (cond < threshold)`` lets a degenerate
-    operator fail closed: float64 production uses the LAPACK rank-tolerance
-    reciprocal ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), cleanly separating the
-    well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
-    singular one (cond >~ 1e15).
+    operator fail closed: float64 production uses the smaller of the LAPACK
+    rank-tolerance reciprocal ``1 / (n * eps)`` and an explicit 1e12 cap,
+    cleanly separating the well-conditioned production ``J^T`` (cond ~ 1e3-1e6,
+    with 1-norm estimates still far below the cap) from numerically singular
+    systems where residual-only success hides a wrong forward solution.
 
     The forward-error *bound* ``cond * residual_rel`` is deliberately applied to
     float32 only.  At large ``n`` (the float64 production regime) the 1-norm
@@ -4633,10 +4663,12 @@ def _solve_square_vector_system_operator_only(
         solution, residual, status, can_refine, accept_first_correction = carry
 
         def refine(_):
-            correction, correction_residual, correction_info = _gmres_solve_array_system(
-                matvec,
-                residual,
-                tol=effective_tol,
+            correction, correction_residual, correction_info = (
+                _gmres_solve_array_system(
+                    matvec,
+                    residual,
+                    tol=effective_tol,
+                )
             )
             correction_finite = _linear_solve_finite(correction, correction_residual)
             refined_solution = lax.cond(
@@ -4737,9 +4769,9 @@ def _dense_square_operator_matrix_bytes_allowed(rhs):
     ``rhs`` is a single vector or a column-batched ``(n, k)`` right-hand side."""
     rhs = jnp.asarray(rhs)
     dimension = int(rhs.shape[0])
-    matrix_bytes = dimension * dimension * _dense_square_operator_matrix_dtype(
-        rhs
-    ).itemsize
+    matrix_bytes = (
+        dimension * dimension * _dense_square_operator_matrix_dtype(rhs).itemsize
+    )
     return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
 
 
@@ -4990,6 +5022,7 @@ def _solve_symmetric_operator_cg_with_status(matvec, rhs, *, tol):
     """
     rhs = jnp.asarray(rhs)
     if rhs.ndim != 1:
+
         def solve_column(column):
             return _solve_symmetric_operator_cg_with_status(matvec, column, tol=tol)
 
@@ -5950,7 +5983,9 @@ def host_jax_least_squares(
 ):
     """Host LM control over a compiled JAX residual evaluator."""
     if method != "lm":
-        raise ValueError(f"host_jax_least_squares() only supports method='lm'. Got {method!r}.")
+        raise ValueError(
+            f"host_jax_least_squares() only supports method='lm'. Got {method!r}."
+        )
     options = dict(options or {})
     if callback is not None:
         options["callback"] = callback
@@ -6013,9 +6048,7 @@ def host_jax_least_squares(
             materialize_dense_linearization=bool(
                 options.get("materialize_dense_linearization", True)
             ),
-            max_dense_linearization_bytes=options.get(
-                "max_dense_linearization_bytes"
-            ),
+            max_dense_linearization_bytes=options.get("max_dense_linearization_bytes"),
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
         )
@@ -6228,7 +6261,9 @@ def host_jax_minimize_value_and_grad(
             "method='bfgs' or method='lbfgs'."
         )
     if not value_and_grad:
-        raise ValueError("host_jax_minimize_value_and_grad() requires value_and_grad=True.")
+        raise ValueError(
+            "host_jax_minimize_value_and_grad() requires value_and_grad=True."
+        )
     options = dict(options or {})
     fun = wrap_strict_target_lane_value_and_grad(fun)
     fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
