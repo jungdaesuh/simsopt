@@ -1327,11 +1327,9 @@ def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
         "objective_kwargs": {"sentinel": 17},
         "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
     }
-    value_and_grad = (
-        surfaceobjectives_traceable_jax_module._build_traceable_solved_state_value_and_grad_from_state(
-            object(),
-            state,
-        )
+    value_and_grad = surfaceobjectives_traceable_jax_module._build_traceable_solved_state_value_and_grad_from_state(
+        object(),
+        state,
     )
 
     value, grad = value_and_grad(
@@ -1427,7 +1425,9 @@ def test_solved_pair_matches_fused_value_and_grad():
         bs_jax, surf, vol, vol_target, constraint_weight=1.0, options=options
     )
     res = booz_jax.run_code(iota0, G0)
-    assert res is not None and res.get("success", False), "Boozer solve did not converge"
+    assert res is not None and res.get("success", False), (
+        "Boozer solve did not converge"
+    )
 
     # iota_target must match the solved surface; coil_dofs = baseline dofs the
     # surface was solved at, so the forward solve succeeds and the success
@@ -1441,9 +1441,7 @@ def test_solved_pair_matches_fused_value_and_grad():
     fr = pair.solve_fn(coil_dofs)
     assert bool(fr["success"]) is True
 
-    v2, g2 = pair.value_grad_from_solved(
-        coil_dofs, fr["x"], fr["linear_solve_factors"]
-    )
+    v2, g2 = pair.value_grad_from_solved(coil_dofs, fr["x"], fr["linear_solve_factors"])
     v1, g1 = fused(coil_dofs)
 
     g1 = np.asarray(jax.device_get(g1))
@@ -5324,10 +5322,17 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
     np.testing.assert_allclose(np.asarray(grad), np.ones(2, dtype=np.float64))
 
 
-@pytest.mark.parametrize("primal_success", [True, False])
-def test_traceable_value_and_grad_rejected_candidate_uses_baseline_gradient(
+@pytest.mark.parametrize(
+    ("primal_success", "expected_gradient"),
+    [
+        (True, np.asarray([18.0, -16.0], dtype=np.float64)),
+        (False, np.asarray([1.0, -0.5], dtype=np.float64)),
+    ],
+)
+def test_traceable_value_and_grad_rejected_candidate_gradient_depends_on_primal_status(
     monkeypatch,
     primal_success,
+    expected_gradient,
 ):
     baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
     state = {
@@ -5380,10 +5385,7 @@ def test_traceable_value_and_grad_rejected_candidate_uses_baseline_gradient(
     )
 
     np.testing.assert_allclose(np.asarray(value), 2.5)
-    np.testing.assert_allclose(
-        np.asarray(grad),
-        2.0 * np.asarray(baseline_coil_dofs),
-    )
+    np.testing.assert_allclose(np.asarray(grad), expected_gradient)
 
 
 def test_traceable_value_and_grad_rejected_candidate_surfaces_baseline_adjoint_failure(
@@ -5705,7 +5707,7 @@ def test_traceable_custom_vjp_rejected_candidate_surfaces_baseline_adjoint_failu
     _assert_nonfinite_gradient(grad)
 
 
-def test_traceable_custom_vjp_rejected_candidate_uses_baseline_gradient():
+def test_traceable_custom_vjp_rejected_candidate_uses_candidate_gradient():
     baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
 
     def compiled_forward_result_for(coil_dofs):
@@ -5715,6 +5717,41 @@ def test_traceable_custom_vjp_rejected_candidate_uses_baseline_gradient():
             "linear_solve_factors": None,
             "success": jnp.asarray(False, dtype=bool),
             "primal_success": jnp.asarray(True, dtype=bool),
+        }
+
+    compiled_bundle = {
+        "compiled_forward_result_for": compiled_forward_result_for,
+        "compiled_total_gradient_for": lambda coil_dofs, *_args: (
+            2.0 * coil_dofs,
+            jnp.asarray(True, dtype=bool),
+        ),
+        "state": {
+            "baseline_coil_dofs": baseline_coil_dofs,
+            "baseline_x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "baseline_linear_solve_factors": None,
+        },
+    }
+    objective = surfaceobjectives_traceable_jax_module._make_traceable_objective_from_compiled_bundle(
+        compiled_bundle
+    )
+
+    grad = jax.grad(objective)(jnp.asarray([9.0, -8.0], dtype=jnp.float64))
+    np.testing.assert_allclose(
+        np.asarray(grad),
+        np.asarray([18.0, -16.0], dtype=np.float64),
+    )
+
+
+def test_traceable_custom_vjp_primal_failure_uses_baseline_gradient():
+    baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+    def compiled_forward_result_for(coil_dofs):
+        return {
+            "value": jnp.asarray(2.5, dtype=jnp.float64),
+            "x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            "linear_solve_factors": None,
+            "success": jnp.asarray(False, dtype=bool),
+            "primal_success": jnp.asarray(False, dtype=bool),
         }
 
     compiled_bundle = {

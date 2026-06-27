@@ -1039,7 +1039,7 @@ def _traceable_rejected_objective_value(value, reference_value):
     reference = lax.stop_gradient(
         _as_runtime_float64(reference_value, reference=reference_value)
     )
-    candidate = lax.stop_gradient(_as_runtime_float64(value, reference=reference))
+    candidate = _as_runtime_float64(value, reference=reference)
     finite_candidate = jnp.where(jnp.isfinite(candidate), candidate, reference)
     penalty = jnp.maximum(
         jnp.abs(reference),
