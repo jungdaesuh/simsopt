@@ -1408,10 +1408,19 @@ def _build_traceable_objective_compiled_bundle_from_state(
             )
 
         def _rejected_candidate_gradient(_):
-            return _total_gradient_at(
-                baseline_coil_dofs,
-                baseline_x,
-                baseline_linear_solve_factors,
+            return lax.cond(
+                result["primal_success"],
+                lambda _: _total_gradient_at(
+                    coil_dofs,
+                    result["x"],
+                    result["linear_solve_factors"],
+                ),
+                lambda _: _total_gradient_at(
+                    baseline_coil_dofs,
+                    baseline_x,
+                    baseline_linear_solve_factors,
+                ),
+                operand=None,
             )
 
         grad, linear_solve_success = lax.cond(
@@ -2017,10 +2026,17 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
             lax.stop_gradient(result["x"]),
             jax.tree.map(lax.stop_gradient, result["linear_solve_factors"]),
             result["success"],
+            result["primal_success"],
         )
 
     def f_bwd(saved_state, cotangent):
-        coil_dofs, solved_x, solved_linear_solve_factors, success = saved_state
+        (
+            coil_dofs,
+            solved_x,
+            solved_linear_solve_factors,
+            success,
+            primal_success,
+        ) = saved_state
         solved_linear_solve_factors = _traceable_runtime_deviceify_tree(
             solved_linear_solve_factors
         )
@@ -2041,10 +2057,19 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
             )
 
         def _rejected_candidate_gradient(_):
-            return _gradient_or_nan(
-                baseline_coil_dofs,
-                baseline_x,
-                baseline_linear_solve_factors,
+            return lax.cond(
+                primal_success,
+                lambda _: _gradient_or_nan(
+                    coil_dofs,
+                    solved_x,
+                    solved_linear_solve_factors,
+                ),
+                lambda _: _gradient_or_nan(
+                    baseline_coil_dofs,
+                    baseline_x,
+                    baseline_linear_solve_factors,
+                ),
+                operand=None,
             )
 
         grad = lax.cond(
