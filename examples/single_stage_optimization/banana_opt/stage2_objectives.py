@@ -57,6 +57,7 @@ from banana_opt.smooth_distance_selection import (
     surface_points_tree_shape,
 )
 from banana_opt.boozer_finite_current import derive_signed_G_from_field
+from banana_opt.edge_iota_proxy import edge_iota_proxy_value_and_grad
 from banana_opt.stage2_single_stage_handoff import (
     BOOZER_FAILURE_POLICY_REPORT_FAILURE,
     BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
@@ -677,6 +678,105 @@ def _add_stage2_s_hel_objective(
         float(objective_value) + float(s_hel_weight) * (1.0 - s_hel_value),
         np.asarray(objective_grad, dtype=float)
         - float(s_hel_weight) * np.asarray(s_hel_objective.dJ_by_dcoils(), dtype=float),
+    )
+
+
+class Stage2EdgeIotaSteeringObjective:
+    """Differentiable edge-delivered-iota STEERING term for Stage 2 soft mode.
+
+    Wraps the precomputed fixed flux contours plus the banana-coil ``BiotSavart``
+    slice. ``J()`` is the edge-band-mean ``delta_abs`` proxy (``|iota_hybrid|`` -
+    ``|iota_tokamak|`` averaged over the edge band); ``dJ_by_dcoils()`` is its
+    analytic gradient projected onto the FULL Stage 2 field DOFs so it slots into
+    the optimizer gradient exactly like :class:`HelicalFieldContentObjective`.
+
+    This is a smooth STEERING signal toward delivering external transform to the
+    plasma edge -- not a confinement guarantee, chaos detector, or promotion gate.
+    Promotion still requires the trace-oracle edge gate and the hardware gates.
+    The J/dJ cache is fingerprinted on the full field's DOFs, so a hot-loop caller
+    that mutates the coils re-computes automatically.
+    """
+
+    def __init__(self, banana_field, full_field, contours):
+        self.banana_field = banana_field
+        self.full_field = full_field
+        self.contours = contours
+        self._value: float | None = None
+        self._grad: np.ndarray | None = None
+        self._x_fingerprint: bytes | None = None
+
+    def _current_fingerprint(self) -> bytes:
+        return np.asarray(self.full_field.x, dtype=float).tobytes()
+
+    def recompute_bell(self) -> None:
+        """Invalidate the J / dJ cache; the next call recomputes both."""
+        self._value = None
+        self._grad = None
+        self._x_fingerprint = None
+
+    def _ensure_computed(self) -> None:
+        fingerprint = self._current_fingerprint()
+        if (
+            self._value is not None
+            and self._grad is not None
+            and self._x_fingerprint == fingerprint
+        ):
+            return
+        result = edge_iota_proxy_value_and_grad(
+            self.banana_field, self.contours, grad_optimizable=self.full_field
+        )
+        self._value = float(result.delta_abs_mean)
+        self._grad = np.asarray(result.grad_delta_abs_mean, dtype=float)
+        self._x_fingerprint = fingerprint
+
+    def J(self) -> float:
+        """Return the edge-band-mean ``delta_abs`` proxy (signed transform gain)."""
+        self._ensure_computed()
+        return self._value
+
+    def dJ_by_dcoils(self) -> np.ndarray:
+        """Return ``d(delta_abs_mean)/d(coil DOFs)`` matching ``full_field.x``."""
+        self._ensure_computed()
+        return self._grad
+
+
+def _add_stage2_edge_iota_objective(
+    objective_value: float,
+    objective_grad: np.ndarray,
+    *,
+    edge_iota_objective,
+    edge_iota_weight: float,
+    edge_iota_target_min: float,
+) -> tuple[float, np.ndarray]:
+    """Fold the edge-iota steering term into (value, grad) as a quadratic hinge.
+
+    The hinge ``0.5 * max(0, target_min - delta_abs_mean)^2`` steers the optimizer
+    to GROW edge-delivered transform until ``target_min`` is reached and then goes
+    inert (C1 at the boundary). It never relaxes a hardware gate and never claims
+    confinement; it only nudges the smooth objective.
+
+    Calibration note: the steered quantity is the edge-band MEAN ``delta_abs`` (a
+    smooth, differentiable surrogate), whereas the ``edge_delta_abs_iota_p10``
+    PROMOTION gate (a percentile, non-differentiable) is enforced separately and
+    authoritatively by the trace-oracle profile. Because mean >= p10, this steering
+    can go inert before the p10 gate is met -- by design: it is a labeled steering
+    nudge toward more transform, not the promotion criterion. The shared
+    ``target_min`` is therefore used here as a MEAN floor, not a p10 guarantee.
+    """
+    edge_iota_objective.recompute_bell()
+    delta_abs_mean = float(edge_iota_objective.J())
+    shortfall = float(edge_iota_target_min) - delta_abs_mean
+    if shortfall <= 0.0:
+        return float(objective_value), np.asarray(objective_grad, dtype=float)
+    penalty = 0.5 * shortfall * shortfall
+    # d(penalty)/dx = shortfall * d(shortfall)/dx = -shortfall * d(delta_abs_mean)/dx
+    penalty_grad = -shortfall * np.asarray(
+        edge_iota_objective.dJ_by_dcoils(), dtype=float
+    )
+    return (
+        float(objective_value) + float(edge_iota_weight) * penalty,
+        np.asarray(objective_grad, dtype=float)
+        + float(edge_iota_weight) * penalty_grad,
     )
 
 
@@ -1913,11 +2013,17 @@ def make_stage2_fun(
     emit_diagnostics=False,
     s_hel_objective=None,
     s_hel_weight: float = 0.0,
+    edge_iota_objective=None,
+    edge_iota_weight: float = 0.0,
+    edge_iota_target_min: float = 0.10,
 ):
     soft_mode_enabled = (
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "soft"
     )
     s_hel_enabled = s_hel_objective is not None and float(s_hel_weight) > 0.0
+    edge_iota_enabled = (
+        edge_iota_objective is not None and float(edge_iota_weight) > 0.0
+    )
 
     def fun(dofs):
         JF.x = dofs
@@ -1964,6 +2070,14 @@ def make_stage2_fun(
                 grad,
                 s_hel_objective=s_hel_objective,
                 s_hel_weight=s_hel_weight,
+            )
+        if edge_iota_enabled:
+            J, grad = _add_stage2_edge_iota_objective(
+                J,
+                grad,
+                edge_iota_objective=edge_iota_objective,
+                edge_iota_weight=edge_iota_weight,
+                edge_iota_target_min=edge_iota_target_min,
             )
         if emit_diagnostics:
             unitn = new_surf.unitnormal()
@@ -2577,6 +2691,9 @@ def evaluate_stage2_alm_problem(
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
     s_hel_objective=None,
     s_hel_weight: float = 0.0,
+    edge_iota_objective=None,
+    edge_iota_weight: float = 0.0,
+    edge_iota_target_min: float = 0.10,
     Jw=None,
     width_min_threshold=None,
     width_max_threshold=None,
@@ -2642,6 +2759,14 @@ def evaluate_stage2_alm_problem(
             base_grad,
             s_hel_objective=s_hel_objective,
             s_hel_weight=s_hel_weight,
+        )
+    if edge_iota_objective is not None and float(edge_iota_weight) > 0.0:
+        base_value, base_grad = _add_stage2_edge_iota_objective(
+            base_value,
+            base_grad,
+            edge_iota_objective=edge_iota_objective,
+            edge_iota_weight=edge_iota_weight,
+            edge_iota_target_min=edge_iota_target_min,
         )
     base_objective_optimizable = base_objective
 

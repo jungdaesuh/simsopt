@@ -1722,10 +1722,10 @@ class Stage2IotaReportingTests(unittest.TestCase):
         ):
             module.validate_stage2_edge_iota_cli_args(args)
 
-    def test_stage2_edge_iota_soft_mode_rejected_until_routing_exists(self):
+    def test_stage2_edge_iota_soft_mode_requires_positive_weight(self):
         module = load_stage2_module()
 
-        args = SimpleNamespace(
+        base = dict(
             stage2_edge_iota_mode="soft",
             stage2_edge_iota_eqdsk="/tmp/shot.eqdsk",
             stage2_edge_iota_lcfs="/tmp/lcfs.json",
@@ -1740,8 +1740,16 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_edge_iota_width_max=None,
         )
 
-        with self.assertRaisesRegex(ValueError, "soft is not implemented yet"):
-            module.validate_stage2_edge_iota_cli_args(args)
+        # Soft mode is now implemented as a differentiable steering term; it
+        # requires an explicit positive weight rather than being rejected.
+        with self.assertRaisesRegex(ValueError, "stage2-edge-iota-weight"):
+            module.validate_stage2_edge_iota_cli_args(
+                SimpleNamespace(**base, stage2_edge_iota_weight=0.0)
+            )
+        # A positive weight passes CLI validation.
+        module.validate_stage2_edge_iota_cli_args(
+            SimpleNamespace(**base, stage2_edge_iota_weight=1.0e-3)
+        )
 
     def test_stage2_edge_iota_off_payload_is_behavior_neutral(self):
         module = load_stage2_module()

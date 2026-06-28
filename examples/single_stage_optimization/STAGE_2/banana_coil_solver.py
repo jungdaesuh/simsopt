@@ -93,6 +93,7 @@ from banana_opt.edge_delivered_iota import (
     validate_tokamak_iota_against_q,
     write_profile_json,
 )
+from banana_opt.edge_iota_proxy import build_edge_iota_proxy_contours
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import (
     run_basin_hopping,
@@ -247,6 +248,7 @@ from banana_opt.stage2_objectives import (
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
     evaluate_stage2_iota_state,
     make_stage2_fun,
+    Stage2EdgeIotaSteeringObjective,
     smooth_min_curve_surface_signed_constraint,
     smooth_max_curvature_signed_constraint,
     smooth_min_distance_signed_constraint,
@@ -947,10 +949,12 @@ def validate_stage2_edge_iota_cli_args(args) -> None:
     config = build_stage2_edge_iota_config(args)
     validate_edge_iota_config(config, mode)
     if mode == EDGE_IOTA_MODE_SOFT:
-        raise ValueError(
-            "--stage2-edge-iota-mode=soft is not implemented yet; use report "
-            "mode until the non-gradient routing story is explicit."
-        )
+        weight = float(getattr(args, "stage2_edge_iota_weight", 0.0))
+        if not np.isfinite(weight) or weight <= 0.0:
+            raise ValueError(
+                "--stage2-edge-iota-mode=soft requires "
+                "--stage2-edge-iota-weight > 0 (the differentiable steering term)."
+            )
 
 
 def validate_s_hel_objective_cli_args(args) -> None:
@@ -1679,6 +1683,17 @@ def parse_args():
         type=float,
         default=float(os.environ.get("STAGE2_EDGE_IOTA_TARGET_MIN", "0.10")),
         help="Promotion-facing minimum p10 edge |iota| magnitude lift.",
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-weight",
+        type=float,
+        default=float(os.environ.get("STAGE2_EDGE_IOTA_WEIGHT", "0.0")),
+        help=(
+            "Weight of the differentiable edge-iota STEERING term used only when "
+            "--stage2-edge-iota-mode=soft. A quadratic hinge nudges the optimizer "
+            "to grow edge-delivered transform up to --stage2-edge-iota-target-min; "
+            "it never relaxes a hardware gate or proves confinement."
+        ),
     )
     parser.add_argument(
         "--stage2-edge-iota-helicity",
@@ -2992,6 +3007,58 @@ def _stage2_edge_iota_banana_biot_savart(stage2_biot_savart, stage2_results_payl
         raise ValueError("Stage 2 edge-iota report requires banana coil-group metadata.")
     coils = list(stage2_biot_savart.coils)
     return BiotSavart(coils[banana_group.start : banana_group.stop])
+
+
+def build_stage2_edge_iota_steering_objective_if_requested(
+    args, *, stage2_biot_savart, banana_coils
+):
+    """Build the differentiable edge-iota STEERING term for soft mode, else None.
+
+    Returns ``(objective, weight, target_min)``. Only active for
+    ``--stage2-edge-iota-mode=soft``; off/report return ``(None, 0.0, target_min)``
+    so the optimizer objective is byte-identical when soft mode is not requested.
+    ``banana_coils`` is the live banana coil-object list (the optimizer's own
+    DOFs); the steering field is their ``BiotSavart`` and the gradient projects
+    onto the full Stage 2 field. The tokamak-only q-profile gate is enforced here
+    too, so the optimizer never steers on an untrustworthy field.
+    """
+    mode = getattr(args, "stage2_edge_iota_mode", EDGE_IOTA_MODE_OFF)
+    config = build_stage2_edge_iota_config(args)
+    target_min = float(config.edge_delta_abs_iota_target_min)
+    if mode != EDGE_IOTA_MODE_SOFT:
+        return None, 0.0, target_min
+    eqdsk = read_eqdsk(config.eqdsk_path)
+    lcfs = load_lcfs_boundary(config.lcfs_path)
+    tokamak_field = eqdsk.build_axisymmetric_field()
+    minor_radius_m = lcfs.minor_radius_from_axis(float(eqdsk.rmaxis))
+    validation = validate_tokamak_iota_against_q(
+        tokamak_field,
+        edge_band=config.edge_band,
+        sample_count=config.sample_count,
+        minor_radius_m=minor_radius_m,
+        relative_tolerance=config.q_validation_rel_tol,
+        turns=config.trace_turns,
+        steps_per_turn=config.steps_per_turn,
+    )
+    if not validation.passed:
+        raise ValueError(
+            "Stage 2 edge-iota soft mode: tokamak-only trace failed EQDSK "
+            "q-profile validation; refusing to steer on an untrustworthy field."
+        )
+    contours = build_edge_iota_proxy_contours(
+        tokamak_field,
+        eqdsk=eqdsk,
+        minor_radius_m=minor_radius_m,
+        edge_band=config.edge_band,
+        sample_count=config.sample_count,
+        helicity_sign=config.helicity_sign,
+    )
+    banana_biot_savart = BiotSavart(list(banana_coils))
+    objective = Stage2EdgeIotaSteeringObjective(
+        banana_biot_savart, stage2_biot_savart, contours
+    )
+    weight = float(getattr(args, "stage2_edge_iota_weight", 0.0))
+    return objective, weight, target_min
 
 
 def build_stage2_edge_iota_profile_artifact(
@@ -5315,6 +5382,11 @@ def main(parsed_args=None):
             )
         lbfgsb_bounds = build_lbfgsb_bounds(JF)
     s_hel_objective, s_hel_weight = build_s_hel_objective(args, new_bs, new_surf)
+    edge_iota_objective, edge_iota_weight, edge_iota_target_min = (
+        build_stage2_edge_iota_steering_objective_if_requested(
+            args, stage2_biot_savart=new_bs, banana_coils=new_banana_coils
+        )
+    )
     fun = make_stage2_fun(
         JF,
         new_bs,
@@ -5326,6 +5398,9 @@ def main(parsed_args=None):
         stage2_iota_runtime=stage2_iota_runtime,
         s_hel_objective=s_hel_objective,
         s_hel_weight=s_hel_weight,
+        edge_iota_objective=edge_iota_objective,
+        edge_iota_weight=edge_iota_weight,
+        edge_iota_target_min=edge_iota_target_min,
     )
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
@@ -5380,6 +5455,9 @@ def main(parsed_args=None):
                 ),
                 s_hel_objective=s_hel_objective,
                 s_hel_weight=s_hel_weight,
+                edge_iota_objective=edge_iota_objective,
+                edge_iota_weight=edge_iota_weight,
+                edge_iota_target_min=edge_iota_target_min,
                 Jw=Jw,
                 width_min_threshold=BANANA_WIDTH_MIN_M,
                 width_max_threshold=BANANA_WIDTH_MAX_M,

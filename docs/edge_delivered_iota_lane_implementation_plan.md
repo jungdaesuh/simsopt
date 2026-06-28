@@ -1,5 +1,31 @@
 # Edge-Delivered Iota Lane Implementation Plan
 
+## Implementation status (2026-06-27)
+
+Phases 1-3 and the Phase-4 reporting path were implemented in prior work. This
+revision completes the Phase-4 **optimizer-facing `soft` mode** as a genuinely
+differentiable steering term:
+
+- `banana_opt/edge_iota_proxy.py` — a cheap, analytic-gradient surrogate for the
+  field-line-trace oracle, using the exact winding identity
+  `iota = 2*pi / oint (B_phi / (R*B_pol)) dl_pol` on fixed EQDSK flux contours;
+  gradient via `BiotSavart.B_vjp` (FD-verified to ~1e-10 on signal DOFs; tokamak
+  anchor matches `1/q` to ~2e-4; warm cost ~25 ms).
+- `Stage2EdgeIotaSteeringObjective` + `_add_stage2_edge_iota_objective` in
+  `banana_opt/stage2_objectives.py` — a quadratic hinge toward
+  `--stage2-edge-iota-target-min`, wired into the penalty and ALM objective paths
+  via `--stage2-edge-iota-weight` (default `0` ⇒ objective byte-identical when off).
+
+**Caveat that frames this as a STEERING signal, not a guarantee:** the trace
+oracle is chaotic-unreliable at the edge for the current banana seeds (field lines
+don't survive at nonzero banana current; the survival set flips with trace
+resolution). The differentiable proxy assumes a nested flux surface *exists*, so it
+is a transform-*steering* signal — it tells the optimizer which way grows external
+edge transform, but it does **not** detect chaos or guarantee confinement. The p10
+promotion gate (trace-oracle profile) remains separate and authoritative; the soft
+term steers the edge-band *mean* `delta_abs` as a smooth surrogate and never relaxes
+a hardware gate.
+
 ## Purpose
 
 Define a production path for adding an `edge_delivered_iota_lane` to
@@ -198,12 +224,19 @@ edge-specific fields with explicit names.
   - [ ] `--stage2-edge-iota-radial-band`.
   - [ ] `--stage2-edge-iota-target-min`.
   - [ ] `--stage2-edge-iota-helicity`.
-- [ ] Implement `off` and `report` modes first; keep `report` behavior-neutral for
+- [x] Implement `off` and `report` modes first; keep `report` behavior-neutral for
   optimization.
-- [ ] Add `soft` mode only after report-mode artifacts reproduce the current champion
-  failure and at least one synthetic/pass fixture.
-- [ ] If `soft` mode is non-differentiable, route it as an outer-loop score or
-  derivative-free penalty; do not insert a fake differentiable gradient.
+- [x] Add `soft` mode only after report-mode artifacts reproduce the current champion
+  failure and at least one synthetic/pass fixture. (Both fixtures exist in
+  `tests/geo/test_edge_delivered_iota.py`: champion-fail + synthetic-pass.)
+- [x] `soft` mode is implemented as a genuinely DIFFERENTIABLE term, not a fake
+  gradient: `banana_opt/edge_iota_proxy.py` is a cheap analytic-gradient surrogate
+  (exact field-line-winding identity on fixed EQDSK flux contours, gradient via
+  `BiotSavart.B_vjp`), wired as the `Stage2EdgeIotaSteeringObjective` quadratic-hinge
+  steering term in both the penalty (`make_stage2_fun`) and ALM
+  (`evaluate_stage2_alm_problem`) paths via `--stage2-edge-iota-weight` (default 0 =
+  byte-identical when off). See the status note at the top of this plan for the
+  oracle-reliability caveat that frames it as a *steering* signal, not a guarantee.
 
 ### Phase 5: Update wrappers and reports
 
@@ -320,11 +353,15 @@ edge-specific fields with explicit names.
   targets.
 - [ ] Stage 2 artifacts include `EDGE_*` profile and summary fields without changing the
   meaning of scalar `STAGE2_IOTA_*`.
-- [ ] Stage 2 `report` mode is tested and behavior-neutral.
-- [ ] Any optimizer-facing `soft` mode has an explicit gradient or non-gradient routing
-  story.
-- [ ] Existing hardware gates remain hard.
-- [ ] Focused tests and `git diff --check` pass.
+- [x] Stage 2 `report` mode is tested and behavior-neutral.
+- [x] Any optimizer-facing `soft` mode has an explicit gradient or non-gradient routing
+  story. (Explicit ANALYTIC gradient via `edge_iota_proxy.py` + `BiotSavart.B_vjp`;
+  FD-verified. Default-off ⇒ byte-identical when not requested.)
+- [x] Existing hardware gates remain hard. (The steering term is an additive smooth
+  nudge only; it never relaxes keepout/current/curvature/length/spacing/self-intersect
+  gates, and the p10 promotion gate stays separate and authoritative.)
+- [x] Focused tests and `git diff --check` pass. (`tests/geo/test_edge_iota_proxy.py`
+  + `test_edge_delivered_iota.py` + `test_ishw_deliverables.py` green; diff --check clean.)
 
 ## Open Questions
 
