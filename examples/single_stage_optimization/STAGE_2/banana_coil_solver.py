@@ -244,7 +244,11 @@ from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
     build_stage2_iota_runtime,
     build_stage2_results as _build_stage2_results_impl,
+    diagnose_seed_gradient,
+    EDGE_IOTA_HINGE_LINEAR,
+    EDGE_IOTA_HINGE_QUADRATIC,
     evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem,
+    format_seed_gradient_diagnostic,
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
     evaluate_stage2_iota_state,
     make_stage2_fun,
@@ -1165,6 +1169,17 @@ def parse_args():
         help="Build and save the initialized configuration without running the optimizer.",
     )
     parser.add_argument(
+        "--diagnose-seed-gradient",
+        action="store_true",
+        default=os.environ.get("STAGE2_DIAGNOSE_SEED_GRADIENT", "") == "1",
+        help=(
+            "Probe the objective at the warm-start seed (||grad||, hardware-vs-edge "
+            "split, scaled gradient, -grad descent check, untruncated first step) to "
+            "root-cause an optimizer that cannot take a first step, then skip the "
+            "optimizer (the seed is kept, like --init-only)."
+        ),
+    )
+    parser.add_argument(
         "--banana-surf-radius",
         type=float,
         default=float(
@@ -1652,9 +1667,9 @@ def parse_args():
         choices=(EDGE_IOTA_MODE_OFF, EDGE_IOTA_MODE_REPORT, EDGE_IOTA_MODE_SOFT),
         default=os.environ.get("STAGE2_EDGE_IOTA_MODE", EDGE_IOTA_MODE_OFF),
         help=(
-            "Post-run fixed-boundary edge-delivered-iota oracle. 'off' is "
-            "behavior-neutral. 'report' writes EDGE_* summary fields and a "
-            "profile JSON. 'soft' is reserved for future non-gradient routing."
+            "Fixed-boundary edge-delivered-iota oracle. 'off' is behavior-neutral. "
+            "'report' writes EDGE_* summary fields and a profile JSON. 'soft' adds "
+            "the differentiable edge-iota STEERING term (see --stage2-edge-iota-weight)."
         ),
     )
     parser.add_argument(
@@ -1690,9 +1705,24 @@ def parse_args():
         default=float(os.environ.get("STAGE2_EDGE_IOTA_WEIGHT", "0.0")),
         help=(
             "Weight of the differentiable edge-iota STEERING term used only when "
-            "--stage2-edge-iota-mode=soft. A quadratic hinge nudges the optimizer "
-            "to grow edge-delivered transform up to --stage2-edge-iota-target-min; "
-            "it never relaxes a hardware gate or proves confinement."
+            "--stage2-edge-iota-mode=soft. A one-sided hinge (see "
+            "--stage2-edge-iota-hinge) nudges the optimizer to grow edge-delivered "
+            "transform up to --stage2-edge-iota-target-min; it never relaxes a "
+            "hardware gate or proves confinement."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-edge-iota-hinge",
+        choices=(EDGE_IOTA_HINGE_QUADRATIC, EDGE_IOTA_HINGE_LINEAR),
+        default=os.environ.get(
+            "STAGE2_EDGE_IOTA_HINGE", EDGE_IOTA_HINGE_QUADRATIC
+        ),
+        help=(
+            "Shape of the soft edge-iota steering hinge. 'quadratic' (default) "
+            "pulls proportionally to the shortfall, so the pull vanishes near "
+            "target_min. 'linear' (L1) keeps a constant pull while below target, "
+            "to drive a coil set off an already-converged hardware minimum where "
+            "the quadratic gradient is too weak to take a first step."
         ),
     )
     parser.add_argument(
@@ -5387,6 +5417,9 @@ def main(parsed_args=None):
             args, stage2_biot_savart=new_bs, banana_coils=new_banana_coils
         )
     )
+    edge_iota_hinge_shape = getattr(
+        args, "stage2_edge_iota_hinge", EDGE_IOTA_HINGE_QUADRATIC
+    )
     fun = make_stage2_fun(
         JF,
         new_bs,
@@ -5401,6 +5434,7 @@ def main(parsed_args=None):
         edge_iota_objective=edge_iota_objective,
         edge_iota_weight=edge_iota_weight,
         edge_iota_target_min=edge_iota_target_min,
+        edge_iota_hinge_shape=edge_iota_hinge_shape,
     )
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
@@ -5458,6 +5492,7 @@ def main(parsed_args=None):
                 edge_iota_objective=edge_iota_objective,
                 edge_iota_weight=edge_iota_weight,
                 edge_iota_target_min=edge_iota_target_min,
+                edge_iota_hinge_shape=edge_iota_hinge_shape,
                 Jw=Jw,
                 width_min_threshold=BANANA_WIDTH_MIN_M,
                 width_max_threshold=BANANA_WIDTH_MAX_M,
@@ -5557,11 +5592,36 @@ def main(parsed_args=None):
         "gtol": args.gtol,
     }
 
-    if args.init_only:
+    if args.diagnose_seed_gradient:
+        # Probe the same objective ``fun`` at the same seed ``dofs`` the penalty
+        # optimizer starts from, under the same ``u = x/scale`` transform, then skip
+        # the optimizer below (the seed is kept). The probes move the shared DOFs
+        # transiently; capture_artifact_state(dofs) below resets them to the seed.
+        print(
+            format_seed_gradient_diagnostic(
+                diagnose_seed_gradient(
+                    fun,
+                    dofs,
+                    build_winding_dof_scale_vector(JF.dof_names, winding_dof_scale_map),
+                    edge_iota_objective=edge_iota_objective,
+                    edge_iota_weight=edge_iota_weight,
+                    edge_iota_target_min=edge_iota_target_min,
+                    edge_iota_hinge_shape=edge_iota_hinge_shape,
+                )
+            ),
+            flush=True,
+        )
+
+    if args.init_only or args.diagnose_seed_gradient:
         res_nit = 0
         optimizer_success = True
-        termination_message = "init_only"
-        print("Skipping Stage 2 optimizer because --init-only was provided.")
+        termination_message = (
+            "diagnose_seed_gradient" if args.diagnose_seed_gradient else "init_only"
+        )
+        skip_flag = (
+            "--diagnose-seed-gradient" if args.diagnose_seed_gradient else "--init-only"
+        )
+        print(f"Skipping Stage 2 optimizer because {skip_flag} was provided.")
     elif CONSTRAINT_METHOD == "alm":
         if args.basin_hops > 0:
             raise ValueError(
@@ -5697,10 +5757,13 @@ def main(parsed_args=None):
     # Ensure SIMSOPT state matches the measured result (needed after basin-hopping
     # and for init-only baselines that still serialize final metrics). Penalty and
     # basin-hopping paths reach here without an assignment, so the fallback must
-    # take the optimizer result, not the pre-optimization seed dofs.
+    # take the optimizer result, not the pre-optimization seed dofs. The
+    # seed-gradient diagnostic skips the optimizer like --init-only, so it keeps the
+    # seed dofs (``res`` is undefined on that path).
     if selected_result_x is None:
         selected_result_x = np.asarray(
-            dofs if args.init_only else res.x, dtype=float
+            dofs if (args.init_only or args.diagnose_seed_gradient) else res.x,
+            dtype=float,
         ).copy()
     final_artifact_state = capture_artifact_state(selected_result_x)
 

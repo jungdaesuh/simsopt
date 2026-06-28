@@ -1,4 +1,5 @@
 import inspect
+import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -740,6 +741,12 @@ class Stage2EdgeIotaSteeringObjective:
         return self._grad
 
 
+# Steering-hinge shapes for the edge-iota soft term (SSOT for the allowed set;
+# the CLI choices and the slurm EDGE_HINGE override resolve to these strings).
+EDGE_IOTA_HINGE_QUADRATIC = "quadratic"
+EDGE_IOTA_HINGE_LINEAR = "linear"
+
+
 def _add_stage2_edge_iota_objective(
     objective_value: float,
     objective_grad: np.ndarray,
@@ -747,13 +754,23 @@ def _add_stage2_edge_iota_objective(
     edge_iota_objective,
     edge_iota_weight: float,
     edge_iota_target_min: float,
+    edge_iota_hinge_shape: str = EDGE_IOTA_HINGE_QUADRATIC,
 ) -> tuple[float, np.ndarray]:
-    """Fold the edge-iota steering term into (value, grad) as a quadratic hinge.
+    """Fold the edge-iota steering term into (value, grad) as a one-sided hinge.
 
-    The hinge ``0.5 * max(0, target_min - delta_abs_mean)^2`` steers the optimizer
-    to GROW edge-delivered transform until ``target_min`` is reached and then goes
-    inert (C1 at the boundary). It never relaxes a hardware gate and never claims
-    confinement; it only nudges the smooth objective.
+    Both shapes steer the optimizer to GROW edge-delivered transform while the
+    edge-band MEAN ``delta_abs`` is below ``target_min`` and go inert once it is
+    reached. Neither relaxes a hardware gate nor claims confinement; they only
+    nudge the smooth objective. ``shortfall = target_min - delta_abs_mean``:
+
+    - ``quadratic`` (default): penalty ``0.5 * shortfall^2``; gradient magnitude
+      ``proportional to shortfall``, so the pull VANISHES as the mean approaches
+      ``target_min`` (C1 at the boundary). Gentle near the target.
+    - ``linear`` (L1): penalty ``shortfall``; gradient magnitude is the CONSTANT
+      ``edge_iota_weight * |d(delta_abs_mean)/dx|`` for any positive shortfall, so
+      the pull does NOT vanish near the target. Use it to drive a coil set off an
+      already-converged hardware minimum, where the quadratic gradient is too weak
+      to define a usable first step (the kink at the boundary is mild for L-BFGS-B).
 
     Calibration note: the steered quantity is the edge-band MEAN ``delta_abs`` (a
     smooth, differentiable surrogate), whereas the ``edge_delta_abs_iota_p10``
@@ -768,16 +785,162 @@ def _add_stage2_edge_iota_objective(
     shortfall = float(edge_iota_target_min) - delta_abs_mean
     if shortfall <= 0.0:
         return float(objective_value), np.asarray(objective_grad, dtype=float)
-    penalty = 0.5 * shortfall * shortfall
-    # d(penalty)/dx = shortfall * d(shortfall)/dx = -shortfall * d(delta_abs_mean)/dx
-    penalty_grad = -shortfall * np.asarray(
-        edge_iota_objective.dJ_by_dcoils(), dtype=float
-    )
+    grad_mean = np.asarray(edge_iota_objective.dJ_by_dcoils(), dtype=float)
+    if edge_iota_hinge_shape == EDGE_IOTA_HINGE_LINEAR:
+        # d(shortfall)/dx = -d(delta_abs_mean)/dx; penalty slope is 1.
+        penalty = shortfall
+        penalty_grad = -grad_mean
+    else:
+        # quadratic: d(penalty)/dx = shortfall * d(shortfall)/dx.
+        penalty = 0.5 * shortfall * shortfall
+        penalty_grad = -shortfall * grad_mean
     return (
         float(objective_value) + float(edge_iota_weight) * penalty,
         np.asarray(objective_grad, dtype=float)
         + float(edge_iota_weight) * penalty_grad,
     )
+
+
+# A directional-derivative magnitude at/below this is treated as "no first-order
+# progress" (the objective is flat along -grad), used only to label the heuristic
+# seed-gradient verdict; the reported raw dJ values remain authoritative.
+_SEED_GRADIENT_FLAT_DJ = 1.0e-10
+
+
+def _classify_seed_gradient(diag) -> str:
+    """Heuristic label for the seed-gradient probe; the raw numbers are authoritative.
+
+    Reads only ``diag`` fields produced by :func:`diagnose_seed_gradient`.
+    """
+    raw = diag["raw_descent"]
+    if not raw:
+        return "zero_gradient_converged_vertex"
+    dJs = [d["dJ"] for d in raw]
+    if min(dJs) >= 0.0 and max(dJs) > 0.0:
+        # Every step along -grad goes uphill: the reported gradient is not a
+        # descent direction => gradient inconsistent with the objective.
+        return "minus_grad_is_ascent_gradient_inconsistent"
+    if min(dJs) >= -_SEED_GRADIENT_FLAT_DJ:
+        # -grad neither climbs nor meaningfully descends: the seed sits at a
+        # (possibly constrained) minimum -- nothing left to improve.
+        return "objective_flat_at_seed"
+    # A genuine descent exists along -grad (so a missing descent direction is NOT
+    # the cause; if the optimizer still aborts, look to scaling/line-search/numeric).
+    return "descent_exists_along_minus_grad"
+
+
+def diagnose_seed_gradient(
+    fun,
+    x0,
+    scale,
+    *,
+    edge_iota_objective=None,
+    edge_iota_weight: float = 0.0,
+    edge_iota_target_min: float = 0.10,
+    edge_iota_hinge_shape: str = EDGE_IOTA_HINGE_QUADRATIC,
+    descent_eps=(1.0e-6, 1.0e-5, 1.0e-4),
+) -> dict:
+    """One-shot root-cause probe of the Stage-2 objective at the warm-start seed.
+
+    Answers "why does L-BFGS-B fail to take a first step from ``x0``?" WITHOUT
+    running the optimizer. ``fun(x) -> (J, grad)`` is the same objective the
+    penalty path optimizes; ``scale`` is the per-DOF vector of the ``u = x/scale``
+    transform, so the optimizer's line search sees ``grad_u = grad * scale`` and
+    its untruncated first step maps back to ``dx = -grad * scale**2`` in x-space.
+    The optimizer is never invoked. Each probe evaluates ``fun``, which for the
+    real Stage-2 objective transiently sets the shared coil-DOF vector as a side
+    effect, so on return the shared DOFs sit at the last probe point -- a caller
+    that then serializes objective state must reset the DOFs to its chosen result
+    first (the Stage-2 path does, via ``capture_artifact_state``).
+
+    Keys (JSON-serialisable): ``J0``; ``n_dofs``; ``grad_norm_2``/``grad_norm_inf``
+    (full gradient); ``grad_edge_norm_2`` (the soft edge-steering term split off via
+    the SSOT hinge with a zero base) and ``grad_hw_norm_2`` (the non-edge remainder
+    ``grad - grad_edge``); with no soft edge term ``grad_edge_norm_2`` is 0 and
+    ``grad_hw_norm_2`` equals the full gradient norm;
+    ``scaled_grad_norm_2``/``_inf`` (``grad*scale`` -- what the line search sees);
+    ``scale_min``/``scale_max``; ``raw_descent`` (``[{eps, dJ}]`` along the unit
+    ``-grad``: ``dJ<0`` => genuine descent direction); ``first_step_dJ``
+    (``J(x0 - grad*scale**2) - J0`` -- the untruncated first step, ``>0`` => it
+    overshoots uphill and L-BFGS-B must back off); ``verdict`` (heuristic label).
+    """
+    x0 = np.asarray(x0, dtype=float)
+    scale = np.asarray(scale, dtype=float)
+    J0, grad = fun(x0)
+    J0 = float(J0)
+    grad = np.asarray(grad, dtype=float)
+
+    if edge_iota_objective is not None and float(edge_iota_weight) > 0.0:
+        # Reuse the SSOT hinge with a zero base to extract the pure edge gradient
+        # contribution (no hinge-math duplication); the remainder is hardware.
+        _, edge_grad = _add_stage2_edge_iota_objective(
+            0.0,
+            np.zeros_like(grad),
+            edge_iota_objective=edge_iota_objective,
+            edge_iota_weight=edge_iota_weight,
+            edge_iota_target_min=edge_iota_target_min,
+            edge_iota_hinge_shape=edge_iota_hinge_shape,
+        )
+        grad_edge = np.asarray(edge_grad, dtype=float)
+    else:
+        grad_edge = np.zeros_like(grad)
+    grad_hw = grad - grad_edge
+
+    grad_norm = float(np.linalg.norm(grad))
+    raw_descent = []
+    if grad_norm > 0.0:
+        unit = grad / grad_norm
+        for eps in descent_eps:
+            raw_descent.append(
+                {"eps": float(eps), "dJ": float(fun(x0 - eps * unit)[0]) - J0}
+            )
+
+    first_step_dJ = float(fun(x0 - grad * scale * scale)[0]) - J0
+    scaled_grad = grad * scale
+
+    diag = {
+        "J0": J0,
+        "n_dofs": int(x0.size),
+        "grad_norm_2": grad_norm,
+        "grad_norm_inf": float(np.linalg.norm(grad, ord=np.inf)),
+        "grad_hw_norm_2": float(np.linalg.norm(grad_hw)),
+        "grad_edge_norm_2": float(np.linalg.norm(grad_edge)),
+        "scaled_grad_norm_2": float(np.linalg.norm(scaled_grad)),
+        "scaled_grad_norm_inf": float(np.linalg.norm(scaled_grad, ord=np.inf)),
+        "scale_min": float(scale.min()),
+        "scale_max": float(scale.max()),
+        "raw_descent": raw_descent,
+        "first_step_dJ": first_step_dJ,
+    }
+    diag["verdict"] = _classify_seed_gradient(diag)
+    return diag
+
+
+def format_seed_gradient_diagnostic(diag) -> str:
+    """Render :func:`diagnose_seed_gradient` output as a human + machine readable block.
+
+    The trailing ``SEED_GRADIENT_DIAGNOSTIC_JSON=`` line carries the full dict for
+    log scraping; the lines above it are for a human reading ``run.log``.
+    """
+    lines = [
+        "=== SEED GRADIENT DIAGNOSTIC ===",
+        f"J0={diag['J0']:.6e}  n_dofs={diag['n_dofs']}",
+        f"||grad||_2={diag['grad_norm_2']:.6e}  ||grad||_inf={diag['grad_norm_inf']:.6e}",
+        f"||grad_hw||_2={diag['grad_hw_norm_2']:.6e}  "
+        f"||grad_edge||_2={diag['grad_edge_norm_2']:.6e}",
+        f"scale[min={diag['scale_min']:.3e}, max={diag['scale_max']:.3e}]  "
+        f"||grad*scale||_2={diag['scaled_grad_norm_2']:.6e}  "
+        f"||grad*scale||_inf={diag['scaled_grad_norm_inf']:.6e}",
+    ]
+    for d in diag["raw_descent"]:
+        lines.append(f"raw -grad descent: eps={d['eps']:.0e}  dJ={d['dJ']:+.6e}")
+    lines.append(
+        f"untruncated first step dJ = J(x0 - grad*scale^2) - J0 = "
+        f"{diag['first_step_dJ']:+.6e}"
+    )
+    lines.append(f"VERDICT: {diag['verdict']}")
+    lines.append("SEED_GRADIENT_DIAGNOSTIC_JSON=" + json.dumps(diag))
+    return "\n".join(lines)
 
 
 def _coerce_stage2_partition_counts(
@@ -2016,6 +2179,7 @@ def make_stage2_fun(
     edge_iota_objective=None,
     edge_iota_weight: float = 0.0,
     edge_iota_target_min: float = 0.10,
+    edge_iota_hinge_shape: str = EDGE_IOTA_HINGE_QUADRATIC,
 ):
     soft_mode_enabled = (
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "soft"
@@ -2078,6 +2242,7 @@ def make_stage2_fun(
                 edge_iota_objective=edge_iota_objective,
                 edge_iota_weight=edge_iota_weight,
                 edge_iota_target_min=edge_iota_target_min,
+                edge_iota_hinge_shape=edge_iota_hinge_shape,
             )
         if emit_diagnostics:
             unitn = new_surf.unitnormal()
@@ -2694,6 +2859,7 @@ def evaluate_stage2_alm_problem(
     edge_iota_objective=None,
     edge_iota_weight: float = 0.0,
     edge_iota_target_min: float = 0.10,
+    edge_iota_hinge_shape: str = EDGE_IOTA_HINGE_QUADRATIC,
     Jw=None,
     width_min_threshold=None,
     width_max_threshold=None,
@@ -2767,6 +2933,7 @@ def evaluate_stage2_alm_problem(
             edge_iota_objective=edge_iota_objective,
             edge_iota_weight=edge_iota_weight,
             edge_iota_target_min=edge_iota_target_min,
+            edge_iota_hinge_shape=edge_iota_hinge_shape,
         )
     base_objective_optimizable = base_objective
 

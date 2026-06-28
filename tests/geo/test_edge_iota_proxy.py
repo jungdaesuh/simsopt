@@ -37,6 +37,7 @@ from banana_opt.edge_iota_proxy import (  # noqa: E402
     edge_iota_proxy_value_and_grad,
 )
 from banana_opt.stage2_objectives import (  # noqa: E402
+    EDGE_IOTA_HINGE_LINEAR,
     Stage2EdgeIotaSteeringObjective,
     _add_stage2_edge_iota_objective,
 )
@@ -207,6 +208,55 @@ class Stage2EdgeIotaSteeringTests(unittest.TestCase):
             )
             self.assertEqual(value_inert, 7.0)
             np.testing.assert_array_equal(grad_inert, base_grad)
+
+    def test_linear_hinge_pull_is_constant_in_shortfall(self):
+        # The L1 hinge exists so the steering gradient does NOT vanish as the mean
+        # approaches target_min (the quadratic one does). Observable consequence:
+        # for two different positive shortfalls the linear penalty gradient is
+        # IDENTICAL (= -weight * grad(delta_abs)), whereas the quadratic one scales
+        # with the shortfall. That constant pull is what drives a converged seed off
+        # its hardware-minimum vertex.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, _, contours = _proxy_setup(tmp)
+            banana = _banana_biot_savart()
+            full = BiotSavart(list(banana.coils))
+            obj = Stage2EdgeIotaSteeringObjective(banana, full, contours)
+            delta = obj.J()
+            grad_delta = obj.dJ_by_dcoils()
+            base_grad = np.zeros(np.asarray(full.x).size)
+            weight = 3.0
+
+            def fold(target_min, shape):
+                return _add_stage2_edge_iota_objective(
+                    7.0, base_grad,
+                    edge_iota_objective=obj,
+                    edge_iota_weight=weight,
+                    edge_iota_target_min=target_min,
+                    edge_iota_hinge_shape=shape,
+                )
+
+            small, large = delta + 0.05, delta + 0.20
+            v_lin_s, g_lin_s = fold(small, EDGE_IOTA_HINGE_LINEAR)
+            v_lin_l, g_lin_l = fold(large, EDGE_IOTA_HINGE_LINEAR)
+            # Closed form: penalty grad == -weight * grad(delta_abs), shortfall-free.
+            np.testing.assert_allclose(g_lin_s, -weight * grad_delta, rtol=1e-12)
+            np.testing.assert_allclose(g_lin_l, g_lin_s, rtol=1e-12)
+            # Value is linear in the shortfall (0.20 vs 0.05 -> 4x the lift over 7.0).
+            self.assertAlmostEqual((v_lin_l - 7.0) / (v_lin_s - 7.0), 4.0, places=6)
+
+            # Contrast: the quadratic hinge gradient DOES scale with the shortfall.
+            _, g_quad_s = fold(small, "quadratic")
+            _, g_quad_l = fold(large, "quadratic")
+            self.assertAlmostEqual(
+                float(np.linalg.norm(g_quad_l) / np.linalg.norm(g_quad_s)),
+                4.0,
+                places=6,
+            )
+
+            # Linear hinge is still inert above target (no pull, unchanged).
+            v_inert, g_inert = fold(delta - 0.05, EDGE_IOTA_HINGE_LINEAR)
+            self.assertEqual(v_inert, 7.0)
+            np.testing.assert_array_equal(g_inert, base_grad)
 
     def test_soft_mode_requires_positive_weight(self):
         base = dict(
