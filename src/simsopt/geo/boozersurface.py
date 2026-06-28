@@ -11,6 +11,26 @@ from functools import partial
 __all__ = ['BoozerSurface']
 
 
+def _boozer_newton_solve_persists(success, final_norm, initial_norm):
+    """Whether a Boozer Newton/least-squares iterate may be written to the surface.
+
+    The Newton/Gauss-Newton solvers warm-start the next solve from the surface DOFs
+    and ``iota``/``G`` they leave behind, so a *diverged* iterate must never be
+    persisted (it would poison every subsequent warm-started solve). An iterate is
+    kept when it converged, or when it stayed finite and did not make the solve's
+    convergence norm *worse* than where it started (the gradient/optimality norm for
+    the penalty solvers, the constraint-residual norm for the exact solver). This
+    preserves the loosely-converged warm-start chaining the solvers rely on while
+    rejecting a blow-up (a norm that grew, or went non-finite, e.g. a
+    self-intersecting trial surface whose field evaluation overflowed). Returns a
+    plain ``bool``.
+    """
+    return bool(
+        success
+        or (np.isfinite(final_norm) and final_norm <= initial_norm)
+    )
+
+
 class BoozerSurface(Optimizable):
     r"""
     The BoozerSurface class computes a flux surface of a BiotSavart magnetic field where the angles
@@ -677,6 +697,12 @@ class BoozerSurface(Optimizable):
         val, dval, d2val = fun_name(x, derivatives=2, constraint_weight=constraint_weight, optimize_G=G is not None, weight_inv_modB=weight_inv_modB)
 
         norm = np.linalg.norm(dval)
+        # Capture the pre-solve state so a diverged iterate can be rolled back
+        # instead of poisoning the warm-start seed (see _boozer_newton_solve_persists).
+        initial_norm = norm
+        initial_dofs = (x[:-1] if G is None else x[:-2]).copy()
+        initial_iota = iota
+        initial_G = G
         while i < maxiter and norm > tol:
             if stab != 0.:
                 d2val.flat[::d2val.shape[0] + 1] += stab
@@ -692,20 +718,36 @@ class BoozerSurface(Optimizable):
         r = self.boozer_penalty_constraints(
             x, derivatives=0, constraint_weight=constraint_weight, scalarize=False, optimize_G=G is not None, weight_inv_modB=weight_inv_modB)
 
-        P, L, U = lu(d2val)
+        # Only factor a finite Hessian (``scipy.linalg.lu`` raises on inf/NaN); a
+        # diverged solve reports ``PLU=None`` so a caller cannot consume it.
+        PLU = lu(d2val) if np.all(np.isfinite(d2val)) else None
         res = {
             "residual": r, "jacobian": dval, "hessian": d2val, "iter": i, "success": norm <= tol, "G": None,
-            "PLU": (P, L, U), "vjp": partial(boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB),
+            "PLU": PLU, "vjp": partial(boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB),
             "type": "ls", "weight_inv_modB": weight_inv_modB
         }
-        if G is None:
-            s.set_dofs(x[:-1])
-            iota = x[-1]
+        # Persist the solved DOFs/iota/G only if the iterate did not diverge;
+        # otherwise roll the surface back to the pre-solve seed so the next
+        # warm-started solve is not poisoned.
+        if _boozer_newton_solve_persists(res["success"], norm, initial_norm):
+            if G is None:
+                s.set_dofs(x[:-1])
+                iota = x[-1]
+            else:
+                s.set_dofs(x[:-2])
+                iota = x[-2]
+                G = x[-1]
+                res['G'] = G
         else:
-            s.set_dofs(x[:-2])
-            iota = x[-2]
-            G = x[-1]
-            res['G'] = G
+            s.set_dofs(initial_dofs)
+            iota = initial_iota
+            if G is not None:
+                G = initial_G
+                res['G'] = G
+            # The factorization belongs to the rejected (diverged) iterate, not the
+            # restored seed geometry; null it so a caller cannot solve an adjoint
+            # against a surface/Hessian mismatch (matches the non-finite path).
+            res['PLU'] = None
         res['iota'] = iota
 
         self.res = res
@@ -753,6 +795,11 @@ class BoozerSurface(Optimizable):
         else:
             x = np.concatenate((s.get_dofs(), [iota, G]))
         norm = 1e10
+        # Pre-solve state so a diverged iterate can be rolled back instead of
+        # poisoning the warm-start seed (see _boozer_newton_solve_persists).
+        initial_dofs = (x[:-1] if G is None else x[:-2]).copy()
+        initial_iota = iota
+        initial_G = G
         if method == 'manual':
             i = 0
             lam = 1.
@@ -760,7 +807,10 @@ class BoozerSurface(Optimizable):
                 x, derivatives=1, constraint_weight=constraint_weight, scalarize=False, optimize_G=G is not None)
             b = J.T@r
             JTJ = J.T@J
+            initial_norm = np.linalg.norm(b)
             while i < maxiter and norm > tol:
+                if not (np.all(np.isfinite(JTJ)) and np.all(np.isfinite(b))):
+                    break
                 dx = np.linalg.solve(JTJ + lam * np.diag(np.diag(JTJ)), b)
                 x -= dx
                 r, J = self.boozer_penalty_constraints(
@@ -773,14 +823,22 @@ class BoozerSurface(Optimizable):
             resdict = {
                 "residual": r, "gradient": b, "jacobian": JTJ, "success": norm <= tol
             }
-            if G is None:
-                s.set_dofs(x[:-1])
-                iota = x[-1]
+            # Persist only a non-diverged iterate; otherwise roll back to the seed.
+            if _boozer_newton_solve_persists(resdict["success"], norm, initial_norm):
+                if G is None:
+                    s.set_dofs(x[:-1])
+                    iota = x[-1]
+                else:
+                    s.set_dofs(x[:-2])
+                    iota = x[-2]
+                    G = x[-1]
+                    resdict['G'] = G
             else:
-                s.set_dofs(x[:-2])
-                iota = x[-2]
-                G = x[-1]
-                resdict['G'] = G
+                s.set_dofs(initial_dofs)
+                iota = initial_iota
+                if G is not None:
+                    G = initial_G
+                    resdict['G'] = G
             resdict['s'] = s
             resdict['iota'] = iota
             return resdict
@@ -794,14 +852,23 @@ class BoozerSurface(Optimizable):
             "info": res, "residual": res.fun, "gradient": res.grad, "jacobian": res.jac, "success": res.status > 0,
             "G": None,
         }
-        if G is None:
-            s.set_dofs(res.x[:-1])
-            iota = res.x[-1]
+        # scipy least_squares globalizes its own steps (trust region + bounds), so a
+        # non-finite result is the only divergence mode; roll back to the seed then.
+        if np.all(np.isfinite(res.x)):
+            if G is None:
+                s.set_dofs(res.x[:-1])
+                iota = res.x[-1]
+            else:
+                s.set_dofs(res.x[:-2])
+                iota = res.x[-2]
+                G = res.x[-1]
+                resdict['G'] = G
         else:
-            s.set_dofs(res.x[:-2])
-            iota = res.x[-2]
-            G = res.x[-1]
-            resdict['G'] = G
+            s.set_dofs(initial_dofs)
+            iota = initial_iota
+            if G is not None:
+                G = initial_G
+                resdict['G'] = G
         resdict['s'] = s
         resdict['iota'] = iota
 
@@ -858,6 +925,12 @@ class BoozerSurface(Optimizable):
             xl = np.concatenate((s.get_dofs(), [iota], lm))
         val, dval = self.boozer_exact_constraints(xl, derivatives=1, optimize_G=G is not None)
         norm = np.linalg.norm(val)
+        # Capture the pre-solve state so a diverged iterate can be rolled back
+        # instead of poisoning the warm-start seed (see _boozer_newton_solve_persists).
+        initial_norm = norm
+        initial_dofs = (xl[:-4] if G is not None else xl[:-3]).copy()
+        initial_iota = iota
+        initial_G = G
         i = 0
         while i < maxiter and norm > tol:
             if s.stellsym:
@@ -884,14 +957,23 @@ class BoozerSurface(Optimizable):
         res = {
             "residual": val, "jacobian": dval, "iter": i, "success": norm <= tol, "lm": lm, "G": None,
         }
-        if G is not None:
-            s.set_dofs(xl[:-4])
-            iota = xl[-4]
-            G = xl[-3]
-            res['G'] = G
+        # Persist the solved DOFs/iota/G only if the iterate did not diverge;
+        # otherwise roll the surface back to the pre-solve seed.
+        if _boozer_newton_solve_persists(res["success"], norm, initial_norm):
+            if G is not None:
+                s.set_dofs(xl[:-4])
+                iota = xl[-4]
+                G = xl[-3]
+                res['G'] = G
+            else:
+                s.set_dofs(xl[:-3])
+                iota = xl[-3]
         else:
-            s.set_dofs(xl[:-3])
-            iota = xl[-3]
+            s.set_dofs(initial_dofs)
+            iota = initial_iota
+            if G is not None:
+                G = initial_G
+                res['G'] = G
         res['s'] = s
         res['iota'] = iota
 

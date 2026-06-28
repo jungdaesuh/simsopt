@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -253,6 +254,114 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         self.assertFalse(bool(res["success"]))
         self.assertIsNone(res["PLU"])
+
+    def test_penalty_newton_finite_divergence_rolls_back_to_seed(self):
+        """A finite-but-diverging penalty-Newton solve (gradient norm grows above its
+        start) must not write the diverged iterate into the surface: the DOFs and the
+        reported iota/G roll back to the pre-solve seed, and success is False. The
+        diverged garbage would otherwise become the next warm-start seed. Only the
+        diverged path changed; converged/loosely-converged solves still persist
+        (covered by the convergence suite)."""
+        bs, boozer_surface = get_boozer_surface(boozer_type='exact')
+        s = boozer_surface.surface
+        trusted_dofs = np.array(s.get_dofs(), copy=True)
+        iota0, G0 = float(boozer_surface.res['iota']), float(boozer_surface.res['G'])
+
+        calls = [0]
+
+        def growing(x, derivatives=2, **kwargs):
+            # Gradient norm grows every call so the final norm exceeds the initial,
+            # i.e. the solve is classified diverged; finite identity Hessian.
+            calls[0] += 1
+            m = np.asarray(x).size
+            return 0.5 * calls[0] ** 2, float(calls[0]) * np.ones(m), np.identity(m)
+
+        boozer_surface.need_to_run_code = True
+        with patch.object(boozer_surface, 'boozer_penalty_constraints_vectorized',
+                          side_effect=growing), \
+             patch.object(boozer_surface, 'boozer_penalty_constraints',
+                          side_effect=lambda x, **kwargs: np.ones(3)):
+            res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+                tol=1e-12, maxiter=4, iota=iota0, G=G0, vectorize=True)
+
+        self.assertFalse(bool(res['success']))
+        np.testing.assert_allclose(np.array(s.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(float(res['iota']), iota0)
+        self.assertAlmostEqual(float(res['G']), G0)
+
+    def test_penalty_ls_manual_finite_divergence_rolls_back_to_seed(self):
+        """The damped Gauss-Newton ('manual') least-squares path rolls a diverged
+        iterate back to the pre-solve seed (DOFs + iota/G), success False."""
+        bs, boozer_surface = get_boozer_surface(boozer_type='exact')
+        s = boozer_surface.surface
+        trusted_dofs = np.array(s.get_dofs(), copy=True)
+        iota0, G0 = float(boozer_surface.res['iota']), float(boozer_surface.res['G'])
+
+        calls = [0]
+
+        def growing(x, derivatives=1, **kwargs):
+            calls[0] += 1
+            m = np.asarray(x).size
+            return float(calls[0]) * np.ones(m), np.identity(m)
+
+        boozer_surface.need_to_run_code = True
+        with patch.object(boozer_surface, 'boozer_penalty_constraints',
+                          side_effect=growing):
+            res = boozer_surface.minimize_boozer_penalty_constraints_ls(
+                tol=1e-12, maxiter=4, iota=iota0, G=G0, method='manual')
+
+        self.assertFalse(bool(res['success']))
+        np.testing.assert_allclose(np.array(s.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(float(res['iota']), iota0)
+        self.assertAlmostEqual(float(res['G']), G0)
+
+    def test_penalty_ls_scipy_nonfinite_result_rolls_back_to_seed(self):
+        """When scipy ``least_squares`` returns a non-finite result, the surface rolls
+        back to the seed instead of persisting the garbage."""
+        bs, boozer_surface = get_boozer_surface(boozer_type='exact')
+        s = boozer_surface.surface
+        trusted_dofs = np.array(s.get_dofs(), copy=True)
+        iota0, G0 = float(boozer_surface.res['iota']), float(boozer_surface.res['G'])
+        n = trusted_dofs.size
+        nonfinite = SimpleNamespace(
+            x=np.full(n + 2, np.inf), fun=np.full(3, np.inf),
+            grad=np.zeros(n + 2), jac=np.zeros((3, n + 2)), status=-1)
+
+        boozer_surface.need_to_run_code = True
+        with patch('simsopt.geo.boozersurface.least_squares', return_value=nonfinite):
+            res = boozer_surface.minimize_boozer_penalty_constraints_ls(
+                tol=1e-12, maxiter=4, iota=iota0, G=G0, method='lm')
+
+        self.assertFalse(bool(res['success']))
+        np.testing.assert_allclose(np.array(s.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(float(res['iota']), iota0)
+        self.assertAlmostEqual(float(res['G']), G0)
+
+    def test_exact_constraints_newton_finite_divergence_rolls_back_to_seed(self):
+        """The exact-constraints Newton solver rolls a diverged iterate back to the
+        pre-solve seed (DOFs + iota/G), success False."""
+        bs, boozer_surface = get_boozer_surface(boozer_type='exact')
+        s = boozer_surface.surface
+        trusted_dofs = np.array(s.get_dofs(), copy=True)
+        iota0, G0 = float(boozer_surface.res['iota']), float(boozer_surface.res['G'])
+
+        calls = [0]
+
+        def growing(xl, derivatives=1, **kwargs):
+            calls[0] += 1
+            m = np.asarray(xl).size
+            return float(calls[0]) * np.ones(m), np.identity(m)
+
+        boozer_surface.need_to_run_code = True
+        with patch.object(boozer_surface, 'boozer_exact_constraints',
+                          side_effect=growing):
+            res = boozer_surface.minimize_boozer_exact_constraints_newton(
+                tol=1e-12, maxiter=4, iota=iota0, G=G0)
+
+        self.assertFalse(bool(res['success']))
+        np.testing.assert_allclose(np.array(s.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(float(res['iota']), iota0)
+        self.assertAlmostEqual(float(res['G']), G0)
 
     def test_exact_newton_finite_nonconverged_solve_preserves_plu(self):
         """A FINITE but non-converged exact solve keeps its factorization: ``success=False`` with a
