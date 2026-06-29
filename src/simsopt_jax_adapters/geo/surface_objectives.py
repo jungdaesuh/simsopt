@@ -33,6 +33,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import lax
+from scipy.spatial.distance import cdist
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt_jax.runtime.host_boundary import (
@@ -103,7 +104,6 @@ from simsopt_jax.core.surface_rzfourier import (
 from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax.geo._pairwise_reductions import (
     _resolve_pairwise_penalty_chunk_size,
-    pairwise_min_distance_pure,
     pairwise_selected_smoothmin_distance_batched_pure,
     pairwise_selected_smoothmin_distance_pure,
     pairwise_thresholded_mean_square_distance_pure,
@@ -257,13 +257,6 @@ class SurfaceSurfaceDistance(Optimizable):
                 argnums=(0, 1),
             )
         )
-        self._shortest_distance = jax.jit(
-            lambda gamma1, gamma2: pairwise_min_distance_pure(
-                gamma1,
-                gamma2,
-                chunk_size=self.chunk_size,
-            )
-        )
         super().__init__(depends_on=[surf1, surf2])
 
     def _flattened_surface_gammas(self):
@@ -282,8 +275,15 @@ class SurfaceSurfaceDistance(Optimizable):
         return _host_scalar(value)
 
     def shortest_distance(self):
-        gamma1, gamma2, _gamma1_shape, _gamma2_shape = self._flattened_surface_gammas()
-        return _host_scalar(self._shortest_distance(gamma1, gamma2))
+        gamma1 = np.asarray(self.surf1.gamma(), dtype=np.float64).reshape((-1, 3))
+        gamma2 = np.asarray(self.surf2.gamma(), dtype=np.float64).reshape((-1, 3))
+        block = 1024
+        return float(
+            min(
+                np.min(cdist(gamma1[start : start + block], gamma2))
+                for start in range(0, gamma1.shape[0], block)
+            )
+        )
 
     @derivative_dec
     def dJ(self):
