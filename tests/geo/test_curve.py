@@ -12,6 +12,7 @@ from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier
 from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
+from simsopt.geo.orientedcurve import rotate_pure
 from simsopt.geo import SurfaceRZFourier, CurveCWSFourier
 from simsopt.geo.curve import RotatedCurve, curves_to_vtk
 from simsopt.geo import parameters
@@ -216,6 +217,37 @@ class Testing(unittest.TestCase):
         curve.x = dofs + rand_scale * np.random.rand(len(dofs)).reshape(dofs.shape)
 
         return curve
+
+    def test_rotate_pure_preserves_yaw_pitch_roll_order(self):
+        points = np.array([
+            [1.0, -0.25, 0.5],
+            [-0.75, 0.4, 1.25],
+            [0.3, 0.8, -0.6],
+        ])
+        yaw, pitch, roll = np.array([0.31, -0.47, 0.19])
+        yaw_matrix = np.array([
+            [np.cos(yaw), -np.sin(yaw), 0.0],
+            [np.sin(yaw), np.cos(yaw), 0.0],
+            [0.0, 0.0, 1.0],
+        ])
+        pitch_matrix = np.array([
+            [np.cos(pitch), 0.0, np.sin(pitch)],
+            [0.0, 1.0, 0.0],
+            [-np.sin(pitch), 0.0, np.cos(pitch)],
+        ])
+        roll_matrix = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, np.cos(roll), -np.sin(roll)],
+            [0.0, np.sin(roll), np.cos(roll)],
+        ])
+
+        expected = points @ yaw_matrix @ pitch_matrix @ roll_matrix
+
+        np.testing.assert_allclose(
+            np.asarray(rotate_pure(points, np.array([yaw, pitch, roll]))),
+            expected,
+            atol=1e-14,
+        )
 
     def test_curvexyzsymmetries_raisesexception(self):
         # test ensures that an exception is raised when you try and create a curvexyzfouriersymmetries

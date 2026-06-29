@@ -1,8 +1,7 @@
 import jax.numpy as jnp
-from math import pi, sin, cos
+from math import pi
 import numpy as np
 from .curve import JaxCurve
-from simsopt._core.optimizable import Optimizable
 
 __all__ = ['OrientedCurveXYZFourier']
 
@@ -53,7 +52,8 @@ def rotate_pure( v, ypr ):
         [0, jnp.sin(roll), jnp.cos(roll)]]
     )
 
-    return v @ Myaw @ Mpitch @ Mroll
+    rotation = Myaw @ Mpitch @ Mroll
+    return v @ rotation
 
 def centercurve_pure(dofs, quadpoints, order):
     """Construct curve centered at the origin
@@ -157,4 +157,3 @@ class OrientedCurveXYZFourier( JaxCurve ):
         oriented_curve.set('z0', xyzcurve.get('zc(0)'))
 
         return oriented_curve
-
