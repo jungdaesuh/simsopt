@@ -5,6 +5,7 @@ from .smoothing import smoothmax_selected, smoothmin_selected
 
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)
+_SURFACE_SURFACE_DISTANCE_BLOCK_ROWS = 1024
 
 
 def _new_derivative():
@@ -23,14 +24,27 @@ def _surface_dgamma_by_dcoeff_derivative(surface, point_gradient):
 
 
 def _selected_distance_rows_and_cols(dists, *, hard_min, temperature):
-    mask = dists <= (hard_min + 4.0 * float(temperature))
+    mask = dists <= _selected_distance_limit(
+        hard_min=hard_min,
+        temperature=temperature,
+    )
     if not np.any(mask):
         mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
     return np.nonzero(mask)
 
 
+def _selected_distance_limit(*, hard_min, temperature):
+    return hard_min + 4.0 * float(temperature)
+
+
 def _distance_directions(diffs, distances):
     return diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+
+
+def _surface_distance_row_blocks(flat_gamma):
+    for start in range(0, len(flat_gamma), _SURFACE_SURFACE_DISTANCE_BLOCK_ROWS):
+        stop = min(start + _SURFACE_SURFACE_DISTANCE_BLOCK_ROWS, len(flat_gamma))
+        yield start, flat_gamma[start:stop]
 
 
 def _smooth_min_signed_constraint(minimum_distance, smooth_min, grad):
@@ -192,26 +206,60 @@ def smooth_min_surface_surface_signed_constraint(
     gamma_2 = np.asarray(surface_2.gamma(), dtype=float)
     flat_gamma_1 = gamma_1.reshape((-1, 3))
     flat_gamma_2 = gamma_2.reshape((-1, 3))
-    diffs = flat_gamma_1[:, None, :] - flat_gamma_2[None, :, :]
-    dists = np.linalg.norm(diffs, axis=2)
-    hard_min = float(np.min(dists))
-    rows, cols = _selected_distance_rows_and_cols(
-        dists,
+
+    hard_min = np.inf
+    fallback_entry = None
+    for row_start, gamma_1_block in _surface_distance_row_blocks(flat_gamma_1):
+        diffs = gamma_1_block[:, None, :] - flat_gamma_2[None, :, :]
+        dists = np.linalg.norm(diffs, axis=2)
+        local_min_flat = int(np.argmin(dists))
+        local_min_distance = float(np.ravel(dists)[local_min_flat])
+        if local_min_distance < hard_min:
+            local_row, col = np.unravel_index(local_min_flat, dists.shape)
+            hard_min = local_min_distance
+            fallback_entry = (
+                np.array([local_row + row_start], dtype=int),
+                np.array([col], dtype=int),
+                diffs[local_row, col][None, :],
+                np.array([local_min_distance], dtype=float),
+            )
+
+    selected_distances = []
+    selected_entries = []
+    active_limit = _selected_distance_limit(
         hard_min=hard_min,
         temperature=temperature,
     )
-    selected_distances = dists[rows, cols]
+    for row_start, gamma_1_block in _surface_distance_row_blocks(flat_gamma_1):
+        diffs = gamma_1_block[:, None, :] - flat_gamma_2[None, :, :]
+        dists = np.linalg.norm(diffs, axis=2)
+        local_rows, cols = np.nonzero(dists <= active_limit)
+        if len(local_rows) > 0:
+            rows = local_rows + row_start
+            selected_distances.append(dists[local_rows, cols])
+            selected_entries.append((rows, cols, diffs[local_rows, cols], dists[local_rows, cols]))
+
+    if not selected_distances:
+        selected_distances.append(fallback_entry[3])
+        selected_entries.append(fallback_entry)
+
+    selected_distances = np.concatenate(selected_distances)
     smooth_min, weights = smoothmin_selected(
         selected_distances,
         temperature,
         _SMOOTHING_EPS,
     )
 
-    directions = _distance_directions(diffs[rows, cols], selected_distances)
     gradient_1 = np.zeros_like(flat_gamma_1)
     gradient_2 = np.zeros_like(flat_gamma_2)
-    np.add.at(gradient_1, rows, weights[:, None] * directions)
-    np.add.at(gradient_2, cols, -weights[:, None] * directions)
+    offset = 0
+    for rows, cols, diffs, distances in selected_entries:
+        count = len(distances)
+        local_weights = weights[offset:offset + count]
+        offset += count
+        directions = _distance_directions(diffs, distances)
+        np.add.at(gradient_1, rows, local_weights[:, None] * directions)
+        np.add.at(gradient_2, cols, -local_weights[:, None] * directions)
 
     derivative = _new_derivative()
     derivative += _surface_dgamma_by_dcoeff_derivative(
