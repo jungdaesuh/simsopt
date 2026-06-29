@@ -299,6 +299,20 @@ class SurfaceXYZFourierTests(unittest.TestCase):
         print("AR rel error is:", rel_err)
         assert rel_err < 1e-5
 
+    def test_mean_cross_sectional_area_raises_for_singular_phi_mapping(self):
+        class DegenerateSurface:
+            def gamma(self):
+                return np.array([[[1.0, 0.0, 0.0]]])
+
+            def gammadash1(self):
+                return np.array([[[0.0, 0.0, 2.0]]])
+
+            def gammadash2(self):
+                return np.array([[[0.0, 1.0, 3.0]]])
+
+        with self.assertRaises(np.linalg.LinAlgError):
+            Surface.mean_cross_sectional_area(DegenerateSurface())
+
     @unittest.skipIf(pyevtk is None, "pyevtk not found")
     def test_to_vtk(self):
         mpol = 4

@@ -675,17 +675,16 @@ class Surface(Optimizable):
         dgamma1 = self.gammadash1()
         dgamma2 = self.gammadash2()
 
-        # compute the average cross sectional area
-        J = np.zeros((xyz.shape[0], xyz.shape[1], 2, 2))
-        J[:, :, 0, 0] = (xyz[:, :, 0] * dgamma1[:, :, 1] - xyz[:, :, 1] * dgamma1[:, :, 0]) / x2y2
-        J[:, :, 0, 1] = (xyz[:, :, 0] * dgamma2[:, :, 1] - xyz[:, :, 1] * dgamma2[:, :, 0]) / x2y2
-        J[:, :, 1, 0] = 0.
-        J[:, :, 1, 1] = 1.
+        # The mapping Jacobian is [[dphi/dvarphi, dphi/dtheta], [0, 1]], so
+        # its determinant and inverse entries are analytic scalars per gridpoint.
+        dphi_dvarphi = (xyz[:, :, 0] * dgamma1[:, :, 1] - xyz[:, :, 1] * dgamma1[:, :, 0]) / x2y2
+        dphi_dtheta = (xyz[:, :, 0] * dgamma2[:, :, 1] - xyz[:, :, 1] * dgamma2[:, :, 0]) / x2y2
 
-        detJ = np.linalg.det(J)
-        Jinv = np.linalg.inv(J)
+        if np.any(dphi_dvarphi == 0):
+            raise np.linalg.LinAlgError("Singular matrix")
 
-        dZ_dtheta = dgamma1[:, :, 2] * Jinv[:, :, 0, 1] + dgamma2[:, :, 2] * Jinv[:, :, 1, 1]
+        detJ = dphi_dvarphi
+        dZ_dtheta = dgamma2[:, :, 2] - dgamma1[:, :, 2] * dphi_dtheta / dphi_dvarphi
         mean_cross_sectional_area = np.abs(np.mean(np.sqrt(x2y2) * dZ_dtheta * detJ))/(2 * np.pi)
         return mean_cross_sectional_area
 

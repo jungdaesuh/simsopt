@@ -310,7 +310,7 @@ unpack the tuple in `dJ()`.
          `v @ Myaw @ Mpitch @ Mroll` (left-assoc ⇒ three `(N,3)@(3,3)` products);
          the current continuation precombines one 3×3 rotation and does a single
          point-cloud matmul, with a focused yaw/pitch/roll order regression test.
-   - [ ] `surface.py:679-689` — replace batched `np.linalg.det/inv` on the
+   - [x] `surface.py:679-689` — replace batched `np.linalg.det/inv` on the
          structured 2×2 (J[1,0]=0, J[1,1]=1) with the analytic inverse.
    - [ ] `objectives/utilities.py:24-48` — replace dense permutation matmul
          (`P@…`, 3 dense n×n factors) with O(n) pivot indexing in
@@ -425,9 +425,11 @@ unpack the tuple in `dJ()`.
   `forward_backward` are replaced by O(n) pivot indexing and factored residual
   matvecs. The current continuation also precombines
   `orientedcurve.rotate_pure`'s yaw/pitch/roll matrices before multiplying the
-  point cloud. The framed-curve VJP consolidation was already covered by Phase 2;
-  the remaining items still need isolated consumer audits or timing proof before
-  changing allocation/host-sync behavior.
+  point cloud, and replaces `surface.mean_cross_sectional_area`'s batched
+  structured-2x2 `det`/`inv` allocation with analytic entries. The framed-curve
+  VJP consolidation was already covered by Phase 2; the remaining items still
+  need isolated consumer audits or timing proof before changing allocation/host-sync
+  behavior.
 - Phase 4.3 (`banana_opt` micro): `hardware_keepout.py` per-candidate host sync
   landed with hardware keepout tests; the other items are deferred. In particular,
   `boozer_finite_current.py` copies stay until a no-alias proof and regression test
@@ -495,6 +497,17 @@ unpack the tuple in `dJ()`.
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile src/simsopt/geo/orientedcurve.py tests/geo/test_curve.py`
   — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_surface_taylor.py -q -k surface_coefficient_derivative`
+  — 1 passed, 18 deselected, 12 subtests passed.
+- `PYTHONNOUSERSITE=1 MPLCONFIGDIR=/tmp ./.conda-env/bin/python -m pytest tests/geo/test_surface_xyzfourier.py -q -k 'aspect_ratio_compare_with_cross_sectional_computation or mean_cross_sectional_area_raises_for_singular_phi_mapping'`
+  — 2 passed, 8 deselected.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check src/simsopt/geo/surface.py tests/geo/test_surface_xyzfourier.py`
+  — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile src/simsopt/geo/surface.py tests/geo/test_surface_xyzfourier.py`
+  — clean.
+- Dense-formula equivalence probe for `Surface.mean_cross_sectional_area`
+  (`get_exact_surface()` helper): current analytic value matched the previous
+  dense `np.linalg.det/inv` computation with absolute delta `5.551e-17`.
 
 ## Risks and Mitigations
 
