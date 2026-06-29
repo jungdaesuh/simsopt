@@ -8,7 +8,7 @@ import numpy as np
 
 from benchmarks.single_stage_smoke_defaults import (
     DEFAULT_PLASMA_SURF_FILENAME,
-    DEFAULT_STAGE2_BS_PATH,
+    SMOKE_TEST_STAGE2_BS_PATH,
 )
 from examples.single_stage_optimization.equilibria_paths import (
     DEFAULT_EQUILIBRIA_DIR,
@@ -21,10 +21,17 @@ DEFAULT_SMOKE_MPOL = 2
 DEFAULT_SMOKE_NTOR = 2
 DEFAULT_VOL_TARGET = 0.10
 DEFAULT_IOTA_TARGET = 0.15
-DEFAULT_OPTIMIZER_BACKEND = "scipy-jax"
+DEFAULT_OPTIMIZER_BACKEND = "scipy-jax-decomposed"
 DEFAULT_REFERENCE_OPTIMIZER_BACKEND = "scipy"
 DEFAULT_CONSTRAINT_WEIGHT = 1.0
 DEFAULT_NUM_TF_COILS = 20
+SMOKE_TEST_SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC = (
+    SMOKE_TEST_STAGE2_BS_PATH.parent / "single_stage_jax_runtime_spec.json"
+)
+DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NPHI = 255
+DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NTHETA = 64
+DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_MPOL = 10
+DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NTOR = 10
 
 
 def default_optimizer_backend_for_backend(backend: str) -> str:
@@ -64,7 +71,7 @@ def build_real_single_stage_init_fixture(
     plasma_surf_filename: str = DEFAULT_PLASMA_SURF_FILENAME,
     equilibria_dir: str | Path = DEFAULT_EQUILIBRIA_DIR,
     equilibrium_path: str | Path | None = None,
-    stage2_bs_path: str | Path = DEFAULT_STAGE2_BS_PATH,
+    stage2_bs_path: str | Path = SMOKE_TEST_STAGE2_BS_PATH,
     nphi: int = DEFAULT_SMOKE_NPHI,
     ntheta: int = DEFAULT_SMOKE_NTHETA,
     mpol: int = DEFAULT_SMOKE_MPOL,

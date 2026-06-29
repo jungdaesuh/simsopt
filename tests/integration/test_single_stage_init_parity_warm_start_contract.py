@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-import shutil
 from pathlib import Path
 
 import pytest
@@ -22,16 +20,77 @@ from benchmarks.single_stage_init_parity import (
     _single_stage_elapsed_s_from_results,
     _validate_warm_start_seed_contract,
 )
+from examples.single_stage_optimization.SINGLE_STAGE import (
+    single_stage_banana_example as single_stage_example,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = REPO_ROOT / "benchmarks" / "fixtures" / "single_stage_seed_iota15"
 
 
-def test_warm_start_contract_accepts_runtime_g_derived_from_biotsavart(tmp_path):
-    """Legacy donors without ``FINAL_G`` remain valid when TF currents define G."""
+class CurveXYZFourier:
+    pass
+
+
+class CurveCWSFourierCPP:
+    pass
+
+
+class RotatedCurve:
+    def __init__(self, curve):
+        self.curve = curve
+
+
+class _Coil:
+    def __init__(self, curve):
+        self.curve = curve
+
+
+def _coils(curve_cls, count):
+    return [_Coil(curve_cls()) for _ in range(count)]
+
+
+def _array_payload(values):
+    return {
+        "@module": "numpy",
+        "@class": "array",
+        "dtype": "float64",
+        "data": values,
+    }
+
+
+def test_warm_start_g_uses_signed_boozer_state_sidecar(tmp_path):
+    surface_path = tmp_path / "surf_opt_boozer_surface.json"
+    surface_path.write_text("{}", encoding="utf-8")
+    (tmp_path / "surf_opt_boozer_state.json").write_text(
+        json.dumps({"G": -2.01061560706768}),
+        encoding="utf-8",
+    )
+
+    resolved_g = single_stage_example.resolve_single_stage_warm_start_G(
+        {"FINAL_IOTA": 0.11015671329581699},
+        surface_path,
+    )
+
+    assert resolved_g == pytest.approx(-2.01061560706768)
+
+
+def test_warm_start_g_stays_missing_without_results_or_state(tmp_path):
+    surface_path = tmp_path / "surf_opt_boozer_surface.json"
+    surface_path.write_text("{}", encoding="utf-8")
+
+    resolved_g = single_stage_example.resolve_single_stage_warm_start_G(
+        {"FINAL_IOTA": 0.11015671329581699},
+        surface_path,
+    )
+
+    assert resolved_g is None
+
+
+def test_warm_start_contract_accepts_signed_g_from_boozer_state_sidecar(tmp_path):
+    """Donors without ``FINAL_G`` remain valid when the Boozer state sidecar has G."""
     seed_dir = tmp_path / "seed"
     seed_dir.mkdir()
-    shutil.copyfile(FIXTURE / "biot_savart_opt.json", seed_dir / "biot_savart_opt.json")
     results = {
         "init_only": False,
         "FINAL_IOTA": 0.22650585872006085,
@@ -39,12 +98,225 @@ def test_warm_start_contract_accepts_runtime_g_derived_from_biotsavart(tmp_path)
         "SELF_INTERSECTING": False,
     }
     (seed_dir / "results.json").write_text(json.dumps(results), encoding="utf-8")
+    (seed_dir / "surf_opt_boozer_surface.json").write_text("{}", encoding="utf-8")
+    (seed_dir / "surf_opt_boozer_state.json").write_text(
+        json.dumps({"G": -2.01061560706768}),
+        encoding="utf-8",
+    )
     args = argparse.Namespace(iota_target=0.22650585872006085, num_tf_coils=20)
 
-    derived_g = _resolve_warm_start_seed_contract_G(args, seed_dir, results)
+    resolved_g = _resolve_warm_start_seed_contract_G(args, seed_dir, results)
 
-    assert math.isfinite(float(derived_g))
+    assert resolved_g == pytest.approx(-2.01061560706768)
     _validate_warm_start_seed_contract(args, seed_dir)
+
+
+def test_runtime_seed_contract_rejects_flattened_materialized_cws_banana_field():
+    donor_results = {"SINGLE_STAGE_BANANA_GEOMETRY_MODE": "materialized_cws"}
+    banana_coils = _coils(CurveXYZFourier, 10)
+
+    with pytest.raises(ValueError, match="0 referenced CurveCWSFourierCPP"):
+        single_stage_example.validate_materialized_cws_runtime_seed_coil_contract(
+            donor_results,
+            banana_coils,
+            biot_savart_path="/seed/biot_savart_opt.json",
+        )
+
+
+def test_runtime_seed_contract_rejects_flattened_cws_banana_curve_class():
+    donor_results = {"banana_curve_class": "CurveCWSFourierCPP"}
+    banana_coils = _coils(CurveXYZFourier, 10)
+
+    with pytest.raises(ValueError, match="0 referenced CurveCWSFourierCPP"):
+        single_stage_example.validate_materialized_cws_runtime_seed_coil_contract(
+            donor_results,
+            banana_coils,
+            biot_savart_path="/seed/biot_savart_opt.json",
+        )
+
+
+def test_runtime_seed_contract_accepts_materialized_cws_banana_field():
+    donor_results = {"SINGLE_STAGE_BANANA_GEOMETRY_MODE": "materialized_cws"}
+    banana_coils = [_Coil(RotatedCurve(CurveCWSFourierCPP())) for _ in range(10)]
+
+    inventory = single_stage_example.validate_materialized_cws_runtime_seed_coil_contract(
+        donor_results,
+        banana_coils,
+        biot_savart_path="/seed/slid_cws_field_chomp.json",
+    )
+
+    assert inventory["RotatedCurve"] == 10
+    assert inventory["CurveCWSFourierCPP"] == 10
+
+
+def test_runtime_seed_contract_rejects_partially_flattened_materialized_cws_field():
+    donor_results = {"SINGLE_STAGE_BANANA_GEOMETRY_MODE": "materialized_cws"}
+    banana_coils = [
+        *[_Coil(RotatedCurve(CurveCWSFourierCPP())) for _ in range(9)],
+        _Coil(CurveXYZFourier()),
+    ]
+
+    with pytest.raises(ValueError, match="9/10 active banana coils"):
+        single_stage_example.validate_materialized_cws_runtime_seed_coil_contract(
+            donor_results,
+            banana_coils,
+            biot_savart_path="/seed/biot_savart_opt.json",
+        )
+
+
+def test_runtime_seed_contract_allows_flattened_free_xyz_banana_field():
+    donor_results = {"SINGLE_STAGE_BANANA_GEOMETRY_MODE": "free_xyz"}
+    banana_coils = _coils(CurveXYZFourier, 10)
+
+    inventory = single_stage_example.validate_materialized_cws_runtime_seed_coil_contract(
+        donor_results,
+        banana_coils,
+        biot_savart_path="/seed/biot_savart_opt.json",
+    )
+
+    assert inventory == {"CurveXYZFourier": 10}
+
+
+def test_runtime_seed_contract_free_xyz_overrides_legacy_cws_curve_class():
+    donor_results = {
+        "SINGLE_STAGE_BANANA_GEOMETRY_MODE": "free_xyz",
+        "banana_curve_class": "CurveCWSFourierCPP",
+    }
+    banana_coils = _coils(CurveXYZFourier, 10)
+
+    inventory = single_stage_example.validate_materialized_cws_runtime_seed_coil_contract(
+        donor_results,
+        banana_coils,
+        biot_savart_path="/seed/biot_savart_opt.json",
+    )
+
+    assert inventory == {"CurveXYZFourier": 10}
+
+
+def test_boozer_surface_sidecar_warm_start_loads_underlying_surface(tmp_path):
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir()
+    (seed_dir / "results.json").write_text(
+        json.dumps({"FINAL_IOTA": 0.11}),
+        encoding="utf-8",
+    )
+    (seed_dir / "surf_opt_boozer_state.json").write_text(
+        json.dumps({"G": -2.01061560706768}),
+        encoding="utf-8",
+    )
+    (seed_dir / "surf_opt_boozer_surface.json").write_text(
+        json.dumps(
+            {
+                "@class": "SIMSON",
+                "graph": [{"$type": "ref", "value": "BoozerSurface1"}],
+                "simsopt_objs": {
+                    "BoozerSurface1": {
+                        "@class": "BoozerSurface",
+                        "surface": {
+                            "$type": "ref",
+                            "value": "SurfaceXYZTensorFourier1",
+                        },
+                    },
+                    "SurfaceXYZTensorFourier1": {
+                        "@class": "SurfaceXYZTensorFourier",
+                        "mpol": 1,
+                        "ntor": 1,
+                        "nfp": 5,
+                        "stellsym": True,
+                        "quadpoints_phi": _array_payload([0.0, 0.1]),
+                        "quadpoints_theta": _array_payload([0.0, 0.2, 0.4]),
+                        "dofs": {"$type": "ref", "value": "SurfaceDofs1"},
+                    },
+                    "SurfaceDofs1": {
+                        "x": _array_payload([0.0, 1.0, 2.0, 3.0]),
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    warm_start_state = single_stage_example.load_single_stage_warm_start_state(
+        seed_dir
+    )
+
+    assert warm_start_state["surface"].surface_class == "SurfaceXYZTensorFourier"
+    assert warm_start_state["surface"].mpol == 1
+    assert warm_start_state["G"] == pytest.approx(-2.01061560706768)
+    assert warm_start_state["surface_path"].endswith(
+        "surf_opt_boozer_surface.json"
+    )
+
+
+def test_warm_start_prefers_surface_artifact_over_boozer_surface_sidecar(tmp_path):
+    seed_dir = tmp_path / "seed"
+    seed_dir.mkdir()
+    (seed_dir / "results.json").write_text(
+        json.dumps({"FINAL_IOTA": 0.11, "FINAL_G": 1.25}),
+        encoding="utf-8",
+    )
+    (seed_dir / "surf_opt.json").write_text(
+        json.dumps(
+            {
+                "@class": "SIMSON",
+                "graph": [{"$type": "ref", "value": "SurfaceXYZTensorFourier1"}],
+                "simsopt_objs": {
+                    "SurfaceXYZTensorFourier1": {
+                        "@class": "SurfaceXYZTensorFourier",
+                        "mpol": 2,
+                        "ntor": 2,
+                        "nfp": 5,
+                        "stellsym": True,
+                        "quadpoints_phi": _array_payload([0.0, 0.1]),
+                        "quadpoints_theta": _array_payload([0.0, 0.2, 0.4]),
+                        "dofs": {"$type": "ref", "value": "SurfaceDofs1"},
+                    },
+                    "SurfaceDofs1": {
+                        "x": _array_payload([0.0, 1.0, 2.0, 3.0]),
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (seed_dir / "surf_opt_boozer_surface.json").write_text(
+        json.dumps(
+            {
+                "@class": "SIMSON",
+                "graph": [{"$type": "ref", "value": "BoozerSurface1"}],
+                "simsopt_objs": {
+                    "BoozerSurface1": {
+                        "@class": "BoozerSurface",
+                        "surface": {
+                            "$type": "ref",
+                            "value": "SurfaceXYZTensorFourier1",
+                        },
+                    },
+                    "SurfaceXYZTensorFourier1": {
+                        "@class": "SurfaceXYZTensorFourier",
+                        "mpol": 1,
+                        "ntor": 1,
+                        "nfp": 5,
+                        "stellsym": True,
+                        "quadpoints_phi": _array_payload([0.0, 0.1]),
+                        "quadpoints_theta": _array_payload([0.0, 0.2, 0.4]),
+                        "dofs": {"$type": "ref", "value": "SurfaceDofs1"},
+                    },
+                    "SurfaceDofs1": {
+                        "x": _array_payload([0.0, 1.0, 2.0, 3.0]),
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    warm_start_state = single_stage_example.load_single_stage_warm_start_state(
+        seed_dir
+    )
+
+    assert warm_start_state["surface"].mpol == 2
+    assert warm_start_state["surface_path"].endswith("surf_opt.json")
 
 
 def test_cpu_reference_outer_run_uses_explicit_warm_start_without_seed_child():

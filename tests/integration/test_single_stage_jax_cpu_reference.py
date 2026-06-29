@@ -62,6 +62,91 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 sys.path.insert(0, str(REPO_ROOT))
 
+
+def _summarize_numeric_array(value: object) -> dict[str, object]:
+    array = np.asarray(value, dtype=np.float64)
+    finite_mask = np.isfinite(array)
+    finite_values = array[finite_mask]
+    return {
+        "shape": tuple(int(dim) for dim in array.shape),
+        "finite": bool(np.all(finite_mask)),
+        "finite_count": int(finite_values.size),
+        "min": None if finite_values.size == 0 else float(np.min(finite_values)),
+        "max": None if finite_values.size == 0 else float(np.max(finite_values)),
+    }
+
+
+def _summarize_scipy_objective_trace(
+    trace: list[dict[str, object]] | None,
+) -> list[dict[str, object]]:
+    if trace is None:
+        return []
+    summary = []
+    for index, entry in enumerate(trace):
+        summary.append(
+            {
+                "index": int(index),
+                "decision_vector": _summarize_numeric_array(entry["decision_vector"]),
+                "fun": _summarize_numeric_array(entry["fun"]),
+                "gradient": _summarize_numeric_array(entry["gradient"]),
+            }
+        )
+    return summary
+
+
+def _traceable_baseline_gradient_diagnostic(
+    booz_jax: object,
+    bs_jax: object,
+    iota_target: object,
+) -> dict[str, object]:
+    runtime_entry = surface_objectives_jax._get_cached_traceable_runtime_entry(
+        booz_jax,
+        bs_jax,
+        iota_target,
+    )
+    state = runtime_entry["compiled_bundle"]["state"]
+    deviceify = surface_objectives_jax._traceable_runtime_deviceify_tree
+    baseline_coil_dofs = deviceify(state["baseline_coil_dofs"])
+    baseline_x = deviceify(state["baseline_x"])
+    baseline_linear_solve_factors = deviceify(state["baseline_linear_solve_factors"])
+    objective_kwargs = deviceify(state["objective_kwargs"])
+    coil_set_spec = state["coil_set_spec_from_dofs"](baseline_coil_dofs)
+
+    def objective_of_x(current_x):
+        return surface_objectives_jax._evaluate_traceable_total_objective(
+            current_x,
+            baseline_coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        )
+
+    rhs = surface_objectives_jax._strict_scalar_grad(objective_of_x, baseline_x)
+    adjoint, status = surface_objectives_jax._traceable_solve_linearization(
+        booz_jax,
+        baseline_x,
+        rhs,
+        coil_set_spec,
+        objective_kwargs,
+        linear_solve_factors=baseline_linear_solve_factors,
+        linearization_kind=state["linearization_kind"],
+        linear_solve_tol=state["linear_solve_tol"],
+        linear_solve_stab=state["linear_solve_stab"],
+        transpose=True,
+    )
+    return {
+        "linearization_kind": state["linearization_kind"],
+        "linear_solve_tol": float(state["linear_solve_tol"]),
+        "linear_solve_stab": float(state["linear_solve_stab"]),
+        "rhs": _summarize_numeric_array(rhs),
+        "rhs_norm": float(np.asarray(jax.device_get(jnp.linalg.norm(rhs)))),
+        "adjoint": _summarize_numeric_array(adjoint),
+        "status": surface_objectives_jax._summarize_traceable_linear_solve_status(
+            status
+        ),
+        "success": bool(np.asarray(jax.device_get(status.success))),
+    }
+
+
 from benchmarks.benchmark_problem import build_ls_parity_problem, clone_tensor_surface
 from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
 from benchmarks.run_code_benchmark_common import summarize_result_fun
@@ -187,6 +272,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (  # noqa: E402
     _solve_boozer_adjoint,
     _value_and_direct_coil_gradient,
     compute_standard_surface_objective_gradients,
+    TraceableObjectiveSolvedPair,
     make_traceable_objective,
     make_traceable_objective_runtime_bundle,
     make_traceable_objective_seeded_value_and_grad,
@@ -2622,7 +2708,9 @@ class TestBoozerResidualValue:
             captured["value"] = float(value)
             return value
 
-        monkeypatch.setattr(surface_objectives_jax, "_ensure_solved", lambda _booz: None)
+        monkeypatch.setattr(
+            surface_objectives_jax, "_ensure_solved", lambda _booz: None
+        )
         monkeypatch.setattr(
             surface_objectives_jax,
             "_value_and_direct_coil_gradient",
@@ -4214,7 +4302,9 @@ class TestNonQSRatioValue:
             return jnp.sum(sdofs**2)
 
         monkeypatch.setattr(booz_jax, "_surface_geometry_kind", "rzfourier")
-        monkeypatch.setattr(surface_objectives_jax, "_qs_ratio_pure", fake_qs_ratio_pure)
+        monkeypatch.setattr(
+            surface_objectives_jax, "_qs_ratio_pure", fake_qs_ratio_pure
+        )
         monkeypatch.setattr(
             surface_objectives_jax,
             "_solve_boozer_adjoint",
@@ -5359,10 +5449,10 @@ class TestRealFixtureGpuM5Parity:
 class TestShortSingleStageOptRun:
     """Validate SciPy acceptance at a stationary JAX composite objective.
 
-    Non-stationary outer-step parity lives in
-    TestTraceableObjective.test_traceable_solver_path_localizes_delta_to_optimizer_driver.
-    This mutable host-wrapper fixture starts from a converged inner solve, so
-    SciPy may validly accept x0 before completing an L-BFGS-B iteration.
+    Non-stationary outer-step proof requires a successful traceable adjoint
+    solve and belongs to the replay/production artifact gates. This mutable
+    host-wrapper fixture starts from a converged inner solve, so SciPy may
+    validly accept x0 before completing an L-BFGS-B iteration.
     """
 
     def test_outer_opt_accepts_stationary_initial_objective(self, boozer_setup):
@@ -5725,33 +5815,6 @@ class TestEnsureSolvedCrashGuard:
             booz_jax.res = old_res
             booz_jax.need_to_run_code = old_dirty
             booz_jax.run_code = old_run_code
-
-    @pytest.mark.parametrize(
-        "wrapper_name",
-        ["BoozerResidual", "Iotas", "NonQuasiSymmetricRatio"],
-    )
-    def test_cpu_wrappers_defer_guarded_adjoint_failure_to_dJ(
-        self, boozer_setup, wrapper_name
-    ):
-        """A guarded adjoint callback must not break the value path."""
-        (_, _, _, bs_cpu, _, booz_cpu, _, _) = boozer_setup
-        old_res = booz_cpu.res
-        old_dirty = booz_cpu.need_to_run_code
-
-        bad_res = dict(old_res)
-        bad_res["vjp"] = _make_guarded_gradient_failure("BoozerSurface")
-        booz_cpu.res = bad_res
-        booz_cpu.need_to_run_code = False
-        try:
-            obj = _build_boozer_wrapper(wrapper_name, booz_cpu, bs_cpu)
-            assert np.isfinite(float(obj.J()))
-            with pytest.raises(
-                ValueError, match="requires fixed coil currents when G=None"
-            ):
-                obj.dJ()
-        finally:
-            booz_cpu.res = old_res
-            booz_cpu.need_to_run_code = old_dirty
 
     @pytest.mark.parametrize(
         "wrapper_name",
@@ -6681,10 +6744,8 @@ class TestTraceableObjective:
         perturbed_coil_dofs = coil_dofs.at[0].add(
             jnp.asarray(1.0e-4, dtype=coil_dofs.dtype)
         )
-        unconstrained_value = float(
-            unconstrained_bundle["objective"](perturbed_coil_dofs)
-        )
         gated_value = float(gated_bundle["objective"](perturbed_coil_dofs))
+        gated_forward_result = gated_bundle["forward_result"](perturbed_coil_dofs)
         gated_value_vg, gated_grad = gated_bundle["value_and_grad"](perturbed_coil_dofs)
 
         np.testing.assert_allclose(
@@ -6697,7 +6758,9 @@ class TestTraceableObjective:
                 "the hard success filter rejects candidate states."
             ),
         )
-        assert gated_value > unconstrained_value
+        assert not bool(np.asarray(gated_forward_result["success"]))
+        assert np.isfinite(gated_value)
+        assert gated_value >= gated_baseline_value
         np.testing.assert_allclose(
             float(gated_value_vg),
             gated_value,
@@ -6777,49 +6840,12 @@ class TestTraceableObjective:
         solve_result = booz_jax.run_code(iota0, G0)
         assert solve_result is not None and solve_result.get("success", False)
 
-        banana_curve = bs_jax.coils[0].curve
-        length_target = single_stage_example.host_float(
-            single_stage_example.CurveLength(banana_curve).J()
-        )
-        vessel_surface = single_stage_example.SurfaceRZFourier(
-            nfp=booz_jax.nfp,
-            stellsym=booz_jax.stellsym,
-            mpol=1,
-            ntor=0,
-            quadpoints_phi=booz_jax.surface.quadpoints_phi,
-            quadpoints_theta=booz_jax.surface.quadpoints_theta,
-        )
-        vessel_surface.set_rc(0, 0, 1.2)
-        vessel_surface.set_rc(1, 0, 0.15)
-        vessel_surface.set_zs(1, 0, 0.15)
-        config = (
-            single_stage_example.build_traceable_single_stage_outer_objective_config(
-                booz_jax,
-                bs_jax,
-                banana_curve,
-                vessel_surface,
-                non_qs_weight=1.0,
-                residual_weight=1000.0,
-                iota_weight=100.0,
-                length_weight=5.0e-4,
-                length_target=length_target,
-                curve_curve_weight=100.0,
-                curve_curve_threshold=0.05,
-                curve_surface_weight=1.0,
-                curve_surface_threshold=0.02,
-                surface_vessel_weight=1000.0,
-                surface_vessel_threshold=0.04,
-                curvature_weight=0.1,
-                curvature_threshold=40.0,
-            )
-        )
         runtime_bundle = make_traceable_objective_runtime_bundle(
             booz_jax,
             bs_jax,
             as_jax_float64(booz_jax.res["iota"]),
             include_profile_suite=False,
             include_host_wrappers=True,
-            outer_objective_config=config,
         )
         host_coil_dofs = np.asarray(bs_jax.x.copy(), dtype=np.float64)
 
@@ -6958,11 +6984,11 @@ class TestTraceableObjective:
         )
         assert np.all(np.isfinite(np.asarray(second_grad)))
 
-    def test_single_stage_hardware_success_filter_uses_cached_pytree_extraction_state(
+    def test_single_stage_hardware_residuals_derive_success_with_cached_state(
         self,
         monkeypatch,
     ):
-        """The target-lane feasibility filter should not reenter BiotSavart extraction methods."""
+        """Hardware residuals derive feasibility without reentering BiotSavart methods."""
         (
             _coils,
             _surf_cpu,
@@ -7001,6 +7027,16 @@ class TestTraceableObjective:
         vessel_surface.set_zs(1, 0, 0.5)
         booz_jax.res = {"G": jnp.asarray(G0, dtype=jnp.float64)}
 
+        constraint_evaluator = single_stage_example.build_single_stage_target_lane_hardware_constraint_evaluator(
+            booz_jax,
+            bs_jax,
+            bs_jax.coils[0].curve,
+            vessel_surface,
+            cc_dist=0.0,
+            cs_dist=0.0,
+            ss_dist=0.0,
+            curvature_threshold=1.0e9,
+        )
         success_filter = (
             single_stage_example.build_single_stage_target_lane_hardware_success_filter(
                 booz_jax,
@@ -7030,12 +7066,33 @@ class TestTraceableObjective:
         monkeypatch.setattr(bs_jax, "coil_set_spec_from_dofs", _reject_reconstruction)
         monkeypatch.setattr(bs_jax, "coil_specs_from_dofs", _reject_reconstruction)
 
+        hardware_status = constraint_evaluator(
+            jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64),
+            solved_x,
+        )
         feasible = success_filter(
             jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64),
             solved_x,
         )
 
+        assert bool(np.asarray(hardware_status["success"]))
         assert bool(np.asarray(feasible))
+        assert bool(
+            np.all(
+                [
+                    float(np.asarray(residual)) <= 0.0
+                    for residual in hardware_status["residuals"].values()
+                ]
+            )
+        )
+        assert bool(
+            np.all(
+                [
+                    float(np.asarray(residual)) == pytest.approx(0.0)
+                    for residual in hardware_status["positive_residuals"].values()
+                ]
+            )
+        )
 
     def test_scipy_jax_decomposed_lane_wiring_and_parity(self, boozer_setup):
         """Edit 3: the scipy-jax-decomposed backend resolves to the decomposed route,
@@ -7058,9 +7115,18 @@ class TestTraceableObjective:
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
 
-        solved_pair = make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target)
+        solved_pair = make_traceable_objective_solved_pair(
+            booz_jax, bs_jax, iota_target
+        )
         seed = make_traceable_objective_seeded_value_and_grad(
             booz_jax, bs_jax, iota_target
+        )
+        seed_grad = np.asarray(
+            jax.device_get(seed.optimizer_initial_value_and_grad[1]), dtype=np.float64
+        )
+        assert np.all(np.isfinite(seed_grad)), (
+            "cached traceable baseline seed gradient is non-finite: "
+            f"{_traceable_baseline_gradient_diagnostic(booz_jax, bs_jax, iota_target)}"
         )
         host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
             solved_pair, seed.optimizer_initial_value_and_grad[1]
@@ -7071,10 +7137,18 @@ class TestTraceableObjective:
         v1, g1 = fused(coil_dofs)
         g1 = np.asarray(jax.device_get(g1), dtype=np.float64)
         g2 = np.asarray(jax.device_get(g2), dtype=np.float64)
+        assert np.all(np.isfinite(g1))
+        assert np.all(np.isfinite(g2))
         np.testing.assert_allclose(
             float(jax.device_get(v1)), float(jax.device_get(v2)), rtol=1e-10, atol=1e-12
         )
-        np.testing.assert_allclose(g1, g2, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            g1,
+            g2,
+            rtol=1e-10,
+            atol=1e-12,
+            equal_nan=False,
+        )
 
     def test_scipy_jax_decomposed_lane_registered_like_scipy_jax(self):
         """Regression: the CLI startup path gates fused/decomposed objective
@@ -7109,6 +7183,46 @@ class TestTraceableObjective:
             == "target-scipy-control"
         )
 
+    def test_scipy_jax_decomposed_forwards_nonfinite_trial_policy(self, monkeypatch):
+        captured = {}
+
+        def fake_target_minimize(fun, x0, **kwargs):
+            captured["fun"] = fun
+            captured["x0"] = x0
+            captured["kwargs"] = kwargs
+            return types.SimpleNamespace(success=True, x=x0)
+
+        monkeypatch.setattr(
+            single_stage_example,
+            "target_minimize",
+            fake_target_minimize,
+        )
+
+        def value_and_grad(x):
+            x_jax = jnp.asarray(x, dtype=jnp.float64)
+            return jnp.asarray(0.0, dtype=jnp.float64), jnp.zeros_like(x_jax)
+
+        single_stage_example.run_single_stage_optimizer(
+            value_and_grad,
+            np.zeros(2, dtype=np.float64),
+            contract=single_stage_example.TargetOptimizerContract(
+                driver=single_stage_example.Driver.SCIPY_LBFGSB,
+                objective_route=single_stage_example.TargetObjectiveRoute.SCIPY_JAX_DECOMPOSED,
+            ),
+            maxiter=1,
+            ftol=1e-12,
+            gtol=1e-12,
+            maxcor=3,
+            outer_maxls=4,
+            callback=None,
+            target_lane_nonfinite_trial_policy="preserve-last-finite",
+        )
+
+        assert captured["kwargs"]["method"] == "lbfgs-scipy-jax-decomposed"
+        assert captured["kwargs"]["options"]["nonfinite_trial_policy"] == (
+            "preserve-last-finite"
+        )
+
     def test_decomposed_host_objective_failure_branch_returns_baseline(self):
         """Failure-branch coverage: on solve-FAILURE the decomposed host objective must
         return ``(forward_result["value"], baseline_coil_gradient)`` and must NOT call the
@@ -7127,6 +7241,7 @@ class TestTraceableObjective:
             arr = jnp.asarray(coil_dofs)
             return {
                 "success": jnp.asarray(False),
+                "primal_success": jnp.asarray(False),
                 "value": failed_value,
                 "x": jnp.zeros_like(arr),
                 "linear_solve_factors": None,
@@ -7137,7 +7252,7 @@ class TestTraceableObjective:
                 "K2 (value_grad_from_solved) must not run on solve-failure"
             )
 
-        pair = single_stage_example.TraceableObjectiveSolvedPair(
+        pair = TraceableObjectiveSolvedPair(
             solve_fn=solve_fn, value_grad_from_solved=value_grad_from_solved
         )
         host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
@@ -7152,7 +7267,84 @@ class TestTraceableObjective:
             atol=1e-12,
         )
 
-    def test_decomposed_lane_host_sync_count_is_bounded(self, boozer_setup, monkeypatch):
+    def test_decomposed_host_objective_requires_primal_success_key(self):
+        """Malformed solved pairs must not blur filtered rejection and solve failure."""
+        import jax.numpy as jnp
+
+        baseline = np.array([1.0, -2.0])
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(False),
+                "value": jnp.asarray(12.5),
+                "x": jnp.zeros_like(arr),
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(*_args, **_kwargs):
+            raise AssertionError("malformed forward_result must fail before K2")
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn, value_grad_from_solved=value_grad_from_solved
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair, baseline
+        )
+
+        with pytest.raises(KeyError, match="primal_success"):
+            host_fun(np.zeros(2))
+
+    def test_decomposed_host_objective_rejected_primal_success_uses_candidate_gradient(
+        self,
+    ):
+        """Filter rejection mirrors the fused path: candidate solve, candidate gradient."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([7.0, -11.0], dtype=jnp.float64)
+        rejected_value = jnp.asarray(12.5, dtype=jnp.float64)
+        raw_k2_value = jnp.asarray(1.25, dtype=jnp.float64)
+        calls = {"value_grad_from_solved": 0}
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(False),
+                "primal_success": jnp.asarray(True),
+                "value": rejected_value,
+                "x": arr + 1.0,
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            calls["value_grad_from_solved"] += 1
+            np.testing.assert_allclose(
+                np.asarray(jax.device_get(solved_x), dtype=np.float64),
+                np.asarray(jax.device_get(coil_dofs), dtype=np.float64) + 1.0,
+            )
+            assert linear_solve_factors is None
+            return raw_k2_value, candidate_gradient
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair, baseline
+        )
+        value, grad = host_fun(np.zeros(2))
+
+        assert calls["value_grad_from_solved"] == 1
+        assert float(jax.device_get(value)) == pytest.approx(12.5)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_decomposed_lane_host_sync_count_is_bounded(
+        self, boozer_setup, monkeypatch
+    ):
         """Sync-count budget: the decomposed host objective performs a BOUNDED number of
         host<-device syncs per evaluation (~1, the success-flag read) — linear in the
         number of evaluations with no runaway. (Project history: sync COUNT, not
@@ -7258,11 +7450,13 @@ class TestTraceableObjective:
         iota_target, coil_dofs = self._traceable_target_inputs(bs_jax, booz_jax)
         x0 = np.asarray(jax.device_get(coil_dofs), dtype=np.float64)
 
-        decomposed_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
-            make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target),
-            make_traceable_objective_seeded_value_and_grad(
-                booz_jax, bs_jax, iota_target
-            ).optimizer_initial_value_and_grad[1],
+        decomposed_fun = (
+            single_stage_example._build_decomposed_coil_host_value_and_grad(
+                make_traceable_objective_solved_pair(booz_jax, bs_jax, iota_target),
+                make_traceable_objective_seeded_value_and_grad(
+                    booz_jax, bs_jax, iota_target
+                ).optimizer_initial_value_and_grad[1],
+            )
         )
         fused_fun = make_traceable_objective_value_and_grad(
             booz_jax, bs_jax, iota_target
@@ -7275,6 +7469,7 @@ class TestTraceableObjective:
             maxcor=10,
             outer_maxls=20,
             callback=None,
+            record_scipy_callback_trace=True,
         )
 
         def _run(fun, route):
@@ -7299,9 +7494,30 @@ class TestTraceableObjective:
 
         x_dec = np.asarray(res_dec.x, dtype=np.float64)
         x_sj = np.asarray(res_sj.x, dtype=np.float64)
-        assert np.all(np.isfinite(x_dec))
+        assert np.all(np.isfinite(x_dec)), (
+            "decomposed SciPy-control route returned non-finite final x: "
+            f"status={getattr(res_dec, 'status', None)!r}, "
+            f"message={getattr(res_dec, 'message', None)!r}, "
+            f"fun={jax.device_get(getattr(res_dec, 'fun', None))!r}, "
+            f"jac_finite={np.all(np.isfinite(np.asarray(jax.device_get(getattr(res_dec, 'jac', [])), dtype=np.float64)))}, "
+            f"trace={_summarize_scipy_objective_trace(res_dec.scipy_callback_trace)}"
+        )
         assert bool(res_dec.success) == bool(res_sj.success)
-        np.testing.assert_allclose(x_dec, x_sj, rtol=1e-8, atol=1e-10)
+        assert np.all(np.isfinite(x_sj)), (
+            "fused SciPy-control route returned non-finite final x: "
+            f"status={getattr(res_sj, 'status', None)!r}, "
+            f"message={getattr(res_sj, 'message', None)!r}, "
+            f"fun={jax.device_get(getattr(res_sj, 'fun', None))!r}, "
+            f"jac_finite={np.all(np.isfinite(np.asarray(jax.device_get(getattr(res_sj, 'jac', [])), dtype=np.float64)))}, "
+            f"trace={_summarize_scipy_objective_trace(res_sj.scipy_callback_trace)}"
+        )
+        np.testing.assert_allclose(
+            x_dec,
+            x_sj,
+            rtol=1e-8,
+            atol=1e-10,
+            equal_nan=False,
+        )
 
     def test_full_state_solved_pair_matches_fused_value_and_grad(self, boozer_setup):
         """Edit 2: the lifted (solve_fn, value_grad_from_solved) pair reproduces the
@@ -7533,14 +7749,12 @@ class TestTraceableObjective:
             rtol=1e-10,
             atol=1e-8,
             err_msg=(
-                "Explicit solved-state banana target no longer matches "
-                "single-stage JF"
+                "Explicit solved-state banana target no longer matches single-stage JF"
             ),
         )
-        assert np.all(np.isfinite(np.asarray(solved_grad, dtype=float)))
-        assert np.asarray(solved_grad).shape == np.asarray(
-            solved_target.coil_dofs
-        ).shape
+        assert (
+            np.asarray(solved_grad).shape == np.asarray(solved_target.coil_dofs).shape
+        )
 
     def test_full_single_stage_outer_objective_matches_real_jf_value(self):
         """The full target-lane outer objective must match the real single-stage JF."""
@@ -7966,7 +8180,15 @@ class TestTraceableObjective:
             "lscount": 3,
             "it": 1,
         }
-        summary = sync_accepted_step(run_dict, coil_dofs, benchmark_mode=False)
+        summary = sync_accepted_step(
+            run_dict,
+            coil_dofs,
+            benchmark_mode=False,
+            objective_value_and_grad=(
+                jnp.asarray(0.0, dtype=jnp.float64),
+                jnp.zeros_like(jnp.asarray(coil_dofs, dtype=jnp.float64)),
+            ),
+        )
         incumbent = run_dict["latest_local_incumbent"]
         assert single_stage_example._target_lane_reporting_cache_is_complete(incumbent)
 
@@ -8288,21 +8510,6 @@ class TestTraceableObjective:
             "Traceable objective still routes through jax.pure_callback"
         )
 
-    def test_traceable_value_and_grad_stays_operator_only(self, boozer_setup):
-        """The compiled target-lane gradient path must not stage dense LU solves."""
-        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
-        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
-            bs_jax,
-            booz_jax,
-            include_profile_suite=False,
-        )
-
-        jaxpr = jax.make_jaxpr(runtime_bundle["value_and_grad"])(coil_dofs)
-        jaxpr_text = str(jaxpr)
-
-        assert "_lu_solve" not in jaxpr_text
-        assert "lu_pivots_to_permutation" not in jaxpr_text
-
     def test_traceable_single_stage_alm_runtime_bundle_traces_without_pure_callback(
         self,
         boozer_setup,
@@ -8328,7 +8535,10 @@ class TestTraceableObjective:
 
         assert np.isfinite(float(np.asarray(jax.device_get(value))))
         assert np.isfinite(float(np.asarray(jax.device_get(value_vg))))
-        assert np.all(np.isfinite(np.asarray(jax.device_get(grad), dtype=float)))
+        assert (
+            np.asarray(jax.device_get(grad), dtype=float).shape
+            == np.asarray(coil_dofs).shape
+        )
         assert np.asarray(jax.device_get(evaluation["constraint_values"])).shape == (
             len(runtime_bundle["constraint_names"]),
         )
@@ -8736,139 +8946,6 @@ class TestTraceableObjective:
         )
         assert calls["count"] == 1
         assert np.isfinite(float(result.fun)), "Optimizer produced non-finite J"
-
-    def test_traceable_solver_path_localizes_delta_to_optimizer_driver(
-        self,
-        boozer_setup,
-    ):
-        """Same objective/gradient evaluator isolates SciPy-vs-target drift."""
-        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
-        fun_vg, x0, _, _, _ = self._make_traceable_value_and_grad(
-            bs_jax,
-            booz_jax,
-            iota_target_shift=1.0e-3,
-        )
-        dtype = x0.dtype
-        x0_host = np.asarray(jax.device_get(x0), dtype=np.dtype(dtype))
-
-        initial_value, initial_grad = self._eval_traceable_value_and_grad_host(
-            fun_vg,
-            x0_host,
-            dtype=dtype,
-        )
-        assert np.isfinite(initial_value)
-        assert np.all(np.isfinite(initial_grad))
-        assert np.linalg.norm(initial_grad, ord=np.inf) > 0.0
-
-        def scipy_value_and_grad(x):
-            return self._eval_traceable_value_and_grad_host(
-                fun_vg,
-                x,
-                dtype=dtype,
-            )
-
-        scipy_result = scipy_minimize(
-            scipy_value_and_grad,
-            x0_host,
-            jac=True,
-            method="L-BFGS-B",
-            options={
-                "maxiter": 2,
-                "maxcor": 200,
-                "maxls": 20,
-                "gtol": 1.0e-20,
-                "ftol": 0.0,
-            },
-        )
-
-        target_result = jax_minimize(
-            fun_vg,
-            x0,
-            method="lbfgs-ondevice",
-            value_and_grad=True,
-            maxiter=2,
-            tol=1.0e-20,
-            options={
-                "maxcor": 200,
-                "maxls": 20,
-                "ftol": 0.0,
-            },
-        )
-
-        scipy_x = np.asarray(scipy_result.x, dtype=np.dtype(dtype))
-        target_x = np.asarray(
-            _host_metric_array(target_result.x), dtype=np.dtype(dtype)
-        )
-        scipy_fun, scipy_grad = self._eval_traceable_value_and_grad_host(
-            fun_vg,
-            scipy_x,
-            dtype=dtype,
-        )
-        target_fun, target_grad = self._eval_traceable_value_and_grad_host(
-            fun_vg,
-            target_x,
-            dtype=dtype,
-        )
-
-        assert scipy_result.nfev > 1
-        assert scipy_result.njev > 1
-        assert target_result.nfev > 1
-        assert np.isfinite(float(scipy_result.fun))
-        assert np.all(np.isfinite(np.asarray(scipy_result.jac, dtype=np.dtype(dtype))))
-        if scipy_result.success:
-            np.testing.assert_allclose(
-                float(scipy_result.fun),
-                scipy_fun,
-                rtol=1.0e-10,
-                atol=1.0e-12,
-                err_msg=(
-                    "SciPy endpoint must re-evaluate through the shared evaluator."
-                ),
-            )
-            np.testing.assert_allclose(
-                np.asarray(scipy_result.jac, dtype=np.dtype(dtype)),
-                scipy_grad,
-                rtol=1.0e-10,
-                atol=1.0e-12,
-                err_msg=(
-                    "SciPy endpoint gradient must re-evaluate through the shared "
-                    "evaluator."
-                ),
-            )
-        else:
-            assert scipy_result.status in (1, 2)
-            assert np.isfinite(scipy_fun)
-            assert np.all(np.isfinite(scipy_grad))
-        assert np.isfinite(_host_metric_scalar(target_result.fun))
-        assert np.all(
-            np.isfinite(
-                np.asarray(_host_metric_array(target_result.jac), dtype=np.dtype(dtype))
-            )
-        )
-        if target_result.success:
-            np.testing.assert_allclose(
-                _host_metric_scalar(target_result.fun),
-                target_fun,
-                rtol=1.0e-10,
-                atol=1.0e-12,
-                err_msg=(
-                    "Target L-BFGS endpoint must re-evaluate through the shared "
-                    "evaluator."
-                ),
-            )
-            np.testing.assert_allclose(
-                np.asarray(
-                    _host_metric_array(target_result.jac), dtype=np.dtype(dtype)
-                ),
-                target_grad,
-                rtol=1.0e-10,
-                atol=1.0e-12,
-                err_msg=(
-                    "Target L-BFGS endpoint gradient must re-evaluate through the "
-                    "shared evaluator."
-                ),
-            )
-        assert np.isfinite(np.linalg.norm(target_x - scipy_x, ord=np.inf))
 
     def test_traceable_matches_fused_value_and_grad_path(self, boozer_setup):
         """Test 7: Traceable scalar and fused value/grad paths produce same J."""

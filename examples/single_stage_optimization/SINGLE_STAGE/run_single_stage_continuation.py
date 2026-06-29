@@ -333,6 +333,69 @@ def build_default_continuation_stages(
     ]
 
 
+def build_explicit_continuation_stages(
+    *,
+    stage_rungs: tuple[int, ...],
+    final_mpol: int,
+    final_ntor: int,
+    final_nphi: int,
+    final_ntheta: int,
+    final_maxiter: int,
+    prefinal_maxiter: int,
+    trial_policy: str = CONTINUATION_TRIAL_POLICY_VALIDATED_FAST,
+) -> list[ContinuationStage]:
+    """Build an exact user-authored mpol ladder without coarse default stages.
+
+    The listed rungs are the complete schedule. A high-resolution warm-start
+    seed is reprojected into the first listed rung instead of causing the
+    selector to skip lower rungs.
+    """
+    if not stage_rungs:
+        raise ValueError("Explicit continuation stage rungs must not be empty")
+    if tuple(sorted(stage_rungs)) != stage_rungs:
+        raise ValueError("Explicit continuation stage rungs must be increasing")
+    if len(set(stage_rungs)) != len(stage_rungs):
+        raise ValueError("Explicit continuation stage rungs must be unique")
+    if any(rung <= 0 for rung in stage_rungs):
+        raise ValueError("Explicit continuation stage rungs must be positive")
+    if stage_rungs[-1] != final_mpol:
+        raise ValueError(
+            "The last explicit continuation rung must match --mpol "
+            f"({stage_rungs[-1]} != {final_mpol})"
+        )
+
+    stages = [
+        ContinuationStage(
+            "final" if rung == final_mpol else f"rung-mpol{rung}",
+            rung,
+            min(final_ntor, rung),
+            final_nphi,
+            final_ntheta,
+            final_maxiter if rung == final_mpol else prefinal_maxiter,
+        )
+        for rung in stage_rungs
+    ]
+    if trial_policy == CONTINUATION_TRIAL_POLICY_VALIDATED_FAST:
+        stages = [
+            stage
+            if stage.name == "final"
+            else ContinuationStage(
+                **(
+                    stage.__dict__
+                    | _VALIDATED_FAST_TRIAL_STAGE_OVERRIDES["prefinal"]
+                )
+            )
+            for stage in stages
+        ]
+    elif trial_policy != CONTINUATION_TRIAL_POLICY_NONE:
+        raise ValueError(f"Unsupported continuation trial policy: {trial_policy}")
+    return stages
+
+
+def parse_int_rungs(value: str) -> tuple[int, ...]:
+    return tuple(int(token) for token in value.split(",") if token.strip())
+
+
 def strip_overridden_passthrough_args(args: list[str]) -> list[str]:
     stripped: list[str] = []
     index = 0
@@ -354,6 +417,11 @@ def resolve_stage_seed_path(run_dir: Path) -> Path:
     if not seed_path.exists():
         raise FileNotFoundError(f"Continuation stage seed file not found: {seed_path}")
     return seed_path
+
+
+def resolve_optional_stage_seed_path(run_dir: Path) -> Path | None:
+    seed_path = run_dir / "biot_savart_opt.json"
+    return seed_path if seed_path.exists() else None
 
 
 def find_single_stage_run_dir(stage_output_root: Path) -> Path:
@@ -1082,6 +1150,19 @@ def existing_stage_jax_runtime_seed_spec_path(
     return path
 
 
+def reproject_stage_jax_runtime_seed_source_path(
+    warm_start_run_dir: Path,
+    stage: ContinuationStage,
+) -> Path | None:
+    path = warm_start_run_dir / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+    if not path.exists():
+        return None
+    shape = read_jax_runtime_seed_spec_resolution(path)
+    if shape == (stage.mpol, stage.ntor, stage.nphi, stage.ntheta):
+        return None
+    return path
+
+
 def build_stage_record(
     *,
     stage: ContinuationStage,
@@ -1779,6 +1860,8 @@ def load_warm_start_contract_overrides(
         results = json.load(infile)
     contract_overrides: dict[str, float] = {}
     for results_key, flag in _WARM_START_CONTRACT_FLAGS:
+        if results_key not in results:
+            continue
         value = float(results[results_key])
         if not math.isfinite(value):
             raise ValueError(
@@ -2044,6 +2127,16 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
             "gentler ladder (e.g. '8' with --mpol 10 gives 2,4,6,8,10). Rungs "
             "outside the (6, final) band are ignored. Default empty keeps the "
             "historical 2,4,6,final ladder."
+        ),
+    )
+    parser.add_argument(
+        "--stage-rungs",
+        default="",
+        help=(
+            "Optional comma-separated exact mpol ladder. When provided, these "
+            "rungs replace the historical coarse ladder entirely, the last "
+            "rung must equal --mpol, and warm-start seed resolution does not "
+            "skip any listed stage."
         ),
     )
     parser.add_argument(
@@ -2766,24 +2859,35 @@ def run_single_continuation_with_args(
             else initial_jax_runtime_seed_source_resolution
         )
     )
-    intermediate_rungs = tuple(
-        int(token) for token in args.intermediate_rungs.split(",") if token.strip()
-    )
-    stages = select_continuation_stages_for_initial_resolution(
-        build_default_continuation_stages(
+    intermediate_rungs = parse_int_rungs(args.intermediate_rungs)
+    stage_rungs = parse_int_rungs(args.stage_rungs)
+    if stage_rungs:
+        stages = build_explicit_continuation_stages(
             final_mpol=args.mpol,
             final_ntor=args.ntor,
             final_nphi=args.nphi,
             final_ntheta=args.ntheta,
             final_maxiter=args.maxiter,
-            coarse_maxiter=args.coarse_maxiter,
-            medium_maxiter=args.medium_maxiter,
             prefinal_maxiter=args.prefinal_maxiter,
             trial_policy=args.trial_policy,
-            intermediate_rungs=intermediate_rungs,
-        ),
-        initial_resolution=initial_stage_selection_resolution,
-    )
+            stage_rungs=stage_rungs,
+        )
+    else:
+        stages = select_continuation_stages_for_initial_resolution(
+            build_default_continuation_stages(
+                final_mpol=args.mpol,
+                final_ntor=args.ntor,
+                final_nphi=args.nphi,
+                final_ntheta=args.ntheta,
+                final_maxiter=args.maxiter,
+                coarse_maxiter=args.coarse_maxiter,
+                medium_maxiter=args.medium_maxiter,
+                prefinal_maxiter=args.prefinal_maxiter,
+                trial_policy=args.trial_policy,
+                intermediate_rungs=intermediate_rungs,
+            ),
+            initial_resolution=initial_stage_selection_resolution,
+        )
     jax_profile_root = (
         forced_jax_profile_root.resolve()
         if forced_jax_profile_root is not None
@@ -2802,6 +2906,8 @@ def run_single_continuation_with_args(
         "stages": [],
         "passthrough_args": passthrough_args,
         "trial_policy": args.trial_policy,
+        "stage_rungs": list(stage_rungs),
+        "intermediate_rungs": list(intermediate_rungs),
         "use_target_lane_fast_trials": use_target_lane_fast_trials,
         "backend": resolve_passthrough_backend(passthrough_args),
         "optimizer_backend": resolve_passthrough_optimizer_backend(passthrough_args),
@@ -2858,8 +2964,19 @@ def run_single_continuation_with_args(
             stage2_seed_path = initial_stage2_seed_path
             warm_start_run_dir = initial_warm_start_run_dir
         else:
-            stage2_seed_path = resolve_stage_seed_path(previous_run_dir)
             warm_start_run_dir = previous_run_dir
+            stage2_seed_path = resolve_optional_stage_seed_path(previous_run_dir)
+            if (
+                stage2_seed_path is None
+                and not (
+                    previous_run_dir / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+                ).exists()
+            ):
+                raise FileNotFoundError(
+                    "Continuation stage seed requires either biot_savart_opt.json "
+                    "or single_stage_jax_runtime_spec.json in "
+                    f"{previous_run_dir}"
+                )
         first_stage_runtime_seed_source = (
             previous_run_dir is None
             and warm_start_run_dir is None
@@ -2869,6 +2986,11 @@ def run_single_continuation_with_args(
             None
             if warm_start_run_dir is None
             else existing_stage_jax_runtime_seed_spec_path(warm_start_run_dir, stage)
+        )
+        reproject_jax_runtime_seed_source_path = (
+            None
+            if warm_start_run_dir is None
+            else reproject_stage_jax_runtime_seed_source_path(warm_start_run_dir, stage)
         )
         jax_runtime_seed_spec_path = existing_jax_runtime_seed_spec_path
         if (
@@ -2883,6 +3005,14 @@ def run_single_continuation_with_args(
                 passthrough_args=passthrough_args,
                 stage=stage,
                 jax_runtime_seed_source=initial_jax_runtime_seed_source,
+                jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
+            )
+        elif reproject_jax_runtime_seed_source_path is not None:
+            jax_runtime_seed_spec_command = build_stage_jax_runtime_seed_source_command(
+                python_executable=sys.executable,
+                passthrough_args=passthrough_args,
+                stage=stage,
+                jax_runtime_seed_source=reproject_jax_runtime_seed_source_path,
                 jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
             )
         elif (

@@ -116,7 +116,11 @@ def main() -> None:
         cmd = sbatch_command(c, tiers=manifest["tiers"], repo_root=args.repo_root,
                              run_root_base=args.run_root_base,
                              warm_start=args.warm_start_run_dir)
-        print(f"# {c['id']}  dim={c['formulation_dim']} status={c['status']}")
+        print(
+            f"# {c['id']}  dim={c['formulation_dim']} status={c['status']} "
+            f"timing={c['timing_classification']} "
+            f"headline={c['supports_performance_headline']}"
+        )
         printable = " ".join(shlex.quote(p) for p in cmd)
         print(printable)
         if args.exec:

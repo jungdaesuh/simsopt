@@ -25,7 +25,7 @@ from benchmarks.single_stage_smoke_fixture import (  # noqa: E402
     DEFAULT_SMOKE_NPHI,
     DEFAULT_SMOKE_NTHETA,
     DEFAULT_SMOKE_NTOR,
-    DEFAULT_STAGE2_BS_PATH,
+    SMOKE_TEST_STAGE2_BS_PATH,
     DEFAULT_VOL_TARGET,
     build_real_single_stage_init_fixture,
 )
@@ -107,11 +107,7 @@ def _single_stage_parity_cache_key() -> str:
         _single_stage_script_path(),
         REPO_ROOT / "src" / "simsopt_jax_adapters" / "geo" / "boozer_surface.py",
         REPO_ROOT / "src" / "simsopt_jax" / "geo" / "optimizers" / "optimizer.py",
-        REPO_ROOT
-        / "src"
-        / "simsopt_jax_adapters"
-        / "geo"
-        / "surface_objectives.py",
+        REPO_ROOT / "src" / "simsopt_jax_adapters" / "geo" / "surface_objectives.py",
         REPO_ROOT / "src" / "simsopt" / "field" / "biotsavart.py",
     ):
         digest.update(path.relative_to(REPO_ROOT).as_posix().encode("utf-8"))
@@ -440,7 +436,7 @@ def _run_single_stage_outer_loop_probe(
     ) as tmp_dir:
         output_json = Path(tmp_dir) / "probe.json"
         jax_runtime_seed_spec = _compile_jax_runtime_seed_spec(
-            DEFAULT_STAGE2_BS_PATH,
+            SMOKE_TEST_STAGE2_BS_PATH,
             Path(tmp_dir) / "single_stage_jax_runtime_spec.json",
         )
         command = [
@@ -483,7 +479,9 @@ def _load_single_stage_outputs(output_root: Path) -> tuple[dict[str, Any], Any, 
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
     )
-    from simsopt_jax_adapters.field.biotsavart_backend import SingleStageRuntimeSpecBiotSavartJAX
+    from simsopt_jax_adapters.field.biotsavart_backend import (
+        SingleStageRuntimeSpecBiotSavartJAX,
+    )
 
     runtime_spec_path = find_single_file(
         output_root, "single_stage_jax_runtime_spec.json"
@@ -626,7 +624,7 @@ def _build_init_fixture(
         backend=backend,
         plasma_surf_filename=DEFAULT_PLASMA_SURF_FILENAME,
         equilibria_dir=DEFAULT_EQUILIBRIA_DIR,
-        stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
+        stage2_bs_path=SMOKE_TEST_STAGE2_BS_PATH,
         nphi=DEFAULT_SMOKE_NPHI,
         ntheta=DEFAULT_SMOKE_NTHETA,
         mpol=DEFAULT_SMOKE_MPOL,
@@ -837,14 +835,14 @@ def outer_baseline_runs() -> tuple[SingleStageOuterRun, SingleStageOuterRun]:
         optimizer_backend="scipy",
         maxiter=1,
         platform="cpu",
-        stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
+        stage2_bs_path=SMOKE_TEST_STAGE2_BS_PATH,
     )
     jax_run = _run_single_stage_script(
         backend="jax",
         optimizer_backend="ondevice",
         maxiter=1,
         platform="cpu",
-        stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
+        stage2_bs_path=SMOKE_TEST_STAGE2_BS_PATH,
     )
     return cpu_run, jax_run
 
@@ -1151,6 +1149,12 @@ def test_outer_loop_probe_cli_accepts_host_jax_memory_gate(monkeypatch, tmp_path
             "host-jax",
             "--boozer-least-squares-algorithm",
             "lm",
+            "--target-lane-boozer-newton-tol",
+            "1e-13",
+            "--target-lane-boozer-newton-maxiter",
+            "80",
+            "--single-stage-case-timeout-seconds",
+            "60",
             "--enable-host-jax-memory-gate",
         ],
     )
@@ -1159,8 +1163,336 @@ def test_outer_loop_probe_cli_accepts_host_jax_memory_gate(monkeypatch, tmp_path
 
     assert args.optimizer_backend == "host-jax"
     assert args.boozer_least_squares_algorithm == "lm"
+    assert args.target_lane_boozer_newton_tol == pytest.approx(1.0e-13)
+    assert args.target_lane_boozer_newton_maxiter == 80
+    assert args.single_stage_case_timeout_seconds == pytest.approx(60.0)
     assert args.enable_host_jax_memory_gate is True
     assert _expected_outer_optimizer_method(args.optimizer_backend) == "lbfgs"
+
+
+def test_outer_loop_probe_cli_accepts_phase3_gradient_proof_gate(monkeypatch, tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            str(tmp_path / "probe.json"),
+            "--record-objective-evaluation-trace",
+            "--enable-phase3-gradient-proof-gate",
+            "--phase3-constraint-margin-abs-tol",
+            "1e-6",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.record_objective_evaluation_trace is True
+    assert args.enable_phase3_gradient_proof_gate is True
+    assert args.phase3_constraint_margin_abs_tol == pytest.approx(1.0e-6)
+
+
+def test_outer_loop_probe_cli_accepts_phase0_noise_calibration_replay_gate(
+    monkeypatch,
+    tmp_path,
+):
+    from benchmarks.single_stage_outer_loop_probe import parse_args
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            str(tmp_path / "probe.json"),
+            "--replay-objective-evaluation-trace",
+            str(baseline_progress_json),
+            "--enable-phase0-noise-calibration-gate",
+            "--phase0-noise-baseline-newton-tol",
+            "1e-11",
+            "--phase0-noise-tightened-newton-tol",
+            "1e-13",
+            "--phase0-noise-objective-evaluation-index",
+            "2",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.replay_objective_evaluation_trace == str(baseline_progress_json)
+    assert args.enable_phase0_noise_calibration_gate is True
+    assert args.phase0_noise_baseline_progress_json is None
+    assert args.phase0_noise_baseline_newton_tol == pytest.approx(1.0e-11)
+    assert args.phase0_noise_tightened_newton_tol == pytest.approx(1.0e-13)
+    assert args.phase0_noise_objective_evaluation_index == 2
+
+
+def test_outer_loop_probe_defaults_to_runtime_seed_resolved_state_reuse(monkeypatch):
+    from benchmarks.single_stage_outer_loop_probe import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            "/tmp/probe.json",
+            "--jax-runtime-seed-spec",
+            "/tmp/single_stage_jax_runtime_spec.json",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.reuse_jax_runtime_seed_solve is True
+    assert args.outer_maxls == 20
+
+
+def test_outer_loop_probe_can_replay_runtime_seed_setup_solve(monkeypatch):
+    from benchmarks.single_stage_outer_loop_probe import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            "/tmp/probe.json",
+            "--jax-runtime-seed-spec",
+            "/tmp/single_stage_jax_runtime_spec.json",
+            "--no-reuse-jax-runtime-seed-solve",
+            "--outer-maxls",
+            "8",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.reuse_jax_runtime_seed_solve is False
+    assert args.outer_maxls == 8
+
+
+def test_outer_loop_probe_phase0_noise_gate_compares_replay_trace(
+    monkeypatch,
+    tmp_path,
+):
+    import benchmarks.single_stage_outer_loop_probe as probe
+    from benchmarks.validation_ladder_common import load_json, write_json
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    tightened_progress_json = tmp_path / "tightened_outer_optimizer_progress.json"
+    output_json = tmp_path / "probe.json"
+    candidate = [0.5, -1.0, 0.25]
+    write_json(
+        baseline_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18000000010, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [0.1, -0.2, 0.3],
+                        "all_finite": True,
+                        "inf_norm": 0.3,
+                    },
+                    "candidate_optimizer_dofs": {"values": candidate},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-11},
+                }
+            ]
+        },
+    )
+    write_json(
+        tightened_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18000000001, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [0.1, -0.2, 0.3],
+                        "all_finite": True,
+                        "inf_norm": 0.3,
+                    },
+                    "candidate_optimizer_dofs": {"values": candidate},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-13},
+                }
+            ]
+        },
+    )
+    captured: dict[str, Path | None] = {}
+
+    def fake_run_single_stage_case(
+        args,
+        backend,
+        *,
+        platform,
+        benchmark_mode,
+        load_surface_gamma,
+        profile_target_lane,
+        profile_target_lane_only,
+        diagnose_target_lane_scaled_phase1,
+        record_target_lane_invalid_state_events,
+        experimental_target_lane_value_and_grad,
+        enable_compile_diagnostics,
+        deterministic_gpu_reductions,
+        jax_runtime_seed_spec,
+        replay_objective_evaluation_trace,
+        output_root,
+    ):
+        captured["replay_objective_evaluation_trace"] = (
+            replay_objective_evaluation_trace
+        )
+        resolved_boozer_backend = probe.resolve_boozer_optimizer_backend(
+            args.optimizer_backend,
+            args.boozer_optimizer_backend,
+        )
+        resolved_boozer_algorithm = probe.resolve_boozer_least_squares_algorithm(
+            resolved_boozer_backend,
+            args.boozer_least_squares_algorithm,
+        )
+        return {
+            "results": {
+                "iterations": 0,
+                "boozer_optimizer_backend": resolved_boozer_backend,
+                "boozer_optimizer_method": probe.resolve_boozer_optimizer_method(
+                    resolved_boozer_backend,
+                    least_squares_algorithm=resolved_boozer_algorithm,
+                ),
+                "outer_optimizer_method": probe._expected_outer_optimizer_method(
+                    args.optimizer_backend
+                ),
+                "SELF_INTERSECTING": False,
+                "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.45,
+                "FIELD_ERROR": 1.0e-4,
+                "MAX_CURVATURE": 2.0,
+                "INITIAL_OBJECTIVE": 0.18000000010,
+                "FINAL_OBJECTIVE": 0.18000000001,
+            },
+            "outer_optimizer_progress_json": str(tightened_progress_json),
+            "elapsed_s": 0.0,
+            "phase_timings": {},
+        }
+
+    monkeypatch.setattr(probe, "bootstrap_local_simsopt", lambda: None)
+    monkeypatch.setattr(probe, "print_provenance", lambda provenance: None)
+    monkeypatch.setattr(probe, "_run_single_stage_case", fake_run_single_stage_case)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            str(output_json),
+            "--enable-phase0-noise-calibration-gate",
+            "--phase0-noise-baseline-progress-json",
+            str(baseline_progress_json),
+            "--target-lane-boozer-newton-tol",
+            "1e-13",
+        ],
+    )
+
+    probe.main()
+    payload = load_json(output_json)
+
+    assert captured["replay_objective_evaluation_trace"] == baseline_progress_json
+    assert payload["status"] == "replay-measurement-passed"
+    assert payload["measurement_passed"] is True
+    assert payload["convergence_passed"] is False
+    assert payload["passed"] is False
+    assert payload["replay_measurement_run"] is True
+    assert payload["probe"]["iterations"] == 0
+    assert payload["phase0_noise_calibration"]["passed"] is True
+    assert payload["phase0_noise_calibration"]["candidate_dofs_match"] is True
+    assert payload["phase0_noise_calibration"]["objective_abs_delta"] == pytest.approx(
+        9.0e-11
+    )
+    assert (
+        payload["phase0_line_search_trace"]["classification"] == "finite_flat_plateau"
+    )
+
+
+def test_target_lane_replay_trace_event_records_boozer_solver_metadata():
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        build_single_stage_target_lane_objective_evaluation_trace_event,
+    )
+
+    event = build_single_stage_target_lane_objective_evaluation_trace_event(
+        source_event={
+            "accepted_iteration_target": 0,
+            "line_search_evaluation": 1,
+            "accepted_iterations": 0,
+        },
+        candidate_optimizer_dofs=np.array([0.5, -1.0, 0.25], dtype=np.float64),
+        objective_value=0.18000000001,
+        optimizer_gradient=np.array([0.1, -0.2, 0.3], dtype=np.float64),
+        forward_result={
+            "success": True,
+            "primal_success": True,
+            "iota": 0.15,
+            "G": 1.0,
+            "sdofs": np.array([0.0, 1.0], dtype=np.float64),
+        },
+        boozer_solver_metadata={
+            "boozer_optimizer_backend": "ondevice",
+            "newton_tol": 1.0e-13,
+            "newton_maxiter": 80,
+        },
+    )
+
+    assert event["target_native_replay"] is True
+    assert event["boozer_solver_metadata"]["boozer_optimizer_backend"] == "ondevice"
+    assert event["boozer_solver_metadata"]["newton_tol"] == pytest.approx(1.0e-13)
+    assert event["boozer_solver_metadata"]["newton_maxiter"] == 80
+    assert event["candidate_optimizer_dofs"]["values"] == [0.5, -1.0, 0.25]
+
+
+def test_outer_loop_probe_failure_json_preserves_partial_phase0_trace(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        write_outer_loop_case_execution_failure_json,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    output_json = tmp_path / "probe.json"
+    run_dir = tmp_path / "case_outputs" / "mpol=10-ntor=10-deadbeef"
+    run_dir.mkdir(parents=True)
+    progress_json = run_dir / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "current_event": "boozer_init_started",
+            "event_count": 2,
+            "events": [
+                {"label": "pre_optimizer_startup_ready"},
+                {"label": "boozer_init_started"},
+            ],
+        },
+    )
+
+    write_outer_loop_case_execution_failure_json(
+        output_json,
+        provenance={"platform_request": "cpu"},
+        case_output_root=tmp_path / "case_outputs",
+        error=RuntimeError("Subprocess timed out after 60.000s"),
+    )
+
+    payload = dict(load_json(output_json))
+
+    assert payload["status"] == "case-execution-failed"
+    assert payload["passed"] is False
+    assert payload["artifacts"]["outer_optimizer_progress_json"] == [str(progress_json)]
+    assert (
+        payload["phase0_line_search_trace"]["classification"]
+        == "missing_objective_evaluations"
+    )
+    assert any(
+        "Progress trace contains no objective_evaluation events" in failure
+        for failure in payload["failures"]
+    )
 
 
 def test_host_jax_memory_gate_skips_warmup_and_checks_growth(tmp_path):
@@ -1363,6 +1695,672 @@ def test_host_jax_compile_gate_accepts_steady_post_warm_counters(tmp_path):
     assert summary["steady_cache_miss_count_growth"] == 0
 
 
+def test_phase0_line_search_trace_classifies_finite_plateau_failure(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_line_search_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "event_count": 4,
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 0,
+                    "objective": {"value": 1.0, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 3.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 1,
+                    "objective": {"value": 1.0 + 2.0e-12, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 2.9},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 2,
+                    "objective": {"value": 1.0 - 3.0e-12, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 2.8},
+                },
+                {
+                    "label": "phase2_returned",
+                    "event_index": 3,
+                    "result": {
+                        "message": "ABNORMAL_TERMINATION_IN_LNSRCH",
+                        "status": 2,
+                        "ls_status": -9,
+                        "nfev": 21,
+                        "success": False,
+                    },
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase0_line_search_trace(progress_json=progress_json)
+
+    assert failures == []
+    assert summary["classification"] == "finite_plateau_line_search_failure"
+    assert summary["line_search_failure_evidence"] is True
+    assert summary["termination_evidence"]["message"] == (
+        "ABNORMAL_TERMINATION_IN_LNSRCH"
+    )
+    assert summary["termination_evidence"]["nfev"] == 21
+    assert summary["nonfinite_event_indices"] == []
+
+
+def test_phase0_line_search_trace_does_not_treat_status_as_proof(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_line_search_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 1.0, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 3.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 1.0 + 2.0e-12, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 2.9},
+                },
+                {
+                    "label": "phase2_returned",
+                    "result": {
+                        "message": "",
+                        "status": 2,
+                        "ls_status": -9,
+                        "nfev": 21,
+                        "success": False,
+                    },
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase0_line_search_trace(progress_json=progress_json)
+
+    assert failures == []
+    assert summary["line_search_failure_evidence"] is False
+    assert summary["classification"] == "finite_flat_plateau"
+    assert summary["termination_evidence"]["status"] == 2
+
+
+def test_phase0_line_search_trace_preserves_task_evidence(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_line_search_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 1.0, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 3.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 1.0 + 1.0e-12, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 2.9},
+                },
+                {
+                    "label": "phase2_returned",
+                    "result": {
+                        "message": "",
+                        "status": 2,
+                        "task": "ABNORMAL_TERMINATION_IN_LNSRCH",
+                    },
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase0_line_search_trace(progress_json=progress_json)
+
+    assert failures == []
+    assert summary["classification"] == "finite_plateau_line_search_failure"
+    assert summary["line_search_failure_evidence"] is True
+    assert summary["termination_evidence"]["task"] == "ABNORMAL_TERMINATION_IN_LNSRCH"
+
+
+def test_phase0_line_search_trace_classifies_nonfinite_event(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_line_search_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 0,
+                    "objective": {"value": 1.0, "finite": True},
+                    "optimizer_gradient": {"all_finite": True, "inf_norm": 3.0},
+                },
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 1,
+                    "objective": {"value": None, "finite": False},
+                    "optimizer_gradient": {"all_finite": False, "inf_norm": None},
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase0_line_search_trace(progress_json=progress_json)
+
+    assert failures == [
+        "Progress trace contains nonfinite objective or optimizer gradient events."
+    ]
+    assert summary["classification"] == "nonfinite_objective_or_gradient"
+    assert summary["passed"] is False
+    assert summary["nonfinite_event_indices"] == [1]
+
+
+def test_phase3_gradient_trace_accepts_point_dependent_accepted_step(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase3_accepted_step_gradient_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "event_count": 3,
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 0,
+                    "accepted_iteration_target": 0,
+                    "line_search_evaluation": 1,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.0, 0.0]},
+                    "objective": {"value": 2.0, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [1.0, -0.25],
+                        "all_finite": True,
+                        "inf_norm": 1.0,
+                    },
+                    "hardware_status": {
+                        "threshold_margins": {
+                            "curve_curve_min_dist": 1.0,
+                            "curve_surface_min_dist": 1.0,
+                            "surface_vessel_min_dist": 1.0,
+                            "max_curvature": 1.0,
+                        }
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "event_index": 1,
+                    "accepted_iteration_target": 1,
+                    "line_search_evaluation": 1,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.2, -0.1]},
+                    "objective": {"value": 1.5, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [0.5, -0.125],
+                        "all_finite": True,
+                        "inf_norm": 0.5,
+                    },
+                    "hardware_status": {
+                        "threshold_margins": {
+                            "curve_curve_min_dist": 2.0e-7,
+                            "curve_surface_min_dist": 0.5,
+                            "surface_vessel_min_dist": 0.5,
+                            "max_curvature": 0.5,
+                        }
+                    },
+                },
+                {"label": "phase2_returned", "result": {"status": 0, "success": True}},
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase3_accepted_step_gradient_trace(
+        progress_json=progress_json,
+        constraint_margin_abs_tol=1.0e-6,
+    )
+
+    assert failures == []
+    assert summary["passed"] is True
+    assert summary["accepted_step_group_count"] == 2
+    assert summary["replay_grade_group_count"] == 2
+    assert summary["point_dependent_gradient_evidence"] is True
+    assert summary["constraint_marginal_evidence"] is True
+    assert summary["constraint_marginal_point_dependent_gradient_evidence"] is True
+    assert summary["comparisons"][0]["candidate_moved_from_baseline"] is True
+    assert summary["comparisons"][0]["gradient_differs_from_baseline"] is True
+    assert summary["comparisons"][0]["hardware_margin_abs_min"] == pytest.approx(2.0e-7)
+
+
+def test_phase3_gradient_trace_rejects_split_margin_and_gradient_evidence(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase3_accepted_step_gradient_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 0,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.0, 0.0]},
+                    "objective": {"value": 2.0, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [1.0, -0.25],
+                        "all_finite": True,
+                        "inf_norm": 1.0,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 1,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.2, -0.1]},
+                    "objective": {"value": 1.5, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [0.5, -0.125],
+                        "all_finite": True,
+                        "inf_norm": 0.5,
+                    },
+                    "hardware_status": {
+                        "threshold_margins": {
+                            "curve_curve_min_dist": 1.0,
+                            "curve_surface_min_dist": 1.0,
+                            "surface_vessel_min_dist": 1.0,
+                            "max_curvature": 1.0,
+                        }
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 2,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.25, -0.15]},
+                    "objective": {"value": 1.25, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [1.0, -0.25],
+                        "all_finite": True,
+                        "inf_norm": 1.0,
+                    },
+                    "hardware_status": {
+                        "threshold_margins": {
+                            "curve_curve_min_dist": 2.0e-7,
+                            "curve_surface_min_dist": 0.5,
+                            "surface_vessel_min_dist": 0.5,
+                            "max_curvature": 0.5,
+                        }
+                    },
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase3_accepted_step_gradient_trace(
+        progress_json=progress_json,
+        constraint_margin_abs_tol=1.0e-6,
+    )
+
+    assert summary["passed"] is False
+    assert summary["point_dependent_gradient_evidence"] is True
+    assert summary["constraint_marginal_evidence"] is True
+    assert summary["constraint_marginal_point_dependent_gradient_evidence"] is False
+    assert any(
+        "point-dependent accepted gradient at the requested hardware constraint margin"
+        in failure
+        for failure in failures
+    )
+
+
+def test_phase3_gradient_trace_rejects_frozen_accepted_step_gradient(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase3_accepted_step_gradient_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 0,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.0, 0.0]},
+                    "objective": {"value": 2.0, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [1.0, -0.25],
+                        "all_finite": True,
+                        "inf_norm": 1.0,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 1,
+                    "native_gradient_used": True,
+                    "candidate_optimizer_dofs": {"values": [0.2, -0.1]},
+                    "objective": {"value": 1.5, "finite": True},
+                    "optimizer_gradient": {
+                        "values": [1.0, -0.25],
+                        "all_finite": True,
+                        "inf_norm": 1.0,
+                    },
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase3_accepted_step_gradient_trace(
+        progress_json=progress_json
+    )
+
+    assert summary["passed"] is False
+    assert summary["point_dependent_gradient_evidence"] is False
+    assert summary["comparisons"][0]["candidate_moved_from_baseline"] is True
+    assert summary["comparisons"][0]["gradient_differs_from_baseline"] is False
+    assert any("frozen baseline gradient" in failure for failure in failures)
+
+
+def test_phase3_gradient_trace_requires_replay_grade_accepted_step_values(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase3_accepted_step_gradient_trace,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    write_json(
+        progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 0,
+                    "native_gradient_used": True,
+                    "objective": {"value": 2.0, "finite": True},
+                    "optimizer_gradient": {
+                        "inf_norm": 1.0,
+                        "all_finite": True,
+                        "values_omitted": True,
+                    },
+                },
+                {
+                    "label": "objective_evaluation",
+                    "accepted_iteration_target": 1,
+                    "native_gradient_used": True,
+                    "objective": {"value": 1.5, "finite": True},
+                    "optimizer_gradient": {
+                        "inf_norm": 0.5,
+                        "all_finite": True,
+                        "values_omitted": True,
+                    },
+                },
+            ],
+        },
+    )
+
+    summary, failures = evaluate_phase3_accepted_step_gradient_trace(
+        progress_json=progress_json
+    )
+
+    assert summary["passed"] is False
+    assert summary["replay_grade_group_count"] == 0
+    assert summary["missing_replay_grade_targets"] == [0, 1]
+    assert any("replay-grade accepted-step groups" in failure for failure in failures)
+
+
+def test_phase0_noise_calibration_requires_fixed_candidate_trace(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_noise_calibration_pair,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    tightened_progress_json = tmp_path / "tight_outer_optimizer_progress.json"
+    candidate = [0.5, -1.0, 0.25]
+    write_json(
+        baseline_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18000000010, "finite": True},
+                    "candidate_optimizer_dofs": {"values": candidate},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-11},
+                }
+            ]
+        },
+    )
+    write_json(
+        tightened_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18000000001, "finite": True},
+                    "candidate_optimizer_dofs": {"values": candidate},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-13},
+                }
+            ]
+        },
+    )
+
+    summary, failures = evaluate_phase0_noise_calibration_pair(
+        baseline_progress_json=baseline_progress_json,
+        tightened_progress_json=tightened_progress_json,
+        baseline_newton_tol=1.0e-11,
+        tightened_newton_tol=1.0e-13,
+    )
+
+    assert failures == []
+    assert summary["candidate_dofs_match"] is True
+    assert summary["objective_abs_delta"] == pytest.approx(9.0e-11)
+    assert summary["baseline_newton_tol"] == pytest.approx(1.0e-11)
+    assert summary["tightened_newton_tol"] == pytest.approx(1.0e-13)
+    assert summary["baseline_recorded_newton_tol"] == pytest.approx(1.0e-11)
+    assert summary["tightened_recorded_newton_tol"] == pytest.approx(1.0e-13)
+    assert summary["baseline_newton_tol_matches"] is True
+    assert summary["tightened_newton_tol_matches"] is True
+
+
+def test_phase0_noise_calibration_rejects_candidate_mismatch(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_noise_calibration_pair,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    tightened_progress_json = tmp_path / "tight_outer_optimizer_progress.json"
+    write_json(
+        baseline_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18, "finite": True},
+                    "candidate_optimizer_dofs": {"values": [0.5, -1.0, 0.25]},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-11},
+                }
+            ]
+        },
+    )
+    write_json(
+        tightened_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.17, "finite": True},
+                    "candidate_optimizer_dofs": {"values": [0.5, -1.0, 0.30]},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-13},
+                }
+            ]
+        },
+    )
+
+    summary, failures = evaluate_phase0_noise_calibration_pair(
+        baseline_progress_json=baseline_progress_json,
+        tightened_progress_json=tightened_progress_json,
+        baseline_newton_tol=1.0e-11,
+        tightened_newton_tol=1.0e-13,
+    )
+
+    assert summary["passed"] is False
+    assert summary["candidate_dofs_match"] is False
+    assert any("candidate DOFs fixed" in failure for failure in failures)
+
+
+def test_phase0_noise_calibration_rejects_missing_candidate_values(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_noise_calibration_pair,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    tightened_progress_json = tmp_path / "tight_outer_optimizer_progress.json"
+    for path, objective_value, newton_tol in (
+        (baseline_progress_json, 0.18000000010, 1.0e-11),
+        (tightened_progress_json, 0.18000000001, 1.0e-13),
+    ):
+        write_json(
+            path,
+            {
+                "events": [
+                    {
+                        "label": "objective_evaluation",
+                        "objective": {"value": objective_value, "finite": True},
+                        "candidate_optimizer_dofs": {
+                            "values_omitted": True,
+                            "values_length": 3,
+                        },
+                        "boozer_solver_metadata": {"newton_tol": newton_tol},
+                    }
+                ]
+            },
+        )
+
+    summary, failures = evaluate_phase0_noise_calibration_pair(
+        baseline_progress_json=baseline_progress_json,
+        tightened_progress_json=tightened_progress_json,
+        baseline_newton_tol=1.0e-11,
+        tightened_newton_tol=1.0e-13,
+    )
+
+    assert summary["passed"] is False
+    assert summary["candidate_dofs_match"] is None
+    assert any("replay-grade candidate values" in failure for failure in failures)
+
+
+def test_phase0_noise_calibration_rejects_newton_tol_mismatch(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_noise_calibration_pair,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    tightened_progress_json = tmp_path / "tight_outer_optimizer_progress.json"
+    candidate = [0.5, -1.0, 0.25]
+    write_json(
+        baseline_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18000000010, "finite": True},
+                    "candidate_optimizer_dofs": {"values": candidate},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-10},
+                }
+            ]
+        },
+    )
+    write_json(
+        tightened_progress_json,
+        {
+            "events": [
+                {
+                    "label": "objective_evaluation",
+                    "objective": {"value": 0.18000000001, "finite": True},
+                    "candidate_optimizer_dofs": {"values": candidate},
+                    "boozer_solver_metadata": {"newton_tol": 1.0e-13},
+                }
+            ]
+        },
+    )
+
+    summary, failures = evaluate_phase0_noise_calibration_pair(
+        baseline_progress_json=baseline_progress_json,
+        tightened_progress_json=tightened_progress_json,
+        baseline_newton_tol=1.0e-11,
+        tightened_newton_tol=1.0e-13,
+    )
+
+    assert summary["passed"] is False
+    assert summary["baseline_newton_tol_matches"] is False
+    assert any("Baseline trace newton_tol" in failure for failure in failures)
+
+
+def test_phase0_noise_calibration_rejects_negative_event_index(tmp_path):
+    from benchmarks.single_stage_outer_loop_probe import (
+        evaluate_phase0_noise_calibration_pair,
+    )
+    from benchmarks.validation_ladder_common import write_json
+
+    baseline_progress_json = tmp_path / "baseline_outer_optimizer_progress.json"
+    tightened_progress_json = tmp_path / "tight_outer_optimizer_progress.json"
+    candidate = [0.5, -1.0, 0.25]
+    for path, objective_value, newton_tol in (
+        (baseline_progress_json, 0.18000000010, 1.0e-11),
+        (tightened_progress_json, 0.18000000001, 1.0e-13),
+    ):
+        write_json(
+            path,
+            {
+                "events": [
+                    {
+                        "label": "objective_evaluation",
+                        "objective": {"value": objective_value, "finite": True},
+                        "candidate_optimizer_dofs": {"values": candidate},
+                        "boozer_solver_metadata": {"newton_tol": newton_tol},
+                    }
+                ]
+            },
+        )
+
+    summary, failures = evaluate_phase0_noise_calibration_pair(
+        baseline_progress_json=baseline_progress_json,
+        tightened_progress_json=tightened_progress_json,
+        baseline_newton_tol=1.0e-11,
+        tightened_newton_tol=1.0e-13,
+        objective_evaluation_index=-1,
+    )
+
+    assert summary["passed"] is False
+    assert summary["objective_evaluation_index"] == -1
+    assert any("must be non-negative" in failure for failure in failures)
+
+
 # Audit #23: ``TestSingleStageOuterLoopCompileSmoke`` moved to
 # ``tests/test_jax_compile_diagnostics.py`` as
 # ``TestJaxCompileDiagnosticParser``. That test verifies parser
@@ -1449,9 +2447,7 @@ class TestDeferredSurfaceNativeDofLineage:
         )
         np.testing.assert_allclose(
             np.asarray(deferred.get_dofs(), dtype=np.float64),
-            np.asarray(
-                deferred._materialize_surface().get_dofs(), dtype=np.float64
-            ),
+            np.asarray(deferred._materialize_surface().get_dofs(), dtype=np.float64),
             rtol=0.0,
             atol=0.0,
         )
@@ -1482,9 +2478,7 @@ class TestDeferredSurfaceNativeDofLineage:
         )
         np.testing.assert_allclose(
             np.asarray(deferred.get_dofs(), dtype=np.float64),
-            np.asarray(
-                deferred._materialize_surface().get_dofs(), dtype=np.float64
-            ),
+            np.asarray(deferred._materialize_surface().get_dofs(), dtype=np.float64),
             rtol=0.0,
             atol=0.0,
         )
@@ -1506,6 +2500,7 @@ def test_target_lane_optimizer_seed_contract_matches_target_minimize_guard():
     for optimizer_backend in (
         "ondevice",
         "scipy-jax",
+        "scipy-jax-decomposed",
         "host-jax",
         "scipy-jax-fullgraph",
         "optax-lbfgs",
@@ -1514,15 +2509,79 @@ def test_target_lane_optimizer_seed_contract_matches_target_minimize_guard():
         contract = single_stage_example.resolve_single_stage_optimizer_contract(
             "jax", optimizer_backend
         )
-        if single_stage_example.target_lane_contract_supports_optimizer_seed(
-            contract
-        ):
+        if single_stage_example.target_lane_contract_supports_optimizer_seed(contract):
             seed_supported_methods.add(
-                single_stage_example.single_stage_optimizer_contract_method(
-                    contract
-                )
+                single_stage_example.single_stage_optimizer_contract_method(contract)
             )
     assert seed_supported_methods == {"lbfgs-ondevice"}
+
+
+def test_single_stage_cli_accepts_scipy_jax_decomposed(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_banana_example.py",
+            "--backend",
+            "jax",
+            "--optimizer-backend",
+            "scipy-jax-decomposed",
+        ],
+    )
+
+    args = single_stage_example.parse_args()
+
+    assert args.backend == "jax"
+    assert args.optimizer_backend == "scipy-jax-decomposed"
+
+
+def test_single_stage_cli_warns_for_deprecated_scipy_jax(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_banana_example.py",
+            "--backend",
+            "jax",
+            "--optimizer-backend",
+            "scipy-jax",
+        ],
+    )
+
+    with pytest.warns(FutureWarning, match="deprecated.*scipy-jax-decomposed"):
+        args = single_stage_example.parse_args()
+
+    assert args.backend == "jax"
+    assert args.optimizer_backend == "scipy-jax"
+
+
+def test_single_stage_cli_defaults_to_scipy_jax_decomposed_for_jax_backend(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_banana_example.py",
+            "--backend",
+            "jax",
+        ],
+    )
+
+    args = single_stage_example.parse_args()
+
+    assert args.backend == "jax"
+    assert args.optimizer_backend == "scipy-jax-decomposed"
 
 
 def test_host_jax_single_stage_contract_uses_host_control():
@@ -1538,8 +2597,7 @@ def test_host_jax_single_stage_contract_uses_host_control():
 
     assert isinstance(contract, single_stage_example.ReferenceOptimizerContract)
     assert (
-        single_stage_example.single_stage_optimizer_contract_method(contract)
-        == "lbfgs"
+        single_stage_example.single_stage_optimizer_contract_method(contract) == "lbfgs"
     )
     assert not single_stage_example.single_stage_optimizer_contract_uses_array_native_target_lane(
         contract,
@@ -1618,7 +2676,11 @@ def test_target_lane_zero_iteration_line_search_failure_anchor_is_specific():
     assert anchor == {
         "iteration": 0,
         "ls_status": -9,
-        "requested_initial_step": {"value": 1.0, "finite": True, "classification": None},
+        "requested_initial_step": {
+            "value": 1.0,
+            "finite": True,
+            "classification": None,
+        },
         "first_tested_alpha": {"value": 1.0, "finite": True, "classification": None},
         "failure_reason": "line_search_failed",
     }
@@ -1751,9 +2813,9 @@ def test_target_lane_retry_fail_fast_stops_repeated_zero_iteration_anchor(monkey
     assert "line_search_fail_fast=repeated_zero_iteration_line_search_failure" in (
         result.message
     )
-    assert [event[0] for event in events if event[0].endswith("fail_fast_triggered")] == [
-        "phase2_line_search_fail_fast_triggered"
-    ]
+    assert [
+        event[0] for event in events if event[0].endswith("fail_fast_triggered")
+    ] == ["phase2_line_search_fail_fast_triggered"]
     assert len(invalid_state_events) == 2
 
 
@@ -2195,6 +3257,57 @@ def test_single_stage_failure_penalty_is_finite_before_initial_objective_seed():
     assert summary["reject_class"] == "hardware"
 
 
+def test_target_lane_initial_objective_records_host_sync_boundaries():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    run_dict = {
+        "initial_objective_pending": True,
+        "it": 1,
+        "accepted_iterations": 0,
+    }
+    events = []
+    trace_events = []
+
+    def target_value_and_grad_objective(objective_dofs):
+        return np.asarray(1.25, dtype=np.float64), 2.0 * np.asarray(objective_dofs)
+
+    value, grad = (
+        single_stage_example.seed_pending_single_stage_target_lane_initial_objective(
+            run_dict,
+            target_value_and_grad_objective=target_value_and_grad_objective,
+            optimizer_dofs=np.asarray([3.0, 4.0], dtype=np.float64),
+            objective_input_dofs=lambda x: np.asarray(x, dtype=np.float64),
+            record_outer_optimizer_event=lambda label, **fields: events.append(
+                (label, fields)
+            ),
+            objective_evaluation_trace_callback=trace_events.append,
+        )
+    )
+
+    labels = [label for label, _fields in events]
+    assert labels.index("target_lane_initial_objective_value_and_grad_returned") < (
+        labels.index("target_lane_initial_objective_finite_check_started")
+    )
+    assert labels.index("target_lane_initial_objective_finite_check_started") < (
+        labels.index("target_lane_initial_objective_finite_check_returned")
+    )
+    assert labels.index("target_lane_initial_objective_finite_check_returned") < (
+        labels.index("target_lane_initial_objective_trace_event_started")
+    )
+    assert labels.index("target_lane_initial_objective_trace_event_started") < (
+        labels.index("target_lane_initial_objective_trace_event_returned")
+    )
+    finite_fields = dict(events)["target_lane_initial_objective_finite_check_returned"]
+    assert finite_fields["phase"] == "initial"
+    assert finite_fields["finite"] is True
+    assert len(trace_events) == 1
+    assert run_dict["initial_objective_pending"] is False
+    assert value == pytest.approx(1.25)
+    np.testing.assert_allclose(grad, [6.0, 8.0])
+
+
 def test_cpu_resolved_warm_start_install_is_value_only_and_stales_next_solve():
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
@@ -2380,9 +3493,7 @@ def test_initial_target_lane_reporting_skips_pending_objective(monkeypatch):
 
         return {
             "reporting_metrics": lambda _coil_dofs, **_kwargs: {},
-            "reporting_metrics_from_solution": (
-                _fake_reporting_metrics_from_solution
-            ),
+            "reporting_metrics_from_solution": (_fake_reporting_metrics_from_solution),
             "objective": _objective,
             "value_and_grad": lambda _coil_dofs: (0.0, np.zeros(2)),
             "forward_result": lambda _coil_dofs: {
@@ -2437,9 +3548,110 @@ def test_initial_target_lane_reporting_skips_pending_objective(monkeypatch):
         1.0
     )
     objective_events = [
-        fields for label, fields in events if label == "target_lane_reporting_objective_started"
+        fields
+        for label, fields in events
+        if label == "target_lane_reporting_objective_started"
     ]
     assert objective_events == [{"reused": False, "skipped": True}]
+
+
+def test_target_lane_finite_nonconverged_sync_does_not_advance_seed(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    def _fake_reporting_metrics_from_solution(
+        coil_dofs,
+        solved_state,
+        success,
+        *,
+        include_distance_metrics,
+    ):
+        np.testing.assert_allclose(coil_dofs, [1.0, 2.0])
+        np.testing.assert_allclose(solved_state, [9.0, 10.0, 11.0])
+        assert bool(success) is False
+        assert include_distance_metrics is True
+        return {
+            "solver_success": False,
+            "curve_curve_min_dist": 1.0,
+            "curve_surface_min_dist": 1.0,
+            "surface_vessel_min_dist": 1.0,
+            "max_curvature": 1.0,
+        }
+
+    def _runtime_bundle_builder(*_args, **_kwargs):
+        return {
+            "reporting_metrics": lambda _coil_dofs, **_kwargs: {},
+            "reporting_metrics_from_solution": (_fake_reporting_metrics_from_solution),
+            "objective": lambda _coil_dofs: 0.0,
+            "value_and_grad": lambda _coil_dofs: (
+                0.0,
+                np.zeros(2, dtype=np.float64),
+            ),
+            "forward_result": lambda _coil_dofs: {},
+        }
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "get_traceable_single_stage_runtime_bundle_builder",
+        lambda: _runtime_bundle_builder,
+    )
+    monkeypatch.setattr(single_stage_example, "CC_DIST", 0.05, raising=False)
+    monkeypatch.setattr(single_stage_example, "CS_DIST", 0.02, raising=False)
+    monkeypatch.setattr(single_stage_example, "SS_DIST", 0.04, raising=False)
+    monkeypatch.setattr(
+        single_stage_example,
+        "CURVATURE_THRESHOLD",
+        40.0,
+        raising=False,
+    )
+
+    sync = single_stage_example.build_single_stage_target_lane_accepted_step_sync(
+        object(),
+        object(),
+        0.5,
+        outer_objective_config=object(),
+        success_filter=None,
+    )
+    run_dict = {
+        "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+        "iota": 0.5,
+        "G": 1.5,
+        "J": 2.0,
+        "dJ": np.asarray([7.0, 8.0], dtype=np.float64),
+        "lscount": 4,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "intersecting": False,
+        "self_intersection_check_available": True,
+    }
+    failed_solve_result = {
+        "success": False,
+        "finite": True,
+        "sdofs": np.asarray([99.0, 101.0], dtype=np.float64),
+        "iota": np.asarray(9161.0, dtype=np.float64),
+        "G": np.asarray(3.599, dtype=np.float64),
+        "x": np.asarray([9.0, 10.0, 11.0], dtype=np.float64),
+        "objective_value": np.asarray(12.0, dtype=np.float64),
+        "objective_grad": np.asarray([13.0, 14.0], dtype=np.float64),
+    }
+
+    accepted_step_summary = sync(
+        run_dict,
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        benchmark_mode=False,
+        update_run_state=True,
+        target_lane_solve_result=failed_solve_result,
+    )
+
+    np.testing.assert_allclose(run_dict["sdofs"], [0.3, 0.4])
+    assert run_dict["iota"] == pytest.approx(0.5)
+    assert run_dict["G"] == pytest.approx(1.5)
+    assert run_dict["J"] == pytest.approx(12.0)
+    np.testing.assert_allclose(run_dict["dJ"], [13.0, 14.0])
+    assert run_dict["lscount"] == 0
+    assert accepted_step_summary["objective_value"] == pytest.approx(12.0)
+    assert run_dict["target_lane_reporting_metrics"]["solver_success"] is False
+    np.testing.assert_allclose(run_dict["latest_local_incumbent"]["sdofs"], [0.3, 0.4])
 
 
 def test_successful_cpu_candidate_seeds_pending_initial_objective():
@@ -2517,6 +3729,114 @@ def test_successful_cpu_candidate_seeds_pending_initial_objective():
     assert run_dict["initial_objective_pending"] is False
     assert run_dict["initial_objective"] == pytest.approx(5.0)
     np.testing.assert_allclose(run_dict["dJ"], [7.0, 8.0])
+
+
+def test_failed_explicit_warm_start_candidate_restores_accepted_state():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        def __init__(self):
+            self.x = np.zeros(2, dtype=np.float64)
+
+        def set_dofs(self, dofs):
+            self.x = np.asarray(dofs, dtype=np.float64).copy()
+
+        def is_self_intersecting(self):
+            return False
+
+    class _BoozerSurface:
+        supports_explicit_surface_warm_start = True
+
+        def __init__(self):
+            self.surface = _Surface()
+            self.need_to_run_code = True
+            self.restore_calls = []
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "iota": 0.5,
+                "G": 1.5,
+                "residual": np.zeros(1, dtype=np.float64),
+            }
+
+        def run_code(self, iota, G, *, sdofs):
+            np.testing.assert_allclose(sdofs, [0.3, 0.4])
+            self.surface.set_dofs([99.0, 101.0])
+            self.res = {
+                "success": False,
+                "primal_success": False,
+                "iota": 9161.0,
+                "G": 3.599,
+                "residual": np.asarray([8.0], dtype=np.float64),
+                "fun": 32.0,
+            }
+            self.need_to_run_code = False
+            return self.res
+
+        def install_value_only_solved_runtime_state(
+            self,
+            *,
+            sdofs,
+            iota,
+            G,
+            optimizer_method,
+        ):
+            self.restore_calls.append(str(optimizer_method))
+            self.surface.set_dofs(sdofs)
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "sdofs": np.asarray(sdofs, dtype=np.float64).copy(),
+                "iota": float(iota),
+                "G": float(G),
+                "residual": np.zeros(1, dtype=np.float64),
+            }
+            self.need_to_run_code = False
+            return self.res
+
+    class _Objective:
+        def J(self):
+            raise AssertionError("failed candidates must not evaluate J")
+
+        def dJ(self):
+            raise AssertionError("failed candidates must reuse prior gradient")
+
+    run_dict = {
+        "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+        "iota": 0.5,
+        "G": 1.5,
+        "J": 2.0,
+        "dJ": np.asarray([7.0, 8.0], dtype=np.float64),
+        "initial_objective": 2.0,
+        "initial_objective_pending": False,
+        "failure_count": 0,
+        "x_prev": np.asarray([1.0, 2.0], dtype=np.float64),
+        "search_policy": "repair_first",
+        "donor_class": "runtime_seed",
+        "intersecting": False,
+        "self_intersection_check_available": True,
+    }
+    boozer_surface = _BoozerSurface()
+
+    value, grad = single_stage_example._evaluate_candidate_impl(
+        np.asarray([4.0, 6.0], dtype=np.float64),
+        run_dict,
+        boozer_surface,
+        _Objective(),
+    )
+
+    assert value > 2.0
+    np.testing.assert_allclose(grad, [7.0, 8.0])
+    assert run_dict["failure_count"] == 1
+    assert run_dict["last_candidate_failure"]["reject_class"] == "solver"
+    assert boozer_surface.restore_calls == ["accepted-state-rollback"]
+    np.testing.assert_allclose(boozer_surface.surface.x, [0.3, 0.4])
+    assert boozer_surface.res["success"] is True
+    assert boozer_surface.res["iota"] == pytest.approx(0.5)
+    assert boozer_surface.res["G"] == pytest.approx(1.5)
+    assert boozer_surface.need_to_run_code is True
 
 
 def test_single_stage_failure_penalty_uses_pre_trial_line_search_point():
@@ -2636,6 +3956,190 @@ def test_final_penalty_metrics_failed_host_jax_state_skips_solved_objectives(
     assert np.isnan(metrics["final_iota_penalty"])
     assert metrics["field_error"] == pytest.approx(0.123)
     assert metrics["final_iota"] == pytest.approx(-1.0e-4)
+
+
+def test_target_benchmark_initial_status_skips_exact_hardware_evaluation(
+    monkeypatch,
+):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    def exact_hardware_status_forbidden(_objectives, _diagnostics):
+        raise AssertionError("benchmark target startup must not evaluate hardware")
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "_evaluate_single_stage_hardware_status_reporting_boundary",
+        exact_hardware_status_forbidden,
+    )
+
+    status = single_stage_example._resolve_initial_single_stage_hardware_status(
+        use_target_lane=True,
+        benchmark_mode=True,
+        objectives=object(),
+        diagnostics=object(),
+    )
+
+    assert status["success"] is None
+    assert status["violations"] == ["skipped_in_benchmark_mode"]
+
+
+def test_benchmark_final_penalty_metrics_skip_exact_distance_status(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    class _Surface:
+        def volume(self):
+            return 0.039
+
+    class _BoozerSurface:
+        surface = _Surface()
+        res = {"success": True, "G": -2.0, "iota": 0.15}
+
+    class _Penalty:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def J(self):
+            return self.value
+
+    class _DistancePenalty(_Penalty):
+        def shortest_distance(self):
+            raise AssertionError("benchmark final status must not replay distance")
+
+    class _CurvaturePenalty(_Penalty):
+        class _Curve:
+            def kappa(self):
+                return np.asarray([1.0, 3.0], dtype=np.float64)
+
+        curve = _Curve()
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "norm_field_summary",
+        lambda _surface, _bs: (0.123, None, None, None, None, None),
+    )
+
+    metrics = single_stage_example.resolve_single_stage_final_penalty_metrics(
+        use_target_lane=False,
+        benchmark_mode=True,
+        skip_outer_optimizer=False,
+        boozer_surface=_BoozerSurface(),
+        bs=object(),
+        iota_target=0.3,
+        coil_dofs=np.zeros(2, dtype=np.float64),
+        outer_objective_config=None,
+        success_filter=None,
+        curvelength=_Penalty(4.0),
+        j_non_qs=_Penalty(1.0),
+        j_boozer_residual=_Penalty(2.0),
+        j_iota=_Penalty(3.0),
+        j_curve_length=_Penalty(5.0),
+        j_curve_curve=_DistancePenalty(0.2),
+        j_curve_surface=_DistancePenalty(0.3),
+        j_surface_surface=_DistancePenalty(0.4),
+        j_curvature=_CurvaturePenalty(6.0),
+        cc_dist=0.1,
+        cs_dist=0.1,
+        ss_dist=0.1,
+        curvature_threshold=10.0,
+        run_dict={},
+    )
+
+    assert metrics["hardware_status"]["success"] is None
+    assert metrics["hardware_status"]["violations"] == ["skipped_in_benchmark_mode"]
+    assert metrics["curve_curve_min_dist"] is None
+    assert metrics["curve_surface_min_dist"] is None
+    assert metrics["surface_vessel_min_dist"] is None
+
+
+def test_benchmark_target_reporting_sync_skips_exact_hardware_status(monkeypatch):
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    def exact_hardware_status_forbidden(*_args, **_kwargs):
+        raise AssertionError("benchmark target reporting must not evaluate hardware")
+
+    def fake_bundle_builder():
+        def build_runtime_bundle(*_args, **_kwargs):
+            def reporting_metrics(coil_dofs, *, include_distance_metrics):
+                assert include_distance_metrics is False
+                return {
+                    "solver_success": np.asarray(True),
+                    "final_G": np.asarray(1.0),
+                    "final_non_qs": np.asarray(0.0),
+                    "final_boozer_residual": np.asarray(0.0),
+                    "final_iota_penalty": np.asarray(0.0),
+                    "final_length_penalty": np.asarray(0.0),
+                    "final_curve_curve_penalty": np.asarray(0.0),
+                    "final_curve_surface_penalty": np.asarray(0.0),
+                    "final_surface_vessel_penalty": np.asarray(0.0),
+                    "final_curvature_penalty": np.asarray(0.0),
+                    "coil_length": np.asarray(1.0),
+                    "max_curvature": np.asarray(2.0),
+                    "banana_current_A": np.asarray(3.0),
+                    "field_error": np.asarray(4.0),
+                    "final_volume": np.asarray(5.0),
+                    "final_iota": np.asarray(6.0),
+                }
+
+            def forward_result(coil_dofs):
+                coil_dofs = np.asarray(coil_dofs, dtype=np.float64)
+                return {
+                    "success": np.asarray(True),
+                    "finite": np.asarray(True),
+                    "sdofs": np.asarray([0.0], dtype=np.float64),
+                    "iota": np.asarray(0.15),
+                    "G": np.asarray(1.0),
+                    "x": np.asarray([0.0], dtype=np.float64),
+                    "objective_value": np.asarray(7.0),
+                    "objective_grad": np.ones_like(coil_dofs),
+                }
+
+            return {
+                "reporting_metrics": reporting_metrics,
+                "objective": lambda _coil_dofs: np.asarray(7.0),
+                "value_and_grad": lambda coil_dofs: (
+                    np.asarray(7.0),
+                    np.ones_like(np.asarray(coil_dofs, dtype=np.float64)),
+                ),
+                "forward_result": forward_result,
+            }
+
+        return build_runtime_bundle
+
+    monkeypatch.setattr(
+        single_stage_example,
+        "get_traceable_single_stage_runtime_bundle_builder",
+        fake_bundle_builder,
+    )
+    monkeypatch.setattr(
+        single_stage_example,
+        "evaluate_single_stage_hardware_constraints_pure",
+        exact_hardware_status_forbidden,
+    )
+
+    sync = single_stage_example.build_single_stage_target_lane_accepted_step_sync(
+        object(),
+        object(),
+        0.15,
+        outer_objective_config=None,
+        success_filter=None,
+    )
+    summary = sync(
+        {},
+        np.asarray([1.0, 2.0], dtype=np.float64),
+        benchmark_mode=True,
+        update_run_state=False,
+    )
+
+    assert summary["reporting_metrics"]["hardware_status"]["success"] is None
+    assert summary["reporting_metrics"]["hardware_status"]["violations"] == [
+        "skipped_in_benchmark_mode"
+    ]
 
 
 def test_final_penalty_metrics_failed_native_state_skips_solved_objectives(

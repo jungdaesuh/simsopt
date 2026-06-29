@@ -39,7 +39,6 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_SMOKE_NPHI,
     DEFAULT_SMOKE_NTHETA,
     DEFAULT_SMOKE_NTOR,
-    DEFAULT_STAGE2_BS_PATH,
     DEFAULT_VOL_TARGET,
     build_real_single_stage_init_fixture,
 )
@@ -112,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-bs-path",
-        default=str(DEFAULT_STAGE2_BS_PATH),
+        default=None,
         help="Path to the fixed Stage 2 seed biot_savart_opt.json fixture.",
     )
     parser.add_argument(
@@ -210,7 +209,13 @@ def parse_args() -> argparse.Namespace:
             "speedup or >=40%% peak device-memory reduction."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.stage2_bs_path is None:
+        parser.error(
+            "--stage2-bs-path is required; pass the Stage 2 seed "
+            "biot_savart_opt.json fixture explicitly."
+        )
+    return args
 
 
 def _rss_high_water_mark_mb() -> float:

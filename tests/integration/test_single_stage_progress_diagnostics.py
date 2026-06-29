@@ -8,8 +8,10 @@ from unittest import mock
 import pytest
 
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+    HIGH_MPOL_OUTER_FTOL_FLOOR,
     _single_stage_hardware_status_progress_fields,
     parse_args,
+    resolve_single_stage_outer_ftol,
     should_evaluate_pending_target_lane_initial_objective,
 )
 
@@ -87,6 +89,19 @@ def test_cli_exposes_reporting_snapshot_diagnostic():
     args = _parse_child_args("--diagnose-target-lane-reporting-snapshot")
 
     assert args.diagnose_target_lane_reporting_snapshot is True
+
+
+@pytest.mark.parametrize("mpol", [14, 15, 16, 17, 18, 24])
+def test_default_outer_ftol_respects_high_mpol_noise_floor(mpol):
+    assert resolve_single_stage_outer_ftol(mpol) >= HIGH_MPOL_OUTER_FTOL_FLOOR
+
+
+def test_default_outer_ftol_preserves_low_mpol_fallback():
+    assert resolve_single_stage_outer_ftol(2) == pytest.approx(1e-5)
+
+
+def test_explicit_outer_ftol_remains_user_override():
+    assert resolve_single_stage_outer_ftol(18, 1e-12) == pytest.approx(1e-12)
 
 
 def test_reporting_snapshot_diagnostic_rejects_other_skip_modes():

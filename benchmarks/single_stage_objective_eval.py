@@ -24,7 +24,6 @@ import numpy as np
 
 from benchmarks.single_stage_smoke_defaults import (
     DEFAULT_PLASMA_SURF_FILENAME,
-    DEFAULT_STAGE2_BS_PATH,
 )
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_CONSTRAINT_WEIGHT,
@@ -199,10 +198,10 @@ def _recover_consistent_iota_G(cpu_boozer, bs, *, num_tf_coils, iota_guess,
 
 def build_matched_same_state_fixture_pair(
     *,
+    stage2_bs_path,
     plasma_surf_filename=DEFAULT_PLASMA_SURF_FILENAME,
     equilibrium_path=None,
     equilibria_dir=DEFAULT_EQUILIBRIA_DIR,
-    stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
     nphi=DEFAULT_SMOKE_NPHI,
     ntheta=DEFAULT_SMOKE_NTHETA,
     mpol=DEFAULT_SMOKE_MPOL,

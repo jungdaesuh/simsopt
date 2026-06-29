@@ -15,16 +15,22 @@ SRC_ROOT = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
+from benchmarks.benchmark_timing_labels import (
+    GPU_TARGET_ONLY,
+    MIXED_PARITY_REFERENCE,
+    REFERENCE_ONLY,
+    TimingClassification,
+    benchmark_timing_label,
+)
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
     DEFAULT_OPTIMIZER_BACKEND,
     DEFAULT_PLASMA_SURF_FILENAME,
-    DEFAULT_SMOKE_MPOL,
-    DEFAULT_SMOKE_NPHI,
-    DEFAULT_SMOKE_NTHETA,
-    DEFAULT_SMOKE_NTOR,
-    DEFAULT_STAGE2_BS_PATH,
+    DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_MPOL,
+    DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NPHI,
+    DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NTHETA,
+    DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NTOR,
     DEFAULT_VOL_TARGET,
 )
 from benchmarks.validation_ladder_common import (
@@ -46,6 +52,10 @@ from benchmarks.validation_ladder_common import (
     tier5_performance_budget,
     write_json,
 )
+from benchmarks.validation_ladder_contract import (
+    TIER4_ADJOINT_FD_EPS_LADDER,
+    TIER4_ADJOINT_FD_EPS_WINDOW,
+)
 
 TIER1_PARITY_RUNG = "tier1b_real_stage2"
 TIER2_PERFORMANCE_RUNG = "tier2_stage2_e2e"
@@ -61,6 +71,39 @@ _TIER5_FIXTURE = "real-single-stage-init"
 
 _RUNTIME_JAX = None
 _RUNTIME_JAXLIB = None
+
+
+def _tier4_fd_eps_window_label() -> str:
+    low, high = TIER4_ADJOINT_FD_EPS_WINDOW
+    return f"[{low:.1e}, {high:.1e}]"
+
+
+def _tier4_production_fd_eps(value: str) -> float:
+    parsed = float(value)
+    low, high = TIER4_ADJOINT_FD_EPS_WINDOW
+    if parsed <= 0.0 or parsed < low or parsed > high:
+        raise argparse.ArgumentTypeError(
+            f"Tier 4 FD eps must be in {_tier4_fd_eps_window_label()}"
+        )
+    return parsed
+
+
+def _validate_tier4_fd_eps_ladder(ladder: tuple[float, ...]) -> tuple[float, ...]:
+    if len(ladder) < 2:
+        raise ValueError(
+            "Tier 4 FD certificate requires --eps-ladder with at least two "
+            "strictly decreasing values."
+        )
+    low, high = TIER4_ADJOINT_FD_EPS_WINDOW
+    for eps in ladder:
+        if eps < low or eps > high:
+            raise ValueError(f"Tier 4 FD eps must be in {_tier4_fd_eps_window_label()}")
+    for coarse_eps, fine_eps in zip(ladder, ladder[1:]):
+        if fine_eps >= coarse_eps:
+            raise ValueError(
+                "Tier 4 FD certificate requires a strictly decreasing --eps-ladder."
+            )
+    return ladder
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,8 +141,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-bs-path",
-        default=str(DEFAULT_STAGE2_BS_PATH),
-        help="Path to the fixed Stage 2 seed biot_savart_opt.json fixture.",
+        default=None,
+        help=(
+            "Path to the Stage 2 seed biot_savart_opt.json forwarded to the "
+            "probes. No default: the seed must be explicit."
+        ),
+    )
+    runtime_seed_group = parser.add_mutually_exclusive_group()
+    runtime_seed_group.add_argument(
+        "--jax-runtime-seed-spec",
+        default=None,
+        help=(
+            "Canonical JAX runtime seed spec forwarded to the Tier 4 adjoint "
+            "FD certificate and the single-stage probes. No default: the seed "
+            "must be explicit."
+        ),
+    )
+    runtime_seed_group.add_argument(
+        "--raw-stage2-seed",
+        action="store_true",
+        help=(
+            "Forward raw Stage 2 replay to Tier 4 instead of the canonical "
+            "resolved JAX runtime seed."
+        ),
     )
     parser.add_argument(
         "--stage2-nphi",
@@ -116,25 +180,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--single-stage-nphi",
         type=int,
-        default=DEFAULT_SMOKE_NPHI,
-        help="Surface toroidal grid points for the reduced-grid trusted fixture.",
+        default=DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NPHI,
+        help="Surface toroidal grid points for the trusted single-stage fixture.",
     )
     parser.add_argument(
         "--single-stage-ntheta",
         type=int,
-        default=DEFAULT_SMOKE_NTHETA,
-        help="Surface poloidal grid points for the reduced-grid trusted fixture.",
+        default=DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NTHETA,
+        help="Surface poloidal grid points for the trusted single-stage fixture.",
     )
     parser.add_argument(
         "--mpol",
         type=int,
-        default=DEFAULT_SMOKE_MPOL,
-        help="Surface poloidal mode count for the trusted single-stage fixture.",
+        default=DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_MPOL,
+        help=(
+            "Surface poloidal mode count for the trusted single-stage fixture. "
+            "Defaults to the Tier 4 runtime-seed resolution "
+            f"({DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_MPOL})."
+        ),
     )
     parser.add_argument(
         "--ntor",
         type=int,
-        default=DEFAULT_SMOKE_NTOR,
+        default=DEFAULT_SINGLE_STAGE_JAX_RUNTIME_SEED_NTOR,
         help="Surface toroidal mode count for the trusted single-stage fixture.",
     )
     parser.add_argument(
@@ -169,9 +237,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--eps",
-        type=float,
-        default=1e-4,
-        help="Finite-difference perturbation magnitude for Tier 4 timing.",
+        type=_tier4_production_fd_eps,
+        default=None,
+        help=(
+            "Deprecated single finite-difference perturbation magnitude for "
+            "Tier 4. Supplying --eps is rejected for certification; use "
+            "--eps-ladder."
+        ),
+    )
+    parser.add_argument(
+        "--eps-ladder",
+        type=_tier4_production_fd_eps,
+        nargs="+",
+        default=TIER4_ADJOINT_FD_EPS_LADDER,
+        help=(
+            "Tier 4 production finite-difference eps ladder. Default: "
+            + " ".join(f"{value:.1e}" for value in TIER4_ADJOINT_FD_EPS_LADDER)
+        ),
     )
     parser.add_argument(
         "--benchmark-mode",
@@ -210,7 +292,28 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="CPU-phase Tier 5 artifact to merge when --phase=aggregate.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.raw_stage2_seed:
+        parser.error(
+            "raw Stage 2 replay is not wired through tier5; run "
+            "adjoint_fd_validation.py --raw-stage2-seed --stage2-bs-path <seed> "
+            "directly, or pass --jax-runtime-seed-spec to tier5."
+        )
+    if args.jax_runtime_seed_spec is None:
+        parser.error(
+            "tier5 requires an explicit --jax-runtime-seed-spec "
+            "<single_stage_jax_runtime_spec.json>; there is no default seed."
+        )
+    if args.eps is not None:
+        parser.error(
+            "Tier 4 FD certificate requires --eps-ladder; a single --eps "
+            "cannot certify coarse-to-fine Taylor error decrease."
+        )
+    try:
+        _validate_tier4_fd_eps_ladder(tuple(float(value) for value in args.eps_ladder))
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def _runtime_modules() -> tuple[Any, Any]:
@@ -261,9 +364,7 @@ def _common_equilibrium_args(args: argparse.Namespace) -> list[str]:
 
 
 def _trusted_single_stage_args(args: argparse.Namespace) -> list[str]:
-    return [
-        "--stage2-bs-path",
-        args.stage2_bs_path,
+    command = [
         "--nphi",
         str(args.single_stage_nphi),
         "--ntheta",
@@ -279,6 +380,11 @@ def _trusted_single_stage_args(args: argparse.Namespace) -> list[str]:
         "--optimizer-backend",
         args.optimizer_backend,
     ]
+    if args.stage2_bs_path is not None:
+        command.extend(["--stage2-bs-path", args.stage2_bs_path])
+    if args.jax_runtime_seed_spec is not None:
+        command.extend(["--jax-runtime-seed-spec", args.jax_runtime_seed_spec])
+    return command
 
 
 def _single_stage_init_probe_args(args: argparse.Namespace) -> list[str]:
@@ -403,14 +509,30 @@ def _with_performance_contract(
     summary: dict[str, Any],
     *,
     timing_semantics: str,
+    timing_classification: TimingClassification,
     recommended_question: str,
     supports_performance_headline: bool,
+    headline_timing_classification: TimingClassification | None,
     counts_toward_phase_pass: bool = True,
     headline_metric: str | None = None,
     headline_speedup_vs_cpu: float | None = None,
     extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched = dict(summary)
+    lane_label = str(enriched.get("lane_label") or "")
+    enriched.update(
+        benchmark_timing_label(
+            timing_classification,
+            includes_gpu_target=lane_label in {"jax-cuda", "jax-gpu"},
+            includes_cpu_reference=True,
+            supports_performance_headline=supports_performance_headline,
+            headline_timing_classification=headline_timing_classification,
+            note=(
+                "Tier 5 summaries distinguish whole-job mixed parity timing "
+                "from any named headline-eligible submetric."
+            ),
+        )
+    )
     enriched["timing_semantics"] = timing_semantics
     enriched["recommended_question"] = recommended_question
     enriched["supports_performance_headline"] = bool(supports_performance_headline)
@@ -445,8 +567,10 @@ def summarize_informational_pair_probe(
             lane_label=lane_label,
         ),
         timing_semantics=timing_semantics,
+        timing_classification=MIXED_PARITY_REFERENCE,
         recommended_question=recommended_question,
         supports_performance_headline=False,
+        headline_timing_classification=None,
     )
 
 
@@ -468,6 +592,9 @@ def summarize_stage2_e2e_performance_probe(
         else None
     )
     outer_speedup_vs_cpu = safe_speedup(cpu_elapsed_s, outer_lane_elapsed_s)
+    headline_classification: TimingClassification = (
+        GPU_TARGET_ONLY if lane_label in {"jax-cuda", "jax-gpu"} else REFERENCE_ONLY
+    )
     return _with_performance_contract(
         summarize_pair_probe(
             name=TIER2_PERFORMANCE_RUNG,
@@ -478,8 +605,10 @@ def summarize_stage2_e2e_performance_probe(
             lane_label=lane_label,
         ),
         timing_semantics="separate_cold_end_to_end_and_warm_steady_state",
+        timing_classification=MIXED_PARITY_REFERENCE,
         recommended_question="cold_and_warm_performance",
         supports_performance_headline=True,
+        headline_timing_classification=headline_classification,
         headline_metric="outer_speedup_vs_cpu",
         headline_speedup_vs_cpu=outer_speedup_vs_cpu,
         extra_fields={
@@ -531,8 +660,10 @@ def summarize_single_stage_outer_loop_performance_probe(
             lane_label=lane_label,
         ),
         timing_semantics="short_outer_loop_probe_with_cpu_reference",
+        timing_classification=MIXED_PARITY_REFERENCE,
         recommended_question="single_stage_outer_loop_performance",
         supports_performance_headline=False,
+        headline_timing_classification=None,
         counts_toward_phase_pass=False,
         extra_fields={"speedup_vs_cpu": safe_speedup(cpu_elapsed_s, lane_elapsed_s)},
     )
@@ -557,6 +688,7 @@ def _tier5_provenance_extra(
         "platform_request": args.platform,
         "plasma_surf_filename": args.plasma_surf_filename,
         "stage2_seed_path": args.stage2_bs_path,
+        "jax_runtime_seed_spec": args.jax_runtime_seed_spec,
         "stage2_nphi": int(args.stage2_nphi),
         "stage2_ntheta": int(args.stage2_ntheta),
         "single_stage_nphi": int(args.single_stage_nphi),
@@ -566,9 +698,22 @@ def _tier5_provenance_extra(
         "stage2_maxiter": int(args.maxiter),
         "optimizer_backend": args.optimizer_backend,
         "benchmark_mode": benchmark_mode,
+        **benchmark_timing_label(
+            MIXED_PARITY_REFERENCE,
+            includes_gpu_target=args.platform in {"auto", "cuda"},
+            includes_cpu_reference=True,
+            supports_performance_headline=False,
+            headline_timing_classification=None,
+            note=(
+                "Tier 5 orchestrates parity/reference probes; use the "
+                "performance_contract named source for headline metrics."
+            ),
+        ),
         "single_stage_outer_loop_maxiter": int(args.single_stage_outer_loop_maxiter),
         "fd_samples": int(args.samples),
-        "fd_eps": float(args.eps),
+        "fd_eps": None if args.eps is None else float(args.eps),
+        "fd_eps_ladder": [float(value) for value in args.eps_ladder],
+        "fd_eps_window": [float(value) for value in TIER4_ADJOINT_FD_EPS_WINDOW],
         "phase": args.phase,
         "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
     }
@@ -586,6 +731,7 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
             "rung": tier1["name"],
             "metric_path": f"rungs.{TIER1_PARITY_RUNG}.results.comparisons",
             "timing_semantics": tier1["timing_semantics"],
+            "timing_classification": tier1["timing_classification"],
         },
         "cold_end_to_end_source": {
             "rung": tier2["name"],
@@ -593,6 +739,7 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
                 f"summary_by_name.{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu"
             ),
             "speedup_vs_cpu": tier2.get("outer_speedup_vs_cpu"),
+            "timing_classification": tier2["timing_classification"],
         },
         "warm_steady_state_source": (
             {
@@ -601,6 +748,7 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
                     f"summary_by_name.{TIER2_PERFORMANCE_RUNG}.warm_speedup_vs_cpu"
                 ),
                 "speedup_vs_cpu": tier2.get("warm_speedup_vs_cpu"),
+                "timing_classification": tier2["timing_classification"],
             }
             if tier2.get("warm_speedup_vs_cpu") is not None
             else None
@@ -611,6 +759,7 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
                 f"summary_by_name.{TIER2_PERFORMANCE_RUNG}.{headline_metric}"
             ),
             "speedup_vs_cpu": headline_speedup,
+            "timing_classification": tier2.get("headline_timing_classification"),
         },
         "sharding_source": {
             "rung": tier2["name"],
@@ -684,14 +833,23 @@ def _informational_speedup_fragment(speedup: float | None) -> str:
 
 
 def _tier4_probe_args(args: argparse.Namespace) -> list[str]:
-    return [
+    if args.eps is not None:
+        raise ValueError(
+            "Tier 4 FD certificate requires --eps-ladder; a single --eps "
+            "cannot certify coarse-to-fine Taylor error decrease."
+        )
+    eps_ladder = _validate_tier4_fd_eps_ladder(
+        tuple(float(value) for value in args.eps_ladder)
+    )
+    command = [
         *_common_equilibrium_args(args),
         *_trusted_single_stage_args(args),
         "--samples",
         str(args.samples),
-        "--eps",
-        str(args.eps),
+        "--eps-ladder",
+        *(str(value) for value in eps_ladder),
     ]
+    return command
 
 
 def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
@@ -815,12 +973,8 @@ def _combine_phase_payload(
         else []
     )
     phase_passed = all(
-        bool(item["passed"])
-        for item in summary
-        if _counts_toward_phase_pass(item)
-    ) and not (
-        performance_failures or sharding_failures
-    )
+        bool(item["passed"]) for item in summary if _counts_toward_phase_pass(item)
+    ) and not (performance_failures or sharding_failures)
     aggregate_complete = not missing_rungs
     payload: dict[str, Any] = {
         "phase": phase,

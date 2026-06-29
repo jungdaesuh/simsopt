@@ -23,6 +23,10 @@ SRC_ROOT = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
+from benchmarks.benchmark_timing_labels import (
+    MIXED_PARITY_REFERENCE,
+    benchmark_timing_label,
+)
 from benchmarks.validation_ladder_common import (
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
     apply_benchmark_compilation_cache_policy,
@@ -68,15 +72,16 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_SMOKE_NPHI,
     DEFAULT_SMOKE_NTHETA,
     DEFAULT_SMOKE_NTOR,
-    DEFAULT_STAGE2_BS_PATH,
+    SMOKE_TEST_STAGE2_BS_PATH,
     DEFAULT_VOL_TARGET,
 )
 from benchmarks.parity_solve_quality import (
     compute_dense_operator_action_max_rel_error,
 )
 from simsopt_jax.geo.optimizers.single_stage_routing import (
-    resolve_single_stage_jax_boozer_optimizer_backend
-    as _resolve_single_stage_jax_boozer_optimizer_backend,
+    JAX_DECOMPOSED_SCIPY_OUTER_OPTIMIZER_METHOD,
+    JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+    resolve_single_stage_jax_boozer_optimizer_backend as _resolve_single_stage_jax_boozer_optimizer_backend,
 )
 
 
@@ -111,6 +116,7 @@ SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = "ondevice"
 HOST_JAX_OPTIMIZER_BACKEND = "host-jax"
 SCIPY_JAX_OPTIMIZER_BACKEND = "scipy-jax"
+SCIPY_JAX_DECOMPOSED_OPTIMIZER_BACKEND = "scipy-jax-decomposed"
 SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
 OPTAX_LBFGS_OPTIMIZER_BACKEND = "optax-lbfgs"
 OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND = "optimistix-lbfgs"
@@ -123,6 +129,7 @@ TARGET_OPTIMIZER_BACKENDS = (
     *TARGET_NATIVE_LBFGS_OPTIMIZER_BACKENDS,
     HOST_JAX_OPTIMIZER_BACKEND,
     SCIPY_JAX_OPTIMIZER_BACKEND,
+    SCIPY_JAX_DECOMPOSED_OPTIMIZER_BACKEND,
     SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND,
 )
 REFERENCE_BACKEND_AUTO = "auto"
@@ -154,7 +161,10 @@ _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
     TARGET_OPTIMIZER_BACKEND: "lbfgs-ondevice",
     HOST_JAX_OPTIMIZER_BACKEND: "lbfgs",
     SCIPY_JAX_OPTIMIZER_BACKEND: _TARGET_OUTER_OPTIMIZER_METHOD,
-    SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND: "lbfgs-scipy-jax-fullgraph",
+    SCIPY_JAX_DECOMPOSED_OPTIMIZER_BACKEND: (
+        JAX_DECOMPOSED_SCIPY_OUTER_OPTIMIZER_METHOD
+    ),
+    SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND: JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
     OPTAX_LBFGS_OPTIMIZER_BACKEND: "optax-lbfgs-ondevice",
     OPTIMISTIX_LBFGS_OPTIMIZER_BACKEND: "optimistix-lbfgs-ondevice",
 }
@@ -362,7 +372,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-bs-path",
-        default=str(DEFAULT_STAGE2_BS_PATH),
+        default=str(SMOKE_TEST_STAGE2_BS_PATH),
         help="Path to the fixed Stage 2 seed biot_savart_opt.json fixture.",
     )
     parser.add_argument(
@@ -712,10 +722,12 @@ def _resolve_target_lane_boozer_newton_polish_policy(
         platform=platform,
         args=args,
     )
-    effective_boozer_optimizer_backend = _resolve_single_stage_jax_boozer_optimizer_backend(
-        backend,
-        getattr(args, "optimizer_backend", None),
-        boozer_optimizer_backend,
+    effective_boozer_optimizer_backend = (
+        _resolve_single_stage_jax_boozer_optimizer_backend(
+            backend,
+            getattr(args, "optimizer_backend", None),
+            boozer_optimizer_backend,
+        )
     )
     if effective_boozer_optimizer_backend != TARGET_OPTIMIZER_BACKEND:
         return None
@@ -880,9 +892,7 @@ def _case_timing_breakdown(case: dict[str, Any]) -> dict[str, Any]:
         "optimizer_wall_excluding_status_reporting_fraction_of_elapsed": (
             _timing_ratio(optimizer_wall_excluding_status_reporting_s, elapsed_s)
         ),
-        "initial_hardware_status_s": combined_timings.get(
-            "initial_hardware_status_s"
-        ),
+        "initial_hardware_status_s": combined_timings.get("initial_hardware_status_s"),
         "final_penalty_metrics_s": combined_timings.get("final_penalty_metrics_s"),
         "final_hardware_metrics_s": combined_timings.get("final_hardware_metrics_s"),
         "final_reporting_s": final_reporting_s,
@@ -1032,9 +1042,7 @@ def _single_stage_full_run_lane_contract(
     provenance = results.get("provenance", {})
     final_artifact_json = str(case["final_artifact_json"])
     final_artifact_accepted = bool(case["final_artifact_accepted"])
-    artifact_source = str(
-        case.get("artifact_source", _CASE_ARTIFACT_SOURCE_GENERATED)
-    )
+    artifact_source = str(case.get("artifact_source", _CASE_ARTIFACT_SOURCE_GENERATED))
     loaded_external_reference = (
         artifact_source == _CASE_ARTIFACT_SOURCE_EXTERNAL_REFERENCE
     )
@@ -1274,9 +1282,7 @@ def _load_single_stage_case_from_output_root(
             "Loaded single-stage reference artifact is missing required "
             f"outer_optimizer_progress.json: {progress_path}"
         )
-    elapsed_s, elapsed_source = _single_stage_elapsed_s_and_source_from_results(
-        results
-    )
+    elapsed_s, elapsed_source = _single_stage_elapsed_s_and_source_from_results(results)
     if elapsed_s is None:
         elapsed_s = _load_progress_elapsed_s(progress_path)
         if elapsed_s is not None:
@@ -1321,10 +1327,13 @@ def _resolve_single_stage_child_platform(
 
 
 def _should_reuse_resolved_warm_start_solve(args: argparse.Namespace) -> bool:
-    """Return whether an explicit donor outer run should skip setup replay."""
-    return (
-        getattr(args, "warm_start_run_dir", None) is not None
-        and int(args.maxiter) > 0
+    """Return whether a resolved seed state should skip setup replay."""
+    if int(args.maxiter) <= 0:
+        return False
+    if getattr(args, "warm_start_run_dir", None) is not None:
+        return True
+    return bool(getattr(args, "reuse_jax_runtime_seed_solve", False)) and (
+        getattr(args, "jax_runtime_seed_spec", None) is not None
     )
 
 
@@ -1648,9 +1657,7 @@ def _compile_jax_runtime_seed_spec_from_run_dir(
 
 def _reference_case_backend(args: argparse.Namespace) -> str:
     """Return the backend that gives the target-lane proof an apples-to-apples reference."""
-    requested_backend = str(
-        getattr(args, "reference_backend", REFERENCE_BACKEND_AUTO)
-    )
+    requested_backend = str(getattr(args, "reference_backend", REFERENCE_BACKEND_AUTO))
     if requested_backend != REFERENCE_BACKEND_AUTO:
         return requested_backend
     if (
@@ -1749,25 +1756,15 @@ def _resolve_warm_start_seed_contract_G(
     warm_start_run_dir: Path,
     results: Mapping[str, object],
 ) -> object:
-    final_g = results.get("FINAL_G")
-    if final_g is not None:
-        return final_g
-
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
     )
 
-    biot_savart_path = single_stage_example.resolve_single_stage_warm_start_biotsavart_path(
+    del args
+    surface_path, _ = single_stage_example.resolve_single_stage_warm_start_paths(
         warm_start_run_dir
     )
-    if biot_savart_path is None:
-        raise FileNotFoundError(
-            "Warm-start donor is missing biot_savart_opt.json, so FINAL_G cannot "
-            f"be derived for {warm_start_run_dir}."
-        )
-    donor_bs = single_stage_example.load(biot_savart_path)
-    tf_coils = donor_bs.coils[: int(getattr(args, "num_tf_coils", 20))]
-    return single_stage_example.resolve_single_stage_runtime_seed_G(None, tf_coils)
+    return single_stage_example.resolve_single_stage_warm_start_G(results, surface_path)
 
 
 def _append_seed_iota_quality_failures(
@@ -1871,9 +1868,7 @@ def _validate_warm_start_seed_contract(
         failures.append("SELF_INTERSECTING is true")
     seed_g = results.get("FINAL_G")
     if seed_g is None and not failures:
-        seed_g = _resolve_warm_start_seed_contract_G(
-            args, warm_start_run_dir, results
-        )
+        seed_g = _resolve_warm_start_seed_contract_G(args, warm_start_run_dir, results)
     _finite_seed_float(
         seed_g,
         field_name="FINAL_G or derived runtime G",
@@ -4320,16 +4315,14 @@ def evaluate_single_stage_init_parity(
     if comparison["jax_self_intersecting"]:
         failures.append("JAX single-stage init produced a self-intersecting surface.")
     if maxiter > 0:
-        if (
-            comparison["cpu_iterations"] < 1
-            and not comparison.get("cpu_stationary_no_step", False)
+        if comparison["cpu_iterations"] < 1 and not comparison.get(
+            "cpu_stationary_no_step", False
         ):
             failures.append(
                 "CPU single-stage outer-loop probe did not accept an optimizer step."
             )
-        if (
-            comparison["jax_iterations"] < 1
-            and not comparison.get("jax_stationary_no_step", False)
+        if comparison["jax_iterations"] < 1 and not comparison.get(
+            "jax_stationary_no_step", False
         ):
             failures.append(
                 "JAX single-stage outer-loop probe did not accept an optimizer step."
@@ -4392,6 +4385,18 @@ def main() -> None:
             "outer_maxiter": int(args.maxiter),
             "command_argv": [sys.executable, *sys.argv],
             "benchmark_mode": benchmark_mode,
+            **benchmark_timing_label(
+                MIXED_PARITY_REFERENCE,
+                includes_gpu_target=args.platform == "cuda",
+                includes_cpu_reference=True,
+                supports_performance_headline=False,
+                headline_timing_classification=None,
+                note=(
+                    "single_stage_init_parity.py co-produces the JAX target "
+                    "lane and cpp/CPU reference; whole-run timing is mixed and "
+                    "not a clean GPU headline."
+                ),
+            ),
             "reference_backend": reference_backend,
             "reference_case_artifacts_dir": None
             if args.reference_case_artifacts_dir is None

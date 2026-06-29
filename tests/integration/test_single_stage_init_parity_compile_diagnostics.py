@@ -26,6 +26,7 @@ from unittest import mock
 
 from benchmarks.single_stage_init_parity import (
     _append_optional_single_stage_flags,
+    _expected_target_outer_optimizer_method,
     _reference_case_backend,
     _run_single_stage_case,
     parse_args,
@@ -101,6 +102,15 @@ def test_cli_exposes_compile_diagnostics_flag_default_off():
     assert _parse([FLAG]).record_jax_compile_diagnostics is True
 
 
+def test_cli_accepts_scipy_jax_decomposed_backend():
+    args = _parse(["--optimizer-backend", "scipy-jax-decomposed"])
+    assert args.optimizer_backend == "scipy-jax-decomposed"
+    assert (
+        _expected_target_outer_optimizer_method(args.optimizer_backend)
+        == "lbfgs-scipy-jax-decomposed"
+    )
+
+
 def test_warm_start_auto_reference_backend_stays_jax_cpu():
     args = _parse(["--warm-start-run-dir", "/tmp/seed"])
     assert _reference_case_backend(args) == "jax"
@@ -166,6 +176,18 @@ def test_cuda_scipy_jax_child_keeps_ondevice_boozer_backend(monkeypatch, tmp_pat
     assert command[index + 1] == "ondevice"
 
 
+def test_cuda_scipy_jax_decomposed_child_keeps_ondevice_boozer_backend(
+    monkeypatch, tmp_path
+):
+    args = _parse(["--optimizer-backend", "scipy-jax-decomposed"])
+    command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cuda")
+    assert "--optimizer-backend" in command
+    optimizer_index = command.index("--optimizer-backend")
+    assert command[optimizer_index + 1] == "scipy-jax-decomposed"
+    boozer_index = command.index("--boozer-optimizer-backend")
+    assert command[boozer_index + 1] == "ondevice"
+
+
 def test_child_command_forwards_boozer_least_squares_algorithm(monkeypatch, tmp_path):
     args = _parse([])
     args.boozer_least_squares_algorithm = "lm"
@@ -198,6 +220,29 @@ def test_explicit_donor_outer_run_reuses_resolved_startup_solve(
 
     assert "--reuse-resolved-warm-start-solve" in command
     assert "--init-only" not in command
+
+
+def test_runtime_seed_outer_probe_reuses_resolved_startup_solve(
+    monkeypatch,
+    tmp_path,
+):
+    args = _parse(["--jax-runtime-seed-spec", "/tmp/seed.json", "--maxiter", "1"])
+    args.reuse_jax_runtime_seed_solve = True
+
+    command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cpu")
+
+    assert "--reuse-resolved-warm-start-solve" in command
+    assert "--jax-runtime-seed-spec" in command
+
+
+def test_runtime_seed_reuse_policy_can_replay_setup_solve(monkeypatch, tmp_path):
+    args = _parse(["--jax-runtime-seed-spec", "/tmp/seed.json", "--maxiter", "1"])
+    args.reuse_jax_runtime_seed_solve = False
+
+    command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cpu")
+
+    assert "--reuse-resolved-warm-start-solve" not in command
+    assert "--jax-runtime-seed-spec" in command
 
 
 def test_init_only_donor_run_replays_setup_solve(monkeypatch, tmp_path):

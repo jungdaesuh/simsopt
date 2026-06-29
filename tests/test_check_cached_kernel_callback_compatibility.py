@@ -26,7 +26,9 @@ from benchmarks.check_cached_kernel_callback_compatibility import (
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _forbidden_in(tmp_path: Path, source: str, symbol: str = "kernel") -> tuple[str, ...]:
+def _forbidden_in(
+    tmp_path: Path, source: str, symbol: str = "kernel"
+) -> tuple[str, ...]:
     module_path = tmp_path / "synthetic_module.py"
     module_path.write_text(textwrap.dedent(source), encoding="utf-8")
     function = _find_target_function(module_path, symbol)
@@ -48,6 +50,20 @@ def test_direct_dotted_callback_is_detected(tmp_path: Path) -> None:
         """,
     )
     assert found == ("jax.debug.callback",)
+
+
+def test_debug_breakpoint_is_detected(tmp_path: Path) -> None:
+    found = _forbidden_in(
+        tmp_path,
+        """
+        import jax
+
+        def kernel(x):
+            jax.debug.breakpoint()
+            return x
+        """,
+    )
+    assert found == ("jax.debug.breakpoint",)
 
 
 def test_aliased_callback_import_is_detected(tmp_path: Path) -> None:
@@ -89,6 +105,34 @@ def test_aliased_host_callback_module_call_is_detected(tmp_path: Path) -> None:
 
         def kernel(x):
             hcb.call(host_fn, x)
+            return x
+        """,
+    )
+    assert found == ("jax.experimental.host_callback.call",)
+
+
+def test_unaliased_dotted_debug_import_is_detected(tmp_path: Path) -> None:
+    found = _forbidden_in(
+        tmp_path,
+        """
+        import jax.debug
+
+        def kernel(x):
+            jax.debug.callback(host_fn, x)
+            return x
+        """,
+    )
+    assert found == ("jax.debug.callback",)
+
+
+def test_unaliased_dotted_host_callback_import_is_detected(tmp_path: Path) -> None:
+    found = _forbidden_in(
+        tmp_path,
+        """
+        import jax.experimental.host_callback
+
+        def kernel(x):
+            jax.experimental.host_callback.call(host_fn, x)
             return x
         """,
     )
@@ -159,6 +203,39 @@ def test_async_target_function_is_resolved_and_scanned(tmp_path: Path) -> None:
     assert found == ("jax.debug.print",)
 
 
+def test_nested_helper_callback_alias_is_detected(tmp_path: Path) -> None:
+    found = _forbidden_in(
+        tmp_path,
+        """
+        def kernel(x):
+            def helper(value):
+                from jax.debug import callback as cb
+                cb(host_fn, value)
+                return value
+
+            return helper(x)
+        """,
+    )
+    assert found == ("jax.debug.callback",)
+
+
+def test_same_module_helper_callback_is_detected(tmp_path: Path) -> None:
+    found = _forbidden_in(
+        tmp_path,
+        """
+        import jax
+
+        def helper(value):
+            jax.debug.callback(host_fn, value)
+            return value
+
+        def kernel(x):
+            return helper(x)
+        """,
+    )
+    assert found == ("jax.debug.callback",)
+
+
 # --- detection: true negatives (must NOT be flagged) ----------------------------
 
 
@@ -178,11 +255,11 @@ def test_callback_name_in_comment_is_not_detected(tmp_path: Path) -> None:
 def test_callback_name_in_docstring_is_not_detected(tmp_path: Path) -> None:
     found = _forbidden_in(
         tmp_path,
-        '''
+        """
         def kernel(x):
             "This kernel must not use jax.pure_callback."
             return x
-        ''',
+        """,
     )
     assert found == ()
 

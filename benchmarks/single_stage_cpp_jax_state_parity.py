@@ -1,4 +1,18 @@
-"""Produce same-state ``cpp_cpu``/JAX fixed-state parity artifacts."""
+"""Produce same-state ``cpp_cpu``/JAX fixed-state parity artifacts.
+
+This producer certifies a FIXED, canned reference fixture -- the bundled
+iota15 / mpol2 single-stage seed (``SMOKE_TEST_STAGE2_BS_PATH`` with
+``DEFAULT_SMOKE_MPOL`` / ``DEFAULT_SMOKE_NTOR`` / ``DEFAULT_SMOKE_NPHI`` /
+``DEFAULT_SMOKE_NTHETA`` / ``DEFAULT_IOTA_TARGET`` / ``DEFAULT_VOL_TARGET``).
+The real-reduced lane calls ``build_real_single_stage_init_fixture`` with NO
+seed override, so every fixture parameter intentionally defaults to that one
+bundled seed. This is NOT a user-supplied configuration parity: it does not,
+and by design must not, accept an arbitrary stage-2 path or runtime seed.
+The pin is deliberate -- a byte-reproducible parity certificate requires a
+single fixed input, so the certified hashes are stable across runs. The
+``reference_fixture`` block emitted in the artifact records exactly which
+pinned seed identity was certified.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +41,13 @@ from benchmarks.single_stage_dof_mapping_proof import (  # noqa: E402
     build_deterministic_coordinate_mapping_fixture,
 )
 from benchmarks.single_stage_smoke_fixture import (  # noqa: E402
+    DEFAULT_IOTA_TARGET,
+    DEFAULT_SMOKE_MPOL,
+    DEFAULT_SMOKE_NPHI,
+    DEFAULT_SMOKE_NTHETA,
+    DEFAULT_SMOKE_NTOR,
+    SMOKE_TEST_STAGE2_BS_PATH,
+    DEFAULT_VOL_TARGET,
     build_real_single_stage_init_fixture,
 )
 from benchmarks.single_stage_parity_matrix import (  # noqa: E402
@@ -121,6 +142,33 @@ SURFACE_GAMMA = np.asarray(
     ],
     dtype=np.float64,
 )
+
+
+def _reference_fixture_identity() -> dict[str, object]:
+    """Record the pinned, canned reference seed this artifact certifies.
+
+    The real-reduced lane builds its fixture from
+    ``build_real_single_stage_init_fixture`` with NO seed override, so these
+    bundled defaults are exactly what gets evaluated. Emitting them makes the
+    artifact self-documenting: it states precisely which fixed seed identity
+    produced the certified byte hashes, and that no user-supplied config was
+    involved. Imported from ``single_stage_smoke_fixture`` (SSOT) so this can
+    never drift from the fixture builder's actual defaults.
+    """
+    return {
+        "description": (
+            "canned bundled iota15/mpol2 single-stage seed; not a "
+            "user-supplied configuration; pinned for byte-reproducible parity"
+        ),
+        "stage2_bs_path": str(SMOKE_TEST_STAGE2_BS_PATH),
+        "mpol": int(DEFAULT_SMOKE_MPOL),
+        "ntor": int(DEFAULT_SMOKE_NTOR),
+        "nphi": int(DEFAULT_SMOKE_NPHI),
+        "ntheta": int(DEFAULT_SMOKE_NTHETA),
+        "iota_target": float(DEFAULT_IOTA_TARGET),
+        "vol_target": float(DEFAULT_VOL_TARGET),
+        "seed_override_supported": False,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -991,6 +1039,17 @@ def _build_deterministic_fixed_state_artifact(platform_request: str) -> dict[str
 
 
 def _build_real_reduced_fixed_state_artifact(platform_request: str) -> dict[str, object]:
+    """Build the real-reduced fixed-state artifact for the canned seed.
+
+    Despite the ``real_reduced`` name, this certifies a FIXED, canned
+    reference fixture -- the bundled iota15 / mpol2 single-stage seed -- not a
+    user-supplied configuration. ``build_real_single_stage_init_fixture`` is
+    called with NO seed override, so every fixture parameter (stage-2 path,
+    mpol, ntor, nphi, ntheta, iota, vol) intentionally defaults to that one
+    bundled seed. The pin is deliberate: a byte-reproducible parity hash
+    requires a single fixed input. The emitted ``reference_fixture`` block
+    records exactly which pinned seed identity was certified.
+    """
     cpu_fixture = build_real_single_stage_init_fixture(
         backend="cpu",
         optimizer_backend="scipy",
@@ -1039,6 +1098,7 @@ def _build_real_reduced_fixed_state_artifact(platform_request: str) -> dict[str,
     failures = _artifact_failures(lanes, comparisons)
     return {
         "schema_version": SCHEMA_VERSION,
+        "reference_fixture": _reference_fixture_identity(),
         "provenance": {
             "fixture_scope": REAL_REDUCED_FIXTURE_SCOPE,
             "platform_request": platform_request,
@@ -1063,6 +1123,16 @@ def build_fixed_state_artifact(
     platform_request: str,
     fixture_scope: str = REAL_REDUCED_FIXTURE_SCOPE,
 ) -> dict[str, object]:
+    """Build the fixed-state parity artifact for a canned reference fixture.
+
+    Both fixture scopes certify a FIXED, canned reference -- not a
+    user-supplied configuration. The default ``real_reduced`` scope pins the
+    bundled iota15 / mpol2 single-stage seed (see ``_reference_fixture_identity``
+    / the emitted ``reference_fixture`` block); the deterministic scope pins a
+    synthetic coordinate-mapping fixture. There is intentionally no path to
+    point this parity at an arbitrary stage-2 seed or runtime config: the pin
+    is what makes the certified byte hashes reproducible across runs.
+    """
     if fixture_scope == DETERMINISTIC_FIXTURE_SCOPE:
         return _build_deterministic_fixed_state_artifact(platform_request)
     return _build_real_reduced_fixed_state_artifact(platform_request)

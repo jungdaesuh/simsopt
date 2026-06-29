@@ -87,8 +87,8 @@ def test_explicit_skip_is_honored():
     assert policy == "skip", policy
 
 
-def test_explicit_skip_is_honored_for_scipy_jax_cpu_child():
-    """The default scipy-jax CPU child still has an ondevice Boozer solve."""
+def test_explicit_skip_is_honored_for_target_lane_cpu_child():
+    """The default target-lane CPU child still has an ondevice Boozer solve."""
     args = _parse(["--target-lane-boozer-newton-polish-policy", "skip"])
     policy = _resolve_target_lane_boozer_newton_polish_policy(
         backend="jax", platform="cpu", args=args

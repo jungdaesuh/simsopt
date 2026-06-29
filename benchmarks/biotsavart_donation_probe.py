@@ -32,7 +32,6 @@ from benchmarks.validation_ladder_common import (
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_PLASMA_SURF_FILENAME,
-    DEFAULT_STAGE2_BS_PATH,
     resolve_equilibrium_path,
 )
 
@@ -83,7 +82,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage2-bs-path",
         type=str,
-        default=str(DEFAULT_STAGE2_BS_PATH),
+        default=None,
         help="Path to the fixed Stage 2 seed biot_savart_opt.json fixture.",
     )
     parser.add_argument(
@@ -400,7 +399,7 @@ def build_biotsavart_donation_probe_payload(
     repeat: int,
     seed: int,
     fixture: str = "procedural",
-    stage2_bs_path: str | Path = DEFAULT_STAGE2_BS_PATH,
+    stage2_bs_path: str | Path | None = None,
     plasma_surf_filename: str = DEFAULT_PLASMA_SURF_FILENAME,
     equilibria_dir: str | Path = DEFAULT_EQUILIBRIA_DIR,
     equilibrium_path: str | Path | None = None,
@@ -413,6 +412,11 @@ def build_biotsavart_donation_probe_payload(
         tuning = simsopt_backend.get_field_kernel_tuning(mode)
         fixture_payload = {"kind": fixture}
         if fixture == "real-stage2":
+            if stage2_bs_path is None:
+                raise ValueError(
+                    "--fixture real-stage2 requires --stage2-bs-path "
+                    "(the Stage 2 seed biot_savart_opt.json fixture)."
+                )
             host_points, coil_spec, fixture_payload, input_bytes = (
                 _build_real_stage2_grouped_fixture(
                     stage2_bs_path=stage2_bs_path,

@@ -64,6 +64,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 import platform
 from pathlib import Path
 import resource
@@ -86,8 +87,8 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
     DEFAULT_PLASMA_SURF_FILENAME,
-    DEFAULT_STAGE2_BS_PATH,
     DEFAULT_VOL_TARGET,
+    SMOKE_TEST_STAGE2_BS_PATH,
     build_real_single_stage_init_fixture,
 )
 from benchmarks.single_stage_objective_eval import (
@@ -134,6 +135,10 @@ _DEFAULT_RESOLUTION_GRID = {
     10: {"ntor": 10, "nphi": 127, "ntheta": 32},
 }
 _DEFAULT_MPOL_LIST = (6, 8, 10)
+_COMPILE_ENVIRONMENT_KEYS = (
+    "JAX_LOG_COMPILES",
+    "XLA_FLAGS",
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,10 @@ def _device_summary() -> list[dict[str, int | str]]:
     ]
 
 
+def _compile_environment_metadata() -> dict[str, str | None]:
+    return {key: os.environ.get(key) for key in _COMPILE_ENVIRONMENT_KEYS}
+
+
 def _resolutions(args: argparse.Namespace) -> list[_Resolution]:
     resolutions: list[_Resolution] = []
     for mpol in args.mpol_list:
@@ -186,9 +195,7 @@ def _resolutions(args: argparse.Namespace) -> list[_Resolution]:
                 mpol=int(mpol),
                 ntor=int(args.ntor if args.ntor is not None else base["ntor"]),
                 nphi=int(args.nphi if args.nphi is not None else base["nphi"]),
-                ntheta=int(
-                    args.ntheta if args.ntheta is not None else base["ntheta"]
-                ),
+                ntheta=int(args.ntheta if args.ntheta is not None else base["ntheta"]),
             )
         )
     return resolutions
@@ -234,13 +241,9 @@ def _build_solved_boozer_fixture(
         and int(seed_resolved["surface"].ntor) == resolution.ntor
     )
     if use_resolved:
-        surface_dofs_override = np.asarray(
-            seed_resolved["surface"].dofs, dtype=float
-        )
+        surface_dofs_override = np.asarray(seed_resolved["surface"].dofs, dtype=float)
         iota_override = float(seed_resolved["iota"])
-        G_override = (
-            None if seed_resolved["G"] is None else float(seed_resolved["G"])
-        )
+        G_override = None if seed_resolved["G"] is None else float(seed_resolved["G"])
         seed_state = "resolved-warm-start"
     else:
         surface_dofs_override = None
@@ -339,9 +342,7 @@ def _build_kernels(
     booz_jax = fixture["boozer_surface"]
     bs_jax = fixture["bs"]
     iota_target = fixture["iota_target"]
-    outer_objective_config = _outer_objective_config(
-        fixture, num_tf_coils=num_tf_coils
-    )
+    outer_objective_config = _outer_objective_config(fixture, num_tf_coils=num_tf_coils)
 
     state = traceable._build_traceable_objective_state(
         booz_jax,
@@ -367,9 +368,11 @@ def _build_kernels(
 
     # K2: value + adjoint gradient from an already-solved state.  The builder returns
     # the ``jax.jit``-wrapped kernel directly, so it is lowerable as-is.
-    k2_value_and_grad = traceable._build_traceable_solved_state_value_and_grad_from_state(
-        booz_jax,
-        state,
+    k2_value_and_grad = (
+        traceable._build_traceable_solved_state_value_and_grad_from_state(
+            booz_jax,
+            state,
+        )
     )
 
     # K0 (fused): the scipy-jax FULLGRAPH kernel -- forward solve + value + adjoint
@@ -531,13 +534,13 @@ def _print_summary_table(results_by_mpol: dict[int, dict[str, object]]) -> None:
         "K2_solved_state_value_and_grad_for": "K2",
         "K0_fused_value_and_grad_for": "K0fused",
     }
-    print("\n## Compile-breadth (construct=lower wall, compile=XLA wall, hlo=op count)\n")
+    print(
+        "\n## Compile-breadth (construct=lower wall, compile=XLA wall, hlo=op count)\n"
+    )
     header = ["mpol", "grid (ntor/nphi/ntheta)", "seed"]
     for label in kernel_labels:
         tag = short[label]
-        header.extend(
-            [f"{tag} construct_s", f"{tag} compile_s", f"{tag} hlo_ops"]
-        )
+        header.extend([f"{tag} construct_s", f"{tag} compile_s", f"{tag} hlo_ops"])
     print("| " + " | ".join(header) + " |")
     print("|" + "|".join(["---"] * len(header)) + "|")
     for mpol in sorted(results_by_mpol):
@@ -561,7 +564,90 @@ def _print_summary_table(results_by_mpol: dict[int, dict[str, object]]) -> None:
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temp_path.replace(path)
+
+
+def _resolution_metadata(resolution: _Resolution) -> dict[str, int]:
+    return {
+        "mpol": resolution.mpol,
+        "ntor": resolution.ntor,
+        "nphi": resolution.nphi,
+        "ntheta": resolution.ntheta,
+    }
+
+
+def _case_metadata(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "mpol_list": list(args.mpol_list),
+        "warm_start_run_dir": args.warm_start_run_dir,
+        "stage2_bs_path": args.stage2_bs_path,
+        "plasma_surf_filename": args.plasma_surf_filename,
+        "equilibria_dir": args.equilibria_dir,
+        "vol_target": float(args.vol_target),
+        "iota_target": float(args.iota_target),
+        "num_tf_coils": int(args.num_tf_coils),
+    }
+
+
+def _compile_breadth_payload(
+    args: argparse.Namespace,
+    results_by_mpol: dict[int, dict[str, object]],
+    *,
+    status: str,
+    active_resolution: _Resolution | None,
+    failure: dict[str, str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "command": [sys.executable, *sys.argv],
+        "jax_version": jax.__version__,
+        "jax_backend": jax.default_backend(),
+        "requested_platform": REQUESTED_PLATFORM,
+        "platform": platform.platform(),
+        "devices": _device_summary(),
+        "compilation_cache_policy": current_compilation_cache_metadata(),
+        "compilation_cache_policy_at_import": _CACHE_POLICY_METADATA,
+        "compile_environment": _compile_environment_metadata(),
+        "child_cuda_memory_env": CHILD_CUDA_MEMORY_ENV,
+        "case": _case_metadata(args),
+        "active_resolution": (
+            None
+            if active_resolution is None
+            else _resolution_metadata(active_resolution)
+        ),
+        "completed_mpol": sorted(results_by_mpol),
+        "results_by_mpol": {
+            str(mpol): record for mpol, record in results_by_mpol.items()
+        },
+    }
+    if failure is not None:
+        payload["failure"] = failure
+    return payload
+
+
+def _write_compile_breadth_json(
+    path: Path,
+    args: argparse.Namespace,
+    results_by_mpol: dict[int, dict[str, object]],
+    *,
+    status: str,
+    active_resolution: _Resolution | None,
+    failure: dict[str, str] | None = None,
+) -> None:
+    _write_json(
+        path,
+        _compile_breadth_payload(
+            args,
+            results_by_mpol,
+            status=status,
+            active_resolution=active_resolution,
+            failure=failure,
+        ),
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -609,7 +695,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-bs-path",
-        default=str(DEFAULT_STAGE2_BS_PATH),
+        default=str(SMOKE_TEST_STAGE2_BS_PATH),
         help="Path to the Stage 2 seed biot_savart_opt.json fixture.",
     )
     parser.add_argument(
@@ -652,15 +738,37 @@ def main() -> None:
     args = _parse_args()
     resolutions = _resolutions(args)
     seed_resolved = _seed_resolved_surface(args)
+    output_path = Path(args.output_json)
 
     results_by_mpol: dict[int, dict[str, object]] = {}
-    for resolution in resolutions:
+    for resolution_index, resolution in enumerate(resolutions):
+        _write_compile_breadth_json(
+            output_path,
+            args,
+            results_by_mpol,
+            status="running",
+            active_resolution=resolution,
+        )
         print(
             f"[compile-breadth] mpol={resolution.mpol} "
             f"ntor={resolution.ntor} nphi={resolution.nphi} "
             f"ntheta={resolution.ntheta}: building solved fixture + kernels"
         )
-        record = _probe_resolution(args, resolution, seed_resolved)
+        try:
+            record = _probe_resolution(args, resolution, seed_resolved)
+        except Exception as exc:
+            _write_compile_breadth_json(
+                output_path,
+                args,
+                results_by_mpol,
+                status="failed",
+                active_resolution=resolution,
+                failure={
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            raise
         results_by_mpol[resolution.mpol] = record
         for label, kernel in record["kernels"].items():
             print(
@@ -669,33 +777,14 @@ def main() -> None:
                 f"compile={kernel['compile_wall_s']:.2f}s "
                 f"hlo_ops={kernel['hlo_op_count']}"
             )
+        _write_compile_breadth_json(
+            output_path,
+            args,
+            results_by_mpol,
+            status="passed" if resolution_index == len(resolutions) - 1 else "partial",
+            active_resolution=None,
+        )
 
-    payload = {
-        "schema_version": 1,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "command": [sys.executable, *sys.argv],
-        "jax_version": jax.__version__,
-        "jax_backend": jax.default_backend(),
-        "requested_platform": REQUESTED_PLATFORM,
-        "platform": platform.platform(),
-        "devices": _device_summary(),
-        "compilation_cache_policy": current_compilation_cache_metadata(),
-        "compilation_cache_policy_at_import": _CACHE_POLICY_METADATA,
-        "child_cuda_memory_env": CHILD_CUDA_MEMORY_ENV,
-        "case": {
-            "mpol_list": list(args.mpol_list),
-            "warm_start_run_dir": args.warm_start_run_dir,
-            "stage2_bs_path": args.stage2_bs_path,
-            "plasma_surf_filename": args.plasma_surf_filename,
-            "equilibria_dir": args.equilibria_dir,
-            "vol_target": float(args.vol_target),
-            "iota_target": float(args.iota_target),
-            "num_tf_coils": int(args.num_tf_coils),
-        },
-        "results_by_mpol": {str(mpol): record for mpol, record in results_by_mpol.items()},
-    }
-    output_path = Path(args.output_json)
-    _write_json(output_path, payload)
     _print_summary_table(results_by_mpol)
     print(json.dumps({"output_json": str(output_path)}, sort_keys=True))
 
@@ -712,7 +801,7 @@ if __name__ == "__main__":
 #   TS=$(date +%s)
 #   setsid env -u OPTIMIZER_BACKEND \
 #     LD_LIBRARY_PATH="$(ls -d $SP/nvidia/*/lib|paste -sd: -)" \
-#     JAX_ENABLE_X64=1 JAX_PLATFORMS=cuda,cpu \
+#     JAX_ENABLE_X64=1 JAX_PLATFORMS=cuda,cpu JAX_LOG_COMPILES=1 \
 #     SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_JAX_PLATFORM=cuda \
 #     SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled \
 #     JAX_COMPILATION_CACHE_DIR=/workspace/cbp_cache_$TS \

@@ -62,7 +62,7 @@ def resolve_single_stage_jax_boozer_optimizer_backend(
         raise ValueError(
             "Single-stage JAX backend with optimizer_backend='scipy' is "
             "CPU/reference-only; use optimizer_backend='ondevice', "
-            "optimizer_backend='scipy-jax', "
+            "optimizer_backend='scipy-jax-decomposed', "
             "optimizer_backend='host-jax', "
             "optimizer_backend='scipy-jax-fullgraph', "
             "optimizer_backend='optax-lbfgs', or "

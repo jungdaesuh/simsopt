@@ -25,8 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.single_stage_smoke_defaults import (
-    DEFAULT_STAGE2_BS_PATH,
-    DEFAULT_STAGE2_RUNTIME_SPEC_PATH,
+    SMOKE_TEST_STAGE2_BS_PATH,
+    SMOKE_TEST_STAGE2_RUNTIME_SPEC_PATH,
 )
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_IOTA_TARGET,
@@ -62,7 +62,7 @@ class LowresCudaPrepConfig:
     single_stage_outer_maxiter: int
     candidate_limit: int
     warm_start_run_dir: Path | None = None
-    jax_runtime_seed_source: Path = DEFAULT_STAGE2_RUNTIME_SPEC_PATH
+    jax_runtime_seed_source: Path = SMOKE_TEST_STAGE2_RUNTIME_SPEC_PATH
 
 
 def _repo_path(path: Path) -> str:
@@ -845,12 +845,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-bs-path",
-        default=str(DEFAULT_STAGE2_BS_PATH),
+        default=str(SMOKE_TEST_STAGE2_BS_PATH),
         help="Stage 2 biot_savart_opt.json seed with adjacent results.json.",
     )
     parser.add_argument(
         "--jax-runtime-seed-source",
-        default=str(DEFAULT_STAGE2_RUNTIME_SPEC_PATH),
+        default=str(SMOKE_TEST_STAGE2_RUNTIME_SPEC_PATH),
         help=(
             "Immutable single-stage JAX runtime seed spec to reproject to the "
             "requested low-resolution rung."

@@ -7,6 +7,9 @@ from typing import Mapping, TypedDict, Union
 
 SHORT_RUN_SMOKE_MAXITER = 20
 TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = "tier3_single_stage_outer_loop"
+TIER4_ADJOINT_FD_MIN_MPOL = 8
+TIER4_ADJOINT_FD_EPS_WINDOW = (0.0, 5.0e-3)
+TIER4_ADJOINT_FD_EPS_LADDER = (7.5e-4, 3.75e-4, 1.875e-4, 9.375e-5)
 
 ParityToleranceValue = Union[float, bool, None]
 
@@ -54,6 +57,8 @@ OPTIMIZER_DRIFT_TOLERANCES: dict[str, dict[str, float | None]] = {
         "fixed_surface_fd_abs_tol": 1e-8,
         "full_resolve_fd_rel_tol": 1e-2,
         "full_resolve_fd_abs_tol": 1e-8,
+        "traceable_single_stage_fd_rel_tol": 1e-2,
+        "traceable_single_stage_fd_abs_tol": 1e-6,
     },
     "optimizer_state_parity": {
         "x_rtol": 1e-6,

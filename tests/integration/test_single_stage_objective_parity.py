@@ -53,6 +53,9 @@ from benchmarks.single_stage_objective_eval import (  # noqa: E402
     build_lane_objective,
     build_matched_same_state_fixture_pair,
 )
+from benchmarks.single_stage_smoke_fixture import (  # noqa: E402
+    SMOKE_TEST_STAGE2_BS_PATH,
+)
 from benchmarks.validation_ladder_contract import (  # noqa: E402
     parity_ladder_tolerances,
 )
@@ -108,7 +111,9 @@ class TestSingleStageObjectiveCrossBoundaryParity:
     """Native C++ objective vs JAX objective at one matched coil-DOF point."""
 
     def test_value_and_gradient_match_native_vs_jax(self):
-        cpu_fixture, jax_fixture = build_matched_same_state_fixture_pair()
+        cpu_fixture, jax_fixture = build_matched_same_state_fixture_pair(
+            stage2_bs_path=SMOKE_TEST_STAGE2_BS_PATH,
+        )
 
         # Sanity: matched-state fixture really did converge both Boozer solves and
         # the JAX lane ran the on-device LS solver (not a CPU re-solve).

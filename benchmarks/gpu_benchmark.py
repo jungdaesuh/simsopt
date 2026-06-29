@@ -15,6 +15,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from benchmarks.benchmark_timing_labels import (
+    MIXED_PARITY_REFERENCE,
+    benchmark_timing_label,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK_DIR = REPO_ROOT / "benchmarks"
@@ -121,6 +126,23 @@ def main() -> None:
     manifest = _load_manifest(manifest_path)
     artifacts_dir = Path(args.artifacts_dir).resolve()
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    timing_label = benchmark_timing_label(
+        MIXED_PARITY_REFERENCE,
+        includes_gpu_target=args.platform == "cuda",
+        includes_cpu_reference=True,
+        supports_performance_headline=False,
+        headline_timing_classification=None,
+        note=(
+            "gpu_benchmark.py delegates to Tier 5, grouped-adjoint, and report "
+            "probes; use named Tier 5 performance-contract metrics for "
+            "headline timing."
+        ),
+    )
+    (artifacts_dir / "benchmark_timing_label.json").write_text(
+        json.dumps(timing_label, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"timing classification: {timing_label['timing_classification']}")
 
     benchmark_flag = ["--benchmark-mode"] if args.benchmark_mode else []
 

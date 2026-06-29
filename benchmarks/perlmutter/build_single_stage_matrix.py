@@ -47,6 +47,11 @@ import argparse
 import json
 from pathlib import Path
 
+from benchmarks.benchmark_timing_labels import (
+    MIXED_PARITY_REFERENCE,
+    benchmark_timing_label,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 SEED = "benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json"
@@ -62,6 +67,12 @@ BUDGETS = {
     "target_lane_boozer_newton_maxiter": 50,
     "target_lane_boozer_newton_polish_policy": "run",
 }
+
+MIXED_PARITY_TIMING_NOTE = (
+    "single_stage_init_parity.py co-produces target-lane and cpp/CPU "
+    "reference timings; do not use the whole job wall time as a clean GPU "
+    "headline."
+)
 
 # Formulation dim is fixed by the optimizer backend (verified against the
 # contract predicates in single_stage_banana_example.py and the valid-backend
@@ -130,8 +141,17 @@ def build_cells() -> list[dict]:
             for tier in TIERS:
                 backend_slug = fdef["optimizer_backend"].replace("-", "")
                 cell_id = f"ss_{dim}_{backend_slug}_{platform}_{tier}"
+                timing_label = benchmark_timing_label(
+                    MIXED_PARITY_REFERENCE,
+                    includes_gpu_target=platform == "gpu",
+                    includes_cpu_reference=True,
+                    supports_performance_headline=False,
+                    headline_timing_classification=None,
+                    note=MIXED_PARITY_TIMING_NOTE,
+                )
                 cells.append({
                     "id": cell_id,
+                    **timing_label,
                     "formulation_dim": dim,
                     "formulation": fdef["description"],
                     "optimizer_backend": fdef["optimizer_backend"],
@@ -161,6 +181,8 @@ def build_cells() -> list[dict]:
                         "PROD_BOOZER_BFGS_MAXITER": str(BUDGETS["target_lane_boozer_bfgs_maxiter"]),
                         "PROD_NEWTON_MAXITER": str(BUDGETS["target_lane_boozer_newton_maxiter"]),
                         "PROD_NEWTON_POLISH_POLICY": BUDGETS["target_lane_boozer_newton_polish_policy"],
+                        "PROD_TIMING_CLASSIFICATION": timing_label["timing_classification"],
+                        "PROD_SUPPORTS_PERFORMANCE_HEADLINE": "0",
                         "PROD_MPOL": str(TIERS[tier]["mpol"]),
                         "PROD_NTOR": str(TIERS[tier]["ntor"]),
                         "PROD_NPHI": str(TIERS[tier]["nphi"]),
@@ -209,6 +231,10 @@ def build_manifest(source_sha: str) -> dict:
             "passed=true -- CPU needed the boozer-backend fix above; GPU is "
             "compile-bound). A mpol=2 smoke must show rc=0/passed=true at the "
             "source SHA before any mpol=10 fullgraph cell is submitted.",
+            "Timing label: all matrix cells are mixed-parity-reference because "
+            "the parity harness co-produces the JAX target lane and the cpp/CPU "
+            "reference. Whole-job wall time is not headline-eligible clean GPU "
+            "timing.",
         ],
         "tiers": TIERS,
         "cells": build_cells(),
@@ -246,17 +272,21 @@ def render_markdown(manifest: dict) -> str:
         "- The cpp/CPU reference is always 51; the 11-dim `scipy-jax` lane is "
         "compared against a dim-mismatched 51 reference, while the 51-dim "
         "`scipy-jax-fullgraph` lane is dim-matched.",
+        "- Timing classification: `mixed-parity-reference`; whole-job wall time "
+        "is not a clean GPU headline.",
         "",
         "## Cells",
         "",
-        "| id | dim | backend | inner-boozer | platform | tier | status | ref dim match | runnable now |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| id | dim | backend | timing | headline? | inner-boozer | platform | tier | status | ref dim match | runnable now |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for c in manifest["cells"]:
         runnable = "yes" if manifest["tiers"][c["tier"]]["runnable_now"] else "no (donor)"
         inner = c["inner_boozer_optimizer_backend"] or "default"
         lines.append(
             f"| `{c['id']}` | {c['formulation_dim']} | {c['optimizer_backend']} | "
+            f"{c['timing_classification']} | "
+            f"{'yes' if c['supports_performance_headline'] else 'no'} | "
             f"{inner} | {c['platform']} | {c['tier']} | {c['status']} | "
             f"{'yes' if c['dim_matched_reference'] else 'NO (51 vs 11)'} | {runnable} |"
         )

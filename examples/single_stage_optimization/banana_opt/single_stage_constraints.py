@@ -84,31 +84,32 @@ def smooth_min_curve_curve_signed_constraint(
     temperature,
     objective_optimizable,
 ):
-    pair_blocks = []
+    gammas = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
     hard_min = np.inf
-    for i, curve_i in enumerate(curves):
-        gamma_i = np.asarray(curve_i.gamma(), dtype=float)
+    for i, gamma_i in enumerate(gammas):
         for j in range(i):
-            curve_j = curves[j]
-            gamma_j = np.asarray(curve_j.gamma(), dtype=float)
+            gamma_j = gammas[j]
             diffs = gamma_i[:, None, :] - gamma_j[None, :, :]
             dists = np.linalg.norm(diffs, axis=2)
             hard_min = min(hard_min, float(np.min(dists)))
-            pair_blocks.append((i, j, diffs, dists))
 
-    if not pair_blocks:
+    if len(gammas) < 2:
         return float(minimum_distance), zero_gradient_like(objective_optimizable.x), 0.0
 
     selected_distances = []
     selected_entries = []
-    for i, j, diffs, dists in pair_blocks:
-        rows, cols = _selected_distance_rows_and_cols(
-            dists,
-            hard_min=hard_min,
-            temperature=temperature,
-        )
-        selected_distances.append(dists[rows, cols])
-        selected_entries.append((i, j, rows, cols, diffs[rows, cols], dists[rows, cols]))
+    for i, gamma_i in enumerate(gammas):
+        for j in range(i):
+            gamma_j = gammas[j]
+            diffs = gamma_i[:, None, :] - gamma_j[None, :, :]
+            dists = np.linalg.norm(diffs, axis=2)
+            rows, cols = _selected_distance_rows_and_cols(
+                dists,
+                hard_min=hard_min,
+                temperature=temperature,
+            )
+            selected_distances.append(dists[rows, cols])
+            selected_entries.append((i, j, rows, cols, diffs[rows, cols], dists[rows, cols]))
 
     flat_distances = np.concatenate(selected_distances)
     smooth_min, flat_weights = smoothmin_selected(
@@ -145,17 +146,17 @@ def smooth_min_curve_surface_signed_constraint(
     surface_gamma = np.asarray(surface.gamma(), dtype=float)
     flat_surface = surface_gamma.reshape((-1, 3))
     hard_min = np.inf
-    curve_blocks = []
-    for curve_index, curve in enumerate(curves):
-        curve_gamma = np.asarray(curve.gamma(), dtype=float)
+    curve_gammas = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    for curve_gamma in curve_gammas:
         diffs = curve_gamma[:, None, :] - flat_surface[None, :, :]
         dists = np.linalg.norm(diffs, axis=2)
         hard_min = min(hard_min, float(np.min(dists)))
-        curve_blocks.append((curve_index, diffs, dists))
 
     selected_distances = []
     selected_entries = []
-    for curve_index, diffs, dists in curve_blocks:
+    for curve_index, curve_gamma in enumerate(curve_gammas):
+        diffs = curve_gamma[:, None, :] - flat_surface[None, :, :]
+        dists = np.linalg.norm(diffs, axis=2)
         rows, cols = _selected_distance_rows_and_cols(
             dists,
             hard_min=hard_min,

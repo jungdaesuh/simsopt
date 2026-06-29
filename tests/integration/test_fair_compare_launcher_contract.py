@@ -79,3 +79,11 @@ def test_records_compile_diagnostics_by_default_identically_on_both_lanes():
     # (a per-lane divergence here would make the comparison unfair).
     assert "compile_diag_args=(--record-jax-compile-diagnostics)" in script
     assert '"${compile_diag_args[@]}"' in script
+
+
+def test_launcher_records_mixed_parity_timing_label():
+    script = _script()
+    assert "FAIR_TIMING_CLASSIFICATION" in script
+    assert "mixed-parity-reference" in script
+    assert "FAIR_SUPPORTS_PERFORMANCE_HEADLINE" in script
+    assert "benchmark_timing_label.json" in script

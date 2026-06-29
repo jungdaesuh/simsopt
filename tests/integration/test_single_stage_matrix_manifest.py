@@ -16,11 +16,15 @@ pre-migration 24-cell ondevice generator.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from benchmarks.benchmark_timing_labels import MIXED_PARITY_REFERENCE
 from benchmarks.perlmutter.build_single_stage_matrix import build_manifest
 from benchmarks.perlmutter.submit_single_stage_matrix import sbatch_command, select
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _export_kv(cmd: list[str]) -> dict[str, str]:
@@ -79,12 +83,45 @@ def test_every_cell_satisfies_submit_consumer_schema():
     manifest = build_manifest("testsha")
     # Exactly the fields submit_single_stage_matrix.py reads off each cell.
     required = {"id", "status", "tier", "formulation_dim", "platform",
-                "env", "account", "sbatch_extra", "launcher"}
+                "env", "account", "sbatch_extra", "launcher",
+                "timing_classification", "supports_performance_headline"}
     for cell in manifest["cells"]:
         assert required <= set(cell), required - set(cell)
     # The consumer reads the warm-start requirement off the tier, not the cell.
     assert manifest["tiers"]["mpol2"]["warm_start"] is None
     assert manifest["tiers"]["mpol10"]["warm_start"] is not None
+
+
+def test_matrix_cells_are_labeled_mixed_parity_reference_not_headline():
+    manifest = build_manifest("testsha")
+    assert "mixed-parity-reference" in " ".join(manifest["notes"])
+    for cell in manifest["cells"]:
+        assert cell["timing_classification"] == MIXED_PARITY_REFERENCE
+        assert cell["timing_includes_gpu_target"] is (cell["platform"] == "gpu")
+        assert cell["timing_includes_cpu_reference"] is True
+        assert cell["supports_performance_headline"] is False
+        assert cell["headline_timing_classification"] is None
+        assert cell["env"]["PROD_TIMING_CLASSIFICATION"] == MIXED_PARITY_REFERENCE
+        assert cell["env"]["PROD_SUPPORTS_PERFORMANCE_HEADLINE"] == "0"
+
+
+def test_production_launchers_default_to_decomposed_backend():
+    for launcher_name in (
+        "single_stage_production_cpu.slurm",
+        "single_stage_production_gpu.slurm",
+    ):
+        launcher = (
+            REPO_ROOT / "benchmarks" / "perlmutter" / launcher_name
+        ).read_text(encoding="utf-8")
+        assert (
+            'PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-scipy-jax-decomposed}"'
+            in launcher
+        )
+        assert (
+            'PROD_TIMING_CLASSIFICATION="${PROD_TIMING_CLASSIFICATION:-mixed-parity-reference}"'
+            in launcher
+        )
+        assert "benchmark_timing_label.json" in launcher
 
 
 def test_submit_emits_fullgraph_backend_without_ls_override():
@@ -95,6 +132,8 @@ def test_submit_emits_fullgraph_backend_without_ls_override():
                          run_root_base="/tmp/runs", warm_start=None)
     kv = _export_kv(cmd)
     assert kv["PROD_OPTIMIZER_BACKEND"] == "scipy-jax-fullgraph"
+    assert kv["PROD_TIMING_CLASSIFICATION"] == MIXED_PARITY_REFERENCE
+    assert kv["PROD_SUPPORTS_PERFORMANCE_HEADLINE"] == "0"
     # Empty LS algorithm is dropped from the export -> child uses quasi-newton.
     assert "PROD_BOOZER_LS_ALGORITHM" not in kv
     assert kv["PROD_MPOL"] == "2"

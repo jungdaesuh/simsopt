@@ -12,6 +12,10 @@ CONCRETE_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
 TARGET_SCIPY_CONTROL_OPTIMIZER_BACKENDS = frozenset(
     {"scipy-jax", "scipy-jax-decomposed", "scipy-jax-fullgraph"}
 )
+SINGLE_STAGE_DEPRECATED_OPTIMIZER_BACKENDS = frozenset({"scipy-jax"})
+_SINGLE_STAGE_OPTIMIZER_BACKEND_REPLACEMENTS = {
+    "scipy-jax": "scipy-jax-decomposed",
+}
 HOST_JAX_OUTER_OPTIMIZER_BACKEND = "host-jax"
 TARGET_PUBLIC_LBFGS_OPTIMIZER_BACKENDS = frozenset({"optax-lbfgs", "optimistix-lbfgs"})
 TARGET_OUTER_OPTIMIZER_BACKENDS = (
@@ -62,3 +66,7 @@ OUTER_OPTIMIZER_BACKEND_MESSAGE = render_invalid_optimizer_backend_message("oute
 RESOLVABLE_OPTIMIZER_BACKEND_MESSAGE = render_invalid_optimizer_backend_message(
     "resolvable"
 )
+
+
+def single_stage_optimizer_backend_replacement(optimizer_backend: str) -> str | None:
+    return _SINGLE_STAGE_OPTIMIZER_BACKEND_REPLACEMENTS.get(optimizer_backend)
