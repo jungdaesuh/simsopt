@@ -12,7 +12,7 @@ from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier
 from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
-from simsopt.geo.orientedcurve import rotate_pure
+from simsopt.geo.orientedcurve import OrientedCurveXYZFourier, rotate_pure
 from simsopt.geo import SurfaceRZFourier, CurveCWSFourier
 from simsopt.geo.curve import RotatedCurve, curves_to_vtk
 from simsopt.geo import parameters
@@ -248,6 +248,79 @@ class Testing(unittest.TestCase):
             expected,
             atol=1e-14,
         )
+
+    def test_jaxcurve_internal_calls_use_local_full_x(self):
+        quadpoints = np.linspace(0, 1, 8, endpoint=False)
+        curves_and_dofs = [
+            (
+                JaxCurveXYZFourier(quadpoints, 2),
+                np.array([
+                    0.0, 0.0, 1.0, 0.10, -0.05,
+                    0.0, 1.0, 0.0, -0.07, 0.04,
+                    0.0, 0.0, 0.2, 0.03, -0.02,
+                ]),
+            ),
+            (
+                OrientedCurveXYZFourier(quadpoints, 2),
+                np.array([
+                    0.10, -0.20, 0.30,
+                    0.05, -0.04, 0.03,
+                    0.0, 1.0, 0.10, -0.05,
+                    1.0, 0.0, -0.07, 0.04,
+                    0.0, 0.2, 0.03, -0.02,
+                ]),
+            ),
+        ]
+
+        for curve, dofs in curves_and_dofs:
+            with self.subTest(curvetype=type(curve).__name__):
+                curve.x = dofs
+                gamma_v = np.linspace(0.2, 1.3, curve.gamma().size).reshape(curve.gamma().shape)
+                gammadash_v = np.linspace(0.3, 1.4, curve.gammadash().size).reshape(curve.gammadash().shape)
+                gammadashdash_v = np.linspace(0.4, 1.5, curve.gammadashdash().size).reshape(curve.gammadashdash().shape)
+                gammadashdashdash_v = np.linspace(0.5, 1.6, curve.gammadashdashdash().size).reshape(curve.gammadashdashdash().shape)
+                kappa_v = np.linspace(0.6, 1.7, curve.kappa().size)
+                torsion_v = np.linspace(0.7, 1.8, curve.torsion().size)
+
+                expected_gamma = curve.gamma().copy()
+                expected_dgamma = curve.dgamma_by_dcoeff().copy()
+                expected_dgamma_vjp = curve.dgamma_by_dcoeff_vjp(gamma_v)(curve).copy()
+                expected_gammadash = curve.gammadash().copy()
+                expected_dgammadash = curve.dgammadash_by_dcoeff().copy()
+                expected_dgammadash_vjp = curve.dgammadash_by_dcoeff_vjp(gammadash_v)(curve).copy()
+                expected_gammadashdash = curve.gammadashdash().copy()
+                expected_dgammadashdash = curve.dgammadashdash_by_dcoeff().copy()
+                expected_dgammadashdash_vjp = curve.dgammadashdash_by_dcoeff_vjp(gammadashdash_v)(curve).copy()
+                expected_gammadashdashdash = curve.gammadashdashdash().copy()
+                expected_dgammadashdashdash = curve.dgammadashdashdash_by_dcoeff().copy()
+                expected_dgammadashdashdash_vjp = curve.dgammadashdashdash_by_dcoeff_vjp(gammadashdashdash_v)(curve).copy()
+                expected_dkappa_vjp = curve.dkappa_by_dcoeff_vjp(kappa_v)(curve).copy()
+                expected_dtorsion_vjp = curve.dtorsion_by_dcoeff_vjp(torsion_v)(curve).copy()
+
+                def fail_get_dofs():
+                    raise AssertionError("JaxCurve internal kernels must use local_full_x")
+
+                curve.get_dofs = fail_get_dofs
+                curve.x = dofs.copy()
+
+                np.testing.assert_allclose(curve.gamma(), expected_gamma, atol=1e-14)
+                np.testing.assert_allclose(curve.dgamma_by_dcoeff(), expected_dgamma, atol=1e-14)
+                np.testing.assert_allclose(curve.dgamma_by_dcoeff_vjp(gamma_v)(curve), expected_dgamma_vjp, atol=1e-14)
+                np.testing.assert_allclose(curve.gammadash(), expected_gammadash, atol=1e-14)
+                np.testing.assert_allclose(curve.dgammadash_by_dcoeff(), expected_dgammadash, atol=1e-14)
+                np.testing.assert_allclose(curve.dgammadash_by_dcoeff_vjp(gammadash_v)(curve), expected_dgammadash_vjp, atol=1e-14)
+                np.testing.assert_allclose(curve.gammadashdash(), expected_gammadashdash, atol=1e-14)
+                np.testing.assert_allclose(curve.dgammadashdash_by_dcoeff(), expected_dgammadashdash, atol=1e-14)
+                np.testing.assert_allclose(curve.dgammadashdash_by_dcoeff_vjp(gammadashdash_v)(curve), expected_dgammadashdash_vjp, atol=1e-14)
+                np.testing.assert_allclose(curve.gammadashdashdash(), expected_gammadashdashdash, atol=1e-14)
+                np.testing.assert_allclose(curve.dgammadashdashdash_by_dcoeff(), expected_dgammadashdashdash, atol=1e-14)
+                np.testing.assert_allclose(
+                    curve.dgammadashdashdash_by_dcoeff_vjp(gammadashdashdash_v)(curve),
+                    expected_dgammadashdashdash_vjp,
+                    atol=1e-14,
+                )
+                np.testing.assert_allclose(curve.dkappa_by_dcoeff_vjp(kappa_v)(curve), expected_dkappa_vjp, atol=1e-14)
+                np.testing.assert_allclose(curve.dtorsion_by_dcoeff_vjp(torsion_v)(curve), expected_dtorsion_vjp, atol=1e-14)
 
     def test_curvexyzsymmetries_raisesexception(self):
         # test ensures that an exception is raised when you try and create a curvexyzfouriersymmetries

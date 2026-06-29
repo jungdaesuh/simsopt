@@ -328,8 +328,10 @@ unpack the tuple in `dJ()`.
    - [ ] Assemble the derivative tree once instead of per-coil build + N−1 dict
          merges (`:87-90, 178-181`).
 2. `geo` array-op / allocation micro (P5).
-   - [ ] `curvexyzfourier.py:240-244` — avoid `np.concatenate` dof rebuild per
-         gamma/derivative call (cache or assign in place).
+   - [x] `curvexyzfourier.py:240-244` — avoid `np.concatenate` dof rebuild per
+         gamma/derivative call by switching the shared `JaxCurve` internal JAX
+         kernels to `local_full_x`. Public `get_dofs()` copy/alias behavior stays
+         unchanged, and the same internal fast path covers `OrientedCurveXYZFourier`.
    - [x] `orientedcurve.py:56` — `rotate_pure` returned
          `v @ Myaw @ Mpitch @ Mroll` (left-assoc ⇒ three `(N,3)@(3,3)` products);
          the current continuation precombines one 3×3 rotation and does a single
@@ -450,7 +452,11 @@ unpack the tuple in `dJ()`.
   matvecs. The current continuation also precombines
   `orientedcurve.rotate_pure`'s yaw/pitch/roll matrices before multiplying the
   point cloud, and replaces `surface.mean_cross_sectional_area`'s batched
-  structured-2x2 `det`/`inv` allocation with analytic entries. The framed-curve
+  structured-2x2 `det`/`inv` allocation with analytic entries. The current
+  continuation also routes `JaxCurve`'s internal gamma/derivative kernels through
+  `local_full_x`, avoiding per-call public `get_dofs()` concatenation for
+  `JaxCurveXYZFourier` and `OrientedCurveXYZFourier` without changing public DOF
+  behavior. The framed-curve
   VJP consolidation was already covered by Phase 2; the remaining items still
   need isolated consumer audits or timing proof before changing allocation/host-sync
   behavior.
@@ -515,11 +521,15 @@ unpack the tuple in `dJ()`.
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_curve.py::Testing::test_rotate_pure_preserves_yaw_pitch_roll_order -q`
   — 1 passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_curve.py::Testing::test_jaxcurve_internal_calls_use_local_full_x -q`
+  — 1 passed, 2 subtests passed.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_curve.py -q`
-  — 27 passed, 386 subtests passed.
-- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check src/simsopt/geo/orientedcurve.py tests/geo/test_curve.py`
+  — 28 passed, 388 subtests passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/field/test_coil.py -q`
+  — 10 passed, 8 subtests passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check src/simsopt/geo/curve.py src/simsopt/geo/orientedcurve.py tests/geo/test_curve.py`
   — clean.
-- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile src/simsopt/geo/orientedcurve.py tests/geo/test_curve.py`
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile src/simsopt/geo/curve.py src/simsopt/geo/orientedcurve.py tests/geo/test_curve.py`
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_surface_taylor.py -q -k surface_coefficient_derivative`
   — 1 passed, 18 deselected, 12 subtests passed.

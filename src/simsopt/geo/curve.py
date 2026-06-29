@@ -463,7 +463,8 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the x,y,z coordinates of the curve :math:`\Gamma`.
         """
 
-        gamma[:, :] = self.gamma_impl_jax(self.get_dofs(), quadpoints)
+        dofs = self.local_full_x
+        gamma[:, :] = self.gamma_impl_jax(dofs, quadpoints)
 
     def dgamma_by_dcoeff_impl(self, dgamma_by_dcoeff):
         r"""
@@ -475,7 +476,8 @@ class JaxCurve(sopp.Curve, Curve):
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
         """
-        dgamma_by_dcoeff[:, :, :] = self.dgamma_by_dcoeff_jax(self.get_dofs())
+        dofs = self.local_full_x
+        dgamma_by_dcoeff[:, :, :] = self.dgamma_by_dcoeff_jax(dofs)
 
     def dgamma_by_dcoeff_vjp_impl(self, v):
         r"""
@@ -488,7 +490,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        return np.asarray(self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), v))
+        dofs = self.local_full_x
+        return np.asarray(self.dgamma_by_dcoeff_vjp_jax(dofs, v))
 
     def gammadash_impl(self, gammadash):
         r"""
@@ -496,7 +499,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        gammadash[:, :] = self.gammadash_jax(self.get_dofs())
+        dofs = self.local_full_x
+        gammadash[:, :] = self.gammadash_jax(dofs)
 
     def dgammadash_by_dcoeff_impl(self, dgammadash_by_dcoeff):
         r"""
@@ -509,7 +513,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadash_by_dcoeff[:, :, :] = self.dgammadash_by_dcoeff_jax(self.get_dofs())
+        dofs = self.local_full_x
+        dgammadash_by_dcoeff[:, :, :] = self.dgammadash_by_dcoeff_jax(dofs)
 
     def dgammadash_by_dcoeff_vjp_impl(self, v):
         r"""
@@ -522,7 +527,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        return np.asarray(self.dgammadash_by_dcoeff_vjp_jax(self.get_dofs(), v))
+        dofs = self.local_full_x
+        return np.asarray(self.dgammadash_by_dcoeff_vjp_jax(dofs, v))
 
     def gammadashdash_impl(self, gammadashdash):
         r"""
@@ -530,7 +536,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        gammadashdash[:, :] = self.gammadashdash_jax(self.get_dofs())
+        dofs = self.local_full_x
+        gammadashdash[:, :] = self.gammadashdash_jax(dofs)
 
     def dgammadashdash_by_dcoeff_impl(self, dgammadashdash_by_dcoeff):
         r"""
@@ -543,7 +550,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadashdash_by_dcoeff[:, :, :] = self.dgammadashdash_by_dcoeff_jax(self.get_dofs())
+        dofs = self.local_full_x
+        dgammadashdash_by_dcoeff[:, :, :] = self.dgammadashdash_by_dcoeff_jax(dofs)
 
     def dgammadashdash_by_dcoeff_vjp_impl(self, v):
         r"""
@@ -557,7 +565,8 @@ class JaxCurve(sopp.Curve, Curve):
 
         """
 
-        return np.asarray(self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), v))
+        dofs = self.local_full_x
+        return np.asarray(self.dgammadashdash_by_dcoeff_vjp_jax(dofs, v))
 
     def gammadashdashdash_impl(self, gammadashdashdash):
         r"""
@@ -565,7 +574,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        gammadashdashdash[:, :] = self.gammadashdashdash_jax(self.get_dofs())
+        dofs = self.local_full_x
+        gammadashdashdash[:, :] = self.gammadashdashdash_jax(dofs)
 
     def dgammadashdashdash_by_dcoeff_impl(self, dgammadashdashdash_by_dcoeff):
         r"""
@@ -578,7 +588,8 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadashdashdash_by_dcoeff[:, :, :] = self.dgammadashdashdash_by_dcoeff_jax(self.get_dofs())
+        dofs = self.local_full_x
+        dgammadashdashdash_by_dcoeff[:, :, :] = self.dgammadashdashdash_by_dcoeff_jax(dofs)
 
     def dgammadashdashdash_by_dcoeff_vjp_impl(self, v):
         r"""
@@ -592,7 +603,8 @@ class JaxCurve(sopp.Curve, Curve):
 
         """
 
-        return np.asarray(self.dgammadashdashdash_by_dcoeff_vjp_jax(self.get_dofs(), v))
+        dofs = self.local_full_x
+        return np.asarray(self.dgammadashdashdash_by_dcoeff_vjp_jax(dofs, v))
 
     def dkappa_by_dcoeff_vjp(self, v):
         r"""
@@ -604,7 +616,8 @@ class JaxCurve(sopp.Curve, Curve):
         where :math:`\mathbf{c}` are the curve dofs and :math:`\kappa` is the curvature.
 
         """
-        return Derivative({self: np.asarray(self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), v))})
+        dofs = self.local_full_x
+        return Derivative({self: np.asarray(self.dkappa_by_dcoeff_vjp_jax(dofs, v))})
 
     def dtorsion_by_dcoeff_vjp(self, v):
         r"""
@@ -617,7 +630,8 @@ class JaxCurve(sopp.Curve, Curve):
 
         """
 
-        return Derivative({self: np.asarray(self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v))})
+        dofs = self.local_full_x
+        return Derivative({self: np.asarray(self.dtorsion_by_dcoeff_vjp_jax(dofs, v))})
 
 
 class RotatedCurve(sopp.Curve, Curve):
