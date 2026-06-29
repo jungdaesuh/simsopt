@@ -36,10 +36,38 @@ gated behind explicit verification.
 
 ## Current Context
 
-- Test harness: `./.conda-env/bin/python` (python 3.11); base `python` (3.13)
-  fails on the `simsoptpp` Curve import. Relevant tests:
-  `tests/field/test_selffieldforces.py`, `tests/geo/test_boozersurface.py`,
-  `tests/field/test_biotsavart.py`.
+- Test harness: `./.conda-env/bin/python` (Python 3.11.15) — the interpreter the
+  repo tests pass under; every validation command below uses it. Do NOT validate
+  with ambient `python` from this shell (`/Users/suhjungdae/.local/bin/python`,
+  Python 3.14.3): `PYTHONPATH=src python -m pytest …` cannot even load
+  `tests/conftest.py`, failing with `ImportError: cannot import name 'Curve' from
+  'simsoptpp'`. The failure resolves `simsoptpp` as a namespace package at
+  `src/simsoptpp/` (`__file__ is None`, no `__init__.py`, no `.so`). Verified
+  2026-06-29: that pytest command fails under ambient `python` and passes
+  (15 passed, 39 subtests) under `.conda-env`. Separate caveat: the Homebrew
+  miniforge base interpreter (`/opt/homebrew/Caskroom/miniforge/base/bin/python`,
+  Python 3.13.12; also current `python3`) can import the compiled site-packages
+  `simsoptpp` extension and passed the focused curve-objectives test in this
+  checkout, but it is not the canonical validation interpreter for this plan.
+  Relevant tests: `tests/field/test_selffieldforces.py`,
+  `tests/geo/test_boozersurface.py`, `tests/field/test_biotsavart.py`,
+  `tests/geo/test_curve_objectives.py`.
+- Checkout baseline for this review: branch `surrogate-confinement-v2`, HEAD
+  `c15e39414`, dirty tree present. Phase 5 DESC anchors are not clean-checkout
+  assumptions: `examples/single_stage_optimization/banana_opt/desc_bridge/objective_factory.py`
+  and `examples/single_stage_optimization/DESC_JOINT/run_desc_joint_banana.py`
+  are untracked in the current tree, while `desc_bridge/runtime_coilset.py` is
+  added. Treat Phase 5 as dirty-tree-scoped until those files are committed or
+  the plan is explicitly scoped to this worktree.
+- Audit provenance: the workflow ID `wf_84dfb068-dd5` is a Claude Code runtime
+  artifact (session transcript), not committed to the repo, so it does not appear in
+  repo `rg`. The cited project memory `project_perf_audit_hotpath_2026_06_29` DOES
+  exist — in the file-based agent memory store at
+  `~/.claude/projects/-Users-suhjungdae-code-columbia-simsopt/memory/project_perf_audit_hotpath_2026_06_29.md`
+  (a different store than OpenMemory MCP, where it was never written; querying
+  OpenMemory and finding nothing is expected, not missing provenance). Before
+  treating the 44-finding count as SSOT, cite that concrete memory path (or export
+  the workflow result) rather than the runtime ID.
 - `simsopt.geo.jit` forces the CPU platform for the geo JAX kernels (per
   `jit.py:2`), so each separate grad jit is also a separate XLA dispatch.
 - Confirmed code shapes (read 2026-06-29):
@@ -90,10 +118,22 @@ pattern applied N times.
   the Phase 1 Task 2 fix must stay scoped to the LS solver
   (`minimize_boozer_penalty_constraints_newton`) and must NOT touch the exact
   solver, where the residual is a real gate input.**
-- `shortest_distance()` return value is reporting/diagnostic-only and never feeds
-  `J`/`dJ` (audit + memory
-  `project_hardware_audit_curve_distance_bruteforce_stall_2026_06_29`). Confirmed
-  by re-grep in Phase 1 Task 1.
+- `shortest_distance()` does not feed `J`/`dJ` or the optimizer in the current
+  grep, but it is not merely a print diagnostic: several callers persist/read it
+  as a clearance metric (`STAGE_2/banana_coil_solver.py`,
+  `VMEC_SINGLE_STAGE/vmec_single_stage_banana.py`,
+  `banana_opt/single_stage_geometry.py`, `banana_opt/stage2_objectives.py`,
+  and downstream summary/report scripts). Capping the empty-candidate value at
+  `minimum_distance` is optimizer-safe, but it intentionally converts those
+  metric sites into lower-bound/pass-fail values. Exact-achieved-clearance
+  consumers need a separate exact helper or a renamed/labeled metric.
+- Existing `tests/geo/test_curve_objectives.py` encodes the old empty-candidate
+  `CurveSurfaceDistance.shortest_distance()` behavior (`:402-411` expects exact
+  distance `>` the capped candidate distance when candidates are empty). Phase 1
+  must update that test and add a `CurveCurveDistance` empty-candidate assertion.
+- Official JAX docs (`/jax-ml/jax`, checked 2026-06-29) confirm that
+  `grad(..., argnums=(0, 1, ...))` and `value_and_grad(..., argnums=(...))`
+  return a tuple of per-primal gradients from one transformed call.
 - `jax.vjp`/`grad` over multiple primals returns the full cotangent tuple from one
   forward+backward — standard JAX semantics; the refactor is exact.
 - Reverse-mode `grad(J, argnums=(0,...,k))` yields identical cotangents to N
@@ -111,9 +151,14 @@ pattern applied N times.
    - [ ] Record current outputs on `surrogate-confinement-v2` HEAD before any edit.
    - [ ] Confirm test baseline is green:
          `./.conda-env/bin/python -m pytest tests/field/test_selffieldforces.py tests/geo/test_boozersurface.py tests/field/test_biotsavart.py -q`
-   - [ ] Glob for an existing curve-objective test
-         (`ls tests/geo | grep -i curveobj`); if none, note that the equivalence
-         harness IS the gate for `curveobjectives.py` changes.
+   - [ ] Use the existing curve-objective test file:
+         `rg --files tests/geo | rg 'test_curve_objectives\.py$'`.
+         Do not use `ls tests/geo | grep -i curveobj`; it misses
+         `tests/geo/test_curve_objectives.py`.
+   - [ ] Record current `tests/geo/test_curve_objectives.py` behavior before the
+         Phase 1 semantic change, especially `CurveSurfaceDistance` lines
+         `:402-411`, which currently assert exact empty-candidate distance is
+         greater than the capped candidate distance.
 
 ### Phase 1 — Safe default-hot-path wins (highest value, lowest risk)
 
@@ -141,6 +186,16 @@ pattern applied N times.
          path — honor `self.downsample` and precompute the downsampled gamma list
          once outside the comprehension (a one-time `scipy.cKDTree` per curve +
          nearest-neighbor query) — do NOT keep full-resolution `cdist`.
+   - [ ] Update `tests/geo/test_curve_objectives.py`: revise the existing
+         `CurveSurfaceDistance` empty-candidate assertion (`:402-411`) and add a
+         `CurveCurveDistance` empty-candidate assertion so both classes lock the
+         capped-return contract.
+   - [ ] Extend the metric audit beyond the original three sites:
+         `banana_opt/stage2_objectives.py:2254,2827`,
+         `src/simsopt/util/permanent_magnet_helper_functions.py:161`, advanced /
+         intermediate example prints, and summary readers that consume the
+         persisted metrics. If exact values are kept, record them under a distinct
+         key so capped lower-bound values are not mislabeled as exact clearance.
 
 2. Boozer LS-Newton tail: stop recomputing the residual via the slow path
    (P3 low; **behavior-touching — LS solver ONLY**). Consumer audit already done
@@ -156,7 +211,7 @@ pattern applied N times.
          unconditionally.
    - [ ] Regression guard after editing — re-run the consumer grep and confirm no
          new LS-path `res['residual']` consumer appeared:
-         `grep -rn "\['residual'\]\|get(\"residual\")" src examples | grep -v __pycache__`.
+         `rg -n "res\['residual'\]|res\.get\(\"residual\"\)|get\(\"residual\"\)|\['residual'\]" src examples tests -g '*.py'`.
 
 ### Phase 2 — Systemic multi-primal-grad sweep (numerically identical, ~10 sites)
 
@@ -198,6 +253,11 @@ unpack the tuple in `dJ()`.
          `R0` free (`:1043-1073`) and the SDF family double trilinear-interp
          (`:1155-1683`, `argnums=0` then `argnums=3`): compute both cotangents in
          one pass.
+   - [ ] `poloidal_extent.py:194-197` and `ellipse_width.py:165-167` — live grep
+         finds the same two-primal grad pattern in banana constraints. Triage
+         whether those constraints are active in the default production lane; if
+         yes, include them in this Phase 2 sweep, otherwise explicitly defer them
+         as non-default hot path.
 
 ### Phase 3 — Per-eval framework micro overhead (universal; every `J(x)`)
 
@@ -218,9 +278,11 @@ unpack the tuple in `dJ()`.
          recursive walk is worth memoizing too. (Corrected: earlier refs
          `:154-165, 309-324` were `DOFs._flag_recompute_opt` / `DOFs.free_x.setter`,
          unrelated to this.)
-2. `solve/serial.py:124-129` AND the sibling `serial_solve` callback (`flush()` at
-   `:241`) — buffer the objective-log writes and drop the per-evaluation `flush()`
-   (flush on close / periodically), removing a syscall per eval. Fix both callbacks.
+2. `solve/serial.py:124-129`, residual callback `:139`, and sibling
+   `serial_solve` callback `:241` — buffer the objective/residual-log writes and
+   drop the per-evaluation `flush()` (flush on close / periodically), removing a
+   syscall per eval. Mirror or explicitly defer the analogous `solve/mpi.py`
+   flushes (`:187, :197, :390, :443`) so the scope is not ambiguous.
 3. `_core/finite_difference.py` — hoist `np.copy(x0)` out of the per-DOF loop in
    BOTH branches (`x = np.copy(x0)` at `:89` centered, `:106` forward); reuse one
    scratch vector and restore the perturbed entry each iteration.
@@ -260,11 +322,12 @@ unpack the tuple in `dJ()`.
          activity tolerances (depend only on smoothing params + static
          config/thresholds, e.g. fixed `Jc.threshold` / `Jccdist.minimum_distance`)
          instead of rebuilding every inner eval.
-   - [ ] `boozer_finite_current.py:178, 189` — drop the array `.copy()` in
-         `_to_explicit_current_basis` / `_to_explicit_current_basis_hessian` (per
-         Newton step). Safe because the inputs are consume-once
-         (freshly-computed-then-discarded); the copy currently only provides input
-         immutability, so in-place suffices.
+   - [ ] `boozer_finite_current.py:178, 189` — do NOT drop the array `.copy()`
+         unless the caller alias proof is written down and covered by a regression
+         test. These helpers currently return the original object only for
+         `I_value == 0.0`; for nonzero transforms, the copy preserves input
+         immutability. If the tensors are freshly computed and consume-once, prove
+         that at each caller and add a no-alias test before using in-place updates.
    - [ ] `single_stage_objectives.py:1326-1403` — cache the simsopt `Optimizable`
          sum/scale graph instead of reconstructing it on every trial objective eval.
    - [ ] `edge_iota_proxy.py:391-392` (the 401-line proxy module — NOT
@@ -300,6 +363,11 @@ unpack the tuple in `dJ()`.
 1. DESC joint lane (P2 high). Flag `--desc-objective-use-jit`
    (`BooleanOptionalAction`, already CLI-overridable); today's default is
    `DEFAULT_DESC_OBJECTIVE_USE_JIT = False` (`objective_factory.py:81`).
+   Current checkout caveat: the two main DESC anchors named below are untracked in
+   this dirty tree (`objective_factory.py`,
+   `DESC_JOINT/run_desc_joint_banana.py`), so this phase is not actionable from a
+   clean checkout until that implementation is landed or this plan is explicitly
+   bound to the dirty tree.
    - [ ] `desc_bridge/objective_factory.py:81, 423, 561-565` — default
          `use_jit=True` for the optimizer (multi-eval) lane; keep `use_jit=False`
          only for the single-shot smoke eval. Prefer auto-select on
@@ -333,15 +401,21 @@ unpack the tuple in `dJ()`.
       (same VJP, reordered) for every refactored object.
 - [ ] `./.conda-env/bin/python -m pytest tests/field/test_selffieldforces.py -q`
       (force.py Phase 2 + biotsavart Phase 4).
+- [ ] `./.conda-env/bin/python -m pytest tests/geo/test_curve_objectives.py -q`
+      (Phase 1 Task 1 `shortest_distance` semantic contract and candidate
+      invalidation behavior).
 - [ ] `./.conda-env/bin/python -m pytest tests/geo/test_boozersurface.py tests/geo/test_boozer_trust_gate.py -q`
       (Phase 1 Task 2 + Phase 4.4 boozer changes).
 - [ ] `./.conda-env/bin/python -m pytest tests/field/test_biotsavart.py -q`
       (Phase 4 biotsavart).
 - [ ] Full geo/field regression:
       `./.conda-env/bin/python -m pytest tests/geo tests/field -q` before sign-off.
-- [ ] `ruff check` on every touched file.
-- [ ] **Caller-audit gate (Phase 1 Task 1 & 2):** the two grep audits return no
+- [ ] `./.conda-env/bin/python -m ruff check` on every touched file.
+- [ ] **Caller-audit gate (Phase 1 Task 1 & 2):** the two `rg` audits return no
       consumer that depends on the removed/changed value.
+- [ ] **DESC lane cleanliness gate (Phase 5):** `git ls-files` contains every DESC
+      path named by the phase, or the implementation note states that Phase 5 is
+      validated only against the current dirty tree.
 - [ ] **Behavior gate (Phase 4.4 & Phase 5):** Boozer convergence parity test +
       one single-stage smoke eval show unchanged convergence (iteration count,
       final `J`) within tolerance; residue/DESC lane smoke matches pre-change
@@ -353,8 +427,10 @@ unpack the tuple in `dJ()`.
 
 - Risk: `shortest_distance()` empty-case change silently alters a real consumer
   (not just a diagnostic print).
-  Mitigation: Phase 1 Task 1 grep gate; the new value equals the existing capped
-  semantics, so any `>= minimum_distance` check is unaffected.
+  Mitigation: Phase 1 Task 1 `rg` gate plus explicit exact-vs-capped metric
+  decision per caller. The new value equals the existing capped semantics, so any
+  `>= minimum_distance` check is unaffected, but exact achieved-clearance metrics
+  must either keep an exact helper or be labeled as lower-bound metrics.
 - Risk: Removing the Boozer LS diagnostic residual breaks a downstream reader.
   Mitigation: consumer grep before editing; fall back to "reuse cached field"
   (compute the same `r` without the redundant `set_points + compute`) if any
@@ -374,6 +450,10 @@ unpack the tuple in `dJ()`.
   everywhere.
   Mitigation: rely on the full `tests/geo tests/field` regression; keep the public
   return types identical (only avoid redundant allocations).
+- Risk: Copy removal in `boozer_finite_current.py` mutates arrays that a caller
+  still owns.
+  Mitigation: leave the copies in place unless each caller proves consume-once
+  ownership and a no-alias regression test covers the in-place path.
 
 ## Completion Criteria
 
@@ -384,7 +464,7 @@ unpack the tuple in `dJ()`.
       `curveobjectives.py`, `self_intersect.py`, `fold_buildability.py`,
       `hardware_keepout.py`) contain no single-argnum `grad(...)` *family* in a `dJ`
       method that should be one tuple-argnums grad. (NB: a repo-wide
-      `grep -rn "argnums=[0-9])" src examples` returns ~101 single-arg grads, most
+      `rg -n "argnums=[0-9]" src examples` returns many single-arg grads, most
       legitimate — scope the check to these files' `dJ` methods, not a global count.)
 - [ ] Phase 3 landed: `Optimizable.x` setter/getter no longer materialize
       `dof_indices.values()` per call; FD loop has no per-iteration `np.copy`;
@@ -395,7 +475,7 @@ unpack the tuple in `dJ()`.
 - [ ] Phases 4–5 tracked: each item either landed-with-gate or explicitly deferred
       with a one-line reason.
 - [ ] Project memory updated (`project_perf_audit_hotpath_2026_06_29`) with
-      landed-vs-deferred status.
+      landed-vs-deferred status only after the implementation actually lands.
 
 ## Open Questions
 
@@ -404,16 +484,29 @@ unpack the tuple in `dJ()`.
   threshold (vs. the capped diagnostic)?~~ **RESOLVED 2026-06-29:** no caller feeds
   `J`/`dJ` or the optimizer (all reporting/certification). Remaining sub-decision:
   the achieved-clearance-metric sites (`banana_coil_solver.py`, `VMEC`,
-  `single_stage_geometry.py`) — gate-only (cap is fine) vs. exact-record-needed
-  (give them the `cKDTree` path)? Owner call per site; see Phase 1 Task 1.
+  `single_stage_geometry.py`, `stage2_objectives.py`, example/status reporters) —
+  gate-only (cap is fine) vs. exact-record-needed (give them the `cKDTree` path or
+  distinct exact helper)? Owner call per site; see Phase 1 Task 1.
 - ~~Is `res['residual']` ever consumed for `type == "ls"` outside diagnostics?~~
   **RESOLVED 2026-06-29 (consumer audit):** No — the LS gate uses
   `jacobian`/`gradient`; only the EXACT path (`handoff.py:956`) + verbose prints
   read the residual. Phase 1 Task 2 is safe when scoped to the LS solver
   (see Assumptions).
-- Is the coil-force objective (`MeanSquaredForce`/`LpCurveForce`) active in the
-  default single-stage banana lane, or only in dedicated force runs? (Determines
-  whether Phase 2 Task 1 is default-path or conditional.)
+- ~~Is the coil-force objective (`MeanSquaredForce`/`LpCurveForce`) active in the
+  default single-stage banana lane, or only in dedicated force runs?~~
+  **RESOLVED 2026-06-29:** active by default for
+  `SINGLE_STAGE/single_stage_banana_example.py` unless `COIL_FORCE_WEIGHT` or
+  `--coil-force-weight` disables it. The parser default is
+  `SINGLE_STAGE_COIL_FORCE_WEIGHT_DEFAULT` (`hardware_contracts.py:166`, value
+  `1.0`) and `JCoilForce` is constructed when `FORCE_WEIGHT > 0.0`
+  (`single_stage_banana_example.py:3619-3626, 10298-10300`). Phase 2 Task 1 is
+  default-path for that runner.
+- ~~Is the audit artifact for `wf_84dfb068-dd5` available in the repo or artifact
+  store?~~ **PARTIALLY RESOLVED 2026-06-29:** the workflow ID is not repo-local, but
+  the project memory with the 44-finding count exists at
+  `~/.claude/projects/-Users-suhjungdae-code-columbia-simsopt/memory/project_perf_audit_hotpath_2026_06_29.md`.
+  Remaining action: cite that concrete path or export the workflow result before
+  treating the 44-count as SSOT in downstream implementation work.
 - Should the DESC `use_jit` default flip be a CLI default change or an
   auto-select on `allow_high_memory` + a memory budget? (Owner decision before
   Phase 5 Task 1.)
