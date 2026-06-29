@@ -52,8 +52,14 @@ target startup/value/grad/callback timing must not silently include them.
   (`single_stage_banana_example.py:1691-1705`) calls `cc/cs/surf.shortest_distance()`
   + `banana_curve.kappa()`. Invoked at startup (`:15561-15577`), per
   **successful** step (`:11619-11625` and `:13459-13468`, gated by Boozer-success
-  + non-self-intersecting), and at final artifact/hardware verdict time
-  (`:17855-17910`). Reporting-only: feeds `run_dict["hardware_constraint_status"]`;
+  + non-self-intersecting), and at the finalization summary (`:12907`, via
+  `_evaluate_single_stage_hardware_status_reporting_boundary`). NOTE: the
+  final-artifact **verdict** at `:17855-17910`
+  (`evaluate_single_stage_artifact_hardware_snapshot` `@:6469` +
+  `apply_hardware_constraint_verdict`) consumes the already-computed min-distances
+  as arguments — it does NOT itself call `.shortest_distance()`, so it is a verdict
+  consumer, not a fresh audit-invocation site.
+  Reporting-only: feeds `run_dict["hardware_constraint_status"]`;
   the optimizer's `J()/dJ()` never depend on it.
 - `objectives["cc"]` / `["cs"]` are the **upstream CPU** classes imported at
   `single_stage_banana_example.py:133-135` and built at `:9092-9093` with
