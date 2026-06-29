@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
 
@@ -97,6 +98,26 @@ def test_curvecwsfouriercpp_accessor_order_matches_metric_block_order():
     assert list(curve.local_dof_names) == curve._make_names()
     assert curve.dgammadash_by_dcoeff().shape == (11, 3, curve.num_dofs())
     assert curve.dgammadashdash_by_dcoeff().shape == (11, 3, curve.num_dofs())
+    derivative = curve.dgammadash_by_dcoeff().copy()
+    base_dofs = curve.get_dofs().copy()
+    eps = 1.0e-6
+    for index, dof_name in enumerate(curve.local_dof_names):
+        plus = base_dofs.copy()
+        minus = base_dofs.copy()
+        plus[index] += eps
+        minus[index] -= eps
+        curve.local_full_x = plus
+        plus_gammadash = curve.gammadash().copy()
+        curve.local_full_x = minus
+        minus_gammadash = curve.gammadash().copy()
+        curve.local_full_x = base_dofs
+        np.testing.assert_allclose(
+            (plus_gammadash - minus_gammadash) / (2.0 * eps),
+            derivative[:, :, index],
+            rtol=1.0e-5,
+            atol=1.0e-5,
+            err_msg=f"dgammadash column mismatch for {dof_name}",
+        )
 
 
 def test_curve_sobolev_metric_is_spd_and_cholesky_round_trips():
@@ -172,27 +193,40 @@ def test_operator_transformed_gradient_matches_central_fd():
 
 
 def test_metric_preconditioner_improves_conditioning_and_first_step():
-    metric_hessian = np.array([[50.0, 20.0], [20.0, 10.0]])
+    curve = _curve(order=2, num_quadpoints=17)
+    metric_hessian = build_curve_sobolev_metric(curve, alpha=4.0, h2_beta=0.25)
     cholesky_factor = build_curve_block_cholesky(metric_hessian)
+    objective_hessian = (
+        metric_hessian
+        + 0.2 * np.diag(np.linspace(0.7, 2.3, metric_hessian.shape[0]))
+        + 0.05
+        * np.outer(
+            np.linspace(-0.3, 0.4, metric_hessian.shape[0]),
+            np.linspace(-0.3, 0.4, metric_hessian.shape[0]),
+        )
+    )
     preconditioner = Stage2PenaltyPreconditioner(
-        diagonal_scale=np.ones(2),
+        diagonal_scale=np.ones(metric_hessian.shape[0]),
         curve_blocks=(
             CurveSobolevBlock(
-                indices=np.array([0, 1]),
+                indices=np.arange(metric_hessian.shape[0]),
                 cholesky_factor=cholesky_factor,
-                metric_trace_mean=float(np.trace(metric_hessian) / 2.0),
+                metric_trace_mean=float(
+                    np.trace(metric_hessian) / metric_hessian.shape[0]
+                ),
             ),
         ),
         metric_kind="h1",
         alpha=1.0,
-        metric_normalization="synthetic",
+        h2_beta=0.25,
+        metric_normalization="trace_mean",
     )
     cholesky_inverse = np.linalg.inv(cholesky_factor)
-    transformed_hessian = cholesky_inverse @ metric_hessian @ cholesky_inverse.T
-    assert np.linalg.cond(transformed_hessian) < np.linalg.cond(metric_hessian)
+    transformed_hessian = cholesky_inverse @ objective_hessian @ cholesky_inverse.T
+    assert np.linalg.cond(transformed_hessian) < np.linalg.cond(objective_hessian)
 
-    fun = _matrix_quadratic(metric_hessian)
-    x0 = np.array([1.0, -0.25])
+    fun = _matrix_quadratic(objective_hessian)
+    x0 = np.linspace(-1.0, 1.0, objective_hessian.shape[0])
     j0, grad = fun(x0)
     identity_first_step_dj = fun(x0 - grad)[0] - j0
     metric_first_step_dj = fun(x0 - preconditioner.step_from_gradient(grad))[0] - j0
@@ -284,6 +318,77 @@ def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
     assert result_payload["STAGE2_SOBOLEV_METRIC_TRACE_MEAN"]
     assert result_payload["STAGE2_OBJECTIVE_NORMALIZE"] is True
     assert result_payload["STAGE2_OBJECTIVE_J_REF"] == 123.0
+
+
+def test_legacy_diagonal_sobolev_scale_reports_metadata():
+    from STAGE_2.banana_coil_solver import (  # noqa: E402
+        resolve_stage2_penalty_preconditioner,
+    )
+
+    dof_names = ["CurveCWSFourierCPP1:phic(1)", "SurfaceRZFourier1:rc(0,0)"]
+    args = SimpleNamespace(
+        stage2_sobolev_metric="off",
+        stage2_sobolev_alpha=4.0,
+        stage2_sobolev_power=2,
+        stage2_sobolev_h2_beta=0.0,
+    )
+
+    preconditioner = resolve_stage2_penalty_preconditioner(
+        args,
+        dof_names,
+        WINDING_DOF_CORRIDOR_SCALE_MAP,
+    )
+    metadata = preconditioner.results_metadata()
+
+    assert metadata["STAGE2_PRECONDITIONER_KIND"] == "diagonal"
+    assert metadata["STAGE2_SOBOLEV_ALPHA"] == 4.0
+    assert metadata["STAGE2_SOBOLEV_H2_BETA"] == 0.0
+    assert metadata["STAGE2_SOBOLEV_METRIC_NORMALIZATION"] == "k_power_2"
+
+
+def test_preconditioner_cli_scope_rejects_unwired_routes():
+    from STAGE_2.banana_coil_solver import (  # noqa: E402
+        validate_stage2_preconditioner_cli_scope,
+    )
+
+    with pytest.raises(ValueError, match="basin-hops"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="h1",
+                stage2_sobolev_alpha=1.0,
+                stage2_objective_normalize=False,
+                basin_hops=1,
+            )
+        )
+    with pytest.raises(ValueError, match="basin-hops"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="off",
+                stage2_sobolev_alpha=2.0,
+                stage2_objective_normalize=False,
+                basin_hops=1,
+            )
+        )
+    with pytest.raises(ValueError, match="penalty L-BFGS-B"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="h2",
+                stage2_sobolev_alpha=1.0,
+                stage2_objective_normalize=False,
+                basin_hops=0,
+            ),
+            constraint_method="alm",
+        )
+    with pytest.raises(ValueError, match="penalty L-BFGS-B"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="off",
+                stage2_sobolev_alpha=0.0,
+                stage2_objective_normalize=True,
+                basin_hops=0,
+            ),
+            constraint_method="alm",
+        )
 
 
 def test_normalize_objective_scales_value_and_gradient_by_frozen_j_ref():

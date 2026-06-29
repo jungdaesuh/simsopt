@@ -122,6 +122,7 @@ from banana_opt.stage2_geometry import (
     WINDING_DOF_CORRIDOR_SCALE_MAP,
 )
 from banana_opt.single_stage_geometry import (
+    Stage2PenaltyPreconditioner,
     as_stage2_penalty_preconditioner,
     build_stage2_penalty_preconditioner,
     build_sobolev_curve_mode_scale_vector,
@@ -1088,8 +1089,18 @@ def resolve_stage2_penalty_preconditioner(
     """Return the transform object consumed by the penalty optimizer and diagnostic."""
     metric_kind = str(getattr(args, "stage2_sobolev_metric", "off")).lower()
     if metric_kind == "off":
-        return as_stage2_penalty_preconditioner(
-            resolve_stage2_penalty_dof_scale(args, dof_names, winding_dof_scale_map)
+        alpha = float(getattr(args, "stage2_sobolev_alpha", 0.0))
+        scale = resolve_stage2_penalty_dof_scale(
+            args, dof_names, winding_dof_scale_map
+        )
+        if alpha <= 0.0:
+            return as_stage2_penalty_preconditioner(scale)
+        power = int(getattr(args, "stage2_sobolev_power", 2))
+        return Stage2PenaltyPreconditioner.from_scale(
+            scale,
+            metric_kind="diagonal",
+            alpha=alpha,
+            metric_normalization=f"k_power_{power}",
         )
     return build_stage2_penalty_preconditioner(
         dof_names,
@@ -1100,6 +1111,31 @@ def resolve_stage2_penalty_preconditioner(
         bounds=bounds,
         metric_kind=metric_kind,
     )
+
+
+def validate_stage2_preconditioner_cli_scope(args, *, constraint_method="penalty"):
+    metric_kind = str(getattr(args, "stage2_sobolev_metric", "off")).lower()
+    alpha = float(getattr(args, "stage2_sobolev_alpha", 0.0))
+    objective_normalize = bool(getattr(args, "stage2_objective_normalize", False))
+    if str(constraint_method).lower() == "alm" and metric_kind != "off":
+        raise ValueError(
+            "--stage2-sobolev-metric is only wired for the penalty L-BFGS-B path"
+        )
+    if str(constraint_method).lower() == "alm" and objective_normalize:
+        raise ValueError(
+            "--stage2-objective-normalize is only wired for the penalty L-BFGS-B path"
+        )
+    basin_hops = int(getattr(args, "basin_hops", 0))
+    if basin_hops > 0 and (metric_kind != "off" or alpha > 0.0):
+        raise ValueError(
+            "--stage2-sobolev-metric/alpha is only wired for the direct penalty "
+            "L-BFGS-B path; disable --basin-hops for metric diagnostics/runs"
+        )
+    if basin_hops > 0 and objective_normalize:
+        raise ValueError(
+            "--stage2-objective-normalize is only wired for the direct penalty "
+            "L-BFGS-B path; disable --basin-hops for normalized metric diagnostics/runs"
+        )
 
 
 def parse_args():
@@ -5539,19 +5575,7 @@ def main(parsed_args=None):
         edge_iota_target_min=edge_iota_target_min,
         edge_iota_hinge_shape=edge_iota_hinge_shape,
     )
-    if (
-        CONSTRAINT_METHOD == "alm"
-        and str(getattr(args, "stage2_sobolev_metric", "off")).lower() != "off"
-    ):
-        raise ValueError(
-            "--stage2-sobolev-metric is only wired for the penalty L-BFGS-B path"
-        )
-    if CONSTRAINT_METHOD == "alm" and bool(
-        getattr(args, "stage2_objective_normalize", False)
-    ):
-        raise ValueError(
-            "--stage2-objective-normalize is only wired for the penalty L-BFGS-B path"
-        )
+    validate_stage2_preconditioner_cli_scope(args, constraint_method=CONSTRAINT_METHOD)
     stage2_penalty_preconditioner = resolve_stage2_penalty_preconditioner(
         args,
         JF.dof_names,

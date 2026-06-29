@@ -1492,7 +1492,15 @@ class Stage2PenaltyPreconditioner:
     metric_normalization: str = "none"
 
     @classmethod
-    def from_scale(cls, scale):
+    def from_scale(
+        cls,
+        scale,
+        *,
+        metric_kind="off",
+        alpha=0.0,
+        h2_beta=0.0,
+        metric_normalization="none",
+    ):
         scale_array = np.asarray(scale, dtype=float)
         if scale_array.ndim != 1:
             raise ValueError("preconditioner scale must be one-dimensional")
@@ -1501,6 +1509,10 @@ class Stage2PenaltyPreconditioner:
         return cls(
             diagonal_scale=scale_array,
             curve_blocks=(),
+            metric_kind=str(metric_kind),
+            alpha=float(alpha),
+            h2_beta=float(h2_beta),
+            metric_normalization=str(metric_normalization),
         )
 
     @property
