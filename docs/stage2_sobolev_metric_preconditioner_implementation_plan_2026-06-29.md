@@ -10,13 +10,16 @@ This plan is now the active metric lane for the order-64 slid-clean Stage-2
 conditioning fix. Local source is implemented in `5dff32284` with the follow-up
 diagnostic/test hardening in `45d2b3ae1`; the Perlmutter launch package and
 handoff are active in `autoresearch` commit `39758405`. The required remote
-gate is still decisive: Perlmutter job `55264061` ran on `shared` with
-`SMOKE=1 STAGE2_DIAGNOSE_SEED_GRADIENT=1 STAGE2_SOBOLEV_METRIC=h1
-STAGE2_SOBOLEV_ALPHA=1.0`, assembled the metric, and reported
-`first_step_dJ=+1.933950e10`; H1 alpha=1.0 is therefore **not** a passing
-setting. Do not launch a full run until a documented H1/H2 alpha sweep successor
-proves `first_step_dJ < 0`. Trust-region remains the fallback only if the metric
-diagnostic sweep cannot flip the seed step to descent.
+gate is still decisive: the H1 and H2 beta=1 Perlmutter sweeps on `shared`
+assembled the metric but failed the descent gate for alpha 1, 4, 16, and 64.
+Every `first_step_dJ` stayed positive (H1: `+1.933950e10`, `+1.941215e10`,
+`+2.122981e10`, `+1.812255e10`; H2 beta=1: `+1.983622e10`,
+`+1.903104e10`, `+2.202494e10`, `+1.702834e10`). The metric lane therefore
+did not produce a passing real-seed diagnostic. The documented trust-region
+fallback smoke completed as Perlmutter job `55271978` (`COMPLETED|0:0`) and
+proved route engagement (`CONSTRAINT_METHOD='alm'`, `EDGE_IOTA_MODE='soft'`,
+`HARDWARE_CONSTRAINTS_OK=True`), but it is not physics closure: the smoke
+reported `EDGE_IOTA_STATUS='insufficient_samples'`.
 
 ## Purpose
 
@@ -355,9 +358,18 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 - [ ] **Perlmutter seed probe**: `SMOKE=1` run on the slid_clean chomp seed
       with `STAGE2_DIAGNOSE_SEED_GRADIENT=1` asserts metric assembles and the
       seed diagnostic prints `first_step_dJ < 0` (the go/no-go for a full run).
-      Evidence so far: H1 alpha=1.0 job `55264061` assembled the metric but
-      failed the descent gate with `first_step_dJ=+1.933950e10`; continue the
-      diagnostic sweep before any full run.
+      Evidence so far: H1 jobs `55264061`, `55265700`, `55265701`, and
+      `55265702` plus H2 beta=1 jobs `55267436`, `55267438`, `55267443`,
+      and `55267445` all assembled the metric but failed the descent gate.
+      Positive `first_step_dJ` ranges were `+1.812255e10..+2.122981e10`
+      for H1 and `+1.702834e10..+2.202494e10` for H2 beta=1.
+- [x] **Trust-region fallback smoke**: Perlmutter job `55271978` completed
+      successfully (`COMPLETED|0:0`, elapsed `00:14:42`) and wrote
+      `results.json` proving `CONSTRAINT_METHOD='alm'`,
+      `ALM_TRUST_RADIUS_INIT=0.02`, `ALM_MAX_OUTER_ITERS=1`,
+      `EDGE_IOTA_MODE='soft'`, and `HARDWARE_CONSTRAINTS_OK=True`. The edge
+      report was still `EDGE_IOTA_STATUS='insufficient_samples'`, so this is
+      route-engagement proof only, not a full edge-iota success.
 - [ ] **Crucible**: route the diff to strict PASS (no defensive fallbacks, SSOT
       composer, no fake/jittered metric, regression tests non-tautological).
 
@@ -408,10 +420,11 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       `45d2b3ae1` operator-aware diagnostic formatter/test coverage.
 - [ ] On the slid_clean chomp seed (Perlmutter `SMOKE=1` with
       `STAGE2_DIAGNOSE_SEED_GRADIENT=1`), the seed-gradient diagnostic reports
-      `first_step_dJ < 0` under the H¹ metric (the diagonal scale could not
-      achieve this). Evidence so far: job `55264061` with
-      `STAGE2_SOBOLEV_METRIC=h1 STAGE2_SOBOLEV_ALPHA=1.0` assembled the metric
-      but failed the gate with `first_step_dJ=+1.933950e10`; continue the sweep.
+      `first_step_dJ < 0` under the metric (the diagonal scale could not
+      achieve this). Evidence so far: H1 and H2 beta=1 alpha values 1, 4,
+      16, and 64 all assembled the metric but failed the gate. The metric
+      completion criterion is not met; fallback smoke `55271978` completed and
+      proved ALM/edge-soft route engagement only.
 - [ ] Crucible strict PASS; plan cross-referenced from
       `docs/stage2_order64_sobolev_conditioning_plan_2026-06-28.md` and the
       `autoresearch:.handoffs/order64-conditioning.md` handoff updated to make
