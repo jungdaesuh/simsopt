@@ -105,10 +105,11 @@ composition tests for their bound/trust-region mappings.
   `2.41e7` for every `alpha ∈ {1,4,16,64}` and `first_step_dJ` saturated at
   `~+3e23` without flipping negative. The dominant bad direction is **not** a
   single high-k curve mode that diagonal mode-scaling can reach.
-- **Operational handoff now makes the metric lane active.**
-  `autoresearch:.handoffs/order64-conditioning.md` records the diagonal sweep as
-  insufficient, points to this plan as the active lane, and keeps trust-region as
-  fallback only if the metric diagnostic sweep fails.
+- **Operational handoff now records the failed metric gate and live fallback.**
+  `autoresearch:.handoffs/order64-conditioning.md` records the diagonal and
+  non-diagonal metric sweeps as insufficient, points to this plan for the metric
+  implementation evidence, and keeps the ALM trust-region fallback as the live
+  operational lane while its full run is pending.
 - **Confirmed building blocks.** The Stage-2 path instantiates
   **`CurveCWSFourierCPP`** (`src/simsopt/geo/curvecwsfourier.py:145`, subclass of
   `Curve, sopp.Curve`) at `banana_opt/stage2_geometry.py:715` — *not* the
@@ -413,9 +414,9 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
   `first_step_dJ < 0` before launching a long run; if it does not, the current
   handoff's trust-region path remains the next executable action.
 - **Risk:** plan/runbook drift.
-  **Mitigation:** before launch, update `autoresearch:.handoffs/order64-
-  conditioning.md` from "trust-region next" to this metric lane, or explicitly
-  leave this plan marked as an experiment.
+  **Mitigation:** keep `autoresearch:.handoffs/order64-conditioning.md` and this
+  plan synchronized on the actual lane state: failed metric gate, ALM fallback
+  smoke passed, full ALM result pending.
 - **Risk:** silent regression of the proven diagonal/off path.
   **Mitigation:** byte-identical-off + bound-preservation tests gate it; the
   operator's identity case must equal the diagonal vector path bit-for-bit.
