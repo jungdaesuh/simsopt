@@ -29,6 +29,10 @@ from banana_opt.stage2_objectives import (  # noqa: E402
     diagnose_seed_gradient,
     format_seed_gradient_diagnostic,
 )
+from banana_opt.single_stage_geometry import (  # noqa: E402
+    CurveSobolevBlock,
+    Stage2PenaltyPreconditioner,
+)
 
 
 def _quadratic(curvature):
@@ -112,6 +116,38 @@ class SeedGradientDiagnosticTest(unittest.TestCase):
         # The line-search-visible gradient is grad*scale (= (1,1)*sqrt(3)); pins the
         # scaled-gradient at scale != 1 so a grad/scale mix-up would be caught.
         self.assertAlmostEqual(diag["scaled_grad_norm_inf"], np.sqrt(3.0))
+
+    def test_operator_step_matches_optimizer_transform(self):
+        cholesky_factor = np.array([[2.0, 0.0], [0.5, 1.5]])
+        preconditioner = Stage2PenaltyPreconditioner(
+            diagonal_scale=np.ones(3),
+            curve_blocks=(
+                CurveSobolevBlock(
+                    indices=np.array([1, 2]),
+                    cholesky_factor=cholesky_factor,
+                    metric_trace_mean=1.0,
+                ),
+            ),
+            metric_kind="h1",
+            alpha=1.0,
+        )
+        curvature = np.array([1.0, 4.0, 9.0])
+        x0 = np.array([1.0, 0.5, -0.25])
+        fun = _quadratic(curvature)
+        grad = curvature * x0
+        expected_step = preconditioner.step_from_gradient(grad)
+        expected_j0 = fun(x0)[0]
+        expected_first_step_dj = fun(x0 - expected_step)[0] - expected_j0
+        expected_scaled_grad = preconditioner.grad_to_u(grad)
+
+        diag = diagnose_seed_gradient(fun, x0, preconditioner)
+
+        self.assertAlmostEqual(diag["first_step_dJ"], expected_first_step_dj)
+        self.assertAlmostEqual(
+            diag["scaled_grad_norm_2"], float(np.linalg.norm(expected_scaled_grad))
+        )
+        self.assertEqual(diag["STAGE2_PRECONDITIONER_KIND"], "h1")
+        self.assertEqual(diag["STAGE2_PRECONDITIONER_CURVE_BLOCK_COUNT"], 1)
 
     def test_hardware_edge_split_equals_the_hinge_contribution(self):
         curvature = np.array([1.0, 2.0, 3.0])

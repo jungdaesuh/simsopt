@@ -122,7 +122,11 @@ from banana_opt.stage2_geometry import (
     WINDING_DOF_CORRIDOR_SCALE_MAP,
 )
 from banana_opt.single_stage_geometry import (
+    as_stage2_penalty_preconditioner,
+    build_stage2_penalty_preconditioner,
+    build_sobolev_curve_mode_scale_vector,
     build_winding_dof_scale_vector,
+    normalize_objective,
     run_scaled_winding_minimize,
 )
 from banana_opt.hardware_contracts import (
@@ -1055,6 +1059,49 @@ def _stage2_alm_env_int(env_name: str, suffix: str) -> int:
     return int(os.environ.get(env_name, str(stage2_alm_default(suffix))))
 
 
+def resolve_stage2_penalty_dof_scale(args, dof_names, winding_dof_scale_map):
+    """Per-DOF ``u = x/scale`` vector for the penalty path: the winding-corridor
+    scale composed (element-wise) with the optional Sobolev curve-mode scale.
+
+    Identity (all-ones) when both are off, so the penalty solve is byte-identical
+    unless ``--winding-dof-scale`` or ``--stage2-sobolev-alpha > 0`` is set. The
+    Sobolev factor damps the n^2-amplified high-order curve-mode gradient (see
+    :func:`build_sobolev_curve_mode_scale_vector`).
+    """
+    scale = build_winding_dof_scale_vector(dof_names, winding_dof_scale_map)
+    alpha = float(getattr(args, "stage2_sobolev_alpha", 0.0))
+    if alpha > 0.0:
+        scale = scale * build_sobolev_curve_mode_scale_vector(
+            dof_names, alpha=alpha, power=int(getattr(args, "stage2_sobolev_power", 2))
+        )
+    return scale
+
+
+def resolve_stage2_penalty_preconditioner(
+    args,
+    dof_names,
+    winding_dof_scale_map,
+    *,
+    curves_by_block=(),
+    bounds=None,
+):
+    """Return the transform object consumed by the penalty optimizer and diagnostic."""
+    metric_kind = str(getattr(args, "stage2_sobolev_metric", "off")).lower()
+    if metric_kind == "off":
+        return as_stage2_penalty_preconditioner(
+            resolve_stage2_penalty_dof_scale(args, dof_names, winding_dof_scale_map)
+        )
+    return build_stage2_penalty_preconditioner(
+        dof_names,
+        curves_by_block,
+        float(getattr(args, "stage2_sobolev_alpha", 0.0)),
+        h2_beta=float(getattr(args, "stage2_sobolev_h2_beta", 0.0)),
+        winding_dof_scale_map=winding_dof_scale_map,
+        bounds=bounds,
+        metric_kind=metric_kind,
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run Stage 2 banana coil optimization against a fixed plasma surface.",
@@ -1246,6 +1293,61 @@ def parse_args():
             "widths and not swamped by the curve harmonics. Default OFF == "
             "byte-identical (scale == 1 everywhere); no effect under "
             "--constraint-method alm or --basin-hops (penalty path only)."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-sobolev-metric",
+        choices=("off", "h1", "h2"),
+        default=os.environ.get("STAGE2_SOBOLEV_METRIC", "off").lower(),
+        help=(
+            "Use the non-diagonal CurveCWSFourierCPP pullback Sobolev metric on "
+            "unbounded curve Fourier DOFs in the L-BFGS-B penalty solve. Default "
+            "off keeps the existing diagonal scale path."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-sobolev-alpha",
+        type=float,
+        default=float(os.environ.get("STAGE2_SOBOLEV_ALPHA", "0.0")),
+        help=(
+            "Sobolev curve-mode preconditioner strength for the L-BFGS-B penalty "
+            "solve: scales the banana-curve Fourier DOFs by 1/(1+alpha*k^power) in the "
+            "u=x/scale transform (composed with --winding-dof-scale), damping the "
+            "n^2-amplified high-order-mode gradient that makes the first step "
+            "overshoot. Default 0.0 == OFF == byte-identical; no effect under "
+            "--constraint-method alm or --basin-hops (penalty path only)."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-sobolev-h2-beta",
+        type=float,
+        default=float(os.environ.get("STAGE2_SOBOLEV_H2_BETA", "0.0")),
+        help=(
+            "Optional H2 contribution strength for --stage2-sobolev-metric h2. "
+            "Ignored for metric=off/h1."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-sobolev-power",
+        type=int,
+        choices=(2, 4),
+        default=int(os.environ.get("STAGE2_SOBOLEV_POWER", "2")),
+        help=(
+            "Exponent of the Sobolev curve-mode scale 1/(1+alpha*k^power). 2 = H^1 "
+            "(1+k^2, the validated form); 4 = H^2-like (more aggressive). Only used "
+            "when --stage2-sobolev-alpha > 0. Named -power (not -order) to avoid "
+            "colliding with the curve --order."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-objective-normalize",
+        action="store_true",
+        default=os.environ.get("STAGE2_OBJECTIVE_NORMALIZE", "").lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Divide the Stage-2 penalty objective value and gradient by the frozen "
+            "seed objective so L-BFGS-B absolute tolerances operate on O(1) units. "
+            "Penalty path and seed diagnostic only; default off."
         ),
     )
     parser.add_argument(
@@ -5436,6 +5538,31 @@ def main(parsed_args=None):
         edge_iota_target_min=edge_iota_target_min,
         edge_iota_hinge_shape=edge_iota_hinge_shape,
     )
+    if (
+        CONSTRAINT_METHOD == "alm"
+        and str(getattr(args, "stage2_sobolev_metric", "off")).lower() != "off"
+    ):
+        raise ValueError(
+            "--stage2-sobolev-metric is only wired for the penalty L-BFGS-B path"
+        )
+    if CONSTRAINT_METHOD == "alm" and bool(
+        getattr(args, "stage2_objective_normalize", False)
+    ):
+        raise ValueError(
+            "--stage2-objective-normalize is only wired for the penalty L-BFGS-B path"
+        )
+    stage2_penalty_preconditioner = resolve_stage2_penalty_preconditioner(
+        args,
+        JF.dof_names,
+        winding_dof_scale_map,
+        curves_by_block=(new_banana_curve,),
+        bounds=lbfgsb_bounds,
+    )
+    stage2_objective_j_ref = None
+    if bool(getattr(args, "stage2_objective_normalize", False)):
+        seed_objective, _seed_grad = fun(dofs)
+        stage2_objective_j_ref = max(float(seed_objective), np.finfo(float).eps)
+        fun = normalize_objective(fun, stage2_objective_j_ref)
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
         alm_settings = build_stage2_alm_settings(args)
@@ -5602,7 +5729,7 @@ def main(parsed_args=None):
                 diagnose_seed_gradient(
                     fun,
                     dofs,
-                    build_winding_dof_scale_vector(JF.dof_names, winding_dof_scale_map),
+                    stage2_penalty_preconditioner,
                     edge_iota_objective=edge_iota_objective,
                     edge_iota_weight=edge_iota_weight,
                     edge_iota_target_min=edge_iota_target_min,
@@ -5745,7 +5872,7 @@ def main(parsed_args=None):
             minimize,
             fun,
             dofs,
-            scale=build_winding_dof_scale_vector(JF.dof_names, winding_dof_scale_map),
+            scale=stage2_penalty_preconditioner,
             bounds=lbfgsb_bounds,
             options=lbfgsb_options,
         )
@@ -6197,8 +6324,13 @@ def main(parsed_args=None):
     if CONSTRAINT_METHOD == "alm":
         results.update(_stage2_alm_adaptive_smoothing_results(alm_smoothing_state))
     results.update(secondary_artifact_metadata)
+    results.update(stage2_penalty_preconditioner.results_metadata())
     results.update(
         {
+            "STAGE2_OBJECTIVE_NORMALIZE": bool(
+                getattr(args, "stage2_objective_normalize", False)
+            ),
+            "STAGE2_OBJECTIVE_J_REF": stage2_objective_j_ref,
             "STAGE2_VESSEL_KEEPOUT_WEIGHT": VESSEL_KEEPOUT_WEIGHT,
             "STAGE2_AVAILABLE_ENVELOPE_REWARD_WEIGHT": (
                 AVAILABLE_ENVELOPE_REWARD_WEIGHT

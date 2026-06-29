@@ -1,9 +1,11 @@
 import inspect
 import math
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
+from scipy.linalg import cholesky, solve_triangular
 from matplotlib.path import Path as MplPath
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
@@ -1426,6 +1428,341 @@ def build_winding_dof_scale_vector(dof_names, scale_map):
     return scale
 
 
+# CurveCWSFourier Fourier-mode DOF name prefixes (``...:phic(k)`` etc.); the
+# integer ``k`` in parens is the Fourier mode order whose gradient scales ~k^2.
+_CURVE_FOURIER_DOF_PREFIXES = ("phic(", "phis(", "thetac(", "thetas(")
+
+
+def build_sobolev_curve_mode_scale_vector(dof_names, alpha, power=2):
+    """Per-DOF Sobolev mode-scale ``1/(1 + alpha*k**power)`` on the curve Fourier DOFs.
+
+    Aligned to ``dof_names`` for the ``u = x/scale`` transform. High-order
+    CurveCWSFourier modes (``phic/phis/thetac/thetas(k)``) carry a gradient that
+    grows with the mode order ``k`` (the n^2 ill-conditioning that makes the
+    L-BFGS-B first step overshoot); scaling those DOFs by ``1/(1+alpha*k**power)``
+    damps the step on exactly those modes (since the x-space step is ``-grad*scale^2``).
+    Non-curve DOFs (winding surface, current) and the ``k=0`` mode get 1.0.
+
+    ``power=2`` is the H^1 metric (``1+k^2``; matches
+    :func:`geometry_cleanup._sobolev_x_scale`); ``power=4`` is the more aggressive
+    H^2-like form. ``alpha`` of 0/None returns all-ones (exact identity / off); a
+    negative or non-finite ``alpha`` is a caller error and raises.
+    """
+    names = list(dof_names)
+    scale = np.ones(len(names), dtype=float)
+    if not alpha:
+        return scale
+    if not (np.isfinite(alpha) and alpha > 0.0):
+        raise ValueError(
+            f"sobolev curve-mode alpha must be finite and positive, got {alpha!r}."
+        )
+    for i, name in enumerate(names):
+        suffix = str(name).rsplit(":", 1)[-1]
+        for prefix in _CURVE_FOURIER_DOF_PREFIXES:
+            if suffix.startswith(prefix):
+                k = int(suffix[len(prefix):suffix.index(")")])
+                scale[i] = 1.0 / (1.0 + alpha * k ** power)
+                break
+    return scale
+
+
+@dataclass(frozen=True)
+class CurveSobolevBlock:
+    """One non-diagonal curve block embedded in the global Stage-2 DOF vector."""
+
+    indices: np.ndarray
+    cholesky_factor: np.ndarray
+    metric_trace_mean: float
+
+
+@dataclass(frozen=True)
+class Stage2PenaltyPreconditioner:
+    """Linear transform used by the Stage-2 penalty L-BFGS-B solve.
+
+    The diagonal block preserves the existing ``u = x/scale`` behavior. Each
+    curve block uses ``u = L.T @ x`` for an SPD metric ``M = L @ L.T`` and is
+    valid only on unbounded DOFs.
+    """
+
+    diagonal_scale: np.ndarray
+    curve_blocks: tuple
+    metric_kind: str = "off"
+    alpha: float = 0.0
+    h2_beta: float = 0.0
+    metric_normalization: str = "none"
+
+    @classmethod
+    def from_scale(cls, scale):
+        scale_array = np.asarray(scale, dtype=float)
+        if scale_array.ndim != 1:
+            raise ValueError("preconditioner scale must be one-dimensional")
+        if not np.all(np.isfinite(scale_array) & (scale_array > 0.0)):
+            raise ValueError("preconditioner scale entries must be finite and positive")
+        return cls(
+            diagonal_scale=scale_array,
+            curve_blocks=(),
+        )
+
+    @property
+    def size(self):
+        return int(self.diagonal_scale.size)
+
+    @property
+    def scale_min(self):
+        return float(np.min(self.diagonal_scale))
+
+    @property
+    def scale_max(self):
+        return float(np.max(self.diagonal_scale))
+
+    def _vector(self, values, name):
+        vector = np.asarray(values, dtype=float)
+        if vector.shape != self.diagonal_scale.shape:
+            raise ValueError(
+                f"{name} shape {vector.shape} does not match preconditioner "
+                f"shape {self.diagonal_scale.shape}"
+            )
+        return vector
+
+    def to_u(self, x):
+        u = self._vector(x, "x") / self.diagonal_scale
+        for block in self.curve_blocks:
+            block_x = np.asarray(x, dtype=float)[block.indices]
+            u[block.indices] = block.cholesky_factor.T @ block_x
+        return u
+
+    def to_x(self, u):
+        x = self._vector(u, "u") * self.diagonal_scale
+        for block in self.curve_blocks:
+            x[block.indices] = solve_triangular(
+                block.cholesky_factor.T,
+                np.asarray(u, dtype=float)[block.indices],
+                lower=False,
+            )
+        return x
+
+    def grad_to_u(self, grad):
+        grad_u = self._vector(grad, "grad") * self.diagonal_scale
+        for block in self.curve_blocks:
+            grad_u[block.indices] = solve_triangular(
+                block.cholesky_factor,
+                np.asarray(grad, dtype=float)[block.indices],
+                lower=True,
+            )
+        return grad_u
+
+    def preconditioned_gradient(self, grad):
+        return self.to_x(self.grad_to_u(grad))
+
+    def step_from_gradient(self, grad):
+        return self.preconditioned_gradient(grad)
+
+    def transform_bounds(self, bounds):
+        if bounds is None:
+            return None
+        if len(bounds) != self.size:
+            raise ValueError(
+                f"bounds length {len(bounds)} does not match preconditioner size {self.size}"
+            )
+        lower = np.asarray([b[0] for b in bounds], dtype=float)
+        upper = np.asarray([b[1] for b in bounds], dtype=float)
+        for block in self.curve_blocks:
+            if np.isfinite(lower[block.indices]).any() or np.isfinite(upper[block.indices]).any():
+                raise ValueError(
+                    "non-diagonal curve Sobolev block cannot carry finite L-BFGS-B bounds"
+                )
+        scaled_lower = np.where(np.isfinite(lower), lower / self.diagonal_scale, lower)
+        scaled_upper = np.where(np.isfinite(upper), upper / self.diagonal_scale, upper)
+        return list(zip(scaled_lower.tolist(), scaled_upper.tolist()))
+
+    def results_metadata(self):
+        return {
+            "STAGE2_PRECONDITIONER_KIND": self.metric_kind,
+            "STAGE2_PRECONDITIONER_CURVE_BLOCK_COUNT": len(self.curve_blocks),
+            "STAGE2_PRECONDITIONER_SCALE_MIN": self.scale_min,
+            "STAGE2_PRECONDITIONER_SCALE_MAX": self.scale_max,
+            "STAGE2_SOBOLEV_ALPHA": float(self.alpha),
+            "STAGE2_SOBOLEV_H2_BETA": float(self.h2_beta),
+            "STAGE2_SOBOLEV_METRIC_NORMALIZATION": self.metric_normalization,
+            "STAGE2_SOBOLEV_METRIC_TRACE_MEAN": [
+                float(block.metric_trace_mean) for block in self.curve_blocks
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class _CurveSobolevMetricResult:
+    metric: np.ndarray
+    trace_mean: float
+    normalization: str
+
+
+def _curve_dcoeff_matrix(curve, accessor_name):
+    values = np.asarray(getattr(curve, accessor_name)(), dtype=float)
+    if values.ndim != 3 or values.shape[1] != 3:
+        raise ValueError(
+            f"{accessor_name} must return shape (num_quadpoints, 3, num_dofs), "
+            f"got {values.shape}"
+        )
+    return values.reshape(values.shape[0] * values.shape[1], values.shape[2]), values.shape[0]
+
+
+def _build_curve_sobolev_metric_result(curve, alpha, *, h2_beta=0.0):
+    alpha = float(alpha)
+    h2_beta = float(h2_beta)
+    if not (np.isfinite(alpha) and alpha >= 0.0):
+        raise ValueError(f"sobolev metric alpha must be finite and nonnegative, got {alpha!r}")
+    if not (np.isfinite(h2_beta) and h2_beta >= 0.0):
+        raise ValueError(f"sobolev metric h2_beta must be finite and nonnegative, got {h2_beta!r}")
+
+    dgamma_dash, num_quadpoints = _curve_dcoeff_matrix(curve, "dgammadash_by_dcoeff")
+    sobolev_metric = (dgamma_dash.T @ dgamma_dash) / float(num_quadpoints)
+    if h2_beta > 0.0:
+        dgamma_dashdash, h2_num_quadpoints = _curve_dcoeff_matrix(
+            curve, "dgammadashdash_by_dcoeff"
+        )
+        if h2_num_quadpoints != num_quadpoints:
+            raise ValueError("H1 and H2 curve derivative grids must use the same quadrature")
+        sobolev_metric = sobolev_metric + (
+            h2_beta * (dgamma_dashdash.T @ dgamma_dashdash) / float(num_quadpoints)
+        )
+
+    trace_mean = float(np.trace(sobolev_metric) / sobolev_metric.shape[0])
+    normalization = "trace_mean"
+    if trace_mean > 0.0:
+        sobolev_metric = sobolev_metric / trace_mean
+    metric = np.eye(sobolev_metric.shape[0]) + alpha * sobolev_metric
+    if not np.allclose(metric, metric.T, rtol=1.0e-12, atol=1.0e-12):
+        raise ValueError("sobolev metric assembly produced a nonsymmetric matrix")
+    return _CurveSobolevMetricResult(
+        metric=metric,
+        trace_mean=trace_mean,
+        normalization=normalization,
+    )
+
+
+def build_curve_sobolev_metric(curve, alpha, *, h2_beta=0.0):
+    return _build_curve_sobolev_metric_result(curve, alpha, h2_beta=h2_beta).metric
+
+
+def build_curve_block_cholesky(metric):
+    metric = np.asarray(metric, dtype=float)
+    if metric.ndim != 2 or metric.shape[0] != metric.shape[1]:
+        raise ValueError("curve Sobolev metric must be a square matrix")
+    return cholesky(metric, lower=True)
+
+
+def _curve_local_dof_names(curve):
+    if hasattr(curve, "local_dof_names"):
+        return [str(name) for name in curve.local_dof_names]
+    return [str(name) for name in curve._make_names()]
+
+
+def _curve_global_indices(dof_names, curve, used_indices):
+    names = [str(name) for name in dof_names]
+    local_names = _curve_local_dof_names(curve)
+    curve_name = getattr(curve, "name", type(curve).__name__)
+    prefixed_names = [f"{curve_name}:{local_name}" for local_name in local_names]
+    if all(name in names for name in prefixed_names):
+        indices = [names.index(name) for name in prefixed_names]
+    else:
+        indices = []
+        for local_name in local_names:
+            matches = [
+                index
+                for index, global_name in enumerate(names)
+                if index not in used_indices
+                and (global_name == local_name or global_name.endswith(f":{local_name}"))
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"expected exactly one global DOF match for curve local DOF "
+                    f"{local_name!r}, found {len(matches)}"
+                )
+            indices.append(matches[0])
+    overlap = set(indices) & set(used_indices)
+    if overlap:
+        raise ValueError(f"curve Sobolev blocks overlap at global indices {sorted(overlap)}")
+    return np.asarray(indices, dtype=int)
+
+
+def _validate_curve_block_bounds(bounds, indices):
+    if bounds is None:
+        return
+    lower = np.asarray([b[0] for b in bounds], dtype=float)
+    upper = np.asarray([b[1] for b in bounds], dtype=float)
+    if np.isfinite(lower[indices]).any() or np.isfinite(upper[indices]).any():
+        raise ValueError("curve Sobolev block indices must be unbounded in L-BFGS-B")
+
+
+def build_stage2_penalty_preconditioner(
+    dof_names,
+    curves_by_block,
+    alpha,
+    *,
+    h2_beta=0.0,
+    winding_dof_scale_map=None,
+    bounds=None,
+    metric_kind="h1",
+):
+    diagonal_scale = build_winding_dof_scale_vector(dof_names, winding_dof_scale_map)
+    metric_kind = str(metric_kind).lower()
+    if metric_kind not in {"off", "h1", "h2"}:
+        raise ValueError(f"unknown stage2 Sobolev metric kind {metric_kind!r}")
+    if metric_kind == "off":
+        return Stage2PenaltyPreconditioner.from_scale(diagonal_scale)
+    curves = tuple(curves_by_block or ())
+    if not curves:
+        raise ValueError("stage2 Sobolev metric requires at least one curve block")
+
+    curve_blocks = []
+    used_indices = set()
+    beta = float(h2_beta) if metric_kind == "h2" else 0.0
+    for curve in curves:
+        metric_result = _build_curve_sobolev_metric_result(curve, alpha, h2_beta=beta)
+        indices = _curve_global_indices(dof_names, curve, used_indices)
+        if indices.size != metric_result.metric.shape[0]:
+            raise ValueError(
+                f"curve metric has {metric_result.metric.shape[0]} DOFs but maps to "
+                f"{indices.size} global indices"
+            )
+        _validate_curve_block_bounds(bounds, indices)
+        curve_blocks.append(
+            CurveSobolevBlock(
+                indices=indices,
+                cholesky_factor=build_curve_block_cholesky(metric_result.metric),
+                metric_trace_mean=metric_result.trace_mean,
+            )
+        )
+        used_indices.update(indices.tolist())
+    return Stage2PenaltyPreconditioner(
+        diagonal_scale=diagonal_scale,
+        curve_blocks=tuple(curve_blocks),
+        metric_kind=metric_kind,
+        alpha=float(alpha),
+        h2_beta=beta,
+        metric_normalization="trace_mean",
+    )
+
+
+def normalize_objective(fun, j_ref):
+    j_ref = float(j_ref)
+    if not (np.isfinite(j_ref) and j_ref > 0.0):
+        raise ValueError(f"objective normalization reference must be positive, got {j_ref!r}")
+
+    def normalized_fun(x):
+        J, grad = fun(x)
+        return float(J) / j_ref, np.asarray(grad, dtype=float) / j_ref
+
+    return normalized_fun
+
+
+def as_stage2_penalty_preconditioner(scale):
+    if isinstance(scale, Stage2PenaltyPreconditioner):
+        return scale
+    return Stage2PenaltyPreconditioner.from_scale(scale)
+
+
 def run_scaled_winding_minimize(
     minimize_fn,
     fun,
@@ -1436,45 +1773,36 @@ def run_scaled_winding_minimize(
     callback=None,
     **minimize_kwargs,
 ):
-    """Run ``minimize_fn`` (L-BFGS-B, jac=True) under the transform ``u = x/scale``.
+    """Run ``minimize_fn`` (L-BFGS-B, jac=True) under the Stage-2 DOF transform.
 
-    Chain rule: x = u*scale so dJ/du = (dJ/dx)*scale; the wrapped objective
-    returns ``(J, grad*scale)``. Bounds map element-wise to ``(lo/scale,
-    hi/scale)`` (``inf`` preserved). The callback is un-scaled before the caller's
-    callback runs, and the result is inverted in place (``res.x *= scale``) so
-    every downstream ``res.x`` consumer sees physical DOFs. ``res.nit/.success/
-    .message/.status`` are untouched. ``scale`` all-ones is an exact identity.
+    ``scale`` may be the legacy diagonal vector or a
+    :class:`Stage2PenaltyPreconditioner`. The callback and final result are mapped
+    back to physical x-space; optimizer status fields are untouched.
     """
-    scale = np.asarray(scale, dtype=float)
+    preconditioner = as_stage2_penalty_preconditioner(scale)
     x0 = np.asarray(x0, dtype=float)
 
     def scaled_fun(u):
-        J, grad = fun(u * scale)
-        return J, np.asarray(grad, dtype=float) * scale
+        J, grad = fun(preconditioner.to_x(u))
+        return J, preconditioner.grad_to_u(grad)
 
     scaled_callback = None
     if callback is not None:
         def scaled_callback(u):
-            return callback(u * scale)
+            return callback(preconditioner.to_x(u))
 
-    scaled_bounds = None
-    if bounds is not None:
-        lower = np.asarray([b[0] for b in bounds], dtype=float)
-        upper = np.asarray([b[1] for b in bounds], dtype=float)
-        scaled_lower = np.where(np.isfinite(lower), lower / scale, lower)
-        scaled_upper = np.where(np.isfinite(upper), upper / scale, upper)
-        scaled_bounds = list(zip(scaled_lower.tolist(), scaled_upper.tolist()))
+    scaled_bounds = preconditioner.transform_bounds(bounds)
 
     result = minimize_fn(
         scaled_fun,
-        x0 / scale,
+        preconditioner.to_u(x0),
         jac=True,
         method="L-BFGS-B",
         bounds=scaled_bounds,
         callback=scaled_callback,
         **minimize_kwargs,
     )
-    result.x = np.asarray(result.x, dtype=float) * scale
+    result.x = preconditioner.to_x(result.x)
     return result
 
 

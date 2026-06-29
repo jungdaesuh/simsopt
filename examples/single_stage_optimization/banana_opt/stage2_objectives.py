@@ -47,7 +47,10 @@ from banana_opt.hardware_constraint_schema import (
 )
 from banana_opt.hardware_keepout import live_winding_r0
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
-from banana_opt.single_stage_geometry import build_surface_configs
+from banana_opt.single_stage_geometry import (
+    as_stage2_penalty_preconditioner,
+    build_surface_configs,
+)
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 from banana_opt.smooth_distance_selection import (
     pairwise_block_min,
@@ -844,10 +847,9 @@ def diagnose_seed_gradient(
 
     Answers "why does L-BFGS-B fail to take a first step from ``x0``?" WITHOUT
     running the optimizer. ``fun(x) -> (J, grad)`` is the same objective the
-    penalty path optimizes; ``scale`` is the per-DOF vector of the ``u = x/scale``
-    transform, so the optimizer's line search sees ``grad_u = grad * scale`` and
-    its untruncated first step maps back to ``dx = -grad * scale**2`` in x-space.
-    The optimizer is never invoked. Each probe evaluates ``fun``, which for the
+    penalty path optimizes; ``scale`` may be either the legacy per-DOF vector or
+    the Stage-2 penalty preconditioner object. The optimizer is never invoked.
+    Each probe evaluates ``fun``, which for the
     real Stage-2 objective transiently sets the shared coil-DOF vector as a side
     effect, so on return the shared DOFs sit at the last probe point -- a caller
     that then serializes objective state must reset the DOFs to its chosen result
@@ -858,14 +860,15 @@ def diagnose_seed_gradient(
     the SSOT hinge with a zero base) and ``grad_hw_norm_2`` (the non-edge remainder
     ``grad - grad_edge``); with no soft edge term ``grad_edge_norm_2`` is 0 and
     ``grad_hw_norm_2`` equals the full gradient norm;
-    ``scaled_grad_norm_2``/``_inf`` (``grad*scale`` -- what the line search sees);
-    ``scale_min``/``scale_max``; ``raw_descent`` (``[{eps, dJ}]`` along the unit
-    ``-grad``: ``dJ<0`` => genuine descent direction); ``first_step_dJ``
-    (``J(x0 - grad*scale**2) - J0`` -- the untruncated first step, ``>0`` => it
-    overshoots uphill and L-BFGS-B must back off); ``verdict`` (heuristic label).
+    ``scaled_grad_norm_2``/``_inf`` (the transformed-space gradient seen by
+    L-BFGS-B); ``scale_min``/``scale_max``; ``raw_descent`` (``[{eps, dJ}]`` along
+    the unit ``-grad``: ``dJ<0`` => genuine descent direction); ``first_step_dJ``
+    (``J(x0 - P.step_from_gradient(grad)) - J0`` -- the untruncated identity-
+    Hessian transformed step, ``>0`` => it overshoots uphill and L-BFGS-B must
+    back off); ``verdict`` (heuristic label).
     """
     x0 = np.asarray(x0, dtype=float)
-    scale = np.asarray(scale, dtype=float)
+    preconditioner = as_stage2_penalty_preconditioner(scale)
     J0, grad = fun(x0)
     J0 = float(J0)
     grad = np.asarray(grad, dtype=float)
@@ -895,8 +898,9 @@ def diagnose_seed_gradient(
                 {"eps": float(eps), "dJ": float(fun(x0 - eps * unit)[0]) - J0}
             )
 
-    first_step_dJ = float(fun(x0 - grad * scale * scale)[0]) - J0
-    scaled_grad = grad * scale
+    scaled_grad = preconditioner.grad_to_u(grad)
+    first_step = preconditioner.step_from_gradient(grad)
+    first_step_dJ = float(fun(x0 - first_step)[0]) - J0
 
     diag = {
         "J0": J0,
@@ -907,11 +911,12 @@ def diagnose_seed_gradient(
         "grad_edge_norm_2": float(np.linalg.norm(grad_edge)),
         "scaled_grad_norm_2": float(np.linalg.norm(scaled_grad)),
         "scaled_grad_norm_inf": float(np.linalg.norm(scaled_grad, ord=np.inf)),
-        "scale_min": float(scale.min()),
-        "scale_max": float(scale.max()),
+        "scale_min": preconditioner.scale_min,
+        "scale_max": preconditioner.scale_max,
         "raw_descent": raw_descent,
         "first_step_dJ": first_step_dJ,
     }
+    diag.update(preconditioner.results_metadata())
     diag["verdict"] = _classify_seed_gradient(diag)
     return diag
 

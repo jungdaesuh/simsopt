@@ -21,6 +21,7 @@ if str(EXAMPLES_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_ROOT))
 
 from banana_opt.single_stage_geometry import (  # noqa: E402
+    build_sobolev_curve_mode_scale_vector,
     build_winding_dof_scale_vector,
     run_scaled_winding_minimize,
 )
@@ -145,3 +146,76 @@ def test_transform_preserves_the_bounded_minimizer():
     np.testing.assert_allclose(r_scaled.x, r_plain.x, atol=1e-5)
     # the inverted result is physical-space (R0 within its corridor)
     assert _BOUNDS[2][0] <= r_scaled.x[2] <= _BOUNDS[2][1]
+
+
+# --- Sobolev curve-mode preconditioner (order-64 conditioning) -----------------
+
+_SOBOLEV_NAMES = [
+    "Current1:x0",                     # non-curve -> 1.0
+    "SurfaceRZFourier1:rc(0,0)",       # winding size -> 1.0 (not a curve prefix)
+    "CurveCWSFourierCPP1:phic(0)",     # k=0 -> 1/(1+a*0) = 1.0
+    "CurveCWSFourierCPP1:phis(1)",     # k=1
+    "CurveCWSFourierCPP1:thetac(8)",   # k=8
+    "CurveCWSFourierCPP1:thetas(64)",  # k=64 (stiff high-order mode)
+]
+
+
+def test_sobolev_scale_damps_curve_modes_by_order():
+    scale = build_sobolev_curve_mode_scale_vector(_SOBOLEV_NAMES, alpha=4.0, power=2)
+    assert scale[0] == 1.0  # current untouched
+    assert scale[1] == 1.0  # winding rc(0,0) untouched (not a curve Fourier DOF)
+    assert scale[2] == 1.0  # k=0 mode: 1/(1+4*0)
+    assert scale[3] == 1.0 / (1.0 + 4.0 * 1 ** 2)
+    assert scale[4] == 1.0 / (1.0 + 4.0 * 8 ** 2)
+    assert scale[5] == 1.0 / (1.0 + 4.0 * 64 ** 2)
+    # strictly decreasing in mode order -> the higher the mode, the harder it is damped
+    assert scale[3] > scale[4] > scale[5]
+
+
+def test_sobolev_alpha_zero_is_identity():
+    scale = build_sobolev_curve_mode_scale_vector(_SOBOLEV_NAMES, alpha=0.0)
+    assert np.array_equal(scale, np.ones(len(_SOBOLEV_NAMES)))
+
+
+def test_sobolev_invalid_alpha_rejected():
+    import pytest
+
+    for bad in (-1.0, np.inf, np.nan):
+        with pytest.raises(ValueError, match="finite and positive"):
+            build_sobolev_curve_mode_scale_vector(_SOBOLEV_NAMES, alpha=bad)
+
+
+def test_sobolev_power4_more_aggressive_than_power2():
+    s2 = build_sobolev_curve_mode_scale_vector(_SOBOLEV_NAMES, alpha=1.0, power=2)
+    s4 = build_sobolev_curve_mode_scale_vector(_SOBOLEV_NAMES, alpha=1.0, power=4)
+    assert s2[5] == 1.0 / (1.0 + 64 ** 2)
+    assert s4[5] == 1.0 / (1.0 + 64 ** 4)
+    assert s4[5] < s2[5]  # H^2-like damps the high mode far harder
+
+
+def test_resolve_penalty_scale_off_is_winding_only_and_on_composes():
+    # The solver's composer: OFF (alpha=0) must equal the winding-only scale
+    # (byte-identical penalty path); ON must be the element-wise product of the
+    # winding-corridor scale and the Sobolev curve-mode scale.
+    from STAGE_2.banana_coil_solver import resolve_stage2_penalty_dof_scale
+
+    winding_only = build_winding_dof_scale_vector(_NAMES, WINDING_DOF_CORRIDOR_SCALE_MAP)
+
+    args_off = SimpleNamespace(stage2_sobolev_alpha=0.0, stage2_sobolev_power=2)
+    scale_off = resolve_stage2_penalty_dof_scale(
+        args_off, _NAMES, WINDING_DOF_CORRIDOR_SCALE_MAP
+    )
+    np.testing.assert_array_equal(scale_off, winding_only)
+
+    args_on = SimpleNamespace(stage2_sobolev_alpha=4.0, stage2_sobolev_power=2)
+    scale_on = resolve_stage2_penalty_dof_scale(
+        args_on, _NAMES, WINDING_DOF_CORRIDOR_SCALE_MAP
+    )
+    expected = winding_only * build_sobolev_curve_mode_scale_vector(
+        _NAMES, alpha=4.0, power=2
+    )
+    np.testing.assert_array_equal(scale_on, expected)
+    # _NAMES[1] = "CurveCWSFourierCPP1:thetas(1)" -> Sobolev-damped, winding factor 1
+    assert scale_on[1] == 1.0 / (1.0 + 4.0 * 1 ** 2)
+    # _NAMES[2] = "SurfaceRZFourier1:rc(0,0)" -> winding-scaled, Sobolev factor 1
+    assert scale_on[2] == WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"]
