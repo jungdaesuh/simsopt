@@ -2653,6 +2653,24 @@ def smooth_max_curvature_signed_constraint(
 ):
     kappa = np.asarray(curve.kappa(), dtype=float)
     hard_max = float(np.max(kappa))
+    return _smooth_max_curvature_signed_constraint_from_kappa(
+        curve,
+        kappa,
+        hard_max,
+        threshold,
+        temperature,
+        base_objective_optimizable,
+    )
+
+
+def _smooth_max_curvature_signed_constraint_from_kappa(
+    curve,
+    kappa,
+    hard_max: float,
+    threshold: float,
+    temperature: float,
+    base_objective_optimizable,
+):
     active_mask = kappa >= (hard_max - 4.0 * float(temperature))
     if not np.any(active_mask):
         active_mask[np.argmax(kappa)] = True
@@ -2668,6 +2686,9 @@ def smooth_max_curvature_signed_constraint(
         dtype=float,
     )
     return smooth_max - float(threshold), grad
+
+
+_DEFAULT_SMOOTH_MAX_CURVATURE_SIGNED_CONSTRAINT = smooth_max_curvature_signed_constraint
 
 
 def smooth_min_distance_signed_constraint(
@@ -2995,14 +3016,30 @@ def evaluate_stage2_alm_problem(
             0.0,
         )
 
-    max_curvature = float(np.max(Jc.curve.kappa()))
+    curvature_kappa = np.asarray(Jc.curve.kappa(), dtype=float)
+    max_curvature = float(np.max(curvature_kappa))
     curvature_violation = upper_bound_residual(max_curvature, Jc.threshold)
-    curvature_signed_value, curvature_grad = smooth_max_curvature_signed_constraint(
-        Jc.curve,
-        Jc.threshold,
-        curvature_smoothing,
-        base_objective_optimizable,
-    )
+    if (
+        smooth_max_curvature_signed_constraint
+        is _DEFAULT_SMOOTH_MAX_CURVATURE_SIGNED_CONSTRAINT
+    ):
+        curvature_signed_value, curvature_grad = (
+            _smooth_max_curvature_signed_constraint_from_kappa(
+                Jc.curve,
+                curvature_kappa,
+                max_curvature,
+                Jc.threshold,
+                curvature_smoothing,
+                base_objective_optimizable,
+            )
+        )
+    else:
+        curvature_signed_value, curvature_grad = smooth_max_curvature_signed_constraint(
+            Jc.curve,
+            Jc.threshold,
+            curvature_smoothing,
+            base_objective_optimizable,
+        )
     coil_width_value = float(Jw.J())
     coil_width_grad = np.asarray(
         Jw.dJ(partials=True)(base_objective_optimizable), dtype=float

@@ -338,7 +338,7 @@ unpack the tuple in `dJ()`.
          point-cloud matmul, with a focused yaw/pitch/roll order regression test.
    - [x] `surface.py:679-689` — replace batched `np.linalg.det/inv` on the
          structured 2×2 (J[1,0]=0, J[1,1]=1) with the analytic inverse.
-   - [ ] `objectives/utilities.py:24-48` — replace dense permutation matmul
+   - [x] `objectives/utilities.py:24-48` — replace dense permutation matmul
          (`P@…`, 3 dense n×n factors) with O(n) pivot indexing in
          `forward_solve`/`forward_backward`.
    - [ ] `framedcurve.py:746-759` — stop re-transferring quadpoints to device /
@@ -349,7 +349,11 @@ unpack the tuple in `dJ()`.
          larger jitted objective); at the scipy boundary a python float is required,
          so this is a no-op there. Verify the consumer first. Low value.
 3. `banana_opt` micro (P5).
-   - [ ] `stage2_objectives.py:2993-3000` — dedup the double `np.max(kappa)`.
+   - [x] `stage2_objectives.py:2993-3000` — dedup the double
+         `Jc.curve.kappa()`/`np.max(kappa)` on the default smooth-curvature path
+         by reusing the hard-path `kappa` array for the smooth signed constraint.
+         Custom injected curvature helpers keep the existing four-argument
+         contract.
    - [ ] `stage2_objectives.py:3226-3268` — cache ALM constraint metadata /
          activity tolerances (depend only on smoothing params + static
          config/thresholds, e.g. fixed `Jc.threshold` / `Jccdist.minimum_distance`)
@@ -461,9 +465,12 @@ unpack the tuple in `dJ()`.
   need isolated consumer audits or timing proof before changing allocation/host-sync
   behavior.
 - Phase 4.3 (`banana_opt` micro): `hardware_keepout.py` per-candidate host sync
-  landed with hardware keepout tests; the other items are deferred. In particular,
-  `boozer_finite_current.py` copies stay until a no-alias proof and regression test
-  exist, and DESC bridge/runtime items belong to the dirty-tree DESC lane.
+  landed with hardware keepout tests. The stage2 curvature path now evaluates
+  `Jc.curve.kappa()` once when the default smooth-curvature helper is injected,
+  while preserving the custom-helper four-argument contract. The other items are
+  deferred. In particular, `boozer_finite_current.py` copies stay until a
+  no-alias proof and regression test exist, and DESC bridge/runtime items belong
+  to the dirty-tree DESC lane.
 - Phase 4.4 (`boozersurface.py` exact-Newton iterative refinement): deferred;
   behavior-affecting convergence-path change requires an isolated Boozer parity
   plus single-stage smoke gate.
@@ -542,6 +549,12 @@ unpack the tuple in `dJ()`.
 - Dense-formula equivalence probe for `Surface.mean_cross_sectional_area`
   (`get_exact_surface()` helper): current analytic value matched the previous
   dense `np.linalg.det/inv` computation with absolute delta `5.551e-17`.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_banana_objective_modules.py::Stage2ObjectiveModuleTests -q`
+  — 62 passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check examples/single_stage_optimization/banana_opt/stage2_objectives.py tests/geo/test_banana_objective_modules.py`
+  — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile examples/single_stage_optimization/banana_opt/stage2_objectives.py tests/geo/test_banana_objective_modules.py`
+  — clean.
 
 ## Risks and Mitigations
 

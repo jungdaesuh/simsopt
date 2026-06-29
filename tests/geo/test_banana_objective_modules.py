@@ -324,6 +324,30 @@ class _FakeCurvatureObjective:
         return self._objective_value
 
 
+class _CountingCurve:
+    def __init__(self, kappa_values):
+        self._kappa = np.asarray(kappa_values, dtype=float)
+        self.kappa_calls = 0
+
+    def kappa(self):
+        self.kappa_calls += 1
+        return self._kappa.copy()
+
+    def dkappa_by_dcoeff_vjp(self, weights):
+        weighted_sum = float(np.sum(weights))
+        return lambda _objective: np.array([weighted_sum, -weighted_sum], dtype=float)
+
+
+class _CountingCurvatureObjective:
+    def __init__(self, threshold, kappa_values, objective_value):
+        self.threshold = float(threshold)
+        self.curve = _CountingCurve(kappa_values)
+        self._objective_value = float(objective_value)
+
+    def J(self):
+        return self._objective_value
+
+
 class _FakeCurve:
     def __init__(self, gamma_points, kappa_values=None):
         self._gamma = np.asarray(gamma_points, dtype=float)
@@ -2097,6 +2121,79 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.1)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
+        self._assert_stage2_alm_signal_contract(result)
+
+    def test_evaluate_stage2_alm_problem_reuses_default_curvature_kappa(self):
+        base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
+        curvature_objective = _CountingCurvatureObjective(
+            40.0,
+            [35.0, 41.0, 38.0],
+            7.5,
+        )
+
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
+            self.assertEqual(len(signed_values), 8)
+            self.assertEqual(len(grads), 8)
+            np.testing.assert_allclose(multipliers, np.zeros(8))
+            self.assertAlmostEqual(penalty, 12.0)
+            return {
+                "total": base_value,
+                "grad": base_grad,
+                "stationarity_norm": 0.5,
+            }
+
+        with mock.patch.object(
+            self.module,
+            "augmented_inequality_objective",
+            side_effect=fake_augmented,
+        ):
+            result = self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=base_objective,
+                new_bs=_FakeBiotSavart((4, 3)),
+                new_surf=_FakeSurfaceNormals((2, 2, 3)),
+                Jf=_FakeScalarObjective(0.25),
+                Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+                length_target=2.0,
+                Jccdist=_UnexpectedCurveDistance(0.05, 0.04),
+                Jc=curvature_objective,
+                banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.zeros(8),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
+                    1e-3,
+                ],
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                    -0.008,
+                ),
+                smooth_max_curvature_signed_constraint=(
+                    self.module.smooth_max_curvature_signed_constraint
+                ),
+                Jw=_FakeWidthObjective(0.10, [0.5, -0.25]),
+                width_min_threshold=0.05,
+                width_max_threshold=0.17,
+                Jself=_FakeSelfIntersectObjective(
+                    0.0, [0.1, -0.2], shortest_self_distance=0.5
+                ),
+                self_intersect_threshold=0.0,
+                length_min_target=0.95,
+            )
+
+        self.assertEqual(curvature_objective.curve.kappa_calls, 1)
         self._assert_stage2_alm_signal_contract(result)
 
     def test_evaluate_stage2_alm_problem_adds_hardware_sdf_reward_to_base_once(
