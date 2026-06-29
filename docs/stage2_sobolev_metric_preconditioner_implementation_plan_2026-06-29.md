@@ -10,9 +10,11 @@ This plan records the metric lane for the order-64 slid-clean Stage-2
 conditioning fix and its current fallback state. Local source is implemented in
 `5dff32284` with follow-up diagnostic/test hardening in `45d2b3ae1`, review
 hardening in `735400361`, and ALM Sobolev-alpha fail-closed hardening in
-`cc91579dd`; the Perlmutter launch package and handoff are active in
+`cc91579dd`, with fallback status wording refreshed in `0d4647a46`; the
+Perlmutter launch package and handoff are active in
 `autoresearch` commits `39758405`, `5cbd31cd`, `d499d62f`, and wrapper
-soft-control forwarding commit `df39e677`. The required remote gate is still
+soft-control forwarding commit `df39e677`, with fallback handoff status refreshed
+through `d51795ae`. The required remote gate is still
 decisive: the H1 and H2 beta=1 Perlmutter sweeps on `shared`
 assembled the metric but failed the descent gate for alpha 1, 4, 16, and 64.
 Every `first_step_dJ` stayed positive (H1: `+1.933950e10`, `+1.941215e10`,
@@ -385,8 +387,11 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 - [ ] **Full ALM fallback result**: Perlmutter job `55273370` is running on
       `regular_1` with 6h limit. It is the next operational fallback evidence,
       but it is not complete and must not be reported as physics closure.
-- [ ] **Crucible**: route the diff to strict PASS (no defensive fallbacks, SSOT
-      composer, no fake/jittered metric, regression tests non-tautological).
+- [x] **Review/Crucible closure for delivered slices**: source, tests, plan, and
+      handoff deltas have strict PASS review coverage (no defensive fallbacks,
+      SSOT composer, no fake/jittered metric, regression tests non-tautological).
+      This review closure is not physics closure; the full ALM fallback result
+      remains the open operational gate.
 
 ## Risks and Mitigations
 
@@ -444,14 +449,16 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       completion criterion is not met; fallback smoke `55271978` completed and
       proved ALM/edge-soft route engagement only. Full ALM fallback job
       `55273370` is running, but no result is available yet.
-- [ ] Crucible strict PASS; plan cross-referenced from
+- [x] Crucible/review strict PASS for the delivered source, tests, plan, and
+      handoff slices; plan cross-referenced from
       `docs/stage2_order64_sobolev_conditioning_plan_2026-06-28.md` and the
       `autoresearch:.handoffs/order64-conditioning.md` handoff updated to record
       the failed metric gate and active ALM fallback, or explicitly left
       unchanged with this plan marked as a non-active experiment.
       Cross-reference/handoff evidence is in
-      `45d2b3ae1`, `39758405`, `5cbd31cd`, `d499d62f`, and the current handoff
-      update; strict PASS evidence is still pending.
+      `45d2b3ae1`, `39758405`, `5cbd31cd`, `d499d62f`, `0d4647a46`, and
+      `d51795ae`. This does not close the physics gate: job `55273370` still
+      needs a full ALM fallback result.
 
 ## Open Questions
 
