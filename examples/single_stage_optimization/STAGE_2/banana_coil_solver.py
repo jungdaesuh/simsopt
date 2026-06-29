@@ -1310,12 +1310,12 @@ def parse_args():
         type=float,
         default=float(os.environ.get("STAGE2_SOBOLEV_ALPHA", "0.0")),
         help=(
-            "Sobolev curve-mode preconditioner strength for the L-BFGS-B penalty "
-            "solve: scales the banana-curve Fourier DOFs by 1/(1+alpha*k^power) in the "
-            "u=x/scale transform (composed with --winding-dof-scale), damping the "
-            "n^2-amplified high-order-mode gradient that makes the first step "
-            "overshoot. Default 0.0 == OFF == byte-identical; no effect under "
-            "--constraint-method alm or --basin-hops (penalty path only)."
+            "Sobolev preconditioner strength for the L-BFGS-B penalty solve. With "
+            "--stage2-sobolev-metric h1/h2, alpha weights the non-diagonal "
+            "CurveCWSFourierCPP pullback metric on unbounded curve DOFs. With "
+            "metric=off, alpha keeps the legacy diagonal curve-mode scale "
+            "1/(1+alpha*k^power). Default 0.0 == OFF == byte-identical; no effect "
+            "under --constraint-method alm or --basin-hops (penalty path only)."
         ),
     )
     parser.add_argument(
@@ -1333,9 +1333,10 @@ def parse_args():
         choices=(2, 4),
         default=int(os.environ.get("STAGE2_SOBOLEV_POWER", "2")),
         help=(
-            "Exponent of the Sobolev curve-mode scale 1/(1+alpha*k^power). 2 = H^1 "
-            "(1+k^2, the validated form); 4 = H^2-like (more aggressive). Only used "
-            "when --stage2-sobolev-alpha > 0. Named -power (not -order) to avoid "
+            "Exponent for the legacy diagonal Sobolev curve-mode scale "
+            "1/(1+alpha*k^power). Ignored when --stage2-sobolev-metric is h1/h2, "
+            "where H1/H2 behavior is selected by the metric flag and "
+            "--stage2-sobolev-h2-beta. Named -power (not -order) to avoid "
             "colliding with the curve --order."
         ),
     )

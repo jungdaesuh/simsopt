@@ -6,11 +6,17 @@
 
 ## Status / Precedence
 
-This is a draft successor plan. The active operational handoff
-`autoresearch:.handoffs/order64-conditioning.md` currently says diagonal
-Sobolev Lever A failed and the next executable step is Lever B trust-region.
-Adopting this metric plan requires updating that handoff; until then, read this
-as a proposed root-cause follow-up, not the active Perlmutter runbook.
+This plan is now the active metric lane for the order-64 slid-clean Stage-2
+conditioning fix. Local source is implemented in `5dff32284` with the follow-up
+diagnostic/test hardening in `45d2b3ae1`; the Perlmutter launch package and
+handoff are active in `autoresearch` commit `39758405`. The required remote
+gate is still decisive: Perlmutter job `55264061` ran on `shared` with
+`SMOKE=1 STAGE2_DIAGNOSE_SEED_GRADIENT=1 STAGE2_SOBOLEV_METRIC=h1
+STAGE2_SOBOLEV_ALPHA=1.0`, assembled the metric, and reported
+`first_step_dJ=+1.933950e10`; H1 alpha=1.0 is therefore **not** a passing
+setting. Do not launch a full run until a documented H1/H2 alpha sweep successor
+proves `first_step_dJ < 0`. Trust-region remains the fallback only if the metric
+diagnostic sweep cannot flip the seed step to descent.
 
 ## Purpose
 
@@ -59,33 +65,42 @@ composition tests for their bound/trust-region mappings.
 
 ## Current Context
 
-- **Diagonal Lever A is held uncommitted and proven insufficient.** Files (all
+- **Diagonal Lever A was implemented and proven insufficient.** The current
+  metric implementation keeps the diagonal/off path as a compatibility baseline
+  while adding the non-diagonal operator. Relevant files (all
   `examples/single_stage_optimization/`):
   - `banana_opt/single_stage_geometry.py`:
     - `build_sobolev_curve_mode_scale_vector(dof_names, alpha, power=2)` →
       `1/(1+alpha*k**power)` on curve Fourier DOFs, 1.0 else (line 1444).
     - `build_winding_dof_scale_vector(dof_names, scale_map)` (line 1414).
-    - `run_scaled_winding_minimize(minimize_fn, fun, x0, *, scale, bounds, ...)`
-      (line 1477): the **diagonal** `u = x/scale` transform — `scaled_fun(u) =
-      (J, grad*scale)`, element-wise bound mapping `(lo/scale, hi/scale)`,
-      `res.x *= scale` on the way out. This is the machinery to generalize.
+    - `Stage2PenaltyPreconditioner` and `run_scaled_winding_minimize(...)`
+      now support either the legacy diagonal `scale` vector or the non-diagonal
+      curve-block operator. The optimizer sees `u`; physical DOFs are mapped
+      through `preconditioner.to_x(...)`, gradients through
+      `preconditioner.grad_to_u(...)`, and final/callback DOFs are mapped back to
+      physical `x`.
     - `_CURVE_FOURIER_DOF_PREFIXES = ("phic(","phis(","thetac(","thetas(")`.
   - `STAGE_2/banana_coil_solver.py`:
-    - `resolve_stage2_penalty_dof_scale(args, dof_names, winding_dof_scale_map)`
-      (~line 1059): composes winding-diagonal × Sobolev-diagonal scale.
-    - `--stage2-sobolev-alpha` / `--stage2-sobolev-power` (~lines 1271/1284).
-    - Penalty call site uses `run_scaled_winding_minimize(...)` with the scale
-      from `resolve_stage2_penalty_dof_scale` (~line 5792); the seed-gradient
-      diagnostic uses the same scale (~line 5649).
+    - `resolve_stage2_penalty_preconditioner(...)` composes the winding
+      diagonal scale with the non-diagonal curve metric when
+      `--stage2-sobolev-metric h1/h2` is enabled, or returns the diagonal/off
+      compatibility path otherwise.
+    - `--stage2-sobolev-metric`, `--stage2-sobolev-alpha`,
+      `--stage2-sobolev-h2-beta`, `--stage2-sobolev-power`, and
+      `--stage2-objective-normalize` are penalty-path flags. `power` only
+      applies to the legacy diagonal path when metric mode is `off`.
+    - Penalty optimizer and seed-gradient diagnostic both receive the same
+      `stage2_penalty_preconditioner`, so `first_step_dJ` is measured under the
+      same operator as the L-BFGS-B path.
   - `tests/geo/test_winding_dof_scale.py`: 11 tests incl. 5 Sobolev-diagonal.
 - **α-sweep verdict (why diagonal failed):** `‖grad·scale‖∞` stayed pinned at
   `2.41e7` for every `alpha ∈ {1,4,16,64}` and `first_step_dJ` saturated at
   `~+3e23` without flipping negative. The dominant bad direction is **not** a
   single high-k curve mode that diagonal mode-scaling can reach.
-- **Operational handoff still says trust-region next.** The current
+- **Operational handoff now makes the metric lane active.**
   `autoresearch:.handoffs/order64-conditioning.md` records the diagonal sweep as
-  insufficient and names Lever B trust-region as the next executable action. This
-  metric plan supersedes that only after the handoff is updated.
+  insufficient, points to this plan as the active lane, and keeps trust-region as
+  fallback only if the metric diagnostic sweep fails.
 - **Confirmed building blocks.** The Stage-2 path instantiates
   **`CurveCWSFourierCPP`** (`src/simsopt/geo/curvecwsfourier.py:145`, subclass of
   `Curve, sopp.Curve`) at `banana_opt/stage2_geometry.py:715` — *not* the
@@ -187,17 +202,22 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 ## Implementation Plan
 
 ### Phase 0 — Verify the DOF-ordering contract (read-only, blocking)
-- [ ] On a tiny `CurveCWSFourierCPP` (`order=2`), confirm the `ndofs` axis of
+- [x] On a tiny `CurveCWSFourierCPP` (`order=2`), confirm the `ndofs` axis of
       `dgammadash_by_dcoeff()` aligns one-to-one (and in order) with the curve's
       `local_dof_names` (`phic/phis/thetac/thetas(k)`), and that those map onto
       the global `JF.dof_names` suffixes — so the per-curve block embeds into the
       correct global indices. (Shape `(num_quadpoints, 3, ndofs)` and uniform
-      `[0,1)` quadrature are already confirmed — see Current Context.)
-- [ ] Confirm the curve-Fourier DOFs are `(-inf, inf)`-bounded in the live
+      `[0,1)` quadrature are already confirmed — see Current Context.) Evidence:
+      committed accessor/order tests in `tests/geo/test_sobolev_metric_precond.py`.
+- [x] Confirm the curve-Fourier DOFs are `(-inf, inf)`-bounded in the live
       Stage-2 bound vector (so the non-diagonal block carries no finite bound).
+      Evidence: `test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata`
+      builds bounds from a JF-like snapshot via `build_lbfgsb_bounds(...)` and
+      asserts every curve-block index is unbounded while finite current/R0 bounds
+      remain diagonal.
 
 ### Phase 1 — Assemble the Sobolev metric (`single_stage_geometry.py`)
-- [ ] Add `build_curve_sobolev_metric(curve, alpha, *, h2_beta=0.0)` returning an
+- [x] Add `build_curve_sobolev_metric(curve, alpha, *, h2_beta=0.0)` returning an
       SPD `(n, n)` metric over the curve's `n` local Fourier DOFs:
   - `Jd = curve.dgammadash_by_dcoeff().reshape(num_quadpoints*3, n)`;
     `M_sob = (1/num_quadpoints) * Jd.T @ Jd` (H¹, PSD).
@@ -217,11 +237,11 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
     is internally normalized before adding identity. Do not leave the metric-unit
     convention implicit; persist the chosen convention in `results.json` so later
     order sweeps compare the same object.
-- [ ] Add `build_curve_block_cholesky(M)` → lower-triangular `L`,
+- [x] Add `build_curve_block_cholesky(M)` → lower-triangular `L`,
       `M = L Lᵀ` (`scipy.linalg.cholesky(M, lower=True)`); raise on non-SPD
       (fail-closed — with the identity baseline this can only fire on extreme-`α`
       numerics, never silently jittered).
-- [ ] Add `build_stage2_penalty_preconditioner(dof_names, curves_by_block,
+- [x] Add `build_stage2_penalty_preconditioner(dof_names, curves_by_block,
       alpha, *, h2_beta, winding_dof_scale_map)` returning a **linear operator**
       object (SSOT) holding: the diagonal winding `scale` for the bounded block,
       and the per-curve `L`/`L⁻¹` factors mapped to the curve-Fourier index
@@ -229,7 +249,7 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       operator reduces to the existing diagonal winding-scale (current behavior).
 
 ### Phase 2 — Generalize the transform (`single_stage_geometry.py`)
-- [ ] Generalize `run_scaled_winding_minimize` to accept **either** a diagonal
+- [x] Generalize `run_scaled_winding_minimize` to accept **either** a diagonal
       `scale` vector **or** the preconditioner operator from Phase 1:
   - Forward: `x = P.to_x(u)` (block: `x_bounded = u_bounded*scale`,
     `x_curve = L⁻ᵀ u_curve`); objective returns `(J, P.grad_to_u(grad))`
@@ -239,18 +259,18 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
   - Invert: `res.x = P.to_x(res.x)` so all downstream consumers see physical
     DOFs. `res.nit/.success/.message/.status` untouched. All-ones/identity ⇒
     byte-identical to the current diagonal path.
-- [ ] Keep the diagonal `scale` signature working unchanged (the diagonal path
+- [x] Keep the diagonal `scale` signature working unchanged (the diagonal path
       is the `alpha=0`/identity special case) — no caller outside the penalty
       path changes.
 
 ### Phase 3 — Objective normalization (`single_stage_geometry.py` / solver)
-- [ ] Add `normalize_objective(fun, j_ref)` wrapper (mirrors
+- [x] Add `normalize_objective(fun, j_ref)` wrapper (mirrors
       `build_scaled_outer_problem`): returns `(J/j_ref, grad/j_ref)`; `j_ref =
       max(J(x0), eps)` computed once at the seed, or a caller-supplied constant.
-- [ ] Apply it around the penalty objective **before** the transform so the
+- [x] Apply it around the penalty objective **before** the transform so the
       transformed gradient and L-BFGS-B `ftol/gtol` operate on `O(1)`
       quantities. Record `j_ref` in `results.json` for reproducibility.
-- [ ] Document honestly: normalization is a **uniform scalar** ⇒ it does not by
+- [x] Document honestly: normalization is a **uniform scalar** ⇒ it does not by
   itself change the condition number (`‖grad‖/J` is invariant); its job is
   to fix the absolute-scale mismatch that makes default tolerances and the
   first-step magnitude easier to interpret under SciPy's absolute tolerances.
@@ -259,29 +279,29 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
   the operator-aware seed diagnostic proves a descent first step.
 
 ### Phase 4 — Solver wiring (`STAGE_2/banana_coil_solver.py`)
-- [ ] Extend `resolve_stage2_penalty_dof_scale` (or add
+- [x] Extend `resolve_stage2_penalty_dof_scale` (or add
       `resolve_stage2_penalty_preconditioner`) to build the Phase-1 operator when
       `--stage2-sobolev-metric` is on, else return the existing diagonal scale
       (SSOT composer; default off).
-- [ ] Add flags: `--stage2-sobolev-metric {off,h1,h2}` (default `off`),
+- [x] Add flags: `--stage2-sobolev-metric {off,h1,h2}` (default `off`),
       `--stage2-sobolev-alpha` (reuse existing), `--stage2-sobolev-h2-beta`
       (default 0), `--stage2-objective-normalize` (default off). Env-mirrored
       like the existing `STAGE2_*` flags for the slurm.
-- [ ] Pass the operator to `run_scaled_winding_minimize` at the penalty call
+- [x] Pass the operator to `run_scaled_winding_minimize` at the penalty call
       site (~line 5792) and to the seed-gradient diagnostic (~line 5649) so the
       diagnostic reports `first_step_dJ` **under the metric** (this is the
       cheap, read-only acceptance probe).
-- [ ] Generalize `banana_opt/stage2_objectives.py::diagnose_seed_gradient` to
+- [x] Generalize `banana_opt/stage2_objectives.py::diagnose_seed_gradient` to
       consume the same transform object as the optimizer. It currently accepts a
       diagonal `scale` vector and computes `x0 - grad * scale * scale`; with a
       metric operator it must compute the operator's identity-Hessian physical
       step (`dx = -P.step_from_gradient(grad)` or equivalent) and report the
       operator-aware `scaled_grad` / `first_step_dJ`.
-- [ ] Leave ALM/trust-region wiring off until separate composition tests prove
+- [x] Leave ALM/trust-region wiring off until separate composition tests prove
       the operator composes with their trust-box and bound transforms.
 
 ### Phase 5 — Campaign wiring (in the **autoresearch** repo, not this one)
-- [ ] Add an `edge_iota_soft_metric` slurm variant (copy of `autoresearch:`
+- [x] Add an `edge_iota_soft_metric` slurm variant (copy of `autoresearch:`
       `campaigns/balance_pareto_singlestage_2026-06-17/perlmutter/edge_iota_soft/`)
       passing `--stage2-sobolev-metric h1 --stage2-sobolev-alpha <swept>
       --stage2-objective-normalize`. For the diagnostic gate, enable
@@ -292,49 +312,52 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 
 ## Validation Plan
 
-- [ ] **CWS accessor / ordering contract test**
+- [x] **CWS accessor / ordering contract test**
       (`tests/geo/test_sobolev_metric_precond.py`, new): instantiate a small
       `CurveCWSFourierCPP`, assert `local_dof_names` ordering matches
       `CurveCWSFourierCPP._make_names`, and assert
       `dgammadash_by_dcoeff().shape == (num_quadpoints, 3, num_dofs)` plus the
       same shape contract for `dgammadashdash_by_dcoeff()`.
-- [ ] **SPD / round-trip unit test** (`tests/geo/test_sobolev_metric_precond.py`,
+- [x] **SPD / round-trip unit test** (`tests/geo/test_sobolev_metric_precond.py`,
       new): on a small `CurveCWSFourierCPP` (`order≈3`), assert `M` symmetric +
       SPD, `L Lᵀ == M` to `1e-10`, and `alpha=0` ⇒ `M == I` (exact identity).
-- [ ] **Transformed-gradient FD test**: capture the operator's `scaled_fun`
+- [x] **Transformed-gradient FD test**: capture the operator's `scaled_fun`
       closure (as `test_winding_dof_scale.py` does for the diagonal path) and
       central-FD-check the transformed gradient to `rtol≤1e-4`; assert
       `grad_u_curve == L⁻¹ grad_curve` to `1e-12` (mutation guard: dropping
       `L⁻¹` fails this).
-- [ ] **Conditioning-improvement test**: on a synthetic ill-conditioned curve
+- [x] **Conditioning-improvement test**: on a synthetic ill-conditioned curve
       block, assert `cond(L⁻¹ H L⁻ᵀ) < cond(H)` for a representative SPD `H`
       (or, on a constructed quadratic, that the metric step flips
       `first_step_dJ` negative where the diagonal scale leaves it positive) — the
       executable proof this is non-diagonal *and* helps.
-- [ ] **Byte-identical-off test**: with `--stage2-sobolev-metric off` and
+- [x] **Byte-identical-off test**: with `--stage2-sobolev-metric off` and
       `--stage2-objective-normalize` off, `run_scaled_winding_minimize` result
       (`res.x`, `res.fun`, `res.nit`) equals a bare `minimize` to the bit
       (extend the existing `test_default_off_is_byte_identical_to_plain_minimize`).
-- [ ] **Live bound-inventory / preservation test**: from the same `JF` object used
+- [x] **Live bound-inventory / preservation test**: from the same `JF` object used
       by the Stage-2 penalty solve, assert every index assigned to a non-diagonal
       curve block has `(-inf, inf)` in `JF.lower_bounds` / `JF.upper_bounds`, and
       assert every finite-bound index remains in the diagonal/identity block with
       transformed bounds equal to the current diagonal path.
-- [ ] **Diagnostic-operator test** (`tests/geo/test_seed_gradient_diagnostic.py`):
+- [x] **Diagnostic-operator test** (`tests/geo/test_seed_gradient_diagnostic.py`):
       prove `diagnose_seed_gradient` uses the same operator as the optimizer by
       comparing its reported first step against `P.step_from_gradient(grad)`;
       keep the existing vector-scale case unchanged.
-- [ ] **Objective-normalization test**: prove the wrapper divides both `J` and
+- [x] **Objective-normalization test**: prove the wrapper divides both `J` and
       `grad` by the same frozen `j_ref`, records `j_ref`, and does not claim a
       condition-number change on a constructed quadratic.
-- [ ] **Local commands** (from `examples/single_stage_optimization`):
+- [x] **Local commands** (from `examples/single_stage_optimization`):
       `PYTHONNOUSERSITE=1 .../.conda-env/bin/python -m pytest
       <abs>/tests/geo/test_sobolev_metric_precond.py
       <abs>/tests/geo/test_seed_gradient_diagnostic.py
-      <abs>/tests/geo/test_winding_dof_scale.py -q`.
+      <abs>/tests/geo/test_winding_dof_scale.py -q`. Evidence: 23 passed.
 - [ ] **Perlmutter seed probe**: `SMOKE=1` run on the slid_clean chomp seed
       with `STAGE2_DIAGNOSE_SEED_GRADIENT=1` asserts metric assembles and the
       seed diagnostic prints `first_step_dJ < 0` (the go/no-go for a full run).
+      Evidence so far: H1 alpha=1.0 job `55264061` assembled the metric but
+      failed the descent gate with `first_step_dJ=+1.933950e10`; continue the
+      diagnostic sweep before any full run.
 - [ ] **Crucible**: route the diff to strict PASS (no defensive fallbacks, SSOT
       composer, no fake/jittered metric, regression tests non-tautological).
 
@@ -373,22 +396,28 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 
 ## Completion Criteria
 
-- [ ] `build_curve_sobolev_metric` + Cholesky + block operator implemented,
+- [x] `build_curve_sobolev_metric` + Cholesky + block operator implemented,
       SPD/round-trip/FD/cond-improvement/byte-identical-off/bound-preservation
-      tests pass locally on the conda interpreter.
-- [ ] Penalty path + seed diagnostic consume the operator; `--stage2-sobolev-
+      tests pass locally on the conda interpreter. Evidence: `45d2b3ae1` plus
+      focused local pytest `23 passed` for `test_sobolev_metric_precond.py`,
+      `test_seed_gradient_diagnostic.py`, and `test_winding_dof_scale.py`.
+- [x] Penalty path + seed diagnostic consume the operator; `--stage2-sobolev-
       metric off` is byte-identical to current behavior, and
       `banana_opt/stage2_objectives.py::diagnose_seed_gradient` covers the same
-      operator step as the optimizer.
+      operator step as the optimizer. Evidence: `5dff32284` source wiring and
+      `45d2b3ae1` operator-aware diagnostic formatter/test coverage.
 - [ ] On the slid_clean chomp seed (Perlmutter `SMOKE=1` with
       `STAGE2_DIAGNOSE_SEED_GRADIENT=1`), the seed-gradient diagnostic reports
       `first_step_dJ < 0` under the H¹ metric (the diagonal scale could not
-      achieve this).
+      achieve this). Evidence so far: job `55264061` with
+      `STAGE2_SOBOLEV_METRIC=h1 STAGE2_SOBOLEV_ALPHA=1.0` assembled the metric
+      but failed the gate with `first_step_dJ=+1.933950e10`; continue the sweep.
 - [ ] Crucible strict PASS; plan cross-referenced from
       `docs/stage2_order64_sobolev_conditioning_plan_2026-06-28.md` and the
       `autoresearch:.handoffs/order64-conditioning.md` handoff updated to make
       the metric lane active, or explicitly left unchanged with this plan marked
-      as a non-active experiment.
+      as a non-active experiment. Cross-reference/handoff evidence is in
+      `45d2b3ae1` and `39758405`; strict PASS evidence is still pending.
 
 ## Open Questions
 
