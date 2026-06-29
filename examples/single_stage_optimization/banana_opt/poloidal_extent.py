@@ -190,11 +190,8 @@ class PoloidalExtent(Optimizable):
                 self.p,
             )
         )
-        self.dJ_dgamma = jit(
-            lambda g, gd, r_winding: grad(self.J_jax, argnums=0)(g, gd, r_winding)
-        )
-        self.dJ_dgammadash = jit(
-            lambda g, gd, r_winding: grad(self.J_jax, argnums=1)(g, gd, r_winding)
+        self.dJ_dprimal = jit(
+            lambda g, gd, r_winding: grad(self.J_jax, argnums=(0, 1))(g, gd, r_winding)
         )
 
     def live_R_winding(self):
@@ -213,10 +210,11 @@ class PoloidalExtent(Optimizable):
         gamma = self.curve.gamma()
         gammadash = self.curve.gammadash()
         r_winding = self.live_R_winding()
+        dJ_dgamma, dJ_dgammadash = self.dJ_dprimal(gamma, gammadash, r_winding)
         return self.curve.dgamma_by_dcoeff_vjp(
-            np.asarray(self.dJ_dgamma(gamma, gammadash, r_winding))
+            np.asarray(dJ_dgamma)
         ) + self.curve.dgammadash_by_dcoeff_vjp(
-            np.asarray(self.dJ_dgammadash(gamma, gammadash, r_winding))
+            np.asarray(dJ_dgammadash)
         )
 
     return_fn_map = {"J": J, "dJ": dJ}

@@ -82,8 +82,7 @@ class LpCurveCurvature(Optimizable):
         self.threshold = threshold
         super().__init__(depends_on=[curve])
         self.J_jax = jit(lambda kappa, gammadash: Lp_curvature_pure(kappa, gammadash, p, threshold))
-        self.thisgrad0 = jit(lambda kappa, gammadash: grad(self.J_jax, argnums=0)(kappa, gammadash))
-        self.thisgrad1 = jit(lambda kappa, gammadash: grad(self.J_jax, argnums=1)(kappa, gammadash))
+        self.thisgrad = jit(lambda kappa, gammadash: grad(self.J_jax, argnums=(0, 1))(kappa, gammadash))
 
     def J(self):
         """
@@ -96,8 +95,7 @@ class LpCurveCurvature(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
-        grad0 = self.thisgrad0(self.curve.kappa(), self.curve.gammadash())
-        grad1 = self.thisgrad1(self.curve.kappa(), self.curve.gammadash())
+        grad0, grad1 = self.thisgrad(self.curve.kappa(), self.curve.gammadash())
         return self.curve.dkappa_by_dcoeff_vjp(grad0) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
 
     return_fn_map = {'J': J, 'dJ': dJ}
@@ -133,8 +131,7 @@ class LpCurveTorsion(Optimizable):
         self.threshold = threshold
         super().__init__(depends_on=[curve])
         self.J_jax = jit(lambda torsion, gammadash: Lp_torsion_pure(torsion, gammadash, p, threshold))
-        self.thisgrad0 = jit(lambda torsion, gammadash: grad(self.J_jax, argnums=0)(torsion, gammadash))
-        self.thisgrad1 = jit(lambda torsion, gammadash: grad(self.J_jax, argnums=1)(torsion, gammadash))
+        self.thisgrad = jit(lambda torsion, gammadash: grad(self.J_jax, argnums=(0, 1))(torsion, gammadash))
 
     def J(self):
         """
@@ -147,8 +144,7 @@ class LpCurveTorsion(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
-        grad0 = self.thisgrad0(self.curve.torsion(), self.curve.gammadash())
-        grad1 = self.thisgrad1(self.curve.torsion(), self.curve.gammadash())
+        grad0, grad1 = self.thisgrad(self.curve.torsion(), self.curve.gammadash())
         return self.curve.dtorsion_by_dcoeff_vjp(grad0) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
 
     return_fn_map = {'J': J, 'dJ': dJ}
@@ -523,16 +519,14 @@ class MeanSquaredCurvature(Optimizable):
         """
         super().__init__(depends_on=[curve])
         self.curve = curve
-        self.thisgrad0 = jit(lambda kappa, gammadash: grad(curve_msc_pure, argnums=0)(kappa, gammadash))
-        self.thisgrad1 = jit(lambda kappa, gammadash: grad(curve_msc_pure, argnums=1)(kappa, gammadash))
+        self.thisgrad = jit(lambda kappa, gammadash: grad(curve_msc_pure, argnums=(0, 1))(kappa, gammadash))
 
     def J(self):
         return float(curve_msc_pure(self.curve.kappa(), self.curve.gammadash()))
 
     @derivative_dec
     def dJ(self):
-        grad0 = self.thisgrad0(self.curve.kappa(), self.curve.gammadash())
-        grad1 = self.thisgrad1(self.curve.kappa(), self.curve.gammadash())
+        grad0, grad1 = self.thisgrad(self.curve.kappa(), self.curve.gammadash())
         return self.curve.dkappa_by_dcoeff_vjp(grad0) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
 
 
@@ -646,22 +640,11 @@ class FramedCurveTwist(Optimizable):
         self.framedcurve = framedcurve 
         self.framedcurve_centroid = FramedCurveCentroid(framedcurve.curve)
         self.framedcurve_centroid.rotation.fix_all()
-        self.frametwist_vjp0 = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
-            lambda g: frametwist_pure(g,n2,b1,b2,b1dash,n2dash), n1)[1](v)[0])
-        self.frametwist_vjp1 = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
-            lambda g: frametwist_pure(n1,g,b1,b2,b1dash,n2dash), n2)[1](v)[0])
-        self.frametwist_vjp2 = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
-            lambda g: frametwist_pure(n1,n2,g,b2,b1dash,n2dash), b1)[1](v)[0])
-        self.frametwist_vjp3 = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
-            lambda g: frametwist_pure(n1,n2,b1,g,b1dash,n2dash), b2)[1](v)[0])
-        self.frametwist_vjp4 = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
-            lambda g: frametwist_pure(n1,n2,b1,b2,g,n2dash), b1dash)[1](v)[0])
-        self.frametwist_vjp5 = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
-            lambda g: frametwist_pure(n1,n2,b1,b2,b1dash,g), n2dash)[1](v)[0])
+        self.frametwist_vjp = jit(lambda n1,n2,b1,b2,b1dash,n2dash,v: vjp(
+            frametwist_pure, n1, n2, b1, b2, b1dash, n2dash)[1](v))
         self.range_grad = jit(lambda twist: grad(frametwist_range_pure, argnums=0)(twist))
         self.net_grad = jit(lambda twist: grad(frametwist_net_pure, argnums=0)(twist))
-        self.lp_grad0 = jit(lambda twist, gammadash, p: grad(frametwist_lp_pure, argnums=0)(twist,gammadash,p))
-        self.lp_grad1 = jit(lambda twist, gammadash, p: grad(frametwist_lp_pure, argnums=1)(twist,gammadash,p))
+        self.lp_grad = jit(lambda twist, gammadash, p: grad(frametwist_lp_pure, argnums=(0, 1))(twist,gammadash,p))
 
     def angle_profile(self,endpoint=False):
         """
@@ -718,8 +701,7 @@ class FramedCurveTwist(Optimizable):
             endpoint = False
             data = self.angle_profile(endpoint=endpoint)
             gammadash = self.framedcurve.curve.gammadash()
-            grad0 = self.lp_grad0(data,gammadash,self.p)
-            grad1 = self.lp_grad1(data,gammadash,self.p)
+            grad0, grad1 = self.lp_grad(data,gammadash,self.p)
         else:
             raise NotImplementedError(f"dJ() not implemented for f={self.f!r}; only 'lp' is supported")
         _, n1, b1 = self.framedcurve.rotated_frame()
@@ -727,12 +709,8 @@ class FramedCurveTwist(Optimizable):
         _, _, b1dash = self.framedcurve.rotated_frame_dash()
         _, n2dash, _ = self.framedcurve_centroid.rotated_frame_dash()
 
-        vjp0 = self.frametwist_vjp0(n1,n2,b1,b2,b1dash,n2dash,grad0)
-        vjp1 = self.frametwist_vjp1(n1,n2,b1,b2,b1dash,n2dash,grad0)
-        vjp2 = self.frametwist_vjp2(n1,n2,b1,b2,b1dash,n2dash,grad0)
-        vjp3 = self.frametwist_vjp3(n1,n2,b1,b2,b1dash,n2dash,grad0)
-        vjp4 = self.frametwist_vjp4(n1,n2,b1,b2,b1dash,n2dash,grad0)
-        vjp5 = self.frametwist_vjp5(n1,n2,b1,b2,b1dash,n2dash,grad0)
+        vjp0, vjp1, vjp2, vjp3, vjp4, vjp5 = self.frametwist_vjp(
+            n1,n2,b1,b2,b1dash,n2dash,grad0)
         zero = np.zeros_like(vjp0)
 
         grad = self.framedcurve.rotated_frame_dcoeff_vjp(zero,vjp0,vjp2) \
@@ -771,8 +749,7 @@ class MinCurveCurveDistance(Optimizable):
         self.maximum_distance = maximum_distance
         self.p = p
         self.J_jax = lambda g1, g2: max_distance_pure(g1, g2, self.maximum_distance, p)
-        self.this_grad_0 = jit(lambda g1, g2: grad(self.J_jax, argnums=0)(g1, g2))
-        self.this_grad_1 = jit(lambda g1, g2: grad(self.J_jax, argnums=1)(g1, g2))
+        self.this_grad = jit(lambda g1, g2: grad(self.J_jax, argnums=(0, 1))(g1, g2))
 
         Optimizable.__init__(self, depends_on=[curve1, curve2])
 
@@ -821,7 +798,6 @@ class MinCurveCurveDistance(Optimizable):
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
 
-        grad0 = self.this_grad_0(g1, g2)
-        grad1 = self.this_grad_1(g1, g2)
+        grad0, grad1 = self.this_grad(g1, g2)
 
         return self.curve1.dgamma_by_dcoeff_vjp( grad0 ) + self.curve2.dgamma_by_dcoeff_vjp( grad1 )

@@ -959,6 +959,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         self._free_dof_size = free_dof_size
         self.dof_indices = dict(zip(self._unique_dof_opts,
                                     zip(dof_indices[:-1], dof_indices[1:])))
+        self._dof_index_items = tuple(self.dof_indices.items())
 
         # Update the reduced dof length of children
         for weakref_child in self._children:
@@ -994,6 +995,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         self._full_dof_size = full_dof_size
         self._full_dof_indices = dict(zip(self._unique_dof_opts,
                                           zip(dof_indices[:-1], dof_indices[1:])))
+        self._full_dof_index_items = tuple(self._full_dof_indices.items())
 
         # Update the full dof length of children
         for weakref_child in self._children:
@@ -1054,14 +1056,16 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Numeric values of the free DOFs associated with the current
         Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.free_x for
-                               opt in self._unique_dof_opts])
+        x = np.empty(self._free_dof_size)
+        for opt, indices in self._dof_index_items:
+            x[indices[0]:indices[1]] = opt._dofs.free_x
+        return x
 
     @x.setter
     def x(self, x: RealArray) -> None:
-        if list(self.dof_indices.values())[-1][-1] != len(x):
+        if self._free_dof_size != len(x):
             raise ValueError
-        for opt, indices in self.dof_indices.items():
+        for opt, indices in self._dof_index_items:
             opt.local_x = x[indices[0]:indices[1]]
 
     @property
@@ -1070,15 +1074,17 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Numeric values of all the DOFs (both free and fixed) associated
         with the current Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.full_x for
-                               opt in self._unique_dof_opts])
+        x = np.empty(self._full_dof_size)
+        for opt, indices in self._full_dof_index_items:
+            x[indices[0]:indices[1]] = opt._dofs.full_x
+        return x
 
     @full_x.setter
     def full_x(self, x: RealArray) -> None:
         """
         Setter used to set all the global DOF values
         """
-        for opt, indices in self._full_dof_indices.items():
+        for opt, indices in self._full_dof_index_items:
             opt.local_full_x = x[indices[0]:indices[1]]
 
     @property
@@ -1210,9 +1216,9 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Set the lower bounds of the fixed and free DOFS associated with the
         current Optimizable object and its ancestors.
         """
-        if list(self.dof_indices.values())[-1][-1] != len(lb):
+        if self._free_dof_size != len(lb):
             raise ValueError
-        for opt, indices in self.dof_indices.items():
+        for opt, indices in self._dof_index_items:
             opt._dofs.full_lower_bounds = lb[indices[0]:indices[1]]
 
     @property
@@ -1229,9 +1235,9 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Set the lower bounds of the free DOFS associated with the
         current Optimizable object and its ancestors.
         """
-        if list(self.dof_indices.values())[-1][-1] != len(lb):
+        if self._free_dof_size != len(lb):
             raise ValueError
-        for opt, indices in self.dof_indices.items():
+        for opt, indices in self._dof_index_items:
             opt._dofs.free_lower_bounds = lb[indices[0]:indices[1]]
 
     def set_lower_bound(self, key: Key, new_val: Real) -> None:
@@ -1291,9 +1297,9 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Set the upper bounds of the fixed and free DOFS associated with the
         current Optimizable object and its ancestors.
         """
-        if list(self.dof_indices.values())[-1][-1] != len(ub):
+        if self._free_dof_size != len(ub):
             raise ValueError
-        for opt, indices in self.dof_indices.items():
+        for opt, indices in self._dof_index_items:
             opt._dofs.full_upper_bounds = ub[indices[0]:indices[1]]
 
     @property
@@ -1310,9 +1316,9 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Set the upper bounds of the free DOFS associated with the
         current Optimizable object and its ancestors.
         """
-        if list(self.dof_indices.values())[-1][-1] != len(ub):
+        if self._free_dof_size != len(ub):
             raise ValueError
-        for opt, indices in self.dof_indices.items():
+        for opt, indices in self._dof_index_items:
             opt._dofs.free_upper_bounds = ub[indices[0]:indices[1]]
 
     def set_upper_bound(self, key: Key, new_val: Real) -> None:
@@ -1463,7 +1469,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
                 booleans. For each array entry that is ``True``, the corresponding dof will be set
                 to fixed.
         """
-        for opt, indices in self._full_dof_indices.items():
+        for opt, indices in self._full_dof_index_items:
             opt._dofs._free[:] = np.logical_not(arr[indices[0]:indices[1]])
             opt._dofs._update_opt_indices()
 
@@ -1477,7 +1483,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
                 booleans. For each array entry that is ``True``, the corresponding dof will be set
                 to free.
         """
-        for opt, indices in self._full_dof_indices.items():
+        for opt, indices in self._full_dof_index_items:
             opt._dofs._free[:] = arr[indices[0]:indices[1]]
             opt._dofs._update_opt_indices()
 

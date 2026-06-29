@@ -393,6 +393,38 @@ unpack the tuple in `dJ()`.
          accepted iterate. (Largely subsumed once Phase 1 Task 1 lands the
          candidate-aware `shortest_distance`.)
 
+### Implementation Status — 2026-06-29
+
+- Phase 1: landed in `02778c0da` with focused `curve_objectives` and Boozer tests.
+- Phase 2: landed in `02778c0da` for `force.py`; follow-up landed in this slice for
+  `framedcurve.py`, `curveobjectives.py`, `self_intersect.py`,
+  `fold_buildability.py`, `hardware_keepout.py`, `poloidal_extent.py`, and
+  `ellipse_width.py`. Remaining single-arg gradients in fixed-R0 or single-primal
+  paths are intentionally not tuple-gradient families.
+- Phase 3: landed in `02778c0da` for finite difference copies and solver flushes;
+  follow-up landed in this slice for `Optimizable` index iteration and
+  `single_stage_geometry.py` `run_code` signature caching.
+- Phase 4.1 (`field/biotsavart.py`): deferred; no code change in this slice, and
+  the current/fixed-current branches need a separate Biot-Savart benchmark plus
+  `tests/field/test_biotsavart.py`.
+- Phase 4.2 (`geo` array/allocation micro): deferred except the framed-curve VJP
+  consolidation already covered by Phase 2; the remaining items need isolated
+  consumer audits or timing proof before changing allocation/host-sync behavior.
+- Phase 4.3 (`banana_opt` micro): `hardware_keepout.py` per-candidate host sync
+  landed with hardware keepout tests; the other items are deferred. In particular,
+  `boozer_finite_current.py` copies stay until a no-alias proof and regression test
+  exist, and DESC bridge/runtime items belong to the dirty-tree DESC lane.
+- Phase 4.4 (`boozersurface.py` exact-Newton iterative refinement): deferred;
+  behavior-affecting convergence-path change requires an isolated Boozer parity
+  plus single-stage smoke gate.
+- Phase 5.1 (DESC joint lane): deferred; the named DESC anchors are still dirty or
+  untracked in this checkout, so this cannot be clean-checkout landed here.
+- Phase 5.2 (residue topology lane): deferred; opt-in residue objective path needs
+  a dedicated `with_tape` trace/Hessian batching design and residue smoke test.
+- Phase 5.3 (ALM solve-orchestration certification gating): deferred; behavior
+  affects certification cadence and is partly subsumed by the Phase 1
+  candidate-aware distance change.
+
 ## Validation Plan
 
 - [ ] **Equivalence gate (numerically-identical changes — all of Phase 2, Phase 1

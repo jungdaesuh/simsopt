@@ -332,9 +332,7 @@ class CurveSelfIntersect(Optimizable):
         super().__init__(depends_on=[curve])
         self.J_jax = jit(lambda g, gd: _self_distance_pure(
             g, gd, minimum_distance, self._mask, normalize))
-        self.dJ_dgamma = jit(lambda g, gd: grad(self.J_jax, argnums=0)(g, gd))
-        self.dJ_dgammadash = jit(
-            lambda g, gd: grad(self.J_jax, argnums=1)(g, gd))
+        self.dJ_dprimal = jit(lambda g, gd: grad(self.J_jax, argnums=(0, 1))(g, gd))
 
     # ── Diagnostics ────────────────────────────────────────────────────
     def shortest_self_distance(self):
@@ -357,10 +355,11 @@ class CurveSelfIntersect(Optimizable):
     def dJ(self):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
+        dJ_dgamma, dJ_dgammadash = self.dJ_dprimal(g, gd)
         return (self.curve.dgamma_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgamma(g, gd)))
+                    np.asarray(dJ_dgamma))
                 + self.curve.dgammadash_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgammadash(g, gd))))
+                    np.asarray(dJ_dgammadash)))
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -420,9 +419,7 @@ class CurveSelfDistance(Optimizable):
                 normalize,
             )
         )
-        self.dJ_dgamma = jit(lambda g, gd: grad(self.J_jax, argnums=0)(g, gd))
-        self.dJ_dgammadash = jit(
-            lambda g, gd: grad(self.J_jax, argnums=1)(g, gd))
+        self.dJ_dprimal = jit(lambda g, gd: grad(self.J_jax, argnums=(0, 1))(g, gd))
 
     def shortest_self_distance(self):
         """Return the minimum pairwise distance outside the live arc window."""
@@ -440,10 +437,11 @@ class CurveSelfDistance(Optimizable):
     def dJ(self):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
+        dJ_dgamma, dJ_dgammadash = self.dJ_dprimal(g, gd)
         return (self.curve.dgamma_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgamma(g, gd)))
+                    np.asarray(dJ_dgamma))
                 + self.curve.dgammadash_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgammadash(g, gd))))
+                    np.asarray(dJ_dgammadash)))
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -486,9 +484,7 @@ class CurveGlobalRadiusOfCurvature(Optimizable):
                 normalize,
             )
         )
-        self.dJ_dgamma = jit(lambda g, gd: grad(self.J_jax, argnums=0)(g, gd))
-        self.dJ_dgammadash = jit(
-            lambda g, gd: grad(self.J_jax, argnums=1)(g, gd))
+        self.dJ_dprimal = jit(lambda g, gd: grad(self.J_jax, argnums=(0, 1))(g, gd))
 
     def shortest_groc(self):
         """Return the minimum point-tangent global radius in metres."""
@@ -506,9 +502,10 @@ class CurveGlobalRadiusOfCurvature(Optimizable):
     def dJ(self):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
+        dJ_dgamma, dJ_dgammadash = self.dJ_dprimal(g, gd)
         return (self.curve.dgamma_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgamma(g, gd)))
+                    np.asarray(dJ_dgamma))
                 + self.curve.dgammadash_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgammadash(g, gd))))
+                    np.asarray(dJ_dgammadash)))
 
     return_fn_map = {'J': J, 'dJ': dJ}

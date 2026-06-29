@@ -54,14 +54,8 @@ class CurveSurfaceGeodesicCurvature(Optimizable):
                 threshold,
             )
         )
-        self.grad0 = jit(
-            lambda geodesic_curvature, gammadash: grad(self.J_jax, argnums=0)(
-                geodesic_curvature,
-                gammadash,
-            )
-        )
-        self.grad1 = jit(
-            lambda geodesic_curvature, gammadash: grad(self.J_jax, argnums=1)(
+        self.grad_primal = jit(
+            lambda geodesic_curvature, gammadash: grad(self.J_jax, argnums=(0, 1))(
                 geodesic_curvature,
                 gammadash,
             )
@@ -92,8 +86,7 @@ class CurveSurfaceGeodesicCurvature(Optimizable):
     def dJ(self):
         geodesic_curvature = self.framedcurve.frame_binormal_curvature()
         gammadash = self.curve.gammadash()
-        grad0 = self.grad0(geodesic_curvature, gammadash)
-        grad1 = self.grad1(geodesic_curvature, gammadash)
+        grad0, grad1 = self.grad_primal(geodesic_curvature, gammadash)
         return self.framedcurve.dframe_binormal_curvature_by_dcoeff_vjp(grad0) + (
             self.curve.dgammadash_by_dcoeff_vjp(grad1)
         )
@@ -139,13 +132,8 @@ class NormalizedCurveCurvatureHinge(Optimizable):
                 kappa, gammadash, self.p, self.threshold
             )
         )
-        self.grad_kappa = jit(
-            lambda kappa, gammadash: grad(self.J_jax, argnums=0)(
-                kappa, gammadash
-            )
-        )
-        self.grad_gammadash = jit(
-            lambda kappa, gammadash: grad(self.J_jax, argnums=1)(
+        self.grad_primal = jit(
+            lambda kappa, gammadash: grad(self.J_jax, argnums=(0, 1))(
                 kappa, gammadash
             )
         )
@@ -157,8 +145,7 @@ class NormalizedCurveCurvatureHinge(Optimizable):
     def dJ(self):
         kappa = self.curve.kappa()
         gammadash = self.curve.gammadash()
-        grad_kappa = self.grad_kappa(kappa, gammadash)
-        grad_gammadash = self.grad_gammadash(kappa, gammadash)
+        grad_kappa, grad_gammadash = self.grad_primal(kappa, gammadash)
         return self.curve.dkappa_by_dcoeff_vjp(
             grad_kappa
         ) + self.curve.dgammadash_by_dcoeff_vjp(grad_gammadash)
@@ -258,29 +245,9 @@ class RotationAwareCurvatureExcessPenalty(Optimizable):
                 )
             )
         )
-        self.grad_kappa = jit(
+        self.grad_primal = jit(
             lambda kappa, gammadash, gammadashdash, frame_n, frame_b: grad(
-                self.J_jax, argnums=0
-            )(kappa, gammadash, gammadashdash, frame_n, frame_b)
-        )
-        self.grad_gammadash = jit(
-            lambda kappa, gammadash, gammadashdash, frame_n, frame_b: grad(
-                self.J_jax, argnums=1
-            )(kappa, gammadash, gammadashdash, frame_n, frame_b)
-        )
-        self.grad_gammadashdash = jit(
-            lambda kappa, gammadash, gammadashdash, frame_n, frame_b: grad(
-                self.J_jax, argnums=2
-            )(kappa, gammadash, gammadashdash, frame_n, frame_b)
-        )
-        self.grad_frame_n = jit(
-            lambda kappa, gammadash, gammadashdash, frame_n, frame_b: grad(
-                self.J_jax, argnums=3
-            )(kappa, gammadash, gammadashdash, frame_n, frame_b)
-        )
-        self.grad_frame_b = jit(
-            lambda kappa, gammadash, gammadashdash, frame_n, frame_b: grad(
-                self.J_jax, argnums=4
+                self.J_jax, argnums=(0, 1, 2, 3, 4)
             )(kappa, gammadash, gammadashdash, frame_n, frame_b)
         )
 
@@ -316,11 +283,9 @@ class RotationAwareCurvatureExcessPenalty(Optimizable):
         gammadashdash = self.banana_curve.gammadashdash()
         normal_axis, binormal_axis = self._frame_axes()
         args = (kappa, gammadash, gammadashdash, normal_axis, binormal_axis)
-        g_kappa = self.grad_kappa(*args)
-        g_gammadash = self.grad_gammadash(*args)
-        g_gammadashdash = self.grad_gammadashdash(*args)
-        g_frame_n = self.grad_frame_n(*args)
-        g_frame_b = self.grad_frame_b(*args)
+        g_kappa, g_gammadash, g_gammadashdash, g_frame_n, g_frame_b = (
+            self.grad_primal(*args)
+        )
         # (i) |kappa| path: kappa + arclength/bend-direction (gammadash, gammadashdash)
         # on the banana centerline dofs.
         curve_path = (

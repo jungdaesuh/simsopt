@@ -1,6 +1,7 @@
 import inspect
 import math
 import os
+from functools import lru_cache
 
 import numpy as np
 from matplotlib.path import Path as MplPath
@@ -1197,7 +1198,12 @@ def _run_code_supports_iota_collapse_guard(boozer_surface):
     run_code implementation that does not forward them simply skips the early-exit (the
     defense-in-depth reject still applies).
     """
-    parameters = inspect.signature(boozer_surface.run_code).parameters
+    return _run_code_type_supports_iota_collapse_guard(type(boozer_surface))
+
+
+@lru_cache(maxsize=None)
+def _run_code_type_supports_iota_collapse_guard(boozer_surface_type):
+    parameters = inspect.signature(boozer_surface_type.run_code).parameters
     return (
         "iota_collapse_fraction" in parameters and "iota_reference" in parameters
     )

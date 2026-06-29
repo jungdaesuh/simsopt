@@ -161,10 +161,8 @@ class ProjectedEllipseWidth(Optimizable):
         # deferred (the curve VJP carries the centerline-translation gradient).
         self.J_jax = jit(lambda g, gd, r_winding: _projected_ellipse_width_pure(
             g, gd, r_winding, a_winding, Z_winding, scale, epsilon))
-        self.dJ_dgamma = jit(
-            lambda g, gd, r_winding: grad(self.J_jax, argnums=0)(g, gd, r_winding))
-        self.dJ_dgammadash = jit(
-            lambda g, gd, r_winding: grad(self.J_jax, argnums=1)(g, gd, r_winding))
+        self.dJ_dprimal = jit(
+            lambda g, gd, r_winding: grad(self.J_jax, argnums=(0, 1))(g, gd, r_winding))
 
     def live_R_winding(self):
         """Live winding major radius the projection frame is measured about, m."""
@@ -182,9 +180,10 @@ class ProjectedEllipseWidth(Optimizable):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
         r_winding = self.live_R_winding()
+        dJ_dgamma, dJ_dgammadash = self.dJ_dprimal(g, gd, r_winding)
         return (self.curve.dgamma_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgamma(g, gd, r_winding)))
+                    np.asarray(dJ_dgamma))
                 + self.curve.dgammadash_by_dcoeff_vjp(
-                    np.asarray(self.dJ_dgammadash(g, gd, r_winding))))
+                    np.asarray(dJ_dgammadash)))
 
     return_fn_map = {'J': J, 'dJ': dJ}
