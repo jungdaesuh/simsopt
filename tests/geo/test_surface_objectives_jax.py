@@ -721,7 +721,14 @@ def test_surface_surface_distance_adapter_flattens_surface_grids_for_pairwise_vj
     )
 
     assert objective.J() == pytest.approx(float(expected_value), rel=1e-12, abs=1e-12)
-    assert objective.shortest_distance() >= 0.0
+    g1 = np.asarray(surf1.gamma(), dtype=np.float64).reshape((-1, 3))
+    g2 = np.asarray(surf2.gamma(), dtype=np.float64).reshape((-1, 3))
+    brute_force_min = float(
+        np.min(np.linalg.norm(g1[:, None, :] - g2[None, :, :], axis=-1))
+    )
+    assert objective.shortest_distance() == pytest.approx(
+        brute_force_min, rel=1e-12, abs=1e-12
+    )
 
     derivative = objective.dJ(partials=True)
     grad1 = derivative(surf1)
