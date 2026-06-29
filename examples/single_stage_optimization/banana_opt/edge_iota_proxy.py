@@ -388,7 +388,6 @@ def edge_iota_proxy_value_and_grad(
         np.column_stack((dL_dBx, dL_dBy, dL_dBz)), dtype=float
     )
 
-    banana_biot_savart.set_points(contours.points_xyz)
     grad = banana_biot_savart.B_vjp(cotangent)(target_optimizable)
 
     return EdgeIotaProxyResult(

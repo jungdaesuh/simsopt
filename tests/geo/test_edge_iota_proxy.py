@@ -33,6 +33,7 @@ from simsopt.geo import create_equally_spaced_curves  # noqa: E402
 
 from banana_opt.edge_delivered_iota import read_eqdsk, trace_iota  # noqa: E402
 from banana_opt.edge_iota_proxy import (  # noqa: E402
+    EdgeIotaProxyContours,
     build_edge_iota_proxy_contours,
     edge_iota_proxy_value_and_grad,
 )
@@ -91,7 +92,64 @@ def _proxy_setup(tmpdir, *, edge_band=(0.30, 0.60), sample_count=3):
     return eqdsk, tokamak_field, minor_radius_m, contours
 
 
+class _SetPointsCountingBiotSavart:
+    def __init__(self):
+        self.points = None
+        self.set_points_calls = 0
+
+    def set_points(self, points):
+        self.points = np.asarray(points, dtype=float).copy()
+        self.set_points_calls += 1
+
+    def B(self):
+        if self.points is None:
+            raise AssertionError("B() called before set_points")
+        return np.tile(np.array([[1.0, 1.0, 0.0]]), (self.points.shape[0], 1))
+
+    def B_vjp(self, cotangent):
+        if self.points is None:
+            raise AssertionError("B_vjp() called before set_points")
+
+        def grad(_target):
+            return np.array([float(np.sum(cotangent))], dtype=float)
+
+        return grad
+
+
+def _minimal_proxy_contours():
+    points_xyz = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.1],
+        ],
+        dtype=float,
+    )
+    return EdgeIotaProxyContours(
+        axis_r_m=1.0,
+        axis_z_m=0.0,
+        helicity_sign=1,
+        radial_labels=(0.5,),
+        phi_planes=(0.0,),
+        points_xyz=points_xyz,
+        point_R=np.ones(2, dtype=float),
+        point_phi=np.zeros(2, dtype=float),
+        dl_pol=np.ones(2, dtype=float),
+        segment_label=np.zeros(2, dtype=int),
+        segment_plane=np.zeros(2, dtype=int),
+        tokamak_cyl_B=np.zeros((2, 3), dtype=float),
+        iota_tokamak=np.zeros(1, dtype=float),
+    )
+
+
 class EdgeIotaProxyTests(unittest.TestCase):
+    def test_value_and_grad_reuses_contour_points_for_b_vjp(self):
+        banana_bs = _SetPointsCountingBiotSavart()
+
+        result = edge_iota_proxy_value_and_grad(banana_bs, _minimal_proxy_contours())
+
+        self.assertEqual(banana_bs.set_points_calls, 1)
+        self.assertEqual(result.grad_delta_abs_mean.shape, (1,))
+
     def test_tokamak_only_proxy_iota_matches_a_direct_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
             eqdsk, tokamak_field, minor_radius_m, contours = _proxy_setup(tmp)

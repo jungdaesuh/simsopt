@@ -366,10 +366,12 @@ unpack the tuple in `dJ()`.
          that at each caller and add a no-alias test before using in-place updates.
    - [ ] `single_stage_objectives.py:1326-1403` — cache the simsopt `Optimizable`
          sum/scale graph instead of reconstructing it on every trial objective eval.
-   - [ ] `edge_iota_proxy.py:391-392` (the 401-line proxy module — NOT
+   - [x] `edge_iota_proxy.py:391-392` (the 401-line proxy module — NOT
          `edge_delivered_iota.py`; both files exist) — remove the redundant
          `BiotSavart.set_points` (points already set at `:142` in
-         `_banana_cyl_B_on_contours`).
+         `_banana_cyl_B_on_contours`). Regression covers that `B()` and `B_vjp()`
+         still see the contour points while the value/gradient path calls
+         `set_points` once.
    - [ ] `edge_iota_proxy.py:186-200` — replace unbuffered `np.add.at` scatter
          (`:190`) with a buffered accumulation.
    - [ ] `hardware_keepout.py:1034-1041` — `J()` does `res += float(self.J_jax(...))`
@@ -467,8 +469,10 @@ unpack the tuple in `dJ()`.
 - Phase 4.3 (`banana_opt` micro): `hardware_keepout.py` per-candidate host sync
   landed with hardware keepout tests. The stage2 curvature path now evaluates
   `Jc.curve.kappa()` once when the default smooth-curvature helper is injected,
-  while preserving the custom-helper four-argument contract. The other items are
-  deferred. In particular, `boozer_finite_current.py` copies stay until a
+  while preserving the custom-helper four-argument contract. The edge-iota proxy
+  gradient path now reuses the contour points already installed for `B()`, avoiding
+  the second identical `BiotSavart.set_points` before `B_vjp()`. The other items
+  are deferred. In particular, `boozer_finite_current.py` copies stay until a
   no-alias proof and regression test exist, and DESC bridge/runtime items belong
   to the dirty-tree DESC lane.
 - Phase 4.4 (`boozersurface.py` exact-Newton iterative refinement): deferred;
@@ -554,6 +558,12 @@ unpack the tuple in `dJ()`.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check examples/single_stage_optimization/banana_opt/stage2_objectives.py tests/geo/test_banana_objective_modules.py`
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile examples/single_stage_optimization/banana_opt/stage2_objectives.py tests/geo/test_banana_objective_modules.py`
+  — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_edge_iota_proxy.py -q`
+  — 9 passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check examples/single_stage_optimization/banana_opt/edge_iota_proxy.py tests/geo/test_edge_iota_proxy.py`
+  — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile examples/single_stage_optimization/banana_opt/edge_iota_proxy.py tests/geo/test_edge_iota_proxy.py`
   — clean.
 
 ## Risks and Mitigations
