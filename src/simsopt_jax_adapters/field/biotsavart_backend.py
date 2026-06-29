@@ -125,6 +125,26 @@ def _spec_cache_key(value: object) -> object:
     raise TypeError(f"Unsupported spec cache key value: {type(value).__name__}")
 
 
+def _current_coil_specs_cache_key(owner) -> tuple[object, int]:
+    return owner._coil_dof_state_token, int(owner._dof_layout_version)
+
+
+def _current_owner_coil_specs(owner) -> tuple[CoilSpec, ...]:
+    cache_key = _current_coil_specs_cache_key(owner)
+    cached = owner._coil_specs_cache
+    if cached is not None:
+        cached_key, cached_specs = cached
+        if cached_key == cache_key:
+            return cached_specs
+
+    coil_specs = coil_specs_from_dof_extraction_spec(
+        owner.coil_dof_extraction_spec(),
+        owner.x,
+    )
+    owner._coil_specs_cache = (cache_key, coil_specs)
+    return coil_specs
+
+
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartFieldPullback",
@@ -401,10 +421,7 @@ class SpecBackedCurrent:
         self.local_upper_bounds = np.asarray([np.inf], dtype=np.float64)
 
     def get_value(self) -> float:
-        coil_spec = coil_specs_from_dof_extraction_spec(
-            self._owner.coil_dof_extraction_spec(),
-            self._owner.x,
-        )[self._coil_index]
+        coil_spec = _current_owner_coil_specs(self._owner)[self._coil_index]
         return host_float(coil_spec.current.value[0])
 
 
@@ -451,10 +468,7 @@ class SpecBackedCurve(Optimizable):
         )
 
     def _current_curve_spec(self) -> CurveSpec:
-        return coil_specs_from_dof_extraction_spec(
-            self._owner.coil_dof_extraction_spec(),
-            self._owner.x,
-        )[self._coil_index].curve
+        return _current_owner_coil_specs(self._owner)[self._coil_index].curve
 
     def to_spec(self) -> CurveSpec:
         return self._current_curve_spec()
@@ -478,12 +492,18 @@ class SpecBackedCurve(Optimizable):
         )
 
     def gamma(self) -> np.ndarray:
-        gamma, _gammadash = curve_gamma_and_dash_from_spec(self._current_curve_spec())
-        return host_array(self._apply_symmetry(gamma)[0], dtype=np.float64)
+        return self.gamma_and_gammadash()[0]
 
     def gammadash(self) -> np.ndarray:
+        return self.gamma_and_gammadash()[1]
+
+    def gamma_and_gammadash(self) -> tuple[np.ndarray, np.ndarray]:
         gamma, gammadash = curve_gamma_and_dash_from_spec(self._current_curve_spec())
-        return host_array(self._apply_symmetry(gamma, gammadash)[1], dtype=np.float64)
+        gamma, gammadash = self._apply_symmetry(gamma, gammadash)
+        return (
+            host_array(gamma, dtype=np.float64),
+            host_array(gammadash, dtype=np.float64),
+        )
 
     def gammadashdash(self) -> np.ndarray:
         _gamma, _gammadash, gammadashdash = self._geometry()
@@ -579,10 +599,14 @@ class SpecBackedRotatedCurve(Optimizable):
         )
 
     def gamma(self) -> np.ndarray:
-        return self._rotate(self.curve.gamma())
+        return self.gamma_and_gammadash()[0]
 
     def gammadash(self) -> np.ndarray:
-        return self._rotate(self.curve.gammadash())
+        return self.gamma_and_gammadash()[1]
+
+    def gamma_and_gammadash(self) -> tuple[np.ndarray, np.ndarray]:
+        gamma, gammadash = self.curve.gamma_and_gammadash()
+        return self._rotate(gamma), self._rotate(gammadash)
 
     def gammadashdash(self) -> np.ndarray:
         return self._rotate(self.curve.gammadashdash())
@@ -768,10 +792,7 @@ class SpecBackedCoil:
         )
 
     def to_spec(self) -> CoilSpec:
-        return coil_specs_from_dof_extraction_spec(
-            self._owner.coil_dof_extraction_spec(),
-            self._owner.x,
-        )[self._coil_index]
+        return _current_owner_coil_specs(self._owner)[self._coil_index]
 
 
 class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
@@ -785,6 +806,7 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._x = _as_jax_float64(biot_savart_spec.coil_dofs)
         self._coil_dofs_generation = 0
         self._coil_dof_state_token = _new_coil_dof_state_token()
+        self._coil_specs_cache = None
         self._points_jax: jax.Array | None = None
         self._points_cyl_jax: jax.Array | None = None
         self._points_version = 0
@@ -909,7 +931,10 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         )
 
     def coil_set_spec(self) -> GroupedCoilSetSpec:
-        return self.coil_set_spec_from_dofs(self._x)
+        return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
+
+    def coil_specs(self) -> tuple[CoilSpec, ...]:
+        return _current_owner_coil_specs(self)
 
     def grouped_coil_arrays_from_dofs(
         self,
@@ -1482,6 +1507,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._dof_layout_version = 0
         self._coil_dofs_generation = 0
         self._coil_dof_state_token = _new_coil_dof_state_token()
+        self._coil_specs_cache = None
         self._free_dof_layout_ready = False
         self._suppress_dependency_coil_dof_state = False
         self._local_free_positions_by_opt = {}
@@ -2052,7 +2078,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     def coil_specs(self):
         """Build immutable per-coil specs from the live coil graph."""
-        return self.coil_specs_from_dofs(_as_jax_float64(self.x))
+        return _current_owner_coil_specs(self)
 
     # ------------------------------------------------------------------
     # VJP (reverse-mode gradient w.r.t. coil DOFs)

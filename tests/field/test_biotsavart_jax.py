@@ -2162,6 +2162,102 @@ class TestBiotSavartJAXCoilStateToken:
 
         assert spec_backed._dof_layout_version > initial_version
 
+    def test_spec_backed_coil_specs_memo_tracks_state_and_layout_updates(self, monkeypatch):
+        import simsopt_jax_adapters.field.biotsavart_backend as backend_module
+        from simsopt_jax_adapters.field.biotsavart_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt_jax.core.specs import make_biot_savart_spec
+
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        current_start, _current_end = bs_jax.dof_indices[coils[0].current]
+        curve_start, _curve_end = bs_jax.dof_indices[coils[0].curve]
+        original_rebuild = backend_module.coil_specs_from_dof_extraction_spec
+        rebuild_owner_dofs = []
+
+        def record_rebuild(extraction_spec, owner_dofs):
+            rebuild_owner_dofs.append(np.asarray(owner_dofs, dtype=np.float64).copy())
+            return original_rebuild(extraction_spec, owner_dofs)
+
+        monkeypatch.setattr(
+            backend_module,
+            "coil_specs_from_dof_extraction_spec",
+            record_rebuild,
+        )
+
+        base_gamma = spec_backed.coils[0].curve.gamma()
+        base_gammadash = spec_backed.coils[0].curve.gammadash()
+        base_current = spec_backed.coils[0].current.get_value()
+        spec_backed.coils[0].to_spec()
+
+        assert len(rebuild_owner_dofs) == 1
+
+        updated = np.asarray(spec_backed.x, dtype=np.float64).copy()
+        updated[current_start] += 1.0
+        updated[curve_start] += 0.125
+        spec_backed.x = updated
+
+        updated_gamma = spec_backed.coils[0].curve.gamma()
+        updated_current = spec_backed.coils[0].current.get_value()
+
+        assert len(rebuild_owner_dofs) == 2
+        assert not np.array_equal(updated_gamma, base_gamma)
+        assert updated_current == base_current + 1.0
+        np.testing.assert_allclose(base_gammadash, spec_backed.coils[0].curve.gammadash())
+        assert len(rebuild_owner_dofs) == 2
+
+        spec_backed.fix(0)
+        spec_backed.coils[0].to_spec()
+
+        assert len(rebuild_owner_dofs) == 3
+
+    def test_biotsavart_jax_coil_specs_memo_tracks_parent_updates(self, monkeypatch):
+        import simsopt_jax_adapters.field.biotsavart_backend as backend_module
+        from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        original_rebuild = backend_module.coil_specs_from_dof_extraction_spec
+        rebuild_owner_dofs = []
+
+        def record_rebuild(extraction_spec, owner_dofs):
+            rebuild_owner_dofs.append(np.asarray(owner_dofs, dtype=np.float64).copy())
+            return original_rebuild(extraction_spec, owner_dofs)
+
+        monkeypatch.setattr(
+            backend_module,
+            "coil_specs_from_dof_extraction_spec",
+            record_rebuild,
+        )
+
+        base_gamma = np.asarray(bs_jax.coil_specs()[0].curve.dofs, dtype=np.float64)
+        bs_jax.coil_specs()
+
+        assert len(rebuild_owner_dofs) == 1
+
+        curve_dofs = np.asarray(coils[0].curve.x, dtype=np.float64).copy()
+        curve_dofs[0] += 0.125
+        coils[0].curve.x = curve_dofs
+        updated_gamma_dofs = np.asarray(bs_jax.coil_specs()[0].curve.dofs, dtype=np.float64)
+
+        assert len(rebuild_owner_dofs) == 2
+        assert not np.array_equal(updated_gamma_dofs, base_gamma)
+
+        current_dofs = np.asarray(coils[0].current.x, dtype=np.float64).copy()
+        current_dofs[0] += 1.0
+        coils[0].current.x = current_dofs
+        updated_current = float(np.asarray(bs_jax.coil_specs()[0].current.value)[0])
+
+        assert len(rebuild_owner_dofs) == 3
+        assert updated_current == 1.0e6 + 1.0
+
     def test_spec_backed_biotsavart_x_setter_writes_free_dofs(self):
         from simsopt_jax_adapters.field.biotsavart_backend import (
             BiotSavartJAX,
