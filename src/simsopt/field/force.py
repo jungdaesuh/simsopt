@@ -94,29 +94,9 @@ class LpCurveForce(Optimizable):
             lp_force_pure(gamma, gammadash, gammadashdash, quadpoints, current, regularization, B_mutual, p, threshold)
         )
 
-        self.dJ_dgamma = jit(
+        self.dJ_dprimal = jit(
             lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=0)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dgammadash = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=1)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dgammadashdash = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=2)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dcurrent = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=3)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dB_mutual = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=4)(gamma, gammadash, gammadashdash, current, B_mutual)
+            grad(self.J_jax, argnums=(0, 1, 2, 3, 4))(gamma, gammadash, gammadashdash, current, B_mutual)
         )
 
         super().__init__(depends_on=allcoils)
@@ -146,15 +126,15 @@ class LpCurveForce(Optimizable):
             self.biotsavart.B()
         ]
 
-        dJ_dB = self.dJ_dB_mutual(*args)
+        dJ_dgamma, dJ_dgammadash, dJ_dgammadashdash, dJ_dcurrent, dJ_dB = self.dJ_dprimal(*args)
         dB_dX = self.biotsavart.dB_by_dX()
         dJ_dX = np.einsum('ij,ikj->ik', dJ_dB, dB_dX)
 
         return (
-            self.coil.curve.dgamma_by_dcoeff_vjp(self.dJ_dgamma(*args) + dJ_dX)
-            + self.coil.curve.dgammadash_by_dcoeff_vjp(self.dJ_dgammadash(*args))
-            + self.coil.curve.dgammadashdash_by_dcoeff_vjp(self.dJ_dgammadashdash(*args))
-            + self.coil.current.vjp(jnp.asarray([self.dJ_dcurrent(*args)]))
+            self.coil.curve.dgamma_by_dcoeff_vjp(dJ_dgamma + dJ_dX)
+            + self.coil.curve.dgammadash_by_dcoeff_vjp(dJ_dgammadash)
+            + self.coil.curve.dgammadashdash_by_dcoeff_vjp(dJ_dgammadashdash)
+            + self.coil.current.vjp(jnp.asarray([dJ_dcurrent]))
             + self.biotsavart.B_vjp(dJ_dB)
         )
 
@@ -206,29 +186,9 @@ class MeanSquaredForce(Optimizable):
             mean_squared_force_pure(gamma, gammadash, gammadashdash, quadpoints, current, regularization, B_mutual)
         )
 
-        self.dJ_dgamma = jit(
+        self.dJ_dprimal = jit(
             lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=0)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dgammadash = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=1)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dgammadashdash = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=2)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dcurrent = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=3)(gamma, gammadash, gammadashdash, current, B_mutual)
-        )
-
-        self.dJ_dB_mutual = jit(
-            lambda gamma, gammadash, gammadashdash, current, B_mutual:
-            grad(self.J_jax, argnums=4)(gamma, gammadash, gammadashdash, current, B_mutual)
+            grad(self.J_jax, argnums=(0, 1, 2, 3, 4))(gamma, gammadash, gammadashdash, current, B_mutual)
         )
 
         super().__init__(depends_on=allcoils)
@@ -258,15 +218,15 @@ class MeanSquaredForce(Optimizable):
             self.biotsavart.B()
         ]
 
-        dJ_dB = self.dJ_dB_mutual(*args)
+        dJ_dgamma, dJ_dgammadash, dJ_dgammadashdash, dJ_dcurrent, dJ_dB = self.dJ_dprimal(*args)
         dB_dX = self.biotsavart.dB_by_dX()
         dJ_dX = np.einsum('ij,ikj->ik', dJ_dB, dB_dX)
 
         return (
-            self.coil.curve.dgamma_by_dcoeff_vjp(self.dJ_dgamma(*args) + dJ_dX)
-            + self.coil.curve.dgammadash_by_dcoeff_vjp(self.dJ_dgammadash(*args))
-            + self.coil.curve.dgammadashdash_by_dcoeff_vjp(self.dJ_dgammadashdash(*args))
-            + self.coil.current.vjp(jnp.asarray([self.dJ_dcurrent(*args)]))
+            self.coil.curve.dgamma_by_dcoeff_vjp(dJ_dgamma + dJ_dX)
+            + self.coil.curve.dgammadash_by_dcoeff_vjp(dJ_dgammadash)
+            + self.coil.curve.dgammadashdash_by_dcoeff_vjp(dJ_dgammadashdash)
+            + self.coil.current.vjp(jnp.asarray([dJ_dcurrent]))
             + self.biotsavart.B_vjp(dJ_dB)
         )
 

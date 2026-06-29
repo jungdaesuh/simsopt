@@ -672,7 +672,9 @@ class BoozerSurface(Optimizable):
             dict: A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
             to others:
 
-                - 'residual': the value of the residual at the solution
+                - 'residual': None. LS Newton success is checked against the gradient
+                  of the scalarized least-squares objective; the raw residual is not
+                  materialized on this path.
                 - 'jacobian': the value of the Jacobian at the solution
                 - 'hessian': the value of the Hessian at the solution
                 - 'iter': the number of iterations taken to converge
@@ -715,14 +717,11 @@ class BoozerSurface(Optimizable):
             norm = np.linalg.norm(dval)
             i = i+1
 
-        r = self.boozer_penalty_constraints(
-            x, derivatives=0, constraint_weight=constraint_weight, scalarize=False, optimize_G=G is not None, weight_inv_modB=weight_inv_modB)
-
         # Only factor a finite Hessian (``scipy.linalg.lu`` raises on inf/NaN); a
         # diverged solve reports ``PLU=None`` so a caller cannot consume it.
         PLU = lu(d2val) if np.all(np.isfinite(d2val)) else None
         res = {
-            "residual": r, "jacobian": dval, "hessian": d2val, "iter": i, "success": norm <= tol, "G": None,
+            "residual": None, "jacobian": dval, "hessian": d2val, "iter": i, "success": norm <= tol, "G": None,
             "PLU": PLU, "vjp": partial(boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB),
             "type": "ls", "weight_inv_modB": weight_inv_modB
         }

@@ -87,10 +87,12 @@ class Testing(unittest.TestCase):
         objective.candidates = [(0, 1), (0, 2)]
         objective.compute_candidates = lambda: None
         objective.J_jax = lambda gamma1, l1, gamma2, l2: 1.0
-        objective.thisgrad0 = lambda gamma1, l1, gamma2, l2: np.ones_like(gamma1)
-        objective.thisgrad1 = lambda gamma1, l1, gamma2, l2: np.ones_like(l1)
-        objective.thisgrad2 = lambda gamma1, l1, gamma2, l2: np.ones_like(gamma2)
-        objective.thisgrad3 = lambda gamma1, l1, gamma2, l2: np.ones_like(l2)
+        objective.thisgrad = lambda gamma1, l1, gamma2, l2: (
+            np.ones_like(gamma1),
+            np.ones_like(l1),
+            np.ones_like(gamma2),
+            np.ones_like(l2),
+        )
 
         self.assertEqual(objective.J(), 2.0)
         derivative = objective.dJ(partials=True)
@@ -130,6 +132,31 @@ class Testing(unittest.TestCase):
 
         self.assertEqual(objective.downsample, 2)
         np.testing.assert_allclose(objective.shortest_distance(), 5.0)
+
+    def test_curve_curve_distance_empty_candidates_returns_threshold(self):
+        class SampledCurve:
+            def __init__(self, points):
+                self._gamma = np.asarray(points, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+        curves = [
+            SampledCurve([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            SampledCurve([[10.0, 0.0, 0.0], [11.0, 0.0, 0.0]]),
+        ]
+        objective = CurveCurveDistance.__new__(CurveCurveDistance)
+        objective.curves = curves
+        objective.minimum_distance = 2.0
+        objective.downsample = 1
+        objective.candidates = []
+        objective.compute_candidates = lambda: None
+
+        np.testing.assert_allclose(objective.shortest_distance(), 2.0)
+        np.testing.assert_allclose(
+            objective.shortest_distance(),
+            objective.shortest_distance_among_candidates(),
+        )
 
     def subtest_curve_length_taylor_test(self, curve):
         J = CurveLength(curve)
@@ -406,7 +433,7 @@ class Testing(unittest.TestCase):
             assert len(J.candidates) >= last_num_candidates
             last_num_candidates = len(J.candidates)
             if len(J.candidates) == 0:
-                assert J.shortest_distance() > J.shortest_distance_among_candidates()
+                assert J.shortest_distance() == J.shortest_distance_among_candidates()
             else:
                 assert J.shortest_distance() == J.shortest_distance_among_candidates()
 

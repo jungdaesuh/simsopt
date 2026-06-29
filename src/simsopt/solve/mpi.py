@@ -184,7 +184,6 @@ def least_squares_mpi_solve(prob: LeastSquaresProblem,
         for xj in x:
             objective_file.write(f",{xj:24.16e}")
         objective_file.write(f",{objective_val:24.16e}\n")
-        objective_file.flush()
 
         if save_residuals:
             residuals_file.write(f"{nevals:6d},{del_t:12.4e}")
@@ -194,7 +193,6 @@ def least_squares_mpi_solve(prob: LeastSquaresProblem,
             for fj in unweighted_residuals:
                 residuals_file.write(f",{fj:24.16e}")
             residuals_file.write("\n")
-            residuals_file.flush()
 
         nevals += 1
         logger.debug(f"residuals are {residuals}")
@@ -387,7 +385,6 @@ def constrained_mpi_solve(prob: ConstrainedProblem,
         for xj in x:
             objective_file.write(f",{xj:24.16e}")
         objective_file.write(f",{objective_val:24.16e}\n")
-        objective_file.flush()
 
         n_objective_evals += 1
         logger.debug(f"objective is {objective_val}")
@@ -440,7 +437,6 @@ def constrained_mpi_solve(prob: ConstrainedProblem,
         for fj in constraint_val:
             constraint_file.write(f",{fj:24.16e}")
         constraint_file.write("\n")
-        constraint_file.flush()
 
         n_constraint_evals += 1
         logger.debug(f"constraints are {constraint_val}")

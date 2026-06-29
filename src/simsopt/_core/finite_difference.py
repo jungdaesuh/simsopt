@@ -85,9 +85,8 @@ class FiniteDifference:
                                         rel_step=self.rel_step)
         if self.diff_method == "centered":
             # Centered differences:
+            x = np.copy(x0)
             for j in range(len(x0)):
-                x = np.copy(x0)
-
                 x[j] = x0[j] + steps[j]
                 self.opt.x = x
                 fplus = np.asarray(self.fn())
@@ -97,18 +96,20 @@ class FiniteDifference:
                 fminus = np.asarray(self.fn())
 
                 jac[:, j] = (fplus - fminus) / (2 * steps[j])
+                x[j] = x0[j]
 
         elif self.diff_method == "forward":
             # 1-sided differences
             self.opt.x = x0
             f0 = np.asarray(self.fn())
+            x = np.copy(x0)
             for j in range(len(x0)):
-                x = np.copy(x0)
                 x[j] = x0[j] + steps[j]
                 self.opt.x = x
                 fplus = np.asarray(self.fn())
 
                 jac[:, j] = (fplus - f0) / steps[j]
+                x[j] = x0[j]
 
         # Set the opt.x to the original x
         self.opt.x = opt_x0

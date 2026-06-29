@@ -289,6 +289,40 @@ class BoozerSurfaceTests(unittest.TestCase):
         self.assertAlmostEqual(float(res['iota']), iota0)
         self.assertAlmostEqual(float(res['G']), G0)
 
+    def test_penalty_newton_skips_raw_residual_diagnostic_recompute(self):
+        class MinimalSurface:
+            def __init__(self):
+                self._dofs = np.array([1.0, 2.0])
+
+            def get_dofs(self):
+                return self._dofs.copy()
+
+            def set_dofs(self, dofs):
+                self._dofs = np.asarray(dofs, dtype=float).copy()
+
+        boozer_surface = BoozerSurface.__new__(BoozerSurface)
+        boozer_surface.surface = MinimalSurface()
+        boozer_surface.need_to_run_code = True
+        boozer_surface.res = None
+
+        def vectorized_penalty(x, derivatives=2, **kwargs):
+            size = np.asarray(x).size
+            return 0.0, np.zeros(size), np.identity(size)
+
+        def raw_residual_recompute(*args, **kwargs):
+            raise AssertionError("LS Newton must not recompute the raw residual diagnostic")
+
+        boozer_surface.boozer_penalty_constraints_vectorized = vectorized_penalty
+        boozer_surface.boozer_penalty_constraints = raw_residual_recompute
+
+        res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+            tol=1e-12, maxiter=1, iota=0.25, vectorize=True)
+
+        self.assertTrue(bool(res["success"]))
+        self.assertIsNone(res["residual"])
+        np.testing.assert_allclose(res["jacobian"], np.zeros(3))
+        self.assertEqual(res["type"], "ls")
+
     def test_penalty_ls_manual_finite_divergence_rolls_back_to_seed(self):
         """The damped Gauss-Newton ('manual') least-squares path rolls a diverged
         iterate back to the pre-solve seed (DOFs + iota/G), success False."""
@@ -1059,7 +1093,10 @@ class BoozerSurfaceTests(unittest.TestCase):
             res = boozer_surface.solve_residual_equation_exactly_newton(
                 tol=1e-12, maxiter=15, iota=res['iota'], G=res['G'])
 
-        print('Residual norm after second stage', np.linalg.norm(res['residual']))
+        if second_stage == 'newton':
+            print('Gradient norm after second stage', np.linalg.norm(res['jacobian']))
+        else:
+            print('Residual norm after second stage', np.linalg.norm(res['residual']))
         assert res['success']
         assert not boozer_surface.surface.is_self_intersecting(thetas=100)
 
@@ -1072,11 +1109,15 @@ class BoozerSurfaceTests(unittest.TestCase):
         else:
             assert np.abs(gammazero[1]) > 1e-6
 
-        if surfacetype == 'SurfaceXYZTensorFourier':
+        if surfacetype == 'SurfaceXYZTensorFourier' and second_stage != 'newton':
             assert np.linalg.norm(res['residual']) < 1e-9
+        if second_stage == 'newton':
+            assert res['residual'] is None
+            assert np.linalg.norm(res['jacobian']) <= 1e-10
 
         print(ar_target, ar.J())
-        print(res['residual'][-10:])
+        if res['residual'] is not None:
+            print(res['residual'][-10:])
         if surfacetype == 'SurfaceXYZTensorFourier' or second_stage == 'newton_exact':
             assert np.abs(ar_target - ar.J()) < 1e-9
         else:

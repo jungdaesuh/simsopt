@@ -126,7 +126,6 @@ def least_squares_serial_solve(prob: LeastSquaresProblem,
             objective_file.write(f",{xj:24.16e}")
         objective_file.write(f",{objective_val:24.16e}")
         objective_file.write("\n")
-        objective_file.flush()
 
         if save_residuals:
             residuals_file.write(f"{nevals:6d},{elapsed_t:12.4e}")
@@ -136,7 +135,6 @@ def least_squares_serial_solve(prob: LeastSquaresProblem,
             for fj in residuals:
                 residuals_file.write(f",{fj:24.16e}")
             residuals_file.write("\n")
-            residuals_file.flush()
 
         nevals += 1
         return residuals
@@ -238,7 +236,6 @@ def serial_solve(prob: Union[Optimizable, Callable],
             # objective_file.write(f",{result:24.16e}")
             objective_file.write(f",{result}")
             objective_file.write("\n")
-            objective_file.flush()
 
             nevals += 1
             return result
@@ -342,7 +339,6 @@ def constrained_serial_solve(prob: ConstrainedProblem,
             objective_file.write(f",{xj:24.16e}")
         objective_file.write(f",{objective_val:24.16e}")
         objective_file.write("\n")
-        objective_file.flush()
 
         n_objective_evals += 1
         return objective_val
@@ -380,7 +376,6 @@ def constrained_serial_solve(prob: ConstrainedProblem,
         for fj in constraint_val:
             constraint_file.write(f",{fj:24.16e}")
         constraint_file.write("\n")
-        constraint_file.flush()
 
         n_constraint_evals += 1
         return constraint_val
