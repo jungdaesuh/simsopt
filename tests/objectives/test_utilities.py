@@ -13,6 +13,7 @@ from simsopt.objectives.utilities import (
     MPIObjective,
     QuadraticPenalty,
     MPIOptimizable,
+    forward_backward,
     forward_solve,
     sum_across_comm,
 )
@@ -31,8 +32,8 @@ class UtilityObjectiveTesting(unittest.TestCase):
     def test_forward_solve_matches_dense_solve_for_plu_factors(self):
         matrix = np.array(
             [
+                [0.0, 1.0, 0.5],
                 [4.0, 1.0, 0.5],
-                [2.0, 5.0, 1.5],
                 [1.0, 0.25, 3.0],
             ]
         )
@@ -43,6 +44,23 @@ class UtilityObjectiveTesting(unittest.TestCase):
         np.testing.assert_allclose(
             forward_solve(P, L, U, rhs, iterative_refinement=True),
             np.linalg.solve(matrix, rhs),
+        )
+
+    def test_forward_backward_matches_dense_transpose_solve_for_plu_factors(self):
+        matrix = np.array(
+            [
+                [0.0, 1.0, 0.5],
+                [4.0, 1.0, 0.5],
+                [1.0, 0.25, 3.0],
+            ]
+        )
+        rhs = np.array([2.0, -1.0, 0.5])
+        P, L, U = lu(matrix)
+
+        np.testing.assert_allclose(forward_backward(P, L, U, rhs), np.linalg.solve(matrix.T, rhs))
+        np.testing.assert_allclose(
+            forward_backward(P, L, U, rhs, iterative_refinement=True),
+            np.linalg.solve(matrix.T, rhs),
         )
 
     def test_sum_across_comm_preserves_scalar_payload_contract(self):

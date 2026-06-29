@@ -2,6 +2,7 @@ import numpy as np
 
 import simsoptpp as sopp
 from .magneticfield import MagneticField
+from .._core.derivative import sum_derivatives
 from .._core.json import GSONDecoder
 
 __all__ = ['BiotSavart']
@@ -26,6 +27,17 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         self._coils = coils
         sopp.BiotSavart.__init__(self, coils)
         MagneticField.__init__(self, depends_on=coils)
+
+    @staticmethod
+    def _current_vjp_scalars(v, field_derivatives):
+        field_derivatives = np.asarray(field_derivatives)
+        return np.sum(v * field_derivatives, axis=tuple(range(1, field_derivatives.ndim)))
+
+    def _sum_coil_vjps(self, v_gamma, v_gammadash, v_current):
+        return sum_derivatives(
+            coil.vjp(v_gamma[i], v_gammadash[i], np.asarray([v_current[i]]))
+            for i, coil in enumerate(self._coils)
+        )
 
     def dB_by_dcoilcurrents(self, compute_derivatives=0):
         points = self.get_points_cart_ref()
@@ -79,14 +91,11 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         sopp.biot_savart_vjp_graph(points, gammas, gammadashs, currents, v,
                                    res_gamma, res_gammadash, vgrad, res_grad_gamma, res_grad_gammadash)
 
-        dB_by_dcoilcurrents = self.dB_by_dcoilcurrents()
-        res_current = [np.sum(v * dB_by_dcoilcurrents[i]) for i in range(len(dB_by_dcoilcurrents))]
-        d2B_by_dXdcoilcurrents = self.d2B_by_dXdcoilcurrents()
-        res_grad_current = [np.sum(vgrad * d2B_by_dXdcoilcurrents[i]) for i in range(len(d2B_by_dXdcoilcurrents))]
-
+        res_current = self._current_vjp_scalars(v, self.dB_by_dcoilcurrents())
+        res_grad_current = self._current_vjp_scalars(vgrad, self.d2B_by_dXdcoilcurrents())
         res = (
-            sum([coils[i].vjp(res_gamma[i], res_gammadash[i], np.asarray([res_current[i]])) for i in range(len(coils))]),
-            sum([coils[i].vjp(res_grad_gamma[i], res_grad_gammadash[i], np.asarray([res_grad_current[i]])) for i in range(len(coils))])
+            self._sum_coil_vjps(res_gamma, res_gammadash, res_current),
+            self._sum_coil_vjps(res_grad_gamma, res_grad_gammadash, res_grad_current)
         )
 
         return res
@@ -114,9 +123,8 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         points = self.get_points_cart_ref()
         sopp.biot_savart_vjp_graph(points, gammas, gammadashs, currents, v,
                                    res_gamma, res_gammadash, [], [], [])
-        dB_by_dcoilcurrents = self.dB_by_dcoilcurrents()
-        res_current = [np.sum(v * dB_by_dcoilcurrents[i]) for i in range(len(dB_by_dcoilcurrents))]
-        return sum([coils[i].vjp(res_gamma[i], res_gammadash[i], np.asarray([res_current[i]])) for i in range(len(coils))])
+        res_current = self._current_vjp_scalars(v, self.dB_by_dcoilcurrents())
+        return self._sum_coil_vjps(res_gamma, res_gammadash, res_current)
 
     def dA_by_dcoilcurrents(self, compute_derivatives=0):
         points = self.get_points_cart_ref()
@@ -170,14 +178,11 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         sopp.biot_savart_vector_potential_vjp_graph(points, gammas, gammadashs, currents, v,
                                                     res_gamma, res_gammadash, vgrad, res_grad_gamma, res_grad_gammadash)
 
-        dA_by_dcoilcurrents = self.dA_by_dcoilcurrents()
-        res_current = [np.sum(v * dA_by_dcoilcurrents[i]) for i in range(len(dA_by_dcoilcurrents))]
-        d2A_by_dXdcoilcurrents = self.d2A_by_dXdcoilcurrents()
-        res_grad_current = [np.sum(vgrad * d2A_by_dXdcoilcurrents[i]) for i in range(len(d2A_by_dXdcoilcurrents))]
-
+        res_current = self._current_vjp_scalars(v, self.dA_by_dcoilcurrents())
+        res_grad_current = self._current_vjp_scalars(vgrad, self.d2A_by_dXdcoilcurrents())
         res = (
-            sum([coils[i].vjp(res_gamma[i], res_gammadash[i], np.asarray([res_current[i]])) for i in range(len(coils))]),
-            sum([coils[i].vjp(res_grad_gamma[i], res_grad_gammadash[i], np.asarray([res_grad_current[i]])) for i in range(len(coils))])
+            self._sum_coil_vjps(res_gamma, res_gammadash, res_current),
+            self._sum_coil_vjps(res_grad_gamma, res_grad_gammadash, res_grad_current)
         )
 
         return res
@@ -205,9 +210,8 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         points = self.get_points_cart_ref()
         sopp.biot_savart_vector_potential_vjp_graph(points, gammas, gammadashs, currents, v,
                                                     res_gamma, res_gammadash, [], [], [])
-        dA_by_dcoilcurrents = self.dA_by_dcoilcurrents()
-        res_current = [np.sum(v * dA_by_dcoilcurrents[i]) for i in range(len(dA_by_dcoilcurrents))]
-        return sum([coils[i].vjp(res_gamma[i], res_gammadash[i], np.asarray([res_current[i]])) for i in range(len(coils))])
+        res_current = self._current_vjp_scalars(v, self.dA_by_dcoilcurrents())
+        return self._sum_coil_vjps(res_gamma, res_gammadash, res_current)
 
     def as_dict(self, serial_objs_dict) -> dict:
         d = super().as_dict(serial_objs_dict=serial_objs_dict)

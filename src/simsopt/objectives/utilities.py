@@ -8,6 +8,22 @@ from .._core.derivative import Derivative, derivative_dec, sum_derivatives
 __all__ = ['MPIOptimizable', 'MPIObjective', 'QuadraticPenalty', 'Weight', 'forward_backward', 'forward_solve']
 
 
+def _permute(P, values):
+    return np.take(values, np.argmax(P, axis=1), axis=0)
+
+
+def _transpose_permute(P, values):
+    return np.take(values, np.argmax(P, axis=0), axis=0)
+
+
+def _plu_matvec(P, L, U, x):
+    return _permute(P, L @ (U @ x))
+
+
+def _plu_transpose_matvec(P, L, U, x):
+    return U.T @ (L.T @ _transpose_permute(P, x))
+
+
 def forward_backward(P, L, U, rhs, iterative_refinement=False):
     """
     Solve a linear system of the form (PLU)^T*adj = rhs for adj.
@@ -23,12 +39,12 @@ def forward_backward(P, L, U, rhs, iterative_refinement=False):
     """
     y = scipy.linalg.solve_triangular(U.T, rhs, lower=True)
     z = scipy.linalg.solve_triangular(L.T, y, lower=False)
-    adj = P@z
+    adj = _permute(P, z)
 
     if iterative_refinement:
-        yp = scipy.linalg.solve_triangular(U.T, rhs-(P@L@U).T@adj, lower=True)
+        yp = scipy.linalg.solve_triangular(U.T, rhs - _plu_transpose_matvec(P, L, U, adj), lower=True)
         zp = scipy.linalg.solve_triangular(L.T, yp, lower=False)
-        adj += P@zp
+        adj += _permute(P, zp)
 
     return adj
 
@@ -37,11 +53,12 @@ def forward_solve(P, L, U, rhs, iterative_refinement=False):
     """
     Solve a linear system of the form (PLU)*x = rhs for x.
     """
-    y = scipy.linalg.solve_triangular(L, P.T@rhs, lower=True, unit_diagonal=True)
+    y = scipy.linalg.solve_triangular(L, _transpose_permute(P, rhs), lower=True, unit_diagonal=True)
     x = scipy.linalg.solve_triangular(U, y, lower=False)
 
     if iterative_refinement:
-        yp = scipy.linalg.solve_triangular(L, P.T@(rhs-(P@L@U)@x), lower=True, unit_diagonal=True)
+        residual = rhs - _plu_matvec(P, L, U, x)
+        yp = scipy.linalg.solve_triangular(L, _transpose_permute(P, residual), lower=True, unit_diagonal=True)
         xp = scipy.linalg.solve_triangular(U, yp, lower=False)
         x += xp
 

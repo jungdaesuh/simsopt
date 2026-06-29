@@ -48,6 +48,20 @@ class Testing(unittest.TestCase):
         total_only.dB_by_dcoilcurrents()
         self.assertTrue(total_only.fieldcache_get_status("B_0"))
 
+    def test_fixed_current_vjp_preserves_as_derivative_partial(self):
+        current = Current(1e4)
+        current.fix_all()
+        coil = Coil(get_curve(), current)
+        bs = BiotSavart([coil])
+        points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+        cotangent = 1e-3 * np.arange(points.size).reshape(points.shape)
+
+        derivative = bs.set_points(points).B_vjp(cotangent)
+        partial = derivative(coil, as_derivative=True)
+        np.testing.assert_allclose(derivative(coil), partial.data[coil.curve])
+        self.assertEqual(partial.data[current].shape, (1,))
+        self.assertFalse(np.allclose(partial.data[current], 0.0))
+
     def test_biotsavart_exponential_convergence(self):
         BiotSavart([Coil(get_curve(), Current(1e4))])
         points = np.asarray(10 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])

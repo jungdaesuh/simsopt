@@ -52,9 +52,11 @@ gated behind explicit verification.
   Relevant tests: `tests/field/test_selffieldforces.py`,
   `tests/geo/test_boozersurface.py`, `tests/field/test_biotsavart.py`,
   `tests/geo/test_curve_objectives.py`.
-- Checkout baseline for this review: branch `surrogate-confinement-v2`, HEAD
-  `c15e39414`, dirty tree present. Phase 5 DESC anchors are not clean-checkout
-  assumptions: `examples/single_stage_optimization/banana_opt/desc_bridge/objective_factory.py`
+- Original checkout baseline for this review: branch `surrogate-confinement-v2`,
+  HEAD `c15e39414`, dirty tree present. Current continuation baseline after the
+  first two hot-path commits is HEAD `095348cf4` (`02778c0da` + `095348cf4`
+  landed Phases 1-3 and the first Phase 4.3 host-sync item). Phase 5 DESC
+  anchors remain dirty-tree scoped: `examples/single_stage_optimization/banana_opt/desc_bridge/objective_factory.py`
   and `examples/single_stage_optimization/DESC_JOINT/run_desc_joint_banana.py`
   are untracked in the current tree, while `desc_bridge/runtime_coilset.py` is
   added. Treat Phase 5 as dirty-tree-scoped until those files are committed or
@@ -402,14 +404,24 @@ unpack the tuple in `dJ()`.
   `ellipse_width.py`. Remaining single-arg gradients in fixed-R0 or single-primal
   paths are intentionally not tuple-gradient families.
 - Phase 3: landed in `02778c0da` for finite difference copies and solver flushes;
-  follow-up landed in this slice for `Optimizable` index iteration and
-  `single_stage_geometry.py` `run_code` signature caching.
-- Phase 4.1 (`field/biotsavart.py`): deferred; no code change in this slice, and
-  the current/fixed-current branches need a separate Biot-Savart benchmark plus
-  `tests/field/test_biotsavart.py`.
-- Phase 4.2 (`geo` array/allocation micro): deferred except the framed-curve VJP
-  consolidation already covered by Phase 2; the remaining items need isolated
-  consumer audits or timing proof before changing allocation/host-sync behavior.
+  follow-up landed in `095348cf4` for `Optimizable` index iteration and
+  `single_stage_geometry.py` `run_code` signature caching. The recursive DAG-walk
+  memoization item is deferred: a visited-set implementation changed shared-graph
+  recompute/update traversal semantics and regressed force/strain Taylor tests, so
+  it needs a separate design and regression proof rather than a hot-path sweep edit.
+- Phase 4.1 (`field/biotsavart.py`): partial continuation slice. The safe pieces
+  are implemented: vectorized current-cotangent reductions and one-pass
+  `sum_derivatives` assembly for `B_vjp`, `B_and_dB_vjp`, `A_vjp`, and
+  `A_and_dA_vjp`. The all-fixed-current branch skip is explicitly deferred: it
+  preserves optimizer-visible free gradients, but it would remove nonzero fixed
+  current entries from the public `Derivative(..., as_derivative=True)` view unless
+  a contract-preserving lazy/current-partial strategy is designed.
+- Phase 4.2 (`geo` array/allocation micro): partial continuation slice. The dense
+  permutation-matrix products in `objectives/utilities.py` `forward_solve` /
+  `forward_backward` are replaced by O(n) pivot indexing and factored residual
+  matvecs. The framed-curve VJP consolidation was already covered by Phase 2; the
+  remaining items still need isolated consumer audits or timing proof before
+  changing allocation/host-sync behavior.
 - Phase 4.3 (`banana_opt` micro): `hardware_keepout.py` per-candidate host sync
   landed with hardware keepout tests; the other items are deferred. In particular,
   `boozer_finite_current.py` copies stay until a no-alias proof and regression test
@@ -454,6 +466,21 @@ unpack the tuple in `dJ()`.
       objective when the flag is on.
 - [ ] (Optional, if a GPU pod is available) timing A/B on one production
       single-stage eval to confirm the predicted ms savings on Phase 1/2/3.
+
+### Validation Evidence — 2026-06-29 Continuation Slice
+
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/field/test_biotsavart.py -q`
+  — 18 passed, 12 subtests passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/field/test_selffieldforces.py -q`
+  — 11 passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/objectives/test_utilities.py -q`
+  — 6 passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_boozersurface.py tests/geo/test_boozer_trust_gate.py -q`
+  — 73 passed, 183 subtests passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_surface_objectives.py tests/geo/test_single_stage_surface_stack_spacing_gradient.py -q`
+  — 26 passed, 159 subtests passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check src/simsopt/field/biotsavart.py src/simsopt/objectives/utilities.py tests/field/test_biotsavart.py tests/objectives/test_utilities.py`
+  — clean.
 
 ## Risks and Mitigations
 
