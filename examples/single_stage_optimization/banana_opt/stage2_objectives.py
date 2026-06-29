@@ -934,13 +934,13 @@ def format_seed_gradient_diagnostic(diag) -> str:
         f"||grad_hw||_2={diag['grad_hw_norm_2']:.6e}  "
         f"||grad_edge||_2={diag['grad_edge_norm_2']:.6e}",
         f"scale[min={diag['scale_min']:.3e}, max={diag['scale_max']:.3e}]  "
-        f"||grad*scale||_2={diag['scaled_grad_norm_2']:.6e}  "
-        f"||grad*scale||_inf={diag['scaled_grad_norm_inf']:.6e}",
+        f"||grad_u||_2={diag['scaled_grad_norm_2']:.6e}  "
+        f"||grad_u||_inf={diag['scaled_grad_norm_inf']:.6e}",
     ]
     for d in diag["raw_descent"]:
         lines.append(f"raw -grad descent: eps={d['eps']:.0e}  dJ={d['dJ']:+.6e}")
     lines.append(
-        f"untruncated first step dJ = J(x0 - grad*scale^2) - J0 = "
+        f"untruncated first step dJ = J(x0 - P.step_from_gradient(grad)) - J0 = "
         f"{diag['first_step_dJ']:+.6e}"
     )
     lines.append(f"VERDICT: {diag['verdict']}")

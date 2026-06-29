@@ -148,6 +148,11 @@ class SeedGradientDiagnosticTest(unittest.TestCase):
         )
         self.assertEqual(diag["STAGE2_PRECONDITIONER_KIND"], "h1")
         self.assertEqual(diag["STAGE2_PRECONDITIONER_CURVE_BLOCK_COUNT"], 1)
+        rendered = format_seed_gradient_diagnostic(diag)
+        self.assertIn("||grad_u||_2=", rendered)
+        self.assertIn("P.step_from_gradient(grad)", rendered)
+        self.assertNotIn("||grad*scale||_2=", rendered)
+        self.assertNotIn("grad*scale^2", rendered)
 
     def test_hardware_edge_split_equals_the_hinge_contribution(self):
         curvature = np.array([1.0, 2.0, 3.0])

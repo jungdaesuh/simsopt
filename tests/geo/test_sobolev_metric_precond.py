@@ -19,7 +19,6 @@ from banana_opt.single_stage_geometry import (  # noqa: E402
     Stage2PenaltyPreconditioner,
     build_curve_block_cholesky,
     build_curve_sobolev_metric,
-    build_stage2_penalty_preconditioner,
     normalize_objective,
     run_scaled_winding_minimize,
 )
@@ -54,6 +53,16 @@ def _quadratic(curvature, target):
     def fun(x):
         delta = np.asarray(x, dtype=float) - target
         return 0.5 * float(np.sum(curvature * delta * delta)), curvature * delta
+
+    return fun
+
+
+def _matrix_quadratic(hessian):
+    hessian = np.asarray(hessian, dtype=float)
+
+    def fun(x):
+        x = np.asarray(x, dtype=float)
+        return 0.5 * float(x @ hessian @ x), hessian @ x
 
     return fun
 
@@ -162,6 +171,36 @@ def test_operator_transformed_gradient_matches_central_fd():
     np.testing.assert_allclose(analytic[[1, 2]], expected_curve_grad, rtol=1.0e-12)
 
 
+def test_metric_preconditioner_improves_conditioning_and_first_step():
+    metric_hessian = np.array([[50.0, 20.0], [20.0, 10.0]])
+    cholesky_factor = build_curve_block_cholesky(metric_hessian)
+    preconditioner = Stage2PenaltyPreconditioner(
+        diagonal_scale=np.ones(2),
+        curve_blocks=(
+            CurveSobolevBlock(
+                indices=np.array([0, 1]),
+                cholesky_factor=cholesky_factor,
+                metric_trace_mean=float(np.trace(metric_hessian) / 2.0),
+            ),
+        ),
+        metric_kind="h1",
+        alpha=1.0,
+        metric_normalization="synthetic",
+    )
+    cholesky_inverse = np.linalg.inv(cholesky_factor)
+    transformed_hessian = cholesky_inverse @ metric_hessian @ cholesky_inverse.T
+    assert np.linalg.cond(transformed_hessian) < np.linalg.cond(metric_hessian)
+
+    fun = _matrix_quadratic(metric_hessian)
+    x0 = np.array([1.0, -0.25])
+    j0, grad = fun(x0)
+    identity_first_step_dj = fun(x0 - grad)[0] - j0
+    metric_first_step_dj = fun(x0 - preconditioner.step_from_gradient(grad))[0] - j0
+
+    assert identity_first_step_dj > 0.0
+    assert metric_first_step_dj < 0.0
+
+
 def test_metric_off_is_byte_identical_to_plain_minimize():
     x0 = np.array([0.3, 0.1, 0.903, 0.142])
     bounds = [(-np.inf, np.inf), (-np.inf, np.inf), (0.903, 0.993), (0.130, 0.20)]
@@ -184,36 +223,67 @@ def test_metric_off_is_byte_identical_to_plain_minimize():
     assert transformed.nit == plain.nit
 
 
-def test_metric_operator_preserves_live_finite_bounds():
+def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
+    from STAGE_2.banana_coil_solver import (  # noqa: E402
+        build_lbfgsb_bounds,
+        resolve_stage2_penalty_preconditioner,
+    )
+
     curve = _curve(order=2, num_quadpoints=13)
     dof_names = (
         ["Current1:x0"]
         + [f"{curve.name}:{name}" for name in curve.local_dof_names]
         + ["SurfaceRZFourier1:rc(0,0)"]
     )
-    bounds = (
-        [(-5.0, 5.0)]
-        + [(-np.inf, np.inf)] * curve.num_dofs()
-        + [(0.903, 0.993)]
+    jf = SimpleNamespace(
+        dof_names=dof_names,
+        lower_bounds=np.array([-5.0] + [-np.inf] * curve.num_dofs() + [0.903]),
+        upper_bounds=np.array([5.0] + [np.inf] * curve.num_dofs() + [0.993]),
+    )
+    bounds = build_lbfgsb_bounds(jf)
+    args = SimpleNamespace(
+        stage2_sobolev_metric="h1",
+        stage2_sobolev_alpha=1.5,
+        stage2_sobolev_h2_beta=0.0,
+        stage2_sobolev_power=2,
     )
 
-    preconditioner = build_stage2_penalty_preconditioner(
-        dof_names,
-        (curve,),
-        alpha=1.5,
-        winding_dof_scale_map=WINDING_DOF_CORRIDOR_SCALE_MAP,
+    preconditioner = resolve_stage2_penalty_preconditioner(
+        args,
+        jf.dof_names,
+        WINDING_DOF_CORRIDOR_SCALE_MAP,
+        curves_by_block=(curve,),
         bounds=bounds,
-        metric_kind="h1",
     )
     curve_indices = preconditioner.curve_blocks[0].indices
-    assert np.all(np.isneginf([bounds[index][0] for index in curve_indices]))
-    assert np.all(np.isposinf([bounds[index][1] for index in curve_indices]))
+    assert np.all(np.isneginf(jf.lower_bounds[curve_indices]))
+    assert np.all(np.isposinf(jf.upper_bounds[curve_indices]))
 
     transformed_bounds = preconditioner.transform_bounds(bounds)
     assert transformed_bounds[0] == bounds[0]
     expected_rc_lower = bounds[-1][0] / WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"]
     expected_rc_upper = bounds[-1][1] / WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"]
-    np.testing.assert_allclose(transformed_bounds[-1], (expected_rc_lower, expected_rc_upper))
+    np.testing.assert_allclose(
+        transformed_bounds[-1],
+        (expected_rc_lower, expected_rc_upper),
+    )
+
+    metadata = preconditioner.results_metadata()
+    result_payload = {}
+    result_payload.update(metadata)
+    result_payload.update(
+        {
+            "STAGE2_OBJECTIVE_NORMALIZE": True,
+            "STAGE2_OBJECTIVE_J_REF": 123.0,
+        }
+    )
+    assert result_payload["STAGE2_PRECONDITIONER_KIND"] == "h1"
+    assert result_payload["STAGE2_PRECONDITIONER_CURVE_BLOCK_COUNT"] == 1
+    assert result_payload["STAGE2_SOBOLEV_ALPHA"] == 1.5
+    assert result_payload["STAGE2_SOBOLEV_METRIC_NORMALIZATION"] == "trace_mean"
+    assert result_payload["STAGE2_SOBOLEV_METRIC_TRACE_MEAN"]
+    assert result_payload["STAGE2_OBJECTIVE_NORMALIZE"] is True
+    assert result_payload["STAGE2_OBJECTIVE_J_REF"] == 123.0
 
 
 def test_normalize_objective_scales_value_and_gradient_by_frozen_j_ref():
@@ -227,4 +297,6 @@ def test_normalize_objective_scales_value_and_gradient_by_frozen_j_ref():
     norm_j, norm_grad = normalized(x)
     assert norm_j == raw_j / j_ref
     np.testing.assert_allclose(norm_grad, raw_grad / j_ref)
-    assert np.linalg.cond(np.diag(curvature / j_ref)) == np.linalg.cond(np.diag(curvature))
+    assert np.linalg.cond(np.diag(curvature / j_ref)) == np.linalg.cond(
+        np.diag(curvature)
+    )
