@@ -420,6 +420,291 @@ class BoozerSurfaceTests(unittest.TestCase):
             err_msg=f"Residual norm {residual_norm:.2e} is not less than 1e-3. Residual: {res['residual']}")
         assert res['success'], f"Optimization did not succeed. Residual norm: {residual_norm:.2e}, Residual: {res['residual']}"
 
+    def test_residual_newton_diverging_solve_does_not_poison_warm_start(self):
+        """A diverged Newton iterate must not overwrite the trusted warm-start.
+
+        Regression for warm-start seed contamination: when
+        ``solve_residual_equation_exactly_newton`` diverges (residual blows up
+        above where it started), the surface DOFs and the reported ``iota``/``G``
+        must roll back to their pre-solve values, so any subsequent solve seeded
+        from them is not poisoned. Only the diverged path changed; a converged or
+        residual-improving solve still persists exactly as before (covered by the
+        convergence tests above).
+        """
+        from unittest import mock
+        import simsopt.geo.boozersurface as boozersurface_module
+
+        _, boozer_surface = get_boozer_surface(boozer_type='exact', converge=True)
+        trusted_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        trusted_iota = float(boozer_surface.res['iota'])
+        trusted_G = float(boozer_surface.res['G'])
+        surface = boozer_surface.surface
+        surface_mask = surface.get_stellsym_mask()
+        residual_mask = np.concatenate(
+            (surface_mask[..., None], surface_mask[..., None],
+             surface_mask[..., None]), axis=2)
+        if surface.stellsym:
+            residual_mask[0, 0, 0] = False
+        residual_size = residual_mask.size
+        state_size = trusted_dofs.size + 2
+
+        call_count = [0]
+
+        def diverging_residual(_surface, _iota, _G, _biotsavart,
+                               derivatives=1):
+            # Residual norm grows on every call, so the final norm exceeds the
+            # initial norm -> the guard classifies the solve as diverged.
+            call_count[0] += 1
+            residual = float(call_count[0]) * np.ones(residual_size)
+            jacobian = np.zeros((residual_size, state_size))
+            return residual, jacobian
+
+        def solve_step(_matrix, _rhs):
+            return np.ones(state_size)
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+                boozersurface_module, 'boozer_surface_residual',
+                side_effect=diverging_residual), mock.patch.object(
+                boozersurface_module.np.linalg, 'solve',
+                side_effect=solve_step):
+            res = boozer_surface.solve_residual_equation_exactly_newton(
+                tol=1e-12, maxiter=5, iota=trusted_iota, G=trusted_G)
+
+        # The solve diverged.
+        assert not bool(res['success'])
+        # Surface DOFs rolled back to the trusted pre-solve state (not the
+        # diverged iterate).
+        np.testing.assert_allclose(
+            np.array(boozer_surface.surface.get_dofs()), trusted_dofs)
+        # Reported iota/G are the trusted warm-start seed, not the diverged one,
+        # so a warm-start chain cannot inherit the poisoned values.
+        self.assertAlmostEqual(res['iota'], trusted_iota)
+        self.assertAlmostEqual(res['G'], trusted_G)
+
+    def test_penalty_lbfgs_diverging_solve_does_not_poison_warm_start(self):
+        """Penalty LBFGS rolls back a failed optimizer result."""
+        from types import SimpleNamespace
+        from unittest import mock
+        import simsopt.geo.boozersurface as boozersurface_module
+
+        _, boozer_surface = get_boozer_surface(
+            boozer_type='ls', converge=False)
+        trusted_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        trusted_iota = -0.406
+        trusted_G = -2.0
+        initial_x = np.concatenate((trusted_dofs, [trusted_iota, trusted_G]))
+        state_size = initial_x.size
+
+        def diverging_penalty(dofs, derivatives=1, constraint_weight=1.,
+                              optimize_G=False, weight_inv_modB=True):
+            assert derivatives == 1
+            assert optimize_G
+            boozer_surface.surface.set_dofs(dofs[:-2])
+            scale = 1.0 if np.allclose(dofs, initial_x) else 10.0
+            return scale, scale * np.ones(state_size)
+
+        def failed_minimize(fun, _x0, jac=True, method=None, options=None):
+            assert jac is True
+            diverged_x = np.array(initial_x, copy=True)
+            diverged_x[:-2] += 1.0
+            fun(diverged_x)
+            return SimpleNamespace(
+                x=diverged_x,
+                fun=10.0,
+                jac=10.0 * np.ones(state_size),
+                nit=1,
+                success=False,
+            )
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+                boozer_surface, 'boozer_penalty_constraints_vectorized',
+                side_effect=diverging_penalty), mock.patch.object(
+                boozersurface_module, 'minimize',
+                side_effect=failed_minimize):
+            res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(
+                tol=1e-12, maxiter=1, constraint_weight=1.0,
+                iota=trusted_iota, G=trusted_G)
+
+        assert not bool(res['success'])
+        np.testing.assert_allclose(
+            np.array(boozer_surface.surface.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(res['iota'], trusted_iota)
+        self.assertAlmostEqual(res['G'], trusted_G)
+
+    def test_penalty_newton_diverging_solve_does_not_poison_warm_start(self):
+        """Penalty Newton rolls back the surface and iota/G after divergence."""
+        from unittest import mock
+        import simsopt.geo.boozersurface as boozersurface_module
+
+        _, boozer_surface = get_boozer_surface(
+            boozer_type='ls', converge=False)
+        trusted_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        trusted_iota = -0.406
+        trusted_G = -2.0
+        initial_x = np.concatenate((trusted_dofs, [trusted_iota, trusted_G]))
+        state_size = initial_x.size
+
+        def diverging_penalty(dofs, derivatives=2, constraint_weight=1.,
+                              optimize_G=False, weight_inv_modB=True):
+            assert derivatives == 2
+            assert optimize_G
+            boozer_surface.surface.set_dofs(dofs[:-2])
+            scale = 1.0 if np.allclose(dofs, initial_x) else 10.0
+            return (
+                scale,
+                scale * np.ones(state_size),
+                np.eye(state_size),
+            )
+
+        def solve_step(_matrix, rhs):
+            return np.ones_like(rhs)
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+                boozer_surface, 'boozer_penalty_constraints_vectorized',
+                side_effect=diverging_penalty), mock.patch.object(
+                boozersurface_module.np.linalg, 'solve',
+                side_effect=solve_step):
+            res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+                tol=1e-12, maxiter=1, constraint_weight=1.0,
+                iota=trusted_iota, G=trusted_G)
+
+        assert not bool(res['success'])
+        np.testing.assert_allclose(
+            np.array(boozer_surface.surface.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(res['iota'], trusted_iota)
+        self.assertAlmostEqual(res['G'], trusted_G)
+
+    def test_penalty_ls_manual_diverging_solve_does_not_poison_warm_start(self):
+        """Manual penalty LS rolls back after a diverging Gauss-Newton step."""
+        from unittest import mock
+        import simsopt.geo.boozersurface as boozersurface_module
+
+        _, boozer_surface = get_boozer_surface(
+            boozer_type='ls', converge=False)
+        trusted_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        trusted_iota = -0.406
+        trusted_G = -2.0
+        initial_x = np.concatenate((trusted_dofs, [trusted_iota, trusted_G]))
+        state_size = initial_x.size
+
+        def diverging_residual_jacobian(dofs, _constraint_weight,
+                                        optimize_G, _weight_inv_modB):
+            assert optimize_G
+            boozer_surface.surface.set_dofs(dofs[:-2])
+            scale = 1.0 if np.allclose(dofs, initial_x) else 10.0
+            return scale * np.ones(state_size), np.eye(state_size)
+
+        def solve_step(_matrix, rhs):
+            return np.ones_like(rhs)
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+                boozer_surface, '_get_residual_vector_and_jacobian',
+                side_effect=diverging_residual_jacobian), mock.patch.object(
+                boozersurface_module.np.linalg, 'solve',
+                side_effect=solve_step):
+            res = boozer_surface.minimize_boozer_penalty_constraints_ls(
+                tol=1e-12, maxiter=1, constraint_weight=1.0,
+                iota=trusted_iota, G=trusted_G, method='manual')
+
+        assert not bool(res['success'])
+        np.testing.assert_allclose(
+            np.array(boozer_surface.surface.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(res['iota'], trusted_iota)
+        self.assertAlmostEqual(res['G'], trusted_G)
+
+    def test_penalty_ls_scipy_diverging_solve_does_not_poison_warm_start(self):
+        """SciPy penalty LS rolls back a failed least_squares result."""
+        from types import SimpleNamespace
+        from unittest import mock
+        import simsopt.geo.boozersurface as boozersurface_module
+
+        _, boozer_surface = get_boozer_surface(
+            boozer_type='ls', converge=False)
+        trusted_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        trusted_iota = -0.406
+        trusted_G = -2.0
+        initial_x = np.concatenate((trusted_dofs, [trusted_iota, trusted_G]))
+        state_size = initial_x.size
+
+        def diverging_residual_jacobian(dofs, _constraint_weight,
+                                        optimize_G, _weight_inv_modB):
+            assert optimize_G
+            boozer_surface.surface.set_dofs(dofs[:-2])
+            scale = 1.0 if np.allclose(dofs, initial_x) else 10.0
+            return scale * np.ones(state_size), np.eye(state_size)
+
+        def failed_least_squares(fun, _x0, *args, jac=None, **kwargs):
+            diverged_x = np.array(initial_x, copy=True)
+            diverged_x[:-2] += 1.0
+            fun(diverged_x)
+            jac(diverged_x)
+            return SimpleNamespace(
+                x=diverged_x,
+                fun=10.0 * np.ones(state_size),
+                grad=10.0 * np.ones(state_size),
+                jac=np.eye(state_size),
+                status=0,
+            )
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+                boozer_surface, '_get_residual_vector_and_jacobian',
+                side_effect=diverging_residual_jacobian), mock.patch.object(
+                boozersurface_module, 'least_squares',
+                side_effect=failed_least_squares):
+            res = boozer_surface.minimize_boozer_penalty_constraints_ls(
+                tol=1e-12, maxiter=1, constraint_weight=1.0,
+                iota=trusted_iota, G=trusted_G, method='lm')
+
+        assert not bool(res['success'])
+        np.testing.assert_allclose(
+            np.array(boozer_surface.surface.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(res['iota'], trusted_iota)
+        self.assertAlmostEqual(res['G'], trusted_G)
+
+    def test_exact_constraints_newton_diverging_solve_does_not_poison_warm_start(self):
+        """Exact-constraint Newton rolls back the surface and iota/G."""
+        from unittest import mock
+        import simsopt.geo.boozersurface as boozersurface_module
+
+        _, boozer_surface = get_boozer_surface(
+            boozer_type='exact', converge=False)
+        trusted_dofs = np.array(boozer_surface.surface.get_dofs(), copy=True)
+        trusted_iota = -0.406
+        trusted_G = -2.0
+        initial_xl = np.concatenate(
+            (trusted_dofs, [trusted_iota, trusted_G], [0.0, 0.0]))
+        state_size = initial_xl.size
+
+        def diverging_exact_constraints(xl, derivatives=1, optimize_G=True):
+            assert derivatives == 1
+            assert optimize_G
+            boozer_surface.surface.set_dofs(xl[:-4])
+            scale = 1.0 if np.allclose(xl, initial_xl) else 10.0
+            return scale * np.ones(state_size), np.eye(state_size)
+
+        def solve_step(_matrix, rhs):
+            return np.ones_like(rhs)
+
+        boozer_surface.need_to_run_code = True
+        with mock.patch.object(
+                boozer_surface, 'boozer_exact_constraints',
+                side_effect=diverging_exact_constraints), mock.patch.object(
+                boozersurface_module.np.linalg, 'solve',
+                side_effect=solve_step):
+            res = boozer_surface.minimize_boozer_exact_constraints_newton(
+                tol=1e-12, maxiter=1, iota=trusted_iota, G=trusted_G)
+
+        assert not bool(res['success'])
+        np.testing.assert_allclose(
+            np.array(boozer_surface.surface.get_dofs()), trusted_dofs)
+        self.assertAlmostEqual(res['iota'], trusted_iota)
+        self.assertAlmostEqual(res['G'], trusted_G)
+
     def test_need_to_run_code_false(self):
         """
         Test that methods return cached results when need_to_run_code=False.
