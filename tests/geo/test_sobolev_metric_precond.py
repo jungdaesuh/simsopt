@@ -383,6 +383,16 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
         validate_stage2_preconditioner_cli_scope(
             SimpleNamespace(
                 stage2_sobolev_metric="off",
+                stage2_sobolev_alpha=2.0,
+                stage2_objective_normalize=False,
+                basin_hops=0,
+            ),
+            constraint_method="alm",
+        )
+    with pytest.raises(ValueError, match="penalty L-BFGS-B"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="off",
                 stage2_sobolev_alpha=0.0,
                 stage2_objective_normalize=True,
                 basin_hops=0,

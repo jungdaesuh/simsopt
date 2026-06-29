@@ -1117,11 +1117,13 @@ def validate_stage2_preconditioner_cli_scope(args, *, constraint_method="penalty
     metric_kind = str(getattr(args, "stage2_sobolev_metric", "off")).lower()
     alpha = float(getattr(args, "stage2_sobolev_alpha", 0.0))
     objective_normalize = bool(getattr(args, "stage2_objective_normalize", False))
-    if str(constraint_method).lower() == "alm" and metric_kind != "off":
+    constraint_method_kind = str(constraint_method).lower()
+    if constraint_method_kind == "alm" and (metric_kind != "off" or alpha > 0.0):
         raise ValueError(
-            "--stage2-sobolev-metric is only wired for the penalty L-BFGS-B path"
+            "--stage2-sobolev-metric/alpha is only wired for the penalty "
+            "L-BFGS-B path"
         )
-    if str(constraint_method).lower() == "alm" and objective_normalize:
+    if constraint_method_kind == "alm" and objective_normalize:
         raise ValueError(
             "--stage2-objective-normalize is only wired for the penalty L-BFGS-B path"
         )
