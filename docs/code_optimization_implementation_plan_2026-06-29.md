@@ -9,6 +9,9 @@ execution-ready plan. It supports fixing the production single-stage stall and
 the structural costs behind it, while explicitly fencing off the audit findings
 that are phantom, latent, or unsafe in **this** repo
 (`simopt-jax-clean-local`, the canonical single-stage prod checkout).
+It also records the verified "inherited CPU/reference code" boundary: those
+paths are acceptable as setup/oracle/final-artifact code, but production GPU
+target startup/value/grad/callback timing must not silently include them.
 
 ## Goals
 
@@ -42,23 +45,56 @@ that are phantom, latent, or unsafe in **this** repo
 ## Current Context
 
 - Default single-stage lane: `bs = SingleStageRuntimeSpecBiotSavartJAX`
-  (`examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:14658`;
+  (`examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:14682`;
   the "example/driver" below) ⇒ coils are
   `SpecBackedCoil` with `SpecBackedCurve`/`SpecBackedCurrent` views.
 - Hardware audit SSOT: `_evaluate_single_stage_hardware_status`
-  (`single_stage_banana_example.py:1686-1700`) calls `cc/cs/surf.shortest_distance()`
-  + `banana_curve.kappa()`. Invoked at startup (`:15538`), per **successful**
-  step (`:13439`, gated by Boozer-success + non-self-intersecting), and at
-  finalization (`:12883`). Reporting-only: feeds `run_dict["hardware_constraint_status"]`;
+  (`single_stage_banana_example.py:1691-1705`) calls `cc/cs/surf.shortest_distance()`
+  + `banana_curve.kappa()`. Invoked at startup (`:15561-15577`), per
+  **successful** step (`:11619-11625` and `:13459-13468`, gated by Boozer-success
+  + non-self-intersecting), and at final artifact/hardware verdict time
+  (`:17855-17910`). Reporting-only: feeds `run_dict["hardware_constraint_status"]`;
   the optimizer's `J()/dJ()` never depend on it.
 - `objectives["cc"]` / `["cs"]` are the **upstream CPU** classes imported at
-  `single_stage_banana_example.py:128-131` and built at `:9068-9069` with
+  `single_stage_banana_example.py:133-135` and built at `:9092-9093` with
   `downsample=1`, `num_basecurves=len(curves)` (~21–30 curves: 20 TF + banana).
 - `objectives["surf"]` is the JAX adapter `SurfaceSurfaceDistance`
   (`src/simsopt_jax_adapters/geo/surface_objectives.py`).
 - ALM lane is **non-default** (`CONSTRAINT_METHOD` default `penalty`,
-  example `:4617`; ALM gated `:16001`); its constraint helpers live in
+  example `:4640`; ALM gated `:16025`); its constraint helpers live in
   `examples/single_stage_optimization/banana_opt/single_stage_constraints.py`.
+
+## Validated Inherited CPU/Reference Route-Fence Inventory
+
+The slow-code sweep is real, but most entries are **route-fence findings**, not
+"rewrite this inherited code" findings. The source-of-truth distinction:
+
+- **Current blocker / hot path:** `_evaluate_single_stage_hardware_status`
+  (`single_stage_banana_example.py`) calls `objectives["cc"].shortest_distance()`,
+  `objectives["cs"].shortest_distance()`, `objectives["surf"].shortest_distance()`,
+  and `banana_curve.kappa()`. It is reached at startup, accepted-step callback,
+  and finalization boundaries. The cc/cs implementations are inherited CPU
+  `CurveCurveDistance` / `CurveSurfaceDistance` fallback loops in
+  `src/simsopt/geo/curveobjectives.py`, and the surf adapter currently performs
+  host blocked `cdist` in `src/simsopt_jax_adapters/geo/surface_objectives.py`.
+  This is the only route-fence item proven to explain the live pre-optimizer stall.
+- **Reference/setup/final-artifact paths:** native Boozer `run_code`, native
+  `surfaceobjectives.py`, Stage 2 CPU evaluators/ALM diagnostics, VMEC/SPEC/
+  BoozerXform wrappers, CPU BiotSavart/reference solve wrappers, finite
+  difference helpers, MPI reference wrappers, and field-tracing host
+  materialization all exist in this checkout and are legitimate reference or
+  artifact-generation code. They must be explicit in launchers and tests; they
+  should not be counted inside "clean GPU target" timing.
+- **Target-lane-adjacent diagnostics:** single-stage candidate/accepted-step
+  diagnostics still have native `Optimizable.J()` / `dJ()` plumbing for legacy
+  host paths and reporting. They are acceptable only when they are outside the
+  production GPU target value/grad timing window, or when a benchmark is clearly
+  labelled as mixed parity/reference work.
+- **Launcher contamination risk:** several benchmark launchers intentionally
+  run parity/reference/artifact work next to a GPU target lane. Those jobs are
+  useful, but their output must be labelled `mixed` or `parity`; only jobs that
+  fence inherited CPU/reference calls out of startup/value/grad/callback may be
+  used for clean GPU performance claims.
 
 ## Rationale
 
@@ -86,6 +122,27 @@ ALM memory restructure second (only if ALM is used), and the AD sweep last.
   `SurfaceRZFourier` default `61*62 = 3782`.
 
 ## Implementation Plan
+
+### Phase 0 — Production GPU route fences and benchmark labelling [PRIORITY]
+
+0. **Fence inherited CPU/reference code out of clean GPU timing**
+   - [ ] Add a production-route contract test that monkeypatches the inherited
+     CPU/reference entry points to raise during target startup/value/grad/callback
+     timing. At minimum cover `CurveCurveDistance.shortest_distance`,
+     `CurveSurfaceDistance.shortest_distance`, native Boozer `run_code`, native
+     `surfaceobjectives.py` value paths, CPU `BiotSavart`, VMEC/SPEC/BoozerXform
+     wrappers, SciPy reference dispatch, finite-difference helpers, and tracing
+     host materialization. Allow those calls only in explicit setup, reference,
+     parity, or final-artifact phases.
+   - [ ] Split benchmark/launcher labels into `gpu-target-only` vs
+     `mixed-parity-reference`. Jobs that call `benchmarks/single_stage_init_parity.py`,
+     Stage 2 CPU/GPU comparisons, or final artifact exports must not be reported
+     as clean GPU throughput without subtracting or separately timing the CPU
+     reference/artifact portions.
+   - [ ] For the live blocker, gate exact hardware-status shortest-distance
+     checks out of the production startup/per-eval/callback window unless the
+     benchmark is explicitly measuring reporting overhead. Keep exact hardware
+     checks at final artifact/reference boundaries until P1.1/P1.3 make them cheap.
 
 ### Phase 1 — Single-stage default hot path (production stall) [PRIORITY]
 
@@ -129,11 +186,11 @@ ALM memory restructure second (only if ALM is used), and the AD sweep last.
      (e.g. in `snapshot_static_tf_geometry`).
    - [ ] Keep the traceable JAX value/grad path untouched (this is host-view only).
 
-4. **Audit caller trim** (reporting-only; `single_stage_banana_example.py:1686-1700`)
+4. **Audit caller trim** (reporting-only; `single_stage_banana_example.py:1691-1705`)
    - [ ] Subsumed by P1.1+P1.3 for cost; additionally, evaluate computing the three
      minima from the JAX gammas already resident from the solve (device
      min-distance) instead of host `cdist`, OR run the full audit **once at
-     finalization** rather than every successful step (`:13439`). Pick the smaller
+     finalization** rather than every successful step (`:13459-13468`). Pick the smaller
      diff that preserves the per-step `hardware_constraint_status` semantics the
      promotion gate relies on.
 
@@ -179,6 +236,16 @@ ALM memory restructure second (only if ALM is used), and the AD sweep last.
 ## Validation Plan
 
 - [ ] Ruff clean on every edited file: `ruff check <files>`.
+- [ ] Phase 0 route-fence test: run one clean GPU-target startup/value/grad/callback
+  path with inherited CPU/reference APIs monkeypatched to raise. The test must
+  fail if exact hardware-status `shortest_distance`, native Boozer `run_code`,
+  native surface-objective value plumbing, CPU BiotSavart, VMEC/SPEC/BoozerXform,
+  SciPy reference dispatch, finite-difference helpers, MPI reference wrappers,
+  or field-tracing host materialization leak into the target timing window.
+- [ ] Launcher labelling check: every benchmark/SLURM entry that mixes target GPU
+  work with CPU reference/parity/final-artifact work writes a `mixed`/`parity`
+  label in its artifact metadata; only route-fenced jobs may publish clean GPU
+  performance numbers.
 - [ ] P1.1 correctness: extend `tests/geo/test_curve_objectives.py` to assert
   `CurveCurveDistance.shortest_distance()` and `CurveSurfaceDistance.shortest_distance()`
   equal an independent brute-force min (both empty- and non-empty-candidate cases),
@@ -222,6 +289,9 @@ ALM memory restructure second (only if ALM is used), and the AD sweep last.
 
 - [ ] Default single-stage lane reaches the first optimizer value/grad without a
   multi-minute pre-optimization audit; per-successful-step audit is <1s.
+- [ ] Clean GPU benchmark artifacts are route-fenced: inherited CPU/reference
+  APIs are absent from target startup/value/grad/callback timing, or the run is
+  explicitly labelled mixed/parity/reference.
 - [ ] Startup `snapshot_static_tf_*` no longer dominated by repeated full coil-spec rebuilds.
 - [ ] `J()`/`dJ()` and (if touched) ALM value+grad proven bit-identical to pre-change.
 - [ ] New correctness + staleness tests green; ruff clean; touched-module pytest green.
