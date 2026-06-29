@@ -6,11 +6,14 @@
 
 ## Status / Precedence
 
-This plan is now the active metric lane for the order-64 slid-clean Stage-2
-conditioning fix. Local source is implemented in `5dff32284` with the follow-up
-diagnostic/test hardening in `45d2b3ae1`; the Perlmutter launch package and
-handoff are active in `autoresearch` commit `39758405`. The required remote
-gate is still decisive: the H1 and H2 beta=1 Perlmutter sweeps on `shared`
+This plan records the metric lane for the order-64 slid-clean Stage-2
+conditioning fix and its current fallback state. Local source is implemented in
+`5dff32284` with follow-up diagnostic/test hardening in `45d2b3ae1`, review
+hardening in `735400361`, and ALM Sobolev-alpha fail-closed hardening in
+`cc91579dd`; the Perlmutter launch package and handoff are active in
+`autoresearch` commits `39758405`, `5cbd31cd`, `d499d62f`, and wrapper
+soft-control forwarding commit `df39e677`. The required remote gate is still
+decisive: the H1 and H2 beta=1 Perlmutter sweeps on `shared`
 assembled the metric but failed the descent gate for alpha 1, 4, 16, and 64.
 Every `first_step_dJ` stayed positive (H1: `+1.933950e10`, `+1.941215e10`,
 `+2.122981e10`, `+1.812255e10`; H2 beta=1: `+1.983622e10`,
@@ -19,7 +22,9 @@ did not produce a passing real-seed diagnostic. The documented trust-region
 fallback smoke completed as Perlmutter job `55271978` (`COMPLETED|0:0`) and
 proved route engagement (`CONSTRAINT_METHOD='alm'`, `EDGE_IOTA_MODE='soft'`,
 `HARDWARE_CONSTRAINTS_OK=True`), but it is not physics closure: the smoke
-reported `EDGE_IOTA_STATUS='insufficient_samples'`.
+reported `EDGE_IOTA_STATUS='insufficient_samples'`. The full ALM fallback job
+`55273370` is running on `regular_1` (started `2026-06-29T16:10:10`, 6h
+limit) and has not yet produced a physics result.
 
 ## Purpose
 
@@ -74,8 +79,8 @@ composition tests for their bound/trust-region mappings.
   `examples/single_stage_optimization/`):
   - `banana_opt/single_stage_geometry.py`:
     - `build_sobolev_curve_mode_scale_vector(dof_names, alpha, power=2)` →
-      `1/(1+alpha*k**power)` on curve Fourier DOFs, 1.0 else (line 1444).
-    - `build_winding_dof_scale_vector(dof_names, scale_map)` (line 1414).
+      `1/(1+alpha*k**power)` on curve Fourier DOFs, 1.0 else.
+    - `build_winding_dof_scale_vector(dof_names, scale_map)`.
     - `Stage2PenaltyPreconditioner` and `run_scaled_winding_minimize(...)`
       now support either the legacy diagonal `scale` vector or the non-diagonal
       curve-block operator. The optimizer sees `u`; physical DOFs are mapped
@@ -134,8 +139,8 @@ composition tests for their bound/trust-region mappings.
   /Users/suhjungdae/code/columbia/simsopt-surrogate/.conda-env/bin/python`;
   pytest is run from `examples/single_stage_optimization` with absolute paths.
 - Local box cannot run order-64 solves (OOM policy); correctness is validated by
-  unit tests on small synthetic CurveCWSFourierCPP objects; the full seed run is on
-  Perlmutter `shared` QOS.
+  unit tests on small synthetic CurveCWSFourierCPP objects. Seed diagnostics and
+  smokes run on Perlmutter `shared` QOS; the full ALM fallback is on `regular`.
 
 ## Rationale
 
@@ -291,7 +296,7 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       (default 0), `--stage2-objective-normalize` (default off). Env-mirrored
       like the existing `STAGE2_*` flags for the slurm.
 - [x] Pass the operator to `run_scaled_winding_minimize` at the penalty call
-      site (~line 5792) and to the seed-gradient diagnostic (~line 5649) so the
+      site and to the seed-gradient diagnostic so the
       diagnostic reports `first_step_dJ` **under the metric** (this is the
       cheap, read-only acceptance probe).
 - [x] Generalize `banana_opt/stage2_objectives.py::diagnose_seed_gradient` to
@@ -354,7 +359,8 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       `PYTHONNOUSERSITE=1 .../.conda-env/bin/python -m pytest
       <abs>/tests/geo/test_sobolev_metric_precond.py
       <abs>/tests/geo/test_seed_gradient_diagnostic.py
-      <abs>/tests/geo/test_winding_dof_scale.py -q`. Evidence: 23 passed.
+      <abs>/tests/geo/test_winding_dof_scale.py -q`. Evidence: 25 passed after
+      `cc91579dd`.
 - [ ] **Perlmutter seed probe**: `SMOKE=1` run on the slid_clean chomp seed
       with `STAGE2_DIAGNOSE_SEED_GRADIENT=1` asserts metric assembles and the
       seed diagnostic prints `first_step_dJ < 0` (the go/no-go for a full run).
@@ -370,6 +376,14 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       `EDGE_IOTA_MODE='soft'`, and `HARDWARE_CONSTRAINTS_OK=True`. The edge
       report was still `EDGE_IOTA_STATUS='insufficient_samples'`, so this is
       route-engagement proof only, not a full edge-iota success.
+- [x] **Wrapper soft-control forwarding**: `autoresearch df39e677` forwards and
+      records `--stage2-edge-iota-weight` and `--stage2-edge-iota-hinge` through
+      `scripts/run_one.py`, with regression coverage on the `soft` wrapper path.
+      The direct Perlmutter launcher already carried these flags; this closes
+      the managed wrapper route.
+- [ ] **Full ALM fallback result**: Perlmutter job `55273370` is running on
+      `regular_1` with 6h limit. It is the next operational fallback evidence,
+      but it is not complete and must not be reported as physics closure.
 - [ ] **Crucible**: route the diff to strict PASS (no defensive fallbacks, SSOT
       composer, no fake/jittered metric, regression tests non-tautological).
 
@@ -411,26 +425,32 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 - [x] `build_curve_sobolev_metric` + Cholesky + block operator implemented,
       SPD/round-trip/FD/cond-improvement/byte-identical-off/bound-preservation
       tests pass locally on the conda interpreter. Evidence: `45d2b3ae1` plus
-      focused local pytest `23 passed` for `test_sobolev_metric_precond.py`,
-      `test_seed_gradient_diagnostic.py`, and `test_winding_dof_scale.py`.
+      `735400361` and `cc91579dd`; focused local pytest reports `25 passed` for
+      `test_sobolev_metric_precond.py`, `test_seed_gradient_diagnostic.py`, and
+      `test_winding_dof_scale.py`.
 - [x] Penalty path + seed diagnostic consume the operator; `--stage2-sobolev-
       metric off` is byte-identical to current behavior, and
       `banana_opt/stage2_objectives.py::diagnose_seed_gradient` covers the same
       operator step as the optimizer. Evidence: `5dff32284` source wiring and
-      `45d2b3ae1` operator-aware diagnostic formatter/test coverage.
+      `45d2b3ae1` operator-aware diagnostic formatter/test coverage,
+      `735400361` for diagonal-metadata and unwired-route hardening, and
+      `cc91579dd` for rejecting ALM runs with unused Sobolev alpha telemetry.
 - [ ] On the slid_clean chomp seed (Perlmutter `SMOKE=1` with
       `STAGE2_DIAGNOSE_SEED_GRADIENT=1`), the seed-gradient diagnostic reports
       `first_step_dJ < 0` under the metric (the diagonal scale could not
       achieve this). Evidence so far: H1 and H2 beta=1 alpha values 1, 4,
       16, and 64 all assembled the metric but failed the gate. The metric
       completion criterion is not met; fallback smoke `55271978` completed and
-      proved ALM/edge-soft route engagement only.
+      proved ALM/edge-soft route engagement only. Full ALM fallback job
+      `55273370` is running, but no result is available yet.
 - [ ] Crucible strict PASS; plan cross-referenced from
       `docs/stage2_order64_sobolev_conditioning_plan_2026-06-28.md` and the
-      `autoresearch:.handoffs/order64-conditioning.md` handoff updated to make
-      the metric lane active, or explicitly left unchanged with this plan marked
-      as a non-active experiment. Cross-reference/handoff evidence is in
-      `45d2b3ae1` and `39758405`; strict PASS evidence is still pending.
+      `autoresearch:.handoffs/order64-conditioning.md` handoff updated to record
+      the failed metric gate and active ALM fallback, or explicitly left
+      unchanged with this plan marked as a non-active experiment.
+      Cross-reference/handoff evidence is in
+      `45d2b3ae1`, `39758405`, `5cbd31cd`, `d499d62f`, and the current handoff
+      update; strict PASS evidence is still pending.
 
 ## Open Questions
 
