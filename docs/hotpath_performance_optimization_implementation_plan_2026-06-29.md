@@ -99,8 +99,10 @@ gated behind explicit verification.
 
 ## Rationale
 
-The audit's wall-time numbers are reasoned (per-call cost × frequency) from code
-reading, not measured (no GPU on the dev laptop). Therefore the plan front-loads
+The audit's wall-time numbers were originally reasoned (per-call cost × frequency)
+from code reading; the safe phases are now **measured** on CPU (geo kernels are
+CPU-forced per `jit.py:2`, so CPU A/B is representative) — see *Measured results*
+below. The plan front-loads
 changes that are **numerically identical** (provable by a bit-for-bit `J`/`dJ`
 equivalence harness) so they can ship on static confidence alone, and isolates
 the two behavior-affecting changes (boozer diagnostic-residual removal, exact
@@ -108,6 +110,28 @@ Newton iterative-refinement gating) behind consumer audits + convergence checks.
 The systemic multi-primal-grad fix is grouped into one phase because every site
 uses the identical idiom and the fix template is the same — a single reviewed
 pattern applied N times.
+
+## Measured results (2026-06-29, CPU A/B)
+
+Faithful before/after on this checkout (`.conda-env` py3.11). Phase-1/2 use the
+committed methods vs reconstructed old paths (CCD brute force; 5-separate vs
+1-tuple grad on the same `J_jax`); Phase-3 framework items use a two-worktree A/B
+(`c15e39414` before vs HEAD).
+
+| Win | Setup | Result |
+|---|---|---|
+| **Phase 1** `CurveCurveDistance` empty-candidate (the stall) | 18 curves×100 pts / 12×400 pts, well-separated | **6,600× / 68,000×** per call (2.2 ms / 11.4 ms → ~0); O(n²·m²) growth; `≥ threshold` gate unchanged |
+| **Phase 2** force multi-primal grad | same `J_jax`, 80 quad pts | **3.68×** (1.28 → 0.35 ms); numerically equivalent (max\|Δ\| 6e-5, fp-reassoc) |
+| **Phase 3** `Optimizable.x` index cache | worktree A/B, 7 opts / 306 dofs | ~2% (23.2 → 22.7 µs) — setter dominated by recompute propagation (left untouched) |
+| **Phase 3** `FiniteDifference.jac` | worktree A/B, 1000 dofs, trivial fn | ~2.4% (3.98 → 3.89 ms); `np.copy` hoist alone saves 0.1–0.7 ms/jac (2–3×) but fn/setter dominate |
+| **Phase 3** serial `flush()` removal | inline per-eval log write | 1.8–22 µs/eval (scales with dof count) |
+
+Conclusion: the `impact × safety` ordering is validated end-to-end. Phase 1 is 4–5
+orders of magnitude per call (the documented 30-min stall); Phase 2 is a ~4×
+default-path win (coil-force is on by default); Phase 3 items are correctly "micro"
+(~2–3%). The dominant per-eval framework cost — Optimizable DAG recompute
+propagation — was deliberately left untouched (its memo regressed force/strain
+Taylor checks and was reverted).
 
 ## Assumptions
 
