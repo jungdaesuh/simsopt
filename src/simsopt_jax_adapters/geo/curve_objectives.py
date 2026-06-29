@@ -95,6 +95,15 @@ def _curve_surface_geometry_snapshot(curves, surface):
     return curve_positions, curve_tangents, surface_gamma, surface_normals
 
 
+def _surface_position_samples(surface, downsample=1):
+    gamma = surface.gamma()
+    return (
+        gamma.reshape((-1, 3))
+        if downsample == 1
+        else gamma[::downsample, ::downsample, :].reshape((-1, 3))
+    )
+
+
 def _add_curve_vjp(buffer, values, downsample):
     if downsample == 1:
         buffer += values
@@ -493,10 +502,11 @@ class CurveCurveDistanceBarrierJAX(_CurveCurveDistanceJAXBase):
 class CurveSurfaceDistanceJAX(Optimizable):
     """JAX-backed curve-surface distance penalty without C++ candidate culling."""
 
-    def __init__(self, curves, surface, minimum_distance):
+    def __init__(self, curves, surface, minimum_distance, downsample=1):
         self.curves = curves
         self.surface = surface
         self.minimum_distance = minimum_distance
+        self.downsample = downsample
         super().__init__(depends_on=curves)
 
     def _evaluation_geometry(self):
@@ -511,14 +521,18 @@ class CurveSurfaceDistanceJAX(Optimizable):
         )
 
     def shortest_distance(self):
-        surface_points = np.asarray(self.surface.gamma(), dtype=np.float64).reshape(
-            (-1, 3)
+        surface_points = np.asarray(
+            _surface_position_samples(self.surface, self.downsample),
+            dtype=np.float64,
         )
         return min(
             float(
                 np.min(
                     np.linalg.norm(
-                        np.asarray(curve.gamma(), dtype=np.float64)[:, None, :]
+                        np.asarray(
+                            _curve_position_samples(curve, self.downsample),
+                            dtype=np.float64,
+                        )[:, None, :]
                         - surface_points[None, :, :],
                         axis=-1,
                     )

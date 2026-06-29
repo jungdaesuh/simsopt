@@ -71,6 +71,22 @@ class Testing(unittest.TestCase):
             coil = RotatedCurve(coil, 0.5, flip=False)
         return coil
 
+    def brute_force_curve_curve_distance(self, curves, downsample=1):
+        gammas = [curve.gamma()[::downsample, :] for curve in curves]
+        return min(
+            np.min(np.linalg.norm(gammas[i][:, None, :] - gammas[j][None, :, :], axis=2))
+            for i in range(len(gammas))
+            for j in range(i)
+        )
+
+    def brute_force_curve_surface_distance(self, curves, surface, downsample=1):
+        curve_gammas = [curve.gamma()[::downsample, :] for curve in curves]
+        surface_gamma = surface.gamma()[::downsample, ::downsample, :].reshape((-1, 3))
+        return min(
+            np.min(np.linalg.norm(gamma[:, None, :] - surface_gamma[None, :, :], axis=2))
+            for gamma in curve_gammas
+        )
+
     def subtest_curve_length_taylor_test(self, curve):
         J = CurveLength(curve)
         J0 = J.J()
@@ -373,6 +389,85 @@ class Testing(unittest.TestCase):
             err_new = np.linalg.norm(deriv_est-deriv)
             self.assertLess(err_new, 0.3 * err, f"New error should be less than 0.3 * old error: {err_new} < {0.3 * err}")
             err = err_new
+
+    def test_curve_curve_shortest_distance_matches_brute_force_empty_and_candidate_paths(self):
+        curves = [
+            self.create_curve("CurveXYZFourier", rotated=False),
+            RotatedCurve(self.create_curve("CurveXYZFourier", rotated=False), 0.18, True),
+            RotatedCurve(self.create_curve("CurveXYZFourier", rotated=False), 0.37, True),
+        ]
+        downsample = 3
+        expected_distance = self.brute_force_curve_curve_distance(curves, downsample)
+
+        empty_objective = CurveCurveDistance(curves, expected_distance * 0.5, downsample=downsample)
+        empty_objective.compute_candidates()
+        self.assertEqual(empty_objective.candidates, [], "Expected empty candidate set for low threshold")
+        self.assertAlmostEqual(empty_objective.shortest_distance(), expected_distance, places=14)
+
+        candidate_objective = CurveCurveDistance(curves, expected_distance * 1.5, downsample=downsample)
+        candidate_objective.compute_candidates()
+        self.assertGreater(len(candidate_objective.candidates), 0, "Expected non-empty candidate set")
+        self.assertAlmostEqual(candidate_objective.shortest_distance(), expected_distance, places=14)
+
+    def test_curve_surface_shortest_distance_matches_brute_force_empty_and_candidate_paths(self):
+        curve = CurvePlanarFourier(48, 0)
+        curve_dofs = np.zeros(curve.dof_size)
+        curve_dofs[0] = 1.0
+        curve.x = curve_dofs
+        curves = [curve]
+
+        surface = SurfaceRZFourier.from_nphi_ntheta(nfp=1, nphi=12, ntheta=12, ntor=0)
+        surface.set("rc(0,0)", 3.0)
+        surface.set("rc(1,0)", 0.2)
+        surface.set("zs(1,0)", 0.2)
+
+        downsample = 2
+        expected_distance = self.brute_force_curve_surface_distance(curves, surface, downsample)
+
+        empty_objective = CurveSurfaceDistance(
+            curves, surface, expected_distance * 0.5, downsample=downsample
+        )
+        empty_objective.compute_candidates()
+        self.assertEqual(empty_objective.candidates, [], "Expected empty candidate set for low threshold")
+        self.assertAlmostEqual(empty_objective.shortest_distance(), expected_distance, places=14)
+
+        candidate_objective = CurveSurfaceDistance(
+            curves, surface, expected_distance * 1.5, downsample=downsample
+        )
+        candidate_objective.compute_candidates()
+        self.assertGreater(len(candidate_objective.candidates), 0, "Expected non-empty candidate set")
+        self.assertAlmostEqual(candidate_objective.shortest_distance(), expected_distance, places=14)
+
+    def test_curve_surface_downsample_keeps_full_resolution_objective_candidates(self):
+        class SurfacePointCloud:
+            def __init__(self, gamma):
+                self._gamma = gamma
+
+            def gamma(self):
+                return self._gamma
+
+            def normal(self):
+                return np.ones_like(self._gamma)
+
+        curve = CurvePlanarFourier(8, 0)
+        curve_dofs = np.zeros(curve.dof_size)
+        curve_dofs[0] = 1.0
+        curve.x = curve_dofs
+
+        surface_gamma = np.full((2, 2, 3), 100.0)
+        surface_gamma[1, 1, :] = curve.gamma()[1] + np.array([1e-3, 0.0, 0.0])
+        surface = SurfacePointCloud(surface_gamma)
+
+        objective = CurveSurfaceDistance([curve], surface, 0.01, downsample=2)
+        objective.compute_candidates()
+
+        self.assertEqual(objective.candidates, [(0, 0)])
+        self.assertGreater(objective.J(), 0.0)
+        self.assertAlmostEqual(
+            objective.shortest_distance(),
+            self.brute_force_curve_surface_distance([curve], surface, downsample=2),
+            places=14,
+        )
 
     def test_linking_number(self):
         for downsample in [1, 2, 5]:

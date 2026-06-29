@@ -660,3 +660,42 @@ def test_public_curve_surface_distance_jax_wrapper_matches_cpu_value_and_gradien
         CurveSurfaceDistance([curve], surface, minimum_distance=0.8),
         CurveSurfaceDistanceJAX([curve], surface, minimum_distance=0.8),
     )
+
+
+def test_curve_surface_distance_jax_shortest_distance_respects_downsample():
+    class SurfacePointCloud:
+        def __init__(self, gamma):
+            self._gamma = gamma
+
+        def gamma(self):
+            return self._gamma
+
+        def normal(self):
+            return np.ones_like(self._gamma)
+
+    curve = _build_nonplanar_curve(quadpoints=8)
+    surface_gamma = np.full((2, 2, 3), 100.0)
+    surface_gamma[1, 1, :] = curve.gamma()[1] + np.array([1e-3, 0.0, 0.0])
+    surface = SurfacePointCloud(surface_gamma)
+
+    full_resolution_distance = CurveSurfaceDistanceJAX(
+        [curve],
+        surface,
+        minimum_distance=0.01,
+    ).shortest_distance()
+    downsampled_cpu = CurveSurfaceDistance(
+        [curve],
+        surface,
+        minimum_distance=0.01,
+        downsample=2,
+    ).shortest_distance()
+    downsampled_jax = CurveSurfaceDistanceJAX(
+        [curve],
+        surface,
+        minimum_distance=0.01,
+        downsample=2,
+    ).shortest_distance()
+
+    assert full_resolution_distance < 0.01
+    assert downsampled_jax > 1.0
+    assert downsampled_jax == pytest.approx(downsampled_cpu)

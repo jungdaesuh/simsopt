@@ -497,21 +497,10 @@ class B2Energy(Optimizable):
             **args
         )
 
-        self.dJ_dgammas = jit(
+        self.dJ_dargs = jit(
             lambda gammas, gammadashs, currents, downsample:
-            grad(self.J_jax, argnums=0)(gammas, gammadashs, currents, downsample),
-            **args
-        )
-
-        self.dJ_dgammadashs = jit(
-            lambda gammas, gammadashs, currents, downsample:
-            grad(self.J_jax, argnums=1)(gammas, gammadashs, currents, downsample),
-            **args
-        )
-
-        self.dJ_dcurrents = jit(
-            lambda gammas, gammadashs, currents, downsample:
-            grad(self.J_jax, argnums=2)(gammas, gammadashs, currents, downsample),
+            grad(self.J_jax, argnums=(0, 1, 2))(
+                gammas, gammadashs, currents, downsample),
             **args
         )
 
@@ -547,9 +536,7 @@ class B2Energy(Optimizable):
             jnp.asarray([c.current.get_value() for c in self.target_coils]),
             self.downsample
         ]
-        dJ_dgammas = self.dJ_dgammas(*args)
-        dJ_dgammadashs = self.dJ_dgammadashs(*args)
-        dJ_dcurrents = self.dJ_dcurrents(*args)
+        dJ_dgammas, dJ_dgammadashs, dJ_dcurrents = self.dJ_dargs(*args)
         vjp = sum([c.current.vjp(jnp.asarray([dJ_dcurrents[i]])) for i, c in enumerate(self.target_coils)])
 
         dJ = (
@@ -715,15 +702,9 @@ class NetFluxes(Optimizable):
             **args
         )
 
-        self.dJ_dgammadash = jit(
+        self.dJ_dargs = jit(
             lambda gammadash, A_ext, downsample:
-            grad(self.J_jax, argnums=0)(gammadash, A_ext, downsample),
-            **args
-        )
-
-        self.dJ_dA = jit(
-            lambda gammadash, A_ext, downsample:
-            grad(self.J_jax, argnums=1)(gammadash, A_ext, downsample),
+            grad(self.J_jax, argnums=(0, 1))(gammadash, A_ext, downsample),
             **args
         )
 
@@ -765,14 +746,14 @@ class NetFluxes(Optimizable):
             1
         ]
 
-        dJ_dA = self.dJ_dA(*args)
+        dJ_dgammadash, dJ_dA = self.dJ_dargs(*args)
         dA_dX = self.biotsavart.dA_by_dX()
         dJ_dX = np.einsum('ij,ikj->ik', dJ_dA, dA_dX)
         A_vjp = self.biotsavart.A_vjp(dJ_dA)
 
         dJ = (
             self.target_coil.curve.dgamma_by_dcoeff_vjp(dJ_dX) +
-            self.target_coil.curve.dgammadash_by_dcoeff_vjp(self.dJ_dgammadash(*args))
+            self.target_coil.curve.dgammadash_by_dcoeff_vjp(dJ_dgammadash)
             + A_vjp
         )
         return dJ
@@ -981,15 +962,10 @@ class SquaredMeanForce(Optimizable):
                 downsample, gammas_sources_fine=gammas_fine, gammadashs_sources_fine=gammadashs_fine, currents_sources_fine=currents_fine
             )
         self.J_jax = jit(_J, **args)
-        self.dJ_dgamma_targets = jit(lambda *a: grad(self.J_jax, argnums=0)(*a), **args)
-        self.dJ_dgamma_sources = jit(lambda *a: grad(self.J_jax, argnums=1)(*a), **args)
-        self.dJ_dgammadash_targets = jit(lambda *a: grad(self.J_jax, argnums=2)(*a), **args)
-        self.dJ_dgammadash_sources = jit(lambda *a: grad(self.J_jax, argnums=3)(*a), **args)
-        self.dJ_dcurrent_targets = jit(lambda *a: grad(self.J_jax, argnums=4)(*a), **args)
-        self.dJ_dcurrent_sources = jit(lambda *a: grad(self.J_jax, argnums=5)(*a), **args)
-        self.dJ_dgamma_sources_fine = jit(lambda *a: grad(self.J_jax, argnums=6)(*a), **args)
-        self.dJ_dgammadash_sources_fine = jit(lambda *a: grad(self.J_jax, argnums=7)(*a), **args)
-        self.dJ_dcurrent_sources_fine = jit(lambda *a: grad(self.J_jax, argnums=8)(*a), **args)
+        self.dJ_dargs = jit(
+            lambda *a: grad(self.J_jax, argnums=(0, 1, 2, 3, 4, 5, 6, 7, 8))(*a),
+            **args,
+        )
 
         super().__init__(depends_on=(target_coils + self.source_coils))
 
@@ -1036,15 +1012,17 @@ class SquaredMeanForce(Optimizable):
             Derivative: The gradient of J with respect to all DOFs.
         """
         args = self._J_args()
-        dJ_dgamma_targets = self.dJ_dgamma_targets(*args)
-        dJ_dgammadash_targets = self.dJ_dgammadash_targets(*args)
-        dJ_dcurrent_targets = self.dJ_dcurrent_targets(*args)
-        dJ_dgamma_coarse = self.dJ_dgamma_sources(*args)
-        dJ_dgammadash_coarse = self.dJ_dgammadash_sources(*args)
-        dJ_dcurrent_coarse = self.dJ_dcurrent_sources(*args)
-        dJ_dgamma_fine = self.dJ_dgamma_sources_fine(*args)
-        dJ_dgammadash_fine = self.dJ_dgammadash_sources_fine(*args)
-        dJ_dcurrent_fine = self.dJ_dcurrent_sources_fine(*args)
+        (
+            dJ_dgamma_targets,
+            dJ_dgamma_coarse,
+            dJ_dgammadash_targets,
+            dJ_dgammadash_coarse,
+            dJ_dcurrent_targets,
+            dJ_dcurrent_coarse,
+            dJ_dgamma_fine,
+            dJ_dgammadash_fine,
+            dJ_dcurrent_fine,
+        ) = self.dJ_dargs(*args)
 
         vjp = sum([c.current.vjp(jnp.asarray([dJ_dcurrent_targets[i]])) for i, c in enumerate(self.target_coils)])
         dJ = (
@@ -1302,16 +1280,10 @@ class LpCurveForce(Optimizable):
             **args
         )
 
-        self.dJ_dgamma_targets = jit(lambda *a: grad(self.J_jax, argnums=0)(*a), **args)
-        self.dJ_dgamma_coarse = jit(lambda *a: grad(self.J_jax, argnums=1)(*a), **args)
-        self.dJ_dgammadash_targets = jit(lambda *a: grad(self.J_jax, argnums=2)(*a), **args)
-        self.dJ_dgammadash_coarse = jit(lambda *a: grad(self.J_jax, argnums=3)(*a), **args)
-        self.dJ_dgammadashdash_targets = jit(lambda *a: grad(self.J_jax, argnums=4)(*a), **args)
-        self.dJ_dcurrent_targets = jit(lambda *a: grad(self.J_jax, argnums=5)(*a), **args)
-        self.dJ_dcurrent_coarse = jit(lambda *a: grad(self.J_jax, argnums=6)(*a), **args)
-        self.dJ_dgamma_fine = jit(lambda *a: grad(self.J_jax, argnums=7)(*a), **args)
-        self.dJ_dgammadash_fine = jit(lambda *a: grad(self.J_jax, argnums=8)(*a), **args)
-        self.dJ_dcurrent_fine = jit(lambda *a: grad(self.J_jax, argnums=9)(*a), **args)
+        self.dJ_dargs = jit(
+            lambda *a: grad(self.J_jax, argnums=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9))(*a),
+            **args,
+        )
 
         super().__init__(depends_on=(target_coils + self.source_coils))
 
@@ -1355,16 +1327,18 @@ class LpCurveForce(Optimizable):
             Derivative: The gradient of J with respect to all DOFs.
         """
         args = self._J_args()
-        dJ_dgamma_targets = self.dJ_dgamma_targets(*args)
-        dJ_dgammadash_targets = self.dJ_dgammadash_targets(*args)
-        dJ_dgammadashdash_targets = self.dJ_dgammadashdash_targets(*args)
-        dJ_dcurrent_targets = self.dJ_dcurrent_targets(*args)
-        dJ_dgamma_coarse = self.dJ_dgamma_coarse(*args)
-        dJ_dgammadash_coarse = self.dJ_dgammadash_coarse(*args)
-        dJ_dcurrent_coarse = self.dJ_dcurrent_coarse(*args)
-        dJ_dgamma_fine = self.dJ_dgamma_fine(*args)
-        dJ_dgammadash_fine = self.dJ_dgammadash_fine(*args)
-        dJ_dcurrent_fine = self.dJ_dcurrent_fine(*args)
+        (
+            dJ_dgamma_targets,
+            dJ_dgamma_coarse,
+            dJ_dgammadash_targets,
+            dJ_dgammadash_coarse,
+            dJ_dgammadashdash_targets,
+            dJ_dcurrent_targets,
+            dJ_dcurrent_coarse,
+            dJ_dgamma_fine,
+            dJ_dgammadash_fine,
+            dJ_dcurrent_fine,
+        ) = self.dJ_dargs(*args)
 
         vjp = sum([c.current.vjp(jnp.asarray([dJ_dcurrent_targets[i]])) for i, c in enumerate(self.target_coils)])
         dJ = (
@@ -1618,16 +1592,10 @@ class LpCurveTorque(Optimizable):
             **args
         )
 
-        self.dJ_dgamma_targets = jit(lambda *a: grad(self.J_jax, argnums=0)(*a), **args)
-        self.dJ_dgamma_coarse = jit(lambda *a: grad(self.J_jax, argnums=1)(*a), **args)
-        self.dJ_dgammadash_targets = jit(lambda *a: grad(self.J_jax, argnums=2)(*a), **args)
-        self.dJ_dgammadash_coarse = jit(lambda *a: grad(self.J_jax, argnums=3)(*a), **args)
-        self.dJ_dgammadashdash_targets = jit(lambda *a: grad(self.J_jax, argnums=4)(*a), **args)
-        self.dJ_dcurrent_targets = jit(lambda *a: grad(self.J_jax, argnums=5)(*a), **args)
-        self.dJ_dcurrent_coarse = jit(lambda *a: grad(self.J_jax, argnums=6)(*a), **args)
-        self.dJ_dgamma_fine = jit(lambda *a: grad(self.J_jax, argnums=7)(*a), **args)
-        self.dJ_dgammadash_fine = jit(lambda *a: grad(self.J_jax, argnums=8)(*a), **args)
-        self.dJ_dcurrent_fine = jit(lambda *a: grad(self.J_jax, argnums=9)(*a), **args)
+        self.dJ_dargs = jit(
+            lambda *a: grad(self.J_jax, argnums=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9))(*a),
+            **args,
+        )
 
         super().__init__(depends_on=(target_coils + self.source_coils))
 
@@ -1671,16 +1639,18 @@ class LpCurveTorque(Optimizable):
             Derivative: The gradient of J with respect to all DOFs.
         """
         args = self._J_args()
-        dJ_dgamma_targets = self.dJ_dgamma_targets(*args)
-        dJ_dgammadash_targets = self.dJ_dgammadash_targets(*args)
-        dJ_dgammadashdash_targets = self.dJ_dgammadashdash_targets(*args)
-        dJ_dcurrent_targets = self.dJ_dcurrent_targets(*args)
-        dJ_dgamma_coarse = self.dJ_dgamma_coarse(*args)
-        dJ_dgammadash_coarse = self.dJ_dgammadash_coarse(*args)
-        dJ_dcurrent_coarse = self.dJ_dcurrent_coarse(*args)
-        dJ_dgamma_fine = self.dJ_dgamma_fine(*args)
-        dJ_dgammadash_fine = self.dJ_dgammadash_fine(*args)
-        dJ_dcurrent_fine = self.dJ_dcurrent_fine(*args)
+        (
+            dJ_dgamma_targets,
+            dJ_dgamma_coarse,
+            dJ_dgammadash_targets,
+            dJ_dgammadash_coarse,
+            dJ_dgammadashdash_targets,
+            dJ_dcurrent_targets,
+            dJ_dcurrent_coarse,
+            dJ_dgamma_fine,
+            dJ_dgammadash_fine,
+            dJ_dcurrent_fine,
+        ) = self.dJ_dargs(*args)
 
         vjp = sum([c.current.vjp(jnp.asarray([dJ_dcurrent_targets[i]])) for i, c in enumerate(self.target_coils)])
         dJ = (
@@ -1905,15 +1875,10 @@ class SquaredMeanTorque(Optimizable):
                 downsample, gammas_sources_fine=gammas_fine, gammadashs_sources_fine=gammadashs_fine, currents_sources_fine=currents_fine
             )
         self.J_jax = jit(_J, **args)
-        self.dJ_dgamma_targets = jit(lambda *a: grad(self.J_jax, argnums=0)(*a), **args)
-        self.dJ_dgamma_coarse = jit(lambda *a: grad(self.J_jax, argnums=1)(*a), **args)
-        self.dJ_dgammadash_targets = jit(lambda *a: grad(self.J_jax, argnums=2)(*a), **args)
-        self.dJ_dgammadash_coarse = jit(lambda *a: grad(self.J_jax, argnums=3)(*a), **args)
-        self.dJ_dcurrent_targets = jit(lambda *a: grad(self.J_jax, argnums=4)(*a), **args)
-        self.dJ_dcurrent_coarse = jit(lambda *a: grad(self.J_jax, argnums=5)(*a), **args)
-        self.dJ_dgamma_fine = jit(lambda *a: grad(self.J_jax, argnums=6)(*a), **args)
-        self.dJ_dgammadash_fine = jit(lambda *a: grad(self.J_jax, argnums=7)(*a), **args)
-        self.dJ_dcurrent_fine = jit(lambda *a: grad(self.J_jax, argnums=8)(*a), **args)
+        self.dJ_dargs = jit(
+            lambda *a: grad(self.J_jax, argnums=(0, 1, 2, 3, 4, 5, 6, 7, 8))(*a),
+            **args,
+        )
 
         super().__init__(depends_on=(target_coils + self.source_coils))
 
@@ -1960,15 +1925,17 @@ class SquaredMeanTorque(Optimizable):
             Derivative: The gradient of J with respect to all DOFs.
         """
         args = self._J_args()
-        dJ_dgamma_targets = self.dJ_dgamma_targets(*args)
-        dJ_dgammadash_targets = self.dJ_dgammadash_targets(*args)
-        dJ_dcurrent_targets = self.dJ_dcurrent_targets(*args)
-        dJ_dgamma_coarse = self.dJ_dgamma_coarse(*args)
-        dJ_dgammadash_coarse = self.dJ_dgammadash_coarse(*args)
-        dJ_dcurrent_coarse = self.dJ_dcurrent_coarse(*args)
-        dJ_dgamma_fine = self.dJ_dgamma_fine(*args)
-        dJ_dgammadash_fine = self.dJ_dgammadash_fine(*args)
-        dJ_dcurrent_fine = self.dJ_dcurrent_fine(*args)
+        (
+            dJ_dgamma_targets,
+            dJ_dgamma_coarse,
+            dJ_dgammadash_targets,
+            dJ_dgammadash_coarse,
+            dJ_dcurrent_targets,
+            dJ_dcurrent_coarse,
+            dJ_dgamma_fine,
+            dJ_dgammadash_fine,
+            dJ_dcurrent_fine,
+        ) = self.dJ_dargs(*args)
 
         vjp = sum([c.current.vjp(jnp.asarray([dJ_dcurrent_targets[i]])) for i, c in enumerate(self.target_coils)])
         dJ = (
