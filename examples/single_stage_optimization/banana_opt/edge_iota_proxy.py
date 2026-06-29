@@ -186,8 +186,12 @@ def _winding_forward(
     B_pol = np.hypot(B_R, B_Z)
     inv = 1.0 / (point_R * B_pol)
     integrand = B_phi * inv * dl_pol
-    plane_integral = np.zeros((n_labels, n_planes), dtype=float)
-    np.add.at(plane_integral, (segment_label, segment_plane), integrand)
+    segment_index = segment_label * int(n_planes) + segment_plane
+    plane_integral = np.bincount(
+        segment_index,
+        weights=integrand,
+        minlength=int(n_labels) * int(n_planes),
+    ).reshape((n_labels, n_planes))
     plane_iota = float(helicity_sign) * 2.0 * math.pi / plane_integral
     return _WindingForward(
         iota=np.mean(plane_iota, axis=1),

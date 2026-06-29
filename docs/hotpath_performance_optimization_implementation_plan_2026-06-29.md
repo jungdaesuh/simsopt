@@ -372,8 +372,10 @@ unpack the tuple in `dJ()`.
          `_banana_cyl_B_on_contours`). Regression covers that `B()` and `B_vjp()`
          still see the contour points while the value/gradient path calls
          `set_points` once.
-   - [ ] `edge_iota_proxy.py:186-200` — replace unbuffered `np.add.at` scatter
-         (`:190`) with a buffered accumulation.
+   - [x] `edge_iota_proxy.py:186-200` — replace unbuffered `np.add.at` scatter
+         (`:190`) with a buffered `np.bincount` accumulation over linear
+         `(label, plane)` bins. Regression covers repeated contributions to the
+         same bin.
    - [ ] `hardware_keepout.py:1034-1041` — `J()` does `res += float(self.J_jax(...))`
          inside the per-candidate loop, forcing one host sync PER candidate;
          accumulate in a JAX scalar and call `float()` ONCE after the loop (N → 1).
@@ -471,10 +473,11 @@ unpack the tuple in `dJ()`.
   `Jc.curve.kappa()` once when the default smooth-curvature helper is injected,
   while preserving the custom-helper four-argument contract. The edge-iota proxy
   gradient path now reuses the contour points already installed for `B()`, avoiding
-  the second identical `BiotSavart.set_points` before `B_vjp()`. The other items
-  are deferred. In particular, `boozer_finite_current.py` copies stay until a
-  no-alias proof and regression test exist, and DESC bridge/runtime items belong
-  to the dirty-tree DESC lane.
+  the second identical `BiotSavart.set_points` before `B_vjp()`, and its contour
+  winding forward pass now uses buffered `np.bincount` accumulation instead of
+  unbuffered `np.add.at`. The other items are deferred. In particular,
+  `boozer_finite_current.py` copies stay until a no-alias proof and regression
+  test exist, and DESC bridge/runtime items belong to the dirty-tree DESC lane.
 - Phase 4.4 (`boozersurface.py` exact-Newton iterative refinement): deferred;
   behavior-affecting convergence-path change requires an isolated Boozer parity
   plus single-stage smoke gate.
@@ -560,7 +563,7 @@ unpack the tuple in `dJ()`.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile examples/single_stage_optimization/banana_opt/stage2_objectives.py tests/geo/test_banana_objective_modules.py`
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_edge_iota_proxy.py -q`
-  — 9 passed.
+  — 10 passed.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check examples/single_stage_optimization/banana_opt/edge_iota_proxy.py tests/geo/test_edge_iota_proxy.py`
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile examples/single_stage_optimization/banana_opt/edge_iota_proxy.py tests/geo/test_edge_iota_proxy.py`

@@ -34,6 +34,7 @@ from simsopt.geo import create_equally_spaced_curves  # noqa: E402
 from banana_opt.edge_delivered_iota import read_eqdsk, trace_iota  # noqa: E402
 from banana_opt.edge_iota_proxy import (  # noqa: E402
     EdgeIotaProxyContours,
+    _winding_forward,
     build_edge_iota_proxy_contours,
     edge_iota_proxy_value_and_grad,
 )
@@ -142,6 +143,32 @@ def _minimal_proxy_contours():
 
 
 class EdgeIotaProxyTests(unittest.TestCase):
+    def test_winding_forward_accumulates_repeated_label_plane_bins(self):
+        cyl_B = np.array(
+            [
+                [0.0, 1.0, 1.0],
+                [0.0, 2.0, 1.0],
+                [0.0, 4.0, 1.0],
+                [0.0, 8.0, 1.0],
+                [0.0, 16.0, 1.0],
+                [0.0, 32.0, 1.0],
+            ],
+            dtype=float,
+        )
+
+        forward = _winding_forward(
+            cyl_B,
+            point_R=np.ones(6, dtype=float),
+            dl_pol=np.ones(6, dtype=float),
+            segment_label=np.array([0, 0, 0, 1, 1, 1], dtype=int),
+            segment_plane=np.array([0, 0, 1, 0, 0, 1], dtype=int),
+            n_labels=2,
+            n_planes=2,
+            helicity_sign=1,
+        )
+
+        np.testing.assert_allclose(forward.plane_integral, [[3.0, 4.0], [24.0, 32.0]])
+
     def test_value_and_grad_reuses_contour_points_for_b_vjp(self):
         banana_bs = _SetPointsCountingBiotSavart()
 
