@@ -269,10 +269,19 @@ def build_boozer_surface_family(
     # March inner shells from outermost (innerN-2) to innermost (inner0).
     for config in reversed(ordered_configs[:-1]):
         surface_name = config["name"]
-        continuation_surface = contract(
-            previous_boozer_surface.surface,
-            config["target_volume"],
-        )
+        if constraint_weight is None:
+            # Exact-Newton build (constraint_weight=None): seed each inner shell from
+            # the previous CONVERGED Boozer surface, UNcontracted. exact-Newton from a
+            # contracted naive-scaled guess diverges (the documented reason 'ls' is the
+            # default build); from the converged neighbor it root-finds the nearest
+            # smaller-volume Boozer surface -- matching the offline nesting probe that
+            # proved the stack nests at vol 0.045. The 'ls' build is unchanged below.
+            continuation_surface = previous_boozer_surface.surface
+        else:
+            continuation_surface = contract(
+                previous_boozer_surface.surface,
+                config["target_volume"],
+            )
         iota_guess = float(previous_boozer_surface.res["iota"])
         # Preserve the strict continuation's fail-fast on a non-finite warm-start G
         # (the driver wrapped this in ``_require_finite_explicit_G``). A solved

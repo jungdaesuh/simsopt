@@ -68,8 +68,15 @@ MU0_OVER_4PI = 1e-7
 DEFAULT_CPU_TMAX_REFERENCE = 7000.0
 DEFAULT_TOL_REFERENCE = 1e-7
 DEFAULT_NFIELDLINES = 50
-DEFAULT_JAX_FIELD_PERIODS = 64
-DEFAULT_JAX_STEPS_PER_FIELD_PERIOD = 64
+# Render-fidelity defaults (raised from 64/64): low-iota surfaces (iota~0.09)
+# need ~200 toroidal returns to fill each poloidal Poincare loop with punctures,
+# plus ~256 RK4 steps/period for trajectory convergence. At 64/64 clean-nested
+# surfaces render as sparse smears that read as "broken" though the field is
+# nested; 256/200 was validated to converge (s256==s512) and match the C++
+# compute_fieldlines reference. Pass smaller CLI/env values for fast GPU-
+# throughput benchmarking, where render fidelity is not the goal.
+DEFAULT_JAX_FIELD_PERIODS = 200
+DEFAULT_JAX_STEPS_PER_FIELD_PERIOD = 256
 DEFAULT_MIN_BPHI_OVER_B = 1e-10
 SEED_INSET_FRACTION = 0.05
 DEFAULT_EXTEND_DISTANCE = 0.05
@@ -505,6 +512,161 @@ def _trace_default_mode_jax_kernel(
     }
 
 
+def _rhs_arclength(states, gamma, gammadash, quadrature_mask, currents):
+    """Arc-length field-line ODE ``dx/ds = B/|B|`` in cylindrical ``(R, phi, Z)``.
+
+    Non-singular everywhere a field exists (``|B| > 0``, ``R > 0``) -- unlike the
+    toroidal-angle RHS, there is no division by ``B_phi``, so trajectories near
+    the low-``B_phi`` separatrix edge stay accurate.  ``states`` is ``(nlines, 3)``;
+    returns ``(deriv (nlines, 3), valid (nlines,))`` with ``deriv`` zeroed where
+    the field is invalid so a dead line freezes.
+    """
+    r = states[:, 0]
+    phi = states[:, 1]
+    z = states[:, 2]
+    cos_phi = jnp.cos(phi)
+    sin_phi = jnp.sin(phi)
+    points = jnp.stack((r * cos_phi, r * sin_phi, z), axis=1)
+    field = _biot_savart_points_jax(points, gamma, gammadash, quadrature_mask, currents)
+    b_r = field[:, 0] * cos_phi + field[:, 1] * sin_phi
+    b_phi = -field[:, 0] * sin_phi + field[:, 1] * cos_phi
+    b_z = field[:, 2]
+    b_norm = jnp.linalg.norm(field, axis=1)
+    valid = jnp.isfinite(b_norm) & (b_norm > 0.0) & (r > 0.0)
+    safe_norm = jnp.where(b_norm > 0.0, b_norm, 1.0)
+    safe_r = jnp.where(r > 0.0, r, 1.0)
+    deriv = jnp.stack(
+        (b_r / safe_norm, b_phi / (safe_r * safe_norm), b_z / safe_norm),
+        axis=1,
+    )
+    return jnp.where(valid[:, None], deriv, 0.0), valid
+
+
+def _rk4_step_arclength(states, ds, gamma, gammadash, quadrature_mask, currents):
+    """One fixed-step RK4 step of length ``ds`` (arc length) of ``_rhs_arclength``."""
+    k1, v1 = _rhs_arclength(states, gamma, gammadash, quadrature_mask, currents)
+    k2, v2 = _rhs_arclength(states + 0.5 * ds * k1, gamma, gammadash, quadrature_mask, currents)
+    k3, v3 = _rhs_arclength(states + 0.5 * ds * k2, gamma, gammadash, quadrature_mask, currents)
+    k4, v4 = _rhs_arclength(states + ds * k3, gamma, gammadash, quadrature_mask, currents)
+    next_states = states + (ds / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    valid = v1 & v2 & v3 & v4 & jnp.all(jnp.isfinite(next_states), axis=1)
+    return next_states, valid
+
+
+@partial(
+    jax.jit,
+    static_argnames=("n_field_periods", "max_inner_steps", "nfp"),
+)
+def _trace_arclength_mode_jax_kernel(
+    seed_radii,
+    z0,
+    gamma,
+    gammadash,
+    quadrature_mask,
+    currents,
+    *,
+    n_field_periods,
+    max_inner_steps,
+    nfp,
+    rmin,
+    rmax,
+    zmax,
+    ds,
+):
+    """Fixed-step arc-length tracer producing the SAME record contract as the
+    toroidal-angle kernel.  Each outer segment emits the puncture on its
+    Poincare plane (``phi == k*segment_dphi``), then integrates in arc length
+    until ``phi`` reaches the next plane, interpolating the crossing.  The
+    per-line ``phi`` is pinned to ``k*segment_dphi`` at every crossing, so the
+    emitted ``hit_time`` is the same scalar-per-segment the toroidal kernel
+    produced and ``jax_trace_records_to_simsopt_format`` is unchanged.
+    """
+    field_period = (2.0 * jnp.pi) / float(nfp)
+    segment_dphi = field_period / 4.0
+    nsegments = int(n_field_periods) * 4
+    nlines = seed_radii.shape[0]
+
+    phi_col = jnp.zeros((nlines,), dtype=seed_radii.dtype)
+    states0 = jnp.stack((seed_radii, phi_col, z0), axis=1)
+    alive0 = jnp.ones((nlines,), dtype=bool)
+    stop_time0 = jnp.full((nlines,), jnp.nan)
+    stop_xyz0 = jnp.zeros((nlines, 3), dtype=states0.dtype)
+    stop_reason0 = jnp.full((nlines,), -1, dtype=jnp.int32)
+
+    def integrate_segment(carry, segment_index):
+        states, alive, stop_time, stop_xyz, stop_reason = carry
+        rz = jnp.stack((states[:, 0], states[:, 2]), axis=1)
+        seg_phi = jnp.asarray(segment_index, dtype=states.dtype) * segment_dphi
+        hit_xyz = _cartesian_from_cylindrical(rz, seg_phi)
+        hit_alive = alive
+        hit_time = seg_phi
+        target = seg_phi + segment_dphi
+
+        def integrate_step(step_carry, _):
+            s_states, s_alive, s_stime, s_sxyz, s_sreason = step_carry
+            s_phi = s_states[:, 1]
+            active = s_alive & (s_phi < target)
+            next_states, valid_field = _rk4_step_arclength(
+                s_states, ds, gamma, gammadash, quadrature_mask, currents
+            )
+            rz_next = jnp.stack((next_states[:, 0], next_states[:, 2]), axis=1)
+            in_bounds, reason = _box_guard_status(rz_next, valid_field, rmin, rmax, zmax)
+            newly_stopped = active & (~in_bounds)
+            crossed = active & in_bounds & (next_states[:, 1] >= target)
+            denom = next_states[:, 1] - s_phi
+            frac = jnp.where(jnp.abs(denom) > 0.0, (target - s_phi) / denom, 0.0)
+            cross_states = jnp.stack(
+                (
+                    s_states[:, 0] + frac * (next_states[:, 0] - s_states[:, 0]),
+                    jnp.full_like(s_phi, target),
+                    s_states[:, 2] + frac * (next_states[:, 2] - s_states[:, 2]),
+                ),
+                axis=1,
+            )
+            advanced = jnp.where(crossed[:, None], cross_states, next_states)
+            out_states = jnp.where((active & in_bounds)[:, None], advanced, s_states)
+            out_alive = s_alive & (~newly_stopped)
+            stop_pt = _cartesian_from_cylindrical(rz_next, next_states[:, 1])
+            s_stime2 = jnp.where(newly_stopped, next_states[:, 1], s_stime)
+            s_sxyz2 = jnp.where(newly_stopped[:, None], stop_pt, s_sxyz)
+            s_sreason2 = jnp.where(newly_stopped, reason, s_sreason)
+            return (out_states, out_alive, s_stime2, s_sxyz2, s_sreason2), None
+
+        next_carry, _ = jax.lax.scan(
+            integrate_step,
+            (states, alive, stop_time, stop_xyz, stop_reason),
+            xs=jnp.arange(max_inner_steps),
+        )
+        return next_carry, (
+            hit_xyz,
+            hit_alive,
+            hit_time,
+            jnp.asarray(segment_index % 4, dtype=jnp.int32),
+        )
+
+    final_carry, hits = jax.lax.scan(
+        integrate_segment,
+        (states0, alive0, stop_time0, stop_xyz0, stop_reason0),
+        xs=jnp.arange(nsegments),
+    )
+    final_states, final_alive, stop_time, stop_xyz, stop_reason = final_carry
+    hit_xyz, hit_alive, hit_time, hit_phi_index = hits
+    final_rz = jnp.stack((final_states[:, 0], final_states[:, 2]), axis=1)
+    final_phi = jnp.asarray(nsegments, dtype=final_states.dtype) * segment_dphi
+    return {
+        "hit_xyz": hit_xyz,
+        "hit_alive": hit_alive,
+        "hit_time": hit_time,
+        "hit_phi_index": hit_phi_index,
+        "stop_time": stop_time,
+        "stop_xyz": stop_xyz,
+        "stop_reason": stop_reason,
+        "final_states": final_rz,
+        "final_alive": final_alive,
+        "final_phi": final_phi,
+    }
+
+
 def jax_trace_records_to_simsopt_format(
     trace_result,
     *,
@@ -583,6 +745,7 @@ def trace_default_mode_jax(
     steps_per_field_period,
     nfp,
     min_bphi_over_b,
+    integrator="phi",
 ):
     steps_per_quarter = validate_jax_trace_settings(
         n_field_periods,
@@ -597,21 +760,42 @@ def trace_default_mode_jax(
     currents = jnp.asarray(coil_data.currents, dtype=jnp.float64)
 
     start = time.perf_counter()
-    trace_result = _trace_default_mode_jax_kernel(
-        seed_radii,
-        z0,
-        gamma,
-        gammadash,
-        quadrature_mask,
-        currents,
-        n_field_periods=int(n_field_periods),
-        steps_per_quarter=int(steps_per_quarter),
-        nfp=int(nfp),
-        rmin=float(trace_domain.stopping_rmin),
-        rmax=float(trace_domain.stopping_rmax),
-        zmax=float(trace_domain.stopping_zmax),
-        min_bphi_over_b=float(min_bphi_over_b),
-    )
+    if integrator == "arclength":
+        segment_dphi = (2.0 * np.pi / float(nfp)) / 4.0
+        r0 = float(np.mean(np.asarray(render_mode["radii"])))
+        ds = float(segment_dphi * r0 / float(steps_per_quarter))
+        max_inner_steps = int(4 * steps_per_quarter)
+        trace_result = _trace_arclength_mode_jax_kernel(
+            seed_radii,
+            z0,
+            gamma,
+            gammadash,
+            quadrature_mask,
+            currents,
+            n_field_periods=int(n_field_periods),
+            max_inner_steps=max_inner_steps,
+            nfp=int(nfp),
+            rmin=float(trace_domain.stopping_rmin),
+            rmax=float(trace_domain.stopping_rmax),
+            zmax=float(trace_domain.stopping_zmax),
+            ds=ds,
+        )
+    else:
+        trace_result = _trace_default_mode_jax_kernel(
+            seed_radii,
+            z0,
+            gamma,
+            gammadash,
+            quadrature_mask,
+            currents,
+            n_field_periods=int(n_field_periods),
+            steps_per_quarter=int(steps_per_quarter),
+            nfp=int(nfp),
+            rmin=float(trace_domain.stopping_rmin),
+            rmax=float(trace_domain.stopping_rmax),
+            zmax=float(trace_domain.stopping_zmax),
+            min_bphi_over_b=float(min_bphi_over_b),
+        )
     trace_result = jax.tree.map(lambda value: np.asarray(value), trace_result)
     elapsed_s = time.perf_counter() - start
     fieldlines_tys, fieldlines_phi_hits, phis = jax_trace_records_to_simsopt_format(
@@ -746,6 +930,7 @@ def run_jax_default_poincare(args):
         steps_per_field_period=args.steps_per_field_period,
         nfp=surf.nfp,
         min_bphi_over_b=args.min_bphi_over_b,
+        integrator=args.integrator,
     )
     metrics = _trace_metrics(
         fieldlines_tys,
@@ -842,6 +1027,17 @@ def build_arg_parser():
             DEFAULT_JAX_STEPS_PER_FIELD_PERIOD,
         ),
         help="RK4 steps per field period; must be divisible by 4.",
+    )
+    parser.add_argument(
+        "--integrator",
+        choices=["phi", "arclength"],
+        default=os.environ.get("POINCARE_JAX_INTEGRATOR", "phi"),
+        help=(
+            "Field-line integrator: 'phi' (fast fixed-step toroidal-angle RK4, "
+            "the GPU-throughput default) or 'arclength' (non-singular fixed-step "
+            "arc-length RK4 matching the C++ compute_fieldlines trajectory near "
+            "the low-B_phi separatrix edge)."
+        ),
     )
     parser.add_argument(
         "--min-bphi-over-b",

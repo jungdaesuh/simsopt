@@ -2613,6 +2613,20 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--published-surface-relax-initial-nesting",
+        action="store_true",
+        default=os.environ.get(
+            "PUBLISHED_SURFACE_RELAX_INITIAL_NESTING", ""
+        ).strip().lower()
+        in ("1", "true", "yes", "on"),
+        help=(
+            "Diagnostic-only published_multisurface admission: allow the initial "
+            "setup stack to be volume/G-valid but geometrically non-nested, then "
+            "use the multisurface ramp gate during search. Finalization and full "
+            "surface-status validation remain strict."
+        ),
+    )
+    parser.add_argument(
         "--surface-gap-threshold",
         type=float,
         default=float(os.environ.get("SURFACE_GAP_THRESHOLD", "0.0")),
@@ -5271,7 +5285,7 @@ def _require_published_surface_nesting(surface_data):
             )
 
 
-def _require_published_surface_data_postconditions(surface_data):
+def _require_published_surface_data_postconditions(surface_data, *, require_nesting=True):
     actual_names = [entry["name"] for entry in surface_data]
     expected_names = list(_published_surface_names(len(surface_data)))
     if actual_names != expected_names:
@@ -5288,7 +5302,10 @@ def _require_published_surface_data_postconditions(surface_data):
     # family on nesting here would reject a valid exact_twin config before the handoff that fixes it.
     # Defer the nesting check to the twin stage in exact_twin mode; ls mode uses the LS family per-eval,
     # so it must nest here. (Names / volume-order / G validate the LS structure in both modes.)
-    if globals().get("MULTISURFACE_RESOLVE_MODE", "ls") != "exact_twin":
+    if (
+        bool(require_nesting)
+        and globals().get("MULTISURFACE_RESOLVE_MODE", "ls") != "exact_twin"
+    ):
         _require_published_surface_nesting(surface_data)
 
 
@@ -5491,6 +5508,7 @@ def initialize_published_surface_data_from_stage2_seed(
     stage2_seed_surface,
     allow_truncation=False,
     min_surfaces=3,
+    relax_initial_nesting=False,
 ):
     """Solve published stacks outer-to-inner, then return inner-to-outer data.
 
@@ -5560,7 +5578,10 @@ def initialize_published_surface_data_from_stage2_seed(
         # relaxed check omits it, so enforce it here.
         _require_published_G_consistency(ordered_surface_data)
     else:
-        _require_published_surface_data_postconditions(ordered_surface_data)
+        _require_published_surface_data_postconditions(
+            ordered_surface_data,
+            require_nesting=not bool(relax_initial_nesting),
+        )
     # Opt-in: hand the solved least-squares family off to exact-grid Newton twins so the per-eval
     # re-solve tracks the coils instead of collapsing iota->0 (see
     # _resolve_published_family_to_exact_twins). Default 'ls' keeps the legacy re-solve byte-for-byte
@@ -5583,7 +5604,8 @@ def initialize_published_surface_data_from_stage2_seed(
         # handoff, so the inner0-based name postcondition does not need re-running.)
         _require_published_volume_order(ordered_surface_data)
         _require_published_G_consistency(ordered_surface_data)
-        _require_published_surface_nesting(ordered_surface_data)
+        if not bool(relax_initial_nesting):
+            _require_published_surface_nesting(ordered_surface_data)
     return ordered_surface_data, []
 
 
@@ -5603,6 +5625,7 @@ def initialize_surface_data_for_contract(
     warm_start_surface_stem,
     allow_truncation=False,
     min_surfaces=3,
+    relax_initial_nesting=False,
 ):
     if (
         surface_mode_contract.mode == PUBLISHED_MULTISURFACE
@@ -5619,6 +5642,7 @@ def initialize_surface_data_for_contract(
             stage2_seed_surface=stage2_seed_surface,
             allow_truncation=allow_truncation,
             min_surfaces=min_surfaces,
+            relax_initial_nesting=relax_initial_nesting,
         )
 
     standard_stage2_seed_surface = (
@@ -7757,6 +7781,7 @@ class RunIdentityConfig:
     surface_label_fractions: tuple[float, ...]
     inner_surface_ratio: float
     surface_gap_threshold: float
+    published_surface_relax_initial_nesting: bool
     multisurface_ramp_iterations: int
     inner_surface_initial_weight: float
     multisurface_initial_step_scale: float
@@ -8615,6 +8640,9 @@ def make_run_identity_config(
         ),
         inner_surface_ratio=resolved_inner_surface_ratio,
         surface_gap_threshold=args.surface_gap_threshold,
+        published_surface_relax_initial_nesting=bool(
+            getattr(args, "published_surface_relax_initial_nesting", False)
+        ),
         multisurface_ramp_iterations=args.multisurface_ramp_iterations,
         inner_surface_initial_weight=args.inner_surface_initial_weight,
         multisurface_initial_step_scale=args.multisurface_initial_step_scale,
@@ -8913,6 +8941,11 @@ def build_run_identity_config(config):
             "surface_nesting_weight",
             "surface_nesting_clearance",
         } and (float(config.surface_nesting_weight) == 0.0):
+            continue
+        if (
+            field.name == "published_surface_relax_initial_nesting"
+            and not bool(value)
+        ):
             continue
         if field.name == "residue_objective_weight" and float(value) == 0.0:
             continue
@@ -12828,6 +12861,9 @@ def evaluate_banana_current_fd_probe(
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        relax_published_initial_nesting=globals().get(
+            "PUBLISHED_SURFACE_RELAX_INITIAL_NESTING", False
+        ),
     )
     search_surface_weights = build_surface_search_weights_for_contract(
         active_surface_mode_contract,
@@ -14819,6 +14855,10 @@ def build_single_stage_solver_checkpoint_state(
                 "invalid_state_rejects_total",
                 0,
             ),
+            "optimizer_invalid_accepts_total": run_dict.get(
+                "optimizer_invalid_accepts_total",
+                0,
+            ),
             "topology_gate_rejects": run_dict.get("topology_gate_rejects", 0),
             "hardware_rejects": run_dict.get("hardware_rejects", 0),
             "curvature_precheck_rejects": run_dict.get(
@@ -15354,6 +15394,27 @@ def hardware_status_with_curvature_traversal(hardware_status, precheck_status):
     return adjusted_status
 
 
+def record_search_step_outcome(run_state, x, *, success):
+    """Record whether the last objective evaluation may be committed by callback."""
+    run_state["last_search_step_x"] = np.asarray(x, dtype=float).copy()
+    run_state["last_search_step_success"] = bool(success)
+
+
+def callback_candidate_is_committable(run_state, x):
+    """Return true when callback sees the same successful candidate as fun()."""
+    last_x = run_state.get("last_search_step_x")
+    if last_x is None:
+        return True
+    return bool(run_state.get("last_search_step_success", False)) and np.array_equal(
+        np.asarray(x, dtype=float),
+        np.asarray(last_x, dtype=float),
+    )
+
+
+class RejectedCandidateAcceptError(RuntimeError):
+    """Abort basin-hopping when L-BFGS-B tries to commit a rejected candidate."""
+
+
 def reject_search_step_on_curvature_precheck(metrics, precheck_status, step_start):
     rejection_increment = hardware_rejection_increment(run_dict["J"])
     run_dict["curvature_precheck_rejects"] = (
@@ -15375,6 +15436,7 @@ def reject_search_step_on_curvature_precheck(metrics, precheck_status, step_star
         hardware_status=None,
         rejection_increment=rejection_increment,
     )
+    record_search_step_outcome(run_dict, JF.x, success=False)
     JF.x = run_dict["accepted_x"]
     restore_surface_states(surface_data, run_dict["surface_state"])
     metrics["total_seconds"] += time.perf_counter() - step_start
@@ -15403,6 +15465,7 @@ def reject_search_step_on_step_norm_limit(
         hardware_status=None,
         rejection_increment=rejection_increment,
     )
+    record_search_step_outcome(run_dict, x, success=False)
     JF.x = run_dict["accepted_x"]
     restore_surface_states(surface_data, run_dict["surface_state"])
     metrics["total_seconds"] += time.perf_counter() - step_start
@@ -15467,6 +15530,9 @@ def evaluate_search_step(x):
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        relax_published_initial_nesting=globals().get(
+            "PUBLISHED_SURFACE_RELAX_INITIAL_NESTING", False
+        ),
     )
     solver_search_gate = surface_stack_search_gate_for_solver(
         search_gate,
@@ -15848,6 +15914,7 @@ def evaluate_search_step(x):
         record_search_step_acceptance(metrics)
 
     evaluation = {"total": J, "grad": dJ}
+    record_search_step_outcome(run_dict, x, success=success)
     if CONSTRAINT_METHOD == "alm":
         metric_eval = objective_eval
         if metric_eval is None or "constraint_values" not in metric_eval:
@@ -15945,6 +16012,21 @@ def callback(x):
     # Update count for tracking
     run_dict["lscount"] = 0
     run_dict["curvature_overcap_boozer_evals_this_iteration"] = 0
+    if not callback_candidate_is_committable(run_dict, x):
+        run_dict["optimizer_invalid_accepts_total"] = (
+            int(run_dict.get("optimizer_invalid_accepts_total", 0)) + 1
+        )
+        run_dict["invalid_state_rejects_total"] = (
+            int(run_dict.get("invalid_state_rejects_total", 0)) + 1
+        )
+        print("/!\\ /!\\ Optimizer attempted to accept rejected candidate /!\\ /!\\")
+        JF.x = run_dict["accepted_x"].copy()
+        restore_surface_states(surface_data, run_dict["surface_state"])
+        run_dict["x_prev"] = run_dict["accepted_x"].copy()
+        message = "optimizer accepted a rejected single-stage candidate"
+        if bool(run_dict.get("active_basin_hopping", False)):
+            raise RejectedCandidateAcceptError(message)
+        raise StopIteration(message)
     outer_entry = surface_data[-1]
 
     # Store last accepted state
@@ -15963,6 +16045,9 @@ def callback(x):
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        relax_published_initial_nesting=globals().get(
+            "PUBLISHED_SURFACE_RELAX_INITIAL_NESTING", False
+        ),
     )
     if (
         "last_successful_eval" in run_dict
@@ -16929,6 +17014,21 @@ if __name__ == "__main__":
         args,
         surface_mode_contract=surface_mode_contract,
     )
+    if bool(args.published_surface_relax_initial_nesting):
+        if surface_mode_contract.mode != PUBLISHED_MULTISURFACE:
+            raise ValueError(
+                "--published-surface-relax-initial-nesting requires "
+                "--surface-mode=published_multisurface."
+            )
+        if (
+            float(args.surface_nesting_weight) <= 0.0
+            or float(args.surface_nesting_clearance) <= 0.0
+        ):
+            raise ValueError(
+                "--published-surface-relax-initial-nesting requires a positive "
+                "--single-stage-surface-nesting-weight and "
+                "--single-stage-surface-nesting-clearance."
+            )
     if args.curvature_threshold > MAX_CURVATURE_INV_M:
         raise ValueError(
             f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
@@ -16958,6 +17058,9 @@ if __name__ == "__main__":
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     MULTISURFACE_RESOLVE_MODE = args.multisurface_resolve_mode
     PUBLISHED_SURFACE_BUILD_MODE = args.published_surface_build_mode
+    PUBLISHED_SURFACE_RELAX_INITIAL_NESTING = (
+        args.published_surface_relax_initial_nesting
+    )
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
     TOPOLOGY_GATE_TMAX = args.topology_gate_tmax
@@ -17439,6 +17542,7 @@ if __name__ == "__main__":
         warm_start_surface_stem=warm_start_surface_stem,
         allow_truncation=bool(args.surface_allow_truncation),
         min_surfaces=int(args.surface_min_surfaces),
+        relax_initial_nesting=bool(args.published_surface_relax_initial_nesting),
     )
     outer_surface_data = surface_data[-1]
     boozer_surface_lineage_metadata = boozer_surface_lineage_metadata_from_surface_data(
@@ -18020,6 +18124,9 @@ if __name__ == "__main__":
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        relax_published_initial_nesting=bool(
+            args.published_surface_relax_initial_nesting
+        ),
     )
     initial_surface_status = evaluate_surface_stack(
         surface_data,
@@ -18093,6 +18200,7 @@ if __name__ == "__main__":
         "best_hardware_near_miss_metric": None,
         "best_hardware_near_miss_stage": None,
         "invalid_state_rejects_total": 0,
+        "optimizer_invalid_accepts_total": 0,
         "topology_gate_rejects": 0,
         "hardware_rejects": 0,
         "curvature_precheck_rejects": 0,
@@ -18144,6 +18252,9 @@ if __name__ == "__main__":
         run_dict["accepted_boozer_stage"] = restored_stage
         run_dict["invalid_state_rejects_total"] = int(
             run_counters.get("invalid_state_rejects_total", 0)
+        )
+        run_dict["optimizer_invalid_accepts_total"] = int(
+            run_counters.get("optimizer_invalid_accepts_total", 0)
         )
         run_dict["topology_gate_rejects"] = int(
             run_counters.get("topology_gate_rejects", 0)
@@ -18792,22 +18903,55 @@ if __name__ == "__main__":
             warm_continue_step_norm_cap_applied_to.append(
                 "basin_hopping_local_minimizer"
             )
-        with temporary_run_dict_value(
-            run_dict,
-            "active_step_norm_limit",
-            warm_continue_step_norm_limit,
-        ):
-            res, basin_telemetry = run_basin_hopping(
-                fun,
-                dofs,
-                basin_hops=args.basin_hops,
-                basin_stepsize=args.basin_stepsize,
-                basin_temperature=args.basin_temperature,
-                basin_niter_success=basin_niter_success,
-                rng_seed=rng_seed,
-                minimizer_kwargs=minimizer_kwargs,
-                disp=True,
+        try:
+            with temporary_run_dict_value(
+                run_dict,
+                "active_step_norm_limit",
+                warm_continue_step_norm_limit,
+            ):
+                with temporary_run_dict_value(run_dict, "active_basin_hopping", True):
+                    res, basin_telemetry = run_basin_hopping(
+                        fun,
+                        dofs,
+                        basin_hops=args.basin_hops,
+                        basin_stepsize=args.basin_stepsize,
+                        basin_temperature=args.basin_temperature,
+                        basin_niter_success=basin_niter_success,
+                        rng_seed=rng_seed,
+                        minimizer_kwargs=minimizer_kwargs,
+                        disp=True,
+                    )
+        except RejectedCandidateAcceptError as exc:
+            print(f"Basin-hopping aborted: {exc}")
+            res = SimpleNamespace(
+                x=run_dict["accepted_x"].copy(),
+                fun=float(run_dict["J"]),
+                nit=0,
+                minimization_failures=1,
+                lowest_optimization_result=SimpleNamespace(
+                    x=run_dict["accepted_x"].copy(),
+                    fun=float(run_dict["J"]),
+                    nit=int(run_dict.get("accepted_iterations", 0)),
+                    message=str(exc),
+                    success=False,
+                    status=2,
+                ),
             )
+            basin_telemetry = {
+                "basin_accepted_hops": 0,
+                "basin_rejected_hops": 0,
+                "basin_completed_hops": 0,
+                "basin_best_objective": float(run_dict["J"]),
+                "basin_initial_objective": float(run_dict["J"]),
+                "basin_best_hop_objective": None,
+                "basin_best_hop_index": None,
+                "basin_best_result_source": "invalid_accept_abort",
+                "basin_objective_improvement": 0.0,
+                "basin_accept_test_rejections": 0,
+                "basin_accept_test_triggered": False,
+                "basin_nonfinite_rejections": 0,
+                "basin_normalized_step_rejections": 0,
+            }
         (
             basin_accepted_hops,
             basin_rejected_hops,
@@ -19560,6 +19704,9 @@ if __name__ == "__main__":
             else [float(value) for value in IOTA_PROFILE_SURFACE_WEIGHTS]
         ),
         "SURFACE_GAP_THRESHOLD": SURFACE_GAP_THRESHOLD,
+        "PUBLISHED_SURFACE_RELAX_INITIAL_NESTING": bool(
+            args.published_surface_relax_initial_nesting
+        ),
         "MULTISURFACE_RAMP_ITERATIONS": MULTISURFACE_RAMP_ITERATIONS,
         "INNER_SURFACE_INITIAL_WEIGHT": INNER_SURFACE_INITIAL_WEIGHT,
         "MULTISURFACE_INITIAL_STEP_SCALE": args.multisurface_initial_step_scale,
@@ -20234,6 +20381,9 @@ if __name__ == "__main__":
         ),
         **build_hardware_constraint_artifact_payload_fields(final_hardware_snapshot),
         "INVALID_STATE_REJECTS_TOTAL": run_dict["invalid_state_rejects_total"],
+        "OPTIMIZER_INVALID_ACCEPTS_TOTAL": run_dict[
+            "optimizer_invalid_accepts_total"
+        ],
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],
         "HARDWARE_REJECTS": run_dict["hardware_rejects"],
         "CURVATURE_PRECHECK_REJECTS": run_dict["curvature_precheck_rejects"],

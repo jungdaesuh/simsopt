@@ -159,10 +159,12 @@ def _projected_reach_pure(gammadash, gammadashdash, frame_n, frame_b, half_n, ha
 
     Differentiable JAX twin of ``rotation_aware_projected_half_extent_m``: the bend
     direction is the curvature vector (``gammadashdash`` projected perpendicular to
-    the tangent), and the reach is the smooth axis interpolation between the
-    measured flatwise and edgewise Type-KK outer-channel half-extents. The numpy
-    SSOT supplies the J VALUE; this pure form supplies the gradient and is pinned
-    byte-for-byte to the numpy function by the gradient-check test.
+    the tangent), and the reach is the rectangle support function
+    ``half_n*|n| + half_b*|b|`` (worst inner-corner half-extent) in the bend
+    direction -- the exact non-fold quantity. The numpy SSOT supplies the J VALUE;
+    this pure form supplies the gradient and is pinned byte-for-byte to the numpy
+    function by the gradient-check test. (``jnp.abs`` has a benign subgradient kink
+    at projection 0, where the relu hinge is already non-smooth.)
     """
     tangent_norm = jnp.linalg.norm(gammadash, axis=1)
     tangent = gammadash / tangent_norm[:, None]
@@ -178,7 +180,7 @@ def _projected_reach_pure(gammadash, gammadashdash, frame_n, frame_b, half_n, ha
     )
     n_component = jnp.sum(bend_direction * frame_n, axis=1)
     b_component = jnp.sum(bend_direction * frame_b, axis=1)
-    return half_n * n_component**2 + half_b * b_component**2
+    return half_n * jnp.abs(n_component) + half_b * jnp.abs(b_component)
 
 
 @jit

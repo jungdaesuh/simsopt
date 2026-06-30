@@ -1383,8 +1383,18 @@ def build_surface_search_gate_for_contract(
     ramp_iterations,
     initial_inner_weight,
     surface_gap_threshold,
+    *,
+    relax_published_initial_nesting=False,
 ):
     if surface_mode_contract.stack_policy == SURFACE_STACK_POLICY_PUBLISHED_FIXED_STACK:
+        if bool(relax_published_initial_nesting):
+            return build_surface_search_gate(
+                surface_mode_contract.num_surfaces,
+                accepted_iterations,
+                ramp_iterations,
+                initial_inner_weight,
+                surface_gap_threshold,
+            )
         return {
             "surface_gap_threshold": float(surface_gap_threshold),
             "enforce_nesting": True,

@@ -816,6 +816,9 @@ def run_penalty_phase1(
         invalid_rejects_before_attempt = int(
             run_dict.get("invalid_state_rejects_total", 0)
         )
+        invalid_accepts_before_attempt = int(
+            run_dict.get("optimizer_invalid_accepts_total", 0)
+        )
         phase1_scale = settings["phase1_scale"]
 
         def record_phase1_accepted_step_rms(accepted_step_rms):
@@ -913,6 +916,37 @@ def run_penalty_phase1(
             if settings["use_local_bounds"]
             else attempt_message
         )
+        invalid_accepts_delta = int(
+            run_dict.get("optimizer_invalid_accepts_total", 0)
+        ) - invalid_accepts_before_attempt
+        if invalid_accepts_delta > 0:
+            restore_accepted_state_fn()
+            return _build_penalty_phase1_result(
+                used_phase1=True,
+                phase1_iterations=phase1_iterations,
+                phase1_termination_message="; ".join(phase1_messages),
+                phase1_success=False,
+                phase1_outcome="invalid_accept_abort",
+                continue_search=False,
+                next_dofs=run_dict["accepted_x"],
+                local_preservation_used=settings["use_local_bounds"],
+                local_preservation_preserved_start=False,
+                local_preservation_attempts=local_attempts_used,
+                local_preservation_radius=(
+                    local_radius if settings["use_local_bounds"] else None
+                ),
+                local_preservation_step_rms=None,
+                phase1_first_accepted_step_rms=phase1_first_accepted_step_rms,
+                phase1_max_accepted_step_rms=phase1_max_accepted_step_rms,
+                phase1_anchor_restore_used=phase1_anchor_restore_used,
+                phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
+                phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
+                startup_local_phase_regime=(
+                    seed_regime if settings["use_local_bounds"] else None
+                ),
+                startup_local_recovery_achieved=startup_local_recovery_achieved,
+                bridge_local_donor_ready=bridge_local_donor_ready,
+            )
         if int(run_dict.get("accepted_iterations", 0)) > accepted_before_attempt:
             accept_summary = evaluate_penalty_phase1_local_accept(
                 anchor_x,
