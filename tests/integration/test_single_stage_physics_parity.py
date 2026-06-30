@@ -2530,6 +2530,8 @@ def test_single_stage_cli_accepts_scipy_jax_decomposed(monkeypatch):
             "jax",
             "--optimizer-backend",
             "scipy-jax-decomposed",
+            "--target-lane-boozer-newton-stab",
+            "1e-4",
         ],
     )
 
@@ -2537,6 +2539,7 @@ def test_single_stage_cli_accepts_scipy_jax_decomposed(monkeypatch):
 
     assert args.backend == "jax"
     assert args.optimizer_backend == "scipy-jax-decomposed"
+    assert args.target_lane_boozer_newton_stab == pytest.approx(1.0e-4)
 
 
 def test_single_stage_cli_warns_for_deprecated_scipy_jax(monkeypatch):
@@ -2886,11 +2889,40 @@ def test_host_jax_boozer_budget_flags_drive_kernelized_init_overrides():
         target_lane_boozer_bfgs_maxiter=1500,
         target_lane_boozer_newton_tol=None,
         target_lane_boozer_newton_maxiter=50,
+        target_lane_boozer_newton_stab=1.0e-4,
     )
 
     assert overrides["bfgs_maxiter_override"] == 1500
     assert overrides["newton_maxiter_override"] == 50
+    assert overrides["newton_stab_override"] == pytest.approx(1.0e-4)
     assert overrides["newton_tol_override"] is None
+
+
+def test_target_lane_newton_stab_rejects_parity_mode():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    with pytest.raises(ValueError, match="parity mode requires newton_stab=0.0"):
+        single_stage_example.validate_target_lane_boozer_newton_stab_backend_mode(
+            1.0e-4,
+            parity_mode=True,
+        )
+
+
+def test_target_lane_newton_stab_allows_nonparity_and_zero_parity():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    single_stage_example.validate_target_lane_boozer_newton_stab_backend_mode(
+        1.0e-4,
+        parity_mode=False,
+    )
+    single_stage_example.validate_target_lane_boozer_newton_stab_backend_mode(
+        0.0,
+        parity_mode=True,
+    )
 
 
 def test_host_jax_single_stage_optimizer_forwards_host_control_permission(monkeypatch):

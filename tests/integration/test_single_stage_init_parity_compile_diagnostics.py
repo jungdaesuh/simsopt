@@ -29,6 +29,7 @@ from benchmarks.single_stage_init_parity import (
     _expected_target_outer_optimizer_method,
     _reference_case_backend,
     _run_single_stage_case,
+    _single_stage_full_run_family_id,
     parse_args,
     resolve_target_lane_compile_diagnostics,
 )
@@ -179,13 +180,44 @@ def test_cuda_scipy_jax_child_keeps_ondevice_boozer_backend(monkeypatch, tmp_pat
 def test_cuda_scipy_jax_decomposed_child_keeps_ondevice_boozer_backend(
     monkeypatch, tmp_path
 ):
-    args = _parse(["--optimizer-backend", "scipy-jax-decomposed"])
+    args = _parse(
+        [
+            "--optimizer-backend",
+            "scipy-jax-decomposed",
+            "--target-lane-boozer-newton-stab",
+            "1e-4",
+        ]
+    )
     command = _capture_child_command(monkeypatch, tmp_path, args, "jax", "cuda")
     assert "--optimizer-backend" in command
     optimizer_index = command.index("--optimizer-backend")
     assert command[optimizer_index + 1] == "scipy-jax-decomposed"
     boozer_index = command.index("--boozer-optimizer-backend")
     assert command[boozer_index + 1] == "ondevice"
+    stab_index = command.index("--target-lane-boozer-newton-stab")
+    assert command[stab_index + 1] == "0.0001"
+
+
+def test_single_stage_full_run_family_id_includes_newton_stab():
+    baseline = _parse(["--optimizer-backend", "scipy-jax-decomposed"])
+    stabilized = _parse(
+        [
+            "--optimizer-backend",
+            "scipy-jax-decomposed",
+            "--target-lane-boozer-newton-stab",
+            "1e-4",
+        ]
+    )
+
+    assert _single_stage_full_run_family_id(
+        baseline,
+        runtime_seed_spec_hash="seed",
+        objective_configuration_hash="objective",
+    ) != _single_stage_full_run_family_id(
+        stabilized,
+        runtime_seed_spec_hash="seed",
+        objective_configuration_hash="objective",
+    )
 
 
 def test_child_command_forwards_boozer_least_squares_algorithm(monkeypatch, tmp_path):

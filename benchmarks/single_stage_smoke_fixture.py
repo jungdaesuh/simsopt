@@ -156,6 +156,13 @@ def build_real_single_stage_init_fixture(
                     None,
                 )
             ),
+            target_lane_boozer_newton_stab=(
+                single_stage_example.resolve_target_lane_boozer_newton_stab(
+                    backend,
+                    resolved_optimizer_backend,
+                    None,
+                )
+            ),
         )
     )
 
@@ -227,6 +234,9 @@ def build_real_single_stage_init_fixture(
         newton_tol_override=resolved_boozer_init_base_overrides["newton_tol_override"],
         newton_maxiter_override=resolved_boozer_init_base_overrides[
             "newton_maxiter_override"
+        ],
+        newton_stab_override=resolved_boozer_init_base_overrides[
+            "newton_stab_override"
         ],
         surface_dofs_override=boozer_surface_dofs_override,
         iota_override=boozer_iota_override,

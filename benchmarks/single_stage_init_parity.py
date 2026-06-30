@@ -440,12 +440,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OPTIMIZER_BACKEND,
         help=(
             "JAX outer optimizer backend for the init probe. The default "
-            "scipy-jax lane uses SciPy-compatible host control over JAX "
-            "objective evaluations; use host-jax for host-controlled "
-            "Boozer/outer iteration with JAX kernels, ondevice, optax-lbfgs, "
-            "or optimistix-lbfgs for explicit target-lane stress tests, and "
-            "scipy-jax-fullgraph for host control over the full JAX value/grad "
-            "graph."
+            "scipy-jax-decomposed lane uses SciPy-compatible host control "
+            "over decomposed JAX objective evaluations. The legacy scipy-jax "
+            "lane remains available for comparison; use host-jax for "
+            "host-controlled Boozer/outer iteration with JAX kernels, "
+            "ondevice, optax-lbfgs, or optimistix-lbfgs for explicit "
+            "target-lane stress tests, and scipy-jax-fullgraph for host "
+            "control over the full JAX value/grad graph."
         ),
     )
     parser.add_argument(
@@ -513,6 +514,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional target-lane Boozer Newton iteration cap override passed "
+            "through to the single-stage runner."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-boozer-newton-stab",
+        type=float,
+        default=None,
+        help=(
+            "Optional target-lane Boozer Newton stabilization override passed "
             "through to the single-stage runner."
         ),
     )
@@ -1024,6 +1034,11 @@ def _single_stage_full_run_family_id(
             "target_lane_boozer_newton_polish_policy": (
                 _requested_target_lane_boozer_newton_polish_policy(args)
             ),
+            "target_lane_boozer_newton_stab": (
+                None
+                if getattr(args, "target_lane_boozer_newton_stab", None) is None
+                else float(args.target_lane_boozer_newton_stab)
+            ),
         }
     )
 
@@ -1141,6 +1156,7 @@ def _append_optional_single_stage_flags(
     target_lane_boozer_bfgs_maxiter: int | None = None,
     target_lane_boozer_newton_tol: float | None = None,
     target_lane_boozer_newton_maxiter: int | None = None,
+    target_lane_boozer_newton_stab: float | None = None,
     target_lane_boozer_newton_polish_policy: str | None = None,
     replay_objective_evaluation_trace: Path | None = None,
 ) -> None:
@@ -1216,6 +1232,13 @@ def _append_optional_single_stage_flags(
             [
                 "--target-lane-boozer-newton-maxiter",
                 str(int(target_lane_boozer_newton_maxiter)),
+            ]
+        )
+    if target_lane_boozer_newton_stab is not None:
+        command.extend(
+            [
+                "--target-lane-boozer-newton-stab",
+                str(float(target_lane_boozer_newton_stab)),
             ]
         )
     if target_lane_boozer_newton_polish_policy is not None:
@@ -1495,6 +1518,9 @@ def _run_single_stage_case(
             ),
             target_lane_boozer_newton_maxiter=getattr(
                 args, "target_lane_boozer_newton_maxiter", None
+            ),
+            target_lane_boozer_newton_stab=getattr(
+                args, "target_lane_boozer_newton_stab", None
             ),
             target_lane_boozer_newton_polish_policy=(
                 _resolve_target_lane_boozer_newton_polish_policy(
@@ -4382,6 +4408,7 @@ def main() -> None:
             "target_lane_boozer_newton_polish_policy": (
                 _requested_target_lane_boozer_newton_polish_policy(args)
             ),
+            "target_lane_boozer_newton_stab": args.target_lane_boozer_newton_stab,
             "outer_maxiter": int(args.maxiter),
             "command_argv": [sys.executable, *sys.argv],
             "benchmark_mode": benchmark_mode,
