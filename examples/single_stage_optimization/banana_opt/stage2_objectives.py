@@ -3,6 +3,7 @@ import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -1564,13 +1565,13 @@ def _stage2_alm_signal_values(
     return dual_update_values, feasibility_values
 
 
-def _stage2_hardware_threshold_overrides(
+def _stage2_hardware_threshold_overrides_from_values(
     *,
     length_target,
-    Jccdist,
-    Jc,
+    curve_curve_min_distance,
+    curvature_threshold,
     banana_current_max_A,
-    Jcsdist=None,
+    curve_surface_min_distance=None,
     poloidal_extent_threshold_rad=None,
     length_min_target=None,
     width_min_threshold=None,
@@ -1581,12 +1582,9 @@ def _stage2_hardware_threshold_overrides(
         (
             ("coil_length", length_target),
             ("coil_length_min", length_min_target),
-            ("coil_coil_spacing", Jccdist.minimum_distance),
-            (
-                "coil_surface_spacing",
-                None if Jcsdist is None else Jcsdist.minimum_distance,
-            ),
-            ("max_curvature", Jc.threshold),
+            ("coil_coil_spacing", curve_curve_min_distance),
+            ("coil_surface_spacing", curve_surface_min_distance),
+            ("max_curvature", curvature_threshold),
             ("banana_current", banana_current_max_A),
             ("poloidal_extent", poloidal_extent_threshold_rad),
             ("width_min", width_min_threshold),
@@ -2645,6 +2643,9 @@ def stage2_constraint_activity_tolerances(
     return tolerances
 
 
+_DEFAULT_STAGE2_CONSTRAINT_ACTIVITY_TOLERANCES = stage2_constraint_activity_tolerances
+
+
 def resolve_stage2_constraint_activity_tolerances(
     stage2_constraint_activity_tolerances_fn,
     distance_smoothing: float,
@@ -2692,6 +2693,234 @@ def resolve_stage2_constraint_activity_tolerances(
             f"{len(tolerance_values)} values for {len(constraint_names)} constraints."
         )
     return {name: value for name, value in zip(constraint_names, tolerance_values)}
+
+
+@dataclass(frozen=True)
+class _Stage2ALMStaticConstraintData:
+    # Immutable cache payload; callers materialize mutable arrays/lists per eval.
+    active_names: tuple[str, ...]
+    raw_constraint_activity_tolerances: tuple[float, ...]
+    metadata_items: tuple[tuple[str, ALMConstraintMetadata], ...]
+    metadata_payload_items: tuple[tuple[str, tuple[object, ...]], ...]
+    constraint_scales: tuple[float, ...]
+
+
+def _build_stage2_alm_static_constraint_data(
+    *,
+    stage2_constraint_activity_tolerances_fn,
+    include_coil_surface: bool,
+    include_poloidal_extent: bool,
+    include_hardware_keepout: bool,
+    include_iota_penalty: bool,
+    distance_smoothing: float,
+    curvature_smoothing: float,
+    iota_tolerance: float | None,
+    hardware_keepout_tolerance: float | None,
+    length_target: float,
+    curve_curve_min_distance: float,
+    curvature_threshold: float,
+    banana_current_max_A: float,
+    curve_surface_min_distance: float | None,
+    poloidal_extent_threshold_rad: float | None,
+    length_min_target: float,
+    width_min_threshold: float,
+    width_max_threshold: float,
+    self_intersect_threshold: float,
+    hardware_keepout_alm_scale: float | None,
+    iota_penalty_threshold: float | None,
+) -> _Stage2ALMStaticConstraintData:
+    active_names = _stage2_constraint_names(
+        include_coil_surface=include_coil_surface,
+        include_poloidal_extent=include_poloidal_extent,
+        include_hardware_keepout=include_hardware_keepout,
+        include_iota_penalty=include_iota_penalty,
+    )
+    tolerance_by_name = resolve_stage2_constraint_activity_tolerances(
+        stage2_constraint_activity_tolerances_fn,
+        distance_smoothing,
+        curvature_smoothing,
+        include_coil_surface=include_coil_surface,
+        include_poloidal_extent=include_poloidal_extent,
+        include_hardware_keepout=include_hardware_keepout,
+        include_iota_penalty=include_iota_penalty,
+        iota_tolerance=iota_tolerance,
+        hardware_keepout_tolerance=hardware_keepout_tolerance,
+    )
+    raw_constraint_activity_tolerances = tuple(
+        float(tolerance_by_name[name]) for name in active_names
+    )
+    threshold_overrides = _stage2_hardware_threshold_overrides_from_values(
+        length_target=length_target,
+        curve_curve_min_distance=curve_curve_min_distance,
+        curvature_threshold=curvature_threshold,
+        banana_current_max_A=banana_current_max_A,
+        curve_surface_min_distance=curve_surface_min_distance,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        length_min_target=length_min_target,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_threshold=self_intersect_threshold,
+    )
+    metadata_by_name = _stage2_alm_constraint_metadata(
+        active_names,
+        threshold_overrides=threshold_overrides,
+        activity_tolerance_by_name=tolerance_by_name,
+        scale_overrides=(
+            None
+            if hardware_keepout_alm_scale is None
+            else {"hardware_keepout": float(hardware_keepout_alm_scale)}
+        ),
+        iota_penalty_threshold=iota_penalty_threshold,
+    )
+    metadata_payload = alm_constraint_metadata_payload(active_names, metadata_by_name)
+    return _Stage2ALMStaticConstraintData(
+        active_names=active_names,
+        raw_constraint_activity_tolerances=raw_constraint_activity_tolerances,
+        metadata_items=tuple((name, metadata_by_name[name]) for name in active_names),
+        metadata_payload_items=tuple(
+            (key, tuple(values)) for key, values in metadata_payload.items()
+        ),
+        constraint_scales=tuple(
+            float(value) for value in metadata_payload["constraint_scales"]
+        ),
+    )
+
+
+@lru_cache(maxsize=128)
+def _cached_stage2_alm_static_constraint_data(
+    *,
+    include_coil_surface: bool,
+    include_poloidal_extent: bool,
+    include_hardware_keepout: bool,
+    include_iota_penalty: bool,
+    distance_smoothing: float,
+    curvature_smoothing: float,
+    iota_tolerance: float | None,
+    hardware_keepout_tolerance: float | None,
+    length_target: float,
+    curve_curve_min_distance: float,
+    curvature_threshold: float,
+    banana_current_max_A: float,
+    curve_surface_min_distance: float | None,
+    poloidal_extent_threshold_rad: float | None,
+    length_min_target: float,
+    width_min_threshold: float,
+    width_max_threshold: float,
+    self_intersect_threshold: float,
+    hardware_keepout_alm_scale: float | None,
+    iota_penalty_threshold: float | None,
+) -> _Stage2ALMStaticConstraintData:
+    return _build_stage2_alm_static_constraint_data(
+        stage2_constraint_activity_tolerances_fn=(
+            _DEFAULT_STAGE2_CONSTRAINT_ACTIVITY_TOLERANCES
+        ),
+        include_coil_surface=include_coil_surface,
+        include_poloidal_extent=include_poloidal_extent,
+        include_hardware_keepout=include_hardware_keepout,
+        include_iota_penalty=include_iota_penalty,
+        distance_smoothing=distance_smoothing,
+        curvature_smoothing=curvature_smoothing,
+        iota_tolerance=iota_tolerance,
+        hardware_keepout_tolerance=hardware_keepout_tolerance,
+        length_target=length_target,
+        curve_curve_min_distance=curve_curve_min_distance,
+        curvature_threshold=curvature_threshold,
+        banana_current_max_A=banana_current_max_A,
+        curve_surface_min_distance=curve_surface_min_distance,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        length_min_target=length_min_target,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_threshold=self_intersect_threshold,
+        hardware_keepout_alm_scale=hardware_keepout_alm_scale,
+        iota_penalty_threshold=iota_penalty_threshold,
+    )
+
+
+def _stage2_alm_static_constraint_data(
+    *,
+    stage2_constraint_activity_tolerances_fn,
+    include_coil_surface: bool,
+    include_poloidal_extent: bool,
+    include_hardware_keepout: bool,
+    include_iota_penalty: bool,
+    distance_smoothing: float,
+    curvature_smoothing: float,
+    iota_tolerance: float | None,
+    hardware_keepout_tolerance: float | None,
+    length_target: float,
+    curve_curve_min_distance: float,
+    curvature_threshold: float,
+    banana_current_max_A: float,
+    curve_surface_min_distance: float | None,
+    poloidal_extent_threshold_rad: float | None,
+    length_min_target: float,
+    width_min_threshold: float,
+    width_max_threshold: float,
+    self_intersect_threshold: float,
+    hardware_keepout_alm_scale: float | None,
+    iota_penalty_threshold: float | None,
+) -> _Stage2ALMStaticConstraintData:
+    kwargs = {
+        "include_coil_surface": include_coil_surface,
+        "include_poloidal_extent": include_poloidal_extent,
+        "include_hardware_keepout": include_hardware_keepout,
+        "include_iota_penalty": include_iota_penalty,
+        "distance_smoothing": float(distance_smoothing),
+        "curvature_smoothing": float(curvature_smoothing),
+        "iota_tolerance": None if iota_tolerance is None else float(iota_tolerance),
+        "hardware_keepout_tolerance": (
+            None
+            if hardware_keepout_tolerance is None
+            else float(hardware_keepout_tolerance)
+        ),
+        "length_target": float(length_target),
+        "curve_curve_min_distance": float(curve_curve_min_distance),
+        "curvature_threshold": float(curvature_threshold),
+        "banana_current_max_A": float(banana_current_max_A),
+        "curve_surface_min_distance": (
+            None
+            if curve_surface_min_distance is None
+            else float(curve_surface_min_distance)
+        ),
+        "poloidal_extent_threshold_rad": (
+            None
+            if poloidal_extent_threshold_rad is None
+            else float(poloidal_extent_threshold_rad)
+        ),
+        "length_min_target": float(length_min_target),
+        "width_min_threshold": float(width_min_threshold),
+        "width_max_threshold": float(width_max_threshold),
+        "self_intersect_threshold": float(self_intersect_threshold),
+        "hardware_keepout_alm_scale": (
+            None
+            if hardware_keepout_alm_scale is None
+            else float(hardware_keepout_alm_scale)
+        ),
+        "iota_penalty_threshold": (
+            None if iota_penalty_threshold is None else float(iota_penalty_threshold)
+        ),
+    }
+    if stage2_constraint_activity_tolerances_fn is (
+        _DEFAULT_STAGE2_CONSTRAINT_ACTIVITY_TOLERANCES
+    ):
+        return _cached_stage2_alm_static_constraint_data(**kwargs)
+    return _build_stage2_alm_static_constraint_data(
+        stage2_constraint_activity_tolerances_fn=stage2_constraint_activity_tolerances_fn,
+        **kwargs,
+    )
+
+
+def _materialize_stage2_alm_static_constraint_data(
+    static_data: _Stage2ALMStaticConstraintData,
+):
+    return (
+        static_data.active_names,
+        np.asarray(static_data.raw_constraint_activity_tolerances, dtype=float),
+        dict(static_data.metadata_items),
+        {key: list(values) for key, values in static_data.metadata_payload_items},
+        np.asarray(static_data.constraint_scales, dtype=float),
+    )
 
 
 def _sanitize_stage2_alm_inputs(
@@ -3291,12 +3520,43 @@ def evaluate_stage2_alm_problem(
             iota_grad = np.asarray(iota_evaluation.penalty_grad, dtype=float)
         _reset_biot_savart_points_to_surface(new_bs, new_surf)
 
-    active_names = _stage2_constraint_names(
+    static_constraint_data = _stage2_alm_static_constraint_data(
+        stage2_constraint_activity_tolerances_fn=stage2_constraint_activity_tolerances,
         include_coil_surface=include_coil_surface,
         include_poloidal_extent=include_poloidal_extent,
         include_hardware_keepout=include_hardware_keepout,
         include_iota_penalty=include_iota_penalty,
+        distance_smoothing=distance_smoothing,
+        curvature_smoothing=curvature_smoothing,
+        iota_tolerance=(
+            None if stage2_iota_runtime is None else stage2_iota_runtime.tolerance
+        ),
+        hardware_keepout_tolerance=hardware_keepout_tolerance,
+        length_target=length_target,
+        curve_curve_min_distance=Jccdist.minimum_distance,
+        curvature_threshold=Jc.threshold,
+        banana_current_max_A=banana_current_max_A,
+        curve_surface_min_distance=(
+            None if Jcsdist is None else Jcsdist.minimum_distance
+        ),
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        length_min_target=length_min_target,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_threshold=self_intersect_threshold,
+        hardware_keepout_alm_scale=hardware_keepout_alm_scale,
+        iota_penalty_threshold=(
+            None if stage2_iota_runtime is None else stage2_iota_penalty_threshold_value
+        ),
     )
+    (
+        active_names,
+        raw_constraint_activity_tolerances,
+        metadata_by_name,
+        metadata_payload,
+        constraint_scales,
+    ) = _materialize_stage2_alm_static_constraint_data(static_constraint_data)
+
     hard_by_name = {
         "coil_length_upper_bound": coil_length - length_target,
         "coil_length_min": length_min_signed_value,
@@ -3395,50 +3655,6 @@ def evaluate_stage2_alm_problem(
         )
     )
 
-    tolerance_by_name = resolve_stage2_constraint_activity_tolerances(
-        stage2_constraint_activity_tolerances,
-        distance_smoothing,
-        curvature_smoothing,
-        include_coil_surface=include_coil_surface,
-        include_poloidal_extent=include_poloidal_extent,
-        include_hardware_keepout=include_hardware_keepout,
-        include_iota_penalty=include_iota_penalty,
-        iota_tolerance=(
-            None if stage2_iota_runtime is None else stage2_iota_runtime.tolerance
-        ),
-        hardware_keepout_tolerance=hardware_keepout_tolerance,
-    )
-    raw_constraint_activity_tolerances = np.asarray(
-        _ordered_constraint_values(active_names, tolerance_by_name),
-        dtype=float,
-    )
-    threshold_overrides = _stage2_hardware_threshold_overrides(
-        length_target=length_target,
-        Jccdist=Jccdist,
-        Jc=Jc,
-        banana_current_max_A=banana_current_max_A,
-        Jcsdist=Jcsdist,
-        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
-        length_min_target=length_min_target,
-        width_min_threshold=width_min_threshold,
-        width_max_threshold=width_max_threshold,
-        self_intersect_threshold=self_intersect_threshold,
-    )
-    metadata_by_name = _stage2_alm_constraint_metadata(
-        active_names,
-        threshold_overrides=threshold_overrides,
-        activity_tolerance_by_name=tolerance_by_name,
-        scale_overrides=(
-            None
-            if hardware_keepout_alm_scale is None
-            else {"hardware_keepout": float(hardware_keepout_alm_scale)}
-        ),
-        iota_penalty_threshold=(
-            None if stage2_iota_runtime is None else stage2_iota_penalty_threshold_value
-        ),
-    )
-    metadata_payload = alm_constraint_metadata_payload(active_names, metadata_by_name)
-    constraint_scales = np.asarray(metadata_payload["constraint_scales"], dtype=float)
     normalized_payload = normalize_alm_constraints(
         sanitized_surrogate_signed_constraint_values,
         sanitized_constraint_grads,

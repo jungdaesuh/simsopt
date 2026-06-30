@@ -359,10 +359,12 @@ unpack the tuple in `dJ()`.
          by reusing the hard-path `kappa` array for the smooth signed constraint.
          Custom injected curvature helpers keep the existing four-argument
          contract.
-   - [ ] `stage2_objectives.py:3226-3268` — cache ALM constraint metadata /
+   - [x] `stage2_objectives.py:3226-3268` — cache ALM constraint metadata /
          activity tolerances (depend only on smoothing params + static
          config/thresholds, e.g. fixed `Jc.threshold` / `Jccdist.minimum_distance`)
-         instead of rebuilding every inner eval.
+         instead of rebuilding every inner eval. The landed cache covers the default
+         tolerance helper and materializes fresh dict/list/array payloads per eval;
+         custom tolerance callables stay uncached.
    - [ ] `boozer_finite_current.py:178, 189` — do NOT drop the array `.copy()`
          unless the caller alias proof is written down and covered by a regression
          test. These helpers currently return the original object only for
@@ -482,9 +484,12 @@ unpack the tuple in `dJ()`.
   gradient path now reuses the contour points already installed for `B()`, avoiding
   the second identical `BiotSavart.set_points` before `B_vjp()`, and its contour
   winding forward pass now uses buffered `np.bincount` accumulation instead of
-  unbuffered `np.add.at`. The other items are deferred. In particular,
-  `boozer_finite_current.py` copies stay until a no-alias proof and regression
-  test exist, and DESC bridge/runtime items belong to the dirty-tree DESC lane.
+  unbuffered `np.add.at`. The ALM path now caches default-helper constraint names,
+  activity tolerances, metadata, and scales while materializing fresh mutable
+  payloads per evaluation; custom tolerance callables stay uncached. The other
+  items are deferred. In particular, `boozer_finite_current.py` copies stay until
+  a no-alias proof and regression test exist, and DESC bridge/runtime items belong
+  to the dirty-tree DESC lane.
 - Phase 4.4 (`boozersurface.py` exact-Newton iterative refinement): deferred;
   behavior-affecting convergence-path change requires an isolated Boozer parity
   plus single-stage smoke gate.

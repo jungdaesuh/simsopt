@@ -2814,6 +2814,63 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             [0.025, 0.12, 2e-3, 4e-3, 5e-3, 6e-3, 3e-6, 7e-3],
         )
 
+    def test_evaluate_stage2_alm_problem_reuses_default_static_constraint_cache(self):
+        self.module._cached_stage2_alm_static_constraint_data.cache_clear()
+
+        def evaluate():
+            return self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=_FakeAlgebraicObjective(
+                    3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+                ),
+                new_bs=_FakeBiotSavart((1, 1, 3)),
+                new_surf=_FakeSurfaceNormals((1, 1, 3)),
+                Jf=_FakeAlgebraicObjective(3.5, [1.2, -0.5]),
+                Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+                length_target=2.0,
+                Jccdist=_FakeCurveDistance(0.05, 0.04),
+                Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+                banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.zeros(8),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=(
+                    self.module.stage2_constraint_activity_tolerances
+                ),
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                    -0.008,
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
+                **_default_geometric_parity_kwargs(),
+            )
+
+        first = evaluate()
+        first_cache_info = (
+            self.module._cached_stage2_alm_static_constraint_data.cache_info()
+        )
+        second = evaluate()
+        second_cache_info = (
+            self.module._cached_stage2_alm_static_constraint_data.cache_info()
+        )
+
+        self.assertEqual(first_cache_info.misses, 1)
+        self.assertEqual(second_cache_info.misses, first_cache_info.misses)
+        self.assertEqual(second_cache_info.hits, first_cache_info.hits + 1)
+        self.assertEqual(first["constraint_names"], second["constraint_names"])
+        self.assertIsNot(first["constraint_blocks"], second["constraint_blocks"])
+        self.assertIsNot(first["constraint_scales"], second["constraint_scales"])
+        np.testing.assert_allclose(
+            first["constraint_activity_tolerances"],
+            second["constraint_activity_tolerances"],
+        )
+
     def test_stage2_constraint_names_insert_hardware_keepout_after_self_intersect(self):
         # 2026-06-15 ALM-row parity: the static-hardware keep-out is promoted to
         # a zero-slack ALM constraint row, schema-ordered right after
