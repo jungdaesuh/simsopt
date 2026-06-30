@@ -39,6 +39,9 @@ TraversalPolicy = Literal["allowed", "forbidden"]
 ALM_PHYSICAL_SCALE_FLOOR = sys.float_info.epsilon
 ALM_OBJECTIVE_SCALE_FLOOR = 1.0e-12
 ALM_ACTIVITY_TOLERANCE_FRACTION = 1.0e-3
+POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND = (
+    "point_cloud_minimum_capped_at_threshold"
+)
 
 
 @dataclass(frozen=True)
@@ -684,6 +687,7 @@ def hardware_constraint_artifact_payload_field_names(
         field_names.extend(
             (
                 f"{prefix}CURVE_CURVE_DISTANCE_METRIC_KIND",
+                f"{prefix}CURVE_SURFACE_DISTANCE_METRIC_KIND",
                 f"{prefix}HARDWARE_CONSTRAINTS_OK",
                 f"{prefix}HARDWARE_CONSTRAINT_VIOLATIONS",
             )
@@ -724,6 +728,10 @@ def build_hardware_constraint_artifact_payload_fields(
 
     metric_kind = hardware_snapshot.get("curve_curve_distance_metric_kind")
     payload_fields[f"{prefix}CURVE_CURVE_DISTANCE_METRIC_KIND"] = (
+        None if metric_kind is None else str(metric_kind)
+    )
+    metric_kind = hardware_snapshot.get("curve_surface_distance_metric_kind")
+    payload_fields[f"{prefix}CURVE_SURFACE_DISTANCE_METRIC_KIND"] = (
         None if metric_kind is None else str(metric_kind)
     )
     artifact_hardware_status = hardware_snapshot.get("artifact_hardware_status")

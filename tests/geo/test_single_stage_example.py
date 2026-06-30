@@ -5198,7 +5198,14 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertFalse(artifact_status["success"])
         self.assertEqual(len(artifact_status["violations"]), 3)
-        self.assertEqual(status["curve_curve_distance_metric_kind"], "banana_coils")
+        self.assertEqual(
+            status["curve_curve_distance_metric_kind"],
+            stage2_solver.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
+        self.assertEqual(
+            status["curve_surface_distance_metric_kind"],
+            stage2_solver.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
         self.assertIn("coil_length", artifact_status["violations"][0])
         self.assertIn("banana_current", artifact_status["violations"][1])
         self.assertIn("tf_current", artifact_status["violations"][2])

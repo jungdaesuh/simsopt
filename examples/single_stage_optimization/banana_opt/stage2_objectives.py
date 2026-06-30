@@ -38,6 +38,7 @@ from banana_opt.hardware_contracts import (
 from banana_opt.hardware_constraint_schema import (
     ALMConstraintMetadata,
     ALM_OBJECTIVE_SCALE_FLOOR,
+    POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
     alm_constraint_metadata_payload,
     build_hardware_constraint_artifact_payload_fields,
     build_hardware_constraint_status,
@@ -1332,8 +1333,10 @@ def _build_stage2_artifact_hardware_snapshot(
     final_coil_length,
     length_target,
     final_curve_curve_min_dist,
+    curve_curve_distance_metric_kind,
     final_max_curvature,
     final_curve_surface_min_dist,
+    curve_surface_distance_metric_kind,
     plasma_vessel_min_dist,
     final_poloidal_extent_rad,
     poloidal_extent_threshold_rad,
@@ -1379,9 +1382,10 @@ def _build_stage2_artifact_hardware_snapshot(
         "coil_length": final_coil_length,
         "length_target": length_target,
         "curve_curve_min_dist": final_curve_curve_min_dist,
-        "curve_curve_distance_metric_kind": "banana_coils",
+        "curve_curve_distance_metric_kind": curve_curve_distance_metric_kind,
         "max_curvature": final_max_curvature,
         "curve_surface_min_dist": final_curve_surface_min_dist,
+        "curve_surface_distance_metric_kind": curve_surface_distance_metric_kind,
         "surface_vessel_min_dist": plasma_vessel_min_dist,
         "poloidal_extent_rad": final_poloidal_extent_rad,
         "poloidal_extent_threshold_rad": poloidal_extent_threshold_rad,
@@ -1753,6 +1757,9 @@ def build_stage2_results(
     final_coil_length,
     final_curve_curve_min_dist,
     hardware_status,
+    curve_curve_distance_metric_kind=(
+        POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+    ),
     winding_surface_mpol=1,
     winding_surface_ntor=0,
     winding_surface_free_mpol=0,
@@ -1763,6 +1770,9 @@ def build_stage2_results(
     cc_objective_threshold=None,
     cc_objective_margin=None,
     final_curve_surface_min_dist=None,
+    curve_surface_distance_metric_kind=(
+        POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+    ),
     plasma_vessel_min_dist=None,
     final_poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
@@ -1809,8 +1819,10 @@ def build_stage2_results(
         final_coil_length=final_coil_length,
         length_target=length_target,
         final_curve_curve_min_dist=final_curve_curve_min_dist,
+        curve_curve_distance_metric_kind=curve_curve_distance_metric_kind,
         final_max_curvature=final_max_curvature,
         final_curve_surface_min_dist=final_curve_surface_min_dist,
+        curve_surface_distance_metric_kind=curve_surface_distance_metric_kind,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         final_poloidal_extent_rad=final_poloidal_extent_rad,
         poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
@@ -2537,6 +2549,9 @@ def evaluate_stage2_hardware_constraints(
             "length_target": float(length_target),
             "length_min_target": float(length_min_target),
             "curve_curve_min_dist": float(curve_curve_min_dist),
+            "curve_curve_distance_metric_kind": (
+                POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+            ),
             "cc_threshold": float(cc_threshold),
             "max_curvature": float(max_curvature),
             "curvature_threshold": float(curvature_threshold),
@@ -2544,6 +2559,9 @@ def evaluate_stage2_hardware_constraints(
     )
     if curve_surface_min_dist is not None and coil_surface_threshold is not None:
         status["curve_surface_min_dist"] = float(curve_surface_min_dist)
+        status["curve_surface_distance_metric_kind"] = (
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        )
         status["coil_surface_threshold"] = float(coil_surface_threshold)
     if plasma_vessel_min_dist is not None and plasma_vessel_threshold is not None:
         status["plasma_vessel_min_dist"] = float(plasma_vessel_min_dist)

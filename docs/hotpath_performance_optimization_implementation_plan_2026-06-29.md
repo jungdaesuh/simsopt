@@ -209,24 +209,32 @@ Taylor checks and was reverted).
          (true min is provably ≥ threshold; matches `min([minimum_distance]+…)` cap).
    - [x] `geo/curveobjectives.py:372-378` — same fix in
          `CurveSurfaceDistance.shortest_distance`.
-   - [ ] For the achieved-clearance-metric callers above, decide per call site
+   - [x] For the achieved-clearance-metric callers above, decide per call site
          before treating persisted values as exact achieved clearance:
          (a) confirm the metric is only consumed as a `≥ threshold` pass/fail (cap is
          fine), or (b) if exact clearance must be recorded, give those sites an exact
          path — honor `self.downsample` and precompute the downsampled gamma list
          once outside the comprehension (a one-time `scipy.cKDTree` per curve +
          nearest-neighbor query) — do NOT keep full-resolution `cdist`.
+         Decision: existing persisted `CURVE_CURVE_MIN_DIST` /
+         `CURVE_SURFACE_MIN_DIST` values remain capped point-cloud minima for
+         threshold-gate reporting, not exact achieved-clearance fields. Their
+         `*_DISTANCE_METRIC_KIND` value is now
+         `point_cloud_minimum_capped_at_threshold`. Stage 2 exact segment audit
+         fields stay distinct as `*_MIN_DIST_SEGMENT_EXACT`.
    - [x] Update `tests/geo/test_curve_objectives.py`: revise the existing
          `CurveSurfaceDistance` empty-candidate assertion (`:402-411`) and add a
          `CurveCurveDistance` empty-candidate assertion so both classes lock the
          capped-return contract.
-   - [ ] Extend the metric audit beyond the original three sites. The source
-         behavior is landed; exact-vs-capped metric labeling remains pending for:
+   - [x] Extend the metric audit beyond the original three sites. The source
+         behavior is landed; exact-vs-capped metric labeling is closed for:
          `banana_opt/stage2_objectives.py:2254,2827`,
          `src/simsopt/util/permanent_magnet_helper_functions.py:161`, advanced /
          intermediate example prints, and summary readers that consume the
-         persisted metrics. If exact values are kept, record them under a distinct
-         key so capped lower-bound values are not mislabeled as exact clearance.
+         persisted metrics. Persisted hotpath fields are labeled as capped
+         point-cloud minima; log-only/example prints were left as diagnostics and
+         do not become SSOT exact-clearance artifacts. Exact Stage 2 segment
+         fields already use distinct keys.
 
 2. Boozer LS-Newton tail: stop recomputing the residual via the slow path
    (P3 low; **behavior-touching — LS solver ONLY**). Consumer audit already done
@@ -446,7 +454,9 @@ unpack the tuple in `dJ()`.
 
 ### Implementation Status — 2026-06-29
 
-- Phase 1: landed in `02778c0da` with focused `curve_objectives` and Boozer tests.
+- Phase 1: landed in `02778c0da` with focused `curve_objectives` and Boozer tests;
+  metric-kind follow-up labels persisted capped point-cloud clearance fields and
+  propagates the labels through Stage 2, VMEC, single-stage, and summary payloads.
 - Phase 2: landed in `02778c0da` for `force.py`; follow-up landed in this slice for
   `framedcurve.py`, `curveobjectives.py`, `self_intersect.py`,
   `fold_buildability.py`, `hardware_keepout.py`, `poloidal_extent.py`, and

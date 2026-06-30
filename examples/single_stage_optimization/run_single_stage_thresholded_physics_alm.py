@@ -449,7 +449,13 @@ def build_summary(
             ),
             "alm_final_stationarity_norm": results.get("ALM_FINAL_STATIONARITY_NORM"),
             "curve_curve_min_dist": results.get("CURVE_CURVE_MIN_DIST"),
+            "curve_curve_distance_metric_kind": results.get(
+                "CURVE_CURVE_DISTANCE_METRIC_KIND"
+            ),
             "curve_surface_min_dist": results.get("CURVE_SURFACE_MIN_DIST"),
+            "curve_surface_distance_metric_kind": results.get(
+                "CURVE_SURFACE_DISTANCE_METRIC_KIND"
+            ),
             "max_curvature": results.get("MAX_CURVATURE"),
             "nonqs_ratio": results.get("NONQS_RATIO"),
             "boozer_residual": results.get("BOOZER_RESIDUAL"),

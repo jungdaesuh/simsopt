@@ -791,6 +791,9 @@ def build_summary(
             "alm_outer_iterations": stage2_results.get("ALM_OUTER_ITERATIONS"),
             "alm_final_penalty": stage2_results.get("ALM_FINAL_PENALTY"),
             "curve_curve_min_dist": stage2_results.get("CURVE_CURVE_MIN_DIST"),
+            "curve_curve_distance_metric_kind": stage2_results.get(
+                "CURVE_CURVE_DISTANCE_METRIC_KIND"
+            ),
             "max_curvature": stage2_results.get("MAX_CURVATURE"),
             "coil_length": stage2_results.get("COIL_LENGTH"),
             "field_error": stage2_results.get("FIELD_ERROR"),
@@ -803,6 +806,9 @@ def build_summary(
                 "STAGE2_SECONDARY_RESULTS_PATH"
             ),
             "coil_plasma_min_dist": stage2_results.get("CURVE_SURFACE_MIN_DIST"),
+            "curve_surface_distance_metric_kind": stage2_results.get(
+                "CURVE_SURFACE_DISTANCE_METRIC_KIND"
+            ),
             "coil_plasma_threshold": stage2_results.get(
                 "COIL_PLASMA_MIN_DIST_M",
                 COIL_PLASMA_MIN_DIST_M,

@@ -92,6 +92,9 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_MIN_FRACTION,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
 )
+from banana_opt.hardware_constraint_schema import (
+    POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+)
 from banana_opt.poloidal_extent import PoloidalExtent, max_poloidal_extent_rad
 from banana_opt.self_intersect import CurveSelfIntersect
 
@@ -1018,7 +1021,12 @@ def build_objective(
             "CURVE_CURVE_MIN_DIST_LIMIT": float(cfg.cc_threshold),
             "CURVE_SURFACE_MIN_DIST": float(bundle.Jcs.shortest_distance()),
             "CURVE_SURFACE_MIN_DIST_LIMIT": float(cfg.cs_threshold),
-            "CURVE_CURVE_DISTANCE_METRIC_KIND": "shortest_distance",
+            "CURVE_CURVE_DISTANCE_METRIC_KIND": (
+                POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+            ),
+            "CURVE_SURFACE_DISTANCE_METRIC_KIND": (
+                POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+            ),
             "MAX_CURVATURE": max_curvature,
             "CURVATURE_THRESHOLD": float(cfg.kappa_max_threshold),
             "COIL_WIDTH": float(bundle.Jwidth.J()),

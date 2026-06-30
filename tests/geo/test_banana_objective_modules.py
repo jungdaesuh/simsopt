@@ -4354,7 +4354,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_EXIT_CLASS"], "feasible_stationarity_unmet")
         self.assertTrue(result["ALM_HARD_CONSTRAINTS_FEASIBLE"])
         self.assertFalse(result["ALM_STATIONARITY_SATISFIED"])
-        self.assertEqual(result["CURVE_CURVE_DISTANCE_METRIC_KIND"], "banana_coils")
+        self.assertEqual(
+            result["CURVE_CURVE_DISTANCE_METRIC_KIND"],
+            self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
+        self.assertEqual(
+            result["CURVE_SURFACE_DISTANCE_METRIC_KIND"],
+            self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
         self.assertAlmostEqual(result["CC_OBJECTIVE_THRESHOLD"], 0.052)
         self.assertAlmostEqual(result["CC_OBJECTIVE_MARGIN_M"], 0.002)
         self.assertEqual(result["BANANA_REPRESENTATION"], "typekk_pack")
@@ -7464,7 +7471,15 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         )
 
         self.assertAlmostEqual(result["curve_curve_min_dist"], 0.04)
+        self.assertEqual(
+            result["curve_curve_distance_metric_kind"],
+            self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
         self.assertAlmostEqual(result["curve_surface_min_dist"], 0.03)
+        self.assertEqual(
+            result["curve_surface_distance_metric_kind"],
+            self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
         self.assertAlmostEqual(result["surface_vessel_min_dist"], 0.01)
         self.assertAlmostEqual(result["max_curvature"], 41.0)
         self.assertIn("search_hardware_status", result)
@@ -8415,6 +8430,12 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
             {
                 "lcfs_major_radius_m": roundoff_major_radius,
                 "lcfs_minor_radius_m": self.module.TARGET_LCFS_MAX_MINOR_RADIUS_M,
+                "curve_curve_distance_metric_kind": (
+                    self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+                ),
+                "curve_surface_distance_metric_kind": (
+                    self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+                ),
                 "artifact_hardware_status": status,
             },
             names=lcfs_constraint_names,
@@ -8422,6 +8443,14 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
 
         self.assertTrue(status["success"])
         self.assertEqual(status["violations"], [])
+        self.assertEqual(
+            payload["CURVE_CURVE_DISTANCE_METRIC_KIND"],
+            self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
+        self.assertEqual(
+            payload["CURVE_SURFACE_DISTANCE_METRIC_KIND"],
+            self.module.POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+        )
         self.assertIs(payload["HARDWARE_CONSTRAINTS_OK"], True)
         self.assertEqual(payload["HARDWARE_CONSTRAINT_VIOLATIONS"], [])
 

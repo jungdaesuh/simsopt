@@ -69,6 +69,9 @@ from banana_opt.constraint_contract import (
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
 )
+from banana_opt.hardware_constraint_schema import (
+    POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
+)
 from banana_opt.coil_order_upgrade import (
     realized_cws_winding_radii,
     upgrade_loaded_seed_biot_savart_order,
@@ -6244,6 +6247,12 @@ def main(parsed_args=None):
         final_coil_length=final_coil_length,
         final_curve_curve_min_dist=final_curve_curve_min_dist,
         final_curve_surface_min_dist=final_curve_surface_min_dist,
+        curve_curve_distance_metric_kind=(
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        ),
+        curve_surface_distance_metric_kind=(
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        ),
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         final_poloidal_extent_rad=final_poloidal_extent_rad,
         poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,

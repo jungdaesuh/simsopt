@@ -2427,18 +2427,32 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "ALM_OUTER_ITERATIONS": 4,
                 "ALM_FINAL_PENALTY": 25.0,
                 "CURVE_CURVE_MIN_DIST": 0.07,
+                "CURVE_CURVE_DISTANCE_METRIC_KIND": (
+                    "point_cloud_minimum_capped_at_threshold"
+                ),
                 "MAX_CURVATURE": 91.0,
                 "COIL_LENGTH": 1.69,
                 "FIELD_ERROR": 2.0e-4,
                 "HARDWARE_CONSTRAINTS_OK": True,
                 "CURVE_SURFACE_MIN_DIST": 0.017,
+                "CURVE_SURFACE_DISTANCE_METRIC_KIND": (
+                    "point_cloud_minimum_capped_at_threshold"
+                ),
                 "COIL_PLASMA_MIN_DIST_M": 0.010,
                 "SURFACE_VESSEL_MIN_DIST": 0.041,
                 "PLASMA_VESSEL_MIN_DIST_M": 0.04,
             },
         )
 
+        self.assertEqual(
+            summary["curve_curve_distance_metric_kind"],
+            "point_cloud_minimum_capped_at_threshold",
+        )
         self.assertEqual(summary["coil_plasma_min_dist"], 0.017)
+        self.assertEqual(
+            summary["curve_surface_distance_metric_kind"],
+            "point_cloud_minimum_capped_at_threshold",
+        )
         self.assertEqual(summary["coil_plasma_threshold"], 0.010)
         self.assertEqual(summary["plasma_vessel_min_dist"], 0.041)
         self.assertEqual(summary["plasma_vessel_threshold"], 0.04)

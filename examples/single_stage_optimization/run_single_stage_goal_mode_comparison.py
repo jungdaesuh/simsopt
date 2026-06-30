@@ -814,7 +814,13 @@ def result_metric_subset(results: dict) -> dict:
         "coil_length": results.get("COIL_LENGTH"),
         "max_curvature": results.get("MAX_CURVATURE"),
         "curve_curve_min_dist": results.get("CURVE_CURVE_MIN_DIST"),
+        "curve_curve_distance_metric_kind": results.get(
+            "CURVE_CURVE_DISTANCE_METRIC_KIND"
+        ),
         "curve_surface_min_dist": results.get("CURVE_SURFACE_MIN_DIST"),
+        "curve_surface_distance_metric_kind": results.get(
+            "CURVE_SURFACE_DISTANCE_METRIC_KIND"
+        ),
         "invalid_state_rejects_total": results.get("INVALID_STATE_REJECTS_TOTAL"),
         "topology_gate_rejects": results.get("TOPOLOGY_GATE_REJECTS"),
         "hardware_rejects": results.get("HARDWARE_REJECTS"),
@@ -830,7 +836,13 @@ def result_metric_subset(results: dict) -> dict:
         "best_feasible_search_objective_j": results.get("BEST_FEASIBLE_SEARCH_OBJECTIVE_J"),
         "best_feasible_base_objective_j": results.get("BEST_FEASIBLE_BASE_OBJECTIVE_J"),
         "best_feasible_curve_curve_min_dist": results.get("BEST_FEASIBLE_CURVE_CURVE_MIN_DIST"),
+        "best_feasible_curve_curve_distance_metric_kind": results.get(
+            "BEST_FEASIBLE_CURVE_CURVE_DISTANCE_METRIC_KIND"
+        ),
         "best_feasible_curve_surface_min_dist": results.get("BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST"),
+        "best_feasible_curve_surface_distance_metric_kind": results.get(
+            "BEST_FEASIBLE_CURVE_SURFACE_DISTANCE_METRIC_KIND"
+        ),
         "best_feasible_max_curvature": results.get("BEST_FEASIBLE_MAX_CURVATURE"),
         "best_feasible_hardware_constraints_ok": results.get("BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK"),
         "best_feasible_final_topology_gate_success": results.get("BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS"),

@@ -27,6 +27,7 @@ from banana_opt.hardware_contracts import (
     validate_lcfs_constraint_mode,
 )
 from banana_opt.hardware_constraint_schema import (
+    POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND,
     build_hardware_constraint_status,
     build_threshold_overrides,
     get_hardware_constraint_spec,
@@ -578,9 +579,14 @@ def evaluate_single_stage_hardware_constraints(
         "search_hardware_status": search_hardware_status,
         "artifact_hardware_status": artifact_hardware_status,
         "curve_curve_min_dist": float(curve_curve_min_dist),
-        "curve_curve_distance_metric_kind": "banana_coils",
+        "curve_curve_distance_metric_kind": (
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        ),
         "cc_dist": float(cc_dist),
         "curve_surface_min_dist": float(curve_surface_min_dist),
+        "curve_surface_distance_metric_kind": (
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        ),
         "cs_dist": float(cs_dist),
         "surface_vessel_min_dist": float(surface_vessel_min_dist),
         "ss_dist": float(ss_dist),
@@ -986,9 +992,14 @@ def evaluate_single_stage_search_hardware_snapshot(
         "search_hardware_status": search_hardware_status,
         "artifact_hardware_status": None,
         "curve_curve_min_dist": curve_curve_min_dist,
-        "curve_curve_distance_metric_kind": "banana_coils",
+        "curve_curve_distance_metric_kind": (
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        ),
         "cc_dist": float(cc_dist),
         "curve_surface_min_dist": curve_surface_min_dist,
+        "curve_surface_distance_metric_kind": (
+            POINT_CLOUD_MINIMUM_CAPPED_AT_THRESHOLD_METRIC_KIND
+        ),
         "cs_dist": float(cs_dist),
         "surface_vessel_min_dist": surface_vessel_min_dist,
         "ss_dist": float(ss_dist),
