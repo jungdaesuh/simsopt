@@ -290,6 +290,16 @@ def phase1_runtime_kwargs(module, *, phase1_config=None):
     }
 
 
+def fake_optimizer_result(x, *, nit, success, message, status):
+    return SimpleNamespace(
+        x=np.asarray(x, dtype=float).copy(),
+        nit=nit,
+        success=success,
+        message=message,
+        status=status,
+    )
+
+
 def build_banana_current_report_fixture(module, *, seed_currents_A=(1.5e4, -1.5e4)):
     current_a = Current(1.5e4)
     current_b = Current(-1.5e4)
@@ -2207,6 +2217,8 @@ class SingleStageExampleTests(unittest.TestCase):
                     "wba_fraction_denominator_policy": None,
                     "wba_fraction_denominator_seed_count": 0,
                     "wba_min_classifiable_seeds": 2,
+                    "wba_min_evaluable_share": 0.5,
+                    "wba_evaluable_share": 0.0,
                     "wba_not_evaluated_seed_count": 0,
                     "wba_seed_count": 0,
                     "wba_survived_seed_count": 0,
@@ -11650,8 +11662,12 @@ class HardwareConstraintTests(unittest.TestCase):
             restore_calls.append(True)
 
         def fake_minimize(*args, **kwargs):
-            return SimpleNamespace(
-                nit=2, success=False, message="ABNORMAL_TERMINATION", status=2
+            return fake_optimizer_result(
+                args[1],
+                nit=2,
+                success=False,
+                message="ABNORMAL_TERMINATION",
+                status=2,
             )
 
         result = module.run_penalty_phase1(
@@ -11724,7 +11740,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.01, -0.99]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.01, -0.99],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -11806,7 +11828,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.0, -1.0]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.0, -1.0],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -11886,10 +11914,17 @@ class HardwareConstraintTests(unittest.TestCase):
             attempts["count"] += 1
             seen_bounds.append(kwargs["bounds"])
             if attempts["count"] == 1:
-                kwargs["callback"](np.array([1.04, -0.96]))
+                x_next = np.array([1.04, -0.96])
             else:
-                kwargs["callback"](np.array([1.01, -0.99]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+                x_next = np.array([1.01, -0.99])
+            kwargs["callback"](x_next)
+            return fake_optimizer_result(
+                x_next,
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12001,7 +12036,13 @@ class HardwareConstraintTests(unittest.TestCase):
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.015, -0.985]))
             kwargs["callback"](np.array([1.01, -0.99]))
-            return SimpleNamespace(nit=2, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.01, -0.99],
+                nit=2,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12068,7 +12109,13 @@ class HardwareConstraintTests(unittest.TestCase):
         def fake_minimize(fun, x0, **kwargs):
             captured["solver_bounds"] = kwargs["bounds"]
             kwargs["callback"](np.array([0.1, -0.1]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [0.1, -0.1],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12178,7 +12225,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.03, -0.97]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.03, -0.97],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         repair_result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12289,8 +12342,12 @@ class HardwareConstraintTests(unittest.TestCase):
             total, grad = fun(x0)
             captured["total"] = total
             captured["grad"] = grad
-            return SimpleNamespace(
-                nit=1, success=False, message="ABNORMAL_TERMINATION", status=2
+            return fake_optimizer_result(
+                x0,
+                nit=1,
+                success=False,
+                message="ABNORMAL_TERMINATION",
+                status=2,
             )
 
         result = module.run_penalty_phase1(
@@ -12397,7 +12454,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.03, -0.97]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.03, -0.97],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12443,7 +12506,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.03, -0.97]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.03, -0.97],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12505,7 +12574,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.03, -0.97]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.03, -0.97],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12548,7 +12623,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.03, -0.97]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.03, -0.97],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12611,7 +12692,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.01, -0.99]))
-            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+            return fake_optimizer_result(
+                [1.01, -0.99],
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+                status=0,
+            )
 
         result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
@@ -12669,8 +12756,12 @@ class HardwareConstraintTests(unittest.TestCase):
         }
 
         def fake_minimize(*args, **kwargs):
-            return SimpleNamespace(
-                nit=1, success=False, message="ABNORMAL_TERMINATION", status=2
+            return fake_optimizer_result(
+                args[1],
+                nit=1,
+                success=False,
+                message="ABNORMAL_TERMINATION",
+                status=2,
             )
 
         result = module.run_penalty_phase1(
@@ -15733,6 +15824,20 @@ class RunIdentityTests(unittest.TestCase):
                     "single_stage_geodesic_curvature_threshold",
                     "single_stage_geodesic_curvature_p",
                     "single_stage_qa_residual_weight",
+                    "single_stage_qa_helicity_m",
+                    "single_stage_qa_helicity_n",
+                    "iota_profile_weight",
+                    "iota_profile_slope_target",
+                    "volume_profile_weight",
+                    "surface_nesting_weight",
+                    "surface_nesting_clearance",
+                    "published_surface_relax_initial_nesting",
+                    "residue_objective_selected_chain_config",
+                    "residue_promotion_gate_enabled",
+                    "residue_promotion_gate_threshold",
+                    "residue_promotion_gate_samples",
+                    "residue_promotion_gate_radius",
+                    "residue_promotion_gate_seed",
                 }
                 or (
                     not config.finite_build
@@ -19114,11 +19219,11 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertLess(threshold, args.curvature_threshold)
         self.assertAlmostEqual(threshold, pack_limit)
         # Adopted self-intersection model: cap = 1/(inner-radius margin +
-        # outer-channel corner reach), independent of the conductor-pack grid.
+        # outer-channel edgewise reach), independent of the conductor-pack grid.
         hardware_contracts = load_hardware_contracts_module()
         expected_limit = 1.0 / (
             hardware_contracts.TYPE_KK_INNER_RADIUS_MARGIN_M
-            + np.hypot(
+            + max(
                 hardware_contracts.TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
                 hardware_contracts.TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
             )
@@ -19458,7 +19563,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError,
             "--single-stage-banana-geometry-mode must be one of "
-            "\\{shared_symmetry, materialized_cws\\}",
+            "\\{shared_symmetry, materialized_cws, free_xyz\\}",
         ):
             module.validate_single_stage_current_args(args)
 
@@ -20045,9 +20150,18 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "nphi": 8,
             "ntheta": 8,
             "init_only": True,
+            "diagnose_seed_gradient": False,
             "banana_surf_radius": 0.21,
             "winding_surface_free_mpol": 0,
             "winding_surface_free_ntor": 0,
+            "winding_dof_scale": False,
+            "stage2_surface_dof_scale": 1.0,
+            "stage2_curve_dof_scale": 1.0,
+            "stage2_sobolev_metric": "off",
+            "stage2_sobolev_alpha": 0.0,
+            "stage2_sobolev_h2_beta": 0.0,
+            "stage2_sobolev_power": 2,
+            "stage2_objective_normalize": False,
             "tf_current_A": -8.0e4,
             "banana_init_current_A": -1.0e4,
             "banana_current_max_A": 1.6e4,
@@ -20125,6 +20239,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_hardware_keepout_json": None,
             "stage2_hardware_keepout_glb": stage2_hardware_keepout_glb_default,
             "stage2_hardware_keepout_sdf_manifest": None,
+            "stage2_hardware_keepout_alm_scale": None,
+            "stage2_hardware_keepout_tolerance": None,
             "stage2_resonant_flux_weight": 0.0,
             "stage2_resonant_iota_target": None,
             "stage2_resonant_delta": 0.02,
@@ -20196,13 +20312,18 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         }
 
         class FakeStage2Objective:
-            def __init__(self, value, gradient, x=None):
+            def __init__(self, value, gradient, x=None, dof_names=None):
                 self._value = float(value)
                 self._gradient = np.asarray(gradient, dtype=float)
                 self.x = (
                     np.zeros(2, dtype=float)
                     if x is None
                     else np.asarray(x, dtype=float)
+                )
+                self.dof_names = (
+                    tuple(f"fake_dof({i})" for i in range(self.x.size))
+                    if dof_names is None
+                    else tuple(dof_names)
                 )
                 self.lower_bounds = np.full(self.x.shape, -np.inf, dtype=float)
                 self.upper_bounds = np.full(self.x.shape, np.inf, dtype=float)
@@ -20226,6 +20347,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     self._value + other.J(),
                     self._gradient + other.dJ(),
                     self.x.copy(),
+                    self.dof_names,
                 )
 
             __radd__ = __add__
@@ -20235,6 +20357,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     self._value * float(scalar),
                     self._gradient * float(scalar),
                     self.x.copy(),
+                    self.dof_names,
                 )
 
             __rmul__ = __mul__

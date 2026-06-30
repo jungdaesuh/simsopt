@@ -53,16 +53,19 @@ gated behind explicit verification.
   `tests/geo/test_boozersurface.py`, `tests/field/test_biotsavart.py`,
   `tests/geo/test_curve_objectives.py`.
 - Original checkout baseline for this review: branch `surrogate-confinement-v2`,
-  HEAD `c15e39414`, dirty tree present. As of the 2026-06-30 validation pass,
-  current committed `HEAD` before this status update is `0d63c7b7c`
-  (`test: add hotpath validation coverage`). `c1a0c7656` fixed the stale ALM
-  contract citations from the earlier status slice, and `0d63c7b7c` added the
-  committed hotpath equivalence probe. The hotpath commits after `c15e39414`
-  include `02778c0da`, `095348cf4`, `f7f5b3007`, `930ec91a3`, `0392fefaf`,
-  `10a98aa92`, `369061131`, `d3f1e1ffd`, `ff96d7db8`, `95107abc2`,
-  `fa313122d`, `a20c8d7c1`, `b9ef4ea90`, `46fa4aef6`, `c1a0c7656`, and
-  `0d63c7b7c`, interleaved with unrelated documentation/Sobolev commits. Phase
-  5 DESC anchors remain dirty-tree scoped:
+  HEAD `c15e39414`, dirty tree present. The 2026-06-30 full-regression closure
+  pass ran from committed base `f095165bc` (`test: refresh single-stage ALM
+  parser fixture`) plus the live worktree fixture/default fixes recorded in this
+  closure update. `c1a0c7656` fixed the stale ALM contract citations from the
+  earlier status slice, `0d63c7b7c` added the committed hotpath equivalence
+  probe, `e6f214f27` refreshed this plan's validation gates, and `f095165bc`
+  refreshed the single-stage ALM parser fixture. The hotpath commits after
+  `c15e39414` include `02778c0da`,
+  `095348cf4`, `f7f5b3007`, `930ec91a3`, `0392fefaf`, `10a98aa92`,
+  `369061131`, `d3f1e1ffd`, `ff96d7db8`, `95107abc2`, `fa313122d`,
+  `a20c8d7c1`, `b9ef4ea90`, `46fa4aef6`, `c1a0c7656`, `0d63c7b7c`,
+  `e6f214f27`, and `f095165bc`, interleaved with unrelated
+  documentation/Sobolev commits. Phase 5 DESC anchors remain dirty-tree scoped:
   `examples/single_stage_optimization/banana_opt/desc_bridge/objective_factory.py`
   and `examples/single_stage_optimization/DESC_JOINT/run_desc_joint_banana.py`
   are untracked in the current tree, while `desc_bridge/runtime_coilset.py` is
@@ -541,7 +544,7 @@ unpack the tuple in `dJ()`.
       (Phase 1 Task 2 + Phase 4.4 boozer changes).
 - [x] `./.conda-env/bin/python -m pytest tests/field/test_biotsavart.py -q`
       (Phase 4 biotsavart).
-- [ ] Full geo/field regression:
+- [x] Full geo/field regression:
       `./.conda-env/bin/python -m pytest tests/geo tests/field -q` before sign-off.
 - [x] `./.conda-env/bin/python -m ruff check` on every touched file.
 - [x] **Caller-audit gate (Phase 1 Task 1 & 2):** the two `rg` audits return no
@@ -669,6 +672,32 @@ unpack the tuple in `dJ()`.
   do not all succeed; Phase 5 remains dirty-tree/deferred, not clean-checkout
   landed.
 
+### Validation Evidence — 2026-06-30 Full Regression Closure Slice
+
+- Committed base for this closure pass: `f095165bc`
+  (`surrogate-confinement-v2`) plus the live worktree fixture/default fixes
+  recorded in this closure update. The worktree remains broadly dirty with
+  unrelated DESC/single-stage/Poincare development files; the full regression
+  below validates the live worktree, not a clean detached checkout. Phase 5 DESC
+  files remain dirty-tree scoped/deferred in committed-tree terms.
+- Focused failure-cluster closure after the earlier 42-failure live run:
+  `PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 ./.conda-env/bin/python -m pytest -q -p no:cacheprovider tests/geo/test_single_stage_example.py tests/geo/test_poincare_jax_default.py tests/geo/test_desc_bridge_conversion.py`
+  — 555 passed, 34 subtests passed in 8.92s. This covered the stale Phase 1
+  fake optimizer `x` contract, Stage 2 fake `dof_names` / parser defaults,
+  Poincare `integrator`, topology WBA schema, run-identity default elision,
+  finite-build edgewise curvature cap, geometry-mode `free_xyz`, and the
+  no-DESC fake-grid runtime-export tests.
+- Focused lint/compile for the touched files:
+  `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check tests/geo/test_single_stage_example.py tests/geo/test_poincare_jax_default.py examples/single_stage_optimization/banana_opt/desc_bridge/runtime_export.py`
+  — `All checks passed!`
+  `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile tests/geo/test_single_stage_example.py tests/geo/test_poincare_jax_default.py examples/single_stage_optimization/banana_opt/desc_bridge/runtime_export.py`
+  — clean.
+- Full live-worktree geo/field regression:
+  `PYTHONNOUSERSITE=1 MPLCONFIGDIR=/tmp PYTHONDONTWRITEBYTECODE=1 ./.conda-env/bin/python -m pytest tests/geo tests/field -q -p no:cacheprovider`
+  — 3427 passed, 5 skipped, 16 warnings, 1218 subtests passed in 2235.80s
+  (0:37:15). Log:
+  `/tmp/hotpath_geo_field_after_fixes_20260630_015714.log`.
+
 ## Risks and Mitigations
 
 - Risk: `shortest_distance()` empty-case change silently alters a real consumer
@@ -716,11 +745,13 @@ unpack the tuple in `dJ()`.
       `dof_indices.values()` per call; FD loop has no per-iteration `np.copy`;
       solve log no longer flushes per eval.
 - [x] Equivalence gate green for all numerically-identical changes.
-- [ ] `tests/geo` + `tests/field` regression green under `.conda-env` python;
-      `ruff` clean on touched files. Current status: ruff is clean on the
-      touched Python file set, equivalence is green, but the full geo/field
-      regression is not green (49 failed in the clean detached-worktree attempt;
-      see 2026-06-30 evidence).
+- [x] `tests/geo` + `tests/field` regression green under `.conda-env` python;
+      `ruff` clean on touched files. Current status: equivalence is green, the
+      focused touched-file suite is green, and the full live-worktree geo/field
+      regression is green (3427 passed, 5 skipped, 16 warnings, 1218 subtests;
+      see 2026-06-30 full-regression closure evidence). The older 49-failure
+      clean detached-worktree attempt is historical evidence for the prior
+      `0d63c7b7c` state, not the current live-worktree status.
 - [x] Phases 4–5 tracked: each item either landed-with-gate or explicitly deferred
       with a one-line reason.
 - [x] Project memory updated (`project_perf_audit_hotpath_2026_06_29`) with

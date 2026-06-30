@@ -219,6 +219,7 @@ def _runner_args():
         cpu_tmax_reference=7000.0,
         field_periods=1,
         steps_per_field_period=4,
+        integrator="phi",
         min_bphi_over_b=1e-10,
         dpi=40,
         tol_reference=1e-7,
