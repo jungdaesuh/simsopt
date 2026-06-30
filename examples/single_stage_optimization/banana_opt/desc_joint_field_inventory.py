@@ -9,6 +9,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from banana_opt.desc_bridge.coil_report_utils import coil_convention_report
+
 _BIOT_SAVART_CLASS = "BiotSavart"
 _COIL_CLASS = "Coil"
 _CURRENT_CLASS = "Current"
@@ -38,6 +40,7 @@ class DescJointFieldInventory:
             "current_values_A": list(self.current_values_A),
             "current_signs": list(self.current_signs),
             "current_sign_counts": dict(self.current_sign_counts),
+            "coil_conventions": coil_convention_report(),
         }
 
 
