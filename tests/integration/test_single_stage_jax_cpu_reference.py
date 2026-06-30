@@ -7342,6 +7342,214 @@ class TestTraceableObjective:
             atol=1e-12,
         )
 
+    def test_decomposed_host_objective_records_k1_k2_micro_events(self):
+        """Progress events isolate K1 forward and K2 solved-state work."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([3.0, -5.0], dtype=jnp.float64)
+        events = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+        def record_event(label, **fields):
+            events.append((label, fields))
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+            record_outer_optimizer_event=record_event,
+        )
+        value, grad = host_fun(np.zeros(2))
+
+        assert float(jax.device_get(value)) == pytest.approx(7.0)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        labels = [label for label, _fields in events]
+        assert labels == [
+            "target_lane_decomposed_k1_forward_started",
+            "target_lane_decomposed_k1_forward_returned",
+            "target_lane_decomposed_k2_value_grad_started",
+            "target_lane_decomposed_k2_value_grad_returned",
+        ]
+        returned_fields = events[1][1]
+        assert returned_fields["evaluation_index"] == 1
+        assert returned_fields["success"] is True
+        assert returned_fields["elapsed_s"] >= 0.0
+        assert events[2][1]["branch"] == "success"
+
+    def test_jax_runtime_cache_metadata_uses_runtime_policy_ssot(self):
+        """Cache metadata records the resolved backend config and policy."""
+        backend_config = simsopt_config.get_backend_config()
+        backend_policy = simsopt_config.get_backend_policy(backend_config.mode)
+
+        metadata = single_stage_example.build_jax_runtime_cache_metadata()
+
+        assert metadata["backend_mode"] == backend_config.mode
+        assert metadata["backend"] == backend_config.backend
+        assert metadata["jax_platform"] == backend_config.jax_platform
+        assert (
+            metadata["compilation_cache_policy"]
+            == backend_policy.compilation_cache_policy
+        )
+        assert metadata["compilation_cache_dir"] == backend_config.compilation_cache_dir
+        assert "jax_compilation_cache_dir" in metadata
+
+    def test_decomposed_host_objective_reuses_k1_forward_result_for_trace(self):
+        """Trace reuse serves the K1 solve and skips a second forward solve."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([3.0, -5.0], dtype=jnp.float64)
+        solve_calls = []
+        fallback_calls = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            solve_calls.append(np.asarray(jax.device_get(arr), dtype=np.float64))
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "iota": jnp.asarray(0.31, dtype=jnp.float64),
+                "G": jnp.asarray(11.0, dtype=jnp.float64),
+                "sdofs": arr,
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+        def fallback_forward_result(coil_dofs):
+            fallback_calls.append(
+                np.asarray(jax.device_get(coil_dofs), dtype=np.float64)
+            )
+            return {"sentinel": "fallback"}
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+        )
+        candidate = np.array([0.5, -0.25])
+        value, _grad = host_fun(candidate)
+        assert float(jax.device_get(value)) == pytest.approx(7.0)
+        assert len(solve_calls) == 1
+
+        reuse = host_fun.reuse_forward_result_for
+        # Same candidate (as the wrapper passes it, device-resident) -> reuse,
+        # so no second forward solve and the fallback provider is never invoked.
+        reused = reuse(
+            jnp.asarray(candidate, dtype=jnp.float64),
+            fallback_forward_result,
+        )
+        assert float(jax.device_get(reused["iota"])) == pytest.approx(0.31)
+        assert len(solve_calls) == 1
+        assert fallback_calls == []
+
+        # Different candidate -> key mismatch -> fallback (never a stale reuse).
+        other = reuse(
+            jnp.asarray([9.0, 9.0], dtype=jnp.float64),
+            fallback_forward_result,
+        )
+        assert other == {"sentinel": "fallback"}
+        assert len(fallback_calls) == 1
+        assert len(solve_calls) == 1
+
+    def test_decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform(self):
+        """Reuse hits through the SAME optimizer->coil transform the wrapper uses.
+
+        Guards the load-bearing equality between the stored key (the value_and_grad
+        input) and the probe key (the target_forward_result input, after
+        ``optimizer_to_coil_dofs``). If that transform ever stops being
+        value-preserving, this fails instead of silently reverting to a second
+        forward solve per traced eval.
+        """
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
+        solve_calls = []
+        base_calls = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            solve_calls.append(np.asarray(jax.device_get(arr), dtype=np.float64))
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "iota": jnp.asarray(0.31, dtype=jnp.float64),
+                "G": jnp.asarray(11.0, dtype=jnp.float64),
+                "sdofs": arr,
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+        def base_forward_result(coil_dofs):
+            base_calls.append(np.asarray(jax.device_get(coil_dofs), dtype=np.float64))
+            return {"sentinel": "base_resolved"}
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+        )
+        reusing_forward_result = (
+            single_stage_example._make_reusing_trace_forward_result(
+                host_fun.reuse_forward_result_for,
+                base_forward_result,
+            )
+        )
+
+        # Mirror the trace wrapper's two calls for one candidate:
+        #  - value_and_grad receives the optimizer dofs (host ndarray) -> stores memo
+        #  - target_forward_result receives
+        #    runtime_device_put(optimizer_to_coil_dofs(candidate_x))
+        optimizer_dofs = np.array([0.5, -0.25])
+        host_fun(optimizer_dofs)
+        assert len(solve_calls) == 1
+
+        candidate_x = single_stage_example._single_stage_optimizer_dofs_array(
+            optimizer_dofs
+        )
+        probe_coil_dofs = single_stage_example.runtime_device_put(
+            single_stage_example.target_coil_dofs_from_optimizer_dofs(candidate_x)
+        )
+        reused = reusing_forward_result(probe_coil_dofs)
+
+        # Memo hit through the real transform: K1 solve served, no second forward
+        # solve, base (re-solving) provider never invoked.
+        assert float(jax.device_get(reused["iota"])) == pytest.approx(0.31)
+        assert len(solve_calls) == 1
+        assert base_calls == []
+
     def test_decomposed_lane_host_sync_count_is_bounded(
         self, boozer_setup, monkeypatch
     ):

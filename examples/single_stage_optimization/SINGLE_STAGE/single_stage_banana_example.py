@@ -185,7 +185,7 @@ from simsopt.geo.surfaceobjectives import (
 )
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
-from simsopt_jax.backend.runtime import get_backend_config
+from simsopt_jax.backend.runtime import get_backend_config, get_backend_policy
 from simsopt_jax_adapters.field.biotsavart_backend import (
     BiotSavartJAX,
     SingleStageRuntimeSpecBiotSavartJAX,
@@ -854,6 +854,26 @@ def _target_lane_success_filter_cache_signature(payload) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded_payload).hexdigest()
+
+
+def build_jax_runtime_cache_metadata():
+    """Return resolved JAX cache policy for progress/results provenance."""
+    backend_config = get_backend_config()
+    backend_policy = get_backend_policy(backend_config.mode)
+    return {
+        "backend_mode": backend_config.mode,
+        "backend": backend_config.backend,
+        "jax_platform": backend_config.jax_platform,
+        "compilation_cache_policy": backend_policy.compilation_cache_policy,
+        "compilation_cache_dir": backend_config.compilation_cache_dir,
+        "jax_compilation_cache_dir": jax.config.jax_compilation_cache_dir,
+        "env_SIMSOPT_JAX_COMPILATION_CACHE_DIR": os.environ.get(
+            "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
+        ),
+        "env_JAX_COMPILATION_CACHE_DIR": os.environ.get(
+            "JAX_COMPILATION_CACHE_DIR"
+        ),
+    }
 
 
 def _hostify_target_lane_constant_tree(value):
@@ -7156,28 +7176,106 @@ def build_traceable_single_stage_value_and_grad(
     )
 
 
-def _build_decomposed_coil_host_value_and_grad(solved_pair, baseline_gradient):
+def _build_decomposed_coil_host_value_and_grad(
+    solved_pair,
+    baseline_gradient,
+    *,
+    record_outer_optimizer_event=None,
+):
     """Return host-driven K1/K2 value/grad with fused-lane failure fallback."""
     baseline_gradient_device = runtime_device_put(baseline_gradient)
+    evaluation_index = 0
+    # Single-entry memo of the most recent K1 forward result, keyed by host coil
+    # DOFs. Shared with ``reuse_forward_result_for`` so the objective-evaluation
+    # trace lane can reuse this solve instead of re-running the forward Boozer
+    # problem. The host outer loop is single-threaded (the same invariant relied
+    # on by ``evaluation_index``); keying by coil DOFs means a reuse can only ever
+    # serve the solve computed for that exact candidate.
+    last_solved_forward_result = {}
+
+    def record_decomposed_event(label, **fields):
+        if record_outer_optimizer_event is None:
+            return
+        record_outer_optimizer_event(label, **fields)
 
     def value_and_grad(coil_dofs):
+        nonlocal evaluation_index
+        evaluation_index += 1
+        current_evaluation_index = evaluation_index
         coil_dofs_device = runtime_device_put(coil_dofs)
+        k1_start_s = _perf_counter_s()
+        record_decomposed_event(
+            "target_lane_decomposed_k1_forward_started",
+            evaluation_index=current_evaluation_index,
+        )
         forward_result = solved_pair.solve_fn(coil_dofs_device)
+        if isinstance(coil_dofs, np.ndarray):
+            last_solved_forward_result["coil_dofs"] = np.array(
+                coil_dofs, dtype=np.float64, copy=True
+            )
+            last_solved_forward_result["forward_result"] = forward_result
+        success = host_bool(forward_result["success"])
+        record_decomposed_event(
+            "target_lane_decomposed_k1_forward_returned",
+            evaluation_index=current_evaluation_index,
+            elapsed_s=float(_perf_counter_s() - k1_start_s),
+            success=bool(success),
+        )
 
-        def value_grad_from_candidate():
-            return solved_pair.value_grad_from_solved(
+        def value_grad_from_candidate(branch):
+            k2_start_s = _perf_counter_s()
+            record_decomposed_event(
+                "target_lane_decomposed_k2_value_grad_started",
+                evaluation_index=current_evaluation_index,
+                branch=branch,
+            )
+            value_and_gradient = solved_pair.value_grad_from_solved(
                 coil_dofs_device,
                 forward_result["x"],
                 forward_result["linear_solve_factors"],
             )
+            record_decomposed_event(
+                "target_lane_decomposed_k2_value_grad_returned",
+                evaluation_index=current_evaluation_index,
+                branch=branch,
+                elapsed_s=float(_perf_counter_s() - k2_start_s),
+            )
+            return value_and_gradient
 
-        if host_bool(forward_result["success"]):
-            return value_grad_from_candidate()
-        if host_bool(forward_result["primal_success"]):
-            _, gradient = value_grad_from_candidate()
+        if success:
+            return value_grad_from_candidate("success")
+        primal_success = host_bool(forward_result["primal_success"])
+        record_decomposed_event(
+            "target_lane_decomposed_primal_success_gate",
+            evaluation_index=current_evaluation_index,
+            primal_success=bool(primal_success),
+        )
+        if primal_success:
+            _, gradient = value_grad_from_candidate("primal_success_rejected")
             return forward_result["value"], gradient
+        record_decomposed_event(
+            "target_lane_decomposed_baseline_gradient_returned",
+            evaluation_index=current_evaluation_index,
+        )
         return forward_result["value"], baseline_gradient_device
 
+    def reuse_forward_result_for(coil_dofs, fallback_forward_result):
+        """Return the memoized K1 forward result, else delegate to ``fallback``.
+
+        Used only by the objective-evaluation-trace lane, after ``value_and_grad``
+        has run for the same candidate within one single-threaded eval, to avoid a
+        second redundant forward Boozer solve. On any key mismatch it falls back to
+        ``fallback_forward_result`` so it can never serve a stale solve.
+        """
+        cached = last_solved_forward_result.get("forward_result")
+        cached_coil_dofs = last_solved_forward_result.get("coil_dofs")
+        if cached is not None and cached_coil_dofs is not None:
+            probe = np.asarray(host_array(coil_dofs, dtype=np.float64))
+            if np.array_equal(probe, cached_coil_dofs):
+                return cached
+        return fallback_forward_result(coil_dofs)
+
+    value_and_grad.reuse_forward_result_for = reuse_forward_result_for
     return value_and_grad
 
 
@@ -8008,6 +8106,7 @@ def build_target_lane_outer_objectives(
     profile_optimizer_dofs=None,
     profile_progress_json_path=None,
     stablehlo_dir=None,
+    record_outer_optimizer_event=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
     target_scalar_objective = None
@@ -8028,6 +8127,10 @@ def build_target_lane_outer_objectives(
 
     target_scalar_objective = runtime_bundle["objective"]
     if use_decomposed_solved_pair:
+        if record_outer_optimizer_event is not None:
+            record_outer_optimizer_event(
+                "target_lane_decomposed_seeded_value_grad_started"
+            )
         seeded_value_and_grad = (
             get_traceable_single_stage_seeded_value_and_grad_builder()(
                 boozer_surface,
@@ -8037,6 +8140,13 @@ def build_target_lane_outer_objectives(
                 success_filter=success_filter,
             )
         )
+        if record_outer_optimizer_event is not None:
+            record_outer_optimizer_event(
+                "target_lane_decomposed_seeded_value_grad_returned"
+            )
+            record_outer_optimizer_event(
+                "target_lane_decomposed_solved_pair_started"
+            )
         solved_pair = get_traceable_single_stage_solved_pair_builder()(
             boozer_surface,
             bs,
@@ -8044,9 +8154,14 @@ def build_target_lane_outer_objectives(
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
+        if record_outer_optimizer_event is not None:
+            record_outer_optimizer_event(
+                "target_lane_decomposed_solved_pair_returned"
+            )
         target_value_and_grad_objective = _build_decomposed_coil_host_value_and_grad(
             solved_pair,
             seeded_value_and_grad.optimizer_initial_value_and_grad[1],
+            record_outer_optimizer_event=record_outer_optimizer_event,
         )
         target_optimizer_initial_value_and_grad = (
             seeded_value_and_grad.optimizer_initial_value_and_grad
@@ -8205,6 +8320,23 @@ def build_single_stage_target_lane_objective_evaluation_trace_forward_result(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
+
+
+def _make_reusing_trace_forward_result(reuse_forward_result_for, base_forward_result):
+    """Wrap a trace forward-result provider so it reuses the decomposed K1 solve.
+
+    ``reuse_forward_result_for`` (exposed by
+    ``_build_decomposed_coil_host_value_and_grad``) returns the forward result the
+    decomposed value/grad already computed for the same candidate within one
+    single-threaded eval, falling back to ``base_forward_result`` on any key
+    mismatch. This removes the second, redundant forward Boozer solve the trace
+    lane would otherwise run per evaluation.
+    """
+
+    def forward_result(coil_dofs):
+        return reuse_forward_result_for(coil_dofs, base_forward_result)
+
+    return forward_result
 
 
 def build_target_lane_profile_coil_dofs(coil_dofs):
@@ -8861,6 +8993,7 @@ def prepare_target_lane_outer_objectives(
     surf_dist_weight,
     curvature_threshold,
     curvature_weight,
+    record_outer_optimizer_event=None,
 ):
     """Build target-lane outer objectives with smooth penalty terms only."""
     target_scalar_objective = None
@@ -8930,6 +9063,7 @@ def prepare_target_lane_outer_objectives(
         profile_optimizer_dofs=profile_optimizer_dofs,
         profile_progress_json_path=profile_progress_json_path,
         stablehlo_dir=stablehlo_dir,
+        record_outer_optimizer_event=record_outer_optimizer_event,
     )
     if target_scalar_objective is None:
         target_scalar_objective = _scalar_objective_from_value_and_grad(
@@ -12447,6 +12581,12 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
         )
         objective_dofs = runtime_device_put(objective_input_values)
         coil_dofs = runtime_device_put(coil_dof_values)
+        # This replay diagnostic intentionally re-solves the forward problem here
+        # rather than reusing the decomposed K1 solve the way the live optimizer
+        # trace lane does (via reuse_forward_result_for). value_and_grad and
+        # target_forward_result are fed device arrays, so the host-ndarray-keyed
+        # reuse memo never populates; replay favors faithful re-execution over
+        # solve reuse, so the second solve is an accepted cost of this path.
         objective_value, optimizer_gradient = target_value_and_grad_objective(
             objective_dofs
         )
@@ -15109,6 +15249,7 @@ if __name__ == "__main__":
         and args.record_target_optimizer_state_trace
         and outer_optimizer_legacy_method == "lbfgs-ondevice"
     )
+    jax_runtime_cache_metadata = build_jax_runtime_cache_metadata()
 
     record_outer_optimizer_event(
         "pre_optimizer_startup_ready",
@@ -15116,6 +15257,10 @@ if __name__ == "__main__":
         target_lane_full_state_optimizer=bool(use_target_lane_full_state_optimizer),
         output_dir=OUT_DIR_ITER,
         optimizer_method=outer_optimizer_legacy_method,
+    )
+    record_outer_optimizer_event(
+        "jax_runtime_cache_policy",
+        **jax_runtime_cache_metadata,
     )
     boozer_init_progress(
         "starting",
@@ -15895,6 +16040,7 @@ if __name__ == "__main__":
                 surf_dist_weight=SURF_DIST_WEIGHT,
                 curvature_threshold=CURVATURE_THRESHOLD,
                 curvature_weight=CURVATURE_WEIGHT,
+                record_outer_optimizer_event=record_outer_optimizer_event,
             )
             target_lane_outer_objective_config = (
                 build_target_lane_outer_objective_config(
@@ -16445,6 +16591,7 @@ if __name__ == "__main__":
                         surf_dist_weight=SURF_DIST_WEIGHT,
                         curvature_threshold=CURVATURE_THRESHOLD,
                         curvature_weight=CURVATURE_WEIGHT,
+                        record_outer_optimizer_event=record_outer_optimizer_event,
                     )
                     record_outer_optimizer_event(
                         "target_lane_objective_provider_setup_returned"
@@ -17129,6 +17276,18 @@ if __name__ == "__main__":
                             target_forward_result = (
                                 target_lane_objective_trace_forward_result
                             )
+                            decomposed_reuse_forward_result_for = getattr(
+                                target_value_and_grad_objective,
+                                "reuse_forward_result_for",
+                                None,
+                            )
+                            if decomposed_reuse_forward_result_for is not None:
+                                target_forward_result = (
+                                    _make_reusing_trace_forward_result(
+                                        decomposed_reuse_forward_result_for,
+                                        target_forward_result,
+                                    )
+                                )
                             optimizer_target_value_and_grad_objective = build_single_stage_target_lane_objective_evaluation_trace_wrapper(
                                 target_value_and_grad_objective=(
                                     target_value_and_grad_objective
@@ -18058,6 +18217,13 @@ if __name__ == "__main__":
         "JAX_RUNTIME_SEED_SPEC_PATH": None
         if warm_start_runtime_spec_state is None
         else warm_start_runtime_spec_state["path"],
+        "JAX_RUNTIME_CACHE": jax_runtime_cache_metadata,
+        "JAX_COMPILATION_CACHE_DIR_RESOLVED": jax_runtime_cache_metadata[
+            "compilation_cache_dir"
+        ],
+        "JAX_COMPILATION_CACHE_POLICY": jax_runtime_cache_metadata[
+            "compilation_cache_policy"
+        ],
         "STAGE2_SOURCE": stage2_source,
         "STAGE2_SOURCE_REQUESTED": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
