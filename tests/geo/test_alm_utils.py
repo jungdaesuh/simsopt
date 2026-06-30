@@ -43,15 +43,15 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
         doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
         doc = doc_path.read_text(encoding="utf-8")
         citations = {
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2831-2838": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:3726-3733": (
                 "augmented_inequality_objective(",
                 "normalized_surrogate_signed_constraint_values",
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2839-2861": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:3734-3761": (
                 '"hard_dual_update_values"',
                 '"surrogate_signed_constraint_values"',
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2853-2860": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:3750-3756": (
                 '"raw_dual_update_values"',
             ),
             "examples/single_stage_optimization/alm_utils.py:2264-2325": (
@@ -59,7 +59,7 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
                 'evaluation["hard_dual_update_values"]',
                 "preferred_dual_update_values",
             ),
-            "examples/single_stage_optimization/alm_utils.py:3466-3481": (
+            "examples/single_stage_optimization/alm_utils.py:3475-3490": (
                 "def _handle_alm_dual_update_transition",
                 "_project_nonnegative_multipliers_with_diagnostics",
                 "routing_state.signal_state.preferred_dual_update_values",
@@ -70,19 +70,19 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
                 "surrogate_activity_mask",
                 "signal_mismatch_active",
             ),
-            "examples/single_stage_optimization/alm_utils.py:4663-4672": (
+            "examples/single_stage_optimization/alm_utils.py:4672-4681": (
                 "and not signal_mismatch_active",
                 "and not run_state.last_cap_binding_active",
             ),
-            "examples/single_stage_optimization/alm_utils.py:4655-4661": (
+            "examples/single_stage_optimization/alm_utils.py:4664-4670": (
                 "constraints_inactive_candidate = (",
                 "and not signal_mismatch_active",
             ),
-            "examples/single_stage_optimization/alm_utils.py:4699-4702": (
+            "examples/single_stage_optimization/alm_utils.py:4706-4711": (
                 "stationarity_norm <= settings.stationarity_tol",
                 "and not run_state.last_cap_binding_active",
             ),
-            "examples/single_stage_optimization/alm_utils.py:4358-4370": (
+            "examples/single_stage_optimization/alm_utils.py:4362-4375": (
                 "current_max_feasibility_violation <= settings.feasibility_tol",
                 "and not current_signal_mismatch_active",
                 "and not run_state.last_cap_binding_active",
