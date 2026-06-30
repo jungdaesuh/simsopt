@@ -44,7 +44,20 @@ from banana_opt.single_stage_objectives import (  # noqa: E402
     _hard_max_curvature_signed_constraint,
     _single_stage_alm_constraint_metadata,
 )
+from banana_opt.single_stage_banana_geometry_mode import (  # noqa: E402
+    BANANA_GEOMETRY_MODE_FREE_XYZ,
+    BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
+    BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+)
+from banana_opt.surface_mode_contracts import (  # noqa: E402
+    PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE,
+)
 from banana_opt.wout_convention import wout_convention_artifact_fields  # noqa: E402
+from topology_scorer import (  # noqa: E402
+    SEED_MODE_CHOICES,
+    SEED_MODE_EXTENDED_SURFACE,
+    SEED_MODE_MIDPLANE,
+)
 
 
 SINGLE_STAGE_MODULE_PATH = (
@@ -443,6 +456,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "DEFAULT_RESIDUE_PROMOTION_GATE_SAMPLES",
                 "DEFAULT_RESIDUE_PROMOTION_GATE_RADIUS",
                 "DEFAULT_RESIDUE_PROMOTION_GATE_SEED",
+                "DEFAULT_TOPOLOGY_SEED_EXTEND_DISTANCE_M",
+                "EDGE_DELIVERED_IOTA_LANE_PROFILE_WEIGHT",
+                "EDGE_DELIVERED_IOTA_LANE_PROFILE_SURFACE_WEIGHTS",
+                "EDGE_DELIVERED_IOTA_LANE_WINDING_SURFACE_FREE_MP",
+                "EDGE_DELIVERED_IOTA_LANE_WINDING_SURFACE_FREE_NT",
+                "SINGLE_STAGE_LANE_DEFAULT",
+                "SINGLE_STAGE_LANE_EDGE_DELIVERED_IOTA",
+                "SINGLE_STAGE_LANE_CHOICES",
                 "SINGLE_STAGE_GEODESIC_CURVATURE_WEIGHT_DEFAULT",
                 "SINGLE_STAGE_GEODESIC_CURVATURE_THRESHOLD_DEFAULT",
                 "SINGLE_STAGE_GEODESIC_CURVATURE_P_DEFAULT",
@@ -454,11 +475,15 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION": (
                     BANANA_FOLD_GEODESIC_CURVATURE_MARGIN_FRACTION
                 ),
+                "PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE": (
+                    PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE
+                ),
             },
         )
         globals_for_extract = {
             "argparse": _argparse,
             "os": _os,
+            "sys": sys,
             "np": np,
             "COIL_COIL_MIN_DIST_M": 0.0462,
             "COIL_LENGTH_HARD_LIMIT_M": 2.0,
@@ -515,6 +540,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "interior_covering_deep",
             ),
             "PUBLISHED_PRESET_DEFAULT_V1": "default_v1",
+            "PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE": (
+                PUBLISHED_PRESET_EDGE_DELIVERED_IOTA_LANE
+            ),
             "BANANA_CURRENT_HARD_LIMIT_A": 1.6e4,
             "BANANA_CURRENT_MODE_SHARED": "shared",
             "BANANA_CURRENT_MODE_INDEPENDENT": "independent",
@@ -535,8 +563,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "HARDWARE_KEEPOUT_SAFETY_MARGIN_M": 0.005,
             "LCFS_CONSTRAINT_MODES": ("centered", "edge_envelope"),
             "LCFS_CONSTRAINT_MODE_DEFAULT": "centered",
-            "BANANA_GEOMETRY_MODE_SHARED_SYMMETRY": "shared_symmetry",
-            "BANANA_GEOMETRY_MODE_MATERIALIZED_CWS": "materialized_cws",
+            "BANANA_GEOMETRY_MODE_SHARED_SYMMETRY": (
+                BANANA_GEOMETRY_MODE_SHARED_SYMMETRY
+            ),
+            "BANANA_GEOMETRY_MODE_MATERIALIZED_CWS": (
+                BANANA_GEOMETRY_MODE_MATERIALIZED_CWS
+            ),
+            "BANANA_GEOMETRY_MODE_FREE_XYZ": BANANA_GEOMETRY_MODE_FREE_XYZ,
+            "SEED_MODE_CHOICES": SEED_MODE_CHOICES,
+            "SEED_MODE_EXTENDED_SURFACE": SEED_MODE_EXTENDED_SURFACE,
+            "SEED_MODE_MIDPLANE": SEED_MODE_MIDPLANE,
             "CLEARANCE_ARC_WEIGHT_PROFILES": (
                 "curvature",
                 "smooth_toroidal_rate",
@@ -582,7 +618,17 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         }
         fns = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
-            ["add_confinement_surrogate_args", "parse_args"],
+            [
+                "_cli_option_supplied",
+                "_config_source_supplied",
+                "add_confinement_surrogate_args",
+                "apply_single_stage_lane_preset",
+                "edge_delivered_iota_lane_profile_surface_weights",
+                "format_single_stage_iota_profile_surface_weights",
+                "parse_args",
+                "parse_published_surface_fractions",
+                "parse_single_stage_iota_profile_surface_weights",
+            ],
             globals_for_extract,
         )
         test_argv = [
