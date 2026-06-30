@@ -8625,15 +8625,22 @@ class IotaShearShortfallTests(_ModuleTestCase):
     def test_edge_iota_shear_shortfall_gradient_rewards_more_shear(self):
         # With spread < 0 (axis > edge), increasing |spread| (more shear) must
         # LOWER the penalty. Give each surface a single +iota dof so the sign of
-        # d(penalty)/d(iota) is read directly: raising axis-iota grows the gap
-        # (dJ < 0) and raising edge-iota shrinks it (dJ > 0). The concatenated
-        # free-dof vector orders axis dofs first, then edge dofs.
+        # d(penalty)/d(iota) is read by objective identity: raising axis-iota
+        # grows the gap (dJ < 0) and raising edge-iota shrinks it (dJ > 0).
+        # The flattened vector order is owned by the Optimizable graph and is
+        # validated separately by the finite-difference test against ``term.x``.
         axis = _LinearIotaLeaf(self.AXIS_IOTA, [1.0])
         edge = _LinearIotaLeaf(self.EDGE_IOTA, [1.0])
         term = self.module.IotaShearShortfall(axis, edge, self.SHEAR_TARGET)
-        grad = term.dJ()
-        self.assertLess(grad[0], 0.0, msg=f"d/d(axis iota) not negative: {grad}")
-        self.assertGreater(grad[1], 0.0, msg=f"d/d(edge iota) not positive: {grad}")
+        partials = term.dJ(partials=True)
+        axis_grad = partials(axis)
+        edge_grad = partials(edge)
+        self.assertLess(
+            axis_grad[0], 0.0, msg=f"d/d(axis iota) not negative: {axis_grad}"
+        )
+        self.assertGreater(
+            edge_grad[0], 0.0, msg=f"d/d(edge iota) not positive: {edge_grad}"
+        )
 
     def test_builder_returns_none_for_single_surface(self):
         # Single-surface mode has no axis->edge profile: clean no-op, no crash.
