@@ -116,6 +116,8 @@ _STOKES_FLUX_RTOL = 1e-5
 _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
+_LINEAX_LSMR_AVAILABLE = hasattr(_opt.lineax, "LSMR")
+_LINEAX_LSMR_SKIP_REASON = "lineax>=0.1.1 is required for LSMR comparator tests"
 
 _PUBLIC_LBFGS_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["lbfgs"]
 _PUBLIC_LS_MANUAL_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["ls_manual"]
@@ -10456,6 +10458,40 @@ class TestUpstreamFactoryBoozerMatrix:
         assert calls[0]["rhs_shape"] == tuple(rhs.shape)
         assert calls[0]["stab"] == pytest.approx(1.0e-4)
         assert calls[0]["tol"] == pytest.approx(booz._linear_solve_tolerance())
+
+    @pytest.mark.skipif(not _LINEAX_LSMR_AVAILABLE, reason=_LINEAX_LSMR_SKIP_REASON)
+    def test_host_jax_kernel_bundle_lsmr_j_runs_under_strict_transfer_guard(
+        self,
+        monkeypatch,
+    ):
+        """The real residual-J LSMR bundle entrypoint stays transfer-clean."""
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        booz.options["newton_stab"] = 1.0e-4
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+        x = jax.device_put(
+            jnp.asarray(
+                np.concatenate((booz.surface.get_dofs(), [-0.3, 1.0])),
+                dtype=jnp.float64,
+            )
+        )
+        rhs = jax.device_put(jnp.zeros_like(x))
+        coil_set_spec = jax.tree.map(jax.device_put, booz.coil_set_spec)
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+
+        warmup_solution, warmup_status = bundle.linear_solve(x, rhs, coil_set_spec)
+        warmup_solution.block_until_ready()
+        assert bool(np.asarray(warmup_status.success))
+
+        with jax.transfer_guard("disallow"):
+            solution, status = bundle.linear_solve(x, rhs, coil_set_spec)
+            solution.block_until_ready()
+
+        assert bool(np.asarray(status.success))
+        np.testing.assert_allclose(np.asarray(solution), np.zeros_like(np.asarray(rhs)))
 
     def test_host_jax_kernel_bundle_lsmr_j_rejects_zero_stab(self, monkeypatch):
         """The production bundle path fails closed for unsupported ``stab=0``."""

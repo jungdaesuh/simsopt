@@ -3492,7 +3492,7 @@ def jax_least_squares_optimistix(
     solver = optx.LevenbergMarquardt(
         rtol=tol_value,
         atol=tol_value,
-        linear_solver=lineax.LSMR(rtol=tol_value, atol=tol_value),
+        linear_solver=_lineax_lsmr_solver(rtol=tol_value, atol=tol_value),
     )
     solution = optx.least_squares(
         optx_residual,
@@ -3648,6 +3648,17 @@ _EXACT_ADJOINT_DENSE_LU = (
     os.environ.get("SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0").strip().lower()
     not in ("", "0", "false", "off", "no")
 )
+
+
+def _lineax_lsmr_solver(*, rtol, atol, max_steps=None):
+    """Return the Lineax LSMR solver required by residual-J comparator paths."""
+    solver_type = getattr(lineax, "LSMR", None)
+    if solver_type is None:
+        raise RuntimeError(
+            "Lineax LSMR is required for this solver path. Install the JAX "
+            "extra from pyproject.toml so lineax>=0.1.1 is available."
+        )
+    return solver_type(rtol=rtol, atol=atol, max_steps=max_steps)
 
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
@@ -5057,7 +5068,7 @@ def _solve_regularized_normal_system_lsmr_j_with_status(
     solution = lineax.linear_solve(
         operator,
         target,
-        solver=lineax.LSMR(
+        solver=_lineax_lsmr_solver(
             rtol=solver_tol,
             atol=solver_tol,
             max_steps=max_steps,

@@ -27,11 +27,14 @@ import numpy as np
 import pytest
 
 jax = pytest.importorskip("jax")
-pytest.importorskip("lineax")
+lineax = pytest.importorskip("lineax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
+
+_LINEAX_LSMR_AVAILABLE = hasattr(lineax, "LSMR")
+_LINEAX_LSMR_SKIP_REASON = "lineax>=0.1.1 is required for LSMR comparator tests"
 
 
 def _spd_problem(n=12, seed=0):
@@ -142,6 +145,7 @@ def _rectangular_j_problem(m=18, n=9, seed=0, stab=0.25):
     return jacobian, residual_fn, objective_fn, rhs, expected
 
 
+@pytest.mark.skipif(not _LINEAX_LSMR_AVAILABLE, reason=_LINEAX_LSMR_SKIP_REASON)
 def test_lsmr_j_regularized_normal_system_matches_dense_oracle():
     """LSMR-on-J solves the same regularized normal system as a dense oracle."""
     _, residual_fn, _, rhs, expected = _rectangular_j_problem(seed=10)
@@ -162,6 +166,7 @@ def test_lsmr_j_regularized_normal_system_matches_dense_oracle():
     )
 
 
+@pytest.mark.skipif(not _LINEAX_LSMR_AVAILABLE, reason=_LINEAX_LSMR_SKIP_REASON)
 def test_lsmr_j_regularized_normal_system_handles_column_batched_rhs():
     """The LSMR-on-J comparator preserves the existing column-batched RHS contract."""
     jacobian, residual_fn, _, rhs, _ = _rectangular_j_problem(seed=11)
@@ -190,6 +195,7 @@ def test_lsmr_j_regularized_normal_system_handles_column_batched_rhs():
     )
 
 
+@pytest.mark.skipif(not _LINEAX_LSMR_AVAILABLE, reason=_LINEAX_LSMR_SKIP_REASON)
 def test_hessian_least_squares_dispatches_to_lsmr_j(monkeypatch):
     """The explicit selector routes through residual-J LSMR, not the Hessian helper."""
     _, residual_fn, objective_fn, rhs, expected = _rectangular_j_problem(seed=13)
@@ -236,6 +242,13 @@ def test_lsmr_j_dispatch_requires_residual_fn_and_positive_stab(monkeypatch):
             tol=1e-11,
             residual_fn=residual_fn,
         )
+
+
+def test_lsmr_j_reports_lineax_dependency_contract(monkeypatch):
+    """A stale Lineax install fails closed with the repo dependency contract."""
+    monkeypatch.delattr(_optimizer.lineax, "LSMR", raising=False)
+    with pytest.raises(RuntimeError, match="lineax>=0.1.1"):
+        _optimizer._lineax_lsmr_solver(rtol=1e-11, atol=1e-11)
 
 
 # --- Opt-in dense-LU exact-Boozer adjoint solver (SIMSOPT_EXACT_ADJOINT_DENSE_LU) ---
