@@ -204,22 +204,24 @@ Taylor checks and was reverted).
          capping UNDER-reports true clearance when coils are well-separated — fine
          for a `≥ threshold` gate, a fidelity loss if exact clearance is recorded
          (handled by the conditional below).
-   - [ ] `geo/curveobjectives.py:240-248` — in `CurveCurveDistance.shortest_distance`,
+   - [x] `geo/curveobjectives.py:240-248` — in `CurveCurveDistance.shortest_distance`,
          when `len(self.candidates) == 0` `return self.minimum_distance`
          (true min is provably ≥ threshold; matches `min([minimum_distance]+…)` cap).
-   - [ ] `geo/curveobjectives.py:372-378` — same fix in
+   - [x] `geo/curveobjectives.py:372-378` — same fix in
          `CurveSurfaceDistance.shortest_distance`.
-   - [ ] For the achieved-clearance-metric callers above, decide per call site:
+   - [ ] For the achieved-clearance-metric callers above, decide per call site
+         before treating persisted values as exact achieved clearance:
          (a) confirm the metric is only consumed as a `≥ threshold` pass/fail (cap is
          fine), or (b) if exact clearance must be recorded, give those sites an exact
          path — honor `self.downsample` and precompute the downsampled gamma list
          once outside the comprehension (a one-time `scipy.cKDTree` per curve +
          nearest-neighbor query) — do NOT keep full-resolution `cdist`.
-   - [ ] Update `tests/geo/test_curve_objectives.py`: revise the existing
+   - [x] Update `tests/geo/test_curve_objectives.py`: revise the existing
          `CurveSurfaceDistance` empty-candidate assertion (`:402-411`) and add a
          `CurveCurveDistance` empty-candidate assertion so both classes lock the
          capped-return contract.
-   - [ ] Extend the metric audit beyond the original three sites:
+   - [ ] Extend the metric audit beyond the original three sites. The source
+         behavior is landed; exact-vs-capped metric labeling remains pending for:
          `banana_opt/stage2_objectives.py:2254,2827`,
          `src/simsopt/util/permanent_magnet_helper_functions.py:161`, advanced /
          intermediate example prints, and summary readers that consume the
@@ -232,14 +234,13 @@ Taylor checks and was reverted).
    genuinely consumes it. Scope this change to
    `minimize_boozer_penalty_constraints_newton` only; leave
    `solve_residual_equation_exactly_newton` untouched.
-   - [ ] In `boozersurface.py:718-719` (LS solver), either (a) build `r` from the
-         already-cached `biotsavart.B()` (still set at the converged points from the
-         loop's final `derivatives=2` eval at `:714`) + `surface.gammadash1/2` in
-         NumPy, or (b) gate the `boozer_penalty_constraints(..., derivatives=0)` call
-         behind `options.get('verbose')`. Do not call the non-vectorized path
-         unconditionally.
-   - [ ] Regression guard after editing — re-run the consumer grep and confirm no
-         new LS-path `res['residual']` consumer appeared:
+   - [x] In `boozersurface.py:718-719` (LS solver), skip the raw residual diagnostic
+         recompute entirely and return `res["residual"] is None`; convergence remains
+         checked from the scalarized LS gradient/Jacobian path, while the EXACT solver
+         still returns its raw residual.
+   - [x] Regression guard after editing — re-run the consumer grep and confirm no
+         new LS-path `res['residual']` consumer appeared. Current grep hits are exact
+         solver consumers, generic DESC/result readers, verbose prints, or tests:
          `rg -n "res\['residual'\]|res\.get\(\"residual\"\)|get\(\"residual\"\)|\['residual'\]" src examples tests -g '*.py'`.
 
 ### Phase 2 — Systemic multi-primal-grad sweep (numerically identical, ~10 sites)
@@ -250,51 +251,52 @@ Fix template:
 unpack the tuple in `dJ()`.
 
 1. `field/force.py` (P2 medium + P3 low).
-   - [ ] `MeanSquaredForce` (`:204-271`) — one `argnums=(0,1,2,3,4)` grad; unpack
+   - [x] `MeanSquaredForce` (`:204-271`) — one `argnums=(0,1,2,3,4)` grad; unpack
          `dJ_dgamma…dJ_dB` from a single call in `dJ()` (`:261-269`).
-   - [ ] `LpCurveForce` (`:92-159`) — identical refactor in `dJ()` (`:137-159`).
+   - [x] `LpCurveForce` (`:92-159`) — identical refactor in `dJ()` (`:137-159`).
    - [ ] Optional deeper win: switch `J_jax` to
          `value_and_grad(J_pure, argnums=(0,1,2,3,4))` and cache `(value, grads)`
          keyed on `set_points` so `J()` and `dJ()` share the single forward
          (currently `J()` does a 6th forward).
 2. `geo/framedcurve.py` (P3 low ×2 + P4 micro).
-   - [ ] Strain penalty binormal/torsion (`:90-118, 181-243, 319-343, 357-457,
+   - [x] Strain penalty binormal/torsion (`:90-118, 181-243, 319-343, 357-457,
          545-569, 630-674`) — replace `binormgrad_vjp0,1,2,4,5` (and Frenet 6×)
          with one multi-primal `vjp(self.binorm, *primals)[1](v)`; unpack
-         `grad0…grad5`. Capture the primal output to also serve `J()`'s separate
-         `frame_binormal_curvature()` forward.
-   - [ ] Finite-build filament frame (`:245-300, 459-506, 676-723, 832-862,
+         `grad0…grad5`.
+   - [ ] Optional deeper win: capture the VJP primal output to also serve `J()`'s
+         separate `frame_binormal_curvature()` forward. The VJP consolidation is
+         landed; cross-call `J()`/`dJ()` forward-sharing remains unproven.
+   - [x] Finite-build filament frame (`:245-300, 459-506, 676-723, 832-862,
          916-946, 976-1014`) — single multi-primal
          `vjp(rotated_*_frame, …)[1]((v0,v1,v2))` and
          `vjp(rotated_*_frame_dash, …)[1]((v0,v1,v2))`; remove per-arg closures.
 3. `geo/curveobjectives.py` (P4 low).
-   - [ ] `CurveCurveDistance` (`:211-214`) — one `argnums=(0,1,2,3)` grad; unpack in
+   - [x] `CurveCurveDistance` (`:211-214`) — one `argnums=(0,1,2,3)` grad; unpack in
          `dJ()` (`:299-302`).
-   - [ ] `CurveSurfaceDistance` (`:351-352`) — one `argnums=(0,1)` grad.
+   - [x] `CurveSurfaceDistance` (`:351-352`) — one `argnums=(0,1)` grad.
 4. `examples/.../banana_opt` constraint terms (P4 low + P4/P5 micro).
-   - [ ] `self_intersect.py` (`:335-512`) — collapse the two separate grads over the
+   - [x] `self_intersect.py` (`:335-512`) — collapse the two separate grads over the
          O(N²) distance-matrix graph into one multi-primal grad.
-   - [ ] `fold_buildability.py` — `RotationAwareCurvatureExcessPenalty.dJ`
+   - [x] `fold_buildability.py` — `RotationAwareCurvatureExcessPenalty.dJ`
          (`:263-339`, 5 grads → 1) and TWO two-grad terms:
          `CurveSurfaceGeodesicCurvature` (grad defs `:57-68`, dJ `:92-99`) and
          `NormalizedCurveCurvatureHinge` (grad defs `:142-151`, dJ `:156-164`).
-   - [ ] `hardware_keepout.py` — `CurveHardwareKeepout.dJ` second grad pass when
-         `R0` free (`:1043-1073`) and the SDF family double trilinear-interp
-         (`:1155-1683`, `argnums=0` then `argnums=3`): compute both cotangents in
-         one pass.
-   - [ ] `poloidal_extent.py:194-197` and `ellipse_width.py:165-167` — live grep
+   - [x] `hardware_keepout.py` — `CurveHardwareKeepout.dJ` second grad pass when
+         `R0` free and the SDF family double trilinear-interp now use tuple-argnums
+         paths for the multi-primal cases. Remaining fixed-R0 `argnums=0` paths are
+         single-primal paths and are intentionally not part of this sweep.
+   - [x] `poloidal_extent.py:194-197` and `ellipse_width.py:165-167` — live grep
          finds the same two-primal grad pattern in banana constraints. Triage
-         whether those constraints are active in the default production lane; if
-         yes, include them in this Phase 2 sweep, otherwise explicitly defer them
-         as non-default hot path.
+         resolved by including them in the tuple-gradient sweep rather than leaving
+         a lane-dependent exception.
 
 ### Phase 3 — Per-eval framework micro overhead (universal; every `J(x)`)
 
 1. `_core/optimizable.py`.
-   - [ ] `x` setter (`:1060-1065`) — cache the total free-dof count instead of
+   - [x] `x` setter (`:1060-1065`) — cache the total free-dof count instead of
          `list(self.dof_indices.values())[-1][-1]` per call; same for the
          `dof_indices.values()` materialization at `:1062, 1213, 1232, 1294, 1313`.
-   - [ ] `x`/`full_x` getters (`:1057-1058, 1073-1074`) — avoid per-block
+   - [x] `x`/`full_x` getters (`:1057-1058, 1073-1074`) — avoid per-block
          fancy-index copy + concatenate churn where a preallocated buffer / cached
          layout suffices.
    - [ ] DAG walk — `set_recompute_flag` (`:1125-1133`) re-walks `self._children`
@@ -307,15 +309,15 @@ unpack the tuple in `dJ()`.
          recursive walk is worth memoizing too. (Corrected: earlier refs
          `:154-165, 309-324` were `DOFs._flag_recompute_opt` / `DOFs.free_x.setter`,
          unrelated to this.)
-2. `solve/serial.py:124-129`, residual callback `:139`, and sibling
+2. [x] `solve/serial.py:124-129`, residual callback `:139`, and sibling
    `serial_solve` callback `:241` — buffer the objective/residual-log writes and
    drop the per-evaluation `flush()` (flush on close / periodically), removing a
    syscall per eval. Mirror or explicitly defer the analogous `solve/mpi.py`
    flushes (`:187, :197, :390, :443`) so the scope is not ambiguous.
-3. `_core/finite_difference.py` — hoist `np.copy(x0)` out of the per-DOF loop in
+3. [x] `_core/finite_difference.py` — hoist `np.copy(x0)` out of the per-DOF loop in
    BOTH branches (`x = np.copy(x0)` at `:89` centered, `:106` forward); reuse one
    scratch vector and restore the perturbed entry each iteration.
-4. `banana_opt/single_stage_geometry.py:1177, 1192-1203` — cache the
+4. [x] `banana_opt/single_stage_geometry.py:1177, 1192-1203` — cache the
    `inspect.signature()` reflection result (per surface class) instead of
    recomputing it on every line-search Boozer re-solve guard.
 
