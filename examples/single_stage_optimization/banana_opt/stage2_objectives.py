@@ -837,6 +837,8 @@ def diagnose_seed_gradient(
     x0,
     scale,
     *,
+    dof_names=None,
+    component_top_n: int = 8,
     edge_iota_objective=None,
     edge_iota_weight: float = 0.0,
     edge_iota_target_min: float = 0.10,
@@ -861,11 +863,13 @@ def diagnose_seed_gradient(
     ``grad - grad_edge``); with no soft edge term ``grad_edge_norm_2`` is 0 and
     ``grad_hw_norm_2`` equals the full gradient norm;
     ``scaled_grad_norm_2``/``_inf`` (the transformed-space gradient seen by
-    L-BFGS-B); ``scale_min``/``scale_max``; ``raw_descent`` (``[{eps, dJ}]`` along
-    the unit ``-grad``: ``dJ<0`` => genuine descent direction); ``first_step_dJ``
-    (``J(x0 - P.step_from_gradient(grad)) - J0`` -- the untruncated identity-
-    Hessian transformed step, ``>0`` => it overshoots uphill and L-BFGS-B must
-    back off); ``verdict`` (heuristic label).
+    L-BFGS-B); top absolute components of raw, hardware, edge, transformed, and
+    physical first-step vectors when ``component_top_n`` is positive; ``scale_min``/
+    ``scale_max``; ``raw_descent`` (``[{eps, dJ}]`` along the unit ``-grad``:
+    ``dJ<0`` => genuine descent direction); ``first_step_dJ`` (``J(x0 -
+    P.step_from_gradient(grad)) - J0`` -- the untruncated identity-Hessian
+    transformed step, ``>0`` => it overshoots uphill and L-BFGS-B must back off);
+    ``verdict`` (heuristic label).
     """
     x0 = np.asarray(x0, dtype=float)
     preconditioner = as_stage2_penalty_preconditioner(scale)
@@ -901,6 +905,15 @@ def diagnose_seed_gradient(
     scaled_grad = preconditioner.grad_to_u(grad)
     first_step = preconditioner.step_from_gradient(grad)
     first_step_dJ = float(fun(x0 - first_step)[0]) - J0
+    component_summaries = _seed_gradient_component_summaries(
+        dof_names=dof_names,
+        top_n=component_top_n,
+        grad=grad,
+        grad_hw=grad_hw,
+        grad_edge=grad_edge,
+        grad_u=scaled_grad,
+        first_step=first_step,
+    )
 
     diag = {
         "J0": J0,
@@ -916,9 +929,116 @@ def diagnose_seed_gradient(
         "raw_descent": raw_descent,
         "first_step_dJ": first_step_dJ,
     }
+    diag.update(component_summaries)
     diag.update(preconditioner.results_metadata())
     diag["verdict"] = _classify_seed_gradient(diag)
     return diag
+
+
+def _seed_gradient_dof_family(name: str) -> str:
+    local = str(name).split(":")[-1]
+    if local.startswith(("phic(", "phis(", "thetac(", "thetas(")):
+        return "curve_fourier"
+    lowered = str(name).lower()
+    if "current" in lowered:
+        return "current"
+    if local.startswith(("rc(", "rs(", "zc(", "zs(")):
+        return "surface_fourier"
+    return "other"
+
+
+def _seed_gradient_component_entries(values, dof_names, top_n):
+    vector = np.asarray(values, dtype=float)
+    if top_n <= 0 or vector.size == 0:
+        return []
+    names = (
+        [str(name) for name in dof_names]
+        if dof_names is not None
+        else [f"dof[{index}]" for index in range(vector.size)]
+    )
+    if len(names) != vector.size:
+        raise ValueError(
+            f"dof_names length {len(names)} does not match gradient size {vector.size}"
+        )
+    order = np.argsort(-np.abs(vector), kind="stable")[: min(int(top_n), vector.size)]
+    return [
+        {
+            "rank": int(rank),
+            "index": int(index),
+            "name": names[int(index)],
+            "family": _seed_gradient_dof_family(names[int(index)]),
+            "value": float(vector[int(index)]),
+            "abs": float(abs(vector[int(index)])),
+        }
+        for rank, index in enumerate(order, start=1)
+    ]
+
+
+def _seed_gradient_family_norms(values, dof_names):
+    vector = np.asarray(values, dtype=float)
+    names = (
+        [str(name) for name in dof_names]
+        if dof_names is not None
+        else [f"dof[{index}]" for index in range(vector.size)]
+    )
+    if len(names) != vector.size:
+        raise ValueError(
+            f"dof_names length {len(names)} does not match gradient size {vector.size}"
+        )
+    family_values = {}
+    for name, value in zip(names, vector, strict=True):
+        family_values.setdefault(_seed_gradient_dof_family(name), []).append(float(value))
+    return {
+        family: {
+            "count": int(len(values_for_family)),
+            "norm_2": float(np.linalg.norm(values_for_family)),
+            "norm_inf": float(np.linalg.norm(values_for_family, ord=np.inf)),
+        }
+        for family, values_for_family in sorted(family_values.items())
+    }
+
+
+def _seed_gradient_component_summaries(
+    *,
+    dof_names,
+    top_n,
+    grad,
+    grad_hw,
+    grad_edge,
+    grad_u,
+    first_step,
+):
+    top_n = int(top_n)
+    if top_n < 0:
+        raise ValueError("component_top_n must be non-negative")
+    return {
+        "top_grad_components": _seed_gradient_component_entries(
+            grad, dof_names, top_n
+        ),
+        "top_grad_hw_components": _seed_gradient_component_entries(
+            grad_hw, dof_names, top_n
+        ),
+        "top_grad_edge_components": _seed_gradient_component_entries(
+            grad_edge, dof_names, top_n
+        ),
+        "top_grad_u_components": _seed_gradient_component_entries(
+            grad_u, dof_names, top_n
+        ),
+        "top_first_step_components": _seed_gradient_component_entries(
+            first_step, dof_names, top_n
+        ),
+        "grad_family_norms": _seed_gradient_family_norms(grad, dof_names),
+        "grad_u_family_norms": _seed_gradient_family_norms(grad_u, dof_names),
+        "first_step_family_norms": _seed_gradient_family_norms(first_step, dof_names),
+    }
+
+
+def _format_component_entries(entries):
+    if not entries:
+        return "none"
+    return ", ".join(
+        f"{entry['name']}={entry['value']:+.3e}" for entry in entries
+    )
 
 
 def format_seed_gradient_diagnostic(diag) -> str:
@@ -939,6 +1059,16 @@ def format_seed_gradient_diagnostic(diag) -> str:
     ]
     for d in diag["raw_descent"]:
         lines.append(f"raw -grad descent: eps={d['eps']:.0e}  dJ={d['dJ']:+.6e}")
+    if "top_grad_u_components" in diag:
+        lines.append(
+            "top |grad_u| components: "
+            + _format_component_entries(diag["top_grad_u_components"])
+        )
+    if "top_first_step_components" in diag:
+        lines.append(
+            "top |P.step_from_gradient(grad)| components: "
+            + _format_component_entries(diag["top_first_step_components"])
+        )
     lines.append(
         f"untruncated first step dJ = J(x0 - P.step_from_gradient(grad)) - J0 = "
         f"{diag['first_step_dJ']:+.6e}"

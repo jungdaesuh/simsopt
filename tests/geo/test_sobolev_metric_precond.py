@@ -280,6 +280,7 @@ def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
         stage2_sobolev_alpha=1.5,
         stage2_sobolev_h2_beta=0.0,
         stage2_sobolev_power=2,
+        stage2_surface_dof_scale=1.0e-4,
     )
 
     preconditioner = resolve_stage2_penalty_preconditioner(
@@ -297,6 +298,8 @@ def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
     assert transformed_bounds[0] == bounds[0]
     expected_rc_lower = bounds[-1][0] / WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"]
     expected_rc_upper = bounds[-1][1] / WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"]
+    expected_rc_lower /= args.stage2_surface_dof_scale
+    expected_rc_upper /= args.stage2_surface_dof_scale
     np.testing.assert_allclose(
         transformed_bounds[-1],
         (expected_rc_lower, expected_rc_upper),
@@ -315,6 +318,7 @@ def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
     assert result_payload["STAGE2_PRECONDITIONER_CURVE_BLOCK_COUNT"] == 1
     assert result_payload["STAGE2_SOBOLEV_ALPHA"] == 1.5
     assert result_payload["STAGE2_SOBOLEV_METRIC_NORMALIZATION"] == "trace_mean"
+    assert result_payload["STAGE2_SURFACE_DOF_SCALE"] == 1.0e-4
     assert result_payload["STAGE2_SOBOLEV_METRIC_TRACE_MEAN"]
     assert result_payload["STAGE2_OBJECTIVE_NORMALIZE"] is True
     assert result_payload["STAGE2_OBJECTIVE_J_REF"] == 123.0
@@ -331,6 +335,7 @@ def test_legacy_diagonal_sobolev_scale_reports_metadata():
         stage2_sobolev_alpha=4.0,
         stage2_sobolev_power=2,
         stage2_sobolev_h2_beta=0.0,
+        stage2_surface_dof_scale=1.0,
     )
 
     preconditioner = resolve_stage2_penalty_preconditioner(
@@ -356,6 +361,7 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
             SimpleNamespace(
                 stage2_sobolev_metric="h1",
                 stage2_sobolev_alpha=1.0,
+                stage2_surface_dof_scale=1.0,
                 stage2_objective_normalize=False,
                 basin_hops=1,
             )
@@ -365,6 +371,17 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
             SimpleNamespace(
                 stage2_sobolev_metric="off",
                 stage2_sobolev_alpha=2.0,
+                stage2_surface_dof_scale=1.0,
+                stage2_objective_normalize=False,
+                basin_hops=1,
+            )
+        )
+    with pytest.raises(ValueError, match="surface-dof-scale"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="off",
+                stage2_sobolev_alpha=0.0,
+                stage2_surface_dof_scale=1.0e-4,
                 stage2_objective_normalize=False,
                 basin_hops=1,
             )

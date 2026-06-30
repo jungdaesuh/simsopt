@@ -1428,6 +1428,39 @@ def build_winding_dof_scale_vector(dof_names, scale_map):
     return scale
 
 
+_SURFACE_FOURIER_DOF_PREFIXES = ("rc(", "rs(", "zc(", "zs(")
+
+
+def _is_surface_fourier_dof_name(name):
+    text = str(name)
+    local_name = text.rsplit(":", 1)[-1]
+    if not local_name.startswith(_SURFACE_FOURIER_DOF_PREFIXES):
+        return False
+    return ":" not in text or "SurfaceRZFourier" in text.rsplit(":", 1)[0]
+
+
+def build_surface_dof_scale_vector(dof_names, surface_scale=1.0):
+    """Per-DOF scale vector for exposed ``SurfaceRZFourier`` coefficients.
+
+    The scale is a metric/preconditioner coordinate choice, not a constraint
+    relaxation: ``surface_scale=1`` is exact identity, while values below one
+    shrink the identity-Hessian first step for every free R/Z surface Fourier DOF.
+    """
+    names = list(dof_names)
+    value = float(surface_scale)
+    if not (np.isfinite(value) and value > 0.0):
+        raise ValueError(
+            f"surface DOF scale must be finite and positive, got {value!r}."
+        )
+    scale = np.ones(len(names), dtype=float)
+    if value == 1.0:
+        return scale
+    for i, name in enumerate(names):
+        if _is_surface_fourier_dof_name(name):
+            scale[i] = value
+    return scale
+
+
 # CurveCWSFourier Fourier-mode DOF name prefixes (``...:phic(k)`` etc.); the
 # integer ``k`` in parens is the Fourier mode order whose gradient scales ~k^2.
 _CURVE_FOURIER_DOF_PREFIXES = ("phic(", "phis(", "thetac(", "thetas(")
@@ -1490,6 +1523,7 @@ class Stage2PenaltyPreconditioner:
     alpha: float = 0.0
     h2_beta: float = 0.0
     metric_normalization: str = "none"
+    surface_dof_scale: float = 1.0
 
     @classmethod
     def from_scale(
@@ -1500,6 +1534,7 @@ class Stage2PenaltyPreconditioner:
         alpha=0.0,
         h2_beta=0.0,
         metric_normalization="none",
+        surface_dof_scale=1.0,
     ):
         scale_array = np.asarray(scale, dtype=float)
         if scale_array.ndim != 1:
@@ -1513,6 +1548,7 @@ class Stage2PenaltyPreconditioner:
             alpha=float(alpha),
             h2_beta=float(h2_beta),
             metric_normalization=str(metric_normalization),
+            surface_dof_scale=float(surface_dof_scale),
         )
 
     @property
@@ -1596,6 +1632,7 @@ class Stage2PenaltyPreconditioner:
             "STAGE2_SOBOLEV_ALPHA": float(self.alpha),
             "STAGE2_SOBOLEV_H2_BETA": float(self.h2_beta),
             "STAGE2_SOBOLEV_METRIC_NORMALIZATION": self.metric_normalization,
+            "STAGE2_SURFACE_DOF_SCALE": float(self.surface_dof_scale),
             "STAGE2_SOBOLEV_METRIC_TRACE_MEAN": [
                 float(block.metric_trace_mean) for block in self.curve_blocks
             ],
@@ -1714,15 +1751,21 @@ def build_stage2_penalty_preconditioner(
     *,
     h2_beta=0.0,
     winding_dof_scale_map=None,
+    surface_dof_scale=1.0,
     bounds=None,
     metric_kind="h1",
 ):
     diagonal_scale = build_winding_dof_scale_vector(dof_names, winding_dof_scale_map)
+    diagonal_scale = diagonal_scale * build_surface_dof_scale_vector(
+        dof_names, surface_dof_scale
+    )
     metric_kind = str(metric_kind).lower()
     if metric_kind not in {"off", "h1", "h2"}:
         raise ValueError(f"unknown stage2 Sobolev metric kind {metric_kind!r}")
     if metric_kind == "off":
-        return Stage2PenaltyPreconditioner.from_scale(diagonal_scale)
+        return Stage2PenaltyPreconditioner.from_scale(
+            diagonal_scale, surface_dof_scale=surface_dof_scale
+        )
     curves = tuple(curves_by_block or ())
     if not curves:
         raise ValueError("stage2 Sobolev metric requires at least one curve block")
@@ -1754,6 +1797,7 @@ def build_stage2_penalty_preconditioner(
         alpha=float(alpha),
         h2_beta=beta,
         metric_normalization="trace_mean",
+        surface_dof_scale=float(surface_dof_scale),
     )
 
 

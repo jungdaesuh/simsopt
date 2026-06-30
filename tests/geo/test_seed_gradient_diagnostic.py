@@ -154,6 +154,36 @@ class SeedGradientDiagnosticTest(unittest.TestCase):
         self.assertNotIn("||grad*scale||_2=", rendered)
         self.assertNotIn("grad*scale^2", rendered)
 
+    def test_component_diagnostic_reports_named_dominant_metric_step_dofs(self):
+        curvature = np.array([1.0, 4.0, 9.0])
+        x0 = np.array([1.0, 1.0, 1.0])
+        dof_names = ("coil:phic(0)", "surface:rc(0,0)", "banana_current")
+
+        diag = diagnose_seed_gradient(
+            _quadratic(curvature),
+            x0,
+            np.ones(3),
+            dof_names=dof_names,
+            component_top_n=2,
+        )
+
+        self.assertEqual(len(diag["top_grad_components"]), 2)
+        self.assertEqual(diag["top_grad_components"][0]["name"], "banana_current")
+        self.assertEqual(diag["top_grad_components"][0]["family"], "current")
+        self.assertEqual(diag["top_grad_components"][1]["name"], "surface:rc(0,0)")
+        self.assertEqual(diag["top_grad_components"][1]["family"], "surface_fourier")
+        self.assertEqual(diag["top_grad_u_components"][0]["name"], "banana_current")
+        self.assertEqual(diag["top_first_step_components"][0]["name"], "banana_current")
+        self.assertEqual(diag["grad_family_norms"]["curve_fourier"]["count"], 1)
+        self.assertEqual(diag["grad_family_norms"]["surface_fourier"]["count"], 1)
+        self.assertEqual(diag["grad_family_norms"]["current"]["count"], 1)
+        rendered = format_seed_gradient_diagnostic(diag)
+        self.assertIn("top |grad_u| components: banana_current=+9.000e+00", rendered)
+        self.assertIn(
+            "top |P.step_from_gradient(grad)| components: banana_current=+9.000e+00",
+            rendered,
+        )
+
     def test_hardware_edge_split_equals_the_hinge_contribution(self):
         curvature = np.array([1.0, 2.0, 3.0])
         x0 = np.array([0.5, 0.5, 0.5])

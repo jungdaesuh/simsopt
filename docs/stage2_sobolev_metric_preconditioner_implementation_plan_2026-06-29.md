@@ -6,8 +6,9 @@
 
 ## Status / Precedence
 
-This plan records the metric lane for the order-64 slid-clean Stage-2
-conditioning fix and its current fallback state. Local source is implemented in
+This plan records the metric-only lane for the order-64 slid-clean Stage-2
+conditioning fix. ALM/trust-region is no longer a desired success path for this
+work. Local source is implemented in
 `5dff32284` with follow-up diagnostic/test hardening in `45d2b3ae1`, review
 hardening in `735400361`, and ALM Sobolev-alpha fail-closed hardening in
 `cc91579dd`, with fallback status wording refreshed in `0d4647a46`; the
@@ -20,13 +21,23 @@ assembled the metric but failed the descent gate for alpha 1, 4, 16, and 64.
 Every `first_step_dJ` stayed positive (H1: `+1.933950e10`, `+1.941215e10`,
 `+2.122981e10`, `+1.812255e10`; H2 beta=1: `+1.983622e10`,
 `+1.903104e10`, `+2.202494e10`, `+1.702834e10`). The metric lane therefore
-did not produce a passing real-seed diagnostic. The documented trust-region
-fallback smoke completed as Perlmutter job `55271978` (`COMPLETED|0:0`) and
-proved route engagement (`CONSTRAINT_METHOD='alm'`, `EDGE_IOTA_MODE='soft'`,
-`HARDWARE_CONSTRAINTS_OK=True`), but it is not physics closure: the smoke
-reported `EDGE_IOTA_STATUS='insufficient_samples'`. The full ALM fallback job
-`55273370` is running on `regular_1` (started `2026-06-29T16:10:10`, 6h
-limit) and has not yet produced a physics result.
+did not produce a passing real-seed diagnostic. The documented ALM trust-region
+smoke remains historical route-engagement evidence only; it is not a fallback
+completion path. The full ALM fallback job `55273370` was canceled on
+2026-06-29 (`CANCELLED by 114058`, elapsed `00:55:48`) after the lane was
+rejected as a success criterion. The next metric-only action is to identify the
+dominant post-metric DOFs from the seed-gradient diagnostic and extend the
+conditioning model only if the evidence shows the bad direction is outside the
+current curve Sobolev block. Metric-only diagnostic job `55277229` confirmed
+that the bad post-metric step is dominated by exposed `SurfaceRZFourier7` DOFs,
+not current or the already-metricized curve block: `first_step_dJ` remained
+`+2.202494e10`, with top transformed/first-step components
+`rc(0,0)=-8.971e2`, `rc(1,0)=+7.917e2`, `zs(1,0)=+1.735e2`,
+`zs(1,-1)=-1.381e2`, and `rc(1,1)=-9.692e1`. The implemented next
+metric-only fix is an opt-in diagonal `SurfaceRZFourier` scale
+(`--stage2-surface-dof-scale`, default identity) composed into the same
+`Stage2PenaltyPreconditioner`; diagnostic job `55278602` is submitted with
+`STAGE2_SURFACE_DOF_SCALE=1e-4`.
 
 ## Purpose
 
@@ -38,9 +49,8 @@ search gives up. This plan implements the **root-cause conditioning fix**: a
 genuine **non-diagonal H¹/H² Sobolev *metric* preconditioner** on the curve
 DOFs, plus **objective normalization**. Unlike globalization-only workarounds
 (ALM trust box, scipy `trust-constr`), this targets the problem conditioning
-itself. This plan initially wires only the penalty L-BFGS-B path and its
-seed-gradient diagnostic; ALM/trust-region use remains gated on explicit
-composition tests for their bound/trust-region mappings.
+itself. This plan wires only the penalty L-BFGS-B path and its seed-gradient
+diagnostic; ALM/trust-region is out of scope for completion.
 
 ## Goals
 
@@ -63,9 +73,8 @@ composition tests for their bound/trust-region mappings.
 
 ## Non-Goals
 
-- Replacing or re-tuning the ALM trust-region route (separate, complementary
-  lever; ALM inner L-BFGS-B can use this metric only after its bound/trust-box
-  composition tests pass).
+- Replacing, re-tuning, waiting on, or declaring success via the ALM
+  trust-region route.
 - Wiring scipy `trust-constr` (already recorded OOM-prone at this scale, job
   `55167099`).
 - A full quasi-Newton / Gauss-Newton Hessian preconditioner (a possible Tier-3b;
@@ -107,11 +116,11 @@ composition tests for their bound/trust-region mappings.
   `2.41e7` for every `alpha ∈ {1,4,16,64}` and `first_step_dJ` saturated at
   `~+3e23` without flipping negative. The dominant bad direction is **not** a
   single high-k curve mode that diagonal mode-scaling can reach.
-- **Operational handoff now records the failed metric gate and live fallback.**
+- **Operational handoff now records the failed metric gate and rejects fallback
+  closure.**
   `autoresearch:.handoffs/order64-conditioning.md` records the diagonal and
   non-diagonal metric sweeps as insufficient, points to this plan for the metric
-  implementation evidence, and keeps the ALM trust-region fallback as the live
-  operational lane while its full run is pending.
+  implementation evidence, and keeps completion metric-only.
 - **Confirmed building blocks.** The Stage-2 path instantiates
   **`CurveCWSFourierCPP`** (`src/simsopt/geo/curvecwsfourier.py:145`, subclass of
   `Curve, sopp.Curve`) at `banana_opt/stage2_geometry.py:715` — *not* the
@@ -174,10 +183,11 @@ only on DOFs whose live `JF.lower_bounds` / `JF.upper_bounds` entries are
 infinite. Every finite-bound non-curve DOF (winding size/current/optional VF
 current) stays in the identity/diagonal block. Bounds are preserved exactly, and
 the existing winding-corridor diagonal scale continues to handle the bounded
-block. The curve↔surface cross-metric terms are intentionally dropped (the
-surface DOFs stay in the diagonal bounded block); this is the modeling decision
-that buys bound-safety at negligible cost (surface DOFs are few and already
-corridor-scaled).
+block. The curve↔surface cross-metric terms are intentionally dropped for
+bound-safety, so exposed surface DOFs stay in the diagonal block. Job `55277229`
+showed this block is not negligible on the slid-clean seed; the bounded next
+extension is therefore an explicit `SurfaceRZFourier` coordinate scale, still
+inside the same preconditioner rather than a route fallback.
 
 This generalizes `run_scaled_winding_minimize` from a diagonal `scale` vector to
 a **linear operator** (with the diagonal case as the all-ones/identity special
@@ -372,26 +382,42 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       and `55267445` all assembled the metric but failed the descent gate.
       Positive `first_step_dJ` ranges were `+1.812255e10..+2.122981e10`
       for H1 and `+1.702834e10..+2.202494e10` for H2 beta=1.
-- [x] **Trust-region fallback smoke**: Perlmutter job `55271978` completed
+- [x] **Historical trust-region smoke (not a completion path)**: Perlmutter job `55271978` completed
       successfully (`COMPLETED|0:0`, elapsed `00:14:42`) and wrote
       `results.json` proving `CONSTRAINT_METHOD='alm'`,
       `ALM_TRUST_RADIUS_INIT=0.02`, `ALM_MAX_OUTER_ITERS=1`,
       `EDGE_IOTA_MODE='soft'`, and `HARDWARE_CONSTRAINTS_OK=True`. The edge
       report was still `EDGE_IOTA_STATUS='insufficient_samples'`, so this is
-      route-engagement proof only, not a full edge-iota success.
+      route-engagement proof only, not a metric solution or completion evidence.
+- [x] **Named component diagnostic added**: `diagnose_seed_gradient` now records
+      top raw-gradient, hardware, edge, transformed-gradient, and physical
+      first-step DOFs plus family norms when called with `JF.dof_names`. This is
+      the next metric-only root-cause probe for the failed real-seed sweep.
+- [x] **Named component diagnostic result**: Perlmutter job `55277229`
+      completed fail-closed (`FAILED|1:0`, elapsed `00:13:54`) after emitting
+      `SEED_GRADIENT_DIAGNOSTIC_JSON`. H2 alpha=16 still had
+      `first_step_dJ=+2.202494e10`; the top transformed and first-step DOFs
+      were dominated by `SurfaceRZFourier7` (`rc(0,0)`, `rc(1,0)`,
+      `zs(1,0)`, `zs(1,-1)`, `rc(1,1)`), with surface-family first-step norm
+      `1.225784e3` versus curve-family `4.179194e2`.
+- [ ] **Surface-block metric diagnostic result**: `--stage2-surface-dof-scale`
+      has been added as a default-identity metric extension and deployed to
+      Perlmutter. Job `55278602` is the first H2 alpha=16,
+      `STAGE2_SURFACE_DOF_SCALE=1e-4` slid-clean seed diagnostic; it must report
+      `first_step_dJ < 0` before any full metric run.
 - [x] **Wrapper soft-control forwarding**: `autoresearch df39e677` forwards and
       records `--stage2-edge-iota-weight` and `--stage2-edge-iota-hinge` through
       `scripts/run_one.py`, with regression coverage on the `soft` wrapper path.
       The direct Perlmutter launcher already carried these flags; this closes
       the managed wrapper route.
-- [ ] **Full ALM fallback result**: Perlmutter job `55273370` is running on
-      `regular_1` with 6h limit. It is the next operational fallback evidence,
-      but it is not complete and must not be reported as physics closure.
+- [x] **ALM fallback rejected/canceled**: Perlmutter job `55273370` was canceled
+      on 2026-06-29 (`CANCELLED by 114058`, elapsed `00:55:48`) and must not be
+      used as completion evidence.
 - [x] **Review/Crucible closure for delivered slices**: source, tests, plan, and
       handoff deltas have strict PASS review coverage (no defensive fallbacks,
       SSOT composer, no fake/jittered metric, regression tests non-tautological).
-      This review closure is not physics closure; the full ALM fallback result
-      remains the open operational gate.
+      This review closure is not physics closure; the open gate is a passing
+      metric-path real-seed diagnostic and then a full metric run.
 
 ## Risks and Mitigations
 
@@ -415,13 +441,14 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
   conditioning win is asserted only for the metric (the cond-improvement test).
 - **Risk:** the geometric metric still misses the actual dominant low-order or
   non-curve direction, just as the diagonal Sobolev sweep did.
-  **Mitigation:** require the operator-aware seed diagnostic to flip
-  `first_step_dJ < 0` before launching a long run; if it does not, the current
-  handoff's trust-region path remains the next executable action.
+  **Mitigation:** the operator-aware seed diagnostic now records named dominant
+  raw, transformed, and first-step DOFs. Use that evidence to extend the metric
+  to the actual bad block while preserving finite bounds; still require
+  `first_step_dJ < 0` before launching a long run.
 - **Risk:** plan/runbook drift.
   **Mitigation:** keep `autoresearch:.handoffs/order64-conditioning.md` and this
   plan synchronized on the actual lane state: failed metric gate, ALM fallback
-  smoke passed, full ALM result pending.
+  rejected/canceled, metric-only root-cause diagnostic next.
 - **Risk:** silent regression of the proven diagonal/off path.
   **Mitigation:** byte-identical-off + bound-preservation tests gate it; the
   operator's identity case must equal the diagonal vector path bit-for-bit.
@@ -446,19 +473,19 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       `first_step_dJ < 0` under the metric (the diagonal scale could not
       achieve this). Evidence so far: H1 and H2 beta=1 alpha values 1, 4,
       16, and 64 all assembled the metric but failed the gate. The metric
-      completion criterion is not met; fallback smoke `55271978` completed and
-      proved ALM/edge-soft route engagement only. Full ALM fallback job
-      `55273370` is running, but no result is available yet.
+      completion criterion is not met; fallback smoke `55271978` is historical
+      route-engagement evidence only, and full ALM fallback job `55273370` was
+      canceled because fallback is not a desired completion path.
 - [x] Crucible/review strict PASS for the delivered source, tests, plan, and
       handoff slices; plan cross-referenced from
       `docs/stage2_order64_sobolev_conditioning_plan_2026-06-28.md` and the
       `autoresearch:.handoffs/order64-conditioning.md` handoff updated to record
-      the failed metric gate and active ALM fallback, or explicitly left
+      the failed metric gate and metric-only next action, or explicitly left
       unchanged with this plan marked as a non-active experiment.
       Cross-reference/handoff evidence is in
       `45d2b3ae1`, `39758405`, `5cbd31cd`, `d499d62f`, `0d4647a46`, and
-      `d51795ae`. This does not close the physics gate: job `55273370` still
-      needs a full ALM fallback result.
+      `d51795ae`. This does not close the physics gate: the metric path still
+      needs a passing real-seed `first_step_dJ < 0` diagnostic.
 
 ## Open Questions
 
