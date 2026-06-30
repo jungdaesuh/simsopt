@@ -234,20 +234,8 @@ class CoilOrderUpgradeTests(unittest.TestCase):
             upgraded_curve.modes[3][seed["banana_curve"].modes[3].size :],
             np.zeros(len(upgraded_curve.modes[3]) - seed["banana_curve"].modes[3].size),
         )
-        fixed_index = next(
-            index
-            for index, dof_name in enumerate(upgraded_curve.full_dof_names)
-            if dof_name.endswith("phic(1)")
-        )
-        new_mode_index = next(
-            index
-            for index, dof_name in enumerate(upgraded_curve.full_dof_names)
-            if dof_name.endswith("phic(4)")
-        )
-        self.assertFalse(
-            upgraded_curve.dofs.free_status[fixed_index]
-        )
-        self.assertTrue(upgraded_curve.dofs.free_status[new_mode_index])
+        self.assertFalse(upgraded_curve.dofs.is_free("phic(1)"))
+        self.assertTrue(upgraded_curve.dofs.is_free("phic(4)"))
 
     def test_upgrade_cws_order_preserves_fix_status_by_name_across_blocks(self):
         # Guards against the positional-copy regression: because DOFs are laid
@@ -401,7 +389,7 @@ class SeedOrderUpgradeEntrypointTests(unittest.TestCase):
 
         _, _, banana_curve, banana_coils, *_ = loaded
         self.assertEqual(banana_curve.order, 4)
-        self.assertEqual(len(banana_curve.x), 17)
+        self.assertEqual(len(banana_curve.local_x), 17)
         self.assertEqual(len(banana_coils), len(seed["banana_coils"]))
 
     def test_single_stage_seed_loader_upgrades_banana_dofs_before_optimizer_state(self):
@@ -423,7 +411,7 @@ class SeedOrderUpgradeEntrypointTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(bs.B(), seed["expected_field"])
         self.assertEqual(banana_curve.order, 4)
-        self.assertEqual(len(banana_curve.x), 17)
+        self.assertEqual(len(banana_curve.local_x), 17)
         self.assertEqual(len(coil_partitions.banana_coils), len(seed["banana_coils"]))
 
 

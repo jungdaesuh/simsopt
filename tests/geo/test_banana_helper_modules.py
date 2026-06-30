@@ -35,9 +35,11 @@ def _load_module(module_path: Path, prefix: str):
 
 
 class _FakeSurfaceRZFourier:
-    def __init__(self, nfp, stellsym):
+    def __init__(self, nfp, stellsym, mpol=1, ntor=0):
         self.nfp = nfp
         self.stellsym = stellsym
+        self.mpol = mpol
+        self.ntor = ntor
         self.rc = {}
         self.zs = {}
 
