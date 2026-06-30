@@ -324,8 +324,9 @@ unpack the tuple in `dJ()`.
 1. `field/biotsavart.py` (P5 micro).
    - [ ] Skip the current-derivative branch when all coil currents are fixed
          (`:82-90, 117-119`).
-   - [ ] Vectorize the per-coil current-derivative reduction (`:83-85, 174-176`).
-   - [ ] Assemble the derivative tree once instead of per-coil build + N−1 dict
+   - [x] Vectorize the per-coil current-derivative reduction (`:83-85, 174-176`)
+         via `_current_vjp_scalars`.
+   - [x] Assemble the derivative tree once instead of per-coil build + N−1 dict
          merges (`:87-90, 178-181`).
 2. `geo` array-op / allocation micro (P5).
    - [x] `curvexyzfourier.py:240-244` — avoid `np.concatenate` dof rebuild per
@@ -376,9 +377,10 @@ unpack the tuple in `dJ()`.
          (`:190`) with a buffered `np.bincount` accumulation over linear
          `(label, plane)` bins. Regression covers repeated contributions to the
          same bin.
-   - [ ] `hardware_keepout.py:1034-1041` — `J()` does `res += float(self.J_jax(...))`
+   - [x] `hardware_keepout.py:1034-1041` — `J()` previously did `res += float(self.J_jax(...))`
          inside the per-candidate loop, forcing one host sync PER candidate;
-         accumulate in a JAX scalar and call `float()` ONCE after the loop (N → 1).
+         current code accumulates in a JAX scalar and calls `float()` once after
+         the loop (N → 1).
          (NOTE: the `:992-1008` `compute_candidates()` AABB rescan is NOT redundant —
          within-eval cached, re-run across evals only because `recompute_bell` nulls
          it on DOF change, i.e. geometry actually moved; only a cheaper/incremental
@@ -603,22 +605,22 @@ unpack the tuple in `dJ()`.
 
 ## Completion Criteria
 
-- [ ] Phase 1 landed: empty-candidate `shortest_distance` returns the capped
+- [x] Phase 1 landed: empty-candidate `shortest_distance` returns the capped
       lower bound; no full-res `cdist` on the well-separated hot path; the LS
       diagnostic-residual recompute removed or cached.
-- [ ] Phase 2 landed: the six target files (`force.py`, `framedcurve.py`,
+- [x] Phase 2 landed: the six target files (`force.py`, `framedcurve.py`,
       `curveobjectives.py`, `self_intersect.py`, `fold_buildability.py`,
       `hardware_keepout.py`) contain no single-argnum `grad(...)` *family* in a `dJ`
       method that should be one tuple-argnums grad. (NB: a repo-wide
       `rg -n "argnums=[0-9]" src examples` returns many single-arg grads, most
       legitimate — scope the check to these files' `dJ` methods, not a global count.)
-- [ ] Phase 3 landed: `Optimizable.x` setter/getter no longer materialize
+- [x] Phase 3 landed: `Optimizable.x` setter/getter no longer materialize
       `dof_indices.values()` per call; FD loop has no per-iteration `np.copy`;
       solve log no longer flushes per eval.
 - [ ] Equivalence gate green for all numerically-identical changes.
 - [ ] `tests/geo` + `tests/field` regression green under `.conda-env` python;
       `ruff` clean on touched files.
-- [ ] Phases 4–5 tracked: each item either landed-with-gate or explicitly deferred
+- [x] Phases 4–5 tracked: each item either landed-with-gate or explicitly deferred
       with a one-line reason.
 - [ ] Project memory updated (`project_perf_audit_hotpath_2026_06_29`) with
       landed-vs-deferred status only after the implementation actually lands.
