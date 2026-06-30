@@ -147,32 +147,83 @@ def _resolve_outer_loop_decision(
             "outer-loop hardware gate is only for vacuum_joint or finite_beta_joint",
         )
     if desc_solve_status.get("state") != "passed":
-        return "rejected", "desc_solve", str(desc_solve_status["reason"])
+        return (
+            "rejected",
+            "desc_solve",
+            _status_text(
+                desc_solve_status,
+                "reason",
+                "DESC solve status has not passed",
+            ),
+        )
     if fixed_polish_status.get("passed") is not True:
-        return "rejected", "fixed_polish_predecessor", str(
-            fixed_polish_status["reason"]
+        return (
+            "rejected",
+            "fixed_polish_predecessor",
+            _status_text(
+                fixed_polish_status,
+                "reason",
+                "fixed-polish predecessor validation has not passed",
+            ),
         )
     if run_mode == "finite_beta_joint" and lane_b_status.get("passed") is not True:
-        reason = lane_b_status.get(
-            "reason",
-            "Lane B vacuum-joint predecessor validation has not passed",
+        return (
+            "rejected",
+            "lane_b_predecessor",
+            _status_text(
+                lane_b_status,
+                "reason",
+                "Lane B vacuum-joint predecessor validation has not passed",
+            ),
         )
-        return "rejected", "lane_b_predecessor", str(reason)
     if physics_status.get("passed") is not True:
-        return "rejected", "physics_validation", str(physics_status["source"])
+        return (
+            "rejected",
+            "physics_validation",
+            _status_text(
+                physics_status,
+                "source",
+                "SIMSOPT physics validation did not pass",
+            ),
+        )
     if artifact_hardware_status.get("passed") is not True:
-        return "rejected", "artifact_hardware", str(
-            artifact_hardware_status["source"]
+        return (
+            "rejected",
+            "artifact_hardware",
+            _status_text(
+                artifact_hardware_status,
+                "source",
+                "artifact hardware validation did not pass",
+            ),
         )
     if final_oracle_status.get("passed") is not True:
         return "rejected", "final_oracle", "direct hardware/contact oracle did not pass"
     if promotion_status.get("state") != "passed":
-        return "rejected", "promotion", str(promotion_status["reason"])
+        return (
+            "rejected",
+            "promotion",
+            _status_text(
+                promotion_status,
+                "reason",
+                "joint candidate promotion is blocked",
+            ),
+        )
     return (
         "accepted",
         None,
         "joint candidate passed predecessor, physics, hardware, and oracle gates",
     )
+
+
+def _status_text(
+    status: Mapping[str, object],
+    field_name: str,
+    default: str,
+) -> str:
+    value = status.get(field_name)
+    if isinstance(value, str) and value != "":
+        return value
+    return default
 
 
 def _require_result_validation_artifact_binding(

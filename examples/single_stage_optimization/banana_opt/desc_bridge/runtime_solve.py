@@ -1044,11 +1044,7 @@ def _combined_constraint_vector_report(
             upper_bound = np.broadcast_to(upper_bound, scaled_value.shape)
         equality_mask = lower_bound == upper_bound
         inequality_mask = np.logical_not(equality_mask)
-        slack_values = np.clip(
-            scaled_value[inequality_mask],
-            lower_bound[inequality_mask],
-            upper_bound[inequality_mask],
-        )
+        slack_values = scaled_value[inequality_mask]
         slack_lower_bound = lower_bound[inequality_mask]
         slack_upper_bound = upper_bound[inequality_mask]
         slack_in_bounds = np.logical_and(

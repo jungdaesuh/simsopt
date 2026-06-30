@@ -233,15 +233,9 @@ def load_desc_equilibrium_seed_runtime(
             if spec.source_kind == "desc_h5":
                 import desc
                 from desc.io import load as desc_load
-                from desc.grid import Grid
 
                 equilibrium = desc_load(os.fspath(spec.source_path))
                 _apply_loaded_desc_h5_resolution(equilibrium, spec=spec)
-                lcfs_parity = _compute_loaded_desc_lcfs_self_parity(
-                    equilibrium,
-                    spec=spec,
-                    desc_grid_cls=Grid,
-                )
             elif spec.source_kind == "vmec_wout":
                 import desc
                 from desc.vmec import VMECIO
@@ -468,36 +462,6 @@ def _fit_desc_lcfs_from_simsopt_surface(
             mean_xyz_delta_m=float(np.mean(deltas)),
             rms_xyz_delta_m=float(np.sqrt(np.mean(deltas * deltas))),
         ),
-    )
-
-
-def _compute_loaded_desc_lcfs_self_parity(
-    equilibrium: object,
-    *,
-    spec: DescEquilibriumSeedSpec,
-    desc_grid_cls: object,
-) -> DescLcfsParityReport | None:
-    desc_surface = getattr(equilibrium, "surface", None)
-    if desc_surface is None or not callable(getattr(desc_surface, "compute", None)):
-        return None
-    samples = _sample_desc_lcfs_parameters(spec)
-    desc_xyz = _compute_desc_surface_xyz(
-        desc_surface,
-        desc_grid_cls=desc_grid_cls,
-        theta_rad=samples.theta_rad,
-        zeta_rad=samples.zeta_rad,
-    )
-    deltas = np.linalg.norm(desc_xyz - desc_xyz, axis=1)
-    return DescLcfsParityReport(
-        source_surface_type=_qualified_type_name(desc_surface),
-        desc_surface_type=_qualified_type_name(desc_surface),
-        sample_count_theta=samples.sample_count_theta,
-        sample_count_phi=samples.sample_count_phi,
-        comparison_sample_count=int(deltas.size),
-        max_source_parameter_phi_delta_rad=0.0,
-        max_xyz_delta_m=float(np.max(deltas)),
-        mean_xyz_delta_m=float(np.mean(deltas)),
-        rms_xyz_delta_m=float(np.sqrt(np.mean(deltas * deltas))),
     )
 
 

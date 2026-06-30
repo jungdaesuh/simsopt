@@ -381,6 +381,7 @@ PYTHONNOUSERSITE=1 ./.conda-env/bin/python \
   --exported-artifact /path/to/output/biot_savart_desc_export.json \
   --oracle-source-artifact /path/to/output/validation/simsopt_validation_run/surf_desc_export_boozer_surface.json \
   --physics-report /path/to/output/validation/desc_joint_simsopt_physics_validation.json \
+  --audit-script /path/to/autoresearch/scripts/audit_hardware_contacts.py \
   --output-root /path/to/output/oracle
 ```
 

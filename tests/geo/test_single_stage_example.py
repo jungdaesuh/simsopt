@@ -5840,9 +5840,47 @@ class HardwareConstraintTests(unittest.TestCase):
             ):
                 module.callback(rejected_x.copy())
 
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        self.assertIn("except RejectedCandidateAcceptError as exc:", source)
-        self.assertIn('"basin_best_result_source": "invalid_accept_abort"', source)
+        res, basin_telemetry = module.invalid_accept_basin_abort_result(
+            module.RejectedCandidateAcceptError(
+                "optimizer accepted a rejected single-stage candidate"
+            ),
+            {
+                "accepted_x": accepted_x.copy(),
+                "J": 1.25,
+                "accepted_iterations": 7,
+            },
+        )
+
+        np.testing.assert_array_equal(res.x, accepted_x)
+        np.testing.assert_array_equal(res.lowest_optimization_result.x, accepted_x)
+        self.assertEqual(res.fun, 1.25)
+        self.assertEqual(res.nit, 0)
+        self.assertEqual(res.minimization_failures, 1)
+        self.assertEqual(res.lowest_optimization_result.nit, 7)
+        self.assertFalse(res.lowest_optimization_result.success)
+        self.assertEqual(res.lowest_optimization_result.status, 2)
+        self.assertEqual(
+            res.lowest_optimization_result.message,
+            "optimizer accepted a rejected single-stage candidate",
+        )
+        self.assertEqual(
+            basin_telemetry,
+            {
+                "basin_accepted_hops": 0,
+                "basin_rejected_hops": 0,
+                "basin_completed_hops": 0,
+                "basin_best_objective": 1.25,
+                "basin_initial_objective": 1.25,
+                "basin_best_hop_objective": None,
+                "basin_best_hop_index": None,
+                "basin_best_result_source": "invalid_accept_abort",
+                "basin_objective_improvement": 0.0,
+                "basin_accept_test_rejections": 0,
+                "basin_accept_test_triggered": False,
+                "basin_nonfinite_rejections": 0,
+                "basin_normalized_step_rejections": 0,
+            },
+        )
 
     def test_topology_archive_entry_preserves_kam_metrics(self):
         module = load_single_stage_example_module()

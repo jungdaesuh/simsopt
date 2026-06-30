@@ -202,6 +202,7 @@ _DESC_JOINT_RESOLUTION_PRESETS: dict[
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    preflight_start = time.perf_counter()
     _resolve_resolution_args(args)
     validate_desc_joint_mode(args.mode)
     mode: DescJointRunMode = args.mode
@@ -304,7 +305,6 @@ def main(argv: list[str] | None = None) -> int:
         for entry in objective_stack
     ]
     preflight_payload["run_timing_seconds"] = _empty_run_timing_seconds()
-    preflight_start = time.perf_counter()
     preflight_payload["run_timing_seconds"]["preflight"] = _elapsed(preflight_start)
     preflight_path = output_root / "desc_joint_preflight.json"
     preflight_path.write_text(

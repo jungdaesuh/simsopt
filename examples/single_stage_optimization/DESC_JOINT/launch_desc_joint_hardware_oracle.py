@@ -86,7 +86,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", required=True)
     parser.add_argument(
         "--audit-script",
-        default="/Users/suhjungdae/code/columbia/autoresearch/scripts/audit_hardware_contacts.py",
+        required=True,
+        help="Path to the hardware-contact audit script.",
     )
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--timeout-seconds", type=float)

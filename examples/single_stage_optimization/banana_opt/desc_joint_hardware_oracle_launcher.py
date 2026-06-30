@@ -28,9 +28,6 @@ DESC_JOINT_HARDWARE_ORACLE_LAUNCH_SCHEMA_VERSION = (
     "desc_joint_hardware_oracle_launch_v1"
 )
 _FINAL_ORACLE_SOURCE = "direct_loaded_artifact_hardware_contact_oracle"
-_DEFAULT_AUDIT_SCRIPT = Path(
-    "/Users/suhjungdae/code/columbia/autoresearch/scripts/audit_hardware_contacts.py"
-)
 _AUDIT_FILENAME = "hardware_contact_audit.json"
 
 
@@ -48,8 +45,8 @@ def launch_desc_joint_hardware_oracle(
     exported_artifact_paths: Sequence[str | Path],
     oracle_source_artifact_path: str | Path,
     output_root: Path,
+    audit_script_path: str | Path,
     physics_report_path: str | Path | None = None,
-    audit_script_path: str | Path = _DEFAULT_AUDIT_SCRIPT,
     python_executable: str | Path = sys.executable,
     timeout_seconds: float | None = None,
     dry_run: bool = False,

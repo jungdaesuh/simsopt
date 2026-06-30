@@ -15415,6 +15415,42 @@ class RejectedCandidateAcceptError(RuntimeError):
     """Abort basin-hopping when L-BFGS-B tries to commit a rejected candidate."""
 
 
+def invalid_accept_basin_abort_result(error, run_state):
+    accepted_x = run_state["accepted_x"].copy()
+    accepted_objective = float(run_state["J"])
+    return (
+        SimpleNamespace(
+            x=accepted_x,
+            fun=accepted_objective,
+            nit=0,
+            minimization_failures=1,
+            lowest_optimization_result=SimpleNamespace(
+                x=accepted_x.copy(),
+                fun=accepted_objective,
+                nit=int(run_state.get("accepted_iterations", 0)),
+                message=str(error),
+                success=False,
+                status=2,
+            ),
+        ),
+        {
+            "basin_accepted_hops": 0,
+            "basin_rejected_hops": 0,
+            "basin_completed_hops": 0,
+            "basin_best_objective": accepted_objective,
+            "basin_initial_objective": accepted_objective,
+            "basin_best_hop_objective": None,
+            "basin_best_hop_index": None,
+            "basin_best_result_source": "invalid_accept_abort",
+            "basin_objective_improvement": 0.0,
+            "basin_accept_test_rejections": 0,
+            "basin_accept_test_triggered": False,
+            "basin_nonfinite_rejections": 0,
+            "basin_normalized_step_rejections": 0,
+        },
+    )
+
+
 def reject_search_step_on_curvature_precheck(metrics, precheck_status, step_start):
     rejection_increment = hardware_rejection_increment(run_dict["J"])
     run_dict["curvature_precheck_rejects"] = (
@@ -18923,35 +18959,7 @@ if __name__ == "__main__":
                     )
         except RejectedCandidateAcceptError as exc:
             print(f"Basin-hopping aborted: {exc}")
-            res = SimpleNamespace(
-                x=run_dict["accepted_x"].copy(),
-                fun=float(run_dict["J"]),
-                nit=0,
-                minimization_failures=1,
-                lowest_optimization_result=SimpleNamespace(
-                    x=run_dict["accepted_x"].copy(),
-                    fun=float(run_dict["J"]),
-                    nit=int(run_dict.get("accepted_iterations", 0)),
-                    message=str(exc),
-                    success=False,
-                    status=2,
-                ),
-            )
-            basin_telemetry = {
-                "basin_accepted_hops": 0,
-                "basin_rejected_hops": 0,
-                "basin_completed_hops": 0,
-                "basin_best_objective": float(run_dict["J"]),
-                "basin_initial_objective": float(run_dict["J"]),
-                "basin_best_hop_objective": None,
-                "basin_best_hop_index": None,
-                "basin_best_result_source": "invalid_accept_abort",
-                "basin_objective_improvement": 0.0,
-                "basin_accept_test_rejections": 0,
-                "basin_accept_test_triggered": False,
-                "basin_nonfinite_rejections": 0,
-                "basin_normalized_step_rejections": 0,
-            }
+            res, basin_telemetry = invalid_accept_basin_abort_result(exc, run_dict)
         (
             basin_accepted_hops,
             basin_rejected_hops,

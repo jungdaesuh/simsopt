@@ -20,6 +20,7 @@ from banana_opt.desc_bridge.objective_factory import (  # noqa: E402
     BOUNDARY_FIDELITY_FIX_HIGH_MODES,
     BOUNDARY_FIDELITY_OFF,
     COIL_SET_MIN_DISTANCE_OBJECTIVE,
+    DEFAULT_BOUNDARY_FIDELITY_FREE_MODE_SUM,
     FULL_DESC_OBJECTIVE_ABLATION_POLICY,
     DescObjectiveRuntimeAssemblyError,
     DescObjectiveRuntimeEvaluationError,
@@ -1185,6 +1186,36 @@ def _fake_desc_source_root(
                 "    def compute_scaled_error(self, x):",
                 "        raise AssertionError('combined value path must not run')",
                 "",
+                "    def compute_scaled(self, x):",
+                "        values = []",
+                "        for objective in self.objectives:",
+                "            args = objective.xs(*tuple(getattr(objective, 'things', ())))",
+                "            values.extend(objective.compute_scaled(*args))",
+                "        return values",
+                "",
+                "    @property",
+                "    def bounds_scaled(self):",
+                "        lower_bounds = []",
+                "        upper_bounds = []",
+                "        for objective in self.objectives:",
+                "            lower, upper = getattr(",
+                "                objective,",
+                "                'bounds_scaled',",
+                "                getattr(objective, 'bounds', (0.0, 0.0)),",
+                "            )",
+                "            dim_f = int(getattr(objective, 'dim_f', 1))",
+                "            if isinstance(lower, (int, float)):",
+                "                lower_values = [float(lower)] * dim_f",
+                "            else:",
+                "                lower_values = [float(value) for value in lower]",
+                "            if isinstance(upper, (int, float)):",
+                "                upper_values = [float(upper)] * dim_f",
+                "            else:",
+                "                upper_values = [float(value) for value in upper]",
+                "            lower_bounds.extend(lower_values)",
+                "            upper_bounds.extend(upper_values)",
+                "        return lower_bounds, upper_bounds",
+                "",
                 "    def jac_scaled_error(self, x):",
                 "        rows = []",
                 "        for index, _objective in enumerate(self.objectives):",
@@ -2030,11 +2061,11 @@ def test_desc_objective_runtime_assembles_fixed_polish_terms(tmp_path):
     assert objective_terms[3].kwargs["normalize_target"] is True
     assert objective_terms[4].kwargs["bounds"] == (
         COIL_COIL_MIN_DIST_M,
-        np.inf,
+        FINITE_NONBINDING_HARDWARE_UPPER_BOUND,
     )
     assert objective_terms[5].kwargs["bounds"] == (
         COIL_PLASMA_MIN_DIST_M,
-        np.inf,
+        FINITE_NONBINDING_HARDWARE_UPPER_BOUND,
     )
     assert objective_terms[5].kwargs["eq_fixed"] is True
     assert constraint_terms[0].args == (coilset,)
@@ -3199,9 +3230,16 @@ def test_desc_joint_runtime_solve_writes_constraint_feasibility_report(tmp_path)
 
     class DiagnosticObjectiveFunction:
         things = (fixture_thing,)
+        bounds_scaled = (
+            np.array([0.0, 0.0, 0.0], dtype=float),
+            np.array([1.0, 1.0, 1.0], dtype=float),
+        )
 
         def x(self, *things):
             return [0.0, 1.0]
+
+        def compute_scaled(self, *args):
+            return [0.5, 1.25, -0.1]
 
     class DiagnosticConstraint:
         things = (fixture_thing,)
@@ -3269,6 +3307,17 @@ def test_desc_joint_runtime_solve_writes_constraint_feasibility_report(tmp_path)
     assert feasibility_report["state_vector"]["dim_x"] == 2
     assert feasibility_report["violation_count"] == 2
     assert feasibility_report["max_abs_scaled_error"] == 0.25
+    assert feasibility_report["combined_constraint_vector"]["status"] == "passed"
+    assert (
+        feasibility_report["combined_constraint_vector"]["slack_vector_in_bounds"]
+        is False
+    )
+    assert (
+        feasibility_report["combined_constraint_vector"][
+            "slack_vector_out_of_bounds_count"
+        ]
+        == 2
+    )
     assert feasibility_report["constraint_terms"][0]["name"] == "DiagnosticConstraint"
     assert feasibility_report["constraint_terms"][0]["violation_count"] == 2
     assert feasibility_report["constraint_terms"][0]["worst_rows"][0] == {
@@ -4176,8 +4225,7 @@ def test_equilibrium_seed_runtime_loads_desc_h5_with_source_root(tmp_path):
         "M_grid": 20,
         "N_grid": 20,
     }
-    assert report["lcfs_parity"]["comparison_sample_count"] == 441
-    assert report["lcfs_parity"]["max_xyz_delta_m"] == 0.0
+    assert report["lcfs_parity"] is None
     equilibrium = loaded_seed.equilibrium
     assert getattr(equilibrium, "surface_refresh_rhos") == [1.0]
     assert getattr(equilibrium, "change_resolution_calls") == [
@@ -4496,6 +4544,8 @@ def test_desc_joint_runner_preflight_applies_resolution_preset_and_overrides(
         "desc_objective_deriv_mode": "blocked",
         "desc_joint_constraint_policy": HARD_VOLUME_AND_FORCE_BALANCE_POLICY,
         "desc_objective_ablation_policy": FULL_DESC_OBJECTIVE_ABLATION_POLICY,
+        "desc_boundary_fidelity_policy": BOUNDARY_FIDELITY_OFF,
+        "desc_boundary_fidelity_free_mode_sum": DEFAULT_BOUNDARY_FIDELITY_FREE_MODE_SUM,
     }
     assert run_configuration["conversion"] == {
         "desc_fourier_order": 10,
@@ -4607,8 +4657,7 @@ def test_desc_joint_runner_equilibrium_load_only_writes_runtime_report(tmp_path)
         "M_grid": 8,
         "N_grid": 8,
     }
-    assert report["lcfs_parity"]["comparison_sample_count"] == 81
-    assert report["lcfs_parity"]["max_xyz_delta_m"] == 0.0
+    assert report["lcfs_parity"] is None
     assert report["mode_profile_adjustment"] == {
         "mode": "fixed_equilibrium_polish",
         "action": "preserved",
@@ -5672,6 +5721,8 @@ def test_desc_joint_runner_fixed_polish_only_writes_desc_result_and_artifact(tmp
         "desc_objective_deriv_mode": "blocked",
         "desc_joint_constraint_policy": HARD_VOLUME_AND_FORCE_BALANCE_POLICY,
         "desc_objective_ablation_policy": FULL_DESC_OBJECTIVE_ABLATION_POLICY,
+        "desc_boundary_fidelity_policy": BOUNDARY_FIDELITY_OFF,
+        "desc_boundary_fidelity_free_mode_sum": DEFAULT_BOUNDARY_FIDELITY_FREE_MODE_SUM,
     }
     assert run_configuration["conversion"] == {
         "desc_fourier_order": 3,
@@ -7788,6 +7839,14 @@ def _result_payload_with_export_report(
     return payload
 
 
+def test_desc_joint_hardware_oracle_launcher_requires_configured_audit_script():
+    signature = inspect.signature(launch_desc_joint_hardware_oracle)
+    assert (
+        signature.parameters["audit_script_path"].default
+        is inspect.Signature.empty
+    )
+
+
 def test_desc_joint_hardware_oracle_launcher_dry_run_records_command(tmp_path):
     exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
     oracle_source_path = tmp_path / "surf_desc_export_boozer_surface.json"
@@ -8045,6 +8104,28 @@ def test_desc_joint_hardware_oracle_launcher_requires_joint_surface_binding(
     )
     assert manifest["fixed_polish_predecessor_status"]["passed"] is True
     assert manifest["promotion_status"]["state"] == "passed"
+
+
+def test_desc_joint_hardware_oracle_launcher_cli_requires_audit_script(tmp_path):
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(EXAMPLES_ROOT / "DESC_JOINT" / "launch_desc_joint_hardware_oracle.py"),
+            "--result",
+            str(tmp_path / "desc_result.json"),
+            "--oracle-source-artifact",
+            str(tmp_path / "surf_desc_export_boozer_surface.json"),
+            "--output-root",
+            str(tmp_path / "hardware_oracle_cli"),
+            "--dry-run",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 2
+    assert "--audit-script" in completed.stderr
 
 
 def test_desc_joint_hardware_oracle_launcher_cli_dry_run(tmp_path):
@@ -8800,6 +8881,50 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
     assert accepted_payload["result_exported_artifact_paths"] == [
         str(exported_artifact_path)
     ]
+
+    missing_predecessor_reason_manifest = json.loads(json.dumps(passing_manifest))
+    missing_predecessor_reason_manifest["fixed_polish_predecessor_status"] = {
+        "passed": False,
+        "artifact_paths": [],
+    }
+    missing_predecessor_reason_manifest["promotion_status"] = {
+        "state": "blocked",
+        "final_oracle_evidence_path": str(oracle_path.resolve()),
+    }
+    predecessor_rejected = materialize_desc_joint_outer_loop_decision(
+        result_payload=desc_passed_payload,
+        validation_manifest=missing_predecessor_reason_manifest,
+        output_root=tmp_path / "outer_loop_reject_missing_predecessor_reason",
+    )
+    predecessor_rejected_payload = json.loads(
+        predecessor_rejected.decision_path.read_text(encoding="utf-8")
+    )
+    assert predecessor_rejected_payload["decision"] == "rejected"
+    assert predecessor_rejected_payload["rejection_stage"] == (
+        "fixed_polish_predecessor"
+    )
+    assert predecessor_rejected_payload["reason"] == (
+        "fixed-polish predecessor validation has not passed"
+    )
+
+    missing_promotion_reason_manifest = json.loads(json.dumps(passing_manifest))
+    missing_promotion_reason_manifest["promotion_status"] = {
+        "state": "blocked",
+        "final_oracle_evidence_path": str(oracle_path.resolve()),
+    }
+    promotion_rejected = materialize_desc_joint_outer_loop_decision(
+        result_payload=desc_passed_payload,
+        validation_manifest=missing_promotion_reason_manifest,
+        output_root=tmp_path / "outer_loop_reject_missing_promotion_reason",
+    )
+    promotion_rejected_payload = json.loads(
+        promotion_rejected.decision_path.read_text(encoding="utf-8")
+    )
+    assert promotion_rejected_payload["decision"] == "rejected"
+    assert promotion_rejected_payload["rejection_stage"] == "promotion"
+    assert promotion_rejected_payload["reason"] == (
+        "joint candidate promotion is blocked"
+    )
 
     lane_b_evidence_path = tmp_path / "lane_b_validation_manifest.json"
     _write_lane_b_predecessor_manifest(
