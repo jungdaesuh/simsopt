@@ -3626,7 +3626,6 @@ def _finite_build_artifact_metadata(
       plasma-facing normal half-build.
     """
     kappa = np.asarray(banana_curve.kappa(), dtype=float)
-    max_curvature = float(np.max(kappa))
     curvature_radius_m = np.divide(
         1.0,
         kappa,

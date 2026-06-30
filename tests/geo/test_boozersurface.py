@@ -1780,7 +1780,6 @@ class SignedGWireInBoozerNewtonConvergenceTests(unittest.TestCase):
         """
         import importlib
         from types import SimpleNamespace
-        from unittest.mock import patch
 
         _import_examples_path()
         handoff = importlib.import_module(
