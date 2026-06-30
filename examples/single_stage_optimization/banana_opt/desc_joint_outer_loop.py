@@ -98,6 +98,11 @@ def desc_joint_outer_loop_decision_payload(
         validation_manifest["promotion_status"],
         "promotion_status",
     )
+    if run_mode in _JOINT_RUN_MODES and promotion_status.get("state") == "passed":
+        _require_joint_result_manifest_runtime_binding(
+            result_payload=result_payload,
+            validation_manifest=validation_manifest,
+        )
     decision, rejection_stage, reason = _resolve_outer_loop_decision(
         run_mode=run_mode,
         desc_solve_status=desc_solve_status,
@@ -282,6 +287,47 @@ def _infer_result_exported_artifact_paths(
         if isinstance(exported_biot_savart, str) and exported_biot_savart != "":
             return (exported_biot_savart,)
     return ()
+
+
+def _require_joint_result_manifest_runtime_binding(
+    *,
+    result_payload: Mapping[str, object],
+    validation_manifest: Mapping[str, object],
+) -> None:
+    result_equilibrium_path = _required_runtime_artifact_path(
+        result_payload,
+        payload_name="desc_result.json",
+        artifact_name="desc_equilibrium",
+    )
+    manifest_equilibrium_path = _required_runtime_artifact_path(
+        validation_manifest,
+        payload_name="validation_manifest",
+        artifact_name="desc_equilibrium",
+    )
+    if result_equilibrium_path != manifest_equilibrium_path:
+        raise ValueError(
+            "validation_manifest desc_runtime_artifacts.desc_equilibrium does not "
+            "match desc_result.json."
+        )
+
+
+def _required_runtime_artifact_path(
+    payload: Mapping[str, object],
+    *,
+    payload_name: str,
+    artifact_name: str,
+) -> Path:
+    runtime_artifacts = _mapping(
+        payload.get("desc_runtime_artifacts"),
+        f"{payload_name}.desc_runtime_artifacts",
+    )
+    raw_path = runtime_artifacts.get(artifact_name)
+    if not isinstance(raw_path, str) or raw_path == "":
+        raise ValueError(
+            f"{payload_name}.desc_runtime_artifacts.{artifact_name} must be a "
+            "nonempty path."
+        )
+    return Path(raw_path).expanduser().resolve()
 
 
 def _coerce_path_sequence(value: object, *, field_name: str) -> tuple[str, ...]:

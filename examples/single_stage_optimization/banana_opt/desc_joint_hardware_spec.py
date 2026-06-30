@@ -6,7 +6,6 @@ actual threshold values remain in ``hardware_constraint_schema``.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -24,6 +23,10 @@ from banana_opt.hardware_constraint_schema import (
 from banana_opt.hardware_keepout import (
     hardware_keepout_metadata,
     hardware_sdf_metadata,
+)
+from banana_opt.desc_joint_io import (
+    read_json_mapping,
+    sha256_file as _sha256_file,
 )
 
 DESC_JOINT_HARDWARE_SPEC_SCHEMA_VERSION = "desc_joint_hardware_spec_v1"
@@ -203,13 +206,13 @@ def _resolve_hardware_metadata(
 
 
 def _read_json_mapping(path: Path) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(
-            f"DESC-joint hardware spec must be a JSON object; got "
+    return read_json_mapping(
+        path,
+        error_message=lambda payload: (
+            "DESC-joint hardware spec must be a JSON object; got "
             f"{type(payload).__name__}."
-        )
-    return payload
+        ),
+    )
 
 
 def _require_schema_version(payload: Mapping[str, object]) -> None:
@@ -345,13 +348,6 @@ def _coerce_constraint_name(raw_name: object) -> str:
         raise ValueError("constraint_names entries must be nonempty strings.")
     return raw_name
 
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _optional_fspath(path: Path | None) -> str | None:

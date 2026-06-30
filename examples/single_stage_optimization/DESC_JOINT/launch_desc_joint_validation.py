@@ -31,13 +31,18 @@ def main(argv: list[str] | None = None) -> int:
             "No exported artifacts supplied and desc_result.json does not record "
             "an exported SIMSOPT artifact."
         )
+    requested_poincare_render_modes = (
+        None
+        if not args.poincare_render_mode
+        else tuple(args.poincare_render_mode)
+    )
     artifacts = launch_desc_joint_simsopt_validation(
         result_payload=result_payload,
         exported_artifact_paths=exported_artifacts,
         output_root=Path(args.output_root).expanduser().resolve(),
         surface_path=args.surface,
         python_executable=args.python_executable,
-        poincare_render_modes=tuple(args.poincare_render_mode),
+        poincare_render_modes=requested_poincare_render_modes,
         poincare_timeout_seconds=args.poincare_timeout_seconds,
         run_poincare=not args.skip_poincare,
         run_boozer=not args.skip_boozer,

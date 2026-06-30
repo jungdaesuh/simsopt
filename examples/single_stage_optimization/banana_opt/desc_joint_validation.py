@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from banana_opt.desc_joint_io import (
+    read_json_mapping,
+    sha256_file as _sha256_file,
+)
 from banana_opt.desc_joint_result_schema import (
     DESC_JOINT_RESULT_SCHEMA_VERSION,
     validate_desc_joint_result_payload,
@@ -38,6 +40,7 @@ def build_desc_joint_validation_manifest(
     physics_validation_evidence_paths: Sequence[str] = (),
 ) -> dict[str, object]:
     validate_desc_joint_result_payload(result_payload)
+    runtime_artifacts = result_payload.get("desc_runtime_artifacts")
     fixed_polish_predecessor_status = _fixed_polish_predecessor_status(
         result_payload,
         expected_source_artifact_checksums=expected_source_artifact_checksums,
@@ -59,6 +62,14 @@ def build_desc_joint_validation_manifest(
         artifact_hardware_passed=artifact_hardware_passed,
         final_oracle_passed=final_oracle_passed,
         final_oracle_evidence_path=final_oracle_evidence_path,
+        expected_joint_equilibrium_artifact_path=(
+            _raw_desc_runtime_artifact_path(
+                result_payload,
+                artifact_name="desc_equilibrium",
+            )
+            if result_payload["run_mode"] in {"vacuum_joint", "finite_beta_joint"}
+            else None
+        ),
     )
     manifest = {
         "schema_version": DESC_JOINT_VALIDATION_MANIFEST_SCHEMA_VERSION,
@@ -94,6 +105,8 @@ def build_desc_joint_validation_manifest(
         },
         "promotion_status": promotion_status,
     }
+    if isinstance(runtime_artifacts, Mapping):
+        manifest["desc_runtime_artifacts"] = dict(runtime_artifacts)
     validate_desc_joint_validation_manifest(manifest)
     return manifest
 
@@ -110,6 +123,7 @@ def resolve_desc_joint_promotion_status(
     artifact_hardware_passed: bool | None,
     final_oracle_passed: bool,
     final_oracle_evidence_path: str | None,
+    expected_joint_equilibrium_artifact_path: str | Path | None = None,
 ) -> dict[str, object]:
     if not desc_solve_passed:
         return {
@@ -183,6 +197,12 @@ def resolve_desc_joint_promotion_status(
         str(oracle_path),
         expected_source_artifact_checksums=expected_source_artifact_checksums,
         expected_exported_artifact_paths=exported_artifact_paths,
+        require_joint_equilibrium_artifact=run_mode
+        in {"vacuum_joint", "finite_beta_joint"},
+        require_oracle_artifact_bindings=True,
+        expected_joint_equilibrium_artifact_path=(
+            expected_joint_equilibrium_artifact_path
+        ),
     )
     return {
         "state": "passed",
@@ -249,6 +269,14 @@ def validate_desc_joint_validation_manifest(payload: Mapping[str, object]) -> No
             exported_artifact_paths=_coerce_artifact_paths(
                 payload.get("exported_artifact_paths", [])
             ),
+            require_joint_equilibrium_artifact=payload.get("run_mode")
+            in {"vacuum_joint", "finite_beta_joint"},
+            expected_joint_equilibrium_artifact_path=(
+                _manifest_joint_equilibrium_artifact_path(
+                    payload,
+                    required=False,
+                )
+            ),
         )
     if promotion_status.get("state") == "passed":
         if source_artifact_checksums is None:
@@ -299,6 +327,25 @@ def validate_desc_joint_validation_manifest(payload: Mapping[str, object]) -> No
                 "promotion_status cannot pass unless physics_validation_status.passed "
                 "is true."
             )
+        exported_artifact_paths = _coerce_artifact_paths(
+            payload.get("exported_artifact_paths", [])
+        )
+        expected_joint_equilibrium_artifact_path = (
+            _manifest_joint_equilibrium_artifact_path(
+                payload,
+                required=True,
+            )
+            if payload.get("run_mode") in {"vacuum_joint", "finite_beta_joint"}
+            else None
+        )
+        _validate_passed_physics_evidence_status(
+            payload["physics_validation_status"],
+            expected_exported_artifact_paths=exported_artifact_paths,
+            expected_joint_equilibrium_artifact_path=(
+                expected_joint_equilibrium_artifact_path
+            ),
+            field_name="physics_validation_status",
+        )
         if payload["artifact_hardware_status"].get("passed") is not True:
             raise ValueError(
                 "promotion_status cannot pass unless artifact_hardware_status.passed "
@@ -308,8 +355,11 @@ def validate_desc_joint_validation_manifest(payload: Mapping[str, object]) -> No
             promotion_status.get("final_oracle_evidence_path"),
             field_name="promotion_status.final_oracle_evidence_path",
             expected_source_artifact_checksums=source_artifact_checksums,
-            exported_artifact_paths=_coerce_artifact_paths(
-                payload.get("exported_artifact_paths", [])
+            exported_artifact_paths=exported_artifact_paths,
+            require_joint_equilibrium_artifact=payload.get("run_mode")
+            in {"vacuum_joint", "finite_beta_joint"},
+            expected_joint_equilibrium_artifact_path=(
+                expected_joint_equilibrium_artifact_path
             ),
         )
         if final_oracle_status.get("passed") is not True:
@@ -321,8 +371,11 @@ def validate_desc_joint_validation_manifest(payload: Mapping[str, object]) -> No
             final_oracle_status.get("evidence_path"),
             field_name="final_oracle_status.evidence_path",
             expected_source_artifact_checksums=source_artifact_checksums,
-            exported_artifact_paths=_coerce_artifact_paths(
-                payload.get("exported_artifact_paths", [])
+            exported_artifact_paths=exported_artifact_paths,
+            require_joint_equilibrium_artifact=payload.get("run_mode")
+            in {"vacuum_joint", "finite_beta_joint"},
+            expected_joint_equilibrium_artifact_path=(
+                expected_joint_equilibrium_artifact_path
             ),
         )
         if promotion_oracle_path.resolve() != final_oracle_path.resolve():
@@ -685,6 +738,7 @@ def _validate_predecessor_physics_evidence(
     *,
     predecessor_label: str,
     expected_exported_artifact_paths: Sequence[str],
+    expected_joint_equilibrium_artifact_path: str | Path | None = None,
 ) -> None:
     if not path.is_file():
         raise ValueError(
@@ -734,6 +788,14 @@ def _validate_predecessor_physics_evidence(
             f"{predecessor_label} physics evidence exported_artifact_checksums "
             "do not match the live exported artifacts."
         )
+    if expected_joint_equilibrium_artifact_path is not None:
+        _validate_physics_current_artifact_binding(
+            payload,
+            predecessor_label=predecessor_label,
+            expected_joint_equilibrium_artifact_path=(
+                expected_joint_equilibrium_artifact_path
+            ),
+        )
     _validate_passed_physics_sidecar_summaries(
         payload.get("poincare_metrics"),
         field_name=f"{predecessor_label} physics evidence poincare_metrics",
@@ -747,6 +809,71 @@ def _validate_predecessor_physics_evidence(
         expected_exported_artifact_paths=evidence_artifact_paths,
         sidecar_kind="boozer",
         require_nonempty=payload.get("require_boozer_state") is True,
+    )
+
+
+def _validate_passed_physics_evidence_status(
+    physics_status: Mapping[str, object],
+    *,
+    expected_exported_artifact_paths: Sequence[str],
+    expected_joint_equilibrium_artifact_path: str | Path | None = None,
+    field_name: str,
+) -> None:
+    evidence_paths = _coerce_artifact_paths(
+        _require_sequence(
+            physics_status.get("evidence_paths"),
+            field_name=f"{field_name}.evidence_paths",
+        )
+    )
+    if not evidence_paths:
+        raise ValueError(f"{field_name} physics validation evidence is required.")
+    for evidence_path in evidence_paths:
+        _validate_predecessor_physics_evidence(
+            Path(evidence_path).expanduser(),
+            predecessor_label=field_name,
+            expected_exported_artifact_paths=expected_exported_artifact_paths,
+            expected_joint_equilibrium_artifact_path=(
+                expected_joint_equilibrium_artifact_path
+            ),
+        )
+
+
+def _validate_physics_current_artifact_binding(
+    payload: Mapping[str, object],
+    *,
+    predecessor_label: str,
+    expected_joint_equilibrium_artifact_path: str | Path,
+) -> None:
+    expected_path = _coerce_existing_path(
+        expected_joint_equilibrium_artifact_path,
+        field_name="desc_runtime_artifacts.desc_equilibrium",
+    )
+    joint_equilibrium_path = _require_existing_payload_path(
+        payload,
+        payload_field="joint_equilibrium_artifact_path",
+        field_name=f"{predecessor_label} physics evidence",
+    )
+    if joint_equilibrium_path.resolve() != expected_path.resolve():
+        raise ValueError(
+            f"{predecessor_label} physics evidence joint_equilibrium_artifact_path "
+            "does not match desc_runtime_artifacts.desc_equilibrium."
+        )
+    _require_payload_sha256_matches_file(
+        payload,
+        payload_field="joint_equilibrium_artifact_sha256",
+        path=joint_equilibrium_path,
+        field_name=f"{predecessor_label} physics evidence",
+    )
+    validated_surface_path = _require_existing_payload_path(
+        payload,
+        payload_field="validated_surface_path",
+        field_name=f"{predecessor_label} physics evidence",
+    )
+    _require_payload_sha256_matches_file(
+        payload,
+        payload_field="validated_surface_sha256",
+        path=validated_surface_path,
+        field_name=f"{predecessor_label} physics evidence",
     )
 
 
@@ -893,18 +1020,66 @@ def _require_existing_final_oracle_path(raw_path: object, *, field_name: str) ->
     return path
 
 
+def _raw_desc_runtime_artifact_path(
+    payload: Mapping[str, object],
+    *,
+    artifact_name: str,
+) -> str | Path | None:
+    runtime_artifacts = payload.get("desc_runtime_artifacts")
+    if not isinstance(runtime_artifacts, Mapping):
+        return None
+    raw_path = runtime_artifacts.get(artifact_name)
+    if isinstance(raw_path, str | Path):
+        return raw_path
+    return None
+
+
+def _manifest_joint_equilibrium_artifact_path(
+    payload: Mapping[str, object],
+    *,
+    required: bool,
+) -> str | Path | None:
+    raw_path = _raw_desc_runtime_artifact_path(
+        payload,
+        artifact_name="desc_equilibrium",
+    )
+    if raw_path is None and required:
+        raise ValueError(
+            "desc_runtime_artifacts.desc_equilibrium is required for passed "
+            "joint-run promotion."
+        )
+    return raw_path
+
+
+def _coerce_existing_path(raw_path: str | Path, *, field_name: str) -> Path:
+    if isinstance(raw_path, str) and raw_path == "":
+        raise ValueError(f"{field_name} must be a nonempty path.")
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        raise ValueError(f"{field_name} must be an existing file: {raw_path}.")
+    return path
+
+
 def _require_passed_final_oracle_evidence(
     raw_path: object,
     *,
     field_name: str,
     expected_source_artifact_checksums: Mapping[str, str],
     exported_artifact_paths: Sequence[str],
+    require_joint_equilibrium_artifact: bool = False,
+    require_oracle_artifact_bindings: bool = True,
+    expected_joint_equilibrium_artifact_path: str | Path | None = None,
 ) -> Path:
     return validate_desc_joint_final_oracle_evidence(
         raw_path,
         field_name=field_name,
         expected_source_artifact_checksums=expected_source_artifact_checksums,
         expected_exported_artifact_paths=exported_artifact_paths,
+        require_joint_equilibrium_artifact=require_joint_equilibrium_artifact,
+        require_oracle_artifact_bindings=require_oracle_artifact_bindings,
+        expected_joint_equilibrium_artifact_path=(
+            expected_joint_equilibrium_artifact_path
+        ),
     )
 
 
@@ -914,6 +1089,9 @@ def validate_desc_joint_final_oracle_evidence(
     field_name: str = "final_oracle_evidence_path",
     expected_source_artifact_checksums: Mapping[str, str] | None = None,
     expected_exported_artifact_paths: Sequence[str] | None = None,
+    require_joint_equilibrium_artifact: bool = False,
+    require_oracle_artifact_bindings: bool = False,
+    expected_joint_equilibrium_artifact_path: str | Path | None = None,
 ) -> Path:
     path = _require_existing_final_oracle_path(raw_path, field_name=field_name)
     payload = _read_json_mapping(path, field_name=field_name)
@@ -967,14 +1145,151 @@ def validate_desc_joint_final_oracle_evidence(
                 f"{field_name} exported_artifact_checksums do not match the "
                 "live exported artifacts."
             )
+    if (
+        require_oracle_artifact_bindings
+        or require_joint_equilibrium_artifact
+        or expected_joint_equilibrium_artifact_path is not None
+    ):
+        _validate_final_oracle_artifact_bindings(
+            payload,
+            field_name=field_name,
+            require_joint_equilibrium_artifact=require_joint_equilibrium_artifact,
+            expected_joint_equilibrium_artifact_path=(
+                expected_joint_equilibrium_artifact_path
+            ),
+        )
     return path
 
 
+def _validate_final_oracle_artifact_bindings(
+    payload: Mapping[str, object],
+    *,
+    field_name: str,
+    require_joint_equilibrium_artifact: bool,
+    expected_joint_equilibrium_artifact_path: str | Path | None,
+) -> None:
+    oracle_source_path = _require_existing_payload_path(
+        payload,
+        payload_field="oracle_source_artifact_path",
+        field_name=field_name,
+    )
+    audit_path = _require_existing_payload_path(
+        payload,
+        payload_field="hardware_contact_audit_path",
+        field_name=field_name,
+    )
+    _require_payload_sha256_matches_file(
+        payload,
+        payload_field="hardware_contact_audit_sha256",
+        path=audit_path,
+        field_name=field_name,
+    )
+    audit_payload = _read_json_mapping(
+        audit_path,
+        field_name=f"{field_name}.hardware_contact_audit",
+    )
+    if audit_payload.get("hits") != 0:
+        raise ValueError(f"{field_name} hardware_contact_audit must record hits=0.")
+    audit_source_sha256 = audit_payload.get("source_sha256")
+    if audit_source_sha256 != _sha256_file(oracle_source_path):
+        raise ValueError(
+            f"{field_name} hardware_contact_audit source_sha256 does not match "
+            "oracle_source_artifact_path."
+        )
+    audit_source_artifact = audit_payload.get("source_artifact")
+    if (
+        audit_source_artifact is not None
+        and audit_source_artifact != oracle_source_path.name
+    ):
+        raise ValueError(
+            f"{field_name} hardware_contact_audit source_artifact does not match "
+            "oracle_source_artifact_path."
+        )
+    joint_equilibrium_path = _optional_existing_payload_path(
+        payload,
+        payload_field="joint_equilibrium_artifact_path",
+        field_name=field_name,
+    )
+    if joint_equilibrium_path is None:
+        if require_joint_equilibrium_artifact:
+            raise ValueError(
+                f"{field_name} joint_equilibrium_artifact_path is required for "
+                "joint-run final oracle evidence."
+            )
+        return
+    if expected_joint_equilibrium_artifact_path is not None:
+        expected_path = _coerce_existing_path(
+            expected_joint_equilibrium_artifact_path,
+            field_name="desc_runtime_artifacts.desc_equilibrium",
+        )
+        if joint_equilibrium_path.resolve() != expected_path.resolve():
+            raise ValueError(
+                f"{field_name} joint_equilibrium_artifact_path does not match "
+                "desc_runtime_artifacts.desc_equilibrium."
+            )
+    _require_payload_sha256_matches_file(
+        payload,
+        payload_field="joint_equilibrium_artifact_sha256",
+        path=joint_equilibrium_path,
+        field_name=field_name,
+    )
+
+
+def _require_existing_payload_path(
+    payload: Mapping[str, object],
+    *,
+    payload_field: str,
+    field_name: str,
+) -> Path:
+    raw_path = payload.get(payload_field)
+    if not isinstance(raw_path, str) or raw_path == "":
+        raise ValueError(f"{field_name}.{payload_field} must be a nonempty path.")
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        raise ValueError(
+            f"{field_name}.{payload_field} must be an existing file: {raw_path}."
+        )
+    return path
+
+
+def _optional_existing_payload_path(
+    payload: Mapping[str, object],
+    *,
+    payload_field: str,
+    field_name: str,
+) -> Path | None:
+    raw_path = payload.get(payload_field)
+    if raw_path is None:
+        return None
+    return _require_existing_payload_path(
+        payload,
+        payload_field=payload_field,
+        field_name=field_name,
+    )
+
+
+def _require_payload_sha256_matches_file(
+    payload: Mapping[str, object],
+    *,
+    payload_field: str,
+    path: Path,
+    field_name: str,
+) -> None:
+    raw_sha256 = payload.get(payload_field)
+    if (
+        not isinstance(raw_sha256, str)
+        or not _SHA256_HEXDIGEST_RE.fullmatch(raw_sha256)
+    ):
+        raise ValueError(f"{field_name}.{payload_field} must be a SHA-256 digest.")
+    if raw_sha256 != _sha256_file(path):
+        raise ValueError(f"{field_name}.{payload_field} does not match the live file.")
+
+
 def _read_json_mapping(path: Path, *, field_name: str) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"{field_name} must contain a JSON object.")
-    return payload
+    return read_json_mapping(
+        path,
+        error_message=f"{field_name} must contain a JSON object.",
+    )
 
 
 def _require_sequence(value: object, *, field_name: str) -> Sequence[object]:
@@ -1017,13 +1332,6 @@ def _exported_artifact_checksum_map(paths: Sequence[str]) -> dict[str, str]:
         checksums[path_string] = _sha256_file(path)
     return checksums
 
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 __all__ = [

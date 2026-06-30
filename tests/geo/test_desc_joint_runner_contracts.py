@@ -69,8 +69,11 @@ from banana_opt.desc_bridge.coil_report_utils import (  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     TYPE_KK_OUTER_CHANNEL_CORNER_REACH_M,
 )
+import banana_opt.desc_bridge.runtime_export as runtime_export_module  # noqa: E402
 from banana_opt.desc_bridge.runtime_export import (  # noqa: E402
+    DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M,
     DescOptimizedSimsoptExportError,
+    DescOptimizedSurfaceExportError,
     materialize_optimized_desc_coil_artifact_simsopt_export,
     materialize_optimized_desc_equilibrium_surface_simsopt_export,
 )
@@ -213,7 +216,42 @@ def _write_final_oracle_evidence(
     *,
     exported_artifact_paths: tuple[str, ...],
     source_artifact_checksums: dict[str, str] | None = None,
+    joint_equilibrium_artifact_path: Path | None = None,
+    oracle_source_artifact_path: Path | None = None,
 ) -> Path:
+    oracle_source_path = (
+        path.parent / f"{path.stem}_oracle_source_artifact.json"
+        if oracle_source_artifact_path is None
+        else oracle_source_artifact_path
+    )
+    if not oracle_source_path.exists():
+        oracle_source_path.write_text('{"surface": true}\n', encoding="utf-8")
+    joint_equilibrium_path = (
+        path.parent / f"{path.stem}_desc_equilibrium.h5"
+        if joint_equilibrium_artifact_path is None
+        else joint_equilibrium_artifact_path
+    )
+    if not joint_equilibrium_path.exists():
+        joint_equilibrium_path.write_text("fixture desc equilibrium\n", encoding="utf-8")
+    audit_path = path.parent / f"{path.stem}_hardware_contact_audit.json"
+    _write_json(
+        audit_path,
+        {
+            "schema_version": 1,
+            "source_artifact": oracle_source_path.name,
+            "source_sha256": _sha256(oracle_source_path),
+            "viewer_artifact": f"{oracle_source_path.name}.viewer.json",
+            "viewer_sha256": "b" * 64,
+            "checker": "fixture hardware_contact_report",
+            "hardware_groups": ["fixture"],
+            "vessel_shell_included": True,
+            "total_coils": 1,
+            "hits": 0,
+            "contacts": [],
+        },
+    )
+    audit_script_path = path.parent / f"{path.stem}_audit_hardware_contacts.py"
+    audit_script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     return _write_json(
         path,
         {
@@ -230,8 +268,68 @@ def _write_final_oracle_evidence(
                 if source_artifact_checksums is None
                 else source_artifact_checksums
             ),
+            "joint_equilibrium_artifact_path": str(joint_equilibrium_path),
+            "joint_equilibrium_artifact_sha256": _sha256(joint_equilibrium_path),
+            "oracle_source_artifact_path": str(oracle_source_path),
+            "hardware_contact_audit_path": str(audit_path),
+            "hardware_contact_audit_sha256": _sha256(audit_path),
+            "audit_script_path": str(audit_script_path),
+            "command": [sys.executable, str(audit_script_path), "--artifact", str(oracle_source_path)],
         },
     )
+
+
+def _record_joint_runtime_artifacts(
+    result_payload: dict[str, object],
+    tmp_path: Path,
+    *,
+    stem: str,
+) -> tuple[Path, Path]:
+    joint_equilibrium_path = tmp_path / f"{stem}_desc_equilibrium.h5"
+    joint_equilibrium_path.write_text("fixture desc equilibrium\n", encoding="utf-8")
+    exported_surface_path = tmp_path / f"{stem}_exported_surface.json"
+    exported_surface_path.write_text('{"surface": true}\n', encoding="utf-8")
+    runtime_artifacts = result_payload.get("desc_runtime_artifacts")
+    retained_artifacts = (
+        dict(runtime_artifacts) if isinstance(runtime_artifacts, dict) else {}
+    )
+    result_payload["desc_runtime_artifacts"] = {
+        **retained_artifacts,
+        "desc_equilibrium": str(joint_equilibrium_path),
+        "exported_surface": str(exported_surface_path),
+    }
+    return joint_equilibrium_path, exported_surface_path
+
+
+def _write_joint_bound_validation_evidence(
+    tmp_path: Path,
+    *,
+    result_payload: dict[str, object],
+    exported_artifact_path: Path,
+    exported_artifact_paths: tuple[str, ...],
+    source_artifact_checksums: dict[str, str],
+    stem: str,
+) -> tuple[Path, Path]:
+    joint_equilibrium_path, exported_surface_path = _record_joint_runtime_artifacts(
+        result_payload,
+        tmp_path,
+        stem=stem,
+    )
+    oracle_path = tmp_path / f"{stem}_hardware_contact_report.json"
+    _write_final_oracle_evidence(
+        oracle_path,
+        exported_artifact_paths=exported_artifact_paths,
+        source_artifact_checksums=source_artifact_checksums,
+        joint_equilibrium_artifact_path=joint_equilibrium_path,
+        oracle_source_artifact_path=exported_surface_path,
+    )
+    physics_report_path = _write_physics_report(
+        tmp_path / f"{stem}_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
+        validated_surface_path=exported_surface_path,
+        joint_equilibrium_artifact_path=joint_equilibrium_path,
+    )
+    return oracle_path, physics_report_path
 
 
 def _write_poincare_metrics(
@@ -3850,6 +3948,68 @@ def test_saved_desc_equilibrium_exports_to_loadable_simsopt_surface(tmp_path):
     assert report["sample_count_theta"] == 9
     assert isinstance(report["max_fit_residual_m"], float)
     assert report["max_fit_residual_m"] >= 0.0
+    assert report["max_fit_residual_threshold_m"] == (
+        DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M
+    )
+
+
+def test_desc_equilibrium_surface_export_rejects_oversized_fit_residual(
+    tmp_path,
+    monkeypatch,
+):
+    optimized_equilibrium_path = tmp_path / "desc_equilibrium.h5"
+    optimized_equilibrium_path.write_text(
+        "fixture desc equilibrium artifact\n",
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "out"
+
+    class DummySurface:
+        def save(self, path):
+            Path(path).write_text('{"surface": true}\n', encoding="utf-8")
+
+    monkeypatch.setattr(
+        runtime_export_module,
+        "load_desc_optimized_equilibrium_artifact",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        runtime_export_module,
+        "_equilibrium_surface",
+        lambda equilibrium: object(),
+    )
+    monkeypatch.setattr(
+        runtime_export_module,
+        "_fit_simsopt_surface_to_desc_surface",
+        lambda *args, **kwargs: (
+            DummySurface(),
+            np.asarray([[DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M * 2.0]]),
+        ),
+    )
+
+    with pytest.raises(
+        DescOptimizedSurfaceExportError,
+        match="surface fit residual exceeds threshold",
+    ) as exc_info:
+        materialize_optimized_desc_equilibrium_surface_simsopt_export(
+            optimized_equilibrium_path=optimized_equilibrium_path,
+            output_root=output_root,
+            desc_source_root=None,
+            nfp=5,
+            stellarator_symmetry=True,
+            mpol=1,
+            ntor=1,
+        )
+
+    report_path = output_root / "desc_optimized_surface_export_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["exported_surface_path"] is None
+    assert report["max_fit_residual_threshold_m"] == (
+        DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M
+    )
+    assert not (output_root / "surf_desc_equilibrium_export.json").exists()
+    assert exc_info.value.report.to_json_dict() == report
 
 
 def test_desc_runtime_coilset_builds_from_simsopt_seed_field(tmp_path):
@@ -7137,6 +7297,34 @@ def test_simsopt_validation_wrapper_records_failed_boozer_evidence(tmp_path):
     assert manifest["promotion_status"]["state"] == "failed"
 
 
+def test_simsopt_validation_wrapper_rejects_nonboolean_boozer_passed(tmp_path):
+    exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
+    exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")
+    poincare_metrics_path = _write_poincare_metrics(
+        tmp_path / "PoincareMetrics_desc_export_validation.json",
+        exported_artifact_paths=(exported_artifact_path,),
+    )
+    malformed_boozer_state_path = _write_json(
+        tmp_path / "surf_desc_export_state_malformed.json",
+        {
+            "schema_version": 1,
+            "surface_path": "surf_desc_export_boozer_surface.json",
+            "passed": "false",
+            "iota": 0.091,
+            "G": -2.01062,
+            **_export_binding_payload((exported_artifact_path,)),
+        },
+    )
+
+    with pytest.raises(ValueError, match="Boozer state passed must be boolean"):
+        build_desc_joint_simsopt_physics_report(
+            exported_artifact_paths=(exported_artifact_path,),
+            poincare_metrics_paths=(poincare_metrics_path,),
+            boozer_state_paths=(malformed_boozer_state_path,),
+            require_boozer_state=True,
+        )
+
+
 def test_validate_desc_joint_export_cli_consumes_sidecar_artifacts(tmp_path):
     exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
     exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")
@@ -7762,6 +7950,111 @@ def test_desc_joint_validation_launcher_cli_dry_run(tmp_path):
     )
 
 
+def test_desc_joint_validation_launcher_cli_uses_default_render_mode(tmp_path):
+    exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
+    surface_path = tmp_path / "surf_opt_boozer_surface.json"
+    exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")
+    surface_path.write_text('{"surface": true}\n', encoding="utf-8")
+    result_payload = _desc_solve_passed_payload(
+        build_preflight_result_payload(
+            mode="fixed_equilibrium_polish",
+            input_contract={
+                "selected_seed": {
+                    "surface": str(surface_path),
+                    "state": None,
+                }
+            },
+            objective_stack=["QuadraticFlux", "LinkingCurrentConsistency"],
+        )
+    )
+    result_payload["artifact_hardware_status"]["artifact_paths"] = [
+        str(exported_artifact_path)
+    ]
+    result_path = _write_json(tmp_path / "desc_result.json", result_payload)
+    output_root = tmp_path / "validation_cli_default_render"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(EXAMPLES_ROOT / "DESC_JOINT" / "launch_desc_joint_validation.py"),
+            "--result",
+            str(result_path),
+            "--output-root",
+            str(output_root),
+            "--dry-run",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    launch_report_path = Path(completed.stdout.strip())
+    launch_report = json.loads(launch_report_path.read_text(encoding="utf-8"))
+    assert launch_report["status"] == "prepared"
+    assert launch_report["poincare"]["env_overrides"]["POINCARE_RENDER_MODES"] == (
+        "validation"
+    )
+
+
+def test_desc_joint_validation_launcher_skip_poincare_fails_closed(tmp_path):
+    exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
+    surface_path = tmp_path / "surf_opt_boozer_surface.json"
+    exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")
+    surface_path.write_text('{"surface": true}\n', encoding="utf-8")
+    result_payload = _desc_solve_passed_payload(
+        build_preflight_result_payload(
+            mode="fixed_equilibrium_polish",
+            input_contract={
+                "selected_seed": {
+                    "surface": str(surface_path),
+                    "state": None,
+                }
+            },
+            objective_stack=["QuadraticFlux", "LinkingCurrentConsistency"],
+        )
+    )
+    result_payload["artifact_hardware_status"]["artifact_paths"] = [
+        str(exported_artifact_path)
+    ]
+    result_path = _write_json(tmp_path / "desc_result.json", result_payload)
+    output_root = tmp_path / "validation_cli_skip_poincare"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(EXAMPLES_ROOT / "DESC_JOINT" / "launch_desc_joint_validation.py"),
+            "--result",
+            str(result_path),
+            "--output-root",
+            str(output_root),
+            "--poincare-render-mode",
+            "validation",
+            "--skip-poincare",
+            "--skip-boozer",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    manifest_path = Path(completed.stdout.strip())
+    physics_report = json.loads(
+        (output_root / "desc_joint_simsopt_physics_validation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    launch_report = json.loads(
+        (output_root / "desc_joint_simsopt_validation_launch_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest_path == output_root / "desc_joint_validation_manifest.json"
+    assert physics_report["passed"] is False
+    assert physics_report["reason"] == "No strict Poincare validation sidecar was supplied."
+    assert launch_report["status"] == "completed"
+    assert launch_report["poincare"]["metrics_paths"] == []
+
+
 def _write_physics_report(
     path: Path,
     *,
@@ -7770,42 +8063,19 @@ def _write_physics_report(
     validated_surface_path: Path | None = None,
     joint_equilibrium_artifact_path: Path | None = None,
 ) -> Path:
-    return _write_json(
-        path,
-        {
-            "schema_version": DESC_JOINT_SIMSOPT_PHYSICS_VALIDATION_SCHEMA_VERSION,
-            "source": "simsopt_boozer_poincare_sidecars",
-            "passed": passed,
-            "reason": "fixture physics validation",
-            "exported_artifact_paths": [str(exported_artifact_path.resolve())],
-            "exported_artifact_checksums": {
-                str(exported_artifact_path.resolve()): _sha256(exported_artifact_path),
-            },
-            "validated_surface_path": (
-                None
-                if validated_surface_path is None
-                else str(validated_surface_path.resolve())
-            ),
-            "validated_surface_sha256": (
-                None
-                if validated_surface_path is None
-                else _sha256(validated_surface_path)
-            ),
-            "joint_equilibrium_artifact_path": (
-                None
-                if joint_equilibrium_artifact_path is None
-                else str(joint_equilibrium_artifact_path.resolve())
-            ),
-            "joint_equilibrium_artifact_sha256": (
-                None
-                if joint_equilibrium_artifact_path is None
-                else _sha256(joint_equilibrium_artifact_path)
-            ),
-            "poincare_metrics": [],
-            "boozer_states": [],
-            "require_boozer_state": False,
-        },
+    poincare_metrics_path = _write_poincare_metrics(
+        path.parent / f"{path.stem}_poincare_metrics.json",
+        exported_artifact_paths=(exported_artifact_path,),
+        validation_status="validated" if passed else "fails_validation",
+        survived_lines=50 if passed else 0,
     )
+    physics_report = build_desc_joint_simsopt_physics_report(
+        exported_artifact_paths=(exported_artifact_path,),
+        poincare_metrics_paths=(poincare_metrics_path,),
+        validated_surface_path=validated_surface_path,
+        joint_equilibrium_artifact_path=joint_equilibrium_artifact_path,
+    )
+    return _write_json(path, physics_report)
 
 
 def _result_payload_with_export_report(
@@ -7994,6 +8264,85 @@ def test_desc_joint_hardware_oracle_launcher_materializes_passing_evidence(
     assert launch_report["status"] == "passed"
 
 
+def test_desc_joint_hardware_oracle_launcher_rejects_positive_hits(
+    tmp_path,
+    monkeypatch,
+):
+    exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
+    oracle_source_path = tmp_path / "surf_desc_export_boozer_surface.json"
+    audit_script_path = tmp_path / "audit_hardware_contacts.py"
+    exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")
+    oracle_source_path.write_text('{"surface": true}\n', encoding="utf-8")
+    audit_script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    result_payload = _result_payload_with_export_report(
+        tmp_path,
+        exported_artifact_path=exported_artifact_path,
+    )
+    physics_report_path = _write_physics_report(
+        tmp_path / "desc_joint_simsopt_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
+    )
+
+    def fake_run(
+        command,
+        *,
+        cwd,
+        check,
+        timeout,
+        text,
+        capture_output,
+    ):
+        _write_json(
+            oracle_source_path.parent / "hardware_contact_audit.json",
+            {
+                "schema_version": 1,
+                "source_artifact": oracle_source_path.name,
+                "source_sha256": _sha256(oracle_source_path),
+                "viewer_artifact": "surf_desc_export_boozer_surface.viewer.json",
+                "viewer_sha256": "b" * 64,
+                "checker": "fixture hardware_contact_report",
+                "hardware_groups": ["fixture"],
+                "vessel_shell_included": True,
+                "total_coils": 3,
+                "hits": 1,
+                "contacts": [{"coil": "banana", "hardware": "vessel"}],
+            },
+        )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="hardware contacts: 1/3 HIT",
+            stderr="",
+        )
+
+    monkeypatch.setattr(hardware_oracle_module.subprocess, "run", fake_run)
+
+    artifacts = launch_desc_joint_hardware_oracle(
+        result_payload=result_payload,
+        exported_artifact_paths=(exported_artifact_path,),
+        oracle_source_artifact_path=oracle_source_path,
+        output_root=tmp_path / "hardware_oracle",
+        physics_report_path=physics_report_path,
+        audit_script_path=audit_script_path,
+    )
+
+    assert artifacts.final_oracle_evidence_path is None
+    manifest = json.loads(
+        artifacts.validation_manifest_path.read_text(encoding="utf-8")
+    )
+    assert manifest["physics_validation_status"]["passed"] is True
+    assert manifest["artifact_hardware_status"]["passed"] is False
+    assert manifest["final_oracle_status"]["passed"] is False
+    assert manifest["promotion_status"]["state"] == "failed"
+    launch_report = json.loads(
+        artifacts.launch_report_path.read_text(encoding="utf-8")
+    )
+    assert launch_report["status"] == "failed"
+    assert launch_report["hardware_contact_audit_path"] == str(
+        oracle_source_path.parent / "hardware_contact_audit.json"
+    )
+
+
 def test_desc_joint_hardware_oracle_launcher_requires_joint_surface_binding(
     tmp_path,
     monkeypatch,
@@ -8172,6 +8521,18 @@ def test_desc_joint_hardware_oracle_launcher_cli_dry_run(tmp_path):
 def test_simsopt_validation_wrapper_fails_closed_on_nonvalidated_poincare(tmp_path):
     exported_artifact_path = tmp_path / "biot_savart_desc_export.json"
     exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")
+
+    missing_poincare_report = build_desc_joint_simsopt_physics_report(
+        exported_artifact_paths=(exported_artifact_path,),
+        poincare_metrics_paths=(),
+    )
+
+    assert missing_poincare_report["passed"] is False
+    assert missing_poincare_report["reason"] == (
+        "No strict Poincare validation sidecar was supplied."
+    )
+    assert missing_poincare_report["poincare_metrics"] == []
+
     diagnostic_metrics_path = _write_poincare_metrics(
         tmp_path / "PoincareMetrics_desc_export_default.json",
         exported_artifact_paths=(exported_artifact_path,),
@@ -8349,6 +8710,14 @@ def test_validation_manifest_keeps_promotion_oracle_separate(tmp_path):
         exported_artifact_paths=exported_artifact_paths,
         source_artifact_checksums=source_checksums,
     )
+    physics_report_path = _write_physics_report(
+        tmp_path / "finite_beta_candidate_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
+    )
+    physics_report_path = _write_physics_report(
+        tmp_path / "desc_joint_simsopt_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
+    )
     blocked_preflight_manifest = build_desc_joint_validation_manifest(
         result_payload=result_payload,
         exported_artifact_paths=exported_artifact_paths,
@@ -8358,6 +8727,7 @@ def test_validation_manifest_keeps_promotion_oracle_separate(tmp_path):
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert blocked_preflight_manifest["promotion_status"]["state"] == "blocked"
     assert "DESC optimization" in blocked_preflight_manifest["promotion_status"][
@@ -8373,8 +8743,65 @@ def test_validation_manifest_keeps_promotion_oracle_separate(tmp_path):
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert passing_manifest["promotion_status"]["state"] == "passed"
+
+    with pytest.raises(ValueError, match="physics validation evidence is required"):
+        build_desc_joint_validation_manifest(
+            result_payload=desc_passed_payload,
+            exported_artifact_paths=exported_artifact_paths,
+            expected_source_artifact_checksums=source_checksums,
+            physics_validation_passed=True,
+            artifact_hardware_passed=True,
+            search_hardware_passed=True,
+            final_oracle_passed=True,
+            final_oracle_evidence_path=str(oracle_path),
+        )
+    other_exported_artifact_path = tmp_path / "other_exported_biot_savart.json"
+    other_exported_artifact_path.write_text('{"field": "stale"}\n', encoding="utf-8")
+    stale_physics_report_path = _write_physics_report(
+        tmp_path / "stale_desc_joint_simsopt_physics_validation.json",
+        exported_artifact_path=other_exported_artifact_path,
+    )
+    with pytest.raises(ValueError, match="exported_artifact_paths"):
+        build_desc_joint_validation_manifest(
+            result_payload=desc_passed_payload,
+            exported_artifact_paths=exported_artifact_paths,
+            expected_source_artifact_checksums=source_checksums,
+            physics_validation_passed=True,
+            artifact_hardware_passed=True,
+            search_hardware_passed=True,
+            final_oracle_passed=True,
+            final_oracle_evidence_path=str(oracle_path),
+            physics_validation_evidence_paths=(str(stale_physics_report_path),),
+        )
+    unbound_oracle_path = tmp_path / "unbound_hardware_contact_report.json"
+    _write_json(
+        unbound_oracle_path,
+        {
+            "schema_version": DESC_JOINT_FINAL_ORACLE_EVIDENCE_SCHEMA_VERSION,
+            "source": "direct_loaded_artifact_hardware_contact_oracle",
+            "passed": True,
+            "exported_artifact_paths": list(exported_artifact_paths),
+            "exported_artifact_checksums": {
+                str(exported_artifact_path): _sha256(exported_artifact_path),
+            },
+            "source_artifact_checksums": source_checksums,
+        },
+    )
+    with pytest.raises(ValueError, match="oracle_source_artifact_path"):
+        build_desc_joint_validation_manifest(
+            result_payload=desc_passed_payload,
+            exported_artifact_paths=exported_artifact_paths,
+            expected_source_artifact_checksums=source_checksums,
+            physics_validation_passed=True,
+            artifact_hardware_passed=True,
+            search_hardware_passed=True,
+            final_oracle_passed=True,
+            final_oracle_evidence_path=str(unbound_oracle_path),
+            physics_validation_evidence_paths=(str(physics_report_path),),
+        )
 
     _write_final_oracle_evidence(
         oracle_path,
@@ -8469,11 +8896,13 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         ],
     )
     desc_passed_payload = _desc_solve_passed_payload(result_payload)
-    oracle_path = tmp_path / "hardware_contact_report.json"
-    _write_final_oracle_evidence(
-        oracle_path,
+    oracle_path, physics_report_path = _write_joint_bound_validation_evidence(
+        tmp_path,
+        result_payload=desc_passed_payload,
+        exported_artifact_path=exported_artifact_path,
         exported_artifact_paths=exported_artifact_paths,
         source_artifact_checksums=source_checksums,
+        stem="vacuum_joint_candidate",
     )
 
     blocked_manifest = build_desc_joint_validation_manifest(
@@ -8485,6 +8914,7 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
 
     assert blocked_manifest["fixed_polish_predecessor_status"]["passed"] is False
@@ -8502,6 +8932,7 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert failed_physics_manifest["promotion_status"]["state"] == "failed"
     assert "SIMSOPT physics validation" in failed_physics_manifest[
@@ -8524,6 +8955,7 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert malformed_manifest["fixed_polish_predecessor_status"]["passed"] is False
     assert "invalid fixed-polish predecessor evidence" in malformed_manifest[
@@ -8569,6 +9001,7 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert invalid_evidence_manifest["fixed_polish_predecessor_status"][
         "passed"
@@ -8597,6 +9030,7 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert mismatched_manifest["fixed_polish_predecessor_status"]["passed"] is False
     assert "source_artifact_checksums" in mismatched_manifest[
@@ -8623,6 +9057,7 @@ def test_validation_manifest_blocks_joint_promotion_without_fixed_polish_predece
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
 
     assert passing_manifest["fixed_polish_predecessor_status"]["passed"] is True
@@ -8660,11 +9095,19 @@ def test_validation_manifest_blocks_finite_beta_without_lane_b_predecessor(
         "reason": "fixed-polish predecessor passed round-trip validation",
         "artifact_paths": [str(fixed_polish_evidence_path)],
     }
+    physics_report_path = _write_physics_report(
+        tmp_path / "finite_beta_candidate_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
+    )
     oracle_path = tmp_path / "hardware_contact_report.json"
     _write_final_oracle_evidence(
         oracle_path,
         exported_artifact_paths=exported_artifact_paths,
         source_artifact_checksums=source_checksums,
+    )
+    physics_report_path = _write_physics_report(
+        tmp_path / "finite_beta_candidate_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
     )
 
     blocked_manifest = build_desc_joint_validation_manifest(
@@ -8676,6 +9119,7 @@ def test_validation_manifest_blocks_finite_beta_without_lane_b_predecessor(
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
 
     assert blocked_manifest["fixed_polish_predecessor_status"]["passed"] is True
@@ -8731,11 +9175,13 @@ def test_validation_manifest_requires_passed_vacuum_joint_for_finite_beta_lane_b
         "reason": "fixed-polish predecessor passed round-trip validation",
         "artifact_paths": [str(fixed_polish_evidence_path)],
     }
-    oracle_path = tmp_path / "hardware_contact_report.json"
-    _write_final_oracle_evidence(
-        oracle_path,
+    oracle_path, physics_report_path = _write_joint_bound_validation_evidence(
+        tmp_path,
+        result_payload=result_payload,
+        exported_artifact_path=exported_artifact_path,
         exported_artifact_paths=exported_artifact_paths,
         source_artifact_checksums=source_checksums,
+        stem="finite_beta_candidate",
     )
 
     result_payload["lane_b_predecessor_status"] = {
@@ -8752,6 +9198,7 @@ def test_validation_manifest_requires_passed_vacuum_joint_for_finite_beta_lane_b
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert wrong_mode_manifest["lane_b_predecessor_status"]["passed"] is False
     assert "vacuum_joint validation manifest" in wrong_mode_manifest[
@@ -8773,6 +9220,7 @@ def test_validation_manifest_requires_passed_vacuum_joint_for_finite_beta_lane_b
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     assert failed_physics_manifest["lane_b_predecessor_status"]["passed"] is False
     assert "SIMSOPT round-trip validation" in failed_physics_manifest[
@@ -8794,6 +9242,7 @@ def test_validation_manifest_requires_passed_vacuum_joint_for_finite_beta_lane_b
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
 
     assert passing_manifest["lane_b_predecessor_status"]["passed"] is True
@@ -8834,11 +9283,13 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
         "reason": "fixed-polish predecessor passed round-trip validation",
         "artifact_paths": [str(fixed_polish_evidence_path)],
     }
-    oracle_path = tmp_path / "hardware_contact_report.json"
-    _write_final_oracle_evidence(
-        oracle_path,
+    oracle_path, physics_report_path = _write_joint_bound_validation_evidence(
+        tmp_path,
+        result_payload=desc_passed_payload,
+        exported_artifact_path=exported_artifact_path,
         exported_artifact_paths=exported_artifact_paths,
         source_artifact_checksums=source_checksums,
+        stem="outer_loop_vacuum_joint",
     )
     passing_manifest = build_desc_joint_validation_manifest(
         result_payload=desc_passed_payload,
@@ -8849,6 +9300,7 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     passing_manifest_path = _write_json(
         tmp_path / "desc_joint_validation_manifest.json",
@@ -8881,6 +9333,19 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
     assert accepted_payload["result_exported_artifact_paths"] == [
         str(exported_artifact_path)
     ]
+
+    stale_result_payload = json.loads(json.dumps(desc_passed_payload))
+    stale_equilibrium_path = tmp_path / "stale_result_desc_equilibrium.h5"
+    stale_equilibrium_path.write_text("stale desc equilibrium\n", encoding="utf-8")
+    stale_runtime_artifacts = stale_result_payload["desc_runtime_artifacts"]
+    assert isinstance(stale_runtime_artifacts, dict)
+    stale_runtime_artifacts["desc_equilibrium"] = str(stale_equilibrium_path)
+    with pytest.raises(ValueError, match="desc_runtime_artifacts.desc_equilibrium"):
+        materialize_desc_joint_outer_loop_decision(
+            result_payload=stale_result_payload,
+            validation_manifest=passing_manifest,
+            output_root=tmp_path / "outer_loop_reject_stale_equilibrium",
+        )
 
     missing_predecessor_reason_manifest = json.loads(json.dumps(passing_manifest))
     missing_predecessor_reason_manifest["fixed_polish_predecessor_status"] = {
@@ -8955,6 +9420,16 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
         "reason": "Lane B predecessor passed strict SIMSOPT validation",
         "artifact_paths": [str(lane_b_evidence_path)],
     }
+    finite_beta_oracle_path, finite_beta_physics_report_path = (
+        _write_joint_bound_validation_evidence(
+            tmp_path,
+            result_payload=finite_beta_passed_payload,
+            exported_artifact_path=exported_artifact_path,
+            exported_artifact_paths=exported_artifact_paths,
+            source_artifact_checksums=source_checksums,
+            stem="outer_loop_finite_beta_joint",
+        )
+    )
     finite_beta_manifest = build_desc_joint_validation_manifest(
         result_payload=finite_beta_passed_payload,
         exported_artifact_paths=exported_artifact_paths,
@@ -8963,7 +9438,8 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
         artifact_hardware_passed=True,
         search_hardware_passed=True,
         final_oracle_passed=True,
-        final_oracle_evidence_path=str(oracle_path),
+        final_oracle_evidence_path=str(finite_beta_oracle_path),
+        physics_validation_evidence_paths=(str(finite_beta_physics_report_path),),
     )
     finite_beta_accepted = materialize_desc_joint_outer_loop_decision(
         result_payload=finite_beta_passed_payload,
@@ -8985,7 +9461,7 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
         artifact_hardware_passed=True,
         search_hardware_passed=True,
         final_oracle_passed=True,
-        final_oracle_evidence_path=str(oracle_path),
+        final_oracle_evidence_path=str(finite_beta_oracle_path),
     )
     finite_beta_rejected = materialize_desc_joint_outer_loop_decision(
         result_payload=finite_beta_passed_payload,
@@ -9002,10 +9478,22 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
     other_exported_artifact_path.write_text('{"field": false}\n', encoding="utf-8")
     other_exported_artifact_paths = (str(other_exported_artifact_path),)
     other_oracle_path = tmp_path / "other_hardware_contact_report.json"
+    desc_runtime_artifacts = desc_passed_payload["desc_runtime_artifacts"]
+    assert isinstance(desc_runtime_artifacts, dict)
+    current_joint_equilibrium_path = Path(desc_runtime_artifacts["desc_equilibrium"])
+    current_exported_surface_path = Path(desc_runtime_artifacts["exported_surface"])
     _write_final_oracle_evidence(
         other_oracle_path,
         exported_artifact_paths=other_exported_artifact_paths,
         source_artifact_checksums=source_checksums,
+        joint_equilibrium_artifact_path=current_joint_equilibrium_path,
+        oracle_source_artifact_path=current_exported_surface_path,
+    )
+    other_physics_report_path = _write_physics_report(
+        tmp_path / "other_joint_candidate_physics_validation.json",
+        exported_artifact_path=other_exported_artifact_path,
+        validated_surface_path=current_exported_surface_path,
+        joint_equilibrium_artifact_path=current_joint_equilibrium_path,
     )
     mismatched_manifest = build_desc_joint_validation_manifest(
         result_payload=desc_passed_payload,
@@ -9016,6 +9504,7 @@ def test_desc_joint_outer_loop_gate_accepts_only_oracle_backed_joint_candidates(
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(other_oracle_path),
+        physics_validation_evidence_paths=(str(other_physics_report_path),),
     )
     with pytest.raises(ValueError, match="exported artifact paths"):
         materialize_desc_joint_outer_loop_decision(
@@ -9070,12 +9559,6 @@ def test_desc_joint_outer_loop_gate_cli_materializes_decision(tmp_path):
         fixed_polish_evidence_path,
         source_artifact_checksums=source_checksums,
     )
-    oracle_path = tmp_path / "hardware_contact_report.json"
-    _write_final_oracle_evidence(
-        oracle_path,
-        exported_artifact_paths=exported_artifact_paths,
-        source_artifact_checksums=source_checksums,
-    )
     result_payload = _desc_solve_passed_payload(
         build_preflight_result_payload(
             mode="vacuum_joint",
@@ -9093,6 +9576,14 @@ def test_desc_joint_outer_loop_gate_cli_materializes_decision(tmp_path):
         "reason": "fixed-polish predecessor passed round-trip validation",
         "artifact_paths": [str(fixed_polish_evidence_path)],
     }
+    oracle_path, physics_report_path = _write_joint_bound_validation_evidence(
+        tmp_path,
+        result_payload=result_payload,
+        exported_artifact_path=exported_artifact_path,
+        exported_artifact_paths=exported_artifact_paths,
+        source_artifact_checksums=source_checksums,
+        stem="outer_loop_cli_vacuum_joint",
+    )
     manifest = build_desc_joint_validation_manifest(
         result_payload=result_payload,
         exported_artifact_paths=exported_artifact_paths,
@@ -9102,6 +9593,7 @@ def test_desc_joint_outer_loop_gate_cli_materializes_decision(tmp_path):
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
     result_path = _write_json(tmp_path / "desc_result.json", result_payload)
     manifest_path = _write_json(tmp_path / "desc_joint_validation_manifest.json", manifest)
@@ -9182,6 +9674,10 @@ def test_validation_manifest_validator_rejects_forged_promotion_pass(tmp_path):
         exported_artifact_paths=exported_artifact_paths,
         source_artifact_checksums=source_checksums,
     )
+    physics_report_path = _write_physics_report(
+        tmp_path / "forged_promotion_physics_validation.json",
+        exported_artifact_path=exported_artifact_path,
+    )
     manifest = build_desc_joint_validation_manifest(
         result_payload=desc_passed_payload,
         exported_artifact_paths=exported_artifact_paths,
@@ -9191,6 +9687,7 @@ def test_validation_manifest_validator_rejects_forged_promotion_pass(tmp_path):
         search_hardware_passed=True,
         final_oracle_passed=True,
         final_oracle_evidence_path=str(oracle_path),
+        physics_validation_evidence_paths=(str(physics_report_path),),
     )
 
     manifest["desc_solve_status"]["state"] = "blocked"

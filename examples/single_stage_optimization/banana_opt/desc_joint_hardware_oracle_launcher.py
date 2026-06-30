@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -12,6 +11,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from banana_opt.desc_joint_io import (
+    read_json_mapping,
+    sha256_file as _sha256_file,
+)
 from banana_opt.desc_joint_simsopt_validation import (
     DESC_JOINT_SIMSOPT_PHYSICS_VALIDATION_SCHEMA_VERSION,
 )
@@ -500,19 +503,11 @@ def _path_checksum_map(paths: Sequence[Path]) -> dict[str, str]:
     return {os.fspath(path): _sha256_file(path) for path in paths}
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _read_json_mapping(path: Path) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Expected JSON object in {path}.")
-    return payload
+    return read_json_mapping(
+        path,
+        error_message=f"Expected JSON object in {path}.",
+    )
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:

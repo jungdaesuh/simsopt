@@ -24,6 +24,7 @@ from banana_opt.desc_bridge.runtime_imports import activate_desc_source_root
 
 DescOptimizedSimsoptExportStatus = Literal["passed", "failed"]
 DescOptimizedSurfaceExportStatus = Literal["passed", "failed"]
+DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M = 1.0e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ class DescOptimizedSurfaceExportReport:
     sample_count_phi: int
     sample_count_theta: int
     max_fit_residual_m: float | None
+    max_fit_residual_threshold_m: float
     mean_fit_residual_m: float | None
     rms_fit_residual_m: float | None
 
@@ -131,6 +133,7 @@ class DescOptimizedSurfaceExportReport:
             "sample_count_phi": self.sample_count_phi,
             "sample_count_theta": self.sample_count_theta,
             "max_fit_residual_m": self.max_fit_residual_m,
+            "max_fit_residual_threshold_m": self.max_fit_residual_threshold_m,
             "mean_fit_residual_m": self.mean_fit_residual_m,
             "rms_fit_residual_m": self.rms_fit_residual_m,
         }
@@ -192,6 +195,13 @@ def materialize_optimized_desc_equilibrium_surface_simsopt_export(
             sample_count_phi=sample_count_phi,
             sample_count_theta=sample_count_theta,
         )
+        max_fit_residual_m = float(np.max(residuals))
+        if max_fit_residual_m > DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M:
+            raise ValueError(
+                "SIMSOPT surface fit residual exceeds threshold: "
+                f"max_fit_residual_m={max_fit_residual_m:.6g} > "
+                f"{DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M:.6g}."
+            )
         exported_surface.save(os.fspath(exported_surface_path))
         report = DescOptimizedSurfaceExportReport(
             status="passed",
@@ -205,7 +215,8 @@ def materialize_optimized_desc_equilibrium_surface_simsopt_export(
             ntor=ntor,
             sample_count_phi=sample_count_phi,
             sample_count_theta=sample_count_theta,
-            max_fit_residual_m=float(np.max(residuals)),
+            max_fit_residual_m=max_fit_residual_m,
+            max_fit_residual_threshold_m=DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M,
             mean_fit_residual_m=float(np.mean(residuals)),
             rms_fit_residual_m=float(np.sqrt(np.mean(residuals * residuals))),
         )
@@ -236,6 +247,7 @@ def materialize_optimized_desc_equilibrium_surface_simsopt_export(
             sample_count_phi=sample_count_phi,
             sample_count_theta=sample_count_theta,
             max_fit_residual_m=None,
+            max_fit_residual_threshold_m=DESC_OPTIMIZED_SURFACE_MAX_FIT_RESIDUAL_M,
             mean_fit_residual_m=None,
             rms_fit_residual_m=None,
         )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -14,6 +13,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from banana_opt.desc_joint_io import (
+    read_json_mapping,
+    sha256_file as _sha256_file,
+)
 from banana_opt.desc_joint_simsopt_validation import (
     DescJointSimsoptValidationArtifacts,
     materialize_desc_joint_simsopt_validation,
@@ -34,6 +37,7 @@ _POINCARE_METRIC_SUFFIX_BY_MODE = {
     "diagnostic": "_diagnostic",
     "default": "_default",
 }
+_DEFAULT_POINCARE_RENDER_MODES = ("validation",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +58,7 @@ def launch_desc_joint_simsopt_validation(
     output_root: Path,
     surface_path: str | Path | None = None,
     python_executable: str | Path = sys.executable,
-    poincare_render_modes: Sequence[str] = ("validation",),
+    poincare_render_modes: Sequence[str] | None = None,
     poincare_timeout_seconds: float | None = None,
     run_poincare: bool = True,
     run_boozer: bool = True,
@@ -184,8 +188,6 @@ def launch_desc_joint_simsopt_validation(
     effective_require_boozer = (
         run_boozer if require_boozer_state is None else require_boozer_state
     )
-    if not poincare_metrics_paths:
-        raise ValueError("No Poincare metrics were produced for physics validation.")
     physics_artifacts = materialize_desc_joint_simsopt_validation(
         result_payload=result_payload,
         exported_artifact_paths=exported_paths,
@@ -565,7 +567,11 @@ def _expected_poincare_metrics_paths(
     return paths
 
 
-def _coerce_poincare_render_modes(render_modes: Sequence[str]) -> tuple[str, ...]:
+def _coerce_poincare_render_modes(
+    render_modes: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if render_modes is None:
+        return _DEFAULT_POINCARE_RENDER_MODES
     if isinstance(render_modes, str) or not isinstance(render_modes, Sequence):
         raise ValueError("poincare_render_modes must be a sequence of strings.")
     modes: list[str] = []
@@ -614,19 +620,11 @@ def _path_checksum_map(paths: Sequence[Path]) -> dict[str, str]:
     return {os.fspath(path): _sha256_file(path) for path in paths}
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _read_json_mapping(path: Path) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"Expected JSON object in {path}.")
-    return payload
+    return read_json_mapping(
+        path,
+        error_message=f"Expected JSON object in {path}.",
+    )
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:

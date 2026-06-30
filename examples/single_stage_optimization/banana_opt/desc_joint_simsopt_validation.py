@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -10,6 +9,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from banana_opt.desc_joint_io import (
+    read_json_mapping,
+    sha256_file as _sha256_file,
+)
 from banana_opt.desc_joint_validation import (
     build_desc_joint_validation_manifest,
     render_desc_joint_validation_report,
@@ -58,11 +61,6 @@ def build_desc_joint_simsopt_physics_report(
         poincare_metrics_paths,
         field_name="poincare_metrics_paths",
     )
-    if not poincare_paths:
-        raise ValueError(
-            "DESC joint SIMSOPT validation requires at least one Poincare "
-            "metrics artifact."
-        )
     validated_surface = _optional_existing_path(
         validated_surface_path,
         field_name="validated_surface_path",
@@ -393,7 +391,10 @@ def _boozer_state_summary(
         expected_exported_artifact_checksums=expected_exported_artifact_checksums,
         field_name=f"Boozer state {path}",
     )
-    if payload.get("passed") is False:
+    passed = payload.get("passed")
+    if passed is not None and not isinstance(passed, bool):
+        raise ValueError("Boozer state passed must be boolean when set.")
+    if passed is False:
         reason = payload.get("reason")
         if not isinstance(reason, str) or reason == "":
             raise ValueError("Failed Boozer state sidecars must record a reason.")
@@ -553,18 +554,10 @@ def _report_path_strings(
 
 
 def _read_json_mapping(path: Path, *, field_name: str) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"{field_name} must contain a JSON object: {path}.")
-    return payload
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return read_json_mapping(
+        path,
+        error_message=f"{field_name} must contain a JSON object: {path}.",
+    )
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:

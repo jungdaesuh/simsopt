@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -18,6 +17,10 @@ from banana_opt.coil_groups import (
 from banana_opt.desc_joint_field_inventory import (
     DescJointFieldInventory,
     load_desc_joint_field_inventory,
+)
+from banana_opt.desc_joint_io import (
+    read_json_mapping,
+    sha256_file as _sha256_file,
 )
 
 DESC_JOINT_SEED_MANIFEST_SCHEMA_VERSION = "desc_joint_seed_manifest_v1"
@@ -501,13 +504,13 @@ def _coerce_surface_kind(label: str, raw_kind: object) -> SeedSurfaceKind:
 
 
 def _read_json_mapping(path: Path) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(
-            f"DESC joint seed manifest must be a JSON object; got "
+    return read_json_mapping(
+        path,
+        error_message=lambda payload: (
+            "DESC joint seed manifest must be a JSON object; got "
             f"{type(payload).__name__}."
-        )
-    return payload
+        ),
+    )
 
 
 def _require_nonempty_string(payload: Mapping[str, object], field_name: str) -> str:
@@ -636,14 +639,6 @@ def _collect_json_class_names(value: object) -> set[str]:
         for child in value:
             names.update(_collect_json_class_names(child))
     return names
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _optional_existing_path(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import os
 from collections.abc import Mapping, Sequence
@@ -10,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from banana_opt.desc_bridge.coil_report_utils import coil_convention_report
+from banana_opt.desc_joint_io import read_json_mapping
 
 _BIOT_SAVART_CLASS = "BiotSavart"
 _COIL_CLASS = "Coil"
@@ -69,10 +69,10 @@ def load_desc_joint_field_inventory(path: str | Path) -> DescJointFieldInventory
 
 
 def _read_json_mapping(path: Path) -> Mapping[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
-        raise ValueError(f"BiotSavart inventory input must be a JSON object: {path}.")
-    return payload
+    return read_json_mapping(
+        path,
+        error_message=f"BiotSavart inventory input must be a JSON object: {path}.",
+    )
 
 
 def _simson_objects(payload: Mapping[str, object]) -> Mapping[str, object]:
