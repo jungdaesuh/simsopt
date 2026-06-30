@@ -15465,7 +15465,7 @@ def reject_search_step_on_step_norm_limit(
         hardware_status=None,
         rejection_increment=rejection_increment,
     )
-    record_search_step_outcome(run_dict, x, success=False)
+    record_search_step_outcome(run_dict, JF.x, success=False)
     JF.x = run_dict["accepted_x"]
     restore_surface_states(surface_data, run_dict["surface_state"])
     metrics["total_seconds"] += time.perf_counter() - step_start

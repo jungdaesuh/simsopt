@@ -5450,6 +5450,44 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["SEARCH_STEP_LAST_STEP_NORM"], 0.125)
         self.assertEqual(payload["SEARCH_STEP_LAST_REJECTION_INCREMENT"], 2.5)
 
+    def test_step_norm_limit_rejection_records_trial_without_name_error(self):
+        module = load_single_stage_example_module()
+        accepted_x = np.array([1.0, 2.0])
+        trial_x = np.array([3.0, 4.0])
+        accepted_grad = np.array([0.25, -0.5])
+        restored_states = []
+        module.run_dict = {
+            "J": 2.0,
+            "dJ": accepted_grad,
+            "accepted_x": accepted_x.copy(),
+            "surface_state": "accepted-surface",
+            "invalid_state_rejects_total": 0,
+        }
+        module.JF = SimpleNamespace(x=trial_x.copy())
+        module.surface_data = ["surface"]
+        module.restore_surface_states = lambda surface_data, state: restored_states.append(
+            (surface_data, state)
+        )
+        metrics = module.new_search_step_metrics()
+
+        evaluation = module.reject_search_step_on_step_norm_limit(
+            metrics,
+            step_norm=0.2,
+            step_norm_limit=0.1,
+            step_start=module.time.perf_counter(),
+        )
+
+        np.testing.assert_allclose(evaluation["grad"], accepted_grad)
+        self.assertEqual(evaluation["total"], 4.0)
+        self.assertEqual(module.run_dict["step_norm_rejects"], 1)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 1)
+        self.assertEqual(metrics["last_rejection_reason"], "step_norm_limit")
+        self.assertEqual(metrics["step_norm_rejects"], 1)
+        self.assertFalse(module.run_dict["last_search_step_success"])
+        np.testing.assert_allclose(module.run_dict["last_search_step_x"], trial_x)
+        np.testing.assert_allclose(module.JF.x, accepted_x)
+        self.assertEqual(restored_states, [(["surface"], "accepted-surface")])
+
     def test_append_jsonl_artifact_rewrites_archive_without_partial_lines(self):
         module = load_single_stage_example_module()
 
