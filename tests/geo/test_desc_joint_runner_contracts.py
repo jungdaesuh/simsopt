@@ -9130,6 +9130,41 @@ def test_desc_joint_outer_loop_gate_cli_materializes_decision(tmp_path):
     assert decision["validation_manifest_path"] == str(manifest_path.resolve())
 
 
+def test_desc_joint_outer_loop_non_joint_manifest_can_omit_exported_artifacts(
+    tmp_path,
+):
+    result_payload = build_preflight_result_payload(
+        mode="fixed_equilibrium_polish",
+        input_contract={"seed": "fixture"},
+        objective_stack=["QuadraticFlux", "LinkingCurrentConsistency"],
+    )
+    manifest = build_desc_joint_validation_manifest(
+        result_payload=result_payload,
+        exported_artifact_paths=(),
+        physics_validation_passed=None,
+        artifact_hardware_passed=None,
+        search_hardware_passed=None,
+        final_oracle_passed=False,
+        final_oracle_evidence_path=None,
+    )
+    del manifest["exported_artifact_paths"]
+    validate_desc_joint_validation_manifest(manifest)
+
+    rejected = materialize_desc_joint_outer_loop_decision(
+        result_payload=result_payload,
+        validation_manifest=manifest,
+        output_root=tmp_path / "outer_loop_reject_non_joint",
+    )
+    rejected_payload = json.loads(
+        rejected.decision_path.read_text(encoding="utf-8")
+    )
+
+    assert rejected_payload["decision"] == "rejected"
+    assert rejected_payload["rejection_stage"] == "run_mode"
+    assert rejected_payload["result_exported_artifact_paths"] == []
+    assert rejected_payload["exported_artifact_paths"] == []
+
+
 def test_validation_manifest_validator_rejects_forged_promotion_pass(tmp_path):
     exported_artifact_path = tmp_path / "exported_biot_savart.json"
     exported_artifact_path.write_text('{"field": true}\n', encoding="utf-8")

@@ -62,9 +62,13 @@ def desc_joint_outer_loop_decision_payload(
     validation_run_mode = validation_manifest["run_mode"]
     if validation_run_mode != run_mode:
         raise ValueError("validation_manifest run_mode does not match desc_result.json.")
+    validation_exported_artifact_paths = _coerce_path_sequence(
+        validation_manifest.get("exported_artifact_paths", ()),
+        field_name="validation_manifest.exported_artifact_paths",
+    )
     result_exported_artifact_paths = _require_result_validation_artifact_binding(
         result_payload=result_payload,
-        validation_manifest=validation_manifest,
+        validation_exported_artifact_paths=validation_exported_artifact_paths,
     )
     desc_solve_status = _mapping(
         result_payload["desc_solve_status"],
@@ -118,7 +122,7 @@ def desc_joint_outer_loop_decision_payload(
             else os.fspath(validation_manifest_path.resolve())
         ),
         "result_exported_artifact_paths": result_exported_artifact_paths,
-        "exported_artifact_paths": list(validation_manifest["exported_artifact_paths"]),
+        "exported_artifact_paths": validation_exported_artifact_paths,
         "desc_solve_status": dict(desc_solve_status),
         "fixed_polish_predecessor_status": dict(fixed_polish_status),
         "lane_b_predecessor_status": dict(lane_b_status),
@@ -229,7 +233,7 @@ def _status_text(
 def _require_result_validation_artifact_binding(
     *,
     result_payload: Mapping[str, object],
-    validation_manifest: Mapping[str, object],
+    validation_exported_artifact_paths: list[str],
 ) -> list[str]:
     run_mode = result_payload["run_mode"]
     if run_mode not in _JOINT_RUN_MODES:
@@ -240,11 +244,9 @@ def _require_result_validation_artifact_binding(
             "desc_result.json does not record exported artifact paths for this "
             "joint candidate."
         )
-    validation_paths = _coerce_path_sequence(
-        validation_manifest.get("exported_artifact_paths", ()),
-        field_name="validation_manifest.exported_artifact_paths",
-    )
-    if _resolved_path_tuple(result_paths) != _resolved_path_tuple(validation_paths):
+    if _resolved_path_tuple(result_paths) != _resolved_path_tuple(
+        validation_exported_artifact_paths,
+    ):
         raise ValueError(
             "validation_manifest exported artifact paths do not match "
             "desc_result.json."
