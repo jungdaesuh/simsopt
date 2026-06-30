@@ -43,14 +43,12 @@ class FramedCurve(sopp.Curve, Curve):
         curve. 
         """
         gammadash = self.curve.gammadash()
-        t, n, _ = self.rotated_frame()
-        _, ndash, _ = self.rotated_frame_dash()
+        (t, n, _), (_, ndash, _) = self.rotated_frame_and_dash()
         return self.frame_twist_jax(gammadash, t, n, ndash)
 
     def dframe_twist_by_dcoeff_vjp(self, v):
         gammadash = self.curve.gammadash()
-        t, n, _ = self.rotated_frame()
-        _, ndash, _ = self.rotated_frame_dash()
+        (t, n, _), (_, ndash, _) = self.rotated_frame_and_dash()
 
         grad0, grad1, grad2, grad3 = self.frame_twistgrad_vjp(gammadash, t, n, ndash, v)
         zeros = np.zeros_like(grad0)
@@ -58,6 +56,9 @@ class FramedCurve(sopp.Curve, Curve):
         return self.curve.dgammadash_by_dcoeff_vjp(grad0) \
             + self.rotated_frame_dcoeff_vjp(grad1, grad2, zeros) \
             + self.rotated_frame_dash_dcoeff_vjp(zeros, grad3, zeros)
+
+    def rotated_frame_and_dash(self):
+        return self.rotated_frame(), self.rotated_frame_dash()
 
 class FramedCurveFrenet(FramedCurve):
     r"""
@@ -101,9 +102,23 @@ class FramedCurveFrenet(FramedCurve):
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}})'(\phi)`.
         The frame is obtained by rotating with respect to the reference Frenet frame by the rotation. 
         """
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return rotated_frenet_frame_dash(
             self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(), self.curve.gammadashdashdash(),
-            self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints)
+            alpha, alphadash
+        )
+
+    def rotated_frame_and_dash(self):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        d3gamma = self.curve.gammadashdashdash()
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
+        return (
+            rotated_frenet_frame(gamma, d1gamma, d2gamma, alpha),
+            rotated_frenet_frame_dash(
+                gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash
+            ),
         )
 
     def rotated_frame_dashdash(self):
@@ -132,8 +147,7 @@ class FramedCurveFrenet(FramedCurve):
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
         d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return self.torsion(gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash)
 
     def frame_binormal_curvature(self):
@@ -145,8 +159,7 @@ class FramedCurveFrenet(FramedCurve):
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
         d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return self.binorm(gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash)
 
     def dframe_torsion_by_dcoeff_vjp(self, v):
@@ -158,8 +171,7 @@ class FramedCurveFrenet(FramedCurve):
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
         d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
 
         grad0, grad1, grad2, grad3, grad4, grad5 = self.torsiongrad_vjp(
             gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash, v)
@@ -180,8 +192,7 @@ class FramedCurveFrenet(FramedCurve):
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
         d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
 
         grad0, grad1, grad2, grad3, grad4, grad5 = self.binormgrad_vjp(
             gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash, v)
@@ -222,8 +233,7 @@ class FramedCurveFrenet(FramedCurve):
         gd = self.curve.gammadash()
         gdd = self.curve.gammadashdash()
         gddd = self.curve.gammadashdashdash()
-        a = self.rotation.alpha(self.curve.quadpoints)
-        ad = self.rotation.alphadash(self.curve.quadpoints)
+        a, ad = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         vjp0, vjp1, vjp2, vjp3, vjp4, vjp5 = rotated_frenet_frame_dash_dcoeff_vjp(
             g, gd, gdd, gddd, a, ad, (v0, v1, v2))
 
@@ -269,8 +279,7 @@ class FramedCurveCentroid(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return self.torsion(gamma, d1gamma, d2gamma, alpha, alphadash)
 
     def dframe_torsion_by_dcoeff_vjp(self, v):
@@ -281,8 +290,7 @@ class FramedCurveCentroid(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
 
         grad0, grad1, grad2, grad4, grad5 = self.torsiongrad_vjp(
             gamma, d1gamma, d2gamma, alpha, alphadash, v)
@@ -301,8 +309,7 @@ class FramedCurveCentroid(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return self.binorm(gamma, d1gamma, d2gamma, alpha, alphadash)
 
     def rotated_frame(self):
@@ -319,9 +326,20 @@ class FramedCurveCentroid(FramedCurve):
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}})'(\phi)`.
         The frame is obtained by rotating with respect to the reference centroid frame by the rotation. 
         """
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return rotated_centroid_frame_dash(
             self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
-            self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints)
+            alpha, alphadash
+        )
+
+    def rotated_frame_and_dash(self):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
+        return (
+            rotated_centroid_frame(gamma, d1gamma, alpha),
+            rotated_centroid_frame_dash(gamma, d1gamma, d2gamma, alpha, alphadash),
         )
 
     def rotated_frame_dashdash(self):
@@ -331,12 +349,13 @@ class FramedCurveCentroid(FramedCurve):
         :math:`(\hat{\textbf{t}}''(\phi), \hat{\textbf{n}}''(\phi), \hat{\textbf{b}}''(\phi))`,
         for the centroid reference frame rotated by the rotation.
         """
+        alpha, alphadash, alphadashdash = self.rotation.alpha_derivatives(
+            self.curve.quadpoints
+        )
         return rotated_centroid_frame_dashdash(
             self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
             self.curve.gammadashdashdash(),
-            self.rotation.alpha(self.curve.quadpoints),
-            self.rotation.alphadash(self.curve.quadpoints),
-            self.rotation.alphadashdash(self.curve.quadpoints)
+            alpha, alphadash, alphadashdash
         )
 
     def dframe_binormal_curvature_by_dcoeff_vjp(self, v):
@@ -347,8 +366,7 @@ class FramedCurveCentroid(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
 
         grad0, grad1, grad2, grad4, grad5 = self.binormgrad_vjp(
             gamma, d1gamma, d2gamma, alpha, alphadash, v)
@@ -385,8 +403,7 @@ class FramedCurveCentroid(FramedCurve):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
         gdd = self.curve.gammadashdash()
-        a = self.rotation.alpha(self.curve.quadpoints)
-        ad = self.rotation.alphadash(self.curve.quadpoints)
+        a, ad = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         vjp0, vjp1, vjp2, vjp4, vjp5 = rotated_centroid_frame_dash_dcoeff_vjp(
             g, gd, gdd, a, ad, (v0, v1, v2))
 
@@ -458,10 +475,26 @@ class FramedCurveSurfaceTangent(FramedCurve):
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}})'(\phi)`.
         The frame is obtained by rotating with respect to the reference surface-tangent frame.
         """
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return rotated_surface_tangent_frame_dash(
             self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
-            self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints),
+            alpha, alphadash,
             self.major_radius, self.midplane_z)
+
+    def rotated_frame_and_dash(self):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
+        return (
+            rotated_surface_tangent_frame(
+                gamma, d1gamma, alpha, self.major_radius, self.midplane_z
+            ),
+            rotated_surface_tangent_frame_dash(
+                gamma, d1gamma, d2gamma, alpha, alphadash,
+                self.major_radius, self.midplane_z
+            ),
+        )
 
     def rotated_frame_dashdash(self):
         r"""
@@ -470,12 +503,13 @@ class FramedCurveSurfaceTangent(FramedCurve):
         :math:`(\hat{\textbf{t}}''(\phi), \hat{\textbf{n}}''(\phi), \hat{\textbf{b}}''(\phi))`,
         for the surface-tangent reference frame rotated by the rotation.
         """
+        alpha, alphadash, alphadashdash = self.rotation.alpha_derivatives(
+            self.curve.quadpoints
+        )
         return rotated_surface_tangent_frame_dashdash(
             self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
             self.curve.gammadashdashdash(),
-            self.rotation.alpha(self.curve.quadpoints),
-            self.rotation.alphadash(self.curve.quadpoints),
-            self.rotation.alphadashdash(self.curve.quadpoints),
+            alpha, alphadash, alphadashdash,
             self.major_radius, self.midplane_z)
 
     def frame_torsion(self):
@@ -486,8 +520,7 @@ class FramedCurveSurfaceTangent(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return self.torsion(gamma, d1gamma, d2gamma, alpha, alphadash)
 
     def frame_binormal_curvature(self):
@@ -498,8 +531,7 @@ class FramedCurveSurfaceTangent(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         return self.binorm(gamma, d1gamma, d2gamma, alpha, alphadash)
 
     def dframe_torsion_by_dcoeff_vjp(self, v):
@@ -510,8 +542,7 @@ class FramedCurveSurfaceTangent(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
 
         grad0, grad1, grad2, grad4, grad5 = self.torsiongrad_vjp(
             gamma, d1gamma, d2gamma, alpha, alphadash, v)
@@ -530,8 +561,7 @@ class FramedCurveSurfaceTangent(FramedCurve):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        alpha, alphadash = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
 
         grad0, grad1, grad2, grad4, grad5 = self.binormgrad_vjp(
             gamma, d1gamma, d2gamma, alpha, alphadash, v)
@@ -568,8 +598,7 @@ class FramedCurveSurfaceTangent(FramedCurve):
         g = self.curve.gamma()
         gd = self.curve.gammadash()
         gdd = self.curve.gammadashdash()
-        a = self.rotation.alpha(self.curve.quadpoints)
-        ad = self.rotation.alphadash(self.curve.quadpoints)
+        a, ad = self.rotation.alpha_and_alphadash(self.curve.quadpoints)
         vjp0, vjp1, vjp2, vjp4, vjp5 = rotated_surface_tangent_frame_dash_dcoeff_vjp(
             g, gd, gdd, a, ad, self.major_radius, self.midplane_z, (v0, v1, v2))
 
@@ -596,24 +625,59 @@ class FrameRotation(Optimizable):
             super().__init__(x0=np.zeros((2*order+1, )))
         else:
             super().__init__(dofs=dofs)
-        self.quadpoints = quadpoints
+        self.quadpoints = np.asarray(quadpoints, dtype=float).copy()
+        self._quadpoints_jax = jnp.asarray(self.quadpoints)
         self.scale = scale
-        self.jac = rotation_dcoeff(quadpoints, order)
-        self.jacdash = rotationdash_dcoeff(quadpoints, order)
+        self.jac = rotation_dcoeff(self.quadpoints, order)
+        self.jacdash = rotationdash_dcoeff(self.quadpoints, order)
         self.jax_alpha = jit(lambda dofs, points: jaxrotation_pure(dofs, points, self.order))
         self.jax_alphadash = jit(lambda dofs, points: jaxrotationdash_pure(dofs, points, self.order))
         self.jax_alphadashdash = jit(lambda dofs, points: jaxrotationdashdash_pure(dofs, points, self.order))
+        self.jax_alpha_and_alphadash = jit(lambda dofs, points: (
+            jaxrotation_pure(dofs, points, self.order),
+            jaxrotationdash_pure(dofs, points, self.order),
+        ))
+        self.jax_alpha_derivatives = jit(lambda dofs, points: (
+            jaxrotation_pure(dofs, points, self.order),
+            jaxrotationdash_pure(dofs, points, self.order),
+            jaxrotationdashdash_pure(dofs, points, self.order),
+        ))
+
+    def _quadpoints_arg(self, quadpoints):
+        if quadpoints is self.quadpoints:
+            return self._quadpoints_jax
+        if (
+            isinstance(quadpoints, np.ndarray)
+            and quadpoints.shape == self.quadpoints.shape
+            and np.array_equal(quadpoints, self.quadpoints)
+        ):
+            return self._quadpoints_jax
+        return quadpoints
 
     def alpha(self, quadpoints):
-        return self.scale * self.jax_alpha(self._dofs.full_x, quadpoints)
+        return self.scale * self.jax_alpha(self._dofs.full_x, self._quadpoints_arg(quadpoints))
 
     def alphadash(self, quadpoints):
-        return self.scale * self.jax_alphadash(self._dofs.full_x, quadpoints)
+        return self.scale * self.jax_alphadash(self._dofs.full_x, self._quadpoints_arg(quadpoints))
 
     def alphadashdash(self, quadpoints):
         """Second derivative of the rotation angle with respect to the curve
         parameter, scaled identically to :meth:`alpha`/:meth:`alphadash`."""
-        return self.scale * self.jax_alphadashdash(self._dofs.full_x, quadpoints)
+        return self.scale * self.jax_alphadashdash(self._dofs.full_x, self._quadpoints_arg(quadpoints))
+
+    def alpha_and_alphadash(self, quadpoints):
+        """Return alpha and its first curve-parameter derivative on one grid."""
+        alpha, alphadash = self.jax_alpha_and_alphadash(
+            self._dofs.full_x, self._quadpoints_arg(quadpoints)
+        )
+        return self.scale * alpha, self.scale * alphadash
+
+    def alpha_derivatives(self, quadpoints):
+        """Return alpha plus first and second curve-parameter derivatives."""
+        alpha, alphadash, alphadashdash = self.jax_alpha_derivatives(
+            self._dofs.full_x, self._quadpoints_arg(quadpoints)
+        )
+        return self.scale * alpha, self.scale * alphadash, self.scale * alphadashdash
 
     def dalpha_by_dcoeff_vjp(self, quadpoints, v):
         return Derivative({self: self.scale * sopp.vjp(v, self.jac)})
@@ -646,6 +710,12 @@ class ZeroRotation(Optimizable):
 
     def alphadashdash(self, quadpoints):
         return self.zero
+
+    def alpha_and_alphadash(self, quadpoints):
+        return self.zero, self.zero
+
+    def alpha_derivatives(self, quadpoints):
+        return self.zero, self.zero, self.zero
 
     def dalpha_by_dcoeff_vjp(self, quadpoints, v):
         return Derivative({})

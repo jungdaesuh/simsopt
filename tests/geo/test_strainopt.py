@@ -14,6 +14,31 @@ class CoilStrainTesting(unittest.TestCase):
             with self.subTest(centroid=centroid):
                 self.subtest_frame_twist_vjp(centroid)
 
+    def test_frame_rotation_combined_helpers_match_public_methods(self):
+        quadpoints = np.linspace(0, 1, 10, endpoint=False)
+        alternate_points = np.linspace(0.025, 0.925, 7)
+        rotation = FrameRotation(quadpoints, order=3, scale=0.75)
+        rotation.x = np.array([0.12, 0.03, -0.02, 0.01, 0.015, -0.04, 0.02])
+
+        for points in [quadpoints, alternate_points]:
+            with self.subTest(points=len(points)):
+                alpha, alphadash = rotation.alpha_and_alphadash(points)
+                (
+                    alpha_from_triple,
+                    alphadash_from_triple,
+                    alphadashdash,
+                ) = rotation.alpha_derivatives(points)
+
+                np.testing.assert_allclose(alpha, rotation.alpha(points))
+                np.testing.assert_allclose(alphadash, rotation.alphadash(points))
+                np.testing.assert_allclose(alpha_from_triple, rotation.alpha(points))
+                np.testing.assert_allclose(
+                    alphadash_from_triple, rotation.alphadash(points)
+                )
+                np.testing.assert_allclose(
+                    alphadashdash, rotation.alphadashdash(points)
+                )
+
     def test_strain_opt(self):
         """ 
         Check that for a circular coil, strains 

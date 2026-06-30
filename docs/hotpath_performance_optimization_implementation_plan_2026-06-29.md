@@ -342,8 +342,10 @@ unpack the tuple in `dJ()`.
    - [x] `objectives/utilities.py:24-48` — replace dense permutation matmul
          (`P@…`, 3 dense n×n factors) with O(n) pivot indexing in
          `forward_solve`/`forward_backward`.
-   - [ ] `framedcurve.py:746-759` — stop re-transferring quadpoints to device /
-         recomputing `FrameRotation.alpha/alphadash` multiple times per eval.
+   - [x] `framedcurve.py` — cache the canonical `FrameRotation` quadpoint grid as
+         a JAX array, add combined `alpha`/`alphadash` helper paths, and route
+         frame/frame-dash callers through shared alpha arrays while preserving
+         arbitrary-quadpoint public method calls.
    - [ ] `curveobjectives.py` — `MeanSquaredCurvature.J` (`:538`) and
          `ArclengthVariation.J` (`:495`) return `float(...)`, a host sync. CAVEAT:
          only a win if the value stays inside a JAX graph downstream (fused into a
@@ -466,10 +468,11 @@ unpack the tuple in `dJ()`.
   continuation also routes `JaxCurve`'s internal gamma/derivative kernels through
   `local_full_x`, avoiding per-call public `get_dofs()` concatenation for
   `JaxCurveXYZFourier` and `OrientedCurveXYZFourier` without changing public DOF
-  behavior. The framed-curve
-  VJP consolidation was already covered by Phase 2; the remaining items still
-  need isolated consumer audits or timing proof before changing allocation/host-sync
-  behavior.
+  behavior. The framed-curve VJP consolidation was already covered by Phase 2;
+  the current continuation also caches `FrameRotation`'s canonical quadpoint grid
+  as a JAX array and routes same-grid frame/frame-dash evaluations through
+  combined alpha helpers. The remaining geo item still needs isolated consumer
+  audits or timing proof before changing host-sync behavior.
 - Phase 4.3 (`banana_opt` micro): `hardware_keepout.py` per-candidate host sync
   landed with hardware keepout tests. The stage2 curvature path now evaluates
   `Jc.curve.kappa()` once when the default smooth-curvature helper is injected,
@@ -569,6 +572,12 @@ unpack the tuple in `dJ()`.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check examples/single_stage_optimization/banana_opt/edge_iota_proxy.py tests/geo/test_edge_iota_proxy.py`
   — clean.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile examples/single_stage_optimization/banana_opt/edge_iota_proxy.py tests/geo/test_edge_iota_proxy.py`
+  — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m pytest tests/geo/test_strainopt.py tests/geo/test_finitebuild.py tests/geo/test_framed_surface_tangent.py tests/geo/test_curvefilament_second_derivative.py tests/geo/test_rotation_aware_curvature_cap.py -q`
+  — 35 passed, 22 subtests passed.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m ruff check src/simsopt/geo/framedcurve.py tests/geo/test_strainopt.py`
+  — clean.
+- `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile src/simsopt/geo/framedcurve.py tests/geo/test_strainopt.py`
   — clean.
 
 ## Risks and Mitigations
