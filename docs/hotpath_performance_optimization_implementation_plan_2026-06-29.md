@@ -53,13 +53,15 @@ gated behind explicit verification.
   `tests/geo/test_boozersurface.py`, `tests/field/test_biotsavart.py`,
   `tests/geo/test_curve_objectives.py`.
 - Original checkout baseline for this review: branch `surrogate-confinement-v2`,
-  HEAD `c15e39414`, dirty tree present. Latest committed hot-path baseline before
-  the current micro slice is `f7f5b3007` (`02778c0da` + `095348cf4` landed Phases
-  1-3 and the first Phase 4.3 host-sync item; `f7f5b3007` landed the Phase 4.1
-  BiotSavart safe pieces and the Phase 4.2 `objectives/utilities.py` PLU
-  allocation cleanup). Current repo `HEAD` may include unrelated non-hotpath
-  commits (for example the Sobolev diagnostics slice `45d2b3ae1`). Phase 5 DESC
-  anchors remain dirty-tree scoped: `examples/single_stage_optimization/banana_opt/desc_bridge/objective_factory.py`
+  HEAD `c15e39414`, dirty tree present. As of the 2026-06-30 validation pass,
+  current committed `HEAD` is `bf2088ae2` (`46fa4aef6` landed the hotpath lint
+  cleanup; `c4bfbd7f9`/`bf2088ae2` are later Sobolev-metric follow-ups on the
+  same branch). The hotpath commits after `c15e39414` include `02778c0da`,
+  `095348cf4`, `f7f5b3007`, `930ec91a3`, `0392fefaf`, `10a98aa92`,
+  `369061131`, `d3f1e1ffd`, `ff96d7db8`, `95107abc2`, `fa313122d`,
+  `a20c8d7c1`, `b9ef4ea90`, and `46fa4aef6`, interleaved with unrelated
+  documentation/Sobolev commits. Phase 5 DESC anchors remain dirty-tree scoped:
+  `examples/single_stage_optimization/banana_opt/desc_bridge/objective_factory.py`
   and `examples/single_stage_optimization/DESC_JOINT/run_desc_joint_banana.py`
   are untracked in the current tree, while `desc_bridge/runtime_coilset.py` is
   added. Treat Phase 5 as dirty-tree-scoped until those files are committed or
@@ -446,11 +448,13 @@ unpack the tuple in `dJ()`.
          passes (collapses ~3072 single-point pybind calls into one batched C++
          call).
 3. ALM solve-orchestration (uncertain; `STAGE_2/banana_coil_solver.py`).
-   - [ ] `:3749-3760` — gate the exact brute-force distance/curvature certification
-         so it runs only on the final incumbent (and on accepted iterates that
-         already beat the best `field_objective`), not unconditionally every
-         accepted iterate. (Largely subsumed once Phase 1 Task 1 lands the
-         candidate-aware `shortest_distance`.)
+   - [ ] `banana_coil_solver.py:5729-5825` — gate
+         `maybe_record_exact_stage2_pass(...)` / `accepted_callback` exact
+         brute-force distance/curvature certification so it runs only on the
+         final incumbent (and on accepted iterates that already beat the best
+         `field_objective`), not unconditionally every accepted iterate.
+         (Largely subsumed once Phase 1 Task 1 lands the candidate-aware
+         `shortest_distance`.)
 
 ### Implementation Status — 2026-06-29
 
@@ -522,23 +526,24 @@ unpack the tuple in `dJ()`.
       Task 1, Phase 4 except 4.4):** rerun the Phase 0 harness post-change and
       assert `J` matches bit-for-bit and `dJ` matches to ≤ 1e-12 relative
       (same VJP, reordered) for every refactored object.
-- [ ] `./.conda-env/bin/python -m pytest tests/field/test_selffieldforces.py -q`
+- [x] `./.conda-env/bin/python -m pytest tests/field/test_selffieldforces.py -q`
       (force.py Phase 2 + biotsavart Phase 4).
-- [ ] `./.conda-env/bin/python -m pytest tests/geo/test_curve_objectives.py -q`
+- [x] `./.conda-env/bin/python -m pytest tests/geo/test_curve_objectives.py -q`
       (Phase 1 Task 1 `shortest_distance` semantic contract and candidate
       invalidation behavior).
-- [ ] `./.conda-env/bin/python -m pytest tests/geo/test_boozersurface.py tests/geo/test_boozer_trust_gate.py -q`
+- [x] `./.conda-env/bin/python -m pytest tests/geo/test_boozersurface.py tests/geo/test_boozer_trust_gate.py -q`
       (Phase 1 Task 2 + Phase 4.4 boozer changes).
-- [ ] `./.conda-env/bin/python -m pytest tests/field/test_biotsavart.py -q`
+- [x] `./.conda-env/bin/python -m pytest tests/field/test_biotsavart.py -q`
       (Phase 4 biotsavart).
 - [ ] Full geo/field regression:
       `./.conda-env/bin/python -m pytest tests/geo tests/field -q` before sign-off.
-- [ ] `./.conda-env/bin/python -m ruff check` on every touched file.
-- [ ] **Caller-audit gate (Phase 1 Task 1 & 2):** the two `rg` audits return no
+- [x] `./.conda-env/bin/python -m ruff check` on every touched file.
+- [x] **Caller-audit gate (Phase 1 Task 1 & 2):** the two `rg` audits return no
       consumer that depends on the removed/changed value.
-- [ ] **DESC lane cleanliness gate (Phase 5):** `git ls-files` contains every DESC
-      path named by the phase, or the implementation note states that Phase 5 is
-      validated only against the current dirty tree.
+- [x] **DESC lane cleanliness/defer gate (Phase 5):** `git ls-files` contains
+      every DESC path named by the phase before any clean-checkout Phase 5
+      landing claim, or the implementation note states that Phase 5 remains
+      dirty-tree-scoped/deferred rather than clean-checkout landed.
 - [ ] **Behavior gate (Phase 4.4 & Phase 5):** Boozer convergence parity test +
       one single-stage smoke eval show unchanged convergence (iteration count,
       final `J`) within tolerance; residue/DESC lane smoke matches pre-change
@@ -602,6 +607,52 @@ unpack the tuple in `dJ()`.
 - `PYTHONNOUSERSITE=1 ./.conda-env/bin/python -m py_compile src/simsopt/geo/framedcurve.py tests/geo/test_strainopt.py`
   — clean.
 
+### Validation Evidence — 2026-06-30 Status Slice
+
+- Current committed `HEAD` during this pass: `bf2088ae2`
+  (`surrogate-confinement-v2`). The plan doc was clean before this status update;
+  the surrounding worktree remained broadly dirty with unrelated DESC/single-stage
+  files.
+- Focused hotpath gates in the live checkout:
+  `tests/field/test_selffieldforces.py -q` — 11 passed;
+  `tests/geo/test_curve_objectives.py -q` — 16 passed, 39 subtests passed;
+  `tests/geo/test_boozersurface.py tests/geo/test_boozer_trust_gate.py -q` —
+  73 passed, 183 subtests passed;
+  `tests/field/test_biotsavart.py -q` — 18 passed, 12 subtests passed.
+- Clean detached-worktree representative run at current `HEAD`
+  (`/tmp/simsopt-hotpath-clean.QSMb2Q/wt`, with the conda editable import finder
+  removed in the pytest launcher): `test_curve_objectives.py`,
+  `test_selffieldforces.py`, and `test_biotsavart.py` passed in the same run, but
+  `tests/geo/test_alm_utils.py::AlmHybridSignalContractDocTests::test_documented_code_citations_still_point_to_contract_anchors`
+  failed on stale ALM citation strings already outside this hotpath plan slice
+  (11 subfailures, 45 passed, 51 subtests passed).
+- Clean detached-worktree Boozer gate at current `HEAD`
+  (`tests/geo/test_boozersurface.py tests/geo/test_boozer_trust_gate.py -q`) —
+  73 passed, 183 subtests passed.
+- Clean detached-worktree ruff gate over every Python file changed between
+  `c15e39414..HEAD` under `src`, `examples`, and `tests` — `All checks passed!`
+- Live dirty-tree full regression attempt:
+  `PYTHONNOUSERSITE=1 MPLCONFIGDIR=/tmp ./.conda-env/bin/python -m pytest tests/geo tests/field -q`
+  — NOT green: 96 failed, 3334 passed, 5 skipped, 1205 subtests passed in
+  2537.24s. Failures included the clean-HEAD ALM citation test plus dirty-tree
+  DESC/single-stage failures from unrelated modified/untracked files, so this
+  remains an unclosed sign-off gate rather than hotpath proof.
+- Caller audits rerun:
+  `rg -n "\.shortest_distance\(|shortest_distance\(" src examples tests -g '*.py'`
+  still shows reporting/tests/helpers and the now-labeled capped metric call sites;
+  `rg -n "res\['residual'\]|res\.get\(\"residual\"\)|get\(\"residual\"\)|\['residual'\]" src examples tests -g '*.py'`
+  still shows exact-solver/verbose/test/DESC-result readers, not a new LS gate
+  consumer.
+- DESC cleanliness/defer gate rerun:
+  `git ls-files .../desc_bridge/objective_factory.py .../DESC_JOINT/run_desc_joint_banana.py .../desc_bridge/runtime_coilset.py`
+  returned only `examples/single_stage_optimization/banana_opt/desc_bridge/runtime_coilset.py`;
+  Phase 5 remains dirty-tree/deferred, not clean-checkout landed.
+- Equivalence gate remains open: no committed Phase 0 before/after harness or
+  pre-change baseline artifact was found in this checkout. Existing tests and
+  measured CPU A/B evidence are useful but do not satisfy the stated
+  requirement to compare every refactored object's `J`/`dJ` against a recorded
+  pre-change baseline.
+
 ## Risks and Mitigations
 
 - Risk: `shortest_distance()` empty-case change silently alters a real consumer
@@ -650,10 +701,12 @@ unpack the tuple in `dJ()`.
       solve log no longer flushes per eval.
 - [ ] Equivalence gate green for all numerically-identical changes.
 - [ ] `tests/geo` + `tests/field` regression green under `.conda-env` python;
-      `ruff` clean on touched files.
+      `ruff` clean on touched files. Current status: ruff is clean on the
+      touched Python file set, but the full geo/field regression is not green
+      (see 2026-06-30 evidence).
 - [x] Phases 4–5 tracked: each item either landed-with-gate or explicitly deferred
       with a one-line reason.
-- [ ] Project memory updated (`project_perf_audit_hotpath_2026_06_29`) with
+- [x] Project memory updated (`project_perf_audit_hotpath_2026_06_29`) with
       landed-vs-deferred status only after the implementation actually lands.
 
 ## Open Questions
