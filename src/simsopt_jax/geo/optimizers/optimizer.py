@@ -3609,20 +3609,16 @@ _DENSE_OPERATOR_CHUNK_BATCH_SIZE = max(
 
 
 # Solver for the inner-Boozer Gauss-Newton adjoint system (``J^T J + stab I``,
-# symmetric positive-(semi)definite).  Any value other than ``"cg"`` (default
-# ``"dense"``) keeps the established path: a dense ``lstsq`` solve when the N x N
-# operator fits ``max_dense_jacobian_bytes``, else an operator-only GMRES
-# refinement.  ``"cg"`` solves the same system matrix-free with ``lineax``
-# Conjugate Gradients -- the Krylov method matched to an SPD operator (cheaper
-# per step than GMRES, which targets nonsymmetric systems and stores the full
-# Krylov basis).  Its GUARANTEED benefit is bounded memory, NOT speed: CG needs
-# O(kappa_eff) matvecs, and at production conditioning (kappa(J^T J) ~ 4e5 with
-# stab=0) an unclustered spectrum needs thousands of HVPs, so ``"cg"`` wins only
-# when the operator spectrum is favourably clustered.  The genuine
-# kappa-reducing speedup (preconditioned CG, or LSMR on ``J`` at kappa(J) ~ 625)
-# requires exposing the residual Jacobian ``J`` at this seam -- a follow-up; the
-# bare penalty-Hessian matvec admits no preconditioner.  Read once at import
-# (selects a static trace-time branch).
+# symmetric positive-(semi)definite).  Any value other than ``"cg"`` or
+# ``"lsmr_j"`` (default ``"dense"``) keeps the established path: a dense
+# ``lstsq`` solve when the N x N operator fits ``max_dense_jacobian_bytes``, else
+# an operator-only GMRES refinement.  ``"cg"`` solves the same square system
+# matrix-free with ``lineax`` CG.  ``"lsmr_j"`` is an explicit experimental
+# comparator: it requires a residual-vector closure and positive ``stab`` so the
+# system is solved as a regularized least-squares problem on the unsquared
+# residual Jacobian ``[J; sqrt(stab) I]``.  The unstabilized production
+# ``stab=0`` case needs a KKT/two-solve formulation, not a disguised normal-
+# equation solve.  Read once at import (selects a static trace-time branch).
 _ADJOINT_LINEAR_SOLVER = (
     os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower()
 )
@@ -5130,6 +5126,98 @@ def _solve_symmetric_operator_cg_with_status(matvec, rhs, *, tol):
     )
 
 
+def _solve_regularized_normal_system_lsmr_j_with_status(
+    jacobian_operator,
+    rhs,
+    *,
+    stab,
+    tol,
+):
+    """Solve ``(J.T @ J + stab I) x = rhs`` through augmented residuals.
+
+    ``stab`` must be positive so the equivalent least-squares problem
+    ``min_x ||[J; sqrt(stab) I] x - [0; rhs/sqrt(stab)]||`` is well-defined.
+    The helper returns a decision-space vector and the established normal-system
+    residual status, making it comparable to the dense and CG adjoint helpers.
+    """
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim != 1:
+
+        def solve_column(column):
+            return _solve_regularized_normal_system_lsmr_j_with_status(
+                jacobian_operator,
+                column,
+                stab=stab,
+                tol=tol,
+            )
+
+        solutions, column_statuses = jax.vmap(
+            solve_column,
+            in_axes=1,
+            out_axes=(1, 0),
+        )(rhs)
+        return solutions, _LinearSolveStatus(
+            success=jnp.all(column_statuses.success),
+            residual=jnp.max(column_statuses.residual),
+            residual_relative=jnp.max(column_statuses.residual_relative),
+            iterations=jnp.max(column_statuses.iterations),
+        )
+
+    stab_host = float(stab)
+    if stab_host <= 0.0:
+        raise ValueError(
+            "SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j requires positive "
+            "newton_stab. The unstabilized stab=0 normal system needs a "
+            "separate KKT/two-solve formulation."
+        )
+
+    dtype = rhs.dtype
+    residual_size, decision_size = jacobian_operator["shape"]
+    sqrt_stab = jnp.sqrt(_optimizer_scalar(stab_host, dtype=dtype))
+    residual_target = jnp.zeros((residual_size,), dtype=dtype)
+    target = jnp.concatenate((residual_target, rhs / sqrt_stab), axis=0)
+
+    def augmented_matvec(vector):
+        residual_part = jnp.ravel(
+            jnp.asarray(jacobian_operator["matvec"](vector), dtype=dtype)
+        )
+        return jnp.concatenate((residual_part, sqrt_stab * vector), axis=0)
+
+    operator = lineax.FunctionLinearOperator(
+        augmented_matvec,
+        jax.ShapeDtypeStruct((decision_size,), dtype),
+    )
+    effective_tol = _effective_linear_solve_tolerance(rhs, tol)
+    # LSMR stops on the augmented least-squares criterion, while callers gate the
+    # induced normal-system residual below.  Ask the inner solve for a modestly
+    # tighter LS tolerance so the returned solution is judged by the same status
+    # contract as the dense/CG helpers.
+    solver_tol = _optimizer_scalar(1.0e-4, dtype=dtype) * effective_tol
+    max_steps = max(20, 10 * int(decision_size))
+    solution = lineax.linear_solve(
+        operator,
+        target,
+        solver=lineax.LSMR(
+            rtol=solver_tol,
+            atol=solver_tol,
+            max_steps=max_steps,
+        ),
+        throw=False,
+    )
+    j_solution = jacobian_operator["matvec"](solution.value)
+    normal_residual = rhs - (
+        jacobian_operator["transpose_matvec"](j_solution)
+        + _optimizer_scalar(stab_host, dtype=dtype) * solution.value
+    )
+    return solution.value, _linear_solve_status(
+        solution.value,
+        normal_residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(solution.stats["num_steps"]),
+    )
+
+
 def _solve_hessian_least_squares_system_with_status(
     objective_fn,
     x,
@@ -5137,6 +5225,7 @@ def _solve_hessian_least_squares_system_with_status(
     *,
     stab,
     tol,
+    residual_fn=None,
 ):
     """Solve a Hessian adjoint system without forming normal equations."""
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
@@ -5145,6 +5234,19 @@ def _solve_hessian_least_squares_system_with_status(
         return _solve_symmetric_operator_cg_with_status(
             operator["matvec"],
             rhs,
+            tol=tol,
+        )
+    if _ADJOINT_LINEAR_SOLVER == "lsmr_j":
+        if residual_fn is None:
+            raise ValueError(
+                "SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j requires a residual_fn "
+                "so it can operate on the residual Jacobian J instead of the "
+                "squared Hessian operator."
+            )
+        return _solve_regularized_normal_system_lsmr_j_with_status(
+            _jacobian_linear_operator(residual_fn, x),
+            rhs,
+            stab=stab,
             tol=tol,
         )
     if _dense_square_operator_materialization_allowed(rhs):
