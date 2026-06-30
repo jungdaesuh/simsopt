@@ -10,12 +10,12 @@ the post-handoff re-validation was added as a watchdog review-fix):
 
   2. ``initialize_published_surface_data_from_stage2_seed`` in
      ``MULTISURFACE_RESOLVE_MODE='exact_twin'`` RE-VALIDATES the twin-replaced stack after
-     the in-place handoff (name-agnostic volume-order + shared-G). The published-family
-     postconditions run on the least-squares family BEFORE the handoff, and exact Newton
-     converges to the NEAREST Boozer surface, so a twin can drift its volume/G; without the
-     post-handoff re-check a volume-crossed (non-nested) or G-inconsistent twin stack would
-     silently seed the optimizer warm-start. These tests prove the re-check rejects such a
-     stack and is inert under the default ``ls`` mode.
+     the in-place handoff (name-agnostic volume-order + nesting + shared-G). The
+     published-family postconditions run on the least-squares family BEFORE the handoff, and
+     exact Newton converges to the NEAREST Boozer surface, so a twin can drift its volume,
+     geometry, or G; without the post-handoff re-check a volume-crossed, non-nested, or
+     G-inconsistent twin stack would silently seed the optimizer warm-start. These tests prove
+     the re-check rejects such a stack and is inert under the default ``ls`` mode.
 
 Everything is stubbed -- no Boozer solve or geometry runs.
 """
@@ -50,12 +50,12 @@ def _load_single_stage_example_module():
     return module
 
 
-def _fake_boozer_surface(*, volume, G, iota=0.3):
+def _fake_boozer_surface(*, volume, G, iota=0.3, nested=True):
     """Stand-in BoozerSurface exposing only what the resolver + re-validation read:
     ``.surface.volume()`` (``_require_published_volume_order``) and ``.res['G']`` /
     ``.res['iota']`` (``_boozer_res_scalar`` / the resolver warm-start)."""
     return SimpleNamespace(
-        surface=SimpleNamespace(volume=lambda v=volume: v),
+        surface=SimpleNamespace(volume=lambda v=volume: v, nested=bool(nested)),
         res={"G": G, "iota": iota},
     )
 
@@ -128,10 +128,11 @@ class ExactTwinRevalidationWiringTests(unittest.TestCase):
 
     Mirrors the stubbing harness of ``test_surface_truncation_wiring`` (no solver/geometry
     runs): the family build is replaced by a stub that returns a controllable band, and the
-    exact-twin handoff is stubbed to set each twin's solved volume/G -- so a test drives the
-    REAL post-handoff ``_require_published_volume_order`` / ``_require_published_G_consistency``
-    invariants on a chosen twin outcome. The pre-handoff strict postcondition is stubbed inert
-    (the least-squares band is valid by construction); we are testing the POST-handoff re-check.
+    exact-twin handoff is stubbed to set each twin's solved volume/nesting/G -- so a test drives
+    the REAL post-handoff ``_require_published_volume_order`` /
+    ``_require_published_surface_nesting`` / ``_require_published_G_consistency`` invariants on a
+    chosen twin outcome. The pre-handoff strict postcondition is stubbed inert (the least-squares
+    band is valid by construction); we are testing the POST-handoff re-check.
     """
 
     @classmethod
@@ -161,7 +162,14 @@ class ExactTwinRevalidationWiringTests(unittest.TestCase):
                     lambda config, boozer_surface, provenance: {"name": config["name"]})
         # Pre-handoff strict postcondition: inert. The LS band is valid by construction; the
         # behaviour under test is the POST-handoff re-validation, which must run for real.
-        self._patch("_require_published_surface_data_postconditions", lambda data: None)
+        self._patch(
+            "_require_published_surface_data_postconditions",
+            lambda data, **kwargs: None,
+        )
+        self._patch(
+            "cross_sections_are_nested",
+            lambda inner, outer: (bool(getattr(inner, "nested", True)), []),
+        )
         self._patch("build_boozer_surface_family", self._fake_family_build)
         self._set_resolve_mode("exact_twin")
         self.stage2_seed_surface = SimpleNamespace(surface=object(), iota=0.3, G=1.0)
@@ -188,11 +196,17 @@ class ExactTwinRevalidationWiringTests(unittest.TestCase):
     def _fake_family_build(self, ordered_configs, **kwargs):
         return self.family_band, SimpleNamespace(truncated=False)
 
-    def _patch_twin_outcome(self, *, volumes, Gs):
-        """Stub the handoff to set each twin's solved volume/G (simulate twin re-solve)."""
+    def _patch_twin_outcome(self, *, volumes, Gs, nested=None):
+        """Stub the handoff to set each twin's solved volume/nesting/G."""
+        nested_flags = [True] * len(volumes) if nested is None else list(nested)
+
         def fake_resolve(ordered_surface_data, **kwargs):
-            for entry, volume, G in zip(ordered_surface_data, volumes, Gs):
-                entry["boozer_surface"] = _fake_boozer_surface(volume=volume, G=G)
+            for entry, volume, G, is_nested in zip(
+                ordered_surface_data, volumes, Gs, nested_flags
+            ):
+                entry["boozer_surface"] = _fake_boozer_surface(
+                    volume=volume, G=G, nested=is_nested
+                )
         self._patch("_resolve_published_family_to_exact_twins", fake_resolve)
 
     def _call(self):
@@ -216,6 +230,16 @@ class ExactTwinRevalidationWiringTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "solved G drifted"):
             self._call()
 
+    def test_revalidation_rejects_twin_non_nesting(self):
+        """Volume-ordered twins that are geometrically non-nested fail closed."""
+        self._patch_twin_outcome(
+            volumes=[1.0, 2.0],
+            Gs=[2.0, 2.0],
+            nested=[False, True],
+        )
+        with self.assertRaisesRegex(RuntimeError, "strictly nested"):
+            self._call()
+
     def test_revalidation_passes_for_consistent_nested_twins(self):
         """Nested (strictly increasing volume), shared-G twins pass and return the band."""
         self._patch_twin_outcome(volumes=[1.0, 2.0], Gs=[2.0, 2.0])
@@ -234,6 +258,7 @@ class ExactTwinRevalidationWiringTests(unittest.TestCase):
             raise AssertionError("post-handoff re-validation must not run in 'ls' mode")
 
         self._patch("_require_published_volume_order", _must_not_run)
+        self._patch("_require_published_surface_nesting", _must_not_run)
         self._patch("_require_published_G_consistency", _must_not_run)
 
         ordered_surface_data, warm_start_paths = self._call()

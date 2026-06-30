@@ -4837,6 +4837,30 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(gate["enforce_nesting"])
         self.assertEqual(gate["gate_scale"], 1.0)
 
+        relaxed_start = module.build_surface_search_gate_for_contract(
+            contract,
+            accepted_iterations=0,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+            relax_published_initial_nesting=True,
+        )
+        relaxed_done = module.build_surface_search_gate_for_contract(
+            contract,
+            accepted_iterations=5,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+            relax_published_initial_nesting=True,
+        )
+
+        self.assertEqual(relaxed_start["surface_gap_threshold"], 0.0)
+        self.assertFalse(relaxed_start["enforce_nesting"])
+        self.assertEqual(relaxed_start["gate_scale"], 0.0)
+        self.assertEqual(relaxed_done["surface_gap_threshold"], 0.005)
+        self.assertTrue(relaxed_done["enforce_nesting"])
+        self.assertEqual(relaxed_done["gate_scale"], 1.0)
+
 
 class HardwareConstraintTests(unittest.TestCase):
     def load_module(self):
@@ -5703,6 +5727,84 @@ class HardwareConstraintTests(unittest.TestCase):
             archive_entries[0]["residue_objective"]["target_manifest_id"],
             "sha256:test-targets",
         )
+
+    def test_callback_rejected_candidate_restores_incumbent_and_stops(self):
+        module = load_single_stage_example_module()
+        accepted_x = np.array([1.0, 2.0])
+        rejected_x = np.array([9.0, -9.0])
+        accepted_surface_state = {
+            "sdofs": [np.array([0.1])],
+            "iota": [TEST_IOTA],
+            "G": [TEST_G0],
+        }
+        module.JF = SimpleNamespace(x=rejected_x.copy())
+        module.surface_data = [object()]
+        module.run_dict = {
+            "accepted_x": accepted_x.copy(),
+            "surface_state": accepted_surface_state,
+            "x_prev": np.zeros_like(accepted_x),
+            "lscount": 3,
+            "curvature_overcap_boozer_evals_this_iteration": 5,
+            "invalid_state_rejects_total": 2,
+            "optimizer_invalid_accepts_total": 0,
+            "last_search_step_x": rejected_x.copy(),
+            "last_search_step_success": False,
+        }
+
+        with patch.object(module, "restore_surface_states") as restore_mock:
+            with self.assertRaisesRegex(
+                StopIteration,
+                "optimizer accepted a rejected single-stage candidate",
+            ):
+                module.callback(rejected_x.copy())
+
+        np.testing.assert_array_equal(module.JF.x, accepted_x)
+        np.testing.assert_array_equal(module.run_dict["x_prev"], accepted_x)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 3)
+        self.assertEqual(module.run_dict["optimizer_invalid_accepts_total"], 1)
+        self.assertEqual(module.run_dict["lscount"], 0)
+        self.assertEqual(
+            module.run_dict["curvature_overcap_boozer_evals_this_iteration"],
+            0,
+        )
+        restore_mock.assert_called_once_with(
+            module.surface_data,
+            accepted_surface_state,
+        )
+
+    def test_callback_rejected_candidate_aborts_basin_hopping(self):
+        module = load_single_stage_example_module()
+        accepted_x = np.array([1.0, 2.0])
+        rejected_x = np.array([9.0, -9.0])
+        module.JF = SimpleNamespace(x=rejected_x.copy())
+        module.surface_data = [object()]
+        module.run_dict = {
+            "accepted_x": accepted_x.copy(),
+            "surface_state": {
+                "sdofs": [np.array([0.1])],
+                "iota": [TEST_IOTA],
+                "G": [TEST_G0],
+            },
+            "x_prev": np.zeros_like(accepted_x),
+            "lscount": 3,
+            "curvature_overcap_boozer_evals_this_iteration": 5,
+            "invalid_state_rejects_total": 2,
+            "optimizer_invalid_accepts_total": 0,
+            "last_search_step_x": rejected_x.copy(),
+            "last_search_step_success": False,
+            "active_basin_hopping": True,
+        }
+
+        with patch.object(module, "restore_surface_states"):
+            with self.assertRaisesRegex(
+                module.RejectedCandidateAcceptError,
+                "optimizer accepted a rejected single-stage candidate",
+            ):
+                module.callback(rejected_x.copy())
+
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertIn("except RejectedCandidateAcceptError as exc:", source)
+        self.assertIn('"basin_best_result_source": "invalid_accept_abort"', source)
 
     def test_topology_archive_entry_preserves_kam_metrics(self):
         module = load_single_stage_example_module()
@@ -11702,6 +11804,76 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(result["phase1_unsafe_accept_rollbacks"], 0)
         self.assertEqual(result["phase1_invalid_reject_attempts"], 0)
         self.assertFalse(result["phase1_recovery_used"])
+        self.assertEqual(result["next_dofs"].tolist(), [1.0, -1.0])
+        self.assertGreaterEqual(len(restore_calls), 1)
+
+    def test_run_penalty_phase1_stops_after_invalid_accept_guard(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "optimizer_invalid_accepts_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+        restore_calls = []
+
+        def fake_restore():
+            restore_calls.append(True)
+
+        def fake_minimize(*args, **kwargs):
+            run_dict["invalid_state_rejects_total"] += 1
+            run_dict["optimizer_invalid_accepts_total"] += 1
+            return SimpleNamespace(
+                x=np.array([1.0, -1.0]),
+                nit=1,
+                success=False,
+                message="`callback` raised `StopIteration`.",
+                status=2,
+            )
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=0.5,
+            initial_step_maxiter=2,
+            enable_local_preservation=False,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=lambda x: None,
+            normalize_message_fn=lambda *args, **kwargs: "callback_stop",
+            restore_accepted_state_fn=fake_restore,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertTrue(result["used_phase1"])
+        self.assertFalse(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "invalid_accept_abort")
         self.assertEqual(result["next_dofs"].tolist(), [1.0, -1.0])
         self.assertGreaterEqual(len(restore_calls), 1)
 

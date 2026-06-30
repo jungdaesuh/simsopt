@@ -37,6 +37,8 @@ import single_stage_banana_example as sse  # noqa: E402
 from banana_opt.fold_buildability import CurveSurfaceGeodesicCurvature  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     TYPE_KK_INNER_RADIUS_MARGIN_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+    TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces  # noqa: E402
 from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
@@ -508,9 +510,32 @@ class RotationAwareCurvatureCapTest(unittest.TestCase):
         # The flatwise/thin-axis best case is ~123.03/m (allow a small numerical band).
         self.assertLessEqual(max(caps), 123.1)
 
-    def test_relaxed_cap_never_below_conservative(self):
+    def test_relaxed_cap_never_below_diagonal_corner(self):
+        # The reach is the rectangle support function half_n*|n| + half_b*|b|, whose
+        # worst (largest) value is the diagonal corner sqrt(half_n^2 + half_b^2).
+        # That corner pokes past the wide binormal axis, so the rotation-aware cap
+        # can dip BELOW the conservative edgewise cap (~43.31/m) -- but never below
+        # the corner cap 1/(margin + sqrt(half_n^2 + half_b^2)) (~40.85/m). The old
+        # quadratic blend half_n*n^2 + half_b*b^2 stayed at/above the edgewise cap,
+        # which is exactly the optimistic floor this fix removes.
+        corner_cap = 1.0 / (
+            TYPE_KK_INNER_RADIUS_MARGIN_M
+            + np.hypot(
+                TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
+                TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
+            )
+        )
         caps = [self._cap_for_constant_alpha(a) for a in np.linspace(0.0, np.pi, 37)]
-        self.assertGreaterEqual(min(caps), self.conservative_inv_m - 1e-6)
+        self.assertGreaterEqual(
+            min(caps), corner_cap - 1e-6,
+            "rotation-aware cap fell below the diagonal-corner support-function cap",
+        )
+        # And the twist scan actually drives the cap below the conservative edgewise
+        # cap -- the observable consequence of the support-function corner.
+        self.assertLess(
+            min(caps), self.conservative_inv_m,
+            "no twist drove the cap below the edgewise cap; the corner is missing",
+        )
 
 
 if __name__ == "__main__":

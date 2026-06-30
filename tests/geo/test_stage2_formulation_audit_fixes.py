@@ -4,8 +4,8 @@ Covers the finite-build default-on and additive changes:
 
 5a. ``--finitebuild-frame-aware-curvature-threshold``: drives finite-build
     optimizer curvature threshold with the conservative frame-aware
-    winding-pack limit ``1 / (single-filament bend floor + pack corner reach)``
-    instead of the centerline cap. Default-on for finite-build, never loosens,
+    edgewise fallback; rotation-aware checks use the support-function reach and
+    can be stricter at diagonal corners. Default-on for finite-build, never loosens,
     explicitly opt-outable, and incompatible with ``--filament-only`` when
     explicitly requested.
 5b. Exact segment-based cc/cs minima recorded at artifact capture
@@ -148,12 +148,10 @@ class FrameAwareCurvatureThresholdTests(unittest.TestCase):
         self.assertAlmostEqual(limit, 43.31, delta=0.01)
         self.assertLess(limit, 100.0)
 
-    def test_pack_limit_is_conservative_for_every_bend_direction(self):
-        # The per-point frame-aware bound uses the axis-interpolated projected
-        # half-extent cos^2*half_n + sin^2*half_b for a bend direction over the
-        # OUTER channel. That convex interpolation never exceeds the edgewise
-        # reach max(half_n, half_b), so a curve at the conservative cap satisfies
-        # every per-point bound.
+    def test_edgewise_pack_limit_matches_axis_aligned_rotation_aware_endpoint(self):
+        # The global frame-aware fallback uses the edgewise axis reach. The live
+        # rotation-aware support function can be stricter at diagonal bend
+        # directions, so this pins only the axis-aligned endpoint equality.
         settings = _type_kk_finite_build_settings()
         limit = finite_build_frame_aware_curvature_limit_inv_m(
             settings,
@@ -161,38 +159,48 @@ class FrameAwareCurvatureThresholdTests(unittest.TestCase):
         )
         half_n = TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M
         half_b = TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M
-        rng = np.random.default_rng(20260611)
-        angles = rng.uniform(0.0, 2.0 * np.pi, size=256)
-        projected = np.cos(angles) ** 2 * half_n + np.sin(angles) ** 2 * half_b
-        per_point_limits = 1.0 / (TYPE_KK_INNER_RADIUS_MARGIN_M + projected)
-        self.assertLessEqual(
+        edgewise_angle = np.pi / 2.0
+        edgewise_limit = finite_build_rotation_aware_curvature_limit_inv_m(
+            settings,
+            TYPE_KK_INNER_RADIUS_MARGIN_M,
+            edgewise_angle,
+        )
+        self.assertAlmostEqual(limit, edgewise_limit, places=12)
+
+        corner_angle = math.atan2(half_b, half_n)
+        corner_limit = finite_build_rotation_aware_curvature_limit_inv_m(
+            settings,
+            TYPE_KK_INNER_RADIUS_MARGIN_M,
+            corner_angle,
+        )
+        self.assertLess(
+            corner_limit,
             limit,
-            float(np.min(per_point_limits)) + 1e-12,
-            "conservative cap must be at most the per-point frame-aware limit "
-            "for every bend direction",
+            "diagonal support-function reach must be stricter than the edgewise "
+            "fallback",
         )
 
     def test_degenerate_zero_radius_returns_inf(self):
-        # The outer-channel reach is a fixed positive constant, so the required
-        # radius is non-positive only when the margin cancels it; the helper
+        # The edgewise fallback reach is a fixed positive constant, so the
+        # required radius is non-positive when the margin cancels it; the helper
         # returns inf at that degenerate boundary.
         settings = _type_kk_finite_build_settings()
-        outer_corner_reach = math.hypot(
+        outer_edge_reach = max(
             TYPE_KK_OUTER_CHANNEL_HALF_DEPTH_NORMAL_M,
             TYPE_KK_OUTER_CHANNEL_HALF_WIDTH_BINORMAL_M,
         )
         self.assertEqual(
             finite_build_frame_aware_curvature_limit_inv_m(
-                settings, -outer_corner_reach
+                settings, -outer_edge_reach
             ),
             float("inf"),
         )
 
-    def test_projected_reach_endpoints_and_maximum_is_edgewise_axis(self):
-        # T3.2: the axis-interpolated projected reach is half_n along the normal
-        # (angle 0), half_b along the binormal (angle pi/2), and -- being a convex
-        # interpolation cos^2*half_n + sin^2*half_b -- maxes out at the edgewise
-        # axis reach max(half_n, half_b), with no stricter diagonal-corner reach.
+    def test_projected_reach_endpoints_and_maximum_is_support_corner(self):
+        # T3.2: the support-function reach is half_n along the normal (angle 0),
+        # half_b along the binormal (angle pi/2), and maxes out at the diagonal
+        # rectangle-corner direction sqrt(half_n^2 + half_b^2), which is stricter
+        # than the edgewise axis reach.
         settings = _type_kk_finite_build_settings()
         half_n = settings.pack_half_extent_n_m
         half_b = settings.pack_half_extent_b_m
@@ -200,12 +208,18 @@ class FrameAwareCurvatureThresholdTests(unittest.TestCase):
         self.assertAlmostEqual(
             pack_projected_reach_m(half_n, half_b, np.pi / 2.0), half_b
         )
-        # The edgewise axis reach max(half_n, half_b) is attained at pi/2 (asserted
-        # above) and -- by convexity -- bounds the reach for every other angle.
         edgewise_reach = max(half_n, half_b)
+        corner_angle = math.atan2(half_b, half_n)
+        corner_reach = math.hypot(half_n, half_b)
+        self.assertAlmostEqual(
+            pack_projected_reach_m(half_n, half_b, corner_angle),
+            corner_reach,
+            places=12,
+        )
+        self.assertGreater(corner_reach, edgewise_reach)
         angles = np.linspace(0.0, 2.0 * np.pi, 720)
         projected = [pack_projected_reach_m(half_n, half_b, a) for a in angles]
-        self.assertLessEqual(float(np.max(projected)), edgewise_reach + 1e-12)
+        self.assertLessEqual(float(np.max(projected)), corner_reach + 1e-12)
 
     def test_rotation_aware_limit_matches_conservative_at_edgewise_bend_angle(self):
         # At the edgewise (wide-axis) bend angle the rotation-aware cap reproduces

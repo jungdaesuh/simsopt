@@ -142,7 +142,9 @@ class TruncationWiringTests(unittest.TestCase):
         self._patch(
             module,
             "_require_published_surface_data_postconditions",
-            lambda data: self.strict_postcondition_calls.append(data),
+            lambda data, **kwargs: self.strict_postcondition_calls.append(
+                (data, dict(kwargs))
+            ),
         )
         self._patch(
             module,
@@ -183,7 +185,13 @@ class TruncationWiringTests(unittest.TestCase):
             fake_build_boozer_surface_family,
         )
 
-    def _call(self, *, allow_truncation=False, min_surfaces=3):
+    def _call(
+        self,
+        *,
+        allow_truncation=False,
+        min_surfaces=3,
+        relax_initial_nesting=False,
+    ):
         return self.module.initialize_published_surface_data_from_stage2_seed(
             self.surface_configs,
             mpol=4,
@@ -195,6 +203,7 @@ class TruncationWiringTests(unittest.TestCase):
             stage2_seed_surface=self.stage2_seed_surface,
             allow_truncation=allow_truncation,
             min_surfaces=min_surfaces,
+            relax_initial_nesting=relax_initial_nesting,
         )
 
     def test_default_off_pins_min_surfaces_and_runs_strict_postcondition(self):
@@ -213,7 +222,11 @@ class TruncationWiringTests(unittest.TestCase):
         )
         # Strict inner0-based name postcondition ran exactly once, on the helper's band.
         self.assertEqual(len(self.strict_postcondition_calls), 1)
-        self.assertIs(self.strict_postcondition_calls[0], _SENTINEL_SURFACE_DATA)
+        self.assertIs(self.strict_postcondition_calls[0][0], _SENTINEL_SURFACE_DATA)
+        self.assertEqual(
+            self.strict_postcondition_calls[0][1],
+            {"require_nesting": True},
+        )
         # The standalone G-consistency check is NOT called directly on the full path
         # (it lives inside the strict postcondition).
         self.assertEqual(self.g_consistency_calls, [])
@@ -252,8 +265,30 @@ class TruncationWiringTests(unittest.TestCase):
         # standalone G-consistency check is not invoked directly.
         self.assertTrue(self.family_call_kwargs["allow_truncation"])
         self.assertEqual(len(self.strict_postcondition_calls), 1)
-        self.assertIs(self.strict_postcondition_calls[0], _SENTINEL_SURFACE_DATA)
+        self.assertIs(self.strict_postcondition_calls[0][0], _SENTINEL_SURFACE_DATA)
+        self.assertEqual(
+            self.strict_postcondition_calls[0][1],
+            {"require_nesting": True},
+        )
         self.assertEqual(self.g_consistency_calls, [])
+
+    def test_relaxed_initial_nesting_skips_only_the_setup_nesting_gate(self):
+        """Opt-in relaxed admission preserves strict name/volume/G checks."""
+        self._install_family_stub(truncated=False)
+
+        ordered_surface_data, warm_start_paths = self._call(
+            relax_initial_nesting=True,
+        )
+
+        self.assertEqual(len(self.strict_postcondition_calls), 1)
+        self.assertIs(self.strict_postcondition_calls[0][0], _SENTINEL_SURFACE_DATA)
+        self.assertEqual(
+            self.strict_postcondition_calls[0][1],
+            {"require_nesting": False},
+        )
+        self.assertEqual(self.g_consistency_calls, [])
+        self.assertIs(ordered_surface_data, _SENTINEL_SURFACE_DATA)
+        self.assertEqual(warm_start_paths, [])
 
     def test_contract_dispatch_forwards_truncation_policy_to_published_path(self):
         """initialize_surface_data_for_contract threads the policy into the published
@@ -277,11 +312,16 @@ class TruncationWiringTests(unittest.TestCase):
             warm_start_surface_stem=None,
             allow_truncation=True,
             min_surfaces=2,
+            relax_initial_nesting=True,
         )
 
         # The policy reached build_boozer_surface_family through the dispatcher.
         self.assertTrue(self.family_call_kwargs["allow_truncation"])
         self.assertEqual(self.family_call_kwargs["min_surfaces"], 2)
+        self.assertEqual(
+            self.strict_postcondition_calls[0][1],
+            {"require_nesting": False},
+        )
 
 
 if __name__ == "__main__":
