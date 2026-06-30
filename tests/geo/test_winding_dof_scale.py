@@ -21,6 +21,7 @@ if str(EXAMPLES_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_ROOT))
 
 from banana_opt.single_stage_geometry import (  # noqa: E402
+    build_curve_dof_scale_vector,
     build_sobolev_curve_mode_scale_vector,
     build_surface_dof_scale_vector,
     build_winding_dof_scale_vector,
@@ -96,6 +97,31 @@ def test_surface_scale_maps_surface_fourier_dofs_only():
         scale,
         np.array([1.0, 1.0, 1.0e-4, 1.0e-4, 1.0]),
     )
+
+
+def test_curve_scale_maps_curve_fourier_dofs_only():
+    names = [
+        "Current1:x0",
+        "CurveCWSFourierCPP1:phic(1)",
+        "CurveCWSFourierCPP1:thetas(7)",
+        "SurfaceRZFourier1:rc(0,0)",
+        "SurfaceRZFourier1:zs(1,0)",
+    ]
+
+    scale = build_curve_dof_scale_vector(names, curve_scale=0.25)
+
+    np.testing.assert_array_equal(
+        scale,
+        np.array([1.0, 0.25, 0.25, 1.0, 1.0]),
+    )
+
+
+def test_curve_scale_rejects_invalid_values():
+    import pytest
+
+    for bad in (0.0, -1.0, np.inf, np.nan):
+        with pytest.raises(ValueError, match="finite and positive"):
+            build_curve_dof_scale_vector(_NAMES, curve_scale=bad)
 
 
 def test_default_off_is_byte_identical_to_plain_minimize():
@@ -259,3 +285,26 @@ def test_resolve_penalty_scale_composes_surface_scale():
     assert scale[0] == 1.0
     assert scale[1] == 1.0
     assert scale[2] == WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"] * 1.0e-4
+
+
+def test_resolve_penalty_scale_composes_curve_scale():
+    from STAGE_2.banana_coil_solver import resolve_stage2_penalty_dof_scale
+
+    args = SimpleNamespace(
+        stage2_sobolev_alpha=0.0,
+        stage2_sobolev_power=2,
+        stage2_surface_dof_scale=1.0,
+        stage2_curve_dof_scale=0.25,
+    )
+
+    scale = resolve_stage2_penalty_dof_scale(
+        args, _NAMES, WINDING_DOF_CORRIDOR_SCALE_MAP
+    )
+
+    expected = build_winding_dof_scale_vector(
+        _NAMES, WINDING_DOF_CORRIDOR_SCALE_MAP
+    ) * build_curve_dof_scale_vector(_NAMES, 0.25)
+    np.testing.assert_array_equal(scale, expected)
+    assert scale[0] == 1.0
+    assert scale[1] == 0.25
+    assert scale[2] == WINDING_DOF_CORRIDOR_SCALE_MAP["rc(0,0)"]

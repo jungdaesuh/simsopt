@@ -1477,6 +1477,26 @@ def build_surface_dof_scale_vector(dof_names, surface_scale=1.0):
 _CURVE_FOURIER_DOF_PREFIXES = ("phic(", "phis(", "thetac(", "thetas(")
 
 
+def _is_curve_fourier_dof_name(name):
+    suffix = str(name).rsplit(":", 1)[-1]
+    return any(suffix.startswith(prefix) for prefix in _CURVE_FOURIER_DOF_PREFIXES)
+
+
+def build_curve_dof_scale_vector(dof_names, curve_scale=1.0):
+    """Per-DOF scale vector for CurveCWSFourier Fourier coefficients."""
+    names = list(dof_names)
+    value = float(curve_scale)
+    if not (np.isfinite(value) and value > 0.0):
+        raise ValueError(f"curve DOF scale must be finite and positive, got {value!r}.")
+    scale = np.ones(len(names), dtype=float)
+    if value == 1.0:
+        return scale
+    for i, name in enumerate(names):
+        if _is_curve_fourier_dof_name(name):
+            scale[i] = value
+    return scale
+
+
 def build_sobolev_curve_mode_scale_vector(dof_names, alpha, power=2):
     """Per-DOF Sobolev mode-scale ``1/(1 + alpha*k**power)`` on the curve Fourier DOFs.
 
@@ -1535,6 +1555,7 @@ class Stage2PenaltyPreconditioner:
     h2_beta: float = 0.0
     metric_normalization: str = "none"
     surface_dof_scale: float = 1.0
+    curve_dof_scale: float = 1.0
 
     @classmethod
     def from_scale(
@@ -1546,12 +1567,16 @@ class Stage2PenaltyPreconditioner:
         h2_beta=0.0,
         metric_normalization="none",
         surface_dof_scale=1.0,
+        curve_dof_scale=1.0,
     ):
         scale_array = np.asarray(scale, dtype=float)
         if scale_array.ndim != 1:
             raise ValueError("preconditioner scale must be one-dimensional")
         if not np.all(np.isfinite(scale_array) & (scale_array > 0.0)):
             raise ValueError("preconditioner scale entries must be finite and positive")
+        curve_scale = float(curve_dof_scale)
+        if not (np.isfinite(curve_scale) and curve_scale > 0.0):
+            raise ValueError(f"curve DOF scale must be finite and positive, got {curve_scale!r}.")
         return cls(
             diagonal_scale=scale_array,
             curve_blocks=(),
@@ -1560,6 +1585,7 @@ class Stage2PenaltyPreconditioner:
             h2_beta=float(h2_beta),
             metric_normalization=str(metric_normalization),
             surface_dof_scale=float(surface_dof_scale),
+            curve_dof_scale=curve_scale,
         )
 
     @property
@@ -1585,29 +1611,32 @@ class Stage2PenaltyPreconditioner:
 
     def to_u(self, x):
         u = self._vector(x, "x") / self.diagonal_scale
+        curve_scale = float(self.curve_dof_scale)
         for block in self.curve_blocks:
             block_x = np.asarray(x, dtype=float)[block.indices]
-            u[block.indices] = block.cholesky_factor.T @ block_x
+            u[block.indices] = (block.cholesky_factor.T @ block_x) / curve_scale
         return u
 
     def to_x(self, u):
         x = self._vector(u, "u") * self.diagonal_scale
+        curve_scale = float(self.curve_dof_scale)
         for block in self.curve_blocks:
             x[block.indices] = solve_triangular(
                 block.cholesky_factor.T,
-                np.asarray(u, dtype=float)[block.indices],
+                np.asarray(u, dtype=float)[block.indices] * curve_scale,
                 lower=False,
             )
         return x
 
     def grad_to_u(self, grad):
         grad_u = self._vector(grad, "grad") * self.diagonal_scale
+        curve_scale = float(self.curve_dof_scale)
         for block in self.curve_blocks:
             grad_u[block.indices] = solve_triangular(
                 block.cholesky_factor,
                 np.asarray(grad, dtype=float)[block.indices],
                 lower=True,
-            )
+            ) * curve_scale
         return grad_u
 
     def preconditioned_gradient(self, grad):
@@ -1644,6 +1673,7 @@ class Stage2PenaltyPreconditioner:
             "STAGE2_SOBOLEV_H2_BETA": float(self.h2_beta),
             "STAGE2_SOBOLEV_METRIC_NORMALIZATION": self.metric_normalization,
             "STAGE2_SURFACE_DOF_SCALE": float(self.surface_dof_scale),
+            "STAGE2_CURVE_DOF_SCALE": float(self.curve_dof_scale),
             "STAGE2_SOBOLEV_METRIC_TRACE_MEAN": [
                 float(block.metric_trace_mean) for block in self.curve_blocks
             ],
@@ -1763,6 +1793,7 @@ def build_stage2_penalty_preconditioner(
     h2_beta=0.0,
     winding_dof_scale_map=None,
     surface_dof_scale=1.0,
+    curve_dof_scale=1.0,
     bounds=None,
     metric_kind="h1",
 ):
@@ -1770,12 +1801,20 @@ def build_stage2_penalty_preconditioner(
     diagonal_scale = diagonal_scale * build_surface_dof_scale_vector(
         dof_names, surface_dof_scale
     )
+    curve_scale = float(curve_dof_scale)
+    if not (np.isfinite(curve_scale) and curve_scale > 0.0):
+        raise ValueError(f"curve DOF scale must be finite and positive, got {curve_scale!r}.")
     metric_kind = str(metric_kind).lower()
     if metric_kind not in {"off", "h1", "h2"}:
         raise ValueError(f"unknown stage2 Sobolev metric kind {metric_kind!r}")
     if metric_kind == "off":
+        diagonal_scale = diagonal_scale * build_curve_dof_scale_vector(
+            dof_names, curve_scale
+        )
         return Stage2PenaltyPreconditioner.from_scale(
-            diagonal_scale, surface_dof_scale=surface_dof_scale
+            diagonal_scale,
+            surface_dof_scale=surface_dof_scale,
+            curve_dof_scale=curve_scale,
         )
     curves = tuple(curves_by_block or ())
     if not curves:
@@ -1809,6 +1848,7 @@ def build_stage2_penalty_preconditioner(
         h2_beta=beta,
         metric_normalization="trace_mean",
         surface_dof_scale=float(surface_dof_scale),
+        curve_dof_scale=curve_scale,
     )
 
 

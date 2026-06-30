@@ -126,6 +126,7 @@ from banana_opt.stage2_geometry import (
 )
 from banana_opt.single_stage_geometry import (
     Stage2PenaltyPreconditioner,
+    build_curve_dof_scale_vector,
     build_surface_dof_scale_vector,
     build_stage2_penalty_preconditioner,
     build_sobolev_curve_mode_scale_vector,
@@ -1069,15 +1070,19 @@ def resolve_stage2_penalty_dof_scale(args, dof_names, winding_dof_scale_map):
     curve-mode scales.
 
     Identity (all-ones) when both are off, so the penalty solve is byte-identical
-    unless ``--winding-dof-scale``, ``--stage2-surface-dof-scale != 1``, or
-    ``--stage2-sobolev-alpha > 0`` is set. The Sobolev factor damps the
+    unless ``--winding-dof-scale``, ``--stage2-surface-dof-scale != 1``,
+    ``--stage2-curve-dof-scale != 1``, or ``--stage2-sobolev-alpha > 0`` is set.
+    The Sobolev factor damps the
     n^2-amplified high-order curve-mode gradient (see
     :func:`build_sobolev_curve_mode_scale_vector`); the surface factor damps the
-    exposed ``SurfaceRZFourier`` block.
+    exposed ``SurfaceRZFourier`` block; the curve factor damps all curve Fourier
+    DOFs as a global coordinate scale.
     """
     scale = build_winding_dof_scale_vector(dof_names, winding_dof_scale_map)
     surface_scale = float(getattr(args, "stage2_surface_dof_scale", 1.0))
     scale = scale * build_surface_dof_scale_vector(dof_names, surface_scale)
+    curve_scale = float(getattr(args, "stage2_curve_dof_scale", 1.0))
+    scale = scale * build_curve_dof_scale_vector(dof_names, curve_scale)
     alpha = float(getattr(args, "stage2_sobolev_alpha", 0.0))
     if alpha > 0.0:
         scale = scale * build_sobolev_curve_mode_scale_vector(
@@ -1104,7 +1109,9 @@ def resolve_stage2_penalty_preconditioner(
         )
         if alpha <= 0.0:
             return Stage2PenaltyPreconditioner.from_scale(
-                scale, surface_dof_scale=surface_scale
+                scale,
+                surface_dof_scale=surface_scale,
+                curve_dof_scale=float(getattr(args, "stage2_curve_dof_scale", 1.0)),
             )
         power = int(getattr(args, "stage2_sobolev_power", 2))
         return Stage2PenaltyPreconditioner.from_scale(
@@ -1113,6 +1120,7 @@ def resolve_stage2_penalty_preconditioner(
             alpha=alpha,
             metric_normalization=f"k_power_{power}",
             surface_dof_scale=surface_scale,
+            curve_dof_scale=float(getattr(args, "stage2_curve_dof_scale", 1.0)),
         )
     return build_stage2_penalty_preconditioner(
         dof_names,
@@ -1121,6 +1129,7 @@ def resolve_stage2_penalty_preconditioner(
         h2_beta=float(getattr(args, "stage2_sobolev_h2_beta", 0.0)),
         winding_dof_scale_map=winding_dof_scale_map,
         surface_dof_scale=float(getattr(args, "stage2_surface_dof_scale", 1.0)),
+        curve_dof_scale=float(getattr(args, "stage2_curve_dof_scale", 1.0)),
         bounds=bounds,
         metric_kind=metric_kind,
     )
@@ -1130,14 +1139,18 @@ def validate_stage2_preconditioner_cli_scope(args, *, constraint_method="penalty
     metric_kind = str(getattr(args, "stage2_sobolev_metric", "off")).lower()
     alpha = float(getattr(args, "stage2_sobolev_alpha", 0.0))
     surface_scale = float(getattr(args, "stage2_surface_dof_scale", 1.0))
+    curve_scale = float(getattr(args, "stage2_curve_dof_scale", 1.0))
     objective_normalize = bool(getattr(args, "stage2_objective_normalize", False))
     constraint_method_kind = str(constraint_method).lower()
     if constraint_method_kind == "alm" and (
-        metric_kind != "off" or alpha > 0.0 or surface_scale != 1.0
+        metric_kind != "off"
+        or alpha > 0.0
+        or surface_scale != 1.0
+        or curve_scale != 1.0
     ):
         raise ValueError(
-            "--stage2-sobolev-metric/alpha/surface-dof-scale is only wired for "
-            "the penalty L-BFGS-B path"
+            "--stage2-sobolev-metric/alpha/surface-dof-scale/curve-dof-scale "
+            "is only wired for the penalty L-BFGS-B path"
         )
     if constraint_method_kind == "alm" and objective_normalize:
         raise ValueError(
@@ -1145,12 +1158,15 @@ def validate_stage2_preconditioner_cli_scope(args, *, constraint_method="penalty
         )
     basin_hops = int(getattr(args, "basin_hops", 0))
     if basin_hops > 0 and (
-        metric_kind != "off" or alpha > 0.0 or surface_scale != 1.0
+        metric_kind != "off"
+        or alpha > 0.0
+        or surface_scale != 1.0
+        or curve_scale != 1.0
     ):
         raise ValueError(
-            "--stage2-sobolev-metric/alpha/surface-dof-scale is only wired for "
-            "the direct penalty L-BFGS-B path; disable --basin-hops for metric "
-            "diagnostics/runs"
+            "--stage2-sobolev-metric/alpha/surface-dof-scale/curve-dof-scale "
+            "is only wired for the direct penalty L-BFGS-B path; disable "
+            "--basin-hops for metric diagnostics/runs"
         )
     if basin_hops > 0 and objective_normalize:
         raise ValueError(
@@ -1362,6 +1378,17 @@ def parse_args():
             "identity-Hessian first step for the winding-surface block. Default "
             "1.0 is identity; no effect under --constraint-method alm or "
             "--basin-hops."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-curve-dof-scale",
+        type=float,
+        default=float(os.environ.get("STAGE2_CURVE_DOF_SCALE", "1.0")),
+        help=(
+            "Multiply every CurveCWSFourier Fourier DOF scale in the penalty-path "
+            "metric transform. Values below 1 shrink the identity-Hessian first "
+            "step for the curve block. Default 1.0 is identity; no effect under "
+            "--constraint-method alm or --basin-hops."
         ),
     )
     parser.add_argument(

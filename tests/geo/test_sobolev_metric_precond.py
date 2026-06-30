@@ -192,6 +192,46 @@ def test_operator_transformed_gradient_matches_central_fd():
     np.testing.assert_allclose(analytic[[1, 2]], expected_curve_grad, rtol=1.0e-12)
 
 
+def test_curve_dof_scale_shrinks_nondiagonal_curve_step():
+    cholesky_factor = np.array([[2.0, 0.0], [0.5, 1.5]])
+    curve_block = CurveSobolevBlock(
+        indices=np.array([1, 2]),
+        cholesky_factor=cholesky_factor,
+        metric_trace_mean=1.0,
+    )
+    base = Stage2PenaltyPreconditioner(
+        diagonal_scale=np.ones(4),
+        curve_blocks=(curve_block,),
+        metric_kind="h2",
+        alpha=16.0,
+        h2_beta=1.0,
+        curve_dof_scale=1.0,
+    )
+    damped = Stage2PenaltyPreconditioner(
+        diagonal_scale=np.ones(4),
+        curve_blocks=(curve_block,),
+        metric_kind="h2",
+        alpha=16.0,
+        h2_beta=1.0,
+        curve_dof_scale=0.25,
+    )
+    grad = np.array([3.0, 5.0, -7.0, 11.0])
+    x = np.array([0.4, 0.2, -0.1, 0.8])
+
+    np.testing.assert_allclose(damped.to_x(damped.to_u(x)), x, rtol=1.0e-12)
+    np.testing.assert_allclose(
+        damped.grad_to_u(grad)[[1, 2]],
+        0.25 * base.grad_to_u(grad)[[1, 2]],
+        rtol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        damped.step_from_gradient(grad)[[1, 2]],
+        0.25 * 0.25 * base.step_from_gradient(grad)[[1, 2]],
+        rtol=1.0e-12,
+    )
+    assert damped.results_metadata()["STAGE2_CURVE_DOF_SCALE"] == 0.25
+
+
 def test_metric_preconditioner_improves_conditioning_and_first_step():
     curve = _curve(order=2, num_quadpoints=17)
     metric_hessian = build_curve_sobolev_metric(curve, alpha=4.0, h2_beta=0.25)
@@ -281,6 +321,7 @@ def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
         stage2_sobolev_h2_beta=0.0,
         stage2_sobolev_power=2,
         stage2_surface_dof_scale=1.0e-4,
+        stage2_curve_dof_scale=0.5,
     )
 
     preconditioner = resolve_stage2_penalty_preconditioner(
@@ -319,6 +360,7 @@ def test_metric_operator_preserves_jf_snapshot_finite_bounds_and_metadata():
     assert result_payload["STAGE2_SOBOLEV_ALPHA"] == 1.5
     assert result_payload["STAGE2_SOBOLEV_METRIC_NORMALIZATION"] == "trace_mean"
     assert result_payload["STAGE2_SURFACE_DOF_SCALE"] == 1.0e-4
+    assert result_payload["STAGE2_CURVE_DOF_SCALE"] == 0.5
     assert result_payload["STAGE2_SOBOLEV_METRIC_TRACE_MEAN"]
     assert result_payload["STAGE2_OBJECTIVE_NORMALIZE"] is True
     assert result_payload["STAGE2_OBJECTIVE_J_REF"] == 123.0
@@ -336,6 +378,7 @@ def test_legacy_diagonal_sobolev_scale_reports_metadata():
         stage2_sobolev_power=2,
         stage2_sobolev_h2_beta=0.0,
         stage2_surface_dof_scale=1.0,
+        stage2_curve_dof_scale=0.25,
     )
 
     preconditioner = resolve_stage2_penalty_preconditioner(
@@ -349,6 +392,7 @@ def test_legacy_diagonal_sobolev_scale_reports_metadata():
     assert metadata["STAGE2_SOBOLEV_ALPHA"] == 4.0
     assert metadata["STAGE2_SOBOLEV_H2_BETA"] == 0.0
     assert metadata["STAGE2_SOBOLEV_METRIC_NORMALIZATION"] == "k_power_2"
+    assert metadata["STAGE2_CURVE_DOF_SCALE"] == 0.25
 
 
 def test_preconditioner_cli_scope_rejects_unwired_routes():
@@ -362,6 +406,7 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
                 stage2_sobolev_metric="h1",
                 stage2_sobolev_alpha=1.0,
                 stage2_surface_dof_scale=1.0,
+                stage2_curve_dof_scale=1.0,
                 stage2_objective_normalize=False,
                 basin_hops=1,
             )
@@ -372,6 +417,7 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
                 stage2_sobolev_metric="off",
                 stage2_sobolev_alpha=2.0,
                 stage2_surface_dof_scale=1.0,
+                stage2_curve_dof_scale=1.0,
                 stage2_objective_normalize=False,
                 basin_hops=1,
             )
@@ -382,6 +428,18 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
                 stage2_sobolev_metric="off",
                 stage2_sobolev_alpha=0.0,
                 stage2_surface_dof_scale=1.0e-4,
+                stage2_curve_dof_scale=1.0,
+                stage2_objective_normalize=False,
+                basin_hops=1,
+            )
+        )
+    with pytest.raises(ValueError, match="curve-dof-scale"):
+        validate_stage2_preconditioner_cli_scope(
+            SimpleNamespace(
+                stage2_sobolev_metric="off",
+                stage2_sobolev_alpha=0.0,
+                stage2_surface_dof_scale=1.0,
+                stage2_curve_dof_scale=0.5,
                 stage2_objective_normalize=False,
                 basin_hops=1,
             )
@@ -391,6 +449,8 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
             SimpleNamespace(
                 stage2_sobolev_metric="h2",
                 stage2_sobolev_alpha=1.0,
+                stage2_surface_dof_scale=1.0,
+                stage2_curve_dof_scale=1.0,
                 stage2_objective_normalize=False,
                 basin_hops=0,
             ),
@@ -401,6 +461,8 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
             SimpleNamespace(
                 stage2_sobolev_metric="off",
                 stage2_sobolev_alpha=2.0,
+                stage2_surface_dof_scale=1.0,
+                stage2_curve_dof_scale=1.0,
                 stage2_objective_normalize=False,
                 basin_hops=0,
             ),
@@ -411,6 +473,8 @@ def test_preconditioner_cli_scope_rejects_unwired_routes():
             SimpleNamespace(
                 stage2_sobolev_metric="off",
                 stage2_sobolev_alpha=0.0,
+                stage2_surface_dof_scale=1.0,
+                stage2_curve_dof_scale=1.0,
                 stage2_objective_normalize=True,
                 basin_hops=0,
             ),

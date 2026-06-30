@@ -52,8 +52,12 @@ follow-up sweep is now closed: `55281416` (alpha 256) failed closed
 `55281418` (alpha 1024) failed closed (`FAILED|1:0`, elapsed `00:13:22`) with
 `first_step_dJ=+1.374272e4`. The alpha 1024 curve first-step norm improved to
 `2.957806e2`, but the untruncated metric step remained uphill and curve
-dominated. The next action is therefore a new metric/root-cause conditioning fix,
-not more waiting on H2 alpha and not ALM/trust-region.
+dominated. The next metric/root-cause conditioning fix is now a default-identity
+curve-coordinate scale (`--stage2-curve-dof-scale`) inside the same
+`Stage2PenaltyPreconditioner`, not more waiting on H2 alpha and not
+ALM/trust-region. It is intended only to shrink the metric-path physical curve
+step under diagnostic control; completion still requires a real-seed
+`--diagnose-seed-gradient` run with `first_step_dJ < 0`.
 
 ## Purpose
 
@@ -108,12 +112,18 @@ diagnostic; ALM/trust-region is out of scope for completion.
     - `build_sobolev_curve_mode_scale_vector(dof_names, alpha, power=2)` →
       `1/(1+alpha*k**power)` on curve Fourier DOFs, 1.0 else.
     - `build_winding_dof_scale_vector(dof_names, scale_map)`.
+    - `build_surface_dof_scale_vector(...)` and
+      `build_curve_dof_scale_vector(...)` are default-identity coordinate-scale
+      extensions for the exposed surface block and the curve Fourier block.
     - `Stage2PenaltyPreconditioner` and `run_scaled_winding_minimize(...)`
       now support either the legacy diagonal `scale` vector or the non-diagonal
       curve-block operator. The optimizer sees `u`; physical DOFs are mapped
       through `preconditioner.to_x(...)`, gradients through
       `preconditioner.grad_to_u(...)`, and final/callback DOFs are mapped back to
-      physical `x`.
+      physical `x`. The curve-coordinate scale composes into this operator:
+      for non-diagonal curve blocks, `curve_dof_scale < 1` shrinks the physical
+      first-step vector by `curve_dof_scale**2` without changing the default
+      identity path.
     - `_CURVE_FOURIER_DOF_PREFIXES = ("phic(","phis(","thetac(","thetas(")`.
   - `STAGE_2/banana_coil_solver.py`:
     - `resolve_stage2_penalty_preconditioner(...)` composes the winding
@@ -124,6 +134,9 @@ diagnostic; ALM/trust-region is out of scope for completion.
       `--stage2-sobolev-h2-beta`, `--stage2-sobolev-power`, and
       `--stage2-objective-normalize` are penalty-path flags. `power` only
       applies to the legacy diagonal path when metric mode is `off`.
+    - `--stage2-surface-dof-scale` and `--stage2-curve-dof-scale` are
+      penalty-path metric coordinate scales; ALM and basin-hopping reject
+      non-identity values.
     - Penalty optimizer and seed-gradient diagnostic both receive the same
       `stage2_penalty_preconditioner`, so `first_step_dJ` is measured under the
       same operator as the L-BFGS-B path.
@@ -201,10 +214,13 @@ infinite. Every finite-bound non-curve DOF (winding size/current/optional VF
 current) stays in the identity/diagonal block. Bounds are preserved exactly, and
 the existing winding-corridor diagonal scale continues to handle the bounded
 block. The curve↔surface cross-metric terms are intentionally dropped for
-bound-safety, so exposed surface DOFs stay in the diagonal block. Job `55277229`
-showed this block is not negligible on the slid-clean seed; the bounded next
-extension is therefore an explicit `SurfaceRZFourier` coordinate scale, still
-inside the same preconditioner rather than a route fallback.
+bound-safety. Job `55277229` showed this exposed surface block was not
+negligible on the slid-clean seed, so `--stage2-surface-dof-scale` suppresses it
+as an explicit `SurfaceRZFourier` coordinate scale. Jobs `55278602`,
+`55281414`, `55281416`, and `55281418` then showed the remaining miss is a
+low/mid-mode curve step that the current H2 metric still leaves too large, so
+`--stage2-curve-dof-scale` is the next explicit coordinate-scale extension inside
+the same preconditioner rather than a route fallback.
 
 This generalizes `run_scaled_winding_minimize` from a diagonal `scale` vector to
 a **linear operator** (with the diagonal case as the all-ones/identity special
