@@ -10,12 +10,12 @@ This plan records the metric-only lane for the order-64 slid-clean Stage-2
 conditioning fix. ALM/trust-region is no longer a desired success path for this
 work. Local source is implemented in
 `5dff32284` with follow-up diagnostic/test hardening in `45d2b3ae1`, review
-hardening in `735400361`, and ALM Sobolev-alpha fail-closed hardening in
-`cc91579dd`, with fallback status wording refreshed in `0d4647a46`; the
-Perlmutter launch package and handoff are active in
-`autoresearch` commits `39758405`, `5cbd31cd`, `d499d62f`, and wrapper
-soft-control forwarding commit `df39e677`, with fallback handoff status refreshed
-through `d51795ae`. The required remote gate is still
+hardening in `735400361`, ALM Sobolev-alpha fail-closed hardening in
+`cc91579dd`, no-fallback status wording in `0d4647a46`, and surface-DOF metric
+diagnostics/scale in `0bef64911`; the Perlmutter launch package and handoff are
+active in `autoresearch` commits `39758405`, `5cbd31cd`, `d499d62f`, wrapper
+soft-control forwarding commit `df39e677`, and no-fallback surface diagnostic
+state in `7334b255`. The required remote gate is still
 decisive: the H1 and H2 beta=1 Perlmutter sweeps on `shared`
 assembled the metric but failed the descent gate for alpha 1, 4, 16, and 64.
 Every `first_step_dJ` stayed positive (H1: `+1.933950e10`, `+1.941215e10`,
@@ -36,8 +36,16 @@ not current or the already-metricized curve block: `first_step_dJ` remained
 `zs(1,-1)=-1.381e2`, and `rc(1,1)=-9.692e1`. The implemented next
 metric-only fix is an opt-in diagonal `SurfaceRZFourier` scale
 (`--stage2-surface-dof-scale`, default identity) composed into the same
-`Stage2PenaltyPreconditioner`; diagnostic job `55278602` is submitted with
-`STAGE2_SURFACE_DOF_SCALE=1e-4`.
+`Stage2PenaltyPreconditioner`. Diagnostic job `55278602` completed fail-closed
+with `STAGE2_SURFACE_DOF_SCALE=1e-4`: the surface-family first-step norm fell to
+`1.225784e-05` (inf `8.970619e-06`), but `first_step_dJ` stayed positive at
+`+2.386923e4`. The remaining bad direction is curve-block dominated
+(`CurveCWSFourierCPP1`, family norm `4.179194e2`, inf `1.064389e2`), led by
+low/mid modes such as `phis(5)`, `phic(11)`, `phic(4)`, `thetas(5)`,
+`phis(2)`, `phic(2)`, `thetac(11)`, and `phic(1)`. The active metric-only
+follow-up is a stronger H2 alpha sweep with the same surface scale: Perlmutter
+jobs `55281414` (alpha 64), `55281416` (alpha 256), and `55281418`
+(alpha 1024).
 
 ## Purpose
 
@@ -152,7 +160,8 @@ diagnostic; ALM/trust-region is out of scope for completion.
   pytest is run from `examples/single_stage_optimization` with absolute paths.
 - Local box cannot run order-64 solves (OOM policy); correctness is validated by
   unit tests on small synthetic CurveCWSFourierCPP objects. Seed diagnostics and
-  smokes run on Perlmutter `shared` QOS; the full ALM fallback is on `regular`.
+  smokes run on Perlmutter `shared` QOS; the full metric run moves to `regular`
+  only after a metric-only diagnostic reports `first_step_dJ < 0`.
 
 ## Rationale
 
@@ -318,8 +327,9 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       metric operator it must compute the operator's identity-Hessian physical
       step (`dx = -P.step_from_gradient(grad)` or equivalent) and report the
       operator-aware `scaled_grad` / `first_step_dJ`.
-- [x] Leave ALM/trust-region wiring off until separate composition tests prove
-      the operator composes with their trust-box and bound transforms.
+- [x] Leave ALM/trust-region wiring off for this completion path. The metric
+      operator is accepted only through the penalty L-BFGS-B path and its
+      seed-gradient diagnostic.
 
 ### Phase 5 — Campaign wiring (in the **autoresearch** repo, not this one)
 - [x] Add an `edge_iota_soft_metric` slurm variant (copy of `autoresearch:`
@@ -400,11 +410,19 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       were dominated by `SurfaceRZFourier7` (`rc(0,0)`, `rc(1,0)`,
       `zs(1,0)`, `zs(1,-1)`, `rc(1,1)`), with surface-family first-step norm
       `1.225784e3` versus curve-family `4.179194e2`.
-- [ ] **Surface-block metric diagnostic result**: `--stage2-surface-dof-scale`
+- [x] **Surface-block metric diagnostic result**: `--stage2-surface-dof-scale`
       has been added as a default-identity metric extension and deployed to
-      Perlmutter. Job `55278602` is the first H2 alpha=16,
-      `STAGE2_SURFACE_DOF_SCALE=1e-4` slid-clean seed diagnostic; it must report
-      `first_step_dJ < 0` before any full metric run.
+      Perlmutter. Job `55278602` completed fail-closed (`FAILED|1:0`, elapsed
+      `00:13:37`) after emitting `SEED_GRADIENT_DIAGNOSTIC_JSON`. H2 alpha=16,
+      `STAGE2_SURFACE_DOF_SCALE=1e-4` reduced the surface-family first-step norm
+      to `1.225784e-05`, but `first_step_dJ=+2.386923e4` stayed positive and the
+      remaining first step was curve dominated (`CurveCWSFourierCPP1`, family
+      norm `4.179194e2`).
+- [ ] **Stronger curve-block metric diagnostic sweep**: with the surface block
+      suppressed, jobs `55281414`, `55281416`, and `55281418` run H2 beta=1 with
+      alpha `64`, `256`, and `1024`, respectively, all with
+      `STAGE2_SURFACE_DOF_SCALE=1e-4`. No full metric run is permitted until one
+      of these or a successor metric-only diagnostic reports `first_step_dJ < 0`.
 - [x] **Wrapper soft-control forwarding**: `autoresearch df39e677` forwards and
       records `--stage2-edge-iota-weight` and `--stage2-edge-iota-hinge` through
       `scripts/run_one.py`, with regression coverage on the `soft` wrapper path.
@@ -472,10 +490,11 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       `STAGE2_DIAGNOSE_SEED_GRADIENT=1`), the seed-gradient diagnostic reports
       `first_step_dJ < 0` under the metric (the diagonal scale could not
       achieve this). Evidence so far: H1 and H2 beta=1 alpha values 1, 4,
-      16, and 64 all assembled the metric but failed the gate. The metric
-      completion criterion is not met; fallback smoke `55271978` is historical
-      route-engagement evidence only, and full ALM fallback job `55273370` was
-      canceled because fallback is not a desired completion path.
+      16, and 64 all assembled the metric but failed the gate; H2 alpha=16 plus
+      `STAGE2_SURFACE_DOF_SCALE=1e-4` also failed with `first_step_dJ=+2.386923e4`.
+      The metric completion criterion is not met; fallback smoke `55271978` is
+      historical route-engagement evidence only, and full ALM fallback job
+      `55273370` was canceled because fallback is not a desired completion path.
 - [x] Crucible/review strict PASS for the delivered source, tests, plan, and
       handoff slices; plan cross-referenced from
       `docs/stage2_order64_sobolev_conditioning_plan_2026-06-28.md` and the
@@ -489,16 +508,15 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 
 ## Open Questions
 
-- **H¹ vs H² as default:** does the curvature-penalty-dominated objective need
-  the `k⁴` H² term, or is H¹ enough to flip `first_step_dJ`? Decide from the
-  seed-diagnostic probe (cheap), not a priori.
-- **Tier-3b (escalation):** if the surface-pullback H¹/H² metric still leaves
-  the dominant direction unconditioned, the next step is a **Gauss-Newton metric**
+- **H2 strength after surface suppression:** after `55278602`, the surface block
+  is not the live driver. Decide whether the curve block needs alpha above 64
+  from the pending alpha 64/256/1024 seed diagnostics, not from a full run.
+- **Tier-3b (escalation):** if stronger curve H2 still leaves the dominant
+  direction unconditioned, the next step is a **Gauss-Newton metric**
   from the field-residual Jacobian (`J_res^T J_res`) — captures the *objective*
   cross-coupling the geometric metric cannot. Larger effort; gated on whether
   Phase 4 actually flips the step. Out of scope here, recorded for sequencing.
-- **Interaction with ALM inner solve:** the same operator should precondition
-  ALM's inner L-BFGS-B (via `_build_box_bounds`); confirm the block transform
-  composes with the trust-box bound mapping before enabling it there.
+- **ALM/trust-region integration:** out of scope for this metric-only completion
+  path. Do not enable or wait for it as a success route for this work.
 - **Order-ladder coupling:** recompute `M` per rung (cheap) or carry/interpolate
   across rungs? Default to recompute-per-rung unless profiling says otherwise.
