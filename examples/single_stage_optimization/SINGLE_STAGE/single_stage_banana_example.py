@@ -476,8 +476,10 @@ from banana_opt.single_stage_banana_current_mode import (
     resolve_banana_current_coordinate_spec,
 )
 from banana_opt.single_stage_banana_geometry_mode import (
+    BANANA_GEOMETRY_MODE_FREE_XYZ,
     BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
     BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
+    convert_single_stage_banana_family_to_xyz,
     resolve_single_stage_banana_geometry_state as _resolve_single_stage_banana_geometry_state_impl,
 )
 from banana_opt.frontier_scalarization import (
@@ -4007,6 +4009,7 @@ def parse_args():
         choices=[
             BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
             BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
+            BANANA_GEOMETRY_MODE_FREE_XYZ,
         ],
         default=os.environ.get(
             "SINGLE_STAGE_BANANA_GEOMETRY_MODE",
@@ -4016,7 +4019,21 @@ def parse_args():
             "Single-stage banana geometry contract. 'shared_symmetry' preserves "
             "the loaded one-master plus symmetry-wrapper curve family. "
             "'materialized_cws' folds each CWS symmetry wrapper into its own "
-            "independent CWS curve on the same winding surface."
+            "independent CWS curve on the same winding surface. 'free_xyz' "
+            "(over-parameterization existence test) replaces each banana coil "
+            "with a free CurveXYZFourier curve OFF the winding surface "
+            "(--free-xyz-order sets the Cartesian order); the resulting coils are "
+            "not surface-buildable, so this mode requires the winding-surface "
+            "levers, frame-aware curvature cap, and finite-build pack to be off."
+        ),
+    )
+    parser.add_argument(
+        "--free-xyz-order",
+        type=int,
+        default=int(os.environ.get("SINGLE_STAGE_BANANA_FREE_XYZ_ORDER", "14")),
+        help=(
+            "Cartesian Fourier order of each free CurveXYZFourier banana curve when "
+            "--single-stage-banana-geometry-mode=free_xyz; ignored otherwise."
         ),
     )
     parser.add_argument(
@@ -7623,10 +7640,11 @@ def validate_single_stage_current_args(args):
     if banana_geometry_mode not in {
         BANANA_GEOMETRY_MODE_SHARED_SYMMETRY,
         BANANA_GEOMETRY_MODE_MATERIALIZED_CWS,
+        BANANA_GEOMETRY_MODE_FREE_XYZ,
     }:
         raise ValueError(
             "--single-stage-banana-geometry-mode must be one of "
-            "{shared_symmetry, materialized_cws}"
+            "{shared_symmetry, materialized_cws, free_xyz}"
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
@@ -17152,13 +17170,26 @@ if __name__ == "__main__":
             finite_current_mode=finite_current_mode,
         )
 
-    bs, coil_partitions, banana_geometry_state = (
-        _resolve_single_stage_banana_geometry_state_impl(
-            bs,
-            coil_partitions,
-            mode=args.single_stage_banana_geometry_mode,
+    # free_xyz over-parameterization replaces each surface-locked banana coil with a
+    # free CurveXYZFourier curve; the resolver raises for it on purpose and routes
+    # here, so dispatch to the dedicated converter. Every other mode keeps coils on
+    # the winding surface via the resolver. Both return (bs, partitions, state).
+    if args.single_stage_banana_geometry_mode == BANANA_GEOMETRY_MODE_FREE_XYZ:
+        bs, coil_partitions, banana_geometry_state = (
+            convert_single_stage_banana_family_to_xyz(
+                bs,
+                coil_partitions,
+                order=int(args.free_xyz_order),
+            )
         )
-    )
+    else:
+        bs, coil_partitions, banana_geometry_state = (
+            _resolve_single_stage_banana_geometry_state_impl(
+                bs,
+                coil_partitions,
+                mode=args.single_stage_banana_geometry_mode,
+            )
+        )
     # B2 finite-build FIELD swap (default-off): replace the thin banana centerline
     # field source with the multi-filament pack so the pack twist enters the
     # BiotSavart field (true Stage-2 parity). Mirrors STAGE_2 banana_coil_solver
