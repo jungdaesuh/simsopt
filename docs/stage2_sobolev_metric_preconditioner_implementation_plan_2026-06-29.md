@@ -47,8 +47,13 @@ low/mid modes such as `phis(5)`, `phic(11)`, `phic(4)`, `thetas(5)`,
 at the same metric gate with
 `first_step_dJ=+1.773113e4`; it reduced the curve first-step norm to
 `3.719896e2` but kept the step curve dominated. The active metric-only
-follow-up is the remaining stronger H2 sweep with the same surface scale:
-Perlmutter jobs `55281416` (alpha 256) and `55281418` (alpha 1024).
+follow-up sweep is now closed: `55281416` (alpha 256) failed closed
+(`FAILED|1:0`, elapsed `00:13:20`) with `first_step_dJ=+1.116740e5`, and
+`55281418` (alpha 1024) failed closed (`FAILED|1:0`, elapsed `00:13:22`) with
+`first_step_dJ=+1.374272e4`. The alpha 1024 curve first-step norm improved to
+`2.957806e2`, but the untruncated metric step remained uphill and curve
+dominated. The next action is therefore a new metric/root-cause conditioning fix,
+not more waiting on H2 alpha and not ALM/trust-region.
 
 ## Purpose
 
@@ -421,16 +426,19 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       to `1.225784e-05`, but `first_step_dJ=+2.386923e4` stayed positive and the
       remaining first step was curve dominated (`CurveCWSFourierCPP1`, family
       norm `4.179194e2`).
-- [ ] **Stronger curve-block metric diagnostic sweep**: with the surface block
+- [x] **Stronger curve-block metric diagnostic sweep**: with the surface block
       suppressed, job `55281414` ran H2 beta=1 alpha 64 with
       `STAGE2_SURFACE_DOF_SCALE=1e-4` and failed closed (`FAILED|1:0`, elapsed
       `00:14:11`) after emitting `SEED_GRADIENT_DIAGNOSTIC_JSON`, with
       `first_step_dJ=+1.773113e4`. Curve first-step norm improved to
       `3.719896e2` (inf `1.046931e2`) and the surface first-step norm stayed
-      suppressed at `1.225784e-05`, but the full metric run remains blocked.
-      Jobs `55281416` and `55281418` are the remaining alpha 256 and 1024
-      diagnostics. No full metric run is permitted until one of these or a
-      successor metric-only diagnostic reports `first_step_dJ < 0`.
+      suppressed at `1.225784e-05`. Jobs `55281416` and `55281418` completed the
+      alpha 256 and 1024 diagnostics and also failed closed (`FAILED|1:0`,
+      elapsed `00:13:20` and `00:13:22`) with `first_step_dJ=+1.116740e5` and
+      `+1.374272e4`. Alpha 1024 reduced the curve first-step norm to
+      `2.957806e2` (inf `8.411305e1`), but the step was still positive. The full
+      metric run remains blocked until a successor metric-only diagnostic reports
+      `first_step_dJ < 0`.
 - [x] **Wrapper soft-control forwarding**: `autoresearch df39e677` forwards and
       records `--stage2-edge-iota-weight` and `--stage2-edge-iota-hinge` through
       `scripts/run_one.py`, with regression coverage on the `soft` wrapper path.
@@ -501,7 +509,8 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       16, and 64 all assembled the metric but failed the gate; H2 alpha=16 plus
       `STAGE2_SURFACE_DOF_SCALE=1e-4` failed with `first_step_dJ=+2.386923e4`,
       and H2 alpha=64 plus the same surface scale failed with
-      `first_step_dJ=+1.773113e4`.
+      `first_step_dJ=+1.773113e4`; alpha 256 and 1024 plus the same surface scale
+      also failed with `first_step_dJ=+1.116740e5` and `+1.374272e4`.
       The metric completion criterion is not met; fallback smoke `55271978` is
       historical route-engagement evidence only, and full ALM fallback job
       `55273370` was canceled because fallback is not a desired completion path.
@@ -518,12 +527,13 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 
 ## Open Questions
 
-- **H2 strength after surface suppression:** after `55278602` and `55281414`,
-  the surface block is not the live driver and alpha 64 still leaves an uphill
-  curve-dominated first step. Decide whether alpha 256 or 1024 flips the step
-  from the pending seed diagnostics, not from a full run.
-- **Tier-3b (escalation):** if stronger curve H2 still leaves the dominant
-  direction unconditioned, the next step is a **Gauss-Newton metric**
+- **Next metric fix after H2 saturation:** after `55278602`, `55281414`,
+  `55281416`, and `55281418`, the surface block is suppressed and the curve
+  first-step norm improves with stronger H2, but the untruncated metric step
+  remains uphill. The next fix must change the metric/root-cause model rather
+  than sweep alpha further.
+- **Tier-3b (escalation):** since stronger curve H2 still leaves the dominant
+  direction unconditioned, the next candidate is a **Gauss-Newton metric**
   from the field-residual Jacobian (`J_res^T J_res`) — captures the *objective*
   cross-coupling the geometric metric cannot. Larger effort; gated on whether
   Phase 4 actually flips the step. Out of scope here, recorded for sequencing.
