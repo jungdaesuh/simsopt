@@ -49,6 +49,7 @@ from .boozer_surface import (
     _ONDEVICE_OPTIMIZER_METHODS,
     _boozer_exact_residual,
     _make_boozer_penalty_objective_closure,
+    _make_boozer_penalty_residual_closure,
 )
 from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
@@ -370,10 +371,10 @@ def _traceable_solve_hessian_linearization(
         )
 
     # `_traceable_result_linear_solve_factors` deliberately returns ``None`` on
-    # the LS runtime lane so adjoint solves stay matrix-free. The operator
-    # path below uses pure-JAX operator GMRES (`_hessian_linear_operator` +
-    # `_solve_square_array_system_operator_only`) and remains fully traceable
-    # under JIT — it does not call a live host solver. Removing this path
+    # the LS runtime lane so adjoint solves stay matrix-free. The default path
+    # uses the pure-JAX Hessian operator solve; the explicit ``lsmr_j`` selector
+    # supplies the residual-J closure to the same solver seam. Both remain fully
+    # traceable under JIT and do not call a live host solver. Removing this path
     # would force every LS warm-start and adjoint solve to surface
     # ``success=False`` and emit NaN gradients (verified by
     # ``test_runtime_bundle_allows_strict_transfer_guard`` /
@@ -383,12 +384,20 @@ def _traceable_solve_hessian_linearization(
         decision_split_mode="jvp",
         **_traceable_inner_objective_kwargs(objective_kwargs),
     )
+    residual_kwargs = {}
+    if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+        residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
+            coil_set_spec=coil_set_spec,
+            decision_split_mode="jvp",
+            **_traceable_inner_objective_kwargs(objective_kwargs),
+        )
     return _optimizer_jax._solve_hessian_least_squares_system_with_status(
         objective_fn,
         solved_x,
         rhs,
         stab=float(linear_solve_stab),
         tol=linear_solve_tol,
+        **residual_kwargs,
     )
 
 
@@ -2687,6 +2696,13 @@ def _traceable_term_adjoint_solve_report(
         )
         hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
         candidate_stab = float(linear_solve_stab)
+        residual_kwargs = {}
+        if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+            residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
+                coil_set_spec=coil_set_spec,
+                decision_split_mode="jvp",
+                **_traceable_inner_objective_kwargs(objective_kwargs),
+            )
         solution, attempt_status = (
             _optimizer_jax._solve_hessian_least_squares_system_with_status(
                 objective_fn,
@@ -2694,6 +2710,7 @@ def _traceable_term_adjoint_solve_report(
                 rhs,
                 stab=candidate_stab,
                 tol=linear_solve_tol,
+                **residual_kwargs,
             )
         )
         attempt_success = _optimizer_jax._linear_solve_status_success(attempt_status)

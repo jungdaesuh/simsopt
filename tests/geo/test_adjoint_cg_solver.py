@@ -1,6 +1,6 @@
 """Tests for the opt-in adjoint linear solvers in ``optimizer.py``.
 
-Two opt-in adjoint paths are covered here:
+Three opt-in adjoint paths are covered here:
 
 1. Matrix-free CG (``SIMSOPT_ADJOINT_LINEAR_SOLVER="cg"``): the inner-Boozer
    Gauss-Newton adjoint operator ``J^T J + stab I`` is symmetric
@@ -10,7 +10,12 @@ Two opt-in adjoint paths are covered here:
    ``_solve_hessian_least_squares_system_with_status`` dispatches to CG when the
    module-level solver selector is ``"cg"``.
 
-2. Dense-LU exact-adjoint (``SIMSOPT_EXACT_ADJOINT_DENSE_LU=1``): direct LU
+2. Experimental LSMR-on-J (``SIMSOPT_ADJOINT_LINEAR_SOLVER="lsmr_j"``): solve
+   a positively regularized normal system through the residual Jacobian
+   ``[J; sqrt(stab) I]``. This is a comparator for the future unsquared LS
+   adjoint path, not the default production route.
+
+3. Dense-LU exact-adjoint (``SIMSOPT_EXACT_ADJOINT_DENSE_LU=1``): direct LU
    factorization of the un-squared, well-conditioned ``J^T`` for the
    exact-Jacobian transpose solve (the GMRES baseline stagnates there).  These
    tests verify the LU+IR solver against an independent ``np.linalg.solve``
@@ -108,6 +113,129 @@ def test_hessian_least_squares_dispatches_to_cg(monkeypatch):
 def test_default_selector_does_not_use_cg():
     """The default selector keeps the established (non-CG) path."""
     assert _optimizer._ADJOINT_LINEAR_SOLVER != "cg"
+    assert _optimizer._ADJOINT_LINEAR_SOLVER != "lsmr_j"
+
+
+# --- Experimental LSMR-on-J comparator for regularized normal systems ---
+
+
+def _rectangular_j_problem(m=18, n=9, seed=0, stab=0.25):
+    """Full-rank rectangular J, a decision-space RHS, and direct oracle."""
+    rng = np.random.default_rng(seed)
+    jacobian_np = rng.standard_normal((m, n))
+    jacobian_np += np.linspace(0.5, 1.5, m)[:, None] * np.eye(m, n)
+    rhs_np = rng.standard_normal(n)
+    jacobian = jnp.asarray(jacobian_np)
+    rhs = jnp.asarray(rhs_np)
+
+    def residual_fn(x):
+        return jacobian @ x
+
+    def objective_fn(x):
+        residual = residual_fn(x)
+        return 0.5 * jnp.vdot(residual, residual).real
+
+    expected = np.linalg.solve(
+        jacobian_np.T @ jacobian_np + stab * np.eye(n),
+        rhs_np,
+    )
+    return jacobian, residual_fn, objective_fn, rhs, expected
+
+
+def test_lsmr_j_regularized_normal_system_matches_dense_oracle():
+    """LSMR-on-J solves the same regularized normal system as a dense oracle."""
+    _, residual_fn, _, rhs, expected = _rectangular_j_problem(seed=10)
+    operator = _optimizer._jacobian_linear_operator(residual_fn, jnp.zeros(rhs.shape))
+    solution, status = _optimizer._solve_regularized_normal_system_lsmr_j_with_status(
+        operator,
+        rhs,
+        stab=0.25,
+        tol=1e-11,
+    )
+    assert bool(status.success)
+    assert int(np.asarray(status.iterations)) > 0
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        expected,
+        rtol=1e-8,
+        atol=1e-10,
+    )
+
+
+def test_lsmr_j_regularized_normal_system_handles_column_batched_rhs():
+    """The LSMR-on-J comparator preserves the existing column-batched RHS contract."""
+    jacobian, residual_fn, _, rhs, _ = _rectangular_j_problem(seed=11)
+    rng = np.random.default_rng(12)
+    rhs_batched_np = np.column_stack(
+        [np.asarray(rhs), rng.standard_normal(rhs.shape[0])]
+    )
+    rhs_batched = jnp.asarray(rhs_batched_np)
+    operator = _optimizer._jacobian_linear_operator(residual_fn, jnp.zeros(rhs.shape))
+    solution, status = _optimizer._solve_regularized_normal_system_lsmr_j_with_status(
+        operator,
+        rhs_batched,
+        stab=0.25,
+        tol=1e-11,
+    )
+    expected = np.linalg.solve(
+        np.asarray(jacobian).T @ np.asarray(jacobian) + 0.25 * np.eye(rhs.shape[0]),
+        rhs_batched_np,
+    )
+    assert bool(status.success)
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        expected,
+        rtol=1e-8,
+        atol=1e-10,
+    )
+
+
+def test_hessian_least_squares_dispatches_to_lsmr_j(monkeypatch):
+    """The explicit selector routes through residual-J LSMR, not the Hessian helper."""
+    _, residual_fn, objective_fn, rhs, expected = _rectangular_j_problem(seed=13)
+    x = jnp.zeros(rhs.shape)
+    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
+        objective_fn,
+        x,
+        rhs,
+        stab=0.25,
+        tol=1e-11,
+        residual_fn=residual_fn,
+    )
+    assert bool(status.success)
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        expected,
+        rtol=1e-8,
+        atol=1e-10,
+    )
+
+
+def test_lsmr_j_dispatch_requires_residual_fn_and_positive_stab(monkeypatch):
+    """The selector fails closed instead of disguising a Hessian solve as LSMR-on-J."""
+    _, residual_fn, objective_fn, rhs, _ = _rectangular_j_problem(seed=14)
+    x = jnp.zeros(rhs.shape)
+    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+
+    with pytest.raises(ValueError, match="requires a residual_fn"):
+        _optimizer._solve_hessian_least_squares_system_with_status(
+            objective_fn,
+            x,
+            rhs,
+            stab=0.25,
+            tol=1e-11,
+        )
+
+    with pytest.raises(ValueError, match="requires positive newton_stab"):
+        _optimizer._solve_hessian_least_squares_system_with_status(
+            objective_fn,
+            x,
+            rhs,
+            stab=0.0,
+            tol=1e-11,
+            residual_fn=residual_fn,
+        )
 
 
 # --- Opt-in dense-LU exact-Boozer adjoint solver (SIMSOPT_EXACT_ADJOINT_DENSE_LU) ---

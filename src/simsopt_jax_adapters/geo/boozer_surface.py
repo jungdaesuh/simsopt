@@ -4688,6 +4688,15 @@ class BoozerSurfaceJAX(Optimizable):
             )
             hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
             stab = float(self.options["newton_stab"])
+            residual_kwargs = {}
+            if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+                residual_kwargs["residual_fn"] = self._make_penalty_residual_with(
+                    optimize_G,
+                    solved_state.weight_inv_modB,
+                    coil_set_spec=self.coil_set_spec,
+                    hostify_inputs=False,
+                    decision_split_mode="jvp",
+                )
 
             def apply_forward(rhs):
                 rhs = jnp.asarray(rhs)
@@ -4726,6 +4735,7 @@ class BoozerSurfaceJAX(Optimizable):
                     rhs,
                     stab=stab,
                     tol=tol_host,
+                    **residual_kwargs,
                 )
 
             def solve_transpose(rhs):
@@ -5893,12 +5903,20 @@ class BoozerSurfaceJAX(Optimizable):
                 def objective_for_x(x_inner):
                     return objective_fn(x_inner, coil_set_spec)
 
+                residual_kwargs = {}
+                if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+
+                    def residual_for_x(x_inner):
+                        return residual_fn(x_inner, coil_set_spec)
+
+                    residual_kwargs["residual_fn"] = residual_for_x
                 return _optimizer_jax._solve_hessian_least_squares_system_with_status(
                     objective_for_x,
                     x,
                     rhs,
                     stab=linear_solve_stab,
                     tol=linear_solve_tol,
+                    **residual_kwargs,
                 )
 
             def factor_apply_fn(x, vector, coil_set_spec):
