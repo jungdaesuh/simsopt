@@ -1,6 +1,15 @@
 # Topology-Aware Multi-Surface Confinement Optimization — Design & Implementation Plan
 
-> Status: DESIGN (Phase 1-4 implementation not yet applied by this plan). Last updated: 2026-06-23.
+> Status: IMPLEMENTED-IN-WORKING-TREE, NOT YET COMMITTED/MERGED. Last updated: 2026-06-24 (header reconciled).
+> All four phases are IMPLEMENTED + crucible-reviewed per the Review Log at the bottom of this file
+> (Phase 1a VolumeBoozer, 1b iota/volume profile objectives, 2 `boozer_surface_family.py` [347 LOC/11 tests],
+> 3 `topology/chirikov_overlap.py` [314 LOC/21 tests], 4 `topology/mather_dw.py` [276 LOC/27 tests]) and present
+> in the tree. The prior "DESIGN / Phase 1-4 not applied" header was STALE — it contradicted this doc's own
+> Review Log. REMAINING to truly close: (a) commit/merge — several new modules are untracked (Pattern-5 commit
+> blockers flagged in the Review Log: `git add boozer_surface_family.py`, `topology/chirikov_overlap.py`,
+> `topology/mather_dw.py` + their tests before commit, else a clean checkout ModuleNotFounds); (b) tick the
+> Completion-Criteria checkboxes below once merged; (c) the multi-surface *optimization* runs themselves
+> (the concurrent/Perlmutter thread) are separate from this code being implemented.
 > Scope: extend the banana-coil single-stage optimizer from a single Boozer surface to
 > multi-surface, topology-aware confinement optimization (nested family, per-surface
 > iota/volume profile, Greene residue [already wired], WBA [already coded], Chirikov
@@ -301,3 +310,70 @@ edge-topology motivation (non-resonant X-point divertor; X-point R=1.0258, det�
 established by a separate two-wave field-line-topology investigation on the same design.
 Figures:
 `/Users/suhjungdae/code/columbia/autoresearch/campaigns/balance_pareto_singlestage_2026-06-17/runs/slid_clean_R0p9095_2026-06-22/{connlength_vs_R,edge_poincare_offsym_zoom,edge_manifold_legs,iota_vs_R_edge}.png`.
+
+## Review Log (loop-driven crucible, 2026-06-23)
+
+Appended by the topology-optimization /loop (crucible + fix per implemented item). Reflects the working tree (uncommitted) at review time.
+
+- **Phase 1a — VolumeBoozer**: IMPLEMENTED + crucible-PASS. `surfaceobjectives.py::VolumeBoozer` (coil-live volume Boozer adjoint); Taylor/FD + dead-gradient + unsolved-surface contract tests (`tests/geo/test_surface_objectives.py::VolumeBoozerTests`, plus added to the `IotasTests` contract test).
+- **Phase 1b — iota/volume profile builders + driver wiring**: IMPLEMENTED (concurrent session) + crucible-reviewed. `build_single_stage_iota_profile_objective` (shear-shape target) + `build_single_stage_volume_profile_objective` (coil-live `VolumeBoozer` terms), default-OFF, threaded into `build_total_objective`/`evaluate_total_objective`. Builder gradient/None/ValueError tests added: `tests/geo/test_single_stage_profile_objectives.py` (10 pass, incl. real 2-surface Boozer Taylor).
+- **CRITICAL found + FIXED (iter 2)**: the new profile kwargs were threaded into `build_`/`evaluate_total_objective` + the driver wrappers but NOT the `evaluate_base_objective`/`evaluate_alm_objective` IMPLS → unconditional `TypeError` on every run's finalization + every ALM eval (broke default-OFF). Fixed: 4 params added to both impl sigs; threaded through `evaluate_base_objective`'s `_optional`/sum/breakdown (mirroring `JMagneticWell`); `evaluate_alm_objective` forwards by keyword. Verified: `SingleStageObjectiveModuleTests` 39 pass, introspection clean, ruff clean. (Advisory: `evaluate_total_objective`'s breakdown DICT still omits the profile per-term entries — not a crash; its scalar via `build_total_objective` is correct.)
+- **Advisory — `band_shear_load`/`BandShearLoad`** (`topology/iota_profile.py`): defined + tested but NO production caller and never committed → Pattern-6 dead scaffold. Wire into the residue/topology diagnostic path or document as an offline diagnostic, else drop.
+- Phases 2 (family helper), 3 (Chirikov), 4 (Mather ΔW): NOT yet implemented.
+
+### Review Log — Phase 2 (loop iter 3, 2026-06-23)
+
+- **Phase 2 — `build_boozer_surface_family` + truncation**: IMPLEMENTED (concurrent session, `banana_opt/boozer_surface_family.py`, 347 lines) + crucible-PASS (functionally correct). DRY thin-caller refactor of `initialize_published_surface_data_from_stage2_seed` is byte-identical to the legacy strict continuation (`_solve_or_raise` verbatim; same march/warm-start/provenance/postconditions). Truncation accept-logic correct (solved ∧ nested ∧ volume-ordered, stop-at-first-failure, never fabricates). `tests/geo/test_boozer_surface_family.py` 8 pass.
+- **🟠 COMMIT BLOCKER (Pattern 5):** `banana_opt/boozer_surface_family.py` is UNTRACKED but imported at module-top by the tracked-modified driver (`single_stage_banana_example.py:141`) → a clean checkout would `ModuleNotFoundError`. `git add` it + `tests/geo/test_boozer_surface_family.py` (+ iter-2's `tests/geo/test_single_stage_profile_objectives.py`) before any commit.
+- **Advisory (test gap):** `_require_relaxed_family_postconditions` raise paths (the doc-mandated band `np.diff>0` + adjacent-nesting checks) and the non-finite warm-start-G raise are untested — the per-step march guard makes a bad band practically unreachable, and the strict-path sibling postcondition is covered at the driver level (`test_single_stage_example.py`), so this is advisory not blocking. Add direct unit tests of `_require_relaxed_family_postconditions` (disordered band → "strictly"; non-nested band → "must nest") and a non-finite-G march test when the file stabilizes.
+- **Advisory (doc/code drift):** `build_boozer_surface_family(allow_truncation=False)` defaults strict; this doc's Decisions/Phase-2 say the family helper defaults `True`. No live bug (the sole caller passes `False` explicitly for byte-identity). Reconcile: recommend keep `False` default + amend the Decisions line, since flipping is riskier with an explicit-False caller already present.
+- Phases 3 (Chirikov), 4 (Mather ΔW): still NOT implemented. `band_shear_load` still has no production caller (Pattern-6 advisory from iter 2 unaddressed).
+
+### Review Log — Phase 3 (loop iter 4, 2026-06-23)
+
+- **Phase 3 — Chirikov island-overlap scalar**: IMPLEMENTED (concurrent session, `banana_opt/topology/chirikov_overlap.py`, 314 lines) + crucible-PASS (physics correct). Pendulum full-width `C=4` derivation correct; Chirikov `s = Σ(half-widths)/spacing` with NO off-by-2 (s=1 at full-widths [1,1]/spacing 1); LSE is a numerically-stable smooth-MAX (not min); nontwist routing correctly raises on `1/√0` and routes to the measured O/X separation (never fabricates); edge cases (zero spacing, <2 crossings, non-finite) handled. Not yet wired into the driver (standalone diagnostic/objective, as designed). `tests/geo/test_chirikov_overlap.py` 20→**21 pass**.
+- **FIXED (iter 4):** added `test_analytic_pendulum_half_widths_summing_to_spacing_cross_one` — the doc's headline calibration ("s crosses 1 when the ANALYTIC half-widths sum to spacing") was previously tested only with a literal width; the new test drives `pendulum_full_width(0.0625, 1.0)==1.0` → `s==1.0` and brackets ±10%, so a pendulum-coefficient regression is now caught at the onset.
+- **Advisory (low):** `CHIRIKOV_TWO_THIRDS_THRESHOLD` (refined s_crit≈0.67) is exported but untested (constant hard to mis-set; primary s≈1 onset is covered).
+- **Pattern-5 note:** `chirikov_overlap.py` + test are untracked but NOT yet imported by production (only the test imports it), so no clean-checkout crash today — still `git add` before commit.
+- Phase-2 deferred test gaps (relaxed band-postcondition raise paths + non-finite-G) remain open advisories (files now stable; low value — practically unreachable via the march guard, strict sibling covered at driver level).
+- Phase 4 (Mather ΔW): still NOT implemented.
+
+### Review Log — iter 5 (caught-up, 2026-06-23)
+
+- **No new implementation since iter 4** (Phase 4 / Mather ΔW still absent; concurrent actor paused). All implemented phases (1a/1b/2/3) remain reviewed + fixed; my prior fixes verified intact (no collision).
+- **FIXED (deferred Phase-2 gap, files now stable):** added `RelaxedBandPostconditionTests` to `tests/geo/test_boozer_surface_family.py` (8→11 pass) — directly exercises `_require_relaxed_family_postconditions` raise paths (volumes-not-strictly-increasing → "strictly"; adjacent-pair-not-nested → "must nest") + the clean-band pass. This closes the doc's Phase-2 Validation headline (`cross_sections_are_nested` per adjacent pair + `np.all(np.diff(volumes) > 0)`), previously unreachable via the march guard.
+- **Remaining open items (all low-value / not-code or owner=elsewhere):** Pattern-5 commit blocker (`git add` the untracked new modules before commit — user's git domain); `CHIRIKOV_TWO_THIRDS_THRESHOLD` untested (constant, hard to mis-set); `allow_truncation` default vs doc-decision drift (reconcile doc); `band_shear_load` dead scaffold (wire or drop — actor's domain); non-finite warm-start-G raise untested (deliberate guard).
+- **Loop status: caught up to the implementation.** Phases 1a/1b/2/3 done+reviewed+fixed; Phase 4 awaits implementation by the concurrent author, after which the loop will review it.
+
+### Review Log — Phase 4 + ALL PHASES COMPLETE (loop iter 6, 2026-06-23)
+
+- **Phase 4 — Mather ΔW certification**: IMPLEMENTED (`banana_opt/topology/mather_dw.py`, 276 lines, standalone/offline as designed) + crucible-PASS (physics correct). Gauge-invariant closed-loop ∮A·dl (telescopes to round-off on planar AND non-planar loops; Stokes flux = B0·πR²); ΔW = W_X − W_O sign correct; golden/noble convergents hand-verified (Fibonacci/Pell); standard-map K_c≈0.9716 calibration is GENUINE (textbook Morse indices X=1/O=0; ΔW(5/8) lifts 7.9e-9→5.0e-5→7.6e-4 across K_c from real Newton-solved orbits; mutation test catches a rigged orbit pair). `tests/geo/test_mather_dw.py` 27 pass.
+- **FIXED (iter 6):** clarified the `mather_delta_w_from_orbits` docstring — a `solve_periodic_orbit` result exposes orbit samples as cylindrical `states` (N,2) + `phi_grid`, not a Cartesian `(N,3)` trajectory; the docstring now names the `[R cosφ, R sinφ, Z]` conversion (closes the doc-spec-vs-reality gap; these routines expect (N,3)).
+- **Advisory (low):** `MatherCertificate` is a passive container (no deepest-convergent enforcement — moot, no builder ships); the doc's real-map cross-consistency (ΔW vs Greene-residue/WBA) is explicitly **scoped out** in the module docstring (disclosed, not silently missing).
+
+## ✅ ALL FOUR PHASES IMPLEMENTED + CRUCIBLE-REVIEWED + FIXED (2026-06-23)
+
+| Phase | Status | Tests |
+|---|---|---|
+| 1a VolumeBoozer | PASS | Taylor/FD + dead-gradient + contract |
+| 1b iota/volume profile builders | PASS (CRITICAL crash fixed) | builder gradient + default-OFF |
+| 2 boozer_surface_family | PASS | 11 (incl. band-postcondition) |
+| 3 Chirikov overlap | PASS | 21 (incl. analytic calibration) |
+| 4 Mather ΔW | PASS | 27 (gauge + standard-map K_c) |
+
+**Remaining (owner = user / author, not loop-fixable):** the Pattern-5 commit blocker (`git add` the untracked new modules: `boozer_surface_family.py`, `topology/chirikov_overlap.py`, `topology/mather_dw.py`, and the 4 new test files, before committing); `band_shear_load` dead scaffold (wire or drop); `allow_truncation` default vs doc-decision drift; two minor untested guards (Chirikov 2/3 threshold, non-finite-G); the real-map cross-consistency test (scoped out).
+
+> **Update (iter 8):** Phases 1-4 above were committed in `953c7a5d2` (so the Pattern-5 blocker is resolved). The `allow_truncation` drift is also resolved — it is now an explicit wired arg (see iter 8 below).
+
+### Review Log — iter 8 (NEW post-commit topology work, 2026-06-23)
+
+Resumed after the Phases 1-4 commit (`953c7a5d2`). Reviewed three newer topology changes with 3 parallel adversarial subagents; adjudicated + fixed myself; all changes re-verified under the miniforge interpreter.
+
+- **🔴 CRITICAL found + FIXED — commit `268506155` (`--surface-allow-truncation` / `--surface-min-surfaces` wiring) was a SILENT NO-OP.** The policy was published as a module global in `__main__` ~400 lines AFTER the setup-time family build had already read it via `globals().get(...)`, so top-to-bottom execution always read the unset global → `False` → the flag never reached `build_boozer_surface_family`. The default-OFF path was byte-identical, masking it. **Root fix (not a band-aid):** thread `allow_truncation`/`min_surfaces` as EXPLICIT args through `initialize_surface_data_for_contract` → `initialize_published_surface_data_from_stage2_seed` → `build_boozer_surface_family`, passed straight from `args` at the single call site, and delete the `globals()` indirection + the dead late assignments. This eliminates the temporal-coupling bug *class* (no global to misorder) and makes the wiring unit-testable. These functions already take all other config as explicit args, so the `globals()` read was the lone anomaly. `tests/geo/test_surface_truncation_wiring.py` rewritten to drive the policy as args (no module globals) + a `_require_published_G_consistency` spy + a new `initialize_surface_data_for_contract` forwarding test (the propagation hop the bug broke). 4 wiring + 11 family = 15 pass.
+- **🟡 MINOR-1 FIXED — truncated bands skipped the G-consistency QA.** A truncated band correctly skips the strict inner0-based name postcondition, but it also dropped `_require_published_G_consistency` (which is name-agnostic — every shell shares the outer G). Now: `if provenance.truncated: _require_published_G_consistency(...) else: <full strict postcondition>`.
+- **🟡 MINOR-2 FIXED — env-var truthiness.** `default=bool(os.environ.get("SURFACE_ALLOW_TRUNCATION"))` treated `"0"`/`"false"` as True. Now parses truthy strings (`in ("1","true","yes","on")`).
+- **✅ `band_shear_load` / `BandShearLoad`** (`topology/iota_profile.py` +108, `test_iota_profile.py` +92): PASS. The branch-aware nearest-resonance formula `min(|ι−(round(ι−f)+f)|)` was proven exact (0.0 error over dense grids + every half-integer banker's-rounding tie, q≤7/13/24); shear adjacency, per-bracket count, and edge cases hold; tests pin exact numerics. Still a dead scaffold (no production caller) — the pre-existing wire-or-drop advisory, owner=user.
+- **✅ `converse_kam.py` +5** (`np.ascontiguousarray` for a column-strided RK4-state slice fed to `set_points`): PASS, monotonically safe; `$MF` repro confirmed the crash without it / success with it. No unfixed live twins (every other `set_points` site in `topology/` is fed fresh-contiguous arrays; the one structural lookalike, `mather_dw.py:279`, is dead/unwired — advisory).
+- **🩹 PRE-EXISTING defect found + FIXED — 3 stale-stub tests in `tests/geo/test_single_stage_example.py`** (`published_stage2_seed_initializes_outer_to_inner`, `..._rejects_solved_G_drift`, `..._rejects_nonmonotone_actual_volumes`). They patched the driver's `initialize_boozer_surface`, but Phase-2's `build_boozer_surface_family` solves via `attempt_initialize_boozer_surface` (resolved in the `boozer_surface_family` module namespace) → the stub was bypassed → the real solver ran on a `FakeSurface` and died on `quadpoints_theta`. **Broken since `953c7a5d2` (git-proven; the test file predates it), missed by iters 2-3** (the "covered at the driver level" claim was wrong). Fix (test-only): redirect the solve patch to `family.attempt_initialize_boozer_surface` and wrap the fakes' returns in the `BoozerInitializationResult` result shape (`result.success`/`result.boozer_surface`). Proven NON-VACUOUS: removing the drift / making volumes monotone flips each rejection test pass→"RuntimeError not raised", so they reject via the real driver guards, not the crash.
+- **Verification (independently re-run):** 28 pass across `test_surface_truncation_wiring` + `test_boozer_surface_family` + the `test_single_stage_example` published-init group; `ruff check` clean on both edited test files; `git status` shows ONLY 3 files touched this iter (the driver + 2 test files) — no production solve/handoff/family code modified. The driver's 3 `F401`s are pre-existing/unrelated (in the rotation-aware import block, proven identical on HEAD) — left for the geometry-track author.
+- **Still open (owner = user/author):** `band_shear_load` wire-or-drop; the `mather_dw.py:279` dead-code contiguity hardening; the Chirikov 2/3-threshold + non-finite-G untested guards; the real-map cross-consistency test (scoped out). All low-value / not loop-fixable.

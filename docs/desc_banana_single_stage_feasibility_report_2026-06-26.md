@@ -8,6 +8,27 @@ Banana-coil single-stage optimization is possible in `simsopt-surrogate` today t
 
 A DESC-backed banana single-stage workflow is engineering-feasible as a new bridge/lane. It needs explicit conversion between SIMSOPT coil/surface objects and DESC equilibrium/coil objects, plus validation that keeps the existing SIMSOPT Poincare/Boozer and CAD hardware-contact oracle as final evidence. DESC objective values alone would not prove a banana artifact is confined, buildable, or hardware-clean.
 
+## Implementation status update
+
+As of 2026-06-26, the SIMSOPT-side bridge slice includes hardware-first spec
+loading, seed manifests, explicit equilibrium-seed provenance,
+SIMSOPT-to-DESC coil export planning, sampled DESC-to-SIMSOPT coil import,
+objective-stack preflight, result/promotion schemas, conversion-only smoke
+execution, DESC objective assembly/evaluation smoke, and guarded optimizer
+entrypoints for fixed-equilibrium polish and joint solve lanes.
+
+The implementation still does not have a validated production DESC-backed
+banana candidate. The real-seed lane has reached passing preflight,
+equilibrium-load, objective assembly, and sequential objective-value evaluation.
+The combined DESC optimizer path reached a 43.23 GB macOS peak footprint on a
+real `scipy-l-bfgs-b --desc-maxiter 1` fixed-polish attempt, so fixed-polish and
+joint optimizer execution now fail closed by default unless
+`--allow-high-memory-desc-optimizer` is supplied. Combined Jacobian evaluation
+and exported-artifact SIMSOPT validation remain open. The runtime objective
+lanes require the paired DESC checkout at
+`/Users/suhjungdae/code/opensource/DESC` with the local
+`LinkingCurrentConsistency(linking_grid=...)` patch.
+
 ## Live evidence
 
 ### Current repository state
