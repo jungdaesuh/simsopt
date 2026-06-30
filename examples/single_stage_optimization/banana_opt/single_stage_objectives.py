@@ -1,4 +1,6 @@
 import math
+from collections import OrderedDict
+from threading import Lock
 
 import numpy as np
 
@@ -54,6 +56,11 @@ from banana_opt.smooth_distance_selection import (
 
 
 ALM_HARD_GEOMETRY_DUAL_SIGNALS = True
+_TOTAL_OBJECTIVE_GRAPH_CACHE_MAXSIZE = 128
+_TOTAL_OBJECTIVE_GRAPH_CACHE = OrderedDict()
+_TOTAL_OBJECTIVE_GRAPH_CACHE_HITS = 0
+_TOTAL_OBJECTIVE_GRAPH_CACHE_MISSES = 0
+_TOTAL_OBJECTIVE_GRAPH_CACHE_LOCK = Lock()
 
 
 def average_surface_objectives(objectives, weights=None):
@@ -953,6 +960,69 @@ def build_total_objective(
     return objective
 
 
+def _total_objective_graph_cache_token(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    return ("object", id(value))
+
+
+def _total_objective_graph_cache_key(args, kwargs):
+    return (
+        tuple(_total_objective_graph_cache_token(value) for value in args),
+        tuple(
+            (name, _total_objective_graph_cache_token(value))
+            for name, value in sorted(kwargs.items())
+        ),
+    )
+
+
+def _cached_total_objective(*args, **kwargs):
+    global _TOTAL_OBJECTIVE_GRAPH_CACHE_HITS
+    global _TOTAL_OBJECTIVE_GRAPH_CACHE_MISSES
+
+    key = _total_objective_graph_cache_key(args, kwargs)
+    with _TOTAL_OBJECTIVE_GRAPH_CACHE_LOCK:
+        objective = _TOTAL_OBJECTIVE_GRAPH_CACHE.get(key)
+        if objective is not None:
+            _TOTAL_OBJECTIVE_GRAPH_CACHE_HITS += 1
+            _TOTAL_OBJECTIVE_GRAPH_CACHE.move_to_end(key)
+            return objective
+        _TOTAL_OBJECTIVE_GRAPH_CACHE_MISSES += 1
+
+    objective = build_total_objective(*args, **kwargs)
+    with _TOTAL_OBJECTIVE_GRAPH_CACHE_LOCK:
+        cached_objective = _TOTAL_OBJECTIVE_GRAPH_CACHE.get(key)
+        if cached_objective is not None:
+            _TOTAL_OBJECTIVE_GRAPH_CACHE_HITS += 1
+            _TOTAL_OBJECTIVE_GRAPH_CACHE.move_to_end(key)
+            return cached_objective
+        _TOTAL_OBJECTIVE_GRAPH_CACHE[key] = objective
+        if len(_TOTAL_OBJECTIVE_GRAPH_CACHE) > _TOTAL_OBJECTIVE_GRAPH_CACHE_MAXSIZE:
+            _TOTAL_OBJECTIVE_GRAPH_CACHE.popitem(last=False)
+    return objective
+
+
+def _clear_total_objective_graph_cache():
+    global _TOTAL_OBJECTIVE_GRAPH_CACHE_HITS
+    global _TOTAL_OBJECTIVE_GRAPH_CACHE_MISSES
+    with _TOTAL_OBJECTIVE_GRAPH_CACHE_LOCK:
+        _TOTAL_OBJECTIVE_GRAPH_CACHE.clear()
+        _TOTAL_OBJECTIVE_GRAPH_CACHE_HITS = 0
+        _TOTAL_OBJECTIVE_GRAPH_CACHE_MISSES = 0
+
+
+def _total_objective_graph_cache_info():
+    with _TOTAL_OBJECTIVE_GRAPH_CACHE_LOCK:
+        return {
+            "hits": _TOTAL_OBJECTIVE_GRAPH_CACHE_HITS,
+            "misses": _TOTAL_OBJECTIVE_GRAPH_CACHE_MISSES,
+            "size": len(_TOTAL_OBJECTIVE_GRAPH_CACHE),
+            "maxsize": _TOTAL_OBJECTIVE_GRAPH_CACHE_MAXSIZE,
+        }
+
+
 def _surface_objective_pair(diagnostic_surface_weights, nonQSs, brs):
     J_QS_obj = average_surface_objectives(nonQSs, weights=diagnostic_surface_weights)
     J_Boozer_obj = average_surface_objectives(brs, weights=diagnostic_surface_weights)
@@ -1323,7 +1393,7 @@ def evaluate_total_objective(
         JNonQSObjective=JNonQSObjective,
         JBoozerObjective=JBoozerObjective,
     )
-    total_objective = build_total_objective(
+    total_objective = _cached_total_objective(
         objective_J_QS_obj,
         RES_WEIGHT,
         objective_J_Boozer_obj,

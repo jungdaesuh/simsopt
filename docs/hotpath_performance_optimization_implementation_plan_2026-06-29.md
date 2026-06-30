@@ -371,8 +371,11 @@ unpack the tuple in `dJ()`.
          `I_value == 0.0`; for nonzero transforms, the copy preserves input
          immutability. If the tensors are freshly computed and consume-once, prove
          that at each caller and add a no-alias test before using in-place updates.
-   - [ ] `single_stage_objectives.py:1326-1403` — cache the simsopt `Optimizable`
+   - [x] `single_stage_objectives.py:1326-1403` — cache the simsopt `Optimizable`
          sum/scale graph instead of reconstructing it on every trial objective eval.
+         The cache is bounded, identity-keyed on graph-shaping objective terms and
+         scalar weights, and leaves direct `build_total_objective(...)` callers
+         unchanged.
    - [x] `edge_iota_proxy.py:391-392` (the 401-line proxy module — NOT
          `edge_delivered_iota.py`; both files exist) — remove the redundant
          `BiotSavart.set_points` (points already set at `:142` in
@@ -486,10 +489,12 @@ unpack the tuple in `dJ()`.
   winding forward pass now uses buffered `np.bincount` accumulation instead of
   unbuffered `np.add.at`. The ALM path now caches default-helper constraint names,
   activity tolerances, metadata, and scales while materializing fresh mutable
-  payloads per evaluation; custom tolerance callables stay uncached. The other
-  items are deferred. In particular, `boozer_finite_current.py` copies stay until
-  a no-alias proof and regression test exist, and DESC bridge/runtime items belong
-  to the dirty-tree DESC lane.
+  payloads per evaluation; custom tolerance callables stay uncached. The weighted
+  single-stage search path now reuses the static `Optimizable` sum/scale graph for
+  repeated objective evaluations while preserving direct builder behavior. The
+  other items are deferred. In particular, `boozer_finite_current.py` copies stay
+  until a no-alias proof and regression test exist, and DESC bridge/runtime items
+  belong to the dirty-tree DESC lane.
 - Phase 4.4 (`boozersurface.py` exact-Newton iterative refinement): deferred;
   behavior-affecting convergence-path change requires an isolated Boozer parity
   plus single-stage smoke gate.

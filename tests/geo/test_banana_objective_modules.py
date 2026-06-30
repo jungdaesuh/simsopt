@@ -5019,6 +5019,94 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 25.0)
         np.testing.assert_allclose(result["grad"], [4.6, 2.8])
 
+    def test_evaluate_total_objective_reuses_static_objective_graph_cache(self):
+        self.module._clear_total_objective_graph_cache()
+
+        nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
+        brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
+        jiota = _FakeAlgebraicObjective(4.0, [0.2, 0.1])
+        jlength = _FakeAlgebraicObjective(5.0, [1.0, 1.5])
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        normalized_nonqs = _FakeAlgebraicObjective(10.0, [10.0, 0.0])
+        normalized_boozer = _FakeAlgebraicObjective(20.0, [1.0, 1.0])
+
+        def evaluate(*, length_weight):
+            return self.module.evaluate_total_objective(
+                np.array([1.0]),
+                nonqs,
+                brs,
+                RES_WEIGHT=0.5,
+                Jiota=jiota,
+                IOTAS_WEIGHT=2.0,
+                JCurveLength=jlength,
+                LENGTH_WEIGHT=length_weight,
+                JCurveCurve=zero,
+                CC_WEIGHT=1.0,
+                JCurveSurface=zero,
+                CS_WEIGHT=1.0,
+                JCurvature=zero,
+                CURVATURE_WEIGHT=1.0,
+                JNonQSObjective=normalized_nonqs,
+                JBoozerObjective=normalized_boozer,
+                include_diagnostics=False,
+            )
+
+        first = evaluate(length_weight=1.0)
+        first_info = self.module._total_objective_graph_cache_info()
+        second = evaluate(length_weight=1.0)
+        second_info = self.module._total_objective_graph_cache_info()
+        changed_weight = evaluate(length_weight=1.5)
+        changed_info = self.module._total_objective_graph_cache_info()
+
+        self.assertEqual(first_info["misses"], 1)
+        self.assertEqual(first_info["hits"], 0)
+        self.assertEqual(second_info["misses"], first_info["misses"])
+        self.assertEqual(second_info["hits"], first_info["hits"] + 1)
+        self.assertEqual(changed_info["misses"], second_info["misses"] + 1)
+        self.assertEqual(changed_info["size"], 2)
+        self.assertAlmostEqual(first["total"], second["total"])
+        np.testing.assert_allclose(first["grad"], second["grad"])
+        self.assertNotEqual(first["total"], changed_weight["total"])
+
+    def test_evaluate_total_objective_surface_weights_do_not_reuse_stale_graph(self):
+        self.module._clear_total_objective_graph_cache()
+
+        left_nonqs = _FakeAlgebraicObjective(2.0, [2.0, 0.0])
+        right_nonqs = _FakeAlgebraicObjective(8.0, [6.0, 0.0])
+        left_boozer = _FakeAlgebraicObjective(3.0, [0.0, 1.0])
+        right_boozer = _FakeAlgebraicObjective(9.0, [0.0, 5.0])
+        jiota = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        jlength = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        def evaluate(surface_weights):
+            return self.module.evaluate_total_objective(
+                np.asarray(surface_weights, dtype=float),
+                [left_nonqs, right_nonqs],
+                [left_boozer, right_boozer],
+                RES_WEIGHT=1.0,
+                Jiota=jiota,
+                IOTAS_WEIGHT=0.0,
+                JCurveLength=jlength,
+                LENGTH_WEIGHT=0.0,
+                JCurveCurve=zero,
+                CC_WEIGHT=0.0,
+                JCurveSurface=zero,
+                CS_WEIGHT=0.0,
+                JCurvature=zero,
+                CURVATURE_WEIGHT=0.0,
+                include_diagnostics=False,
+            )
+
+        left_weighted = evaluate([1.0, 0.0])
+        right_weighted = evaluate([0.0, 1.0])
+
+        self.assertEqual(self.module._total_objective_graph_cache_info()["misses"], 2)
+        self.assertAlmostEqual(left_weighted["total"], 5.0)
+        self.assertAlmostEqual(right_weighted["total"], 17.0)
+        np.testing.assert_allclose(left_weighted["grad"], [2.0, 1.0])
+        np.testing.assert_allclose(right_weighted["grad"], [6.0, 5.0])
+
     def test_evaluate_total_objective_supports_frontier_specific_objective_terms(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
