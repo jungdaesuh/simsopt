@@ -42,10 +42,13 @@ with `STAGE2_SURFACE_DOF_SCALE=1e-4`: the surface-family first-step norm fell to
 `+2.386923e4`. The remaining bad direction is curve-block dominated
 (`CurveCWSFourierCPP1`, family norm `4.179194e2`, inf `1.064389e2`), led by
 low/mid modes such as `phis(5)`, `phic(11)`, `phic(4)`, `thetas(5)`,
-`phis(2)`, `phic(2)`, `thetac(11)`, and `phic(1)`. The active metric-only
-follow-up is a stronger H2 alpha sweep with the same surface scale: Perlmutter
-jobs `55281414` (alpha 64), `55281416` (alpha 256), and `55281418`
-(alpha 1024).
+`phis(2)`, `phic(2)`, `thetac(11)`, and `phic(1)`. Stronger H2 alpha job
+`55281414` (alpha 64) also failed closed (`FAILED|1:0`, elapsed `00:14:11`)
+at the same metric gate with
+`first_step_dJ=+1.773113e4`; it reduced the curve first-step norm to
+`3.719896e2` but kept the step curve dominated. The active metric-only
+follow-up is the remaining stronger H2 sweep with the same surface scale:
+Perlmutter jobs `55281416` (alpha 256) and `55281418` (alpha 1024).
 
 ## Purpose
 
@@ -419,10 +422,15 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       remaining first step was curve dominated (`CurveCWSFourierCPP1`, family
       norm `4.179194e2`).
 - [ ] **Stronger curve-block metric diagnostic sweep**: with the surface block
-      suppressed, jobs `55281414`, `55281416`, and `55281418` run H2 beta=1 with
-      alpha `64`, `256`, and `1024`, respectively, all with
-      `STAGE2_SURFACE_DOF_SCALE=1e-4`. No full metric run is permitted until one
-      of these or a successor metric-only diagnostic reports `first_step_dJ < 0`.
+      suppressed, job `55281414` ran H2 beta=1 alpha 64 with
+      `STAGE2_SURFACE_DOF_SCALE=1e-4` and failed closed (`FAILED|1:0`, elapsed
+      `00:14:11`) after emitting `SEED_GRADIENT_DIAGNOSTIC_JSON`, with
+      `first_step_dJ=+1.773113e4`. Curve first-step norm improved to
+      `3.719896e2` (inf `1.046931e2`) and the surface first-step norm stayed
+      suppressed at `1.225784e-05`, but the full metric run remains blocked.
+      Jobs `55281416` and `55281418` are the remaining alpha 256 and 1024
+      diagnostics. No full metric run is permitted until one of these or a
+      successor metric-only diagnostic reports `first_step_dJ < 0`.
 - [x] **Wrapper soft-control forwarding**: `autoresearch df39e677` forwards and
       records `--stage2-edge-iota-weight` and `--stage2-edge-iota-hinge` through
       `scripts/run_one.py`, with regression coverage on the `soft` wrapper path.
@@ -491,7 +499,9 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
       `first_step_dJ < 0` under the metric (the diagonal scale could not
       achieve this). Evidence so far: H1 and H2 beta=1 alpha values 1, 4,
       16, and 64 all assembled the metric but failed the gate; H2 alpha=16 plus
-      `STAGE2_SURFACE_DOF_SCALE=1e-4` also failed with `first_step_dJ=+2.386923e4`.
+      `STAGE2_SURFACE_DOF_SCALE=1e-4` failed with `first_step_dJ=+2.386923e4`,
+      and H2 alpha=64 plus the same surface scale failed with
+      `first_step_dJ=+1.773113e4`.
       The metric completion criterion is not met; fallback smoke `55271978` is
       historical route-engagement evidence only, and full ALM fallback job
       `55273370` was canceled because fallback is not a desired completion path.
@@ -508,9 +518,10 @@ case), keeping SSOT: one transform, one penalty call site, one composer.
 
 ## Open Questions
 
-- **H2 strength after surface suppression:** after `55278602`, the surface block
-  is not the live driver. Decide whether the curve block needs alpha above 64
-  from the pending alpha 64/256/1024 seed diagnostics, not from a full run.
+- **H2 strength after surface suppression:** after `55278602` and `55281414`,
+  the surface block is not the live driver and alpha 64 still leaves an uphill
+  curve-dominated first step. Decide whether alpha 256 or 1024 flips the step
+  from the pending seed diagnostics, not from a full run.
 - **Tier-3b (escalation):** if stronger curve H2 still leaves the dominant
   direction unconditioned, the next step is a **Gauss-Newton metric**
   from the field-residual Jacobian (`J_res^T J_res`) — captures the *objective*
