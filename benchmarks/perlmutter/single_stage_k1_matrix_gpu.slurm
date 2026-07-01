@@ -31,6 +31,9 @@ MATRIX_NTOR="${MATRIX_NTOR:-10}"
 MATRIX_NPHI="${MATRIX_NPHI:-64}"
 MATRIX_NTHETA="${MATRIX_NTHETA:-32}"
 MATRIX_JAX_CACHE_DIR="${MATRIX_JAX_CACHE_DIR:-${RUN_ROOT}/jax_compilation_cache}"
+MATRIX_WARM_START_RUN_DIR="${MATRIX_WARM_START_RUN_DIR:-}"
+MATRIX_IOTA_TARGET="${MATRIX_IOTA_TARGET:-}"
+MATRIX_VOL_TARGET="${MATRIX_VOL_TARGET:-}"
 MATRIX_CASES="${MATRIX_CASES:-all}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-7200}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-7200}"
@@ -132,6 +135,7 @@ write_case_manifest() {
   local newton_stab="$6"
   python - "$case_label" "$chunk_batch" "$limited_memory" "$newton_policy" "$adjoint_solver" "$newton_stab" <<'PY'
 import json
+import os
 import sys
 
 label, chunk, limited_memory, newton_policy, adjoint_solver, newton_stab = sys.argv[1:]
@@ -142,6 +146,9 @@ payload = {
     "target_lane_boozer_newton_polish_policy": newton_policy,
     "SIMSOPT_ADJOINT_LINEAR_SOLVER": adjoint_solver,
     "target_lane_boozer_newton_stab": None if newton_stab == "" else float(newton_stab),
+    "MATRIX_WARM_START_RUN_DIR": os.environ.get("MATRIX_WARM_START_RUN_DIR") or None,
+    "MATRIX_IOTA_TARGET": os.environ.get("MATRIX_IOTA_TARGET") or None,
+    "MATRIX_VOL_TARGET": os.environ.get("MATRIX_VOL_TARGET") or None,
 }
 print(json.dumps(payload, indent=2, sort_keys=True))
 PY
@@ -180,6 +187,17 @@ run_case() {
   if [[ -n "${newton_stab}" ]]; then
     newton_stab_args=(--target-lane-boozer-newton-stab "${newton_stab}")
   fi
+  local warm_start_args=()
+  if [[ -n "${MATRIX_WARM_START_RUN_DIR}" ]]; then
+    warm_start_args=(--warm-start-run-dir "${MATRIX_WARM_START_RUN_DIR}")
+  fi
+  local target_args=()
+  if [[ -n "${MATRIX_VOL_TARGET}" ]]; then
+    target_args+=(--vol-target "${MATRIX_VOL_TARGET}")
+  fi
+  if [[ -n "${MATRIX_IOTA_TARGET}" ]]; then
+    target_args+=(--iota-target "${MATRIX_IOTA_TARGET}")
+  fi
 
   echo "=== ${case_label} ==="
   nvidia-smi > "${case_dir}/nvidia_smi_before.txt" || true
@@ -196,6 +214,8 @@ run_case() {
         --benchmark-mode \
         --minimal-artifacts \
         "${success_filter_args[@]}" \
+        "${warm_start_args[@]}" \
+        "${target_args[@]}" \
         --reference-optimizer-method lbfgs \
         --maxiter "${MATRIX_MAXITER}" \
         --initial-step-scale "${MATRIX_INITIAL_STEP_SCALE}" \
