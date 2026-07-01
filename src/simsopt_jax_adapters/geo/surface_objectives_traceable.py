@@ -650,6 +650,19 @@ def _pack_traceable_forward_result(
     pre_newton_ngev=None,
     pre_newton_line_search_status=None,
     newton_iter=None,
+    dense_operator_chunk_batch_size=None,
+    initial_gradient_norm=None,
+    newton_attempted_iterations=None,
+    newton_stalled=None,
+    newton_stop_reason_code=None,
+    newton_last_step_accepted=None,
+    newton_last_step_norm=None,
+    newton_last_step_finite=None,
+    newton_last_linear_solve_success=None,
+    newton_last_linear_solve_iterations=None,
+    newton_last_linear_residual_relative=None,
+    newton_last_backtracking_iterations=None,
+    newton_last_accepted_alpha=None,
     ls_condition_estimate=None,
     ls_residual_jacobian_condition_estimate=None,
     hessian_materialized=None,
@@ -732,6 +745,56 @@ def _pack_traceable_forward_result(
         ),
         "newton_iter": int_field(newton_iter),
         "newton_iter_present": present_field(newton_iter),
+        "dense_operator_chunk_batch_size": int_field(dense_operator_chunk_batch_size),
+        "dense_operator_chunk_batch_size_present": present_field(
+            dense_operator_chunk_batch_size
+        ),
+        "initial_gradient_norm": float_field(initial_gradient_norm),
+        "initial_gradient_norm_present": present_field(initial_gradient_norm),
+        "newton_attempted_iterations": int_field(newton_attempted_iterations),
+        "newton_attempted_iterations_present": present_field(
+            newton_attempted_iterations
+        ),
+        "newton_stalled": bool_field(newton_stalled),
+        "newton_stalled_present": present_field(newton_stalled),
+        "newton_stop_reason_code": int_field(newton_stop_reason_code),
+        "newton_stop_reason_code_present": present_field(newton_stop_reason_code),
+        "newton_last_step_accepted": bool_field(newton_last_step_accepted),
+        "newton_last_step_accepted_present": present_field(
+            newton_last_step_accepted
+        ),
+        "newton_last_step_norm": float_field(newton_last_step_norm),
+        "newton_last_step_norm_present": present_field(newton_last_step_norm),
+        "newton_last_step_finite": bool_field(newton_last_step_finite),
+        "newton_last_step_finite_present": present_field(newton_last_step_finite),
+        "newton_last_linear_solve_success": bool_field(
+            newton_last_linear_solve_success
+        ),
+        "newton_last_linear_solve_success_present": present_field(
+            newton_last_linear_solve_success
+        ),
+        "newton_last_linear_solve_iterations": int_field(
+            newton_last_linear_solve_iterations
+        ),
+        "newton_last_linear_solve_iterations_present": present_field(
+            newton_last_linear_solve_iterations
+        ),
+        "newton_last_linear_residual_relative": float_field(
+            newton_last_linear_residual_relative
+        ),
+        "newton_last_linear_residual_relative_present": present_field(
+            newton_last_linear_residual_relative
+        ),
+        "newton_last_backtracking_iterations": int_field(
+            newton_last_backtracking_iterations
+        ),
+        "newton_last_backtracking_iterations_present": present_field(
+            newton_last_backtracking_iterations
+        ),
+        "newton_last_accepted_alpha": float_field(newton_last_accepted_alpha),
+        "newton_last_accepted_alpha_present": present_field(
+            newton_last_accepted_alpha
+        ),
         "ls_condition_estimate": float_field(ls_condition_estimate),
         "ls_condition_estimate_present": present_field(ls_condition_estimate),
         "ls_residual_jacobian_condition_estimate": float_field(
@@ -921,6 +984,35 @@ def _traceable_general_forward_result(
                 "pre_newton_line_search_status"
             ),
             newton_iter=solve_result.get("newton_iter"),
+            dense_operator_chunk_batch_size=solve_result.get(
+                "dense_operator_chunk_batch_size"
+            ),
+            initial_gradient_norm=solve_result.get("initial_gradient_norm"),
+            newton_attempted_iterations=solve_result.get(
+                "newton_attempted_iterations"
+            ),
+            newton_stalled=solve_result.get("newton_stalled"),
+            newton_stop_reason_code=solve_result.get("newton_stop_reason_code"),
+            newton_last_step_accepted=solve_result.get(
+                "newton_last_step_accepted"
+            ),
+            newton_last_step_norm=solve_result.get("newton_last_step_norm"),
+            newton_last_step_finite=solve_result.get("newton_last_step_finite"),
+            newton_last_linear_solve_success=solve_result.get(
+                "newton_last_linear_solve_success"
+            ),
+            newton_last_linear_solve_iterations=solve_result.get(
+                "newton_last_linear_solve_iterations"
+            ),
+            newton_last_linear_residual_relative=solve_result.get(
+                "newton_last_linear_residual_relative"
+            ),
+            newton_last_backtracking_iterations=solve_result.get(
+                "newton_last_backtracking_iterations"
+            ),
+            newton_last_accepted_alpha=solve_result.get(
+                "newton_last_accepted_alpha"
+            ),
             ls_condition_estimate=solve_result.get("ls_condition_estimate"),
             ls_residual_jacobian_condition_estimate=solve_result.get(
                 "ls_residual_jacobian_condition_estimate"

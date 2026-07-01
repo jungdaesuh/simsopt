@@ -205,6 +205,7 @@ import simsopt_jax.geo.optimizers.optimizer as optimizer_jax_module  # noqa: E40
 import simsopt_jax_adapters.field.biotsavart_backend as biotsavart_backend  # noqa: E402
 import simsopt_jax_adapters.geo.boozer_surface as boozer_surface_jax  # noqa: E402
 import simsopt_jax_adapters.geo.surface_objectives as surface_objectives_jax  # noqa: E402
+import simsopt_jax_adapters.geo.surface_objectives_traceable as surface_objectives_traceable_jax  # noqa: E402
 from simsopt_jax.backend import invalidate_backend_cache  # noqa: E402
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX  # noqa: E402
 from simsopt_jax_adapters.geo.curvecwsfourier import (  # noqa: E402
@@ -7491,6 +7492,72 @@ class TestTraceableObjective:
         assert returned_fields["max_dense_hessian_bytes"] == 8192
         assert returned_fields["dense_newton_steps_materialized"] is False
         assert events[2][1]["branch"] == "success"
+
+    def test_traceable_forward_result_packs_newton_progress_fields(self):
+        """Packed K1 results must preserve Newton diagnostics for progress logs."""
+        forward_result = (
+            surface_objectives_traceable_jax._pack_traceable_forward_result(
+                value=jnp.asarray(7.0, dtype=jnp.float64),
+                x=jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+                sdofs=jnp.asarray([3.0, 4.0], dtype=jnp.float64),
+                iota=jnp.asarray(0.15, dtype=jnp.float64),
+                G=jnp.asarray(-2.0, dtype=jnp.float64),
+                linear_solve_factors=None,
+                success=jnp.asarray(True),
+                primal_success=jnp.asarray(True),
+                adjoint_linear_solve_available=jnp.asarray(True),
+                optimizer_method="bfgs-ondevice",
+                linearization_kind="hessian",
+                linear_solve_backend="operator",
+                result_type="ls",
+                dense_operator_chunk_batch_size=jnp.asarray(16, dtype=jnp.int32),
+                initial_gradient_norm=jnp.asarray(9.5, dtype=jnp.float64),
+                newton_attempted_iterations=jnp.asarray(4, dtype=jnp.int32),
+                newton_stalled=jnp.asarray(False),
+                newton_stop_reason_code=jnp.asarray(2, dtype=jnp.int32),
+                newton_last_step_accepted=jnp.asarray(True),
+                newton_last_step_norm=jnp.asarray(0.25, dtype=jnp.float64),
+                newton_last_step_finite=jnp.asarray(True),
+                newton_last_linear_solve_success=jnp.asarray(True),
+                newton_last_linear_solve_iterations=jnp.asarray(
+                    7,
+                    dtype=jnp.int32,
+                ),
+                newton_last_linear_residual_relative=jnp.asarray(
+                    2.5e-13,
+                    dtype=jnp.float64,
+                ),
+                newton_last_backtracking_iterations=jnp.asarray(
+                    1,
+                    dtype=jnp.int32,
+                ),
+                newton_last_accepted_alpha=jnp.asarray(1.0, dtype=jnp.float64),
+                final_gradient_norm=jnp.asarray(1.0e-11, dtype=jnp.float64),
+                final_gradient_inf_norm=jnp.asarray(8.0e-12, dtype=jnp.float64),
+            )
+        )
+
+        fields = single_stage_example._summarize_k1_forward_result_for_progress(
+            forward_result
+        )
+
+        assert fields["dense_operator_chunk_batch_size"] == 16
+        assert fields["initial_gradient_norm"] == pytest.approx(9.5)
+        assert fields["newton_attempted_iterations"] == 4
+        assert fields["newton_stalled"] is False
+        assert fields["newton_stop_reason_code"] == 2
+        assert fields["newton_last_step_accepted"] is True
+        assert fields["newton_last_step_norm"] == pytest.approx(0.25)
+        assert fields["newton_last_step_finite"] is True
+        assert fields["newton_last_linear_solve_success"] is True
+        assert fields["newton_last_linear_solve_iterations"] == 7
+        assert fields["newton_last_linear_residual_relative"] == pytest.approx(
+            2.5e-13
+        )
+        assert fields["newton_last_backtracking_iterations"] == 1
+        assert fields["newton_last_accepted_alpha"] == pytest.approx(1.0)
+        assert fields["final_gradient_norm"] == pytest.approx(1.0e-11)
+        assert fields["final_gradient_inf_norm"] == pytest.approx(8.0e-12)
 
     def test_decomposed_host_objective_records_opt_in_k1_subtimers(self):
         """Opt-in K1 replay profiling records split subphase timings per eval."""
