@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.extend import core as jax_core
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from simsopt_jax.runtime.host_boundary import (
     host_array,
@@ -103,6 +104,32 @@ def _call_lbfgs_value_and_grad(value_and_grad, x, value_and_grad_consts):
     return value_and_grad(x, value_and_grad_consts)
 
 
+def _lbfgs_const_placement(example_x):
+    if isinstance(example_x, jax.core.Tracer):
+        return jax.typeof(example_x).sharding
+    return example_x.sharding
+
+
+def _lbfgs_const_leaf_placement(reference_placement, leaf):
+    if not isinstance(reference_placement, NamedSharding):
+        return reference_placement
+    leaf_ndim = int(np.ndim(leaf))
+    if len(reference_placement.spec) <= leaf_ndim:
+        return reference_placement
+    return NamedSharding(reference_placement.mesh, P())
+
+
+def _device_put_lbfgs_consts(value_and_grad_consts, example_x):
+    reference_placement = _lbfgs_const_placement(example_x)
+    return jax.tree.map(
+        lambda leaf: jax.device_put(
+            leaf,
+            _lbfgs_const_leaf_placement(reference_placement, leaf),
+        ),
+        value_and_grad_consts,
+    )
+
+
 def _cached_lbfgs_value_and_grad_kernel(
     value_and_grad_fun,
     *,
@@ -139,7 +166,7 @@ def _cached_lbfgs_value_and_grad_kernel(
         cache_key=("lbfgs-value-and-grad-closure-converted", *cache_key_prefix),
         builder=build_kernel,
     )
-    value_and_grad_consts = jax.device_put(value_and_grad_consts, example_x.sharding)
+    value_and_grad_consts = _device_put_lbfgs_consts(value_and_grad_consts, example_x)
     return value_and_grad_kernel, value_and_grad_consts
 
 
@@ -400,6 +427,31 @@ def _check_lbfgsb_run_mode(run_mode: str) -> str:
         raise ValueError(
             "lbfgs_run_mode must be 'stepwise' or 'monolithic_debug', "
             f"got {run_mode!r}."
+        )
+    return run_mode
+
+
+def _resolve_lbfgsb_run_mode_for_runtime(
+    run_mode: str,
+    x0,
+    *,
+    callback,
+    progress_callback,
+    record_optimizer_state_trace: bool,
+) -> str:
+    if not isinstance(x0, jax.core.Tracer):
+        return run_mode
+    if callback is not None or progress_callback is not None or record_optimizer_state_trace:
+        raise ValueError(
+            "lbfgs-ondevice host observation is not available while "
+            "tracing a JAX function."
+        )
+    if run_mode == _LBFGS_RUN_MODE_STEPWISE:
+        raise ValueError(
+            "lbfgs-ondevice stepwise mode uses host-observed macro steps and "
+            "cannot run while tracing a JAX function. Pass "
+            "lbfgs_run_mode='monolithic_debug' explicitly for the full-solve "
+            "debug path."
         )
     return run_mode
 
@@ -697,6 +749,13 @@ def _minimize_lbfgs_private_impl(
         callback=callback,
     )
     x0 = _require_private_optimizer_runtime(x0)
+    run_mode = _resolve_lbfgsb_run_mode_for_runtime(
+        run_mode,
+        x0,
+        callback=callback,
+        progress_callback=progress_callback,
+        record_optimizer_state_trace=bool(record_optimizer_state_trace),
+    )
     dtype = x0.dtype
     maxiter_limit_value, maxfun_limit_value = _resolve_scipy_lbfgsb_limits(
         maxiter,
