@@ -55,9 +55,9 @@ python3 -m venv "${ENV_ROOT}"
 . "${ENV_ROOT}/bin/activate"
 
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT:-1.9.4.dev0}"
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install --upgrade "jax==0.10.0" "jaxlib==0.10.0" etils
-python -m pip install -e ".[JAX,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
+python -m pip install --no-compile --upgrade pip setuptools wheel
+python -m pip install --no-compile --upgrade "jax==0.10.0" "jaxlib==0.10.0" etils
+python -m pip install --no-compile -e ".[JAX,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 python -m pip freeze > "${JOB_ROOT}/pip_freeze.txt"
 
 git rev-parse HEAD > "${JOB_ROOT}/repo_sha.txt"
@@ -76,6 +76,7 @@ fi
 
 export SLURM_CPU_BIND="cores"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONDONTWRITEBYTECODE=1
 # This is a warm-start BUILD job, not a parity benchmark. The continuation
 # driver runs its outer optimization through the host-SciPy reference lane
 # (optimizer_jax_reference.reference_minimize, method='lbfgs'), which requires
