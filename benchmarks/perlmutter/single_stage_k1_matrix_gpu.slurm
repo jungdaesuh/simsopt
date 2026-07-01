@@ -57,9 +57,9 @@ python3 -m venv "${ENV_ROOT}"
 . "${ENV_ROOT}/bin/activate"
 
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT:-1.9.4.dev0}"
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install --upgrade "${JAX_GPU_WHEEL_SPEC}" etils
-python -m pip install -e ".[JAX_GPU,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
+python -m pip install --no-compile --upgrade pip setuptools wheel
+python -m pip install --no-compile --upgrade "${JAX_GPU_WHEEL_SPEC}" etils
+python -m pip install --no-compile -e ".[JAX_GPU,test,ALGS]" "shapely>=2.1,<3" "numba>=0.64,<0.66"
 python -m pip freeze > "${JOB_ROOT}/pip_freeze.txt"
 
 git rev-parse HEAD > "${JOB_ROOT}/repo_sha.txt"
@@ -74,6 +74,7 @@ export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
 export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
 export NUMEXPR_NUM_THREADS="${OMP_NUM_THREADS}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONDONTWRITEBYTECODE=1
 export SIMSOPT_BACKEND_MODE=jax_gpu_parity
 export SIMSOPT_BACKEND_STRICT=1
 export SIMSOPT_JAX_TRANSFER_GUARD=disallow
