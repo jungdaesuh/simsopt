@@ -32,7 +32,9 @@ from benchmarks.single_stage_init_parity import (
     parse_args,
 )
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+    build_target_lane_trial_boozer_overrides,
     resolve_effective_boozer_newton_polish_policy_override,
+    resolve_effective_trial_boozer_newton_polish_policy_override,
 )
 
 
@@ -180,3 +182,54 @@ def test_child_override_is_none_off_the_jax_ondevice_path():
         )
         is None
     )
+
+
+def test_child_trial_override_defaults_to_skip_on_jax_ondevice():
+    """Trial solves default to bounded K1 work; full-fidelity solves still run."""
+    full_override = resolve_effective_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_boozer_newton_polish_policy=None,
+    )
+    trial_override = resolve_effective_trial_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_trial_boozer_newton_polish_policy=None,
+    )
+
+    assert full_override == "run"
+    assert trial_override == "skip"
+
+
+def test_child_trial_override_honors_explicit_run():
+    override = resolve_effective_trial_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_trial_boozer_newton_polish_policy="run",
+    )
+    assert override == "run", override
+
+
+def test_trial_boozer_overrides_use_trial_policy_not_full_policy():
+    """The temporary trial solve override is independent of full solve fidelity."""
+    full_override = resolve_effective_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_boozer_newton_polish_policy=None,
+    )
+    trial_override = resolve_effective_trial_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_trial_boozer_newton_polish_policy=None,
+    )
+    overrides = build_target_lane_trial_boozer_overrides(
+        bfgs_tol=None,
+        bfgs_maxiter=None,
+        newton_tol=None,
+        newton_maxiter=None,
+        newton_stab=None,
+        newton_polish_policy=trial_override,
+    )
+
+    assert full_override == "run"
+    assert overrides["newton_polish_policy"] == "skip"

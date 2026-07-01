@@ -7365,6 +7365,83 @@ class TestTraceableObjective:
             atol=1e-12,
         )
 
+    def test_decomposed_host_objective_feeds_final_reporting_sync_cache(self):
+        """Non-trace decomposed K1 results are cached for exact-DOF final sync."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([7.0, -11.0], dtype=jnp.float64)
+        objective_value = jnp.asarray(3.25, dtype=jnp.float64)
+        calls = {"solve": 0, "value_grad_from_solved": 0}
+
+        def solve_fn(coil_dofs):
+            calls["solve"] += 1
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "finite": jnp.asarray(True),
+                "value": objective_value,
+                "x": arr + 1.0,
+                "sdofs": jnp.asarray([0.1, 0.2], dtype=jnp.float64),
+                "iota": jnp.asarray(0.11015671329581699, dtype=jnp.float64),
+                "G": jnp.asarray(-2.0106, dtype=jnp.float64),
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            calls["value_grad_from_solved"] += 1
+            return objective_value, candidate_gradient
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+        )
+        run_dict = {}
+        wrapped_fun = (
+            single_stage_example.build_single_stage_target_lane_objective_evaluation_sync_cache_wrapper(
+                target_value_and_grad_objective=host_fun,
+                optimizer_to_coil_dofs=lambda x: x,
+                run_dict=run_dict,
+            )
+        )
+        optimizer_dofs = np.array([1.0, 2.0], dtype=np.float64)
+
+        value, grad = wrapped_fun(optimizer_dofs)
+
+        assert calls == {"solve": 1, "value_grad_from_solved": 1}
+        assert float(jax.device_get(value)) == pytest.approx(3.25)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        cached = (
+            single_stage_example._cached_target_lane_objective_evaluation_sync_state(
+                run_dict,
+                optimizer_dofs,
+            )
+        )
+        assert cached is not None
+        assert float(jax.device_get(cached["objective_value"])) == pytest.approx(3.25)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(cached["objective_grad"]), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert (
+            single_stage_example._cached_target_lane_objective_evaluation_sync_state(
+                run_dict,
+                optimizer_dofs + np.array([0.0, 1.0e-15], dtype=np.float64),
+            )
+            is None
+        )
+
     def test_decomposed_host_objective_records_k1_k2_micro_events(self):
         """Progress events isolate K1 forward and K2 solved-state work."""
         baseline = np.array([1.0, -2.0])

@@ -262,6 +262,12 @@ _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "run",
     "skip",
 )
+_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "skip"
+_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
+    "default",
+    "run",
+    "skip",
+)
 _KERNELIZED_BOOZER_BUDGET_BACKENDS = frozenset(
     {"ondevice", _JAX_HOST_CONTROL_OUTER_OPTIMIZER_BACKEND}
 )
@@ -1128,6 +1134,7 @@ def build_single_stage_problem_contract(
     target_lane_boozer_newton_maxiter_record,
     target_lane_boozer_newton_stab_record,
     target_lane_boozer_newton_polish_policy_record=None,
+    target_lane_trial_boozer_newton_polish_policy_record=None,
     single_stage_search_policy=None,
     effective_initial_phase_settings=None,
     args=None,
@@ -1295,6 +1302,9 @@ def build_single_stage_problem_contract(
             "target_lane_boozer_newton_polish_policy": (
                 target_lane_boozer_newton_polish_policy_record
             ),
+            "target_lane_trial_boozer_newton_polish_policy": (
+                target_lane_trial_boozer_newton_polish_policy_record
+            ),
             "effective_banana_surface_radius": float(banana_surf_radius),
             "benchmark_mode": bool(args.benchmark_mode),
             "minimal_artifacts": bool(args.minimal_artifacts),
@@ -1457,6 +1467,7 @@ def build_single_stage_results_envelope(
     target_lane_boozer_newton_maxiter_record,
     target_lane_boozer_newton_stab_record,
     target_lane_boozer_newton_polish_policy_record=None,
+    target_lane_trial_boozer_newton_polish_policy_record=None,
     single_stage_search_policy=None,
     effective_initial_phase_settings=None,
     args=None,
@@ -1582,6 +1593,9 @@ def build_single_stage_results_envelope(
             target_lane_boozer_newton_stab_record=target_lane_boozer_newton_stab_record,
             target_lane_boozer_newton_polish_policy_record=(
                 target_lane_boozer_newton_polish_policy_record
+            ),
+            target_lane_trial_boozer_newton_polish_policy_record=(
+                target_lane_trial_boozer_newton_polish_policy_record
             ),
             single_stage_search_policy=single_stage_search_policy,
             effective_initial_phase_settings=effective_initial_phase_settings,
@@ -5197,7 +5211,20 @@ def parse_args():
         ),
         help=(
             "Policy for the Boozer Newton polish in JAX/ondevice target-lane "
-            "Boozer initialization and trial solves."
+            "Boozer initialization and full-fidelity solves."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-trial-boozer-newton-polish-policy",
+        choices=_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES,
+        default=os.environ.get(
+            "TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY",
+            _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
+        ),
+        help=(
+            "Policy for the Boozer Newton polish in JAX/ondevice target-lane "
+            "outer-loop trial solves. Accepted-step/final reporting keeps the "
+            "full target-lane Boozer policy."
         ),
     )
     parser.add_argument(
@@ -5671,6 +5698,13 @@ def parse_args():
             args.backend,
             args.optimizer_backend,
             args.target_lane_boozer_newton_polish_policy,
+        )
+    )
+    args.target_lane_trial_boozer_newton_polish_policy = (
+        resolve_target_lane_trial_boozer_newton_polish_policy(
+            args.backend,
+            args.optimizer_backend,
+            args.target_lane_trial_boozer_newton_polish_policy,
         )
     )
     if (
@@ -7418,11 +7452,41 @@ def _build_decomposed_coil_host_value_and_grad(
     # on by ``evaluation_index``); keying by coil DOFs means a reuse can only ever
     # serve the solve computed for that exact candidate.
     last_solved_forward_result = {}
+    solve_result_required_keys = frozenset(("sdofs", "iota", "G"))
 
     def record_decomposed_event(label, **fields):
         if record_outer_optimizer_event is None:
             return
         record_outer_optimizer_event(label, **fields)
+
+    def cache_last_solved_payload(
+        coil_dofs,
+        forward_result,
+        *,
+        objective_value=None,
+        objective_grad=None,
+    ):
+        if not isinstance(coil_dofs, np.ndarray):
+            return
+        cached_coil_dofs = np.array(coil_dofs, dtype=np.float64, copy=True)
+        last_solved_forward_result["coil_dofs"] = cached_coil_dofs
+        last_solved_forward_result["forward_result"] = forward_result
+        missing_solve_keys = [
+            key for key in solve_result_required_keys if key not in forward_result
+        ]
+        if missing_solve_keys:
+            last_solved_forward_result.pop("solve_result", None)
+            return
+        solved_forward_result = dict(forward_result)
+        if objective_value is not None:
+            solved_forward_result["objective_value"] = objective_value
+        if objective_grad is not None:
+            solved_forward_result["objective_grad"] = objective_grad
+        last_solved_forward_result["solve_result"] = (
+            single_stage_target_lane_accepted_step_solve_result(
+                solved_forward_result
+            )
+        )
 
     def value_and_grad(coil_dofs):
         nonlocal evaluation_index
@@ -7435,11 +7499,7 @@ def _build_decomposed_coil_host_value_and_grad(
             evaluation_index=current_evaluation_index,
         )
         forward_result = solved_pair.solve_fn(coil_dofs_device)
-        if isinstance(coil_dofs, np.ndarray):
-            last_solved_forward_result["coil_dofs"] = np.array(
-                coil_dofs, dtype=np.float64, copy=True
-            )
-            last_solved_forward_result["forward_result"] = forward_result
+        cache_last_solved_payload(coil_dofs, forward_result)
         success = host_bool(forward_result["success"])
         record_decomposed_event(
             "target_lane_decomposed_k1_forward_returned",
@@ -7477,7 +7537,14 @@ def _build_decomposed_coil_host_value_and_grad(
             return value_and_gradient
 
         if success:
-            return value_grad_from_candidate("success")
+            objective_value, gradient = value_grad_from_candidate("success")
+            cache_last_solved_payload(
+                coil_dofs,
+                forward_result,
+                objective_value=objective_value,
+                objective_grad=gradient,
+            )
+            return objective_value, gradient
         primal_success = host_bool(forward_result["primal_success"])
         record_decomposed_event(
             "target_lane_decomposed_primal_success_gate",
@@ -7486,10 +7553,22 @@ def _build_decomposed_coil_host_value_and_grad(
         )
         if primal_success:
             _, gradient = value_grad_from_candidate("primal_success_rejected")
+            cache_last_solved_payload(
+                coil_dofs,
+                forward_result,
+                objective_value=forward_result["value"],
+                objective_grad=gradient,
+            )
             return forward_result["value"], gradient
         record_decomposed_event(
             "target_lane_decomposed_baseline_gradient_returned",
             evaluation_index=current_evaluation_index,
+        )
+        cache_last_solved_payload(
+            coil_dofs,
+            forward_result,
+            objective_value=forward_result["value"],
+            objective_grad=baseline_gradient_device,
         )
         return forward_result["value"], baseline_gradient_device
 
@@ -7510,6 +7589,19 @@ def _build_decomposed_coil_host_value_and_grad(
         return fallback_forward_result(coil_dofs)
 
     value_and_grad.reuse_forward_result_for = reuse_forward_result_for
+
+    def target_lane_solve_result_for_coil_dofs(coil_dofs):
+        cached = last_solved_forward_result.get("solve_result")
+        cached_coil_dofs = last_solved_forward_result.get("coil_dofs")
+        if cached is not None and cached_coil_dofs is not None:
+            probe = np.asarray(host_array(coil_dofs, dtype=np.float64))
+            if np.array_equal(probe, cached_coil_dofs):
+                return cached
+        return None
+
+    value_and_grad.target_lane_solve_result_for_coil_dofs = (
+        target_lane_solve_result_for_coil_dofs
+    )
     return value_and_grad
 
 
@@ -9823,6 +9915,29 @@ def resolve_target_lane_boozer_newton_polish_policy(
     return policy
 
 
+def resolve_target_lane_trial_boozer_newton_polish_policy(
+    field_backend,
+    optimizer_backend,
+    target_lane_trial_boozer_newton_polish_policy=None,
+):
+    """Resolve the Boozer Newton polish policy for target-lane trial solves."""
+    del field_backend, optimizer_backend
+    policy = (
+        _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
+        if target_lane_trial_boozer_newton_polish_policy is None
+        else str(target_lane_trial_boozer_newton_polish_policy).strip().lower()
+    )
+    if policy == "default":
+        return _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
+    if policy not in _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES:
+        choices = ", ".join(_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES)
+        raise ValueError(
+            "target_lane_trial_boozer_newton_polish_policy must be one of: "
+            f"{choices}."
+        )
+    return policy
+
+
 def single_stage_boozer_budget_overrides_apply(
     field_backend,
     boozer_optimizer_backend,
@@ -9859,6 +9974,28 @@ def resolve_effective_boozer_newton_polish_policy_override(
         field_backend,
         optimizer_backend,
         target_lane_boozer_newton_polish_policy,
+    )
+
+
+def resolve_effective_trial_boozer_newton_polish_policy_override(
+    *,
+    field_backend,
+    optimizer_backend,
+    boozer_optimizer_backend=None,
+    target_lane_trial_boozer_newton_polish_policy=None,
+):
+    """Map the trial-only policy onto the BoozerSurfaceJAX option value."""
+    effective_boozer_backend = (
+        optimizer_backend
+        if boozer_optimizer_backend is None
+        else boozer_optimizer_backend
+    )
+    if field_backend != "jax" or effective_boozer_backend != "ondevice":
+        return None
+    return resolve_target_lane_trial_boozer_newton_polish_policy(
+        field_backend,
+        optimizer_backend,
+        target_lane_trial_boozer_newton_polish_policy,
     )
 
 
@@ -10193,7 +10330,15 @@ def build_target_lane_full_state_value_and_grad(
             coil_gradient,
         )
 
-    return jax.jit(full_state_value_and_grad)
+    full_state_objective = jax.jit(full_state_value_and_grad)
+    for attribute_name in (
+        "reuse_forward_result_for",
+        "target_lane_solve_result_for_coil_dofs",
+    ):
+        attribute = getattr(value_and_grad_objective, attribute_name, None)
+        if attribute is not None:
+            setattr(full_state_objective, attribute_name, attribute)
+    return full_state_objective
 
 
 def build_target_lane_full_state_solved_pair(
@@ -13210,6 +13355,46 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
     return wrapped
 
 
+def build_single_stage_target_lane_objective_evaluation_sync_cache_wrapper(
+    *,
+    target_value_and_grad_objective,
+    optimizer_to_coil_dofs,
+    run_dict,
+):
+    """Populate final-reporting sync cache from non-trace decomposed K1 solves."""
+    solve_result_for_coil_dofs = getattr(
+        target_value_and_grad_objective,
+        "target_lane_solve_result_for_coil_dofs",
+        None,
+    )
+    if solve_result_for_coil_dofs is None:
+        return target_value_and_grad_objective
+
+    def wrapped(optimizer_dofs):
+        objective_value, optimizer_gradient = target_value_and_grad_objective(
+            optimizer_dofs
+        )
+        if not _contains_jax_tracer(optimizer_dofs):
+            candidate_x = _single_stage_optimizer_dofs_array(optimizer_dofs)
+            coil_dofs = optimizer_to_coil_dofs(candidate_x)
+            solve_result = solve_result_for_coil_dofs(coil_dofs)
+            if solve_result is not None:
+                _cache_target_lane_objective_evaluation_sync_state(
+                    run_dict,
+                    optimizer_dofs=candidate_x,
+                    solve_result=solve_result,
+                )
+        return objective_value, optimizer_gradient
+
+    wrapped.reuse_forward_result_for = getattr(
+        target_value_and_grad_objective,
+        "reuse_forward_result_for",
+        None,
+    )
+    wrapped.target_lane_solve_result_for_coil_dofs = solve_result_for_coil_dofs
+    return wrapped
+
+
 def snapshot_accepted_step_state_from_values(
     run_dict,
     *,
@@ -15371,6 +15556,24 @@ if __name__ == "__main__":
         )
         else None
     )
+    target_lane_trial_boozer_newton_polish_policy_record = (
+        args.target_lane_trial_boozer_newton_polish_policy
+        if single_stage_boozer_budget_overrides_apply(
+            args.backend,
+            boozer_optimizer_backend_record,
+        )
+        else None
+    )
+    target_lane_trial_boozer_newton_polish_policy_override = (
+        resolve_effective_trial_boozer_newton_polish_policy_override(
+            field_backend=args.backend,
+            optimizer_backend=optimizer_backend_record,
+            boozer_optimizer_backend=boozer_optimizer_backend_record,
+            target_lane_trial_boozer_newton_polish_policy=(
+                target_lane_trial_boozer_newton_polish_policy_record
+            ),
+        )
+    )
     boozer_optimizer_backend_hash_record = (
         args.boozer_optimizer_backend if args.backend == "jax" else None
     )
@@ -15476,6 +15679,8 @@ if __name__ == "__main__":
         str(target_lane_boozer_newton_maxiter_record),
         str(target_lane_boozer_newton_stab_record),
         str(target_lane_boozer_newton_polish_policy_record),
+        str(target_lane_trial_boozer_newton_polish_policy_record),
+        str(target_lane_trial_boozer_newton_polish_policy_override),
         str(effective_boozer_init_overrides["newton_stab_override"]),
         str(effective_boozer_init_overrides["newton_polish_policy_override"]),
         str(single_stage_search_policy.donor_class),
@@ -16290,6 +16495,15 @@ if __name__ == "__main__":
         initial_step_scale=float(effective_initial_step_scale),
         initial_step_maxiter=int(effective_initial_step_maxiter),
         target_lane_outer_initial_step_size=args.target_lane_outer_initial_step_size,
+        target_lane_boozer_newton_polish_policy=(
+            target_lane_boozer_newton_polish_policy_record
+        ),
+        target_lane_trial_boozer_newton_polish_policy=(
+            target_lane_trial_boozer_newton_polish_policy_record
+        ),
+        target_lane_trial_boozer_newton_polish_policy_override=(
+            target_lane_trial_boozer_newton_polish_policy_override
+        ),
         record_target_lane_invalid_state_events=bool(
             record_target_lane_invalid_state_events
         ),
@@ -16312,9 +16526,9 @@ if __name__ == "__main__":
             newton_tol=target_lane_boozer_newton_tol_record,
             newton_maxiter=target_lane_boozer_newton_maxiter_record,
             newton_stab=target_lane_boozer_newton_stab_record,
-            newton_polish_policy=effective_boozer_init_overrides[
-                "newton_polish_policy_override"
-            ],
+            newton_polish_policy=(
+                target_lane_trial_boozer_newton_polish_policy_override
+            ),
         )
         target_lane_trial_boozer_solver_metadata = (
             build_target_lane_trial_boozer_solver_trace_metadata(
@@ -16849,9 +17063,9 @@ if __name__ == "__main__":
                     newton_tol=target_lane_boozer_newton_tol_record,
                     newton_maxiter=target_lane_boozer_newton_maxiter_record,
                     newton_stab=target_lane_boozer_newton_stab_record,
-                    newton_polish_policy=effective_boozer_init_overrides[
-                        "newton_polish_policy_override"
-                    ],
+                    newton_polish_policy=(
+                        target_lane_trial_boozer_newton_polish_policy_override
+                    ),
                 )
             )
             target_lane_trial_boozer_solver_metadata = (
@@ -16891,80 +17105,81 @@ if __name__ == "__main__":
                     use_target_lane=use_target_lane,
                     use_host_jax_outer_objective=use_host_jax_outer_objective,
                 )
-            ) as jax_compile_diagnostics_recorder, temporary_boozer_surface_option_overrides(
-                boozer_surface,
-                **target_lane_trial_boozer_overrides,
-            ):
-                with maybe_trace_single_stage_phase(
-                    "single_stage.target_lane_bundle_setup",
-                    enabled=jax_profile_enabled and use_target_lane,
+            ) as jax_compile_diagnostics_recorder:
+                with temporary_boozer_surface_option_overrides(
+                    boozer_surface,
+                    **target_lane_trial_boozer_overrides,
                 ):
-                    record_outer_optimizer_event(
-                        "target_lane_objective_provider_setup_started"
-                    )
-                    if use_target_lane:
-                        _materialize_target_lane_boozer_linearization(
+                    with maybe_trace_single_stage_phase(
+                        "single_stage.target_lane_bundle_setup",
+                        enabled=jax_profile_enabled and use_target_lane,
+                    ):
+                        record_outer_optimizer_event(
+                            "target_lane_objective_provider_setup_started"
+                        )
+                        if use_target_lane:
+                            _materialize_target_lane_boozer_linearization(
+                                boozer_surface,
+                                run_dict,
+                                record_outer_optimizer_event=record_outer_optimizer_event,
+                            )
+                        (
+                            target_scalar_objective,
+                            target_value_and_grad_objective,
+                            target_lane_optimizer_initial_value_and_grad,
+                            target_lane_profile,
+                            target_lane_success_filter,
+                        ) = prepare_target_lane_outer_objectives(
                             boozer_surface,
-                            run_dict,
+                            bs,
+                            banana_curve,
+                            VV,
+                            iota_target,
+                            use_target_lane=use_target_lane,
+                            use_value_and_grad=use_target_lane_vg,
+                            use_decomposed_solved_pair=use_decomposed_solved_pair,
+                            use_full_state_optimizer=(use_target_lane_full_state_optimizer),
+                            full_state_optimizer_dof_map=(
+                                full_graph_optimizer_dof_map
+                                if use_target_lane_full_state_optimizer
+                                else None
+                            ),
+                            profile_optimizer_dofs=dofs
+                            if use_target_lane_full_state_optimizer
+                            else None,
+                            profile_target_lane=args.profile_target_lane,
+                            profile_target_lane_memory_analysis=(
+                                args.profile_target_lane_memory_analysis
+                            ),
+                            trace_target_lane_k1_subtimers=(
+                                args.trace_target_lane_k1_subtimers
+                            ),
+                            profile_batch_size=args.profile_target_lane_batch_size,
+                            profile_progress_json_path=(
+                                args.target_lane_profile_progress_json
+                            ),
+                            stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                            disable_success_filter=(
+                                args.disable_target_lane_success_filter
+                            ),
+                            non_qs_weight=NON_QS_WEIGHT,
+                            residual_weight=RES_WEIGHT,
+                            iota_weight=IOTAS_WEIGHT,
+                            length_weight=LENGTH_WEIGHT,
+                            length_target=length_target,
+                            cc_dist=CC_DIST,
+                            cc_weight=CC_WEIGHT,
+                            cs_dist=CS_DIST,
+                            cs_weight=CS_WEIGHT,
+                            ss_dist=SS_DIST,
+                            surf_dist_weight=SURF_DIST_WEIGHT,
+                            curvature_threshold=CURVATURE_THRESHOLD,
+                            curvature_weight=CURVATURE_WEIGHT,
                             record_outer_optimizer_event=record_outer_optimizer_event,
                         )
-                    (
-                        target_scalar_objective,
-                        target_value_and_grad_objective,
-                        target_lane_optimizer_initial_value_and_grad,
-                        target_lane_profile,
-                        target_lane_success_filter,
-                    ) = prepare_target_lane_outer_objectives(
-                        boozer_surface,
-                        bs,
-                        banana_curve,
-                        VV,
-                        iota_target,
-                        use_target_lane=use_target_lane,
-                        use_value_and_grad=use_target_lane_vg,
-                        use_decomposed_solved_pair=use_decomposed_solved_pair,
-                        use_full_state_optimizer=(use_target_lane_full_state_optimizer),
-                        full_state_optimizer_dof_map=(
-                            full_graph_optimizer_dof_map
-                            if use_target_lane_full_state_optimizer
-                            else None
-                        ),
-                        profile_optimizer_dofs=dofs
-                        if use_target_lane_full_state_optimizer
-                        else None,
-                        profile_target_lane=args.profile_target_lane,
-                        profile_target_lane_memory_analysis=(
-                            args.profile_target_lane_memory_analysis
-                        ),
-                        trace_target_lane_k1_subtimers=(
-                            args.trace_target_lane_k1_subtimers
-                        ),
-                        profile_batch_size=args.profile_target_lane_batch_size,
-                        profile_progress_json_path=(
-                            args.target_lane_profile_progress_json
-                        ),
-                        stablehlo_dir=args.dump_target_lane_stablehlo_dir,
-                        disable_success_filter=(
-                            args.disable_target_lane_success_filter
-                        ),
-                        non_qs_weight=NON_QS_WEIGHT,
-                        residual_weight=RES_WEIGHT,
-                        iota_weight=IOTAS_WEIGHT,
-                        length_weight=LENGTH_WEIGHT,
-                        length_target=length_target,
-                        cc_dist=CC_DIST,
-                        cc_weight=CC_WEIGHT,
-                        cs_dist=CS_DIST,
-                        cs_weight=CS_WEIGHT,
-                        ss_dist=SS_DIST,
-                        surf_dist_weight=SURF_DIST_WEIGHT,
-                        curvature_threshold=CURVATURE_THRESHOLD,
-                        curvature_weight=CURVATURE_WEIGHT,
-                        record_outer_optimizer_event=record_outer_optimizer_event,
-                    )
-                    record_outer_optimizer_event(
-                        "target_lane_objective_provider_setup_returned"
-                    )
+                        record_outer_optimizer_event(
+                            "target_lane_objective_provider_setup_returned"
+                        )
                 record_outer_optimizer_event(
                     "target_lane_reporting_provider_setup_started"
                 )
@@ -17679,6 +17894,17 @@ if __name__ == "__main__":
                                 progress_event_callback=record_outer_optimizer_event,
                                 progress_event_phase="target_lane_optimizer",
                             )
+                        optimizer_target_value_and_grad_objective = (
+                            build_single_stage_target_lane_objective_evaluation_sync_cache_wrapper(
+                                target_value_and_grad_objective=(
+                                    optimizer_target_value_and_grad_objective
+                                ),
+                                optimizer_to_coil_dofs=(
+                                    target_lane_optimizer_to_coil_dofs
+                                ),
+                                run_dict=run_dict,
+                            )
+                        )
                     phase1_dofs = dofs
                     phase1_base_fun = (
                         optimizer_target_value_and_grad_objective
@@ -18560,6 +18786,9 @@ if __name__ == "__main__":
             target_lane_boozer_newton_polish_policy_record=(
                 target_lane_boozer_newton_polish_policy_record
             ),
+            target_lane_trial_boozer_newton_polish_policy_record=(
+                target_lane_trial_boozer_newton_polish_policy_record
+            ),
             single_stage_search_policy=single_stage_search_policy,
             effective_initial_phase_settings=effective_initial_phase_settings,
             args=args,
@@ -18735,6 +18964,12 @@ if __name__ == "__main__":
         "target_lane_boozer_newton_stab": target_lane_boozer_newton_stab_record,
         "target_lane_boozer_newton_polish_policy": (
             target_lane_boozer_newton_polish_policy_record
+        ),
+        "target_lane_trial_boozer_newton_polish_policy": (
+            target_lane_trial_boozer_newton_polish_policy_record
+        ),
+        "effective_target_lane_trial_boozer_newton_polish_policy": (
+            target_lane_trial_boozer_newton_polish_policy_override
         ),
         "INITIAL_PHASE_ITERATIONS": phase1_iterations,
         "INITIAL_PHASE_TERMINATION_MESSAGE": phase1_termination_message,
