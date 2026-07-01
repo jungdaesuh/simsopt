@@ -4854,6 +4854,28 @@ class TestScriptBackendSelection:
         assert recorder.called, "BoozerSurfaceJAX was not constructed"
         logger.info("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
 
+    def test_single_stage_ondevice_limited_memory_routes_to_lbfgs(self):
+        """The CLI resolver must expose the ondevice L-BFGS inner Boozer path."""
+        assert (
+            single_stage_example.resolve_single_stage_boozer_limited_memory(
+                "jax",
+                "scipy-jax-decomposed",
+                boozer_optimizer_backend="ondevice",
+                boozer_limited_memory=True,
+            )
+            is True
+        )
+
+        driver = single_stage_example.resolve_single_stage_boozer_inner_driver(
+            "jax",
+            "scipy-jax-decomposed",
+            boozer_optimizer_backend="ondevice",
+            boozer_least_squares_algorithm="quasi-newton",
+            boozer_limited_memory=True,
+        )
+
+        assert driver is single_stage_example.Driver.SIMSOPT_LBFGSB
+
     def test_real_fixture_cpu_warm_start_overrides_do_not_crash(self):
         """Reduced real CPU fixture must accept warm-start overrides without sdofs=."""
         with patch.object(
@@ -7356,6 +7378,27 @@ class TestTraceableObjective:
                 "value": jnp.asarray(7.0, dtype=jnp.float64),
                 "x": arr + 1.0,
                 "linear_solve_factors": None,
+                "optimizer_method_code": jnp.asarray(1, dtype=jnp.int32),
+                "optimizer_method_code_present": jnp.asarray(True),
+                "linearization_kind_code": jnp.asarray(1, dtype=jnp.int32),
+                "linearization_kind_code_present": jnp.asarray(True),
+                "linear_solve_backend_code": jnp.asarray(3, dtype=jnp.int32),
+                "linear_solve_backend_code_present": jnp.asarray(True),
+                "type_code": jnp.asarray(1, dtype=jnp.int32),
+                "type_code_present": jnp.asarray(True),
+                "adjoint_linear_solve_available": jnp.asarray(True),
+                "dense_linear_solve_factors_available": jnp.asarray(True),
+                "dense_operator_chunk_batch_size": jnp.asarray(16, dtype=jnp.int32),
+                "pre_newton_iter": jnp.asarray(24, dtype=jnp.int32),
+                "pre_newton_nfev": jnp.asarray(31, dtype=jnp.int32),
+                "pre_newton_ngev": jnp.asarray(31, dtype=jnp.int32),
+                "pre_newton_line_search_status": jnp.asarray(-1, dtype=jnp.int32),
+                "newton_iter": jnp.asarray(3, dtype=jnp.int32),
+                "ls_condition_estimate": jnp.asarray(6.15e6, dtype=jnp.float64),
+                "hessian_materialized": jnp.asarray(False),
+                "dense_hessian_bytes": jnp.asarray(4096, dtype=jnp.int32),
+                "max_dense_hessian_bytes": jnp.asarray(8192, dtype=jnp.int32),
+                "dense_newton_steps_materialized": jnp.asarray(False),
             }
 
         def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
@@ -7394,7 +7437,244 @@ class TestTraceableObjective:
         assert returned_fields["evaluation_index"] == 1
         assert returned_fields["success"] is True
         assert returned_fields["elapsed_s"] >= 0.0
+        assert returned_fields["primal_success"] is True
+        assert returned_fields["optimizer_method"] == "bfgs-ondevice"
+        assert returned_fields["linearization_kind"] == "hessian"
+        assert returned_fields["linear_solve_backend"] == "dense-plu-shared"
+        assert returned_fields["type"] == "ls"
+        assert returned_fields["adjoint_linear_solve_available"] is True
+        assert returned_fields["dense_linear_solve_factors_available"] is True
+        assert returned_fields["dense_operator_chunk_batch_size"] == 16
+        assert returned_fields["pre_newton_iter"] == 24
+        assert returned_fields["pre_newton_nfev"] == 31
+        assert returned_fields["pre_newton_ngev"] == 31
+        assert returned_fields["pre_newton_line_search_status"] == -1
+        assert returned_fields["newton_iter"] == 3
+        assert returned_fields["ls_condition_estimate"] == pytest.approx(6.15e6)
+        assert returned_fields["hessian_materialized"] is False
+        assert returned_fields["dense_hessian_bytes"] == 4096
+        assert returned_fields["max_dense_hessian_bytes"] == 8192
+        assert returned_fields["dense_newton_steps_materialized"] is False
         assert events[2][1]["branch"] == "success"
+
+    def test_decomposed_host_objective_records_opt_in_k1_subtimers(self):
+        """Opt-in K1 replay profiling records split subphase timings per eval."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([3.0, -5.0], dtype=jnp.float64)
+        events = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+        profile_suite = {
+            "warmstart_predict": lambda coil_dofs: {
+                "x": jnp.asarray(coil_dofs) + 0.25,
+                "success": jnp.asarray(True),
+            },
+            "pre_newton_solve_from_warmstart": lambda _coil_dofs, warmstart_x: {
+                "x": warmstart_x + 0.25,
+                "success": jnp.asarray(True),
+            },
+            "newton_polish_from_pre_newton": lambda _coil_dofs, pre_newton_x: {
+                "x": pre_newton_x + 0.25,
+                "success": jnp.asarray(True),
+            },
+            "solved_total_gradient": lambda *_args: candidate_gradient,
+        }
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+            k1_subtimer_profile_suite=profile_suite,
+            record_outer_optimizer_event=lambda label, **fields: events.append(
+                (label, fields)
+            ),
+        )
+        value, grad = host_fun(np.zeros(2))
+
+        assert float(jax.device_get(value)) == pytest.approx(7.0)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        returned_subphases = [
+            fields["subphase"]
+            for label, fields in events
+            if label == "target_lane_decomposed_k1_subtimer_returned"
+        ]
+        assert returned_subphases == [
+            "warmstart_predict",
+            "pre_newton_solve_from_warmstart",
+            "newton_polish_from_pre_newton",
+            "solved_total_gradient",
+        ]
+        for label, fields in events:
+            if label == "target_lane_decomposed_k1_subtimer_returned":
+                assert fields["evaluation_index"] == 1
+                assert fields["dispatch_s"] >= 0.0
+                assert fields["ready_s"] >= 0.0
+                assert fields["total_s"] >= 0.0
+
+    def test_decomposed_host_objective_omits_missing_k1_optional_fields(self):
+        """Missing optional K1 metadata must not be serialized as measured false."""
+        baseline = np.array([1.0, -2.0])
+        events = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "linear_solve_factors": None,
+                "hessian_materialized": jnp.asarray(False),
+                "hessian_materialized_present": jnp.asarray(False),
+                "dense_newton_steps_materialized": jnp.asarray(False),
+                "dense_newton_steps_materialized_present": jnp.asarray(False),
+            }
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=lambda *_args: (
+                jnp.asarray(7.0, dtype=jnp.float64),
+                jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+            ),
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+            record_outer_optimizer_event=lambda label, **fields: events.append(
+                (label, fields)
+            ),
+        )
+        host_fun(np.zeros(2))
+
+        returned_fields = events[1][1]
+        assert "hessian_materialized" not in returned_fields
+        assert "dense_newton_steps_materialized" not in returned_fields
+
+    def test_decomposed_host_objective_records_k1_nonfinite_classification(self):
+        """Real non-finite scalar metadata is recorded without violating JSON."""
+        baseline = np.array([1.0, -2.0])
+        events = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "linear_solve_factors": None,
+                "ls_condition_estimate": jnp.asarray(jnp.inf, dtype=jnp.float64),
+                "ls_condition_estimate_present": jnp.asarray(True),
+            }
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=lambda *_args: (
+                jnp.asarray(7.0, dtype=jnp.float64),
+                jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+            ),
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+            record_outer_optimizer_event=lambda label, **fields: events.append(
+                (label, fields)
+            ),
+        )
+        host_fun(np.zeros(2))
+
+        returned_fields = events[1][1]
+        assert "ls_condition_estimate" not in returned_fields
+        assert returned_fields["ls_condition_estimate_finite"] is False
+        assert returned_fields["ls_condition_estimate_classification"] == "+inf"
+
+    def test_target_lane_profile_records_pre_newton_phase(self):
+        """The target-lane profiler records split K1 phase timings when exposed."""
+        coil_dofs = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+        solved_x = jnp.asarray([0.1, 0.2, 0.3], dtype=jnp.float64)
+        warmstart_x = jnp.asarray([0.4, 0.5, 0.6], dtype=jnp.float64)
+        pre_newton_x = jnp.asarray([0.7, 0.8, 0.9], dtype=jnp.float64)
+
+        def solved_total_gradient(
+            _coil_dofs,
+            _solved_x,
+            _linear_solve_factors,
+        ):
+            return jnp.asarray([3.0, 4.0], dtype=jnp.float64)
+
+        profile_suite = {
+            "forward_result": lambda _coil_dofs: {
+                "x": solved_x,
+                "linear_solve_factors": None,
+            },
+            "forward_value": lambda _coil_dofs: jnp.asarray(1.0, dtype=jnp.float64),
+            "warmstart_predict": lambda _coil_dofs: {
+                "x": warmstart_x,
+                "success": jnp.asarray(True),
+            },
+            "pre_newton_solve_from_warmstart": lambda _coil_dofs, _warmstart_x: {
+                "x": pre_newton_x,
+                "success": jnp.asarray(True),
+            },
+            "inner_solve": lambda _coil_dofs: {"success": jnp.asarray(True)},
+            "newton_polish_from_pre_newton": lambda _coil_dofs, _pre_newton_x: {
+                "x": solved_x,
+                "success": jnp.asarray(True),
+            },
+            "surface_geometry": lambda _solved_x: jnp.zeros(
+                (1, 1, 3),
+                dtype=jnp.float64,
+            ),
+            "field_eval": lambda _coil_dofs, _solved_x: jnp.zeros(
+                (1, 3),
+                dtype=jnp.float64,
+            ),
+            "solved_total_objective": lambda _coil_dofs, _solved_x: jnp.asarray(
+                2.0,
+                dtype=jnp.float64,
+            ),
+            "solved_total_gradient": solved_total_gradient,
+            "value_and_grad_pipeline": lambda _coil_dofs: (
+                jnp.asarray(5.0, dtype=jnp.float64),
+                jnp.asarray([6.0, 7.0], dtype=jnp.float64),
+            ),
+            "batched_value_and_grad_pipeline": lambda _coil_dofs_batch: (
+                jnp.asarray([8.0], dtype=jnp.float64),
+                jnp.asarray([[9.0, 10.0]], dtype=jnp.float64),
+            ),
+        }
+
+        profile = single_stage_example.profile_traceable_target_lane_objective(
+            profile_suite,
+            coil_dofs,
+        )
+
+        assert "warmstart_predict" in profile
+        assert "pre_newton_solve_from_warmstart" in profile
+        assert "inner_solve" in profile
+        assert "newton_polish_from_pre_newton" in profile
+        assert profile["solve_success"] is True
 
     def test_jax_runtime_cache_metadata_uses_runtime_policy_ssot(self):
         """Cache metadata records the resolved backend config and policy."""
@@ -8296,6 +8576,76 @@ class TestTraceableObjective:
                 curvature_threshold=40.0,
             )
 
+    def test_target_lane_adapter_reuses_cached_sync_state(self):
+        accepted_x = np.asarray([1.0, 2.0], dtype=np.float64)
+        run_dict = {}
+        solve_result = {
+            "success": np.asarray(True),
+            "finite": np.asarray(True),
+            "sdofs": np.asarray([0.3, 0.4], dtype=np.float64),
+            "iota": np.asarray(0.5, dtype=np.float64),
+            "G": np.asarray(1.5, dtype=np.float64),
+            "objective_value": np.asarray(12.5, dtype=np.float64),
+            "objective_grad": np.asarray([3.0, 4.0], dtype=np.float64),
+        }
+        single_stage_example._cache_target_lane_objective_evaluation_sync_state(
+            run_dict,
+            optimizer_dofs=accepted_x,
+            solve_result=solve_result,
+        )
+        sync_calls = []
+
+        def accepted_step_state_sync(
+            run_dict_arg,
+            coil_dofs,
+            *,
+            benchmark_mode,
+            update_run_state=True,
+            target_lane_solve_result=None,
+            objective_value_and_grad=None,
+        ):
+            sync_calls.append(
+                {
+                    "run_dict": run_dict_arg,
+                    "coil_dofs": np.asarray(coil_dofs, dtype=np.float64),
+                    "benchmark_mode": benchmark_mode,
+                    "update_run_state": update_run_state,
+                    "target_lane_solve_result": target_lane_solve_result,
+                    "objective_value_and_grad": objective_value_and_grad,
+                }
+            )
+            return {"objective_value": 12.5, "reporting_metrics": {}}
+
+        adapter = single_stage_example.SingleStageAdapter(
+            run_dict,
+            object(),
+            object(),
+            object(),
+            {},
+            None,
+            "/dev/null",
+            benchmark_mode=True,
+            accepted_step_state_sync=accepted_step_state_sync,
+        )
+
+        adapter.sync_accepted_step(accepted_x)
+
+        assert len(sync_calls) == 1
+        call = sync_calls[0]
+        assert call["run_dict"] is run_dict
+        np.testing.assert_allclose(call["coil_dofs"], accepted_x)
+        assert call["benchmark_mode"] is True
+        assert call["update_run_state"] is True
+        assert call["target_lane_solve_result"] is not None
+        np.testing.assert_allclose(
+            call["target_lane_solve_result"]["sdofs"],
+            solve_result["sdofs"],
+        )
+        assert call["objective_value_and_grad"] is not None
+        objective_value, objective_grad = call["objective_value_and_grad"]
+        assert float(objective_value) == pytest.approx(12.5)
+        np.testing.assert_allclose(objective_grad, solve_result["objective_grad"])
+
     def test_target_lane_accepted_step_sync_matches_legacy_mutable_surface_lane(
         self,
         boozer_setup,
@@ -8609,6 +8959,21 @@ class TestTraceableObjective:
         assert bool(np.asarray(warmstart["success"])) is True
         assert warmstart_x.shape[0] > 0
         assert jnp.all(jnp.isfinite(warmstart_x))
+        if "pre_newton_solve_from_warmstart" in profile_suite:
+            pre_newton = profile_suite["pre_newton_solve_from_warmstart"](
+                coil_dofs,
+                warmstart_x,
+            )
+            assert pre_newton["x"].shape == warmstart_x.shape
+            assert "pre_newton_nfev" in pre_newton
+            assert "pre_newton_ngev" in pre_newton
+            if "newton_polish_from_pre_newton" in profile_suite:
+                newton_polish = profile_suite["newton_polish_from_pre_newton"](
+                    coil_dofs,
+                    pre_newton["x"],
+                )
+                assert newton_polish["x"].shape == warmstart_x.shape
+                assert "final_gradient_norm" in newton_polish
 
     def test_traceable_runtime_bundle_profiles_exact_optimizer_callable(
         self,

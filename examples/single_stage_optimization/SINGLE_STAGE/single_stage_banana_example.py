@@ -96,6 +96,7 @@ from simsopt_jax.geo.optimizers.single_stage_routing import (
     JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS as _JAX_TARGET_LBFGS_OUTER_OPTIMIZER_BACKENDS,
     JAX_TARGET_OUTER_MAXLS_BACKENDS as _JAX_TARGET_OUTER_MAXLS_BACKENDS,
     JAX_TARGET_OUTER_OPTIMIZER_BACKENDS as _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS,
+    resolve_boozer_limited_memory as _resolve_boozer_limited_memory_policy,
     resolve_single_stage_jax_boozer_optimizer_backend as _resolve_single_stage_jax_boozer_optimizer_backend,
 )
 
@@ -141,6 +142,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (
     NonQuasiSymmetricRatioJAX,
     SurfaceSurfaceDistance,
     TraceableObjectiveSolvedPair,
+    _TRACEABLE_FORWARD_METADATA_LABELS,
     coil_dofs_gradient_to_derivative,
     compute_standard_surface_objective_gradients,
     diagnose_traceable_objective_runtime,
@@ -537,6 +539,175 @@ def _summarize_optional_host_vector(vector):
 
 def _summarize_optional_host_array(array):
     return None if array is None else _summarize_host_array(array)
+
+
+_K1_FORWARD_BOOL_PROGRESS_FIELDS = (
+    "primal_success",
+    "adjoint_linear_solve_available",
+    "dense_linear_solve_factors_available",
+    "hessian_materialized",
+    "dense_newton_steps_materialized",
+    "linear_solve_success",
+    "newton_polish_skipped",
+)
+
+_K1_FORWARD_STRING_PROGRESS_FIELDS = (
+    "optimizer_method",
+    "linearization_kind",
+    "linear_solve_backend",
+    "linear_solve_probe_backend",
+    "type",
+)
+
+_K1_FORWARD_CODE_PROGRESS_FIELDS = {
+    "optimizer_method": "optimizer_method_code",
+    "linearization_kind": "linearization_kind_code",
+    "linear_solve_backend": "linear_solve_backend_code",
+    "type": "type_code",
+}
+
+_K1_FORWARD_SCALAR_PROGRESS_FIELDS = (
+    "nit",
+    "dense_operator_chunk_batch_size",
+    "pre_newton_iter",
+    "pre_newton_nfev",
+    "pre_newton_ngev",
+    "pre_newton_line_search_status",
+    "newton_iter",
+    "ls_condition_estimate",
+    "ls_residual_jacobian_condition_estimate",
+    "dense_hessian_bytes",
+    "max_dense_hessian_bytes",
+    "linear_solve_residual",
+    "linear_solve_residual_relative",
+    "linear_solve_iterations",
+    "final_gradient_norm",
+    "final_gradient_inf_norm",
+)
+
+
+def _progress_field_present(forward_result, key):
+    present_key = f"{key}_present"
+    if present_key not in forward_result:
+        return True
+    return host_bool(forward_result[present_key])
+
+
+def _host_scalar_progress_value(value):
+    host = np.asarray(host_array(value))
+    if host.shape != ():
+        return None, None
+    scalar = host.item()
+    if (
+        isinstance(scalar, (int, np.integer))
+        and int(scalar) == np.iinfo(np.int32).min
+    ):
+        return None, None
+    if isinstance(scalar, (bool, np.bool_)):
+        return bool(scalar), None
+    if isinstance(scalar, (int, np.integer)):
+        return int(scalar), None
+    if isinstance(scalar, (float, np.floating)):
+        scalar_float = float(scalar)
+        if np.isfinite(scalar_float):
+            return scalar_float, None
+        return None, _classify_nonfinite_scalar(scalar_float)
+    return str(scalar), None
+
+
+def _summarize_k1_forward_result_for_progress(forward_result):
+    """Return bounded scalar metadata for K1 progress events."""
+    fields = {}
+    for key in _K1_FORWARD_BOOL_PROGRESS_FIELDS:
+        if (
+            key in forward_result
+            and forward_result[key] is not None
+            and _progress_field_present(forward_result, key)
+        ):
+            fields[key] = bool(host_bool(forward_result[key]))
+    for key in _K1_FORWARD_STRING_PROGRESS_FIELDS:
+        if key in forward_result and forward_result[key] is not None:
+            fields[key] = str(forward_result[key])
+    for key, code_key in _K1_FORWARD_CODE_PROGRESS_FIELDS.items():
+        if key in fields:
+            continue
+        if (
+            code_key in forward_result
+            and forward_result[code_key] is not None
+            and _progress_field_present(forward_result, code_key)
+        ):
+            scalar, classification = _host_scalar_progress_value(
+                forward_result[code_key]
+            )
+            if classification is None and scalar is not None:
+                label = _TRACEABLE_FORWARD_METADATA_LABELS[key].get(int(scalar))
+                if label is not None:
+                    fields[key] = label
+    for key in _K1_FORWARD_SCALAR_PROGRESS_FIELDS:
+        if (
+            key in forward_result
+            and forward_result[key] is not None
+            and _progress_field_present(forward_result, key)
+        ):
+            scalar, classification = _host_scalar_progress_value(forward_result[key])
+            if scalar is not None:
+                fields[key] = scalar
+            elif classification is not None:
+                fields[f"{key}_finite"] = False
+                fields[f"{key}_classification"] = classification
+    return fields
+
+
+def _record_decomposed_k1_subtimers(
+    profile_suite,
+    coil_dofs_device,
+    forward_result,
+    *,
+    evaluation_index,
+    record_event,
+):
+    """Replay split K1 profile closures for one candidate and record timings."""
+    if profile_suite is None or record_event is None:
+        return
+
+    def record_profile_call(name, *args):
+        profile_fn = profile_suite.get(name)
+        if profile_fn is None:
+            return None
+        record_event(
+            "target_lane_decomposed_k1_subtimer_started",
+            evaluation_index=evaluation_index,
+            subphase=name,
+        )
+        out, timings = _profile_tree_call(profile_fn, *args)
+        record_event(
+            "target_lane_decomposed_k1_subtimer_returned",
+            evaluation_index=evaluation_index,
+            subphase=name,
+            **timings,
+        )
+        return out
+
+    warmstart = record_profile_call("warmstart_predict", coil_dofs_device)
+    pre_newton = None
+    if warmstart is not None:
+        pre_newton = record_profile_call(
+            "pre_newton_solve_from_warmstart",
+            coil_dofs_device,
+            warmstart["x"],
+        )
+    if pre_newton is not None:
+        record_profile_call(
+            "newton_polish_from_pre_newton",
+            coil_dofs_device,
+            pre_newton["x"],
+        )
+    record_profile_call(
+        "solved_total_gradient",
+        coil_dofs_device,
+        forward_result["x"],
+        forward_result["linear_solve_factors"],
+    )
 
 
 def _single_stage_host_vector_array(value):
@@ -5247,6 +5418,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--trace-target-lane-k1-subtimers",
+        action="store_true",
+        help=(
+            "Diagnostic-only: for each decomposed target-lane optimizer "
+            "evaluation, replay split K1 profile closures and record warmstart, "
+            "pre-Newton, Newton-polish, and solved-gradient timings."
+        ),
+    )
+    parser.add_argument(
         "--target-lane-profile-progress-json",
         default=None,
         help=(
@@ -5481,7 +5661,11 @@ def parse_args():
             args.target_lane_boozer_newton_polish_policy,
         )
     )
-    if args.profile_target_lane_only or args.profile_target_lane_memory_analysis:
+    if (
+        args.profile_target_lane_only
+        or args.profile_target_lane_memory_analysis
+        or args.trace_target_lane_k1_subtimers
+    ):
         args.profile_target_lane = True
     if args.profile_target_lane_batch_size < 1:
         raise ValueError("--profile-target-lane-batch-size must be at least 1")
@@ -5496,6 +5680,7 @@ def parse_args():
     if args.constraint_method == "alm" and (
         args.profile_target_lane
         or args.profile_target_lane_only
+        or args.trace_target_lane_k1_subtimers
         or args.diagnose_target_lane_gradient
         or args.diagnose_target_lane_first_line_search
         or args.diagnose_target_lane_optimistix
@@ -7209,6 +7394,7 @@ def _build_decomposed_coil_host_value_and_grad(
     solved_pair,
     baseline_gradient,
     *,
+    k1_subtimer_profile_suite=None,
     record_outer_optimizer_event=None,
 ):
     """Return host-driven K1/K2 value/grad with fused-lane failure fallback."""
@@ -7249,6 +7435,14 @@ def _build_decomposed_coil_host_value_and_grad(
             evaluation_index=current_evaluation_index,
             elapsed_s=float(_perf_counter_s() - k1_start_s),
             success=bool(success),
+            **_summarize_k1_forward_result_for_progress(forward_result),
+        )
+        _record_decomposed_k1_subtimers(
+            k1_subtimer_profile_suite,
+            coil_dofs_device,
+            forward_result,
+            evaluation_index=current_evaluation_index,
+            record_event=record_outer_optimizer_event,
         )
 
         def value_grad_from_candidate(branch):
@@ -8128,6 +8322,7 @@ def build_target_lane_outer_objectives(
     use_decomposed_solved_pair: bool = False,
     profile_target_lane: bool,
     profile_target_lane_memory_analysis: bool = False,
+    trace_target_lane_k1_subtimers: bool = False,
     profile_batch_size: int = 1,
     outer_objective_config=None,
     success_filter=None,
@@ -8190,6 +8385,11 @@ def build_target_lane_outer_objectives(
         target_value_and_grad_objective = _build_decomposed_coil_host_value_and_grad(
             solved_pair,
             seeded_value_and_grad.optimizer_initial_value_and_grad[1],
+            k1_subtimer_profile_suite=(
+                runtime_bundle["profile_suite"]
+                if trace_target_lane_k1_subtimers
+                else None
+            ),
             record_outer_optimizer_event=record_outer_optimizer_event,
         )
         target_optimizer_initial_value_and_grad = (
@@ -9008,6 +9208,7 @@ def prepare_target_lane_outer_objectives(
     profile_optimizer_dofs=None,
     profile_target_lane: bool,
     profile_target_lane_memory_analysis: bool = False,
+    trace_target_lane_k1_subtimers: bool = False,
     profile_batch_size: int,
     profile_progress_json_path=None,
     stablehlo_dir=None,
@@ -9088,6 +9289,7 @@ def prepare_target_lane_outer_objectives(
         use_decomposed_solved_pair=use_decomposed_solved_pair,
         profile_target_lane=profile_target_lane,
         profile_target_lane_memory_analysis=profile_target_lane_memory_analysis,
+        trace_target_lane_k1_subtimers=trace_target_lane_k1_subtimers,
         profile_batch_size=profile_batch_size,
         outer_objective_config=target_lane_outer_objective_config,
         success_filter=target_lane_success_filter,
@@ -9336,19 +9538,10 @@ def resolve_single_stage_boozer_limited_memory(
         optimizer_backend,
         boozer_optimizer_backend,
     )
-    if effective_boozer_backend == "host-jax":
-        return bool(boozer_limited_memory)
-    if effective_boozer_backend != "ondevice":
-        return False
-    if boozer_limited_memory is not None:
-        if boozer_limited_memory:
-            raise ValueError(
-                "boozer_limited_memory=True is not supported for the JAX/ondevice "
-                "single-stage target lane; the private L-BFGS Boozer solve is "
-                "host-dispatched and cannot be traced."
-            )
-        return bool(boozer_limited_memory)
-    return False
+    return _resolve_boozer_limited_memory_policy(
+        effective_boozer_backend,
+        bool(boozer_limited_memory),
+    )
 
 
 def resolve_single_stage_boozer_inner_driver(
@@ -10386,7 +10579,9 @@ def profile_traceable_target_lane_memory_analysis(
         ("forward_result", (coil_dofs,)),
         ("forward_value", (coil_dofs,)),
         ("warmstart_predict", (coil_dofs,)),
+        ("pre_newton_solve_from_warmstart", (coil_dofs, solved_x)),
         ("inner_solve", (coil_dofs,)),
+        ("newton_polish_from_pre_newton", (coil_dofs, solved_x)),
         ("surface_geometry", (solved_x,)),
         ("field_eval", (coil_dofs, solved_x)),
         ("solved_total_objective", (coil_dofs, solved_x)),
@@ -10399,6 +10594,7 @@ def profile_traceable_target_lane_memory_analysis(
     return {
         name: _compiled_memory_analysis_stats(profile_suite[name], *args)
         for name, args in memory_analysis_specs
+        if name in profile_suite
     }
 
 
@@ -10606,8 +10802,29 @@ def profile_traceable_target_lane_objective(
         coil_dofs,
     )
     _, profiled["forward_value"] = profile_named("forward_value", coil_dofs)
-    _, profiled["warmstart_predict"] = profile_named("warmstart_predict", coil_dofs)
+    warmstart, profiled["warmstart_predict"] = profile_named(
+        "warmstart_predict",
+        coil_dofs,
+    )
+    pre_newton_result = None
+    if "pre_newton_solve_from_warmstart" in profile_suite:
+        pre_newton_result, profiled["pre_newton_solve_from_warmstart"] = (
+            profile_named(
+                "pre_newton_solve_from_warmstart",
+                coil_dofs,
+                warmstart["x"],
+            )
+        )
     solve_result, profiled["inner_solve"] = profile_named("inner_solve", coil_dofs)
+    if (
+        "newton_polish_from_pre_newton" in profile_suite
+        and pre_newton_result is not None
+    ):
+        _, profiled["newton_polish_from_pre_newton"] = profile_named(
+            "newton_polish_from_pre_newton",
+            coil_dofs,
+            pre_newton_result["x"],
+        )
     solved_x = forward_result["x"]
     solved_linear_solve_factors = forward_result["linear_solve_factors"]
     _, profiled["surface_geometry"] = profile_named(
@@ -13355,6 +13572,24 @@ class SingleStageAdapter:
             self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
         return accepted_step_summary
 
+    def _cached_target_lane_sync_inputs(self, x):
+        """Return cached target-lane solve/value data for an accepted point."""
+        target_lane_solve_result = _cached_target_lane_objective_evaluation_sync_state(
+            self.run_dict,
+            x,
+        )
+        if target_lane_solve_result is None:
+            return None, None
+        objective_value_and_grad = None
+        if target_lane_solve_result_value_and_grad_available(
+            target_lane_solve_result
+        ):
+            objective_value_and_grad = (
+                target_lane_solve_result["objective_value"],
+                target_lane_solve_result["objective_grad"],
+            )
+        return target_lane_solve_result, objective_value_and_grad
+
     def sync_accepted_step_state_from_target_lane_values(
         self,
         x,
@@ -13419,25 +13654,42 @@ class SingleStageAdapter:
         if self.accepted_step_state_sync is None:
             self.sync_accepted_step(x)
             return
-        self._sync_target_lane_accepted_step_summary(x, update_run_state=True)
+        target_lane_solve_result, objective_value_and_grad = (
+            self._cached_target_lane_sync_inputs(x)
+        )
+        self._sync_target_lane_accepted_step_summary(
+            x,
+            update_run_state=True,
+            target_lane_solve_result=target_lane_solve_result,
+            objective_value_and_grad=objective_value_and_grad,
+        )
 
     def observe_accepted_step(self, x):
         """Emit target-lane accepted-step observability without state mutation."""
         if self.accepted_step_state_sync is None:
             self.sync_accepted_step(x)
             return
+        target_lane_solve_result, _objective_value_and_grad = (
+            self._cached_target_lane_sync_inputs(x)
+        )
         accepted_step_summary = self._sync_target_lane_accepted_step_summary(
             x,
             update_run_state=False,
+            target_lane_solve_result=target_lane_solve_result,
         )
         self._log_target_lane_accepted_step(accepted_step_summary)
 
     def sync_accepted_step(self, x):
         """Refresh mutable state if needed, then snapshot one accepted step."""
         if self.accepted_step_state_sync is not None:
+            target_lane_solve_result, objective_value_and_grad = (
+                self._cached_target_lane_sync_inputs(x)
+            )
             accepted_step_summary = self._sync_target_lane_accepted_step_summary(
                 x,
                 update_run_state=True,
+                target_lane_solve_result=target_lane_solve_result,
+                objective_value_and_grad=objective_value_and_grad,
             )
             self._log_target_lane_accepted_step(accepted_step_summary)
             return
@@ -16072,6 +16324,9 @@ if __name__ == "__main__":
             profile_target_lane_memory_analysis=bool(
                 args.profile_target_lane_memory_analysis
             ),
+            trace_target_lane_k1_subtimers=bool(
+                args.trace_target_lane_k1_subtimers
+            ),
             success_filter_disabled=bool(args.disable_target_lane_success_filter),
             trial_boozer_overrides={
                 key: None if value is None else _jsonable_value(value)
@@ -16114,6 +16369,9 @@ if __name__ == "__main__":
                 profile_target_lane=args.profile_target_lane,
                 profile_target_lane_memory_analysis=(
                     args.profile_target_lane_memory_analysis
+                ),
+                trace_target_lane_k1_subtimers=(
+                    args.trace_target_lane_k1_subtimers
                 ),
                 profile_batch_size=args.profile_target_lane_batch_size,
                 profile_progress_json_path=args.target_lane_profile_progress_json,
@@ -16606,6 +16864,9 @@ if __name__ == "__main__":
                 profile_target_lane_memory_analysis=bool(
                     args.profile_target_lane_memory_analysis
                 ),
+                trace_target_lane_k1_subtimers=bool(
+                    args.trace_target_lane_k1_subtimers
+                ),
                 success_filter_disabled=bool(args.disable_target_lane_success_filter),
                 trial_boozer_overrides={
                     key: None if value is None else _jsonable_value(value)
@@ -16662,6 +16923,9 @@ if __name__ == "__main__":
                         profile_target_lane=args.profile_target_lane,
                         profile_target_lane_memory_analysis=(
                             args.profile_target_lane_memory_analysis
+                        ),
+                        trace_target_lane_k1_subtimers=(
+                            args.trace_target_lane_k1_subtimers
                         ),
                         profile_batch_size=args.profile_target_lane_batch_size,
                         profile_progress_json_path=(
@@ -18399,6 +18663,9 @@ if __name__ == "__main__":
         "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
         "profile_target_lane_memory_analysis": bool(
             args.profile_target_lane_memory_analysis
+        ),
+        "trace_target_lane_k1_subtimers": bool(
+            args.trace_target_lane_k1_subtimers
         ),
         "diagnose_target_lane_gradient": bool(args.diagnose_target_lane_gradient),
         "diagnose_target_lane_first_line_search": bool(

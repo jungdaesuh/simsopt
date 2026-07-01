@@ -168,6 +168,10 @@ def _with_host_bridge_transfer_guard(fn):
     return wrapped
 
 
+def _runtime_int32_scalar(value):
+    return runtime_device_put(value, dtype=np.int32)
+
+
 SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
     "ls_hessian_symmetry_rel",
     "ls_hessian_action_max_rel",
@@ -3348,6 +3352,22 @@ def _ls_newton_reporting_fields(result):
     }
 
 
+def _optimizer_state_attr(state, name):
+    """Return one optional optimizer-state field from dict or namedtuple state."""
+    if isinstance(state, dict):
+        return state.get(name)
+    return getattr(state, name, None)
+
+
+def _optimizer_state_first_attr(state, names):
+    """Return the first available optimizer-state field from multiple aliases."""
+    for name in names:
+        value = _optimizer_state_attr(state, name)
+        if value is not None:
+            return value
+    return None
+
+
 def _skipped_newton_polish_fields(max_bytes, newton_iter, grad_norm, grad_inf_norm):
     skipped_message = "Newton polish skipped by policy."
     return {
@@ -5898,14 +5918,18 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 resolved_constraint_weight,
             )
+            dense_operator_chunk_batch_size = (
+                _optimizer_jax.dense_operator_chunk_batch_size()
+            )
+
             def jacobian_fn(x, coil_set_spec):
                 # Assemble the dense Jacobian in column batches (jax.lax.map
                 # batch_size) instead of jax.jacfwd's parallel vmap over all N
                 # input directions: the per-column JVP holds ~1 GB of BiotSavart
                 # intermediates, so the full N-wide vmap peaks at tens of GB and
                 # OOMs. Batching bounds peak memory to batch_size parallel JVPs
-                # (here 8) while staying far faster than a fully sequential map,
-                # and yields the identical Jacobian.
+                # while staying far faster than a fully sequential map, and yields
+                # the identical Jacobian.
                 x_arr = jnp.asarray(x)
 
                 def jvp_column(tangent):
@@ -5914,7 +5938,11 @@ class BoozerSurfaceJAX(Optimizable):
                     )[1]
 
                 eye = jnp.eye(x_arr.shape[0], dtype=x_arr.dtype)
-                columns = jax.lax.map(jvp_column, eye, batch_size=8)
+                columns = jax.lax.map(
+                    jvp_column,
+                    eye,
+                    batch_size=dense_operator_chunk_batch_size,
+                )
                 return jnp.moveaxis(columns, 0, -1)
 
             def least_squares_state_fn(x, coil_set_spec):
@@ -6001,6 +6029,148 @@ class BoozerSurfaceJAX(Optimizable):
             self._traceable_exact_residual_cache[key] = residual_fn
         return self._traceable_exact_residual_cache[key]
 
+    def _run_traceable_pre_newton_stage(
+        self,
+        coil_set_spec,
+        x0,
+        method,
+        *,
+        optimize_G,
+        weight_inv_modB,
+        materialize_dense_linearization=True,
+    ):
+        """Run the traceable pre-Newton Boozer optimizer stage."""
+        if method not in _ONDEVICE_OPTIMIZER_METHODS:
+            raise RuntimeError(
+                "run_code_traceable() requires optimizer_backend='ondevice' for LS solves."
+            )
+
+        if method in _ONDEVICE_LEAST_SQUARES_METHODS:
+            residual_fn = self._get_traceable_penalty_residual(
+                optimize_G,
+                weight_inv_modB,
+            )
+            least_squares_options = self._collect_least_squares_options()
+            if method == "lm-minpack-ondevice":
+                solver = levenberg_marquardt_minpack_traceable
+            elif method == "optimistix-lm-ondevice":
+                solver = jax_least_squares_optimistix
+            else:
+                solver = levenberg_marquardt_traceable
+            gtol = least_squares_options.get("gtol")
+            if method == "lm-minpack-ondevice" and gtol is None:
+                gtol = 1e-8
+            ls_state = solver(
+                residual_fn,
+                x0,
+                maxiter=self.options["bfgs_maxiter"],
+                tol=self.options["bfgs_tol"],
+                ftol=least_squares_options.get("ftol", 1e-8),
+                xtol=least_squares_options.get("xtol", 1e-8),
+                gtol=gtol,
+                materialize_dense_linearization=bool(
+                    least_squares_options["materialize_dense_linearization"]
+                    and materialize_dense_linearization
+                ),
+                max_dense_linearization_bytes=least_squares_options[
+                    "max_dense_linearization_bytes"
+                ],
+                args=(coil_set_spec,),
+            )
+            ls_residual_jacobian_condition_estimate = (
+                _dense_residual_jacobian_condition_estimate_or_none(
+                    ls_state.get("residual_jacobian")
+                )
+            )
+            x_ls = ls_state["x"]
+            ls_success = ls_state["success"]
+            ls_nit = ls_state["nit"]
+        else:
+            ls_residual_jacobian_condition_estimate = None
+            ls_obj_fn = self._make_penalty_objective_with(
+                optimize_G,
+                weight_inv_modB,
+                coil_set_spec=coil_set_spec,
+                hostify_inputs=False,
+            )
+            optimizer_options = self._collect_optimizer_options(method=method)
+
+            if method == "bfgs-ondevice":
+                ls_state = _optimizer_jax._minimize_bfgs_private(
+                    ls_obj_fn,
+                    x0,
+                    maxiter=self.options["bfgs_maxiter"],
+                    gtol=self.options["bfgs_tol"],
+                    line_search_maxiter=int(
+                        optimizer_options.get("line_search_maxiter", 10)
+                    ),
+                )
+                x_ls = ls_state.x_k
+            else:
+                ls_state = _optimizer_jax._minimize_lbfgs_private(
+                    ls_obj_fn,
+                    x0,
+                    maxiter=self.options["bfgs_maxiter"],
+                    gtol=self.options["bfgs_tol"],
+                    maxcor=int(
+                        optimizer_options.get(
+                            "maxcor", _default_lbfgs_maxcor_for_method(method)
+                        )
+                    ),
+                    ftol=float(optimizer_options.get("ftol", 0.0)),
+                    maxfun=optimizer_options.get("maxfun"),
+                    maxls=int(optimizer_options.get("maxls", 20)),
+                )
+                x_ls = ls_state.x_k
+            ls_success = ls_state.converged & jnp.logical_not(ls_state.failed)
+            ls_nit = ls_state.k
+
+        return {
+            "x": x_ls,
+            "success": ls_success,
+            "nit": ls_nit,
+            "pre_newton_nfev": _optimizer_state_attr(ls_state, "nfev"),
+            "pre_newton_ngev": _optimizer_state_attr(ls_state, "ngev"),
+            "pre_newton_line_search_status": _optimizer_state_first_attr(
+                ls_state,
+                ("line_search_status", "ls_status"),
+            ),
+            "ls_residual_jacobian_condition_estimate": (
+                ls_residual_jacobian_condition_estimate
+            ),
+        }
+
+    def _run_traceable_newton_polish_stage(
+        self,
+        coil_set_spec,
+        x0,
+        method,
+        *,
+        optimize_G,
+        weight_inv_modB,
+        materialize_dense_linearization=True,
+    ):
+        """Run the traceable Newton polish stage from a pre-Newton state."""
+        obj_fn = self._get_traceable_penalty_objective(
+            optimize_G,
+            weight_inv_modB,
+        )
+        materialize_traceable_hessian = bool(
+            self.options["materialize_dense_linearization"]
+            and materialize_dense_linearization
+        )
+        return self._run_newton_polish_for_method(
+            method,
+            obj_fn,
+            x0,
+            maxiter=self.options["newton_maxiter"],
+            tol=self.options["newton_tol"],
+            stab=self.options["newton_stab"],
+            materialize_hessian=materialize_traceable_hessian,
+            max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
+            objective_args=(coil_set_spec,),
+        )
+
     def run_code_traceable(
         self,
         coil_source,
@@ -6073,6 +6243,9 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
                 "residual": result["residual"],
                 "jacobian": jacobian,
+                "dense_operator_chunk_batch_size": _runtime_int32_scalar(
+                    _optimizer_jax.dense_operator_chunk_batch_size()
+                ),
                 **_exact_newton_reporting_fields(result),
                 **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
                 "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
@@ -6086,88 +6259,26 @@ class BoozerSurfaceJAX(Optimizable):
             }
 
         optimize_G = G is not None
-        method = self._resolve_optimizer_method(optimize_G=optimize_G)
-        if method not in _ONDEVICE_OPTIMIZER_METHODS:
-            raise RuntimeError(
-                "run_code_traceable() requires optimizer_backend='ondevice' for LS solves."
-            )
-
         x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
-        if method in _ONDEVICE_LEAST_SQUARES_METHODS:
-            residual_fn = self._get_traceable_penalty_residual(
-                optimize_G,
-                weight_inv_modB,
-            )
-            least_squares_options = self._collect_least_squares_options()
-            if method == "lm-minpack-ondevice":
-                solver = levenberg_marquardt_minpack_traceable
-            elif method == "optimistix-lm-ondevice":
-                solver = jax_least_squares_optimistix
-            else:
-                solver = levenberg_marquardt_traceable
-            gtol = least_squares_options.get("gtol")
-            if method == "lm-minpack-ondevice" and gtol is None:
-                gtol = 1e-8
-            ls_state = solver(
-                residual_fn,
-                x0,
-                maxiter=self.options["bfgs_maxiter"],
-                tol=self.options["bfgs_tol"],
-                ftol=least_squares_options.get("ftol", 1e-8),
-                xtol=least_squares_options.get("xtol", 1e-8),
-                gtol=gtol,
-                materialize_dense_linearization=bool(
-                    least_squares_options["materialize_dense_linearization"]
-                    and materialize_dense_linearization
-                ),
-                max_dense_linearization_bytes=least_squares_options[
-                    "max_dense_linearization_bytes"
-                ],
-                args=(coil_set_spec,),
-            )
-            ls_residual_jacobian_condition_estimate = (
-                _dense_residual_jacobian_condition_estimate_or_none(
-                    ls_state.get("residual_jacobian")
-                )
-            )
-            x_ls = ls_state["x"]
-        else:
-            ls_residual_jacobian_condition_estimate = None
-            ls_obj_fn = self._make_penalty_objective_with(
-                optimize_G,
-                weight_inv_modB,
-                coil_set_spec=coil_set_spec,
-                hostify_inputs=False,
-            )
-            optimizer_options = self._collect_optimizer_options(method=method)
-
-            if method == "bfgs-ondevice":
-                ls_state = _optimizer_jax._minimize_bfgs_private(
-                    ls_obj_fn,
-                    x0,
-                    maxiter=self.options["bfgs_maxiter"],
-                    gtol=self.options["bfgs_tol"],
-                    line_search_maxiter=int(
-                        optimizer_options.get("line_search_maxiter", 10)
-                    ),
-                )
-                x_ls = ls_state.x_k
-            else:
-                ls_state = _optimizer_jax._minimize_lbfgs_private(
-                    ls_obj_fn,
-                    x0,
-                    maxiter=self.options["bfgs_maxiter"],
-                    gtol=self.options["bfgs_tol"],
-                    maxcor=int(
-                        optimizer_options.get(
-                            "maxcor", _default_lbfgs_maxcor_for_method(method)
-                        )
-                    ),
-                    ftol=float(optimizer_options.get("ftol", 0.0)),
-                    maxfun=optimizer_options.get("maxfun"),
-                    maxls=int(optimizer_options.get("maxls", 20)),
-                )
-                x_ls = ls_state.x_k
+        method = self._resolve_optimizer_method(optimize_G=optimize_G)
+        pre_newton = self._run_traceable_pre_newton_stage(
+            coil_set_spec,
+            x0,
+            method,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            materialize_dense_linearization=materialize_dense_linearization,
+        )
+        x_ls = pre_newton["x"]
+        pre_newton_iter = pre_newton["nit"]
+        pre_newton_nfev = pre_newton["pre_newton_nfev"]
+        pre_newton_ngev = pre_newton["pre_newton_ngev"]
+        pre_newton_line_search_status = pre_newton[
+            "pre_newton_line_search_status"
+        ]
+        ls_residual_jacobian_condition_estimate = pre_newton[
+            "ls_residual_jacobian_condition_estimate"
+        ]
 
         obj_fn = self._get_traceable_penalty_objective(
             optimize_G,
@@ -6179,12 +6290,7 @@ class BoozerSurfaceJAX(Optimizable):
                 return obj_fn(x, coil_set_spec)
 
             fun_skip, grad_skip = jax.value_and_grad(objective_eval)(x_ls)
-            if method in _ONDEVICE_LEAST_SQUARES_METHODS:
-                ls_success = ls_state["success"]
-                ls_nit = ls_state["nit"]
-            else:
-                ls_success = ls_state.converged & jnp.logical_not(ls_state.failed)
-                ls_nit = ls_state.k
+            ls_success = pre_newton["success"]
             sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
                 x_ls,
                 optimize_G,
@@ -6221,29 +6327,28 @@ class BoozerSurfaceJAX(Optimizable):
                 "ls_residual_jacobian_condition_estimate": (
                     ls_residual_jacobian_condition_estimate
                 ),
-                "pre_newton_iter": ls_nit,
+                "pre_newton_iter": pre_newton_iter,
+                "pre_newton_nfev": pre_newton_nfev,
+                "pre_newton_ngev": pre_newton_ngev,
+                "pre_newton_line_search_status": pre_newton_line_search_status,
                 **_skipped_newton_polish_fields(
                     self.options["max_dense_linearization_bytes"],
                     jnp.asarray(0, dtype=jnp.int32),
                     gradient_norm,
                     jnp.linalg.norm(grad_skip, ord=np.inf),
                 ),
+                "dense_operator_chunk_batch_size": _runtime_int32_scalar(
+                    _optimizer_jax.dense_operator_chunk_batch_size()
+                ),
             }
 
-        materialize_traceable_hessian = bool(
-            self.options["materialize_dense_linearization"]
-            and materialize_dense_linearization
-        )
-        newton_result = self._run_newton_polish_for_method(
-            method,
-            obj_fn,
+        newton_result = self._run_traceable_newton_polish_stage(
+            coil_set_spec,
             x_ls,
-            maxiter=self.options["newton_maxiter"],
-            tol=self.options["newton_tol"],
-            stab=self.options["newton_stab"],
-            materialize_hessian=materialize_traceable_hessian,
-            max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
-            objective_args=(coil_set_spec,),
+            method,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            materialize_dense_linearization=materialize_dense_linearization,
         )
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
@@ -6311,12 +6416,19 @@ class BoozerSurfaceJAX(Optimizable):
             "optimizer_method": method,
             **_ls_newton_reporting_fields(newton_result),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+            "pre_newton_iter": pre_newton_iter,
+            "pre_newton_nfev": pre_newton_nfev,
+            "pre_newton_ngev": pre_newton_ngev,
+            "pre_newton_line_search_status": pre_newton_line_search_status,
             "ls_condition_estimate": ls_condition_estimate,
             "ls_residual_jacobian_condition_estimate": (
                 ls_residual_jacobian_condition_estimate
             ),
             "newton_polish_policy": str(self.options["newton_polish_policy"]),
             "newton_polish_skipped": False,
+            "dense_operator_chunk_batch_size": _runtime_int32_scalar(
+                _optimizer_jax.dense_operator_chunk_batch_size()
+            ),
         }
 
     def _compute_residual_vector(

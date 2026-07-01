@@ -298,6 +298,7 @@ __all__ = [
     "target_least_squares",
     "target_minimize",
     "target_optimizer_diagnostic_events",
+    "dense_operator_chunk_batch_size",
 ]
 
 
@@ -3606,6 +3607,11 @@ def jax_least_squares_optimistix(
 _DENSE_OPERATOR_CHUNK_BATCH_SIZE = max(
     1, int(os.environ.get("SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE", "8"))
 )
+
+
+def dense_operator_chunk_batch_size():
+    """Return the static dense-operator chunk batch size used by JAX kernels."""
+    return int(_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
 
 
 # Solver for the inner-Boozer Gauss-Newton adjoint system (``J^T J + stab I``,

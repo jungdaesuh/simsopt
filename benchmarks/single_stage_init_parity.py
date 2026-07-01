@@ -489,6 +489,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--boozer-limited-memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Pass through the inner JAX Boozer limited-memory policy. "
+            "--boozer-limited-memory selects L-BFGS for the quasi-Newton "
+            "Boozer stage; --no-boozer-limited-memory selects dense BFGS."
+        ),
+    )
+    parser.add_argument(
         "--target-lane-boozer-newton-polish-policy",
         choices=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES,
         default=_TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
@@ -608,6 +618,14 @@ def parse_args() -> argparse.Namespace:
             "surfaces recompile counts (e.g. GPU XLA cache thrash) for the "
             "fair CPU-vs-GPU comparison. Observational only: it toggles JAX "
             "compile logging and does not change compiled code or numerics."
+        ),
+    )
+    parser.add_argument(
+        "--trace-target-lane-k1-subtimers",
+        action="store_true",
+        help=(
+            "Pass --trace-target-lane-k1-subtimers to single-stage child runs "
+            "so decomposed K1 evaluations emit split replay timing events."
         ),
     )
     parser.add_argument(
@@ -1152,6 +1170,8 @@ def _append_optional_single_stage_flags(
     disable_target_lane_success_filter: bool,
     record_objective_evaluation_trace: bool,
     record_target_optimizer_state_trace: bool,
+    boozer_limited_memory: bool | None = None,
+    trace_target_lane_k1_subtimers: bool = False,
     target_lane_boozer_bfgs_tol: float | None = None,
     target_lane_boozer_bfgs_maxiter: int | None = None,
     target_lane_boozer_newton_tol: float | None = None,
@@ -1199,6 +1219,14 @@ def _append_optional_single_stage_flags(
         command.append("--record-objective-evaluation-trace")
     if record_target_optimizer_state_trace:
         command.append("--record-target-optimizer-state-trace")
+    if boozer_limited_memory is not None:
+        command.append(
+            "--boozer-limited-memory"
+            if bool(boozer_limited_memory)
+            else "--no-boozer-limited-memory"
+        )
+    if trace_target_lane_k1_subtimers:
+        command.append("--trace-target-lane-k1-subtimers")
     if replay_objective_evaluation_trace is not None:
         command.extend(
             [
@@ -1506,6 +1534,15 @@ def _run_single_stage_case(
                 and args.optimizer_backend == TARGET_OPTIMIZER_BACKEND
                 and getattr(args, "reference_optimizer_method", "lbfgs")
                 == "lbfgs-trace"
+            ),
+            boozer_limited_memory=(
+                getattr(args, "boozer_limited_memory", None)
+                if backend == "jax"
+                else None
+            ),
+            trace_target_lane_k1_subtimers=bool(
+                backend == "jax"
+                and getattr(args, "trace_target_lane_k1_subtimers", False)
             ),
             target_lane_boozer_bfgs_tol=getattr(
                 args, "target_lane_boozer_bfgs_tol", None
