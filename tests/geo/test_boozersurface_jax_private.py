@@ -21,6 +21,7 @@ from simsopt_jax.geo.optimizers.private import (
 )
 from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from scipy import optimize
 
 from .boozersurface_jax_test_helpers import (
@@ -2401,6 +2402,131 @@ class TestLBFGSMethodPrivate:
 
         assert result.x.shape == (2,)
         assert result.nit <= 1
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_value_and_grad_kernel_accepts_traced_example_sharding(self):
+        target = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        scale = jnp.asarray(0.5, dtype=jnp.float64)
+
+        def value_and_grad(x):
+            residual = x - target
+            return scale * jnp.vdot(residual, residual), 2.0 * scale * residual
+
+        def build_and_call_with_traced_example(x):
+            value_and_grad_kernel, value_and_grad_consts = (
+                _private_lbfgs._cached_lbfgs_value_and_grad_kernel(
+                    value_and_grad,
+                    cache_owner=None,
+                    adapter=None,
+                    objective_mode="value_and_grad",
+                    dtype=x.dtype,
+                    example_x=x,
+                )
+            )
+            return value_and_grad_kernel(x, value_and_grad_consts)
+
+        x0 = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
+        value, grad = jax.jit(build_and_call_with_traced_example)(x0)
+
+        np.testing.assert_allclose(value, 2.5, rtol=1e-14, atol=1e-14)
+        np.testing.assert_allclose(
+            np.asarray(grad),
+            np.asarray([-1.0, 2.0]),
+            rtol=1e-14,
+            atol=1e-14,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_value_and_grad_kernel_places_scalar_consts_on_named_sharding(self):
+        mesh = Mesh(np.asarray(jax.devices()[:1]), ("x",))
+        vector_sharding = NamedSharding(mesh, P("x"))
+        target = jax.device_put(
+            np.asarray([1.0, -2.0], dtype=np.float64),
+            vector_sharding,
+        )
+        scale = jnp.asarray(0.5, dtype=jnp.float64)
+
+        def value_and_grad(x):
+            residual = x - target
+            return scale * jnp.vdot(residual, residual), 2.0 * scale * residual
+
+        def build_and_call_with_traced_example(x):
+            value_and_grad_kernel, value_and_grad_consts = (
+                _private_lbfgs._cached_lbfgs_value_and_grad_kernel(
+                    value_and_grad,
+                    cache_owner=None,
+                    adapter=None,
+                    objective_mode="value_and_grad",
+                    dtype=x.dtype,
+                    example_x=x,
+                )
+            )
+            return value_and_grad_kernel(x, value_and_grad_consts)
+
+        x0 = jax.device_put(
+            np.asarray([0.0, 0.0], dtype=np.float64),
+            vector_sharding,
+        )
+        value, grad = jax.jit(build_and_call_with_traced_example)(x0)
+
+        np.testing.assert_allclose(value, 2.5, rtol=1e-14, atol=1e-14)
+        np.testing.assert_allclose(
+            np.asarray(grad),
+            np.asarray([-1.0, 2.0]),
+            rtol=1e-14,
+            atol=1e-14,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_minimize_lbfgs_private_rejects_stepwise_inside_jit(self):
+        def quad(x):
+            return 0.5 * jnp.vdot(x, x)
+
+        def run_traced_lbfgs(x):
+            result = _private_lbfgs._minimize_lbfgs_private(
+                quad,
+                x,
+                maxiter=1,
+            )
+            return result.x_k
+
+        with pytest.raises(ValueError, match="stepwise mode uses host-observed"):
+            jax.jit(run_traced_lbfgs)(jnp.asarray([1.0, -2.0], dtype=jnp.float64))
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_minimize_lbfgs_private_monolithic_debug_runs_inside_jit(self):
+        target = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+
+        def quad(x):
+            residual = x - target
+            return 0.5 * jnp.vdot(residual, residual)
+
+        def run_traced_lbfgs(x):
+            result = _private_lbfgs._minimize_lbfgs_private(
+                quad,
+                x,
+                maxiter=3,
+                gtol=1e-12,
+                run_mode="monolithic_debug",
+            )
+            return result.x_k, result.f_k, result.k
+
+        x, value, iterations = jax.jit(run_traced_lbfgs)(
+            jnp.asarray([0.0, 0.0], dtype=jnp.float64)
+        )
+
+        assert int(iterations) > 0
+        assert float(value) < 2.5
+        np.testing.assert_allclose(
+            np.asarray(x),
+            np.asarray([1.0, -2.0]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
