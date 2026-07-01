@@ -5080,6 +5080,7 @@ class TestBoozerSurfaceJAXClass:
         booz.options["ftol"] = 2e-13
         booz.options["maxfun"] = 19
         booz.options["maxls"] = 11
+        booz.options["lbfgs_run_mode"] = "monolithic_debug"
         captured = {}
 
         def fake_target_minimize(
@@ -5121,9 +5122,22 @@ class TestBoozerSurfaceJAXClass:
             "ftol": 2e-13,
             "maxfun": 19,
             "maxls": 11,
+            "lbfgs_run_mode": "monolithic_debug",
         }
         assert captured["value_and_grad"] is False
         assert result["optimizer_method"] == "lbfgs-ondevice"
+
+    def test_reference_limited_memory_ls_filters_private_lbfgs_run_mode(self):
+        """Private L-BFGS run mode must not leak into SciPy-backed L-BFGS."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.options["limited_memory"] = True
+        booz.options["lbfgs_run_mode"] = "monolithic_debug"
+
+        options = booz._collect_optimizer_options(method="lbfgs")
+
+        assert options["maxcor"] == 200
+        assert "lbfgs_run_mode" not in options
 
     def test_ondevice_limited_memory_ls_uses_boozer_maxcor_default(self, monkeypatch):
         """BoozerSurfaceJAX L-BFGS uses the bounded on-device history default."""

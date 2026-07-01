@@ -3643,6 +3643,7 @@ _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
     {
         "force_ondevice_limited_memory",
         "line_search_maxiter",
+        "lbfgs_run_mode",
     }
 )
 
@@ -6120,6 +6121,12 @@ class BoozerSurfaceJAX(Optimizable):
                     ftol=float(optimizer_options.get("ftol", 0.0)),
                     maxfun=optimizer_options.get("maxfun"),
                     maxls=int(optimizer_options.get("maxls", 20)),
+                    run_mode=str(
+                        optimizer_options.get(
+                            "lbfgs_run_mode",
+                            "monolithic_debug",
+                        )
+                    ),
                 )
                 x_ls = ls_state.x_k
             ls_success = ls_state.converged & jnp.logical_not(ls_state.failed)
@@ -6541,6 +6548,8 @@ class BoozerSurfaceJAX(Optimizable):
         }
         if method in {"lbfgs", "lbfgs-ondevice"} and "maxcor" not in optimizer_options:
             optimizer_options["maxcor"] = _default_lbfgs_maxcor_for_method(method)
+        if method == "lbfgs-ondevice" and "lbfgs_run_mode" in self.options:
+            optimizer_options["lbfgs_run_mode"] = self.options["lbfgs_run_mode"]
         if method not in _ONDEVICE_OPTIMIZER_METHODS:
             optimizer_options.update(
                 {k: self.options[k] for k in _SCIPY_TRACE_OPTIONS if k in self.options}

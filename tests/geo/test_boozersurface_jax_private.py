@@ -3352,6 +3352,60 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert res["optimizer_method"] == "lbfgs-ondevice"
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_traceable_limited_memory_pre_newton_uses_monolithic_lbfgs(
+        self, monkeypatch
+    ):
+        """Traceable limited-memory LS must use the jit-compatible L-BFGS mode."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+
+        captured = {}
+
+        def fake_minimize_lbfgs(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            maxcor,
+            ftol,
+            maxfun,
+            maxls,
+            run_mode,
+        ):
+            del fun, maxiter, gtol, maxcor, ftol, maxfun, maxls
+            captured["run_mode"] = run_mode
+            return types.SimpleNamespace(
+                converged=jnp.asarray(True),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(2, dtype=jnp.int32),
+                nfev=jnp.asarray(3, dtype=jnp.int32),
+                ngev=jnp.asarray(4, dtype=jnp.int32),
+                x_k=x0,
+                f_k=jnp.asarray(0.0, dtype=x0.dtype),
+                g_k=jnp.zeros_like(x0),
+                ls_status=jnp.asarray(0, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize_lbfgs)
+
+        x0 = booz._pack_decision_vector(0.3, 0.05)
+        result = booz._run_traceable_pre_newton_stage(
+            booz.coil_set_spec,
+            x0,
+            "lbfgs-ondevice",
+            optimize_G=True,
+            weight_inv_modB=True,
+            materialize_dense_linearization=False,
+        )
+
+        assert captured["run_mode"] == "monolithic_debug"
+        np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
+        assert bool(np.asarray(result["success"])) is True
+        assert int(np.asarray(result["nit"])) == 2
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_force_limited_memory_routes_to_lbfgs(self, monkeypatch):
         """The explicit Boozer LS override must route ondevice solves through lbfgs."""
         booz = _make_mock_boozer_surface()
