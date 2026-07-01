@@ -5,8 +5,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 32
-#SBATCH --exclusive
-#SBATCH --mem=0
+#SBATCH --mem=128G
 #SBATCH -J ss-cont-donor
 
 set -euo pipefail
