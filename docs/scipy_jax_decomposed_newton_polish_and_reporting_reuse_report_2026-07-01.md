@@ -32,9 +32,19 @@ the JAX lane pays duplicate expensive solve work that the native CPU path avoids
 structurally through mutable `BoozerSurface` state.
 
 The follow-up patch addresses both workflow boundaries in the default
-`scipy-jax-decomposed` path. The remaining validation task is to prove the
-effect with the Perlmutter GPU matrix and compare the dense-adjoint path against
-the optional `lsmr_j` experiment.
+`scipy-jax-decomposed` path. The focused dense-adjoint Perlmutter smoke at
+commit `118803140155` proved final-sync reuse of the exact-DOF solved-state
+payload and clean process exit, but it also exposed a missed runtime wiring
+boundary: the run was configured with the trial-only `skip` policy, yet K1
+events still reported `newton_polish_skipped=false`. A later Perlmutter smoke at
+remote commit `b67d15a8` proved the solve-call trial-policy correction: trial K1
+returned with `newton_polish_skipped=true`, `newton_iter=0`, and
+`pre_newton_iter=0`. That same run exposed one remaining cache boundary in the
+trace wrapper: real target-lane inputs arrived as `jax.Array`, while the
+decomposed K1 memo only cached NumPy inputs. The current patch fixes that by
+host-normalizing all non-tracer array inputs before keying the memo. Local and
+remote regressions cover the JAX-array cache hit; a fresh GPU smoke is still
+needed to prove the latest trace-reuse correction at runtime.
 
 The right fix is not to default to `lsmr_j`, not to switch to `lbfgs-ondevice`,
 and not to copy the CPU path blindly. The right fix is to make the target-lane
@@ -544,11 +554,119 @@ Implemented in the follow-up patch:
 - The target lane now has a separate trial-only Boozer Newton-polish policy,
   defaulting trial solves to `skip` while leaving initialization,
   accepted-step, final, and reference paths on the full `run` policy.
+- The decomposed K1 `solve_fn` is wrapped so trial Boozer overrides are applied
+  when SciPy evaluates each candidate, not only while the objective provider is
+  constructed.
+- The decomposed K1 memo now host-normalizes non-tracer array inputs before
+  keying the cache. This covers the real target-lane path where SciPy/JAX
+  wrapper calls pass `jax.Array` inputs rather than plain NumPy arrays.
+- The traceable runtime cache signature includes `newton_polish_policy`, so
+  full-vs-trial K1 runtimes cannot share a stale compiled runtime keyed only on
+  the other Boozer options.
 - The parity wrapper and Perlmutter launch scripts now pass and record the
   trial-only policy, so GPU validation jobs exercise the intended child
   runtime contract instead of relying on implicit child defaults.
 - Focused regressions cover exact-DOF solved-state cache reuse and the
   trial-vs-full polish policy split.
+
+Runtime validation from the first follow-up patch:
+
+- Staged local commit: `118803140155`
+- Remote archive commit: `88ffef1e73a2`
+- Run root:
+  `/pscratch/sd/j/jungdae/scipy_jax_decomp_report_runs/20260701T173241Z-118803140155-iota011-direct`
+- Completed fixed-path job: `55358522`
+- Case:
+  `/pscratch/sd/j/jungdae/scipy_jax_decomp_report_runs/20260701T173241Z-118803140155-iota011-direct/55358152B/task_1_skip_trial_dense`
+- GPU/runtime evidence:
+  - `default_backend=gpu`
+  - device `cuda:0`
+  - `jax 0.10.0`
+  - x64 enabled
+  - `SIMSOPT_JAX_TRANSFER_GUARD=disallow`
+  - `XLA_PYTHON_CLIENT_PREALLOCATE=true`
+  - `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE=4`
+  - `SIMSOPT_ADJOINT_LINEAR_SOLVER=dense`
+- Manifest evidence:
+  - `case_label=skip_trial_dense`
+  - `trial_newton_polish_policy=skip`
+  - `local_commit=118803140155`
+  - `remote_archive_commit=88ffef1e73a2`
+- Progress evidence:
+  - startup event recorded
+    `target_lane_trial_boozer_newton_polish_policy=skip`
+  - bundle setup recorded
+    `trial_boozer_overrides.newton_polish_policy=skip`
+  - decomposed K1 evals returned in about `44.15 s`, `33.20 s`, and
+    `63.30 s`
+  - those K1 evals still reported `newton_polish_skipped=false`, with Newton
+    iterations observed on the rejected-trial path; this disproved the initial
+    assumption that construction-time trial overrides reached the later SciPy
+    `solve_fn` calls
+  - decomposed K2 value/grad ran for evals 1 and 3
+  - final sync recorded
+    `target_lane_reporting_forward_result_started reused=true`
+  - final sync returned in about `83.00 s`
+- Output evidence:
+  - `exit_status.txt` is `0`
+  - Slurm job `55358522` completed with `ExitCode=0:0`
+  - `/usr/bin/time` recorded `20:30.32` for the Python step
+  - no `fatal_error.log` content
+  - the final artifact is `REJECTED.json`, not `results.json`, because the
+    smoke intentionally used `maxiter=1`
+  - rejection reasons are `optimizer_success_not_true` and
+    `optimizer_status_1`
+  - optimizer status is `1`, message
+    `STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT`
+  - physics state stayed coherent for the smoke:
+    `FINAL_IOTA=0.11017506684972597`,
+    `TARGET_IOTA=0.11015671329581699`,
+    `FINAL_VOLUME=0.04916423194665707`,
+    `TARGET_VOLUME=0.04920000000000004`,
+    `FINAL_BOOZER_RESIDUAL=4.573133940318431e-07`,
+    `MAX_CURVATURE=35.92533799246334`,
+    `SELF_INTERSECTING=false`
+
+Runtime boundary:
+
+- This is a completed GPU smoke proving final-sync reuse and clean process exit
+  for the dense-adjoint path. It is not a final accepted single-stage production
+  result.
+- A second focused Perlmutter smoke for the solve-call correction was run as
+  job `55363238` against remote source commit `b67d15a8e9c8287e6755948246d42b1b424a4e5d`:
+  `/pscratch/sd/j/jungdae/scipy_jax_decomp_report_runs/20260701T190508Z-6e0cb1c337be-iota011-direct`.
+  Runtime files are under
+  `/pscratch/sd/j/jungdae/scipy_jax_decomp_report_runs/20260701T190508Z-6e0cb1c337be-iota011-direct/55363238/task_1_skip_trial_dense_fast2`.
+  This run used `default_backend=gpu`, device `cuda:0`, x64, transfer guard
+  `disallow`, preallocation `true`, chunk batch `4`, and dense adjoint solver.
+  It proved the trial solve-call policy: eval 1 emitted
+  `target_lane_decomposed_k1_forward_returned` with
+  `newton_polish_skipped=true`, `newton_iter=0`, `pre_newton_iter=0`,
+  `success=true`, and `primal_success=true`.
+- The same job exposed a cache boundary bug in the trace wrapper. After K2
+  returned, progress recorded
+  `target_lane_optimizer_objective_eval_1_forward_result_started` instead of
+  `target_lane_optimizer_objective_eval_1_forward_result_reused`. The cause was
+  the K1 memo's NumPy-only cache population; the real path passed a `jax.Array`.
+  Job `55363238` was intentionally cancelled after this finding to avoid paying
+  the duplicate K1 recompute.
+- The current patch fixes the JAX-array cache population and strengthens the
+  regression so the trace wrapper calls the decomposed objective with a
+  `jax.Array` under `jax.transfer_guard("disallow")`. Remote commit
+  `425969c7db8a657d96e6d12031c114bcfd4b9162` passed:
+  `pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k "trace_wrapper_uses_decomposed_k1_cache_after_value_grad or decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform"`.
+  The stricter local transfer-guard version of the same regression also passed
+  in the final focused validation set.
+  A follow-up interactive allocation (`55364581`) timed out before resources were
+  granted, so this latest trace-reuse correction is regression-tested locally and
+  partially mirrored remotely, but not yet GPU-smoke-proven.
+- A same-resolution JAX runtime seed-spec projection hang was encountered while
+  staging the official warm-start path. The smoke used a manually generated
+  direct-DOF runtime seed spec for `iota011_R0935`. That is a separate
+  staging-path issue and should be fixed independently by bypassing projection
+  when the serialized surface already matches the requested resolution.
+- The optional `lsmr_j` comparator was not run as part of this smoke and should
+  remain experimental until its optimizer-step behavior is validated.
 
 ## Bottom Line
 
@@ -561,8 +679,12 @@ The original target-lane slowdown was mainly a workflow/contract problem:
 - Final reporting recomputed forward state that was already available from the
   optimizer.
 
-The follow-up patch now fixes those two workflow boundaries for the default
-`scipy-jax-decomposed` path: trial probes use the trial-only `skip` policy, and
-final sync can reuse the exact-DOF solved-state payload. The next proof point is
-runtime evidence from the Perlmutter GPU matrix, including the optional `lsmr_j`
-comparator as an experiment rather than the primary solution.
+The follow-up patch fixes the two intended workflow boundaries for the default
+`scipy-jax-decomposed` path: final sync reuses the exact-DOF solved-state
+payload, and trial probes are wired to use the trial-only `skip` policy at K1
+solve-call time. Perlmutter dense-path smokes confirm final-sync reuse, clean
+process execution, and trial K1 Newton-polish skipping. The latest runtime smoke
+also found a real trace-wrapper cache miss for `jax.Array` inputs; that is now
+fixed and covered by local and remote regressions, but still needs a fresh GPU
+smoke when an interactive GPU allocation is available. A longer accepted-result
+run and an optional `lsmr_j` comparator remain separate follow-ups.

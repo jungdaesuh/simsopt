@@ -310,6 +310,7 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "bfgs_tol",
     "newton_maxiter",
     "newton_tol",
+    "newton_polish_policy",
     "newton_stab",
     "materialize_dense_linearization",
     "max_dense_linearization_bytes",

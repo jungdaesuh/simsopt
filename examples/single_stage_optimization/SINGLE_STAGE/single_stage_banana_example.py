@@ -7381,6 +7381,28 @@ def get_traceable_single_stage_solved_pair_builder():
     return make_traceable_objective_solved_pair
 
 
+def wrap_target_lane_solved_pair_with_boozer_overrides(
+    boozer_surface,
+    solved_pair,
+    option_overrides,
+):
+    """Apply target-lane Boozer overrides when the split K1 solve is evaluated."""
+    applied_overrides = {
+        key: value for key, value in (option_overrides or {}).items() if value is not None
+    }
+    if not applied_overrides:
+        return solved_pair
+
+    def solve_fn(coil_dofs):
+        with temporary_boozer_surface_option_overrides(
+            boozer_surface,
+            **applied_overrides,
+        ):
+            return solved_pair.solve_fn(coil_dofs)
+
+    return solved_pair._replace(solve_fn=solve_fn)
+
+
 def get_traceable_single_stage_seeded_value_and_grad_builder():
     """Load the baseline optimizer value/grad seed for split objective fallback."""
     return make_traceable_objective_seeded_value_and_grad
@@ -7466,9 +7488,13 @@ def _build_decomposed_coil_host_value_and_grad(
         objective_value=None,
         objective_grad=None,
     ):
-        if not isinstance(coil_dofs, np.ndarray):
+        if _contains_jax_tracer(coil_dofs):
             return
-        cached_coil_dofs = np.array(coil_dofs, dtype=np.float64, copy=True)
+        cached_coil_dofs = np.array(
+            host_array(coil_dofs, dtype=np.float64),
+            dtype=np.float64,
+            copy=True,
+        )
         last_solved_forward_result["coil_dofs"] = cached_coil_dofs
         last_solved_forward_result["forward_result"] = forward_result
         missing_solve_keys = [
@@ -7572,6 +7598,17 @@ def _build_decomposed_coil_host_value_and_grad(
         )
         return forward_result["value"], baseline_gradient_device
 
+    def cached_forward_result_for_coil_dofs(coil_dofs):
+        """Return the memoized K1 forward result for exact coil DOFs, if any."""
+        cached = last_solved_forward_result.get("forward_result")
+        cached_coil_dofs = last_solved_forward_result.get("coil_dofs")
+        if cached is None or cached_coil_dofs is None:
+            return None
+        probe = np.asarray(host_array(coil_dofs, dtype=np.float64))
+        if np.array_equal(probe, cached_coil_dofs):
+            return cached
+        return None
+
     def reuse_forward_result_for(coil_dofs, fallback_forward_result):
         """Return the memoized K1 forward result, else delegate to ``fallback``.
 
@@ -7580,14 +7617,14 @@ def _build_decomposed_coil_host_value_and_grad(
         second redundant forward Boozer solve. On any key mismatch it falls back to
         ``fallback_forward_result`` so it can never serve a stale solve.
         """
-        cached = last_solved_forward_result.get("forward_result")
-        cached_coil_dofs = last_solved_forward_result.get("coil_dofs")
-        if cached is not None and cached_coil_dofs is not None:
-            probe = np.asarray(host_array(coil_dofs, dtype=np.float64))
-            if np.array_equal(probe, cached_coil_dofs):
-                return cached
+        cached = cached_forward_result_for_coil_dofs(coil_dofs)
+        if cached is not None:
+            return cached
         return fallback_forward_result(coil_dofs)
 
+    value_and_grad.cached_forward_result_for_coil_dofs = (
+        cached_forward_result_for_coil_dofs
+    )
     value_and_grad.reuse_forward_result_for = reuse_forward_result_for
 
     def target_lane_solve_result_for_coil_dofs(coil_dofs):
@@ -8433,6 +8470,7 @@ def build_target_lane_outer_objectives(
     profile_optimizer_dofs=None,
     profile_progress_json_path=None,
     stablehlo_dir=None,
+    solved_pair_boozer_overrides=None,
     record_outer_optimizer_event=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
@@ -8481,6 +8519,11 @@ def build_target_lane_outer_objectives(
             iota_target,
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
+        )
+        solved_pair = wrap_target_lane_solved_pair_with_boozer_overrides(
+            boozer_surface,
+            solved_pair,
+            solved_pair_boozer_overrides,
         )
         if record_outer_optimizer_event is not None:
             record_outer_optimizer_event(
@@ -9316,6 +9359,7 @@ def prepare_target_lane_outer_objectives(
     profile_batch_size: int,
     profile_progress_json_path=None,
     stablehlo_dir=None,
+    solved_pair_boozer_overrides=None,
     disable_success_filter: bool,
     non_qs_weight,
     residual_weight,
@@ -9401,6 +9445,7 @@ def prepare_target_lane_outer_objectives(
         profile_optimizer_dofs=profile_optimizer_dofs,
         profile_progress_json_path=profile_progress_json_path,
         stablehlo_dir=stablehlo_dir,
+        solved_pair_boozer_overrides=solved_pair_boozer_overrides,
         record_outer_optimizer_event=record_outer_optimizer_event,
     )
     if target_scalar_objective is None:
@@ -10332,6 +10377,7 @@ def build_target_lane_full_state_value_and_grad(
 
     full_state_objective = jax.jit(full_state_value_and_grad)
     for attribute_name in (
+        "cached_forward_result_for_coil_dofs",
         "reuse_forward_result_for",
         "target_lane_solve_result_for_coil_dofs",
     ):
@@ -13029,10 +13075,9 @@ def run_single_stage_target_lane_objective_evaluation_trace_replay(
         coil_dofs = runtime_device_put(coil_dof_values)
         # This replay diagnostic intentionally re-solves the forward problem here
         # rather than reusing the decomposed K1 solve the way the live optimizer
-        # trace lane does (via reuse_forward_result_for). value_and_grad and
-        # target_forward_result are fed device arrays, so the host-ndarray-keyed
-        # reuse memo never populates; replay favors faithful re-execution over
-        # solve reuse, so the second solve is an accepted cost of this path.
+        # trace lane does. Replay favors faithful re-execution of recorded
+        # objective events over solve reuse, so the second solve is an accepted
+        # cost of this diagnostic path.
         objective_value, optimizer_gradient = target_value_and_grad_objective(
             objective_dofs
         )
@@ -13126,6 +13171,11 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
     cached_forward_results = []
     cached_forward_results_accepted_iterations = int(
         run_dict.get("accepted_iterations", 0)
+    )
+    cached_forward_result_for_coil_dofs = getattr(
+        target_value_and_grad_objective,
+        "cached_forward_result_for_coil_dofs",
+        None,
     )
 
     def record_progress_event(label, **fields):
@@ -13298,16 +13348,29 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
                     f"{label_prefix}_coil_dofs_device_put_returned",
                     line_search_evaluation=int(line_search_evaluation),
                 )
-                record_progress_event(
-                    f"{label_prefix}_forward_result_started",
-                    line_search_evaluation=int(line_search_evaluation),
-                )
-                forward_result = target_forward_result(coil_dofs)
-                record_progress_event(
-                    f"{label_prefix}_forward_result_returned",
-                    line_search_evaluation=int(line_search_evaluation),
-                )
+                if cached_forward_result_for_coil_dofs is not None:
+                    forward_result = cached_forward_result_for_coil_dofs(coil_dofs)
+                    if forward_result is not None:
+                        record_progress_event(
+                            f"{label_prefix}_forward_result_reused",
+                            line_search_evaluation=int(line_search_evaluation),
+                            cache_source="decomposed_k1",
+                        )
+                if forward_result is None:
+                    record_progress_event(
+                        f"{label_prefix}_forward_result_started",
+                        line_search_evaluation=int(line_search_evaluation),
+                    )
+                    forward_result = target_forward_result(coil_dofs)
+                    record_progress_event(
+                        f"{label_prefix}_forward_result_returned",
+                        line_search_evaluation=int(line_search_evaluation),
+                    )
         if forward_result is not None:
+            if not target_lane_solve_result_value_and_grad_available(forward_result):
+                forward_result = dict(forward_result)
+                forward_result["objective_value"] = objective_value
+                forward_result["objective_grad"] = optimizer_gradient
             if target_lane_solve_result is None:
                 target_lane_solve_result = (
                     single_stage_target_lane_accepted_step_solve_result(forward_result)
@@ -13389,6 +13452,11 @@ def build_single_stage_target_lane_objective_evaluation_sync_cache_wrapper(
     wrapped.reuse_forward_result_for = getattr(
         target_value_and_grad_objective,
         "reuse_forward_result_for",
+        None,
+    )
+    wrapped.cached_forward_result_for_coil_dofs = getattr(
+        target_value_and_grad_objective,
+        "cached_forward_result_for_coil_dofs",
         None,
     )
     wrapped.target_lane_solve_result_for_coil_dofs = solve_result_for_coil_dofs
@@ -16602,6 +16670,7 @@ if __name__ == "__main__":
                 profile_batch_size=args.profile_target_lane_batch_size,
                 profile_progress_json_path=args.target_lane_profile_progress_json,
                 stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                solved_pair_boozer_overrides=target_lane_trial_boozer_overrides,
                 disable_success_filter=args.disable_target_lane_success_filter,
                 non_qs_weight=NON_QS_WEIGHT,
                 residual_weight=RES_WEIGHT,
@@ -17159,6 +17228,9 @@ if __name__ == "__main__":
                                 args.target_lane_profile_progress_json
                             ),
                             stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                            solved_pair_boozer_overrides=(
+                                target_lane_trial_boozer_overrides
+                            ),
                             disable_success_filter=(
                                 args.disable_target_lane_success_filter
                             ),

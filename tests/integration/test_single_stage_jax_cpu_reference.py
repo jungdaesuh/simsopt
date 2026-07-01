@@ -8141,6 +8141,99 @@ class TestTraceableObjective:
         assert len(solve_calls) == 1
         assert base_calls == []
 
+    def test_trace_wrapper_uses_decomposed_k1_cache_after_value_grad(self):
+        """Traced decomposed evals must not re-run K1 after host value/grad."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([13.0, -17.0], dtype=jnp.float64)
+        objective_value = jnp.asarray(5.75, dtype=jnp.float64)
+        success_flag = jnp.asarray(True)
+        finite_flag = jnp.asarray(True)
+        solved_sdofs = jnp.asarray([0.1, 0.2], dtype=jnp.float64)
+        solved_iota = jnp.asarray(0.11015671329581699, dtype=jnp.float64)
+        solved_G = jnp.asarray(-2.0106, dtype=jnp.float64)
+        solved_x_offset = jnp.asarray([1.0, 1.0], dtype=jnp.float64)
+        solve_calls = []
+        progress_events = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            solve_calls.append(np.asarray(jax.device_get(arr), dtype=np.float64))
+            return {
+                "success": success_flag,
+                "primal_success": success_flag,
+                "finite": finite_flag,
+                "value": objective_value,
+                "x": arr + solved_x_offset,
+                "sdofs": solved_sdofs,
+                "iota": solved_iota,
+                "G": solved_G,
+                "linear_solve_factors": None,
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return objective_value, candidate_gradient
+
+        def fallback_forward_result(coil_dofs):
+            raise AssertionError(
+                "trace wrapper re-entered target_forward_result instead of "
+                "reusing the decomposed K1 forward result"
+            )
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+        )
+        run_dict = {}
+
+        traced_fun = (
+            single_stage_example.build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+                target_value_and_grad_objective=host_fun,
+                target_forward_result=fallback_forward_result,
+                optimizer_to_coil_dofs=lambda x: x,
+                run_dict=run_dict,
+                progress_event_callback=lambda label, **fields: progress_events.append(
+                    (label, fields)
+                ),
+                progress_event_phase="target_lane_optimizer",
+            )
+        )
+
+        optimizer_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+        with jax.transfer_guard("disallow"):
+            value, gradient = traced_fun(optimizer_dofs)
+
+        assert len(solve_calls) == 1
+        assert float(jax.device_get(value)) == pytest.approx(5.75)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(gradient), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        labels = [label for label, _fields in progress_events]
+        assert "target_lane_optimizer_objective_eval_1_forward_result_reused" in labels
+        assert "target_lane_optimizer_objective_eval_1_forward_result_started" not in labels
+
+        cached = (
+            single_stage_example._cached_target_lane_objective_evaluation_sync_state(
+                run_dict,
+                np.asarray(jax.device_get(optimizer_dofs), dtype=np.float64),
+            )
+        )
+        assert cached is not None
+        assert float(jax.device_get(cached["objective_value"])) == pytest.approx(5.75)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(cached["objective_grad"]), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
     def test_decomposed_lane_host_sync_count_is_bounded(
         self, boozer_setup, monkeypatch
     ):

@@ -24,10 +24,13 @@ onto the BoozerSurfaceJAX options).
 
 from __future__ import annotations
 
+from collections import namedtuple
 import sys
 from unittest import mock
 
 import pytest
+
+from simsopt_jax_adapters.geo.surface_objectives import _TRACEABLE_RUNTIME_OPTION_KEYS
 
 from benchmarks.single_stage_init_parity import (
     _resolve_target_lane_boozer_newton_polish_policy,
@@ -38,6 +41,7 @@ from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example
     build_target_lane_trial_boozer_overrides,
     resolve_effective_boozer_newton_polish_policy_override,
     resolve_effective_trial_boozer_newton_polish_policy_override,
+    wrap_target_lane_solved_pair_with_boozer_overrides,
 )
 
 
@@ -262,3 +266,44 @@ def test_trial_boozer_overrides_use_trial_policy_not_full_policy():
 
     assert full_override == "run"
     assert overrides["newton_polish_policy"] == "skip"
+
+
+def test_traceable_runtime_cache_key_includes_newton_polish_policy():
+    """Changing full vs trial Newton polish policy must rebuild the K1 runtime."""
+    assert "newton_polish_policy" in _TRACEABLE_RUNTIME_OPTION_KEYS
+
+
+def test_decomposed_solved_pair_applies_trial_policy_at_solve_call_time():
+    """SciPy calls the split K1 solve after construction-time overrides restore."""
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    observed_policies = []
+
+    class BoozerSurface:
+        def __init__(self):
+            self.options = {
+                "newton_polish_policy": "run",
+                "newton_stab": 0.0,
+            }
+
+    boozer_surface = BoozerSurface()
+
+    def solve_fn(coil_dofs):
+        observed_policies.append(boozer_surface.options["newton_polish_policy"])
+        return {"coil_dofs": coil_dofs}
+
+    solved_pair = solved_pair_type(
+        solve_fn=solve_fn,
+        value_grad_from_solved=object(),
+    )
+    wrapped_pair = wrap_target_lane_solved_pair_with_boozer_overrides(
+        boozer_surface,
+        solved_pair,
+        {"newton_polish_policy": "skip"},
+    )
+
+    assert boozer_surface.options["newton_polish_policy"] == "run"
+    assert wrapped_pair.solve_fn("candidate") == {"coil_dofs": "candidate"}
+    assert observed_policies == ["skip"]
+    assert boozer_surface.options["newton_polish_policy"] == "run"
