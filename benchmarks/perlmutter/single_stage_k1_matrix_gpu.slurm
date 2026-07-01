@@ -31,6 +31,7 @@ MATRIX_NTOR="${MATRIX_NTOR:-10}"
 MATRIX_NPHI="${MATRIX_NPHI:-64}"
 MATRIX_NTHETA="${MATRIX_NTHETA:-32}"
 MATRIX_JAX_CACHE_DIR="${MATRIX_JAX_CACHE_DIR:-${RUN_ROOT}/jax_compilation_cache}"
+MATRIX_CASES="${MATRIX_CASES:-all}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-7200}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-7200}"
 MATRIX_DISABLE_SUCCESS_FILTER="${MATRIX_DISABLE_SUCCESS_FILTER:-0}"
@@ -220,13 +221,38 @@ run_case() {
   return 0
 }
 
+case_enabled() {
+  local case_label="$1"
+  local selected_case
+  if [[ -z "${MATRIX_CASES}" || "${MATRIX_CASES}" == "all" ]]; then
+    return 0
+  fi
+  for selected_case in ${MATRIX_CASES//,/ }; do
+    if [[ "${selected_case}" == "${case_label}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+maybe_run_case() {
+  local case_label="$1"
+  if case_enabled "${case_label}"; then
+    run_case "$@"
+  else
+    echo "=== ${case_label} skipped by MATRIX_CASES=${MATRIX_CASES} ==="
+    mkdir -p "${ARTIFACT_DIR}/${case_label}"
+    printf 'MATRIX_CASES=%s\n' "${MATRIX_CASES}" > "${ARTIFACT_DIR}/${case_label}/skip_reason.txt"
+  fi
+}
+
 nvidia-smi > "${JOB_ROOT}/nvidia_smi_start.txt" || true
 
-run_case baseline_dense_run_chunk8 8 0 run dense ""
-run_case lbfgs_run_chunk8 8 1 run dense ""
-run_case dense_skip_chunk8 8 0 skip dense ""
-run_case dense_run_lsmrj_chunk8 8 0 run lsmr_j "${MATRIX_LSMR_NEWTON_STAB}"
-run_case dense_run_chunk16 16 0 run dense ""
+maybe_run_case baseline_dense_run_chunk8 8 0 run dense ""
+maybe_run_case lbfgs_run_chunk8 8 1 run dense ""
+maybe_run_case dense_skip_chunk8 8 0 skip dense ""
+maybe_run_case dense_run_lsmrj_chunk8 8 0 run lsmr_j "${MATRIX_LSMR_NEWTON_STAB}"
+maybe_run_case dense_run_chunk16 16 0 run dense ""
 
 nvidia-smi > "${JOB_ROOT}/nvidia_smi_end.txt" || true
 
@@ -249,6 +275,8 @@ import pathlib
 import sys
 
 summary = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if not summary:
+    raise SystemExit("MATRIX_CASES did not select any runnable cases")
 failed = {label: status for label, status in summary.items() if status != 0}
 if failed:
     print("matrix cases failed:", json.dumps(failed, sort_keys=True), file=sys.stderr)
