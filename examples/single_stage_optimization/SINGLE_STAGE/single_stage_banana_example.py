@@ -5664,7 +5664,6 @@ def parse_args():
     if (
         args.profile_target_lane_only
         or args.profile_target_lane_memory_analysis
-        or args.trace_target_lane_k1_subtimers
     ):
         args.profile_target_lane = True
     if args.profile_target_lane_batch_size < 1:
@@ -8338,12 +8337,13 @@ def build_target_lane_outer_objectives(
     target_optimizer_initial_value_and_grad = None
     target_lane_profile = None
     runtime_bundle = None
+    include_profile_suite = profile_target_lane or trace_target_lane_k1_subtimers
 
     runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
         boozer_surface,
         bs,
         iota_target,
-        include_profile_suite=profile_target_lane,
+        include_profile_suite=include_profile_suite,
         include_host_wrappers=False,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,

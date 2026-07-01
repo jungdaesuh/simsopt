@@ -91,6 +91,19 @@ def test_cli_exposes_reporting_snapshot_diagnostic():
     assert args.diagnose_target_lane_reporting_snapshot is True
 
 
+def test_cli_k1_subtimers_do_not_enable_full_target_lane_profile():
+    args = _parse_child_args(
+        "--backend",
+        "jax",
+        "--optimizer-backend",
+        "scipy-jax-decomposed",
+        "--trace-target-lane-k1-subtimers",
+    )
+
+    assert args.trace_target_lane_k1_subtimers is True
+    assert args.profile_target_lane is False
+
+
 @pytest.mark.parametrize("mpol", [14, 15, 16, 17, 18, 24])
 def test_default_outer_ftol_respects_high_mpol_noise_floor(mpol):
     assert resolve_single_stage_outer_ftol(mpol) >= HIGH_MPOL_OUTER_FTOL_FLOOR

@@ -7532,6 +7532,138 @@ class TestTraceableObjective:
                 assert fields["ready_s"] >= 0.0
                 assert fields["total_s"] >= 0.0
 
+    def test_target_lane_k1_subtimers_skip_full_profile_lane(self, monkeypatch):
+        """K1 subtimers request split closures without running full profiling."""
+        include_profile_suite_values = []
+        candidate_gradient = jnp.asarray([3.0, -5.0], dtype=jnp.float64)
+        events = []
+
+        profile_suite = {
+            "warmstart_predict": lambda coil_dofs: {
+                "x": jnp.asarray(coil_dofs) + 0.25,
+                "success": jnp.asarray(True),
+            },
+            "pre_newton_solve_from_warmstart": lambda _coil_dofs, warmstart_x: {
+                "x": warmstart_x + 0.25,
+                "success": jnp.asarray(True),
+            },
+            "newton_polish_from_pre_newton": lambda _coil_dofs, pre_newton_x: {
+                "x": pre_newton_x + 0.25,
+                "success": jnp.asarray(True),
+            },
+            "solved_total_gradient": lambda *_args: candidate_gradient,
+        }
+
+        def runtime_bundle_builder():
+            def build_runtime_bundle(
+                _boozer_surface,
+                _bs,
+                _iota_target,
+                *,
+                include_profile_suite,
+                include_host_wrappers,
+                outer_objective_config,
+                success_filter,
+            ):
+                del include_host_wrappers, outer_objective_config, success_filter
+                include_profile_suite_values.append(bool(include_profile_suite))
+                bundle = {"objective": lambda _coil_dofs: jnp.asarray(0.0)}
+                if include_profile_suite:
+                    bundle["profile_suite"] = profile_suite
+                return bundle
+
+            return build_runtime_bundle
+
+        def seeded_value_and_grad_builder():
+            def build_seeded_value_and_grad(*_args, **_kwargs):
+                return types.SimpleNamespace(
+                    optimizer_initial_value_and_grad=(
+                        jnp.asarray(0.0, dtype=jnp.float64),
+                        jnp.asarray([1.0, -1.0], dtype=jnp.float64),
+                    )
+                )
+
+            return build_seeded_value_and_grad
+
+        def solved_pair_builder():
+            def build_solved_pair(*_args, **_kwargs):
+                def solve_fn(coil_dofs):
+                    arr = jnp.asarray(coil_dofs)
+                    return {
+                        "success": jnp.asarray(True),
+                        "primal_success": jnp.asarray(True),
+                        "value": jnp.asarray(7.0, dtype=jnp.float64),
+                        "x": arr + 1.0,
+                        "linear_solve_factors": None,
+                    }
+
+                def value_grad_from_solved(
+                    _coil_dofs,
+                    _solved_x,
+                    _linear_solve_factors,
+                ):
+                    return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+                return TraceableObjectiveSolvedPair(
+                    solve_fn=solve_fn,
+                    value_grad_from_solved=value_grad_from_solved,
+                )
+
+            return build_solved_pair
+
+        monkeypatch.setattr(
+            single_stage_example,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            runtime_bundle_builder,
+        )
+        monkeypatch.setattr(
+            single_stage_example,
+            "get_traceable_single_stage_seeded_value_and_grad_builder",
+            seeded_value_and_grad_builder,
+        )
+        monkeypatch.setattr(
+            single_stage_example,
+            "get_traceable_single_stage_solved_pair_builder",
+            solved_pair_builder,
+        )
+
+        _scalar_objective, value_and_grad, target_lane_profile, _initial = (
+            single_stage_example.build_target_lane_outer_objectives(
+                None,
+                None,
+                jnp.asarray(0.0, dtype=jnp.float64),
+                use_value_and_grad=True,
+                use_decomposed_solved_pair=True,
+                profile_target_lane=False,
+                trace_target_lane_k1_subtimers=True,
+                record_outer_optimizer_event=lambda label, **fields: events.append(
+                    (label, fields)
+                ),
+            )
+        )
+
+        assert include_profile_suite_values == [True]
+        assert target_lane_profile is None
+        value, grad = value_and_grad(np.zeros(2))
+        assert float(jax.device_get(value)) == pytest.approx(7.0)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            np.asarray(candidate_gradient, dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        returned_subphases = [
+            fields["subphase"]
+            for label, fields in events
+            if label == "target_lane_decomposed_k1_subtimer_returned"
+        ]
+        assert returned_subphases == [
+            "warmstart_predict",
+            "pre_newton_solve_from_warmstart",
+            "newton_polish_from_pre_newton",
+            "solved_total_gradient",
+        ]
+
     def test_decomposed_host_objective_omits_missing_k1_optional_fields(self):
         """Missing optional K1 metadata must not be serialized as measured false."""
         baseline = np.array([1.0, -2.0])
