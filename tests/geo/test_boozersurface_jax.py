@@ -4519,6 +4519,7 @@ class TestBoozerSurfaceJAXClass:
             resolve_boozer_optimizer_backend("scipy-jax", "host-jax") == "host-jax"
         )
         assert resolve_boozer_limited_memory("host-jax", True) is True
+        assert resolve_boozer_limited_memory("ondevice", True) is True
         assert (
             resolve_boozer_optimizer_method(
                 "host-jax",
@@ -4547,6 +4548,7 @@ class TestBoozerSurfaceJAXClass:
             ("scipy", False, "quasi-newton", "bfgs"),
             ("scipy", True, "quasi-newton", "lbfgs"),
             ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
+            ("ondevice", True, "quasi-newton", "lbfgs-ondevice"),
             ("ondevice", False, "lm", "lm-ondevice"),
             ("ondevice", False, "lm-minpack", "lm-minpack-ondevice"),
             ("ondevice", False, "optimistix-lm", "optimistix-lm-ondevice"),
@@ -8328,7 +8330,15 @@ class TestBoozerSurfaceJAXExactPath:
         )
 
         def fake_minimize(_fun, x0, **_kwargs):
-            return types.SimpleNamespace(x_k=x0)
+            return types.SimpleNamespace(
+                x_k=x0,
+                converged=jnp.asarray(True),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(2, dtype=jnp.int32),
+                nfev=jnp.asarray(9, dtype=jnp.int32),
+                ngev=jnp.asarray(9, dtype=jnp.int32),
+                ls_status=jnp.asarray(0, dtype=jnp.int32),
+            )
 
         def fake_newton_polish(
             obj_fn,
@@ -8376,6 +8386,10 @@ class TestBoozerSurfaceJAXExactPath:
                 continue
             assert result[field] is None
         assert bool(result["success"])
+        assert int(np.asarray(result["pre_newton_iter"])) == 2
+        assert int(np.asarray(result["pre_newton_nfev"])) == 9
+        assert int(np.asarray(result["pre_newton_ngev"])) == 9
+        assert int(np.asarray(result["pre_newton_line_search_status"])) == 0
         np.testing.assert_allclose(np.asarray(result["fun"]), np.asarray(expected_fun))
         np.testing.assert_allclose(
             np.asarray(result["grad"]),
@@ -8399,6 +8413,9 @@ class TestBoozerSurfaceJAXExactPath:
                 converged=jnp.asarray(True),
                 failed=jnp.asarray(False),
                 k=jnp.asarray(3, dtype=jnp.int32),
+                nfev=jnp.asarray(11, dtype=jnp.int32),
+                ngev=jnp.asarray(11, dtype=jnp.int32),
+                ls_status=jnp.asarray(0, dtype=jnp.int32),
             )
 
         def forbidden_newton_polish(*_args, **_kwargs):
@@ -8420,6 +8437,10 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["dense_linear_solve_factors_available"] is False
         assert result["dense_newton_steps_materialized"] is False
         assert result["newton_iter"] == 0
+        assert int(np.asarray(result["pre_newton_iter"])) == 3
+        assert int(np.asarray(result["pre_newton_nfev"])) == 11
+        assert int(np.asarray(result["pre_newton_ngev"])) == 11
+        assert int(np.asarray(result["pre_newton_line_search_status"])) == 0
 
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),

@@ -2839,6 +2839,29 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
             "success": jnp.asarray(True, dtype=bool),
             "primal_success": jnp.asarray(True, dtype=bool),
             "adjoint_linear_solve_available": jnp.asarray(False, dtype=bool),
+            "optimizer_method": "bfgs-ondevice",
+            "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
+            "type": "ls",
+            "dense_linear_solve_factors_available": jnp.asarray(True, dtype=bool),
+            "newton_polish_skipped": jnp.asarray(False, dtype=bool),
+            "nit": jnp.asarray(6, dtype=jnp.int32),
+            "pre_newton_iter": jnp.asarray(686, dtype=jnp.int32),
+            "pre_newton_nfev": jnp.asarray(812, dtype=jnp.int32),
+            "pre_newton_ngev": jnp.asarray(812, dtype=jnp.int32),
+            "pre_newton_line_search_status": jnp.asarray(0, dtype=jnp.int32),
+            "newton_iter": jnp.asarray(6, dtype=jnp.int32),
+            "ls_condition_estimate": jnp.asarray(6.15e6, dtype=jnp.float64),
+            "ls_residual_jacobian_condition_estimate": jnp.asarray(
+                1.25e3,
+                dtype=jnp.float64,
+            ),
+            "hessian_materialized": jnp.asarray(True, dtype=bool),
+            "dense_hessian_bytes": jnp.asarray(1024, dtype=jnp.int32),
+            "max_dense_hessian_bytes": jnp.asarray(2048, dtype=jnp.int32),
+            "dense_newton_steps_materialized": jnp.asarray(False, dtype=bool),
+            "final_gradient_norm": jnp.asarray(8.997e-12, dtype=jnp.float64),
+            "final_gradient_inf_norm": jnp.asarray(3.0e-12, dtype=jnp.float64),
         },
     )
 
@@ -2863,7 +2886,33 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
 
     assert bool(result["primal_success"]) is True
     assert bool(result["adjoint_linear_solve_available"]) is False
+    assert int(np.asarray(result["optimizer_method_code"])) == 1
+    assert int(np.asarray(result["linearization_kind_code"])) == 1
+    assert int(np.asarray(result["linear_solve_backend_code"])) == 1
+    assert int(np.asarray(result["type_code"])) == 1
+    assert bool(result["dense_linear_solve_factors_available"]) is True
+    assert bool(result["newton_polish_skipped"]) is False
     assert bool(result["success"]) is True
+    assert int(np.asarray(result["nit"])) == 6
+    assert int(np.asarray(result["pre_newton_iter"])) == 686
+    assert int(np.asarray(result["pre_newton_nfev"])) == 812
+    assert int(np.asarray(result["pre_newton_ngev"])) == 812
+    assert int(np.asarray(result["pre_newton_line_search_status"])) == 0
+    assert int(np.asarray(result["newton_iter"])) == 6
+    np.testing.assert_allclose(np.asarray(result["ls_condition_estimate"]), 6.15e6)
+    np.testing.assert_allclose(
+        np.asarray(result["ls_residual_jacobian_condition_estimate"]),
+        1.25e3,
+    )
+    assert bool(result["hessian_materialized"]) is True
+    assert int(np.asarray(result["dense_hessian_bytes"])) == 1024
+    assert int(np.asarray(result["max_dense_hessian_bytes"])) == 2048
+    assert bool(result["dense_newton_steps_materialized"]) is False
+    np.testing.assert_allclose(np.asarray(result["final_gradient_norm"]), 8.997e-12)
+    np.testing.assert_allclose(
+        np.asarray(result["final_gradient_inf_norm"]),
+        3.0e-12,
+    )
     np.testing.assert_allclose(np.asarray(result["value"]), -123.0)
     np.testing.assert_allclose(np.asarray(objective_value), -123.0)
 

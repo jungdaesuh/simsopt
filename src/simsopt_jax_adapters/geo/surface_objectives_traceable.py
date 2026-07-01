@@ -156,6 +156,45 @@ _TRACEABLE_EXACT_RESIDUAL_KEYS = (
     "weight_inv_modB",
 )
 
+_TRACEABLE_FORWARD_METADATA_CODE_TABLES = {
+    "optimizer_method": {
+        "bfgs-ondevice": 1,
+        "lbfgs-ondevice": 2,
+        "lm-ondevice": 3,
+        "lm-minpack-ondevice": 4,
+        "optimistix-lm-ondevice": 5,
+    },
+    "linearization_kind": {
+        "hessian": 1,
+        "exact_jacobian": 2,
+    },
+    "linear_solve_backend": {
+        "operator": 1,
+        "dense-plu": 2,
+        "dense-plu-shared": 3,
+        "none": 4,
+    },
+    "type": {
+        "ls": 1,
+        "exact": 2,
+    },
+}
+_TRACEABLE_FORWARD_METADATA_LABELS = {
+    field: {code: label for label, code in table.items()}
+    for field, table in _TRACEABLE_FORWARD_METADATA_CODE_TABLES.items()
+}
+
+
+def _traceable_forward_metadata_code(field, value):
+    """Return a stable int code for static metadata carried through JIT."""
+    if value is None:
+        return None
+    table = _TRACEABLE_FORWARD_METADATA_CODE_TABLES[field]
+    label = str(value)
+    if label not in table:
+        raise ValueError(f"Unsupported traceable forward metadata {field}={label!r}.")
+    return table[label]
+
 
 def _traceable_inner_objective_kwargs(objective_kwargs):
     """Select the LS inner-objective kwargs from the full traceable contract."""
@@ -599,8 +638,48 @@ def _pack_traceable_forward_result(
     success,
     primal_success,
     adjoint_linear_solve_available,
+    optimizer_method=None,
+    linearization_kind=None,
+    linear_solve_backend=None,
+    result_type=None,
+    dense_linear_solve_factors_available=None,
+    newton_polish_skipped=None,
+    nit=None,
+    pre_newton_iter=None,
+    pre_newton_nfev=None,
+    pre_newton_ngev=None,
+    pre_newton_line_search_status=None,
+    newton_iter=None,
+    ls_condition_estimate=None,
+    ls_residual_jacobian_condition_estimate=None,
+    hessian_materialized=None,
+    dense_hessian_bytes=None,
+    max_dense_hessian_bytes=None,
+    dense_newton_steps_materialized=None,
+    final_gradient_norm=None,
+    final_gradient_inf_norm=None,
 ):
     """Return the normalized traceable forward-result contract."""
+    missing_int = jnp.asarray(np.iinfo(np.int32).min, dtype=jnp.int32)
+    missing_float = jnp.asarray(np.nan, dtype=jnp.float64)
+    missing_bool = jnp.asarray(False, dtype=bool)
+
+    def present_field(value):
+        return jnp.asarray(value is not None, dtype=bool)
+
+    def bool_field(value):
+        return missing_bool if value is None else jnp.asarray(value, dtype=bool)
+
+    def int_field(value):
+        return missing_int if value is None else jnp.asarray(value, dtype=jnp.int32)
+
+    def float_field(value):
+        return (
+            missing_float
+            if value is None
+            else jnp.asarray(value, dtype=jnp.float64)
+        )
+
     return {
         "value": value,
         "x": x,
@@ -611,6 +690,72 @@ def _pack_traceable_forward_result(
         "success": success,
         "primal_success": primal_success,
         "adjoint_linear_solve_available": adjoint_linear_solve_available,
+        "optimizer_method_code": int_field(
+            _traceable_forward_metadata_code("optimizer_method", optimizer_method)
+        ),
+        "optimizer_method_code_present": present_field(optimizer_method),
+        "linearization_kind_code": int_field(
+            _traceable_forward_metadata_code(
+                "linearization_kind",
+                linearization_kind,
+            )
+        ),
+        "linearization_kind_code_present": present_field(linearization_kind),
+        "linear_solve_backend_code": int_field(
+            _traceable_forward_metadata_code(
+                "linear_solve_backend",
+                linear_solve_backend,
+            )
+        ),
+        "linear_solve_backend_code_present": present_field(linear_solve_backend),
+        "type_code": int_field(_traceable_forward_metadata_code("type", result_type)),
+        "type_code_present": present_field(result_type),
+        "dense_linear_solve_factors_available": bool_field(
+            dense_linear_solve_factors_available
+        ),
+        "dense_linear_solve_factors_available_present": present_field(
+            dense_linear_solve_factors_available
+        ),
+        "newton_polish_skipped": bool_field(newton_polish_skipped),
+        "newton_polish_skipped_present": present_field(newton_polish_skipped),
+        "nit": int_field(nit),
+        "nit_present": present_field(nit),
+        "pre_newton_iter": int_field(pre_newton_iter),
+        "pre_newton_iter_present": present_field(pre_newton_iter),
+        "pre_newton_nfev": int_field(pre_newton_nfev),
+        "pre_newton_nfev_present": present_field(pre_newton_nfev),
+        "pre_newton_ngev": int_field(pre_newton_ngev),
+        "pre_newton_ngev_present": present_field(pre_newton_ngev),
+        "pre_newton_line_search_status": int_field(pre_newton_line_search_status),
+        "pre_newton_line_search_status_present": present_field(
+            pre_newton_line_search_status
+        ),
+        "newton_iter": int_field(newton_iter),
+        "newton_iter_present": present_field(newton_iter),
+        "ls_condition_estimate": float_field(ls_condition_estimate),
+        "ls_condition_estimate_present": present_field(ls_condition_estimate),
+        "ls_residual_jacobian_condition_estimate": float_field(
+            ls_residual_jacobian_condition_estimate
+        ),
+        "ls_residual_jacobian_condition_estimate_present": present_field(
+            ls_residual_jacobian_condition_estimate
+        ),
+        "hessian_materialized": bool_field(hessian_materialized),
+        "hessian_materialized_present": present_field(hessian_materialized),
+        "dense_hessian_bytes": int_field(dense_hessian_bytes),
+        "dense_hessian_bytes_present": present_field(dense_hessian_bytes),
+        "max_dense_hessian_bytes": int_field(max_dense_hessian_bytes),
+        "max_dense_hessian_bytes_present": present_field(max_dense_hessian_bytes),
+        "dense_newton_steps_materialized": bool_field(
+            dense_newton_steps_materialized
+        ),
+        "dense_newton_steps_materialized_present": present_field(
+            dense_newton_steps_materialized
+        ),
+        "final_gradient_norm": float_field(final_gradient_norm),
+        "final_gradient_norm_present": present_field(final_gradient_norm),
+        "final_gradient_inf_norm": float_field(final_gradient_inf_norm),
+        "final_gradient_inf_norm_present": present_field(final_gradient_inf_norm),
     }
 
 
@@ -760,6 +905,34 @@ def _traceable_general_forward_result(
             success=success,
             primal_success=primal_success,
             adjoint_linear_solve_available=adjoint_linear_solve_available,
+            optimizer_method=solve_result.get("optimizer_method"),
+            linearization_kind=solve_result.get("linearization_kind"),
+            linear_solve_backend=solve_result.get("linear_solve_backend"),
+            result_type=solve_result.get("type"),
+            dense_linear_solve_factors_available=solve_result.get(
+                "dense_linear_solve_factors_available"
+            ),
+            newton_polish_skipped=solve_result.get("newton_polish_skipped"),
+            nit=solve_result.get("nit"),
+            pre_newton_iter=solve_result.get("pre_newton_iter"),
+            pre_newton_nfev=solve_result.get("pre_newton_nfev"),
+            pre_newton_ngev=solve_result.get("pre_newton_ngev"),
+            pre_newton_line_search_status=solve_result.get(
+                "pre_newton_line_search_status"
+            ),
+            newton_iter=solve_result.get("newton_iter"),
+            ls_condition_estimate=solve_result.get("ls_condition_estimate"),
+            ls_residual_jacobian_condition_estimate=solve_result.get(
+                "ls_residual_jacobian_condition_estimate"
+            ),
+            hessian_materialized=solve_result.get("hessian_materialized"),
+            dense_hessian_bytes=solve_result.get("dense_hessian_bytes"),
+            max_dense_hessian_bytes=solve_result.get("max_dense_hessian_bytes"),
+            dense_newton_steps_materialized=solve_result.get(
+                "dense_newton_steps_materialized"
+            ),
+            final_gradient_norm=solve_result.get("final_gradient_norm"),
+            final_gradient_inf_norm=solve_result.get("final_gradient_inf_norm"),
         )
 
     if linearization_kind != "exact_jacobian":
@@ -3184,6 +3357,11 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     baseline_x = state["baseline_x"]
     baseline_linear_solve_factors = state["baseline_linear_solve_factors"]
     optimize_G = state["optimize_G"]
+    resolved_optimizer_method = (
+        None
+        if booz_jax.boozer_type == "exact"
+        else booz_jax._resolve_optimizer_method(optimize_G=optimize_G)
+    )
     predictor_kind = state["predictor_kind"]
     linearization_kind = state["linearization_kind"]
     linear_solve_tol = state["linear_solve_tol"]
@@ -3220,6 +3398,45 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         return {
             "x": warmstart_x,
             "success": warmstart_linear_solve_success,
+        }
+
+    def _pre_newton_solve_for(coil_dofs, warmstart_x):
+        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+        return booz_jax._run_traceable_pre_newton_stage(
+            coil_set_spec,
+            warmstart_x,
+            resolved_optimizer_method,
+            optimize_G=optimize_G,
+            weight_inv_modB=booz_jax.options["weight_inv_modB"],
+            materialize_dense_linearization=False,
+        )
+
+    def _newton_polish_from_pre_newton_for(coil_dofs, pre_newton_x):
+        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+        newton_result = booz_jax._run_traceable_newton_polish_stage(
+            coil_set_spec,
+            pre_newton_x,
+            resolved_optimizer_method,
+            optimize_G=optimize_G,
+            weight_inv_modB=booz_jax.options["weight_inv_modB"],
+            materialize_dense_linearization=False,
+        )
+        hessian = newton_result["hessian"]
+        hessian_materialized = hessian is not None
+        return {
+            "x": newton_result["x"],
+            "fun": newton_result["fun"],
+            "success": newton_result["success"],
+            "nit": _runtime_int32_scalar(newton_result["nit"]),
+            "hessian_materialized": _runtime_bool(hessian_materialized),
+            "dense_hessian_bytes": _runtime_int32_scalar(
+                0 if hessian is None else hessian.size * hessian.dtype.itemsize
+            ),
+            "final_gradient_norm": jnp.linalg.norm(newton_result["grad"]),
+            "final_gradient_inf_norm": jnp.linalg.norm(
+                newton_result["grad"],
+                ord=np.inf,
+            ),
         }
 
     def _solve_for(coil_dofs):
@@ -3346,6 +3563,10 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         compiled_forward_result_for
     )
     compiled_warmstart_for = jax.jit(_warmstart_for)
+    compiled_pre_newton_solve_for = jax.jit(_pre_newton_solve_for)
+    compiled_newton_polish_from_pre_newton_for = jax.jit(
+        _newton_polish_from_pre_newton_for
+    )
     compiled_inner_solve_for = jax.jit(_solve_for)
     compiled_surface_geometry_for = jax.jit(_surface_geometry_for)
     compiled_field_for = jax.jit(_field_for)
@@ -3355,7 +3576,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     compiled_solved_total_objective_for = jax.jit(_solved_total_objective_for)
     compiled_solved_total_gradient_for = jax.jit(_total_gradient_for)
 
-    return {
+    profile_suite = {
         "forward_result": compiled_forward_result_for,
         "forward_value": compiled_forward_value_for,
         "warmstart_predict": compiled_warmstart_for,
@@ -3368,6 +3589,18 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         "value_and_grad_pipeline": resolved_value_and_grad_pipeline,
         "batched_value_and_grad_pipeline": resolved_batched_value_and_grad_pipeline,
     }
+    if booz_jax.boozer_type != "exact":
+        profile_suite["pre_newton_solve_from_warmstart"] = (
+            compiled_pre_newton_solve_for
+        )
+    if (
+        booz_jax.boozer_type != "exact"
+        and booz_jax.options["newton_polish_policy"] != "skip"
+    ):
+        profile_suite["newton_polish_from_pre_newton"] = (
+            compiled_newton_polish_from_pre_newton_for
+        )
+    return profile_suite
 
 
 def make_traceable_objective_runtime_bundle(
