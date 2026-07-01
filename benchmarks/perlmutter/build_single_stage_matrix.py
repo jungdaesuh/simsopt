@@ -66,6 +66,7 @@ BUDGETS = {
     "target_lane_boozer_bfgs_maxiter": 1500,
     "target_lane_boozer_newton_maxiter": 50,
     "target_lane_boozer_newton_polish_policy": "run",
+    "target_lane_trial_boozer_newton_polish_policy": "skip",
 }
 
 MIXED_PARITY_TIMING_NOTE = (
@@ -181,6 +182,9 @@ def build_cells() -> list[dict]:
                         "PROD_BOOZER_BFGS_MAXITER": str(BUDGETS["target_lane_boozer_bfgs_maxiter"]),
                         "PROD_NEWTON_MAXITER": str(BUDGETS["target_lane_boozer_newton_maxiter"]),
                         "PROD_NEWTON_POLISH_POLICY": BUDGETS["target_lane_boozer_newton_polish_policy"],
+                        "PROD_TRIAL_NEWTON_POLISH_POLICY": BUDGETS[
+                            "target_lane_trial_boozer_newton_polish_policy"
+                        ],
                         "PROD_TIMING_CLASSIFICATION": timing_label["timing_classification"],
                         "PROD_SUPPORTS_PERFORMANCE_HEADLINE": "0",
                         "PROD_MPOL": str(TIERS[tier]["mpol"]),
@@ -251,7 +255,8 @@ def render_markdown(manifest: dict) -> str:
         f"- Budgets: outer L-BFGS {manifest['budgets']['outer_lbfgs_maxiter']}, "
         f"Boozer BFGS {manifest['budgets']['target_lane_boozer_bfgs_maxiter']}, "
         f"Boozer Newton {manifest['budgets']['target_lane_boozer_newton_maxiter']}, "
-        f"polish `{manifest['budgets']['target_lane_boozer_newton_polish_policy']}`",
+        f"full polish `{manifest['budgets']['target_lane_boozer_newton_polish_policy']}`, "
+        f"trial polish `{manifest['budgets']['target_lane_trial_boozer_newton_polish_policy']}`",
         f"- Inner Boozer least-squares: `{manifest['inner_boozer_least_squares']}` "
         "(both lanes; LM/lm-minpack dropped)",
         "",

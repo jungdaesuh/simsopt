@@ -53,6 +53,10 @@ FAIR_MAXITER="${FAIR_MAXITER:-1500}"
 FAIR_BOOZER_BFGS_MAXITER="${FAIR_BOOZER_BFGS_MAXITER:-1500}"
 FAIR_NEWTON_MAXITER="${FAIR_NEWTON_MAXITER:-50}"
 FAIR_NEWTON_POLISH_POLICY="${FAIR_NEWTON_POLISH_POLICY:-run}"
+FAIR_TRIAL_NEWTON_POLISH_POLICY="${FAIR_TRIAL_NEWTON_POLISH_POLICY:-skip}"
+FAIR_TIMING_CLASSIFICATION="${FAIR_TIMING_CLASSIFICATION:-mixed-parity-reference}"
+FAIR_SUPPORTS_PERFORMANCE_HEADLINE="${FAIR_SUPPORTS_PERFORMANCE_HEADLINE:-0}"
+FAIR_HEADLINE_TIMING_CLASSIFICATION="${FAIR_HEADLINE_TIMING_CLASSIFICATION:-}"
 # Record JAX compile/cache-miss diagnostics on both lanes by default (set =0 to
 # disable for a pristine throughput run). See the NOTE above.
 FAIR_RECORD_COMPILE_DIAGNOSTICS="${FAIR_RECORD_COMPILE_DIAGNOSTICS:-1}"
@@ -71,6 +75,12 @@ case "${run_root_real}/" in
 esac
 
 mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+printf '%s\n' "${FAIR_TIMING_CLASSIFICATION}" > "${JOB_ROOT}/timing_classification.txt"
+printf '{"timing_classification":"%s","supports_performance_headline":%s,"headline_timing_classification":"%s"}\n' \
+  "${FAIR_TIMING_CLASSIFICATION}" \
+  "${FAIR_SUPPORTS_PERFORMANCE_HEADLINE}" \
+  "${FAIR_HEADLINE_TIMING_CLASSIFICATION}" \
+  > "${JOB_ROOT}/benchmark_timing_label.json"
 exec > >(tee "${LOG_DIR}/driver_stdout.log")
 exec 2> >(tee "${LOG_DIR}/driver_stderr.log" >&2)
 
@@ -167,6 +177,7 @@ run_lane() {
         --nphi "${FAIR_NPHI}" --ntheta "${FAIR_NTHETA}" \
         --warm-start-run-dir "${FAIR_WARM_START_RUN_DIR}" \
         --target-lane-boozer-newton-polish-policy "${FAIR_NEWTON_POLISH_POLICY}" \
+        --target-lane-trial-boozer-newton-polish-policy "${FAIR_TRIAL_NEWTON_POLISH_POLICY}" \
         --target-lane-boozer-newton-maxiter "${FAIR_NEWTON_MAXITER}" \
         --stage2-bs-path "${FIXTURE_STAGE2_BS}" \
         --case-artifacts-dir "${step_dir}/cases" \

@@ -191,6 +191,12 @@ _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "run",
     "skip",
 )
+_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "skip"
+_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
+    "default",
+    "run",
+    "skip",
+)
 _SAME_CANDIDATE_X_ATOL = 1e-8
 _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL = 1e-12
 _SAME_CANDIDATE_SCALAR_RTOL = 1e-10
@@ -510,6 +516,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target-lane-trial-boozer-newton-polish-policy",
+        choices=_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES,
+        default=_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
+        help=(
+            "Policy for the JAX/ondevice Boozer Newton polish in target-lane "
+            "line-search trial solves. Defaults to 'skip' so rejected probes do "
+            "not pay full polish; accepted-step/final reporting keeps the full "
+            "target-lane policy."
+        ),
+    )
+    parser.add_argument(
         "--target-lane-boozer-newton-tol",
         type=float,
         default=None,
@@ -724,6 +741,25 @@ def _normalize_target_lane_boozer_newton_polish_policy(policy: str | None) -> st
     return normalized
 
 
+def _normalize_target_lane_trial_boozer_newton_polish_policy(
+    policy: str | None,
+) -> str:
+    normalized = (
+        _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
+        if policy is None
+        else str(policy).strip().lower()
+    )
+    if normalized == "default":
+        normalized = _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT
+    if normalized not in _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES:
+        choices = ", ".join(_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES)
+        raise ValueError(
+            "target_lane_trial_boozer_newton_polish_policy must be one of: "
+            f"{choices}."
+        )
+    return normalized
+
+
 def _requested_target_lane_boozer_newton_polish_policy(
     args: argparse.Namespace,
 ) -> str:
@@ -732,6 +768,18 @@ def _requested_target_lane_boozer_newton_polish_policy(
             args,
             "target_lane_boozer_newton_polish_policy",
             _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
+        )
+    )
+
+
+def _requested_target_lane_trial_boozer_newton_polish_policy(
+    args: argparse.Namespace,
+) -> str:
+    return _normalize_target_lane_trial_boozer_newton_polish_policy(
+        getattr(
+            args,
+            "target_lane_trial_boozer_newton_polish_policy",
+            _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
         )
     )
 
@@ -745,6 +793,32 @@ def _resolve_target_lane_boozer_newton_polish_policy(
     if backend != "jax":
         return None
     policy = _requested_target_lane_boozer_newton_polish_policy(args)
+    boozer_optimizer_backend = _resolve_target_boozer_optimizer_backend(
+        backend=backend,
+        platform=platform,
+        args=args,
+    )
+    effective_boozer_optimizer_backend = (
+        _resolve_single_stage_jax_boozer_optimizer_backend(
+            backend,
+            getattr(args, "optimizer_backend", None),
+            boozer_optimizer_backend,
+        )
+    )
+    if effective_boozer_optimizer_backend != TARGET_OPTIMIZER_BACKEND:
+        return None
+    return policy
+
+
+def _resolve_target_lane_trial_boozer_newton_polish_policy(
+    *,
+    backend: str,
+    platform: str,
+    args: argparse.Namespace,
+) -> str | None:
+    if backend != "jax":
+        return None
+    policy = _requested_target_lane_trial_boozer_newton_polish_policy(args)
     boozer_optimizer_backend = _resolve_target_boozer_optimizer_backend(
         backend=backend,
         platform=platform,
@@ -1052,6 +1126,9 @@ def _single_stage_full_run_family_id(
             "target_lane_boozer_newton_polish_policy": (
                 _requested_target_lane_boozer_newton_polish_policy(args)
             ),
+            "target_lane_trial_boozer_newton_polish_policy": (
+                _requested_target_lane_trial_boozer_newton_polish_policy(args)
+            ),
             "target_lane_boozer_newton_stab": (
                 None
                 if getattr(args, "target_lane_boozer_newton_stab", None) is None
@@ -1178,6 +1255,7 @@ def _append_optional_single_stage_flags(
     target_lane_boozer_newton_maxiter: int | None = None,
     target_lane_boozer_newton_stab: float | None = None,
     target_lane_boozer_newton_polish_policy: str | None = None,
+    target_lane_trial_boozer_newton_polish_policy: str | None = None,
     replay_objective_evaluation_trace: Path | None = None,
 ) -> None:
     if benchmark_mode:
@@ -1274,6 +1352,13 @@ def _append_optional_single_stage_flags(
             [
                 "--target-lane-boozer-newton-polish-policy",
                 str(target_lane_boozer_newton_polish_policy),
+            ]
+        )
+    if target_lane_trial_boozer_newton_polish_policy is not None:
+        command.extend(
+            [
+                "--target-lane-trial-boozer-newton-polish-policy",
+                str(target_lane_trial_boozer_newton_polish_policy),
             ]
         )
 
@@ -1561,6 +1646,13 @@ def _run_single_stage_case(
             ),
             target_lane_boozer_newton_polish_policy=(
                 _resolve_target_lane_boozer_newton_polish_policy(
+                    backend=backend,
+                    platform=platform,
+                    args=args,
+                )
+            ),
+            target_lane_trial_boozer_newton_polish_policy=(
+                _resolve_target_lane_trial_boozer_newton_polish_policy(
                     backend=backend,
                     platform=platform,
                     args=args,
@@ -4444,6 +4536,9 @@ def main() -> None:
             "boozer_optimizer_backend": args.boozer_optimizer_backend,
             "target_lane_boozer_newton_polish_policy": (
                 _requested_target_lane_boozer_newton_polish_policy(args)
+            ),
+            "target_lane_trial_boozer_newton_polish_policy": (
+                _requested_target_lane_trial_boozer_newton_polish_policy(args)
             ),
             "target_lane_boozer_newton_stab": args.target_lane_boozer_newton_stab,
             "outer_maxiter": int(args.maxiter),

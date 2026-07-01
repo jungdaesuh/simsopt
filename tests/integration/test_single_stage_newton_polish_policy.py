@@ -12,12 +12,14 @@ Newton. Parity therefore compared a BFGS-only GPU surface against a
 Newton-converged CPU surface (apples-to-oranges), and the CPU Newton was the slow
 lane. Verified against the parent commit's resolver.
 
-The policy is now an explicit ``"run"``/``"skip"`` choice that defaults to
-``"run"`` on every platform -- matching the production GPU lane, which already
-passes ``--target-lane-boozer-newton-polish-policy run`` and converges the inner
-ondevice Newton via the strict-clean traceable path. These tests pin that
-contract at both resolvers: the benchmark parent (which builds the child command)
-and the example child (which maps the policy onto the BoozerSurfaceJAX option).
+The full-fidelity policy is now an explicit ``"run"``/``"skip"`` choice that
+defaults to ``"run"`` on every platform -- matching the production GPU lane,
+which already passes ``--target-lane-boozer-newton-polish-policy run`` and
+converges the inner ondevice Newton via the strict-clean traceable path. The
+trial-only policy is resolved separately and defaults to ``"skip"`` for
+line-search probes. These tests pin both contracts at the benchmark parent
+(which builds the child command) and the example child (which maps the policies
+onto the BoozerSurfaceJAX options).
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import pytest
 
 from benchmarks.single_stage_init_parity import (
     _resolve_target_lane_boozer_newton_polish_policy,
+    _resolve_target_lane_trial_boozer_newton_polish_policy,
     parse_args,
 )
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
@@ -98,6 +101,26 @@ def test_explicit_skip_is_honored_for_target_lane_cpu_child():
     assert policy == "skip", policy
 
 
+def test_parent_trial_policy_defaults_to_skip_for_target_lane_cuda_child():
+    args = _parse([])
+    policy = _resolve_target_lane_trial_boozer_newton_polish_policy(
+        backend="jax",
+        platform="cuda",
+        args=args,
+    )
+    assert policy == "skip", policy
+
+
+def test_parent_trial_policy_honors_explicit_run():
+    args = _parse(["--target-lane-trial-boozer-newton-polish-policy", "run"])
+    policy = _resolve_target_lane_trial_boozer_newton_polish_policy(
+        backend="jax",
+        platform="cuda",
+        args=args,
+    )
+    assert policy == "run", policy
+
+
 def test_scipy_jax_fullgraph_child_gets_no_ondevice_policy_override():
     """Fullgraph's scipy Boozer child does not receive a JAX/ondevice override."""
     args = _parse(
@@ -112,6 +135,12 @@ def test_scipy_jax_fullgraph_child_gets_no_ondevice_policy_override():
         backend="jax", platform="cpu", args=args
     )
     assert policy is None, policy
+    trial_policy = _resolve_target_lane_trial_boozer_newton_polish_policy(
+        backend="jax",
+        platform="cpu",
+        args=args,
+    )
+    assert trial_policy is None, trial_policy
 
 
 def test_non_jax_reference_lane_gets_no_override():

@@ -28,18 +28,22 @@ PROD_NEWTON_MAXITER="${PROD_NEWTON_MAXITER:-50}"
 # Default to the decomposed lane (host outer L-BFGS-B + split K1 forward /
 # K2 value+adjoint): campaign-productionized as the lane that compiles and
 # passes at mpol10, where plain scipy-jax re-fuses K1+K2 into the heavier
-# kernel. Export PROD_OPTIMIZER_BACKEND=scipy-jax or scipy-jax-fullgraph to
-# exercise the fused lanes instead.
+# kernel. Export PROD_OPTIMIZER_BACKEND=scipy-jax only for the deprecated
+# legacy reduced lane; use scipy-jax-fullgraph for fused parity.
 PROD_OPTIMIZER_BACKEND="${PROD_OPTIMIZER_BACKEND:-scipy-jax-decomposed}"
 PROD_BOOZER_LS_ALGORITHM="${PROD_BOOZER_LS_ALGORITHM:-}"
 PROD_BOOZER_OPTIMIZER_BACKEND="${PROD_BOOZER_OPTIMIZER_BACKEND:-}"
 PROD_VARIANT="${PROD_OPTIMIZER_BACKEND}${PROD_BOOZER_LS_ALGORITHM:+-${PROD_BOOZER_LS_ALGORITHM}}"
+PROD_TIMING_CLASSIFICATION="${PROD_TIMING_CLASSIFICATION:-mixed-parity-reference}"
+PROD_SUPPORTS_PERFORMANCE_HEADLINE="${PROD_SUPPORTS_PERFORMANCE_HEADLINE:-0}"
+PROD_HEADLINE_TIMING_CLASSIFICATION="${PROD_HEADLINE_TIMING_CLASSIFICATION:-}"
 PROD_MPOL="${PROD_MPOL:-}"
 PROD_NTOR="${PROD_NTOR:-}"
 PROD_NPHI="${PROD_NPHI:-}"
 PROD_NTHETA="${PROD_NTHETA:-}"
 PROD_WARM_START_RUN_DIR="${PROD_WARM_START_RUN_DIR:-}"
 PROD_NEWTON_POLISH_POLICY="${PROD_NEWTON_POLISH_POLICY:-run}"
+PROD_TRIAL_NEWTON_POLISH_POLICY="${PROD_TRIAL_NEWTON_POLISH_POLICY:-skip}"
 # Persistent JAX/XLA compilation cache. Keep this OUTSIDE ${JOB_ROOT} so the one
 # slow cold XLA:GPU compile (~73 min on the RunPod cu1290 image; diagnosed
 # "once-slow" in docs/jax_scipy_jax_gpu_compile_diagnostic_next.md) is paid once
@@ -179,6 +183,12 @@ print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 
 echo "${PROD_VARIANT}" > "${JOB_ROOT}/production_variant.txt"
+printf '%s\n' "${PROD_TIMING_CLASSIFICATION}" > "${JOB_ROOT}/timing_classification.txt"
+printf '{"timing_classification":"%s","supports_performance_headline":%s,"headline_timing_classification":"%s"}\n' \
+  "${PROD_TIMING_CLASSIFICATION}" \
+  "${PROD_SUPPORTS_PERFORMANCE_HEADLINE}" \
+  "${PROD_HEADLINE_TIMING_CLASSIFICATION}" \
+  > "${JOB_ROOT}/benchmark_timing_label.json"
 boozer_bfgs_args=()
 if [[ -n "${PROD_BOOZER_BFGS_MAXITER}" ]]; then
   boozer_bfgs_args=(--target-lane-boozer-bfgs-maxiter "${PROD_BOOZER_BFGS_MAXITER}")
@@ -223,6 +233,7 @@ set +e
     "${boozer_bfgs_args[@]}" \
     "${resolution_args[@]}" \
     --target-lane-boozer-newton-polish-policy "${PROD_NEWTON_POLISH_POLICY}" \
+    --target-lane-trial-boozer-newton-polish-policy "${PROD_TRIAL_NEWTON_POLISH_POLICY}" \
     --target-lane-boozer-newton-maxiter "${PROD_NEWTON_MAXITER}" \
     --stage2-bs-path "${FIXTURE_STAGE2_BS}" \
     --case-artifacts-dir "${ARTIFACT_DIR}/single_stage_cuda_production_${PROD_VARIANT}_cases" \

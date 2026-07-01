@@ -9,13 +9,13 @@ Scope: single-stage banana optimization with JAX target lane, especially
 
 ## Executive Summary
 
-The current performance problem is not primarily that the JAX kernels are
-uncompiled, running on CPU, or using the wrong linear solver. The latest
-diagnostic evidence points to two higher-level target-lane workflow problems:
+The diagnosed performance problem was not primarily that the JAX kernels were
+uncompiled, running on CPU, or using the wrong linear solver. The diagnostic
+evidence pointed to two higher-level target-lane workflow problems:
 
-1. Full Newton polish is being paid on line-search trial candidates, including
+1. Full Newton polish was paid on line-search trial candidates, including
    candidates that are rejected or already show failure/stall symptoms.
-2. Final/reporting synchronization can recompute target-lane forward state
+2. Final/reporting synchronization could recompute target-lane forward state
    instead of reusing the phase-2 K1 forward result that was already computed
    for the final optimizer point.
 
@@ -30,6 +30,11 @@ The split is good, but it makes reuse boundaries explicit. If K1 is run during
 the optimizer and then final reporting runs another K1 for the same final DOFs,
 the JAX lane pays duplicate expensive solve work that the native CPU path avoids
 structurally through mutable `BoozerSurface` state.
+
+The follow-up patch addresses both workflow boundaries in the default
+`scipy-jax-decomposed` path. The remaining validation task is to prove the
+effect with the Perlmutter GPU matrix and compare the dense-adjoint path against
+the optional `lsmr_j` experiment.
 
 The right fix is not to default to `lsmr_j`, not to switch to `lbfgs-ondevice`,
 and not to copy the CPU path blindly. The right fix is to make the target-lane
@@ -248,8 +253,8 @@ The target-lane Boozer adapter supports a policy knob:
 - `src/simsopt_jax_adapters/geo/boozer_surface.py:7865` - otherwise run Newton
   polish
 
-The current policy is too coarse. It is essentially global `run` or `skip`.
-What the diagnostics require is a context-aware policy:
+The pre-fix policy was too coarse. It was essentially global `run` or `skip`.
+The diagnostics required a context-aware policy:
 
 - Line-search trial candidate: bounded/cheap solve, early escape on failure.
 - Accepted/final candidate: full Newton polish.
@@ -259,8 +264,8 @@ What the diagnostics require is a context-aware policy:
 
 The root cause is not a single low-level kernel. It is an orchestration mismatch:
 the target lane made the inner Boozer solve more explicit and more functional,
-but the outer workflow still treats every candidate and every reporting sync as
-if a native mutable state object were cheap to refresh.
+but the outer workflow treated every candidate and every reporting sync as if a
+native mutable state object were cheap to refresh.
 
 This produces two concrete costs:
 
@@ -268,8 +273,8 @@ This produces two concrete costs:
 
    The line search probes candidates that are expected to be rejected. Some are
    far from the accepted state or already show failed linear solves /
-   backtracking failure. The current target-lane solve can still pay full Newton
-   polish before returning a failure. The diagnostic eval-2 shows this can cost
+   backtracking failure. The pre-fix target-lane solve could still pay full
+   Newton polish before returning a failure. The diagnostic eval-2 shows this can cost
    about 175 seconds for one rejected trial.
 
 2. **Final-reporting duplicate K1**
@@ -539,18 +544,25 @@ Implemented in the follow-up patch:
 - The target lane now has a separate trial-only Boozer Newton-polish policy,
   defaulting trial solves to `skip` while leaving initialization,
   accepted-step, final, and reference paths on the full `run` policy.
+- The parity wrapper and Perlmutter launch scripts now pass and record the
+  trial-only policy, so GPU validation jobs exercise the intended child
+  runtime contract instead of relying on implicit child defaults.
 - Focused regressions cover exact-DOF solved-state cache reuse and the
   trial-vs-full polish policy split.
 
 ## Bottom Line
 
-The target-lane slowdown is mainly a workflow/contract problem:
+The original target-lane slowdown was mainly a workflow/contract problem:
 
 - JAX made K1/K2/forward-result boundaries explicit.
-- The optimizer/reporting workflow has not fully exploited those boundaries.
-- Rejected line-search candidates can still pay full Newton polish.
-- Final reporting can still recompute forward state already available from the
+- The optimizer/reporting workflow had not fully exploited those boundaries.
+- Rejected line-search candidates paid full Newton polish before the outer line
+  search accepted or rejected them.
+- Final reporting recomputed forward state that was already available from the
   optimizer.
 
-Fixing those boundaries should be attempted before treating `lsmr_j` or any
-other linear-solver swap as the main solution.
+The follow-up patch now fixes those two workflow boundaries for the default
+`scipy-jax-decomposed` path: trial probes use the trial-only `skip` policy, and
+final sync can reuse the exact-DOF solved-state payload. The next proof point is
+runtime evidence from the Perlmutter GPU matrix, including the optional `lsmr_j`
+comparator as an experiment rather than the primary solution.
