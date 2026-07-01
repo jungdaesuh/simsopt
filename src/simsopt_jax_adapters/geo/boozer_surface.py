@@ -304,6 +304,35 @@ _BOOZER_LINEARIZED_RESULT_KEYS = frozenset(
         "linearization_residency",
     }
 )
+_BOOZER_NEWTON_DIAGNOSTIC_RESULT_KEYS: tuple[str, ...] = (
+    "initial_gradient_norm",
+    "final_gradient_norm",
+    "final_gradient_inf_norm",
+    "newton_attempted_iterations",
+    "newton_stalled",
+    "newton_stop_reason_code",
+    "newton_last_step_accepted",
+    "newton_last_step_norm",
+    "newton_last_step_finite",
+    "newton_last_linear_solve_success",
+    "newton_last_linear_solve_iterations",
+    "newton_last_linear_residual_relative",
+    "newton_last_backtracking_iterations",
+    "newton_last_accepted_alpha",
+    "newton_trace_active",
+    "newton_trace_step_accepted",
+    "newton_trace_value_before",
+    "newton_trace_gradient_norm_before",
+    "newton_trace_linear_tol",
+    "newton_trace_step_norm",
+    "newton_trace_step_finite",
+    "newton_trace_linear_solve_success",
+    "newton_trace_linear_solve_iterations",
+    "newton_trace_linear_residual_relative",
+    "newton_trace_backtracking_iterations",
+    "newton_trace_accepted_alpha",
+)
+
 _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
     {
         "hessian_materialized",
@@ -313,8 +342,7 @@ _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
         "dense_newton_steps_materialized",
         "dense_newton_steps_message",
         "newton_iter",
-        "final_gradient_norm",
-        "final_gradient_inf_norm",
+        *_BOOZER_NEWTON_DIAGNOSTIC_RESULT_KEYS,
         "iterative_refinement_ran",
         "final_step_iterative_refinement_ran",
         "dense_refinement_ran",
@@ -3336,8 +3364,10 @@ def _ls_newton_reporting_fields(result):
         ),
         "dense_newton_steps_message": result.get("dense_newton_steps_message"),
         "newton_iter": result.get("newton_iter"),
-        "final_gradient_norm": result.get("final_gradient_norm"),
-        "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
+        **{
+            key: result.get(key)
+            for key in _BOOZER_NEWTON_DIAGNOSTIC_RESULT_KEYS
+        },
         "iterative_refinement_ran": result.get("iterative_refinement_ran"),
         "final_step_iterative_refinement_ran": result.get(
             "final_step_iterative_refinement_ran"

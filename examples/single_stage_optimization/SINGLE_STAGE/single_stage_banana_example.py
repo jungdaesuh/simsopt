@@ -549,6 +549,10 @@ _K1_FORWARD_BOOL_PROGRESS_FIELDS = (
     "dense_newton_steps_materialized",
     "linear_solve_success",
     "newton_polish_skipped",
+    "newton_stalled",
+    "newton_last_step_accepted",
+    "newton_last_step_finite",
+    "newton_last_linear_solve_success",
 )
 
 _K1_FORWARD_STRING_PROGRESS_FIELDS = (
@@ -574,6 +578,14 @@ _K1_FORWARD_SCALAR_PROGRESS_FIELDS = (
     "pre_newton_ngev",
     "pre_newton_line_search_status",
     "newton_iter",
+    "initial_gradient_norm",
+    "newton_attempted_iterations",
+    "newton_stop_reason_code",
+    "newton_last_step_norm",
+    "newton_last_linear_solve_iterations",
+    "newton_last_linear_residual_relative",
+    "newton_last_backtracking_iterations",
+    "newton_last_accepted_alpha",
     "ls_condition_estimate",
     "ls_residual_jacobian_condition_estimate",
     "dense_hessian_bytes",

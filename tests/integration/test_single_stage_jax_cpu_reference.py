@@ -7394,6 +7394,27 @@ class TestTraceableObjective:
                 "pre_newton_ngev": jnp.asarray(31, dtype=jnp.int32),
                 "pre_newton_line_search_status": jnp.asarray(-1, dtype=jnp.int32),
                 "newton_iter": jnp.asarray(3, dtype=jnp.int32),
+                "initial_gradient_norm": jnp.asarray(9.5, dtype=jnp.float64),
+                "newton_attempted_iterations": jnp.asarray(4, dtype=jnp.int32),
+                "newton_stalled": jnp.asarray(False),
+                "newton_stop_reason_code": jnp.asarray(0, dtype=jnp.int32),
+                "newton_last_step_accepted": jnp.asarray(True),
+                "newton_last_step_norm": jnp.asarray(0.25, dtype=jnp.float64),
+                "newton_last_step_finite": jnp.asarray(True),
+                "newton_last_linear_solve_success": jnp.asarray(True),
+                "newton_last_linear_solve_iterations": jnp.asarray(
+                    7,
+                    dtype=jnp.int32,
+                ),
+                "newton_last_linear_residual_relative": jnp.asarray(
+                    2.5e-13,
+                    dtype=jnp.float64,
+                ),
+                "newton_last_backtracking_iterations": jnp.asarray(
+                    1,
+                    dtype=jnp.int32,
+                ),
+                "newton_last_accepted_alpha": jnp.asarray(1.0, dtype=jnp.float64),
                 "ls_condition_estimate": jnp.asarray(6.15e6, dtype=jnp.float64),
                 "hessian_materialized": jnp.asarray(False),
                 "dense_hessian_bytes": jnp.asarray(4096, dtype=jnp.int32),
@@ -7450,6 +7471,20 @@ class TestTraceableObjective:
         assert returned_fields["pre_newton_ngev"] == 31
         assert returned_fields["pre_newton_line_search_status"] == -1
         assert returned_fields["newton_iter"] == 3
+        assert returned_fields["initial_gradient_norm"] == pytest.approx(9.5)
+        assert returned_fields["newton_attempted_iterations"] == 4
+        assert returned_fields["newton_stalled"] is False
+        assert returned_fields["newton_stop_reason_code"] == 0
+        assert returned_fields["newton_last_step_accepted"] is True
+        assert returned_fields["newton_last_step_norm"] == pytest.approx(0.25)
+        assert returned_fields["newton_last_step_finite"] is True
+        assert returned_fields["newton_last_linear_solve_success"] is True
+        assert returned_fields["newton_last_linear_solve_iterations"] == 7
+        assert returned_fields["newton_last_linear_residual_relative"] == pytest.approx(
+            2.5e-13
+        )
+        assert returned_fields["newton_last_backtracking_iterations"] == 1
+        assert returned_fields["newton_last_accepted_alpha"] == pytest.approx(1.0)
         assert returned_fields["ls_condition_estimate"] == pytest.approx(6.15e6)
         assert returned_fields["hessian_materialized"] is False
         assert returned_fields["dense_hessian_bytes"] == 4096

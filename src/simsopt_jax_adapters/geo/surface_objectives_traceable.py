@@ -3428,15 +3428,71 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             "fun": newton_result["fun"],
             "success": newton_result["success"],
             "nit": _runtime_int32_scalar(newton_result["nit"]),
+            "newton_iter": _runtime_int32_scalar(newton_result["newton_iter"]),
+            "initial_gradient_norm": newton_result["initial_gradient_norm"],
+            "newton_attempted_iterations": _runtime_int32_scalar(
+                newton_result["newton_attempted_iterations"]
+            ),
+            "newton_stalled": newton_result["newton_stalled"],
+            "newton_stop_reason_code": _runtime_int32_scalar(
+                newton_result["newton_stop_reason_code"]
+            ),
+            "newton_last_step_accepted": newton_result[
+                "newton_last_step_accepted"
+            ],
+            "newton_last_step_norm": newton_result["newton_last_step_norm"],
+            "newton_last_step_finite": newton_result["newton_last_step_finite"],
+            "newton_last_linear_solve_success": newton_result[
+                "newton_last_linear_solve_success"
+            ],
+            "newton_last_linear_solve_iterations": _runtime_int32_scalar(
+                newton_result["newton_last_linear_solve_iterations"]
+            ),
+            "newton_last_linear_residual_relative": newton_result[
+                "newton_last_linear_residual_relative"
+            ],
+            "newton_last_backtracking_iterations": _runtime_int32_scalar(
+                newton_result["newton_last_backtracking_iterations"]
+            ),
+            "newton_last_accepted_alpha": newton_result[
+                "newton_last_accepted_alpha"
+            ],
+            "newton_trace_active": newton_result["newton_trace_active"],
+            "newton_trace_step_accepted": newton_result[
+                "newton_trace_step_accepted"
+            ],
+            "newton_trace_value_before": newton_result[
+                "newton_trace_value_before"
+            ],
+            "newton_trace_gradient_norm_before": newton_result[
+                "newton_trace_gradient_norm_before"
+            ],
+            "newton_trace_linear_tol": newton_result["newton_trace_linear_tol"],
+            "newton_trace_step_norm": newton_result["newton_trace_step_norm"],
+            "newton_trace_step_finite": newton_result[
+                "newton_trace_step_finite"
+            ],
+            "newton_trace_linear_solve_success": newton_result[
+                "newton_trace_linear_solve_success"
+            ],
+            "newton_trace_linear_solve_iterations": newton_result[
+                "newton_trace_linear_solve_iterations"
+            ],
+            "newton_trace_linear_residual_relative": newton_result[
+                "newton_trace_linear_residual_relative"
+            ],
+            "newton_trace_backtracking_iterations": newton_result[
+                "newton_trace_backtracking_iterations"
+            ],
+            "newton_trace_accepted_alpha": newton_result[
+                "newton_trace_accepted_alpha"
+            ],
             "hessian_materialized": _runtime_bool(hessian_materialized),
             "dense_hessian_bytes": _runtime_int32_scalar(
                 0 if hessian is None else hessian.size * hessian.dtype.itemsize
             ),
-            "final_gradient_norm": jnp.linalg.norm(newton_result["grad"]),
-            "final_gradient_inf_norm": jnp.linalg.norm(
-                newton_result["grad"],
-                ord=np.inf,
-            ),
+            "final_gradient_norm": newton_result["final_gradient_norm"],
+            "final_gradient_inf_norm": newton_result["final_gradient_inf_norm"],
         }
 
     def _solve_for(coil_dofs):

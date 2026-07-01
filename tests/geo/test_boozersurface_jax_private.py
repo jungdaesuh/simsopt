@@ -3206,6 +3206,95 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_reports_iteration_diagnostics(
+        self, monkeypatch
+    ):
+        """Traceable Newton must expose enough loop state to diagnose slow K1 solves."""
+
+        def exact_operator_solve(_matvec, rhs, *, tol):
+            del _matvec, tol
+            return rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(1e-14, dtype=jnp.float64),
+                residual_relative=jnp.asarray(2.5e-13, dtype=jnp.float64),
+                iterations=jnp.asarray(7, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_square_array_system_operator_only",
+            exact_operator_solve,
+        )
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=3,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        initial_norm = np.linalg.norm(np.asarray(x0))
+        np.testing.assert_array_equal(
+            np.asarray(result["newton_trace_active"]),
+            np.asarray([True, False, False]),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(result["newton_trace_step_accepted"]),
+            np.asarray([True, False, False]),
+        )
+        np.testing.assert_allclose(
+            np.asarray(result["newton_trace_gradient_norm_before"])[0],
+            initial_norm,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result["newton_trace_step_norm"])[0],
+            initial_norm,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        assert bool(result["newton_trace_step_finite"][0]) is True
+        assert bool(result["newton_trace_linear_solve_success"][0]) is True
+        assert int(result["newton_trace_linear_solve_iterations"][0]) == 7
+        np.testing.assert_allclose(
+            np.asarray(result["newton_trace_linear_residual_relative"])[0],
+            2.5e-13,
+            rtol=0.0,
+            atol=1e-18,
+        )
+        assert int(result["newton_trace_backtracking_iterations"][0]) == 1
+        np.testing.assert_allclose(
+            np.asarray(result["newton_trace_accepted_alpha"])[0],
+            1.0,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        assert int(result["newton_attempted_iterations"]) == 1
+        assert int(result["newton_iter"]) == 1
+        assert bool(result["newton_stalled"]) is False
+        assert int(result["newton_stop_reason_code"]) == _opt._NEWTON_STOP_SUCCESS
+        assert bool(result["newton_last_step_accepted"]) is True
+        assert bool(result["newton_last_linear_solve_success"]) is True
+        assert int(result["newton_last_linear_solve_iterations"]) == 7
+        np.testing.assert_allclose(
+            np.asarray(result["initial_gradient_norm"]),
+            initial_norm,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result["final_gradient_norm"]),
+            0.0,
+            rtol=0.0,
+            atol=1e-12,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_accepts_finite_descent_step_with_failed_status(
         self, monkeypatch
     ):
@@ -3247,7 +3336,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
             del _matvec, tol
-            return jnp.full_like(rhs, jnp.nan), jnp.array(False, dtype=bool)
+            return jnp.full_like(rhs, jnp.nan), _mock_linear_solve_status(False)
 
         def forbid_dense_hessian(*_args, **_kwargs):
             raise AssertionError(
@@ -3274,6 +3363,9 @@ class TestBoozerSurfaceJAXClassPrivate:
         np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
         assert int(result["nit"]) == 0
         assert bool(result["success"]) is False
+        assert int(result["newton_attempted_iterations"]) == 1
+        assert bool(result["newton_stalled"]) is True
+        assert bool(result["newton_last_step_finite"]) is False
         assert result["hessian"] is None
 
     @PRIVATE_OPTIMIZER_RUNTIME
@@ -3286,7 +3378,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
             del _matvec, tol
-            return -rhs, jnp.array(True, dtype=bool)
+            return -rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _opt,
@@ -3311,6 +3403,10 @@ class TestBoozerSurfaceJAXClassPrivate:
         np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
         assert int(result["nit"]) == 0
         assert bool(result["success"]) is False
+        assert int(result["newton_attempted_iterations"]) == 1
+        assert bool(result["newton_stalled"]) is True
+        assert bool(result["newton_last_step_accepted"]) is False
+        assert int(result["newton_last_backtracking_iterations"]) == 8
         assert observed["progress_calls"] == 0
 
     @PRIVATE_OPTIMIZER_RUNTIME

@@ -4066,6 +4066,13 @@ def _newton_backtracking_continue(state):
     return (state["iteration"] < _NEWTON_BACKTRACKING_MAX_STEPS) & (~state["accepted"])
 
 
+_NEWTON_STOP_SUCCESS = 0
+_NEWTON_STOP_MAXITER = 1
+_NEWTON_STOP_STALLED = 2
+_NEWTON_STOP_NONFINITE = 3
+_NEWTON_STOP_UNKNOWN = 4
+
+
 def _backtracking_value_grad_step(
     val_and_grad_fn,
     x,
@@ -5617,6 +5624,14 @@ def _build_traceable_newton_polish_runner(
         tol_value = _optimizer_scalar(tol, dtype=dtype)
         val0, grad0 = val_and_grad_fn(x_init)
         norm0 = jnp.linalg.norm(grad0)
+        trace_shape = (maxiter,)
+        trace_false = jnp.zeros(trace_shape, dtype=jnp.bool_)
+        trace_nan = jnp.full(trace_shape, jnp.nan, dtype=dtype)
+        trace_unknown_int = jnp.full(
+            trace_shape,
+            _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+            dtype=jnp.int32,
+        )
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
         materialize_final_hessian, dense_report = (
             _resolve_dense_hessian_materialization(
@@ -5629,7 +5644,7 @@ def _build_traceable_newton_polish_runner(
 
         def cond_fun(state):
             return (
-                (state["nit"] < maxiter)
+                (state["attempted_iterations"] < maxiter)
                 & (state["norm"] > tol_value)
                 & (~state["stalled"])
             )
@@ -5645,11 +5660,13 @@ def _build_traceable_newton_polish_runner(
             def matvec(v):
                 return hvp_fn(state["x"], v) + stab_value * v
 
-            dx, _ = _solve_square_array_system_operator_only(
+            dx, linear_status = _solve_square_array_system_operator_only(
                 matvec,
                 state["grad"],
                 tol=linear_tol,
             )
+            step_norm = jnp.linalg.norm(dx)
+            step_finite = jnp.all(jnp.isfinite(dx))
             candidate = _backtracking_value_grad_step(
                 val_and_grad_fn,
                 state["x"],
@@ -5660,6 +5677,13 @@ def _build_traceable_newton_polish_runner(
             )
             accepted = candidate["accepted"]
             next_nit = state["nit"] + 1
+            next_attempted_iterations = state["attempted_iterations"] + 1
+            accepted_alpha = lax.select(
+                accepted,
+                candidate["alpha"] * _optimizer_scalar(2.0, dtype=dtype),
+                _optimizer_scalar(0.0, dtype=dtype),
+            )
+            trace_index = state["attempted_iterations"]
             if progress_callback_enabled:
                 lax.cond(
                     accepted,
@@ -5686,6 +5710,65 @@ def _build_traceable_newton_polish_runner(
                 ),
                 "nit": lax.select(accepted, next_nit, state["nit"]),
                 "stalled": ~accepted,
+                "attempted_iterations": next_attempted_iterations,
+                "last_step_accepted": accepted,
+                "last_step_norm": step_norm,
+                "last_step_finite": step_finite,
+                "last_linear_solve_success": linear_status.success,
+                "last_linear_solve_iterations": linear_status.iterations,
+                "last_linear_residual_relative": linear_status.residual_relative,
+                "last_backtracking_iterations": candidate["iteration"],
+                "last_accepted_alpha": accepted_alpha,
+                "newton_trace_active": state["newton_trace_active"]
+                .at[trace_index]
+                .set(True),
+                "newton_trace_step_accepted": state[
+                    "newton_trace_step_accepted"
+                ]
+                .at[trace_index]
+                .set(accepted),
+                "newton_trace_value_before": state["newton_trace_value_before"]
+                .at[trace_index]
+                .set(state["val"]),
+                "newton_trace_gradient_norm_before": state[
+                    "newton_trace_gradient_norm_before"
+                ]
+                .at[trace_index]
+                .set(state["norm"]),
+                "newton_trace_linear_tol": state["newton_trace_linear_tol"]
+                .at[trace_index]
+                .set(linear_tol),
+                "newton_trace_step_norm": state["newton_trace_step_norm"]
+                .at[trace_index]
+                .set(step_norm),
+                "newton_trace_step_finite": state["newton_trace_step_finite"]
+                .at[trace_index]
+                .set(step_finite),
+                "newton_trace_linear_solve_success": state[
+                    "newton_trace_linear_solve_success"
+                ]
+                .at[trace_index]
+                .set(linear_status.success),
+                "newton_trace_linear_solve_iterations": state[
+                    "newton_trace_linear_solve_iterations"
+                ]
+                .at[trace_index]
+                .set(linear_status.iterations),
+                "newton_trace_linear_residual_relative": state[
+                    "newton_trace_linear_residual_relative"
+                ]
+                .at[trace_index]
+                .set(linear_status.residual_relative),
+                "newton_trace_backtracking_iterations": state[
+                    "newton_trace_backtracking_iterations"
+                ]
+                .at[trace_index]
+                .set(candidate["iteration"]),
+                "newton_trace_accepted_alpha": state[
+                    "newton_trace_accepted_alpha"
+                ]
+                .at[trace_index]
+                .set(accepted_alpha),
             }
 
         state = lax.while_loop(
@@ -5699,11 +5782,55 @@ def _build_traceable_newton_polish_runner(
                 "previous_norm": norm0,
                 "nit": jnp.asarray(0, dtype=jnp.int32),
                 "stalled": jnp.asarray(False),
+                "attempted_iterations": jnp.asarray(0, dtype=jnp.int32),
+                "last_step_accepted": jnp.asarray(False),
+                "last_step_norm": _optimizer_scalar(jnp.nan, dtype=dtype),
+                "last_step_finite": jnp.asarray(False),
+                "last_linear_solve_success": jnp.asarray(False),
+                "last_linear_solve_iterations": jnp.asarray(
+                    _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+                    dtype=jnp.int32,
+                ),
+                "last_linear_residual_relative": _optimizer_scalar(jnp.nan, dtype=dtype),
+                "last_backtracking_iterations": jnp.asarray(
+                    _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+                    dtype=jnp.int32,
+                ),
+                "last_accepted_alpha": _optimizer_scalar(jnp.nan, dtype=dtype),
+                "newton_trace_active": trace_false,
+                "newton_trace_step_accepted": trace_false,
+                "newton_trace_value_before": trace_nan,
+                "newton_trace_gradient_norm_before": trace_nan,
+                "newton_trace_linear_tol": trace_nan,
+                "newton_trace_step_norm": trace_nan,
+                "newton_trace_step_finite": trace_false,
+                "newton_trace_linear_solve_success": trace_false,
+                "newton_trace_linear_solve_iterations": trace_unknown_int,
+                "newton_trace_linear_residual_relative": trace_nan,
+                "newton_trace_backtracking_iterations": trace_unknown_int,
+                "newton_trace_accepted_alpha": trace_nan,
             },
         )
 
         val_final, grad_final = val_and_grad_fn(state["x"])
         norm_final = jnp.linalg.norm(grad_final)
+        norm_final_finite = jnp.isfinite(norm_final)
+        success = norm_final <= tol_value
+        stop_reason_code = jnp.select(
+            [
+                success,
+                state["stalled"],
+                ~norm_final_finite,
+                state["attempted_iterations"] >= jnp.asarray(maxiter, dtype=jnp.int32),
+            ],
+            [
+                jnp.asarray(_NEWTON_STOP_SUCCESS, dtype=jnp.int32),
+                jnp.asarray(_NEWTON_STOP_STALLED, dtype=jnp.int32),
+                jnp.asarray(_NEWTON_STOP_NONFINITE, dtype=jnp.int32),
+                jnp.asarray(_NEWTON_STOP_MAXITER, dtype=jnp.int32),
+            ],
+            default=jnp.asarray(_NEWTON_STOP_UNKNOWN, dtype=jnp.int32),
+        )
         H = None
         if materialize_final_hessian:
             H = _stabilize_dense_hessian(
@@ -5717,7 +5844,52 @@ def _build_traceable_newton_polish_runner(
             "grad": grad_final,
             "hessian": H,
             "nit": state["nit"],
-            "success": norm_final <= tol_value,
+            "newton_iter": state["nit"],
+            "success": success,
+            "initial_gradient_norm": norm0,
+            "final_gradient_norm": norm_final,
+            "final_gradient_inf_norm": jnp.linalg.norm(grad_final, ord=jnp.inf),
+            "newton_attempted_iterations": state["attempted_iterations"],
+            "newton_stalled": state["stalled"],
+            "newton_stop_reason_code": stop_reason_code,
+            "newton_last_step_accepted": state["last_step_accepted"],
+            "newton_last_step_norm": state["last_step_norm"],
+            "newton_last_step_finite": state["last_step_finite"],
+            "newton_last_linear_solve_success": state[
+                "last_linear_solve_success"
+            ],
+            "newton_last_linear_solve_iterations": state[
+                "last_linear_solve_iterations"
+            ],
+            "newton_last_linear_residual_relative": state[
+                "last_linear_residual_relative"
+            ],
+            "newton_last_backtracking_iterations": state[
+                "last_backtracking_iterations"
+            ],
+            "newton_last_accepted_alpha": state["last_accepted_alpha"],
+            "newton_trace_active": state["newton_trace_active"],
+            "newton_trace_step_accepted": state["newton_trace_step_accepted"],
+            "newton_trace_value_before": state["newton_trace_value_before"],
+            "newton_trace_gradient_norm_before": state[
+                "newton_trace_gradient_norm_before"
+            ],
+            "newton_trace_linear_tol": state["newton_trace_linear_tol"],
+            "newton_trace_step_norm": state["newton_trace_step_norm"],
+            "newton_trace_step_finite": state["newton_trace_step_finite"],
+            "newton_trace_linear_solve_success": state[
+                "newton_trace_linear_solve_success"
+            ],
+            "newton_trace_linear_solve_iterations": state[
+                "newton_trace_linear_solve_iterations"
+            ],
+            "newton_trace_linear_residual_relative": state[
+                "newton_trace_linear_residual_relative"
+            ],
+            "newton_trace_backtracking_iterations": state[
+                "newton_trace_backtracking_iterations"
+            ],
+            "newton_trace_accepted_alpha": state["newton_trace_accepted_alpha"],
             "hessian_materialized": materialize_final_hessian,
             **dense_report,
         }
