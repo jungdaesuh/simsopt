@@ -173,6 +173,17 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   to summarize all progress files while preserving `target_outputs` as the
   primary progress view. The patched reader successfully regenerated
   `k1_matrix_report.json` against the `55381297` artifacts.
+- Follow-up Perlmutter job `55382657` is submitted from source
+  `1beeec411151` at
+  `/pscratch/sd/j/jungdae/simopt-jax-clean-local-1beeec411151-k1matrix-20260702T120245Z-src`
+  with artifacts under
+  `/pscratch/sd/j/jungdae/simopt-jax-clean-local-k1matrix-1beeec411151-20260702T120245Z-interactive`.
+  It selects `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
+  `MATRIX_MAXITER=20`, the iota011_R0935 warm-start seed, m10/n10
+  255x64 resolution, `MATRIX_REQUIRE_TRACE_REUSE=1`,
+  `MATRIX_REQUIRE_FINAL_SYNC_REUSE=1`, and `MATRIX_TRACE_K1_SUBTIMERS=0`.
+  It is pending at submission time, so this is execution status, not result
+  proof.
 - Phase 3 measurement plumbing is implemented and now has a real H100 artifact.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
@@ -527,7 +538,8 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       high-water from `nvidia-smi_before/after` snapshots the harness writes.
       Job `55381297` produced a partial comparison, but it forced
       `--trace-target-lane-k1-subtimers`; rerun with
-      `MATRIX_TRACE_K1_SUBTIMERS=0` for fair wall timing.
+      `MATRIX_TRACE_K1_SUBTIMERS=0` for fair wall timing. Job `55382657` is
+      submitted for this rerun but has not produced runtime artifacts yet.
 - [ ] Any Phase 3–5 change that can touch the objective path passes the
       equivalence gate before default-on; env-gated until then.
 
