@@ -2973,6 +2973,36 @@ def _single_stage_runtime_seed_shape(*, mpol, ntor, nphi, ntheta):
     return (int(mpol), int(ntor), int(nphi), int(ntheta))
 
 
+def _single_stage_runtime_seed_payload_shape(payload):
+    surface_payload = payload["surface"]
+    quadrature_payload = payload["quadrature"]
+    return _single_stage_runtime_seed_shape(
+        mpol=surface_payload["mpol"],
+        ntor=surface_payload["ntor"],
+        nphi=quadrature_payload["nphi"],
+        ntheta=quadrature_payload["ntheta"],
+    )
+
+
+def _require_single_stage_runtime_seed_payload_header(payload):
+    if payload["schema"] != _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA:
+        raise ValueError("JAX warm-start runtime spec has the wrong schema")
+    if int(payload["schema_version"]) != _SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION:
+        raise ValueError(
+            "JAX warm-start runtime spec has an unsupported schema version"
+        )
+    if payload["self_intersection_mode"] != _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE:
+        raise ValueError(
+            "JAX warm-start runtime spec must use supported-surface JAX "
+            "self-intersection; run seed conversion first."
+        )
+    if payload["surface"]["surface_class"] != "SurfaceXYZTensorFourier":
+        raise ValueError(
+            "JAX warm start requires a canonical SurfaceXYZTensorFourier runtime "
+            "spec; run seed conversion first."
+        )
+
+
 def _single_stage_runtime_seed_initial_diagnostics_shape(payload):
     return tuple(
         int(payload[field_name])
@@ -3177,6 +3207,32 @@ def write_single_stage_jax_runtime_seed_spec(path_or_run_dir, **kwargs):
     return path
 
 
+def _copy_matching_single_stage_jax_runtime_seed_spec(
+    source_path,
+    source_payload,
+    *,
+    mpol,
+    ntor,
+    nphi,
+    ntheta,
+    output_path_or_run_dir,
+):
+    """Copy an immutable runtime seed spec when target resolution is unchanged."""
+    _require_single_stage_runtime_seed_payload_header(source_payload)
+    target_shape = _single_stage_runtime_seed_shape(
+        mpol=mpol,
+        ntor=ntor,
+        nphi=nphi,
+        ntheta=ntheta,
+    )
+    if _single_stage_runtime_seed_payload_shape(source_payload) != target_shape:
+        return None
+    output_path = resolve_single_stage_jax_runtime_spec_path(output_path_or_run_dir)
+    if os.path.abspath(output_path) != os.path.abspath(source_path):
+        write_json_file(output_path, source_payload)
+    return output_path
+
+
 def make_single_stage_half_period_quadpoints(*, nphi, ntheta, nfp):
     quadpoints_phi, quadpoints_theta = surface_module.Surface.get_quadpoints(
         nphi,
@@ -3361,6 +3417,17 @@ def reproject_single_stage_jax_runtime_seed_spec(
     source_path = resolve_single_stage_jax_runtime_spec_path(source_path_or_run_dir)
     with open(source_path, "r", encoding="utf-8") as infile:
         source_payload = json.load(infile)
+    copied_path = _copy_matching_single_stage_jax_runtime_seed_spec(
+        source_path,
+        source_payload,
+        mpol=mpol,
+        ntor=ntor,
+        nphi=nphi,
+        ntheta=ntheta,
+        output_path_or_run_dir=output_path_or_run_dir,
+    )
+    if copied_path is not None:
+        return copied_path
     source_surface = source_payload["surface"]
     source_quadrature = source_payload["quadrature"]
     source_state = load_single_stage_jax_runtime_seed_spec(
@@ -3557,17 +3624,7 @@ def load_single_stage_jax_runtime_seed_spec(
         )
     with open(path, "r", encoding="utf-8") as infile:
         payload = json.load(infile)
-    if payload["schema"] != _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA:
-        raise ValueError("JAX warm-start runtime spec has the wrong schema")
-    if int(payload["schema_version"]) != _SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION:
-        raise ValueError(
-            "JAX warm-start runtime spec has an unsupported schema version"
-        )
-    if payload["self_intersection_mode"] != _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE:
-        raise ValueError(
-            "JAX warm-start runtime spec must use supported-surface JAX "
-            "self-intersection; run seed conversion first."
-        )
+    _require_single_stage_runtime_seed_payload_header(payload)
     surface_payload = payload["surface"]
     spec_phi, spec_theta = _require_matching_single_stage_jax_runtime_surface(
         surface_payload,

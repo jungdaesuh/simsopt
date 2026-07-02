@@ -32,6 +32,7 @@ therefore requires ``simsoptpp``.
 """
 
 import gc
+import json
 import logging
 import os
 from functools import partial
@@ -4791,6 +4792,55 @@ class TestCompositeGradientPipeline:
 
 class TestScriptBackendSelection:
     """initialize_boozer_surface(..., backend='jax') uses BoozerSurfaceJAX."""
+
+    def test_matching_runtime_seed_source_is_copied_without_reprojection(self, tmp_path):
+        source_dir = tmp_path / "source"
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        source_path = (
+            source_dir / single_stage_example._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+        )
+        output_path = (
+            output_dir / single_stage_example._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+        )
+        payload = {
+            "schema": single_stage_example._SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA,
+            "schema_version": single_stage_example._SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION,
+            "surface": {
+                "surface_class": "SurfaceXYZTensorFourier",
+                "mpol": 10,
+                "ntor": 10,
+            },
+            "quadrature": {"nphi": 255, "ntheta": 64},
+            "self_intersection_mode": (
+                single_stage_example._SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE
+            ),
+            "sentinel": {"copied_without_projection": True},
+        }
+        single_stage_example.write_json_file(source_path, payload)
+
+        with patch.object(
+            single_stage_example,
+            "load_single_stage_jax_runtime_seed_spec",
+            side_effect=AssertionError("same-shape runtime seed must not load"),
+        ), patch.object(
+            single_stage_example,
+            "project_surface_dofs_to_resolution",
+            side_effect=AssertionError("same-shape runtime seed must not project"),
+        ):
+            result_path = single_stage_example.reproject_single_stage_jax_runtime_seed_spec(
+                source_dir,
+                mpol=10,
+                ntor=10,
+                nphi=255,
+                ntheta=64,
+                output_path_or_run_dir=output_dir,
+            )
+
+        assert result_path == str(output_path)
+        with output_path.open("r", encoding="utf-8") as infile:
+            copied_payload = json.load(infile)
+        assert copied_payload == payload
 
     def test_jax_backend_constructs_boozer_surface_jax(self, boozer_setup):
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
