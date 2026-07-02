@@ -13,8 +13,10 @@ native cpp/CPU reference. Companion to
 code; this plan covers (1) the still-missing runtime proof of those fixes,
 (2) the trial-policy quality gate, and (3) the remaining structural per-solve
 gap. Historical file:line citations in the diagnosis section are anchored at
-commit `0cf4230cb`; the execution-status section reflects later implementation
-commits and should be read as the current source-of-truth for completion state.
+commit `0cf4230cb`; prefer the adjacent symbol/function names as durable anchors
+when the actively edited files drift. The execution-status section reflects
+later implementation commits and should be read as the current source-of-truth
+for completion state.
 
 Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`,
 `OPT` = `src/simsopt_jax/geo/optimizers/optimizer.py`,
@@ -22,9 +24,11 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
 
 ## Goals
 
-- Prove at GPU runtime that `0cf4230cb` (jax.Array memo-key normalization,
-  `EX:7491-7498`) eliminates both the trace-lane duplicate K1 solve and the
-  final-sync K1 re-solve on the production non-trace path.
+- Prove at GPU runtime that `0cf4230cb` (jax.Array memo-key normalization in the
+  decomposed K1 memo/cache path: `last_solved_forward_result`,
+  `cache_last_solved_payload`, and the `*_forward_result_reused` progress
+  events) eliminates both the trace-lane duplicate K1 solve and the final-sync
+  K1 re-solve on the production non-trace path.
 - Resolve the trial-only Newton-polish policy: either prove `skip` does not
   degrade optimizer trajectory quality vs `run`, or keep lower-fidelity trial
   policies explicit. Current code can separate the first incumbent `x0` solve
@@ -57,7 +61,10 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
 - Close the workflow only against a clean, instrumentation-free end-state target:
   same seed/resolution/hardware class, no K1 subtimer replay or objective trace,
   steady-state per-eval wall recorded separately from cold compile/setup, and no
-  OOM under normal preallocation.
+  OOM under normal preallocation. Once the fair native cpp/CPU reference exists
+  for the same config, the A100-tier closure criterion becomes numeric:
+  steady-state GPU wall per objective evaluation must beat the recorded native
+  cpp/CPU per-eval wall, with objective/physics within the accepted tolerances.
 
 ## Non-Goals
 
@@ -94,22 +101,27 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
   `jax.Array`; `0cf4230cb` host-normalizes the key and activates both. Local
   regressions pass; the follow-up GPU smoke (job 55364581) timed out before
   allocation, so **the linchpin commit has no GPU runtime proof yet**.
-- Trial policy plumbing: the historical follow-up tried default trial `skip`
-  (`EX:265` at the time), resolved it per K1 solve call via
-  `wrap_target_lane_solved_pair_with_boozer_overrides` (`EX:7384`), and proved
-  the mechanics. The later H100 quality A/B did **not** prove `skip` as a safe
+- Trial policy plumbing: the historical follow-up tried default trial `skip`,
+  resolved it per K1 solve call via
+  `wrap_target_lane_solved_pair_with_boozer_overrides`, and proved the
+  mechanics. The later H100 quality A/B did **not** prove `skip` as a safe
   production default, so current HEAD keeps both full and trial Newton-polish
   defaults at `run`. A follow-up cap-300 A/B proved useful plumbing and exposed
   a first-`x0` routing bug; that bug is fixed in current code. Trial BFGS caps
   and `skip` still remain explicit experimental flags until accepted-trajectory
   quality gates prove them safe as production defaults.
 - Structural cost: traceable Newton polish solves each correction with
-  operator-GMRES over HVPs (restart 64 × maxiter 10 + 1 refinement pass,
-  `OPT:4207-4210`, `OPT:4735-4821`) — worst case ~1280 HVPs/iteration, each a
-  full fwd+bwd BiotSavart pass over the 255×64 half-period grid. The
+  operator-GMRES over HVPs (restart 64 × maxiter 10 + 1 refinement pass;
+  current symbols:
+  `_solve_square_array_system_operator_only`,
+  `_traceable_forward_result_newton_polish_traceable`) — the current H100
+  artifact records a budget of `1302` and actual telemetry of `1307` matvec
+  callbacks per Newton iteration, each a full fwd+bwd BiotSavart pass over the
+  255×64 half-period grid. The
   factor-once path materializes the dense n×n Hessian (n=663 at
   mpol10/ntor10 stellsym, run metadata) via `lax.map` chunks
-  (`OPT:3669-3684`): batch 8 → 83 sequential chunks, batch 4 (40GB A100) → 166.
+  (`_materialize_dense_linear_operator`): batch 8 → 83 sequential chunks, batch
+  4 (40GB A100) → 166.
   Native C++ Newton pays ONE analytic `sopp.boozer_residual_ds2` assembly +
   ONE LAPACK LU per iteration (`src/simsopt/geo/boozersurface.py:536-554`).
 - Boozer init evidence: on-device L-BFGS ran 701 iterations, failed
@@ -525,6 +537,10 @@ parity/trajectory gates (Phase 8).
          accepted/rejected eval counts, invalid-state counts, and wall time.
          Also measure `J_trial(x) - J_full(x)` on the same candidate points so
          the trial-fidelity tradeoff is quantified instead of treated as binary.
+         If `skip` is too low-fidelity but full `run` is too expensive, test the
+         explicit middle policy: pre-Newton L-BFGS plus one or two
+         Eisenstat-Walker-loose Newton iterations for trial probes, while
+         incumbent/accepted/final solves stay full-fidelity.
 
 3. **Phase 3 — Structural: cut HVPs per Newton iteration (measure first)**
    - [x] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
@@ -869,7 +885,10 @@ parity/trajectory gates (Phase 8).
       clean no-subtimer/no-trace steady-state per-eval wall, cold compile/setup
       separated, no OOM with normal preallocation, and final objective/physics
       within the accepted tolerances on the iota011_R0935 mpol10/nphi255 config
-      or the documented successor production config.
+      or the documented successor production config. After the fair cpp/CPU leg
+      exists for the same config, replace this structural target with the numeric
+      threshold: GPU steady-state wall per objective evaluation must be lower
+      than the recorded native cpp/CPU per-eval wall.
 
 ## Open Questions
 
@@ -884,7 +903,9 @@ parity/trajectory gates (Phase 8).
 - Native cpp/CPU per-eval wall at the iota011_R0935 config on Perlmutter CPU
   nodes: no local record exists; needed for the definitive post-fix
   cpp-vs-GPU headline. (`single_stage_fair_compare_gpu.slurm` co-produces the
-  reference; one fair-compare run answers it.)
+  reference; one fair-compare run answers it.) When that artifact lands, promote
+  its native cpp/CPU per-eval wall into the numeric A100-tier end-state target
+  above.
 - Benchmark-mode final-sync cache interaction is resolved for same-fidelity and
   non-binding iteration-cap trial solves. It remains intentionally disabled for
   true lower-fidelity or failed/cap-bound trial solves.
