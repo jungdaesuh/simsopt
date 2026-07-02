@@ -102,10 +102,13 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   focused synthetic pytest slices, and CLI synthetic progress/report smokes.
   Fresh GPU submission initially failed when the account was omitted. The
   valid Perlmutter shape is `sbatch -A m4680_g -C gpu -q shared ...`.
-  Current-HEAD Phase-1 jobs are now submitted from source commit
-  `c25e37583f31599d620b02c23539705da82e87dd` and pending on priority:
-  trace-enabled job `55373355`, non-trace final-sync job `55373358`. Run root:
-  `/pscratch/sd/j/jungdae/simopt_jax_clean_local_runs/phase1-k1-current-c25e37583-20260702T021729Z`.
+  Current-HEAD Phase-1 jobs were submitted from source commit
+  `c25e37583f31599d620b02c23539705da82e87dd`. The initial 12h jobs
+  (`55373355`, `55373358`) were superseded and canceled after a 4h walltime
+  backfill probe gave a concrete start estimate. Active short jobs are pending
+  on priority: trace-enabled job `55373498`, non-trace final-sync job
+  `55373499`. Run root:
+  `/pscratch/sd/j/jungdae/simopt_jax_clean_local_runs/phase1-k1-short-c25e37583-20260702T022152Z`.
   They do not prove the GPU runtime gate until they run and emit artifacts.
 - Phase 3 measurement plumbing is partially implemented at `61d1cb99a`.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
