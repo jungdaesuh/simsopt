@@ -2917,6 +2917,33 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
     np.testing.assert_allclose(np.asarray(objective_value), -123.0)
 
 
+def test_traceable_forward_result_packs_large_dense_byte_counts_as_int64():
+    byte_count = 2**32
+
+    result = surfaceobjectives_traceable_jax_module._pack_traceable_forward_result(
+        value=jnp.asarray(1.0, dtype=jnp.float64),
+        x=jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        sdofs=jnp.asarray([3.0], dtype=jnp.float64),
+        iota=jnp.asarray(0.1, dtype=jnp.float64),
+        G=jnp.asarray(-2.0, dtype=jnp.float64),
+        linear_solve_factors=None,
+        success=jnp.asarray(True),
+        primal_success=jnp.asarray(True),
+        adjoint_linear_solve_available=jnp.asarray(False),
+        optimizer_method="bfgs-ondevice",
+        linearization_kind="hessian",
+        linear_solve_backend="operator",
+        result_type="ls",
+        dense_hessian_bytes=byte_count,
+        max_dense_hessian_bytes=byte_count,
+    )
+
+    assert result["dense_hessian_bytes"].dtype == jnp.int64
+    assert result["max_dense_hessian_bytes"].dtype == jnp.int64
+    assert int(np.asarray(result["dense_hessian_bytes"])) == byte_count
+    assert int(np.asarray(result["max_dense_hessian_bytes"])) == byte_count
+
+
 def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     booz = types.SimpleNamespace(
         options={},

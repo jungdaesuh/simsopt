@@ -678,6 +678,7 @@ def _pack_traceable_forward_result(
 ):
     """Return the normalized traceable forward-result contract."""
     missing_int = jnp.asarray(np.iinfo(np.int32).min, dtype=jnp.int32)
+    missing_int64 = jnp.asarray(np.iinfo(np.int64).min, dtype=jnp.int64)
     missing_float = jnp.asarray(np.nan, dtype=jnp.float64)
     missing_bool = jnp.asarray(False, dtype=bool)
 
@@ -689,6 +690,9 @@ def _pack_traceable_forward_result(
 
     def int_field(value):
         return missing_int if value is None else jnp.asarray(value, dtype=jnp.int32)
+
+    def int64_field(value):
+        return missing_int64 if value is None else jnp.asarray(value, dtype=jnp.int64)
 
     def float_field(value):
         return (
@@ -831,9 +835,9 @@ def _pack_traceable_forward_result(
         ),
         "hessian_materialized": bool_field(hessian_materialized),
         "hessian_materialized_present": present_field(hessian_materialized),
-        "dense_hessian_bytes": int_field(dense_hessian_bytes),
+        "dense_hessian_bytes": int64_field(dense_hessian_bytes),
         "dense_hessian_bytes_present": present_field(dense_hessian_bytes),
-        "max_dense_hessian_bytes": int_field(max_dense_hessian_bytes),
+        "max_dense_hessian_bytes": int64_field(max_dense_hessian_bytes),
         "max_dense_hessian_bytes_present": present_field(max_dense_hessian_bytes),
         "dense_newton_steps_materialized": bool_field(
             dense_newton_steps_materialized
