@@ -100,12 +100,13 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   trace-reuse counts, final-sync reuse, and missing-artifact issues before the
   matrix failure gate. Remote Perlmutter validation passed for py-compile, the
   focused synthetic pytest slices, and CLI synthetic progress/report smokes.
-  Fresh GPU submission of this assertion-enabled job is currently blocked by
-  Slurm policy: even minimal `sbatch --test-only` GPU jobs for `gpu_debug`,
-  `gpu_interactive`, `gpu_shared`, and `gpu_regular` returned
-  `Job request does not match any supported policy`. Existing earlier GPU jobs
-  remain pending, but they target older source commits and therefore do not
-  prove this assertion-enabled HEAD.
+  Fresh GPU submission initially failed when the account was omitted. The
+  valid Perlmutter shape is `sbatch -A m4680_g -C gpu -q shared ...`.
+  Current-HEAD Phase-1 jobs are now submitted from source commit
+  `c25e37583f31599d620b02c23539705da82e87dd` and pending on priority:
+  trace-enabled job `55373355`, non-trace final-sync job `55373358`. Run root:
+  `/pscratch/sd/j/jungdae/simopt_jax_clean_local_runs/phase1-k1-current-c25e37583-20260702T021729Z`.
+  They do not prove the GPU runtime gate until they run and emit artifacts.
 - Phase 3 measurement plumbing is partially implemented at `61d1cb99a`.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
