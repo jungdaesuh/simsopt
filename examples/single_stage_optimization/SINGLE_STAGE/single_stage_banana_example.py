@@ -156,6 +156,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (
 )
 from simsopt_jax.geo.optimizers.optimizer import (
     Driver,
+    _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
     ReferenceOptimizerContract,
     TargetObjectiveRoute,
     TargetOptimizerContract,
@@ -168,6 +169,7 @@ from simsopt_jax.geo.optimizers.optimizer import (
     target_driver_method,
     target_minimize,
     target_optimizer_diagnostic_events,
+    traceable_newton_matvec_counts_from_token,
 )
 import simsopt.geo.surface as surface_module
 from simsopt_jax.core.surface_fourier_indices import stellsym_scatter_indices
@@ -635,6 +637,42 @@ def _host_scalar_progress_value(value):
     return str(scalar), None
 
 
+def _traceable_newton_matvec_progress_fields(forward_result):
+    if not _progress_field_present(forward_result, "newton_matvec_counter_token"):
+        return {}
+    token_value, _classification = _host_scalar_progress_value(
+        forward_result["newton_matvec_counter_token"]
+    )
+    if token_value is None:
+        return {}
+    counts = traceable_newton_matvec_counts_from_token(int(token_value))
+    if counts is None:
+        return {}
+    attempted_value, _classification = _host_scalar_progress_value(
+        forward_result["newton_attempted_iterations"]
+    )
+    if attempted_value is None:
+        return {}
+    actual = np.full(
+        (len(counts),),
+        _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+        dtype=np.int32,
+    )
+    attempted_count = min(max(int(attempted_value), 0), len(counts))
+    if attempted_count > 0:
+        actual[:attempted_count] = np.asarray(counts, dtype=np.int32)[
+            :attempted_count
+        ]
+    if attempted_count <= 0:
+        last_actual = _LINEAR_SOLVE_ITERATIONS_UNKNOWN
+    else:
+        last_actual = int(actual[attempted_count - 1])
+    return {
+        "newton_last_linear_solve_matvec_actual": last_actual,
+        "newton_trace_linear_solve_matvec_actual": actual.tolist(),
+    }
+
+
 def _summarize_k1_forward_result_for_progress(forward_result):
     """Return bounded scalar metadata for K1 progress events."""
     fields = {}
@@ -675,6 +713,7 @@ def _summarize_k1_forward_result_for_progress(forward_result):
             elif classification is not None:
                 fields[f"{key}_finite"] = False
                 fields[f"{key}_classification"] = classification
+    fields.update(_traceable_newton_matvec_progress_fields(forward_result))
     return fields
 
 

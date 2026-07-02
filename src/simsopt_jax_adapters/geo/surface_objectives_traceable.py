@@ -660,9 +660,12 @@ def _pack_traceable_forward_result(
     newton_last_step_finite=None,
     newton_last_linear_solve_success=None,
     newton_last_linear_solve_iterations=None,
+    newton_last_linear_solve_matvec_budget=None,
+    newton_last_linear_solve_matvec_actual=None,
     newton_last_linear_residual_relative=None,
     newton_last_backtracking_iterations=None,
     newton_last_accepted_alpha=None,
+    newton_matvec_counter_token=None,
     ls_condition_estimate=None,
     ls_residual_jacobian_condition_estimate=None,
     hessian_materialized=None,
@@ -779,6 +782,18 @@ def _pack_traceable_forward_result(
         "newton_last_linear_solve_iterations_present": present_field(
             newton_last_linear_solve_iterations
         ),
+        "newton_last_linear_solve_matvec_budget": int_field(
+            newton_last_linear_solve_matvec_budget
+        ),
+        "newton_last_linear_solve_matvec_budget_present": present_field(
+            newton_last_linear_solve_matvec_budget
+        ),
+        "newton_last_linear_solve_matvec_actual": int_field(
+            newton_last_linear_solve_matvec_actual
+        ),
+        "newton_last_linear_solve_matvec_actual_present": present_field(
+            newton_last_linear_solve_matvec_actual
+        ),
         "newton_last_linear_residual_relative": float_field(
             newton_last_linear_residual_relative
         ),
@@ -794,6 +809,10 @@ def _pack_traceable_forward_result(
         "newton_last_accepted_alpha": float_field(newton_last_accepted_alpha),
         "newton_last_accepted_alpha_present": present_field(
             newton_last_accepted_alpha
+        ),
+        "newton_matvec_counter_token": int_field(newton_matvec_counter_token),
+        "newton_matvec_counter_token_present": present_field(
+            newton_matvec_counter_token
         ),
         "ls_condition_estimate": float_field(ls_condition_estimate),
         "ls_condition_estimate_present": present_field(ls_condition_estimate),
@@ -1004,6 +1023,12 @@ def _traceable_general_forward_result(
             newton_last_linear_solve_iterations=solve_result.get(
                 "newton_last_linear_solve_iterations"
             ),
+            newton_last_linear_solve_matvec_budget=solve_result.get(
+                "newton_last_linear_solve_matvec_budget"
+            ),
+            newton_last_linear_solve_matvec_actual=solve_result.get(
+                "newton_last_linear_solve_matvec_actual"
+            ),
             newton_last_linear_residual_relative=solve_result.get(
                 "newton_last_linear_residual_relative"
             ),
@@ -1012,6 +1037,9 @@ def _traceable_general_forward_result(
             ),
             newton_last_accepted_alpha=solve_result.get(
                 "newton_last_accepted_alpha"
+            ),
+            newton_matvec_counter_token=solve_result.get(
+                "newton_matvec_counter_token"
             ),
             ls_condition_estimate=solve_result.get("ls_condition_estimate"),
             ls_residual_jacobian_condition_estimate=solve_result.get(

@@ -144,23 +144,58 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   as proof: `55373498` failed during editable-install submodule setup, and
   `55373499` failed the matrix command because the high-resolution donor
   continuation path lacked `MATRIX_WARM_START_RUN_DIR`.
-- Phase 3 measurement plumbing is partially implemented at `61d1cb99a`.
+- Phase 3 measurement plumbing is implemented and now has a real H100 artifact.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
   `newton_last_linear_solve_matvec_actual`; default behavior is unchanged.
-  Remote Perlmutter validation passed the focused private optimizer tests.
-  The decision gate still requires a real GPU run artifact because the local
-  JAX public `gmres` `info` value is status-only on the pinned runtime, not an
-  iteration count.
-- Phase 4 code for byte-budget chunk sizing has landed, but the required
-  no-explicit-override GPU validation has not run yet.
+  Remote RunPod H100 run
+  `/workspace/runpod-k1-runs/phase3-phase4-iota011-R0935-run-matvec-autochunk-h100-20260702T072931Z-final`
+  exited `0` and wrote progress for cell `mpol=10-ntor=10-45d88835`.
+  The rejected K1 trial recorded `newton_iter=40`,
+  `newton_attempted_iterations=40`, all 40 actual matvec entries positive at
+  `1307`, and `newton_last_linear_solve_matvec_budget=1302`. The accepted K1
+  solve recorded `newton_iter=3` and three positive actual entries, also
+  `1307`. At n=663 this is about `1.97 * n` matvecs per Newton iteration,
+  which resolves the measure-first Phase 3 gate in favor of a dense
+  materialization comparator.
+- Phase 4 byte-budget chunk sizing now has a no-explicit-override H100 proof in
+  the same run: `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` and
+  `SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU` were unset, preallocation stayed on,
+  transfer guard stayed disallow, and K1 progress recorded
+  `dense_operator_chunk_batch_size=8` with
+  `max_dense_hessian_bytes=268435456`. This validates the default auto-sizing
+  on the allocated H100 80GB target; a lower-memory A100-40GB validation remains
+  useful when that hardware is available.
+- The same H100 artifact exposed one remaining reporting-reuse gap:
+  `target_lane_reporting_forward_result_started` at `858.75 s` returned at
+  `1060.20 s`, so final reporting still paid about `201.4 s` for a K1 forward
+  result in this run.
 - Phase 5 trial-budget plumbing has landed in the child single-stage runner,
   the parent parity wrapper, and the K1 matrix launcher. The launcher now
   accepts `MATRIX_TRIAL_BOOZER_BFGS_TOL` and
   `MATRIX_TRIAL_BOOZER_BFGS_MAXITER`, records them in each case manifest, and
-  forwards them as `--target-lane-trial-boozer-bfgs-*` to the child. No
-  accepted-result A/B quality gate or measured 200/300/500 sweep has completed
-  yet.
+  forwards them as `--target-lane-trial-boozer-bfgs-*` to the child. RunPod
+  H100 sweep
+  `/workspace/runpod-k1-runs/phase5-iota011-R0935-bfgs-sweep-h100-20260702T075558Z`
+  completed caps `200`, `300`, and `500` with exit `0` on the same
+  `iota011_R0935` Phase 2 config (`maxiter=20`, full accepted/final BFGS
+  budget `1500`, full Newton polish `run`, no explicit dense chunk override).
+  All three stopped after one accepted iteration and reached indistinguishable
+  physics, but cap `300` was fastest:
+
+  | trial BFGS cap | final event elapsed | phase2 elapsed | K1 durations (s) | rejected-trial K1 | final J | final iota | final vol | Boozer residual |
+  | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+  | 200 | 671.2 s | 298.3 s | 168.0, 25.8, 34.8 | 25.8 s (`pre_newton_iter=200`, `newton_iter=1`) | 7.16440496073957e-4 | 0.11017563996762356 | 0.04916423160514324 | 4.5732067736942573e-7 |
+  | 300 | 532.2 s | 296.5 s | 166.8, 26.0, 34.6 | 26.0 s (`pre_newton_iter=300`, `newton_iter=1`) | 7.164389974566755e-4 | 0.11017554592247202 | 0.04916423166118373 | 4.573194822063472e-7 |
+  | 500 | 612.9 s | 376.2 s | 165.8, 106.3, 34.8 | 106.3 s (`pre_newton_iter=500`, `newton_iter=9`) | 7.164368308119462e-4 | 0.11017540985669198 | 0.049164231742263885 | 4.5731775303772417e-7 |
+
+  Interpretation: cap `300` is the current best measured trial budget. It
+  preserves the final objective/physics envelope of cap `500` while avoiding
+  the expensive rejected-trial Newton work. Cap `200` produced the same
+  optimizer result but paid a one-off `201.8 s` final-reporting forward-result
+  recompute; cap `300`/`500` reporting recompute was about `65 s`. This keeps
+  the reporting-reuse fix on the critical path, but the trial-budget knob is
+  validated as useful.
 - Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
   was validated remotely with a real CLI same-shape copy smoke
   (`payload_equal=true`, identical SHA-256 source/output).
@@ -315,11 +350,14 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
    - [x] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
          GMRES matvec count per Newton iteration (Eisenstat–Walker-adjusted),
          surfaced through the existing K1 subtimer events. Source and focused
-         remote validation landed at `61d1cb99a`; GPU artifact measurement is
-         still pending.
-   - [ ] Decision gate (write results into this file): if measured
+         remote validation landed at `61d1cb99a`; RunPod H100 artifact
+         `phase3-phase4-iota011-R0935-run-matvec-autochunk-h100-20260702T072931Z-final`
+         closed the GPU measurement.
+   - [x] Decision gate (write results into this file): if measured
          HVPs/iteration ≥ ~n (663), implement Option A; if well below,
-         document and close this phase as not-a-win.
+         document and close this phase as not-a-win. The measured value was
+         `1307` actual operator matvecs per Newton iteration at n=663, so
+         Option A is the next implementation target.
    - [ ] Option A: per-iteration dense materialization
          (`_materialize_dense_linear_operator`, `OPT:3669`) + on-device PLU
          solve inside the traceable Newton loop, reusing the factor-once
@@ -341,9 +379,13 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          Constraint: `lax.map` needs a static batch at import (`OPT:3601-3606`).
          Source and focused remote validation have landed; no-explicit-override
          GPU validation remains open below.
-   - [ ] Verify the auto value on the lowest-memory target GPU, including the
-         prior 40GB A100 diagnostic class when available, with
-         `XLA_PYTHON_CLIENT_PREALLOCATE=true` does not OOM. Historical handoff
+   - [x] Verify the auto value on the allocated H100 target with
+         `XLA_PYTHON_CLIENT_PREALLOCATE=true`, transfer guard disallow, and no
+         explicit chunk/budget env overrides. The H100 artifact above exited
+         `0` and recorded auto `dense_operator_chunk_batch_size=8` with
+         `max_dense_hessian_bytes=268435456`.
+   - [ ] Verify the same auto value on a lower-memory target GPU, including the
+         prior 40GB A100 diagnostic class when available. Historical handoff
          evidence records batch=32 OOM around a 49.35 GiB effective allocation
          at mpol10/nphi255 (HANDOFF.md §5); the auto-sizer must be validated on
          the actual allocated GPU rather than assuming 32 is safe on every
@@ -356,9 +398,16 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          through the parent parity wrapper plus the K1 matrix launcher.
          Evidence for sizing: init used 701/1500 iterations and still failed
          1e-10.
-   - [ ] Run a measured sweep (e.g. 200/300/500) on the Phase 2 config.
-   - [ ] Guard: accepted/final/reference solves keep the full budget;
+   - [x] Run a measured sweep (e.g. 200/300/500) on the Phase 2 config.
+         Completed on RunPod H100 at
+         `/workspace/runpod-k1-runs/phase5-iota011-R0935-bfgs-sweep-h100-20260702T075558Z`.
+         Cap `300` is fastest among the three clean exits with effectively
+         unchanged final objective and physics.
+   - [x] Guard: accepted/final/reference solves keep the full budget;
          policy recorded in progress metadata like `newton_polish_policy`.
+         The sweep command set only `--target-lane-trial-boozer-bfgs-maxiter`
+         per case; accepted/final remained at
+         `--target-lane-boozer-bfgs-maxiter 1500`.
 
 6. **Phase 6 (independent) — seed-spec projection bypass**
    - [x] Bypass same-resolution runtime-seed-spec projection when the
@@ -421,16 +470,18 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       comparison; the same-A100 per-eval wall target remains open.
 - [ ] Phase 2 quality gate passed and recorded (or `skip` default reverted
       with the evidence written into the report doc).
-- [ ] Phase 3 decision gate resolved either way with measured HVP counts in
-      this file; if implemented, equivalence gate green.
+- [x] Phase 3 decision gate resolved with measured HVP counts in this file.
+- [ ] Phase 3 Option A implemented behind a comparator flag and equivalence
+      gate green before any default flip.
 - [ ] Phases 4–5 landed with regressions, or explicitly rejected with data.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
 
 ## Open Questions
 
-- Measured HVPs per Newton iteration under Eisenstat–Walker at production
-  conditioning (κ≈6e6 LS-Hessian) — the Phase 3 gate input.
+- Phase 3 Option A implementation result: the H100 gate input is no longer open
+  (`1307` matvecs per Newton iteration at n=663), but the dense-materialization
+  comparator and equivalence gate are still pending.
 - Native cpp/CPU per-eval wall at the iota011_R0935 config on Perlmutter CPU
   nodes: no local record exists; needed for the definitive post-fix
   cpp-vs-GPU headline. (`single_stage_fair_compare_gpu.slurm` co-produces the

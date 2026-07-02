@@ -3341,6 +3341,52 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_records_matvec_counts_inside_jit(
+        self, monkeypatch
+    ):
+        """Matvec diagnostics must not host-convert traced Newton metadata."""
+
+        monkeypatch.setenv(_opt._TRACEABLE_NEWTON_MATVEC_COUNT_ENV, "1")
+
+        @jax.jit
+        def run_nested_newton(x0):
+            result = _opt.newton_polish_traceable(
+                lambda x: 0.5 * jnp.dot(x, x),
+                x0,
+                maxiter=3,
+                tol=1e-12,
+                stab=0.0,
+                materialize_hessian=False,
+            )
+            return (
+                result["newton_trace_active"],
+                result["newton_matvec_counter_token"],
+            )
+
+        active, token = run_nested_newton(
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        )
+        active = np.asarray(active, dtype=bool)
+        active_indices = np.nonzero(active)[0]
+        counts = _opt.traceable_newton_matvec_counts_from_token(int(token))
+        assert counts is not None
+        assert _opt.traceable_newton_matvec_counts_from_token(int(token)) is None
+        actual = np.full(
+            active.shape,
+            _opt._LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+            dtype=np.int32,
+        )
+        actual[active] = np.asarray(counts, dtype=np.int32)[active]
+
+        assert active_indices.size >= 1
+        assert np.all(actual[active] > 0)
+        assert np.all(
+            actual[~active] == _opt._LINEAR_SOLVE_ITERATIONS_UNKNOWN
+        )
+        assert int(actual[active_indices[-1]]) > 0
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_accepts_finite_descent_step_with_failed_status(
         self, monkeypatch
     ):

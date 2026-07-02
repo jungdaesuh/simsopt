@@ -332,6 +332,7 @@ _BOOZER_NEWTON_DIAGNOSTIC_RESULT_KEYS: tuple[str, ...] = (
     "newton_trace_linear_solve_iterations",
     "newton_trace_linear_solve_matvec_budget",
     "newton_trace_linear_solve_matvec_actual",
+    "newton_matvec_counter_token",
     "newton_trace_linear_residual_relative",
     "newton_trace_backtracking_iterations",
     "newton_trace_accepted_alpha",

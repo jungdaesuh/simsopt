@@ -577,6 +577,22 @@ def _drain_traceable_matvec_counter(token: int) -> tuple[int, ...] | None:
     return tuple(values)
 
 
+def _is_jax_tracer(value) -> bool:
+    return isinstance(value, jax.core.Tracer)
+
+
+def traceable_newton_matvec_counts_from_token(token: int) -> tuple[int, ...] | None:
+    """Read and unregister one opt-in traceable Newton matvec counter token."""
+
+    if token == 0:
+        return None
+    with _TRACEABLE_CALLBACK_LOCK:
+        values = _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
+    if values is None:
+        return None
+    return tuple(values)
+
+
 class _StrongTraceableCallableRef:
     __slots__ = ("_callable_fn",)
 
@@ -6104,35 +6120,44 @@ def newton_polish_traceable(
             )
         if progress_callback_token != 0 or matvec_counter_token != 0:
             jax.effects_barrier()
-        matvec_counts = _drain_traceable_matvec_counter(matvec_counter_token)
-        matvec_counter_token = 0
-        if matvec_counts is not None:
-            active = np.asarray(
-                jax.device_get(result["newton_trace_active"]),
-                dtype=bool,
-            )
-            actual = np.full(
-                (int(maxiter),),
-                _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
-                dtype=np.int32,
-            )
-            actual[active] = np.asarray(matvec_counts, dtype=np.int32)[active]
-            attempted = int(
-                np.asarray(jax.device_get(result["newton_attempted_iterations"]))
-            )
-            last_actual = (
-                _LINEAR_SOLVE_ITERATIONS_UNKNOWN
-                if attempted <= 0
-                else int(actual[attempted - 1])
-            )
+        if matvec_counter_token != 0 and _is_jax_tracer(
+            result["newton_trace_active"]
+        ):
             result = dict(result)
-            result["newton_trace_linear_solve_matvec_actual"] = jnp.asarray(
-                actual,
-                dtype=jnp.int32,
+            result["newton_matvec_counter_token"] = _device_int32(
+                matvec_counter_token
             )
-            result["newton_last_linear_solve_matvec_actual"] = _device_int32(
-                last_actual
-            )
+            matvec_counter_token = 0
+        else:
+            matvec_counts = _drain_traceable_matvec_counter(matvec_counter_token)
+            matvec_counter_token = 0
+            if matvec_counts is not None:
+                result = dict(result)
+                active = np.asarray(
+                    jax.device_get(result["newton_trace_active"]),
+                    dtype=bool,
+                )
+                actual = np.full(
+                    (int(maxiter),),
+                    _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+                    dtype=np.int32,
+                )
+                actual[active] = np.asarray(matvec_counts, dtype=np.int32)[active]
+                attempted = int(
+                    np.asarray(jax.device_get(result["newton_attempted_iterations"]))
+                )
+                last_actual = (
+                    _LINEAR_SOLVE_ITERATIONS_UNKNOWN
+                    if attempted <= 0
+                    else int(actual[attempted - 1])
+                )
+                result["newton_trace_linear_solve_matvec_actual"] = jnp.asarray(
+                    actual,
+                    dtype=jnp.int32,
+                )
+                result["newton_last_linear_solve_matvec_actual"] = _device_int32(
+                    last_actual
+                )
         return result
     finally:
         _unregister_traceable_callback(progress_callback_token)
