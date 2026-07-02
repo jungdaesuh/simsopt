@@ -164,6 +164,66 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
 - Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
   was validated remotely with a real CLI same-shape copy smoke
   (`payload_equal=true`, identical SHA-256 source/output).
+- Phase 2 has a first accepted-result H100 A/B on the real `iota011_R0935`
+  gallery seed, but it should be treated as a measured short-run result rather
+  than a production quality pass. Both legs used the same seed, targets
+  (`iota=0.11015671329581699`, `vol=0.04920000000000004`), resolution
+  (`mpol=10`, `ntor=10`, `nphi=255`, `ntheta=64`), chunk batch `8`,
+  preallocation enabled, `maxiter=20`, benchmark/minimal artifacts, and the
+  cloned successful H100 launcher environment; only
+  `--target-lane-trial-boozer-newton-polish-policy` differed.
+  - `skip` artifact:
+    `/workspace/runpod-k1-runs/phase2-iota011-R0935-skip-quality-h100-20260702T050023Z`
+    (`results.json` in cell `mpol=10-ntor=10-d38a5a3d`) exited `0`,
+    `OPTIMIZER_SUCCESS=True`, `iterations=1`, `OPTIMIZER_NFEV=19`,
+    wall `16:21.59`, `INITIAL_OBJECTIVE=7.173839457696713e-4`,
+    `FINAL_OBJECTIVE=7.171619766357395e-4`,
+    `FINAL_IOTA=0.1102158156590774`,
+    `FINAL_VOLUME=0.0491642076547637`,
+    `FINAL_BOOZER_RESIDUAL=4.5783162720818724e-7`.
+    It recorded 19 K1 returns, 13 K2 returns, and 6 baseline-gradient
+    fallback returns. K1 durations were `24.8 s`, `8.1 s`, then mostly
+    `4.9 s`; K2 was `228.3 s` for the first call and then about `15.8 s`.
+    Phase 2 took `534.9 s`; final reporting/sync took `279.0 s`, including a
+    `189.7 s` reporting forward-result step. This quality launcher did not
+    emit a `reused=true` final-sync payload, so do not use it as proof of
+    final-sync reuse.
+  - `run` artifact:
+    `/workspace/runpod-k1-runs/phase2-iota011-R0935-run-quality-h100-20260702T052815Z-clonedskipenv`
+    (`results.json` in cell `mpol=10-ntor=10-22d2939f`) exited `0`,
+    `OPTIMIZER_SUCCESS=True`, `iterations=1`, `OPTIMIZER_NFEV=3`,
+    wall `15:28.43`, `INITIAL_OBJECTIVE=7.173839457696713e-4`,
+    `FINAL_OBJECTIVE=7.164330117522752e-4`,
+    `FINAL_IOTA=0.11017516973394964`,
+    `FINAL_VOLUME=0.04916423188534984`,
+    `FINAL_BOOZER_RESIDUAL=4.5731470149987164e-7`.
+    It recorded 3 K1 returns, 2 K2 returns, and 1 baseline-gradient fallback.
+    K1 durations were `168.1 s`, `403.5 s`, and `34.7 s`; K2 durations were
+    `57.6 s` and `15.8 s`. Phase 2 took `679.8 s`; final reporting/sync took
+    `79.8 s`, including a `68.5 s` reporting forward-result step.
+  - Interpretation: the trial-polish cost mechanism is confirmed by the K1
+    timings (`run` spends minutes in full K1 polish where `skip` returns in
+    seconds), but the default-`skip` quality gate is not closed by this single
+    short run. Both legs stopped after one accepted iteration on SciPy's loose
+    relative-function-reduction criterion; `run` took far fewer evaluations and
+    reached a slightly lower objective, while `skip` made many cheap rejected
+    probes. Keep `skip` as the performance hypothesis, but require a
+    longer/tighter quality gate or a trial-BFGS-budget sweep before declaring it
+    production-quality superior.
+- Two launcher/runtime traps were found during that A/B and are separate from
+  the trial-policy comparison:
+  - Strict JAX transfer guard (`JAX_TRANSFER_GUARD*`) fails during
+    `SingleStageRuntimeSpecBiotSavartJAX` construction because
+    `biotsavart_backend._spec_cache_key -> _array_cache_key` calls
+    `np.asarray` on a device `jax.Array` (`shape=(9)`, `dtype=float64`,
+    `device=cuda:0`). The completed quality runs used the existing
+    `SIMSOPT_JAX_TRANSFER_GUARD=disallow` launcher variable, matching the
+    successful skip leg, not the raw JAX guard.
+  - An incomplete cloned launcher environment can fail Boozer init condition
+    estimation with a CPU/GPU scalar mix in
+    `_dense_matrix_condition_estimate` (`matrix_norm` on GPU times
+    `inverse_norm` on CPU). The fair A/B run cloned the successful skip
+    launcher environment exactly and changed only the trial policy.
 
 ## Rationale
 
@@ -231,16 +291,25 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          production performance policy.
 
 2. **Phase 2 — Trial-skip trajectory quality gate**
-   - [ ] Same seed/targets (iota011_R0935: iota 0.11015671329581699,
+   - [x] Same seed/targets (iota011_R0935: iota 0.11015671329581699,
          vol 0.04920000000000004), `maxiter` 20–50, A/B
          `--target-lane-trial-boozer-newton-polish-policy skip` vs `run`.
-   - [ ] Compare: final J, FINAL_IOTA / FINAL_VOLUME / FINAL_BOOZER_RESIDUAL,
+         Completed on RunPod H100 with `maxiter=20`:
+         `phase2-iota011-R0935-skip-quality-h100-20260702T050023Z` vs
+         `phase2-iota011-R0935-run-quality-h100-20260702T052815Z-clonedskipenv`.
+   - [x] Compare: final J, FINAL_IOTA / FINAL_VOLUME / FINAL_BOOZER_RESIDUAL,
          accepted-iteration count, total line-search eval count,
          rejected-trial rate, wall time.
+         Recorded in the execution-status section above.
    - [ ] Gate: `skip` reaches equal-or-better J at equal accepted iterations
          (tolerance: the two trajectories may diverge; judge by objective
          quality, not step-for-step parity), and the rejected-trial rate does
          not increase enough to erase the per-trial savings.
+         First H100 A/B does **not** close this gate: both legs stopped after
+         one accepted iteration, but `run` reached the lower final objective
+         (`7.1643e-4` vs `7.1716e-4`) with fewer objective evaluations.
+         The K1 timing mechanism is confirmed; the quality gate needs a
+         longer/tighter run or the Phase 5 trial-BFGS-budget sweep.
 
 3. **Phase 3 — Structural: cut HVPs per Newton iteration (measure first)**
    - [x] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
