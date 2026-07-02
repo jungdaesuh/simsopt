@@ -192,9 +192,11 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          not increase enough to erase the per-trial savings.
 
 3. **Phase 3 — Structural: cut HVPs per Newton iteration (measure first)**
-   - [ ] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
+   - [x] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
          GMRES matvec count per Newton iteration (Eisenstat–Walker-adjusted),
-         surfaced through the existing K1 subtimer events.
+         surfaced through the existing K1 subtimer events. Source and focused
+         remote validation landed at `61d1cb99a`; GPU artifact measurement is
+         still pending.
    - [ ] Decision gate (write results into this file): if measured
          HVPs/iteration ≥ ~n (663), implement Option A; if well below,
          document and close this phase as not-a-win.
@@ -211,12 +213,14 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          ≤1e-12 equivalence harness) before any default flip.
 
 4. **Phase 4 — Chunk-batch byte-budget auto-sizing**
-   - [ ] Derive the dense-operator chunk batch from the GPU byte budget
+   - [x] Derive the dense-operator chunk batch from the GPU byte budget
          (`SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU`, env name at
          `runtime.py:126`, default at `runtime.py:234`) instead of the
          hardcoded env default 8 (`OPT:3607`); keep
          `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` as explicit override.
          Constraint: `lax.map` needs a static batch at import (`OPT:3601-3606`).
+         Source and focused remote validation have landed; no-explicit-override
+         GPU validation remains open below.
    - [ ] Verify the auto value on the lowest-memory target GPU, including the
          prior 40GB A100 diagnostic class when available, with
          `XLA_PYTHON_CLIENT_PREALLOCATE=true` does not OOM. Historical handoff
@@ -237,15 +241,18 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          policy recorded in progress metadata like `newton_polish_policy`.
 
 6. **Phase 6 (independent) — seed-spec projection bypass**
-   - [ ] Bypass same-resolution runtime-seed-spec projection when the
+   - [x] Bypass same-resolution runtime-seed-spec projection when the
          serialized surface already matches the requested resolution (the
          staging hang noted in the report's Runtime boundary section). Not a
          perf-gap item; unblocks official warm-start staging for Phases 1–2.
+         Landed at `651639189` and validated remotely with a real same-shape
+         CLI copy smoke (`payload_equal=true`, identical SHA-256 output).
 
 ## Validation Plan
 
-- [ ] Local regressions (repo tests require the meta-path workaround from
-      HANDOFF.md §4 — drop `ScikitBuildRedirectingFinder`, force `src/`):
+- [ ] Targeted regressions (run remotely for this workflow; repo tests require
+      the meta-path workaround from HANDOFF.md §4 — drop
+      `ScikitBuildRedirectingFinder`, force `src/`):
       `tests/integration/test_single_stage_jax_cpu_reference.py -k "trace_wrapper_uses_decomposed_k1_cache_after_value_grad or decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform"`,
       `tests/integration/test_single_stage_newton_polish_policy.py`,
       `tests/geo/test_boozersurface_jax_private.py`.
