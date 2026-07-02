@@ -1,7 +1,7 @@
 # scipy-jax-decomposed GPU Perf Gap Closure Plan
 
-**Status:** Draft
-**Last updated:** 2026-07-01
+**Status:** In progress
+**Last updated:** 2026-07-02
 
 ## Purpose
 
@@ -81,6 +81,40 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
   with cases `baseline_dense_run_chunk8`, `lbfgs_run_chunk8`,
   `dense_skip_chunk8`, `dense_run_lsmrj_chunk8`, `dense_run_chunk16`,
   selectable via `MATRIX_CASES`.
+
+## Execution Status (2026-07-02)
+
+Authoritative state as of commit `61d1cb99a`:
+
+- Phase 1 is now assertable but not GPU-proven. The K1 matrix launcher has an
+  opt-in progress gate (`MATRIX_ASSERT_K1_PROGRESS=1`) backed by
+  `benchmarks/single_stage_k1_progress_assertions.py`. By default it checks K1
+  return events, trial Newton skip semantics, and optional final-sync reuse; when
+  `MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE=1`, it additionally checks
+  exactly-one K1 return per `objective_evaluation` and optional trace-forward
+  reuse. Remote Perlmutter
+  validation passed for py-compile, the focused synthetic pytest slice, and a
+  CLI synthetic progress smoke. Fresh GPU submission of this assertion-enabled
+  job is currently blocked by Slurm policy: even minimal `sbatch --test-only`
+  GPU jobs for `gpu_debug`, `gpu_interactive`, `gpu_shared`, and `gpu_regular`
+  returned `Job request does not match any supported policy`. Existing earlier
+  GPU jobs remain pending, but they target older source commits and therefore
+  do not prove this assertion-enabled HEAD.
+- Phase 3 measurement plumbing is partially implemented at `61d1cb99a`.
+  `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
+  callback counts into `newton_trace_linear_solve_matvec_actual` and
+  `newton_last_linear_solve_matvec_actual`; default behavior is unchanged.
+  Remote Perlmutter validation passed the focused private optimizer tests.
+  The decision gate still requires a real GPU run artifact because the local
+  JAX public `gmres` `info` value is status-only on the pinned runtime, not an
+  iteration count.
+- Phase 4 code for byte-budget chunk sizing has landed, but the required
+  no-explicit-override GPU validation has not run yet.
+- Phase 5 trial-budget plumbing has landed with pending GPU sweep jobs from an
+  older source. No accepted-result A/B quality gate has completed yet.
+- Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
+  was validated remotely with a real CLI same-shape copy smoke
+  (`payload_equal=true`, identical SHA-256 source/output).
 
 ## Rationale
 

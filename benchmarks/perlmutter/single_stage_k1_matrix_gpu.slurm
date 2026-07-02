@@ -39,6 +39,10 @@ MATRIX_CASES="${MATRIX_CASES:-all}"
 CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-7200}"
 TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-7200}"
 MATRIX_DISABLE_SUCCESS_FILTER="${MATRIX_DISABLE_SUCCESS_FILTER:-0}"
+MATRIX_ASSERT_K1_PROGRESS="${MATRIX_ASSERT_K1_PROGRESS:-0}"
+MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE="${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE:-0}"
+MATRIX_REQUIRE_TRACE_REUSE="${MATRIX_REQUIRE_TRACE_REUSE:-0}"
+MATRIX_REQUIRE_FINAL_SYNC_REUSE="${MATRIX_REQUIRE_FINAL_SYNC_REUSE:-0}"
 
 repo_root_real="$(realpath "${REPO_ROOT}")"
 run_root_real="$(realpath -m "${RUN_ROOT}")"
@@ -159,9 +163,52 @@ payload = {
     "MATRIX_WARM_START_RUN_DIR": os.environ.get("MATRIX_WARM_START_RUN_DIR") or None,
     "MATRIX_IOTA_TARGET": os.environ.get("MATRIX_IOTA_TARGET") or None,
     "MATRIX_VOL_TARGET": os.environ.get("MATRIX_VOL_TARGET") or None,
+    "MATRIX_ASSERT_K1_PROGRESS": os.environ.get("MATRIX_ASSERT_K1_PROGRESS") or None,
+    "MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE": (
+        os.environ.get("MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE") or None
+    ),
+    "MATRIX_REQUIRE_TRACE_REUSE": os.environ.get("MATRIX_REQUIRE_TRACE_REUSE") or None,
+    "MATRIX_REQUIRE_FINAL_SYNC_REUSE": (
+        os.environ.get("MATRIX_REQUIRE_FINAL_SYNC_REUSE") or None
+    ),
 }
+
 print(json.dumps(payload, indent=2, sort_keys=True))
 PY
+}
+
+assert_case_progress() {
+  local case_label="$1"
+  local case_dir="${ARTIFACT_DIR}/${case_label}"
+  if [[ "${MATRIX_ASSERT_K1_PROGRESS}" != "1" ]]; then
+    return 0
+  fi
+  local progress_json
+  progress_json="$(find "${case_dir}/cases" -name outer_optimizer_progress.json -type f -print -quit)"
+  if [[ -z "${progress_json}" ]]; then
+    echo "Missing outer_optimizer_progress.json for ${case_label}" >&2
+    return 1
+  fi
+  local expect_skip="false"
+  if [[ "${MATRIX_TRIAL_NEWTON_POLISH_POLICY}" == "skip" ]]; then
+    expect_skip="true"
+  fi
+  local assertion_args=(
+    --progress-json "${progress_json}"
+    --require-k1-forward-events
+    --expect-newton-skip "${expect_skip}"
+    --output-json "${case_dir}/k1_progress_assertions.json"
+  )
+  if [[ "${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE}" == "1" ]]; then
+    assertion_args+=(--require-k1-per-objective)
+  fi
+  if [[ "${MATRIX_REQUIRE_TRACE_REUSE}" == "1" ]]; then
+    assertion_args+=(--require-trace-forward-reuse)
+  fi
+  if [[ "${MATRIX_REQUIRE_FINAL_SYNC_REUSE}" == "1" ]]; then
+    assertion_args+=(--require-final-sync-reuse)
+  fi
+  python benchmarks/single_stage_k1_progress_assertions.py "${assertion_args[@]}"
 }
 
 run_case() {
@@ -193,6 +240,10 @@ run_case() {
   if [[ "${MATRIX_DISABLE_SUCCESS_FILTER}" == "1" ]]; then
     success_filter_args=(--disable-target-lane-success-filter)
   fi
+  local trace_args=()
+  if [[ "${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE}" == "1" ]]; then
+    trace_args=(--record-objective-evaluation-trace)
+  fi
   local newton_stab_args=()
   if [[ -n "${newton_stab}" ]]; then
     newton_stab_args=(--target-lane-boozer-newton-stab "${newton_stab}")
@@ -221,6 +272,7 @@ run_case() {
         "${limited_memory_args[@]}" \
         --record-jax-compile-diagnostics \
         --trace-target-lane-k1-subtimers \
+        "${trace_args[@]}" \
         --benchmark-mode \
         --minimal-artifacts \
         "${success_filter_args[@]}" \
@@ -250,6 +302,19 @@ run_case() {
   set -e
   echo "${status}" > "${case_dir}/exit_status.txt"
   nvidia-smi > "${case_dir}/nvidia_smi_after.txt" || true
+  if [[ "${status}" == "0" ]]; then
+    set +e
+    assert_case_progress "${case_label}" \
+      > "${case_dir}/k1_progress_assertions_stdout.log" \
+      2> "${case_dir}/k1_progress_assertions_stderr.log"
+    local assertion_status="$?"
+    set -e
+    echo "${assertion_status}" > "${case_dir}/k1_progress_assertions_exit_status.txt"
+    if [[ "${assertion_status}" != "0" ]]; then
+      status="${assertion_status}"
+      echo "${status}" > "${case_dir}/exit_status.txt"
+    fi
+  fi
   return 0
 }
 
