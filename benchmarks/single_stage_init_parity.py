@@ -1857,6 +1857,9 @@ def _compile_jax_runtime_seed_spec_from_run_dir(
         single_stage_banana_example as single_stage_example,
     )
 
+    _, stage2_seed_results = single_stage_example.load_stage2_results(
+        str(args.stage2_bs_path)
+    )
     return Path(
         single_stage_example.compile_single_stage_jax_runtime_seed_spec(
             str(run_dir),
@@ -1866,6 +1869,7 @@ def _compile_jax_runtime_seed_spec_from_run_dir(
             ntheta=int(args.ntheta),
             num_tf_coils=int(getattr(args, "num_tf_coils", 20)),
             output_path_or_run_dir=str(output_path),
+            stage2_seed_results=stage2_seed_results,
         )
     )
 

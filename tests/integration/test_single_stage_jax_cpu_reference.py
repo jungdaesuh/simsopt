@@ -458,6 +458,47 @@ _REAL_FIXTURE_SOLVER_CPU_JAX_TOLS = {
     ),
     "axis_z_abs": (0.0, _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"]),
 }
+
+
+def test_runtime_stage2_seed_results_fills_missing_order_from_explicit_seed():
+    """Explicit Stage-2 seed metadata fills missing donor seed identity fields."""
+    donor_results = {
+        "MAJOR_RADIUS": 0.94,
+        "TOROIDAL_FLUX": 0.25,
+        "banana_surf_radius": 0.21,
+        "FINAL_IOTA": 0.11,
+    }
+    stage2_seed_results = {
+        "MAJOR_RADIUS": 0.915,
+        "TOROIDAL_FLUX": 0.24,
+        "order": 2,
+    }
+
+    merged = single_stage_example.single_stage_runtime_stage2_seed_results(
+        donor_results,
+        stage2_seed_results=stage2_seed_results,
+    )
+
+    assert merged["MAJOR_RADIUS"] == pytest.approx(0.94)
+    assert merged["TOROIDAL_FLUX"] == pytest.approx(0.25)
+    assert merged["order"] == 2
+    assert "order" not in donor_results
+
+
+def test_runtime_stage2_seed_results_requires_complete_fallback_metadata():
+    donor_results = {
+        "MAJOR_RADIUS": 0.94,
+        "TOROIDAL_FLUX": 0.25,
+        "banana_surf_radius": 0.21,
+    }
+
+    with pytest.raises(KeyError, match="order"):
+        single_stage_example.single_stage_runtime_stage2_seed_results(
+            donor_results,
+            stage2_seed_results={},
+        )
+
+
 _REAL_FIXTURE_SOLVER_CPU_GPU_TOLS = {
     "iota": (0.0, _GPU_RUNTIME_TOLS["whole_solve_value_atol"]),
     "G": (

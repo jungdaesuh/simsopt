@@ -2992,6 +2992,45 @@ def build_single_stage_runtime_stage2_seed_payload(
     }
 
 
+_SINGLE_STAGE_RUNTIME_STAGE2_SEED_RESULT_FIELDS = (
+    "MAJOR_RADIUS",
+    "TOROIDAL_FLUX",
+    "order",
+)
+
+
+def single_stage_runtime_stage2_seed_results(
+    donor_results,
+    *,
+    stage2_seed_results=None,
+):
+    """Return Stage-2 seed metadata for a JAX runtime seed spec.
+
+    Single-stage warm-start donors may not carry the original Stage-2 seed
+    fields. In that case an explicit Stage-2 seed result may provide only the
+    immutable Stage-2 metadata; donor physics diagnostics remain donor-owned.
+    """
+    missing = [
+        key
+        for key in _SINGLE_STAGE_RUNTIME_STAGE2_SEED_RESULT_FIELDS
+        if key not in donor_results
+    ]
+    if not missing:
+        return donor_results
+    if stage2_seed_results is None:
+        return donor_results
+    fallback_missing = [key for key in missing if key not in stage2_seed_results]
+    if fallback_missing:
+        raise KeyError(
+            "Stage-2 seed metadata fallback is missing required fields: "
+            + ", ".join(fallback_missing)
+        )
+    merged = dict(donor_results)
+    for key in missing:
+        merged[key] = stage2_seed_results[key]
+    return merged
+
+
 def stage2_results_from_single_stage_runtime_seed_payload(stage2_seed_payload):
     return {
         "MAJOR_RADIUS": float(stage2_seed_payload["major_radius"]),
@@ -3378,6 +3417,7 @@ def compile_single_stage_jax_runtime_seed_spec(
     ntheta,
     num_tf_coils,
     output_path_or_run_dir=None,
+    stage2_seed_results=None,
 ):
     warm_start_state = load_single_stage_warm_start_state(run_dir)
     quadpoints_phi, quadpoints_theta = make_single_stage_half_period_quadpoints(
@@ -3412,6 +3452,10 @@ def compile_single_stage_jax_runtime_seed_spec(
         types.SimpleNamespace(banana_surf_radius=None),
         donor_results,
     )
+    runtime_stage2_seed_results = single_stage_runtime_stage2_seed_results(
+        donor_results,
+        stage2_seed_results=stage2_seed_results,
+    )
     banana_current_A = float(banana_coils[0].current.get_value())
     runtime_spec_destination = (
         output_path_or_run_dir if output_path_or_run_dir is not None else run_dir
@@ -3432,7 +3476,7 @@ def compile_single_stage_jax_runtime_seed_spec(
         tf_current_A=tf_current_A,
         banana_current_A=banana_current_A,
         stage2_seed=build_single_stage_runtime_stage2_seed_payload(
-            donor_results,
+            runtime_stage2_seed_results,
             banana_surf_radius=banana_surf_radius,
         ),
         initial_diagnostics=build_single_stage_runtime_seed_initial_diagnostics_payload(
