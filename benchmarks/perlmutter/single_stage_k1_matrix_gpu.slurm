@@ -388,6 +388,10 @@ print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 
 cat "${ARTIFACT_DIR}/matrix_exit_summary.json"
+python -m benchmarks.single_stage_k1_matrix_report \
+  --artifact-dir "${ARTIFACT_DIR}" \
+  --output-json "${ARTIFACT_DIR}/k1_matrix_report.json"
+cat "${ARTIFACT_DIR}/k1_matrix_report.json"
 python - <<'PY' "${ARTIFACT_DIR}/matrix_exit_summary.json"
 import json
 import pathlib

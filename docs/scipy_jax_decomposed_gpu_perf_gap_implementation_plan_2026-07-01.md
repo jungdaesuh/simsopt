@@ -94,14 +94,18 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   return events, trial Newton skip semantics, and optional final-sync reuse; when
   `MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE=1`, it additionally checks
   exactly-one K1 return per `objective_evaluation` and optional trace-forward
-  reuse. Remote Perlmutter
-  validation passed for py-compile, the focused synthetic pytest slice, and a
-  CLI synthetic progress smoke. Fresh GPU submission of this assertion-enabled
-  job is currently blocked by Slurm policy: even minimal `sbatch --test-only`
-  GPU jobs for `gpu_debug`, `gpu_interactive`, `gpu_shared`, and `gpu_regular`
-  returned `Job request does not match any supported policy`. Existing earlier
-  GPU jobs remain pending, but they target older source commits and therefore
-  do not prove this assertion-enabled HEAD.
+  reuse. The launcher also emits `k1_matrix_report.json` via
+  `python -m benchmarks.single_stage_k1_matrix_report`, a pure artifact reader that
+  rolls up per-case exit status, assertion status, progress-file summaries,
+  trace-reuse counts, final-sync reuse, and missing-artifact issues before the
+  matrix failure gate. Remote Perlmutter validation passed for py-compile, the
+  focused synthetic pytest slices, and CLI synthetic progress/report smokes.
+  Fresh GPU submission of this assertion-enabled job is currently blocked by
+  Slurm policy: even minimal `sbatch --test-only` GPU jobs for `gpu_debug`,
+  `gpu_interactive`, `gpu_shared`, and `gpu_regular` returned
+  `Job request does not match any supported policy`. Existing earlier GPU jobs
+  remain pending, but they target older source commits and therefore do not
+  prove this assertion-enabled HEAD.
 - Phase 3 measurement plumbing is partially implemented at `61d1cb99a`.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
