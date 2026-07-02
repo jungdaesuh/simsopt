@@ -39,6 +39,21 @@ def _write_case(
     return case_dir
 
 
+def _write_case_progress(
+    case_dir: Path,
+    output_label: str,
+    progress_payload: dict[str, object],
+) -> None:
+    _write_json(
+        case_dir
+        / "cases"
+        / output_label
+        / "mpol=10-ntor=10-test"
+        / "outer_optimizer_progress.json",
+        progress_payload,
+    )
+
+
 def _progress_payload() -> dict[str, object]:
     return {
         "events": [
@@ -101,6 +116,33 @@ def test_matrix_report_summarizes_successful_case(tmp_path: Path) -> None:
     assert progress["k1_pre_newton_metrics_present_count"] == 1
     assert progress["trace_forward_result"] == {"reused": 1, "recomputed": 0}
     assert progress["final_sync_forward_result"]["both_reused"] is True
+    assert case["progresses"] == [progress]
+
+
+def test_matrix_report_summarizes_reference_and_target_progress_files(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    case_dir = _write_case(
+        artifact_dir,
+        "dense_skip_chunk8",
+        exit_code=0,
+        assertion_exit_code=0,
+    )
+    _write_case_progress(case_dir, "reference_outputs", _progress_payload())
+    _write_case_progress(case_dir, "target_outputs", _progress_payload())
+    _write_json(artifact_dir / "matrix_exit_summary.json", {"dense_skip_chunk8": 0})
+
+    report = matrix_report.build_report(artifact_dir)
+
+    assert report["failed_cases"] == []
+    case = report["cases"][0]
+    assert case["issues"] == []
+    assert case["progress"]["label"] == "target_outputs"
+    assert [progress["label"] for progress in case["progresses"]] == [
+        "reference_outputs",
+        "target_outputs",
+    ]
 
 
 def test_matrix_report_records_failed_and_missing_progress_cases(

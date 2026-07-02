@@ -65,20 +65,20 @@ def _event_int_or_none(event: dict[str, object], key: str) -> int | None:
     return value
 
 
-def _find_progress_json(case_dir: Path) -> Path | None:
+def _find_progress_jsons(case_dir: Path) -> list[Path]:
     case_roots = [case_dir / "cases"]
     progress_files: list[Path] = []
     for case_root in case_roots:
         if case_root.exists():
             progress_files.extend(sorted(case_root.rglob("outer_optimizer_progress.json")))
-    if not progress_files:
-        return None
-    if len(progress_files) > 1:
-        raise ValueError(
-            f"Expected one outer_optimizer_progress.json under {case_dir}, "
-            f"found {len(progress_files)}"
-        )
-    return progress_files[0]
+    return progress_files
+
+
+def _progress_label(case_dir: Path, progress_json: Path) -> str:
+    relative_parts = progress_json.relative_to(case_dir).parts
+    if len(relative_parts) >= 4 and relative_parts[0] == "cases":
+        return relative_parts[1]
+    return progress_json.parent.name
 
 
 def _trace_reuse_counts(events: list[dict[str, object]]) -> dict[str, int]:
@@ -118,7 +118,7 @@ def _reporting_reuse(events: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def _progress_report(progress_json: Path) -> dict[str, object]:
+def _progress_report(case_dir: Path, progress_json: Path) -> dict[str, object]:
     events = k1_assertions.load_events(progress_json)
     summary = k1_assertions.summarize(events)
     k1_events = [event for event in events if _event_label(event) == K1_RETURNED_LABEL]
@@ -139,6 +139,7 @@ def _progress_report(progress_json: Path) -> dict[str, object]:
     )
     return {
         **summary,
+        "label": _progress_label(case_dir, progress_json),
         "path": str(progress_json),
         "k1_newton_iter_max": max(newton_iters) if newton_iters else None,
         "k1_newton_polish_skipped_all": (
@@ -158,7 +159,7 @@ def summarize_case(case_dir: Path) -> dict[str, object]:
         case_dir / "k1_progress_assertions_exit_status.txt"
     )
     summary_path = case_dir / "summary.json"
-    progress_json = _find_progress_json(case_dir)
+    progress_jsons = _find_progress_jsons(case_dir)
 
     manifest = _load_json_object(manifest_path) if manifest_path.exists() else None
     if manifest is None:
@@ -169,8 +170,20 @@ def summarize_case(case_dir: Path) -> dict[str, object]:
         issues.append(f"case exited nonzero: {exit_code}")
     if assertion_exit_code not in {None, 0}:
         issues.append(f"k1 progress assertions exited nonzero: {assertion_exit_code}")
-    if progress_json is None and exit_code == 0:
+    if not progress_jsons and exit_code == 0:
         issues.append("missing outer_optimizer_progress.json")
+
+    progress_reports = [
+        _progress_report(case_dir, progress_json) for progress_json in progress_jsons
+    ]
+    primary_progress = next(
+        (
+            progress
+            for progress in progress_reports
+            if progress.get("label") == "target_outputs"
+        ),
+        progress_reports[0] if progress_reports else None,
+    )
 
     return {
         "label": case_dir.name,
@@ -180,7 +193,8 @@ def summarize_case(case_dir: Path) -> dict[str, object]:
         "assertion_exit_code": assertion_exit_code,
         "skipped": (case_dir / "skip_reason.txt").exists(),
         "summary_present": summary_path.exists(),
-        "progress": None if progress_json is None else _progress_report(progress_json),
+        "progress": primary_progress,
+        "progresses": progress_reports,
         "issues": issues,
     }
 
