@@ -26,28 +26,46 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
   `EX:7491-7498`) eliminates both the trace-lane duplicate K1 solve and the
   final-sync K1 re-solve on the production non-trace path.
 - Resolve the trial-only Newton-polish policy: either prove `skip` does not
-  degrade optimizer trajectory quality vs `run`, or revert the default and keep
-  lower-fidelity trial policies explicit until the objective wrapper can
-  classify true line-search probes separately from incumbent evaluations.
+  degrade optimizer trajectory quality vs `run`, or keep lower-fidelity trial
+  policies explicit. Current code can separate the first incumbent `x0` solve
+  from later trial/probe solves; the remaining blocker is trajectory quality,
+  not first-`x0` routing.
 - Reduce the per-Newton-iteration HVP count in the traceable Newton polish
-  (`newton_polish_traceable`, `OPT:5908`), measured before designed.
+  (`newton_polish_traceable`), measured before designed.
 - Replace the hardcoded dense-operator chunk batch default
-  (`_DENSE_OPERATOR_CHUNK_BATCH_SIZE`, `OPT:3607`) with byte-budget
-  auto-sizing.
+  (`_DENSE_OPERATOR_CHUNK_BATCH_SIZE`) with byte-budget auto-sizing.
 - Evaluate whether the trial pre-Newton L-BFGS budget can be bounded safely.
   Do not default-enable a cap unless it is proven not to affect incumbent/full-
   fidelity objective evaluations.
+- Un-clamp Eisenstat-Walker forcing so early Newton linear solves can stop at a
+  genuinely loose tolerance while preserving the final tight tolerance.
+- Reduce dense HVP assembly memory enough to A/B larger chunk batches
+  (`8/16/32`) under normal preallocation and transfer-guard settings.
+- Keep final reporting on the accepted solved state when a later rejected trial
+  would otherwise evict the single-entry solve cache.
+- Convert progress-event persistence from full-history rewrites to append-only
+  or otherwise bounded-cost logging for long optimizer runs.
+- Measure `lsmr_j` with a stabilization sweep and trajectory gate before any
+  default decision; treat any projected speedup as unproven until the sweep
+  collapses the iteration-count uncertainty.
 
 ## Non-Goals
 
 - Making `lsmr_j` the default adjoint solver (stays an experimental comparator
-  behind `SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j`, requires `newton_stab > 0`,
-  `OPT:5153-5242`).
+  behind `SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j`; current implementation is
+  `_solve_regularized_normal_system_lsmr_j_with_status` and requires
+  `newton_stab > 0`).
 - Switching the outer optimizer to `lbfgs-ondevice` (monolithic-compile risk;
   decided against in the report).
 - Any change to the native CPU/cpp reference path or to physics/objective math.
 - Re-running the compile-cache operational work (persistent-cache dir handling
   is a known separate thread; see HANDOFF.md §9).
+- Treating the arithmetic estimates in the performance audit as measured
+  speedups. Timing claims require clean artifacts with
+  `--trace-target-lane-k1-subtimers` and objective-evaluation trace disabled
+  unless the claim is specifically about instrumentation overhead.
+- Default-enabling `lsmr_j`, traceable dense-LU Newton, trial Newton `skip`, or
+  trial BFGS caps without the trajectory/equivalence gates in this file.
 
 ## Current Context
 
@@ -70,12 +88,11 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
   (`EX:265` at the time), resolved it per K1 solve call via
   `wrap_target_lane_solved_pair_with_boozer_overrides` (`EX:7384`), and proved
   the mechanics. The later H100 quality A/B did **not** prove `skip` as a safe
-  production default, so current HEAD reverts the trial Newton-polish default
-  to `run`. A follow-up cap-300 A/B proved useful plumbing but also exposed a
-  contract problem: the decomposed value/grad callable applies trial overrides
-  to SciPy's first `x0` objective evaluation as well as to line-search probes.
-  Therefore trial BFGS caps and `skip` remain explicit experimental flags until
-  incumbent/full-fidelity evaluations can be excluded.
+  production default, so current HEAD keeps both full and trial Newton-polish
+  defaults at `run`. A follow-up cap-300 A/B proved useful plumbing and exposed
+  a first-`x0` routing bug; that bug is fixed in current code. Trial BFGS caps
+  and `skip` still remain explicit experimental flags until accepted-trajectory
+  quality gates prove them safe as production defaults.
 - Structural cost: traceable Newton polish solves each correction with
   operator-GMRES over HVPs (restart 64 × maxiter 10 + 1 refinement pass,
   `OPT:4207-4210`, `OPT:4735-4821`) — worst case ~1280 HVPs/iteration, each a
@@ -298,9 +315,35 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   `304.8 s` (`pre_newton_iter=300`, `newton_iter=17`, stalled). This invalidates
   cap `300` as an implicit default even though explicit cap sweeps remain
   useful.
+- The incumbent/probe separation bug from that A100 smoke is now fixed in the
+  decomposed host value/grad wrapper. The first exact SciPy `x0` candidate is
+  routed through the unwrapped full-fidelity solved pair and can populate the
+  final-sync solved-state cache; later line-search/probe candidates use the
+  trial-wrapped solved pair, and cap-bound trial solves still remain excluded
+  from final-sync reuse. Target-lane bundle construction was also narrowed so
+  temporary trial Boozer overrides are used only for the materialization probe,
+  not for constructing the base solved pair. Remote RunPod A100 validation was
+  run against a current tracked-file mirror on
+  `/workspace/simopt-jax-clean-local-b31bbde4d96d-clean`: py-compile passed for
+  the touched files,
+  `tests/integration/test_single_stage_newton_polish_policy.py` reported
+  `38 passed`, and
+  `tests/integration/test_single_stage_jax_cpu_reference.py -k decomposed_host_objective`
+  reported `9 passed, 195 deselected`. This closes the contract bug; cap `300`
+  remains explicit-only until a longer accepted-trajectory quality gate says it
+  is safe as a production default.
 - Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
   was validated remotely with a real CLI same-shape copy smoke
   (`payload_equal=true`, identical SHA-256 source/output).
+- The follow-up whole-flow audit confirmed the remaining optimization work is
+  concentrated in routing and orchestration, not the leaf Biot-Savart kernels:
+  the K2 default still uses the dense/squared-system adjoint path; `lsmr_j`
+  exists but is experimental and requires positive stabilization; K1 Newton
+  still defaults to operator-GMRES over HVPs; the Eisenstat-Walker clamp is
+  effectively pinned at the tight floor for `newton_tol=1e-11`; K1 subtimer
+  tracing replays K1 pieces and is not a clean timing mode; final-sync reuse can
+  still miss when a rejected trailing trial evicts the accepted solve; and
+  progress JSON persistence rewrites the full event list on every event.
 - Phase 2 has a first accepted-result H100 A/B on the real `iota011_R0935`
   gallery seed, but it should be treated as a measured short-run result rather
   than a production quality pass. Both legs used the same seed, targets
@@ -345,9 +388,10 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
     reduction criterion; `run` took far fewer evaluations and reached a
     slightly lower objective, while `skip` made many cheap rejected probes.
     Therefore `skip` remains an explicit experimental flag, not the production
-    default. The later cap-300 A100 direct smoke also shows that BFGS caps must
-    remain explicit-only until the wrapper separates line-search probes from
-    incumbent/full-fidelity evaluations.
+    default. The later cap-300 A100 direct smoke exposed a first-`x0` routing
+    bug that is now fixed; BFGS caps still remain explicit-only until a longer
+    accepted-trajectory quality gate proves the cap safe as a production
+    default.
 - Two launcher/runtime traps were found during that A/B and are separate from
   the trial-policy comparison:
   - Strict JAX transfer guard (`JAX_TRANSFER_GUARD*`) fails during
@@ -365,18 +409,20 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
 
 ## Rationale
 
-The redundancy fixes are committed but the activating commit is unproven on
-GPU; running validation first is cheap and de-risks everything downstream.
-The trial-`skip` policy is a deliberate contract change (line search now sees
-L-BFGS-only merit values), so it needs a trajectory-quality gate before it can
-be trusted in production sign-off. That gate did not pass on the first H100
-A/B, so production defaults now keep trial Newton polish at `run` and leave
-trial BFGS caps explicit-only until incumbent/probe classification exists. Only
-then is structural work justified:
-measure actual GMRES matvec counts first, because Eisenstat–Walker adaptive
-tolerances (`OPT:4466-4495`) may make the worst-case bound irrelevant — if
-measured HVPs/iteration is already below ~n (663), swapping GMRES for a
-materialize-once-per-iteration + direct-solve scheme is not a win.
+The redundancy fixes now have GPU proof for trace reuse and same-fidelity
+non-trace final-sync reuse, but clean wall-time proof still needs a no-subtimer,
+no-objective-trace benchmark. The trial-`skip` policy is a deliberate contract
+change (line search sees L-BFGS-only merit values), so it needs a
+trajectory-quality gate before production sign-off. That gate did not pass on
+the first H100 A/B, so production defaults keep trial Newton polish at `run` and
+trial BFGS caps explicit-only even though the first-`x0`/probe routing bug is
+now fixed. The structural measurement already showed actual operator-GMRES
+matvec counts near `2*n` at mpol10, while the later audit showed
+Eisenstat-Walker forcing is effectively clamped to the tight floor at
+`newton_tol=1e-11`. That splits the next work into two buckets: low-risk
+reductions that preserve the accepted objective contract (Phase 7), and
+behavior-changing linear-algebra candidates that must stay behind explicit
+parity/trajectory gates (Phase 8).
 
 ## Assumptions
 
@@ -387,7 +433,8 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
   cpp (1.14×, 2026-06-23 cross-GPU benchmark), so "GPU slower than cpp/cpu" is
   an A100-tier + workflow-multiplier statement, not universal.
 - Run metadata condition estimates hold (`ls_condition_estimate ≈ 6.1e6`;
-  squared-system GMRES stagnation gate documented at `OPT:3641-3652`).
+  squared-system GMRES stagnation gate documented near the optimizer's adjoint
+  linear-solver dispatch).
 - The dirty working tree stays under concurrent edits; every phase commits
   scoped (`git commit --only -- <paths>`).
 
@@ -433,8 +480,9 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          Same-fidelity full-polish H100 eval 2 still cost about `203 s`
          (`event_elapsed_s` 166.77 -> 369.66) with 539 pre-Newton BFGS steps and
          27 Newton iterations, motivating a future incumbent-aware trial budget
-         design. The measured cap-300 path is explicit-only because it currently
-         also affects SciPy's first `x0` evaluation.
+         design. The measured cap-300 path is explicit-only because the first
+         accepted-trajectory gate has not proved it safe as a production
+         default; the earlier first-`x0` routing bug is fixed in current code.
 
 2. **Phase 2 — Trial-skip trajectory quality gate**
    - [x] Same seed/targets (iota011_R0935: iota 0.11015671329581699,
@@ -471,9 +519,9 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          `1307` actual operator matvecs per Newton iteration at n=663, so
          Option A is the next implementation target.
    - [x] Option A: per-iteration dense materialization
-         (`_materialize_dense_linear_operator`, `OPT:3669`) + on-device PLU
+         (`_materialize_dense_linear_operator`) + on-device PLU
          solve inside the traceable Newton loop, reusing the factor-once
-         dispatch machinery (`BZ:3527-3548`). Env-gated comparator first
+         dispatch machinery. Env-gated comparator first
          (mirror the `lsmr_j` precedent), default off. Implemented at
          `1d055547e` behind `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=dense_lu`;
          default remains `operator_gmres`.
@@ -491,11 +539,12 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 
 4. **Phase 4 — Chunk-batch byte-budget auto-sizing**
    - [x] Derive the dense-operator chunk batch from the GPU byte budget
-         (`SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU`, env name at
-         `runtime.py:126`, default at `runtime.py:234`) instead of the
-         hardcoded env default 8 (`OPT:3607`); keep
-         `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` as explicit override.
-         Constraint: `lax.map` needs a static batch at import (`OPT:3601-3606`).
+        (`SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU`, env name in
+        `src/simsopt_jax/backend/runtime.py`, default `256 MiB`) instead of the
+        hardcoded env default 8; keep
+        `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` as explicit override.
+        Constraint: `_materialize_dense_linear_operator` uses `lax.map`, so the
+        chunk batch remains static inside compiled kernels.
          Source and focused remote validation have landed; no-explicit-override
          GPU validation remains open below.
    - [x] Verify the auto value on the allocated H100 target with
@@ -513,7 +562,7 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 5. **Phase 5 — Bounded trial pre-Newton budget**
    - [x] Add a trial-context `bfgs_maxiter`/`bfgs_tol` override alongside the
          trial polish policy (same plumbing:
-         `build_target_lane_trial_boozer_overrides`, `EX:8644`) and expose it
+         `build_target_lane_trial_boozer_overrides`) and expose it
          through the parent parity wrapper plus the K1 matrix launcher.
          Evidence for sizing: init used 701/1500 iterations and still failed
          1e-10.
@@ -522,15 +571,15 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          `/workspace/runpod-k1-runs/phase5-iota011-R0935-bfgs-sweep-h100-20260702T075558Z`.
          Cap `300` is fastest among the three clean exits with effectively
          unchanged final objective and physics.
-   - [ ] Guard: accepted/final/reference solves keep the full budget, and the
+   - [x] Guard: accepted/final/reference solves keep the full budget, and the
          first SciPy incumbent `x0` objective evaluation is not treated as a
          low-budget trial. The explicit cap sweep kept final/reference solves
-         on the full budget, but the direct A100 smoke proved the optimizer
-         value/grad wrapper still applies trial overrides to the first `x0`
-         call. This guard is therefore **not** complete.
-         The sweep command set only `--target-lane-trial-boozer-bfgs-maxiter`
-         per case; accepted/final remained at
-         `--target-lane-boozer-bfgs-maxiter 1500`.
+         on the full budget, and the decomposed value/grad wrapper now routes
+         the first exact `x0` candidate through the full-fidelity solved pair
+         before switching later line-search/probe candidates to the trial
+         solved pair. Remote A100 contract validation passed the full
+         `test_single_stage_newton_polish_policy.py` file (`38 passed`) plus
+         the decomposed host-objective regression slice (`9 passed`).
 
 6. **Phase 6 (independent) — seed-spec projection bypass**
    - [x] Bypass same-resolution runtime-seed-spec projection when the
@@ -539,6 +588,77 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          perf-gap item; unblocks official warm-start staging for Phases 1–2.
          Landed at `651639189` and validated remotely with a real same-shape
          CLI copy smoke (`payload_equal=true`, identical SHA-256 output).
+
+7. **Phase 7 — Low-risk runtime reductions**
+   These are intended to reduce sequential device work or host overhead without
+   changing the accepted objective contract. Each item still needs a remote
+   artifact because local JAX timing is not representative.
+
+   - [ ] Un-clamp Eisenstat-Walker forcing in
+         `_eisenstat_walker_choice2_tolerance` (`OPT`) so the tight cap binds
+         near convergence instead of forcing `1e-12` for every iteration at
+         `newton_tol=1e-11`. Add a focused test that demonstrates an early
+         far-from-converged residual gets a loose tolerance above the floor and
+         a near-converged residual still gets the tight cap. Remote gate: K1
+         matvec counts drop on early Newton iterations while final Boozer
+         residual, final iota, final volume, and objective remain within the
+         existing tolerances.
+   - [ ] Pin accepted solved states in the decomposed solve cache. Replace or
+         extend the single-entry `last_solved_forward_result` cache with a small
+         exact-DOF-keyed cache that preserves the last accepted/final solve even
+         if a trailing rejected line-search probe is evaluated later. Preserve
+         the current fidelity policy: failed, cap-bound, or lower-fidelity trial
+         solves must not be reused for final reporting. Regression: a rejected
+         trailing trial does not evict the accepted solve and final sync records
+         `reused=true` for same-fidelity accepted DOFs.
+   - [ ] Convert progress-event persistence to append-only NDJSON or an
+         equivalent bounded-cost format. Keep the current summary JSON available
+         for existing artifact readers, but stop re-sanitizing and rewriting the
+         full event list on every event. Regression: a synthetic long event
+         stream scales O(N) in writes and the matrix-report/progress readers can
+         consume the new artifact layout.
+   - [ ] Add objective-level rematerialization for HVP/dense-assembly paths
+         where the residual/geometry tape dominates live memory. The existing
+         leaf Biot-Savart kernel is already checkpointed; this task is about the
+         higher-level `jvp(grad(fn))` HVP closure. Gate with a correctness test
+         and remote memory telemetry; do not keep the change if it increases
+         compile/runtime more than the larger-batch win it unlocks.
+   - [ ] A/B dense operator chunk batches `8`, `16`, and `32` with
+         `XLA_PYTHON_CLIENT_PREALLOCATE=true`, transfer guard disallow, and no
+         K1 subtimer replay. Batch `32` only becomes a candidate if the remat
+         path keeps memory within the allocated GPU budget. Record K2 wall,
+         device memory high-water, and whether XLA emits any OOM or remat
+         regressions.
+   - [ ] Revisit accepted-path L-BFGS handoff only after the Eisenstat-Walker
+         fix. Design a progress-based handoff/cap that leaves first-incumbent
+         and accepted/final solves full-fidelity unless a separate trajectory
+         gate proves the cap safe as a production default.
+
+8. **Phase 8 — Behavior-changing linear-algebra experiments**
+   These can plausibly produce the largest speed and memory wins, but they
+   change the adjoint/Newton linear-algebra route. They stay env-gated until
+   parity and trajectory gates pass.
+
+   - [ ] Run an `lsmr_j` stabilization sweep on the iota011_R0935 config with
+         the same resolution and chunk settings as the dense baseline. Record
+         stabilization value, LSMR iterations/matvecs, K2 wall, peak memory,
+         gradient norm, gradient parity against dense, final objective, final
+         iota/volume, Boozer residual, accepted/rejected eval counts, and wall
+         time. This is the measurement that decides whether `lsmr_j` is a speed
+         path or only a memory path.
+   - [ ] Define the `stab=0` contract before extending `lsmr_j` to the fully
+         unstabilized case. The current code requires positive stabilization;
+         unstabilized support needs a KKT or two-solve formulation with explicit
+         success/failure semantics, not a silent fallback.
+   - [ ] Add a trajectory gate for any behavior-changing solver: compare dense
+         default vs candidate over at least one short accepted-result run and one
+         longer run. Required fields: final J, final iota, final volume, final
+         Boozer residual, accepted iterations, total objective evals, rejected
+         trial rate, invalid-state counts, and wall time.
+   - [ ] Keep `SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j` and
+         `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=dense_lu` default-off unless
+         the candidate is equal or better on both physics/optimizer quality and
+         wall/memory for the target production resolution.
 
 ## Validation Plan
 
@@ -555,6 +675,13 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       (`5 passed`) and the same final-sync adapter slice (`2 passed`). Earlier
       focused remote/Perlmutter validations covered the trace-wrapper and
       private optimizer slices listed here.
+      The first-`x0` separation patch was validated on RunPod A100 after
+      overlaying current tracked source onto the remote tree: py-compile passed
+      for the touched files,
+      `tests/integration/test_single_stage_newton_polish_policy.py` reported
+      `38 passed`, and
+      `tests/integration/test_single_stage_jax_cpu_reference.py -k decomposed_host_objective`
+      reported `9 passed, 195 deselected`.
 - [x] Phase 1 progress-event assertions (listed inline above) on actual RunPod
       H100 artifacts, not just exit codes. Perlmutter job `55381297` also
       exercised the matrix harness on A100-40GB and wrote reference/target
@@ -568,6 +695,23 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       submitted for this rerun but has not produced runtime artifacts yet.
 - [ ] Any Phase 3–5 change that can touch the objective path passes the
       equivalence gate before default-on; env-gated until then.
+- [ ] Phase 7 Eisenstat-Walker tests prove the forcing tolerance is loose away
+      from convergence and tight near convergence; remote K1 artifacts show
+      lower early Newton matvec counts without worse final physics.
+- [ ] Phase 7 accepted-cache regression proves final sync can reuse an accepted
+      solve after a later rejected trial, and still refuses failed/cap-bound or
+      lower-fidelity trial solves.
+- [ ] Phase 7 progress-log regression proves bounded/O(N) writes and verifies
+      current artifact readers or compatibility shims.
+- [ ] Phase 7 remat/chunk A/B runs without K1 subtimer replay and records K2
+      wall plus GPU memory high-water for batches `8/16/32`.
+- [ ] Phase 8 `lsmr_j` sweep produces a table of stabilization, iteration
+      counts, K2 wall, peak memory, and dense-gradient parity before any default
+      decision.
+- [ ] Any wall-time claim excludes instrumentation replay:
+      `MATRIX_TRACE_K1_SUBTIMERS=0`, `--trace-target-lane-k1-subtimers` absent,
+      and `--record-objective-evaluation-trace` absent unless the benchmark is
+      explicitly measuring trace overhead.
 
 ## Risks and Mitigations
 
@@ -578,9 +722,10 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 - Risk: trial BFGS caps are applied too broadly by the decomposed solved-pair
   wrapper and degrade incumbent/full-fidelity evaluations, not just risky
   line-search probes.
-  Mitigation: leave caps explicit-only until the wrapper can classify true
-  line-search probes or can route exact-DOF incumbent evaluations through the
-  full-fidelity solved pair.
+  Mitigation: current code routes first `x0`/accepted/final/reference solves
+  through full-fidelity settings; leave caps explicit-only until an
+  accepted-trajectory gate proves the capped trial path safe as a production
+  default.
 - Risk: Phase 3 Option A pays n HVPs of assembly on iterations where
   Eisenstat–Walker GMRES would have converged in far fewer matvecs.
   Mitigation: the measure-first decision gate; comparator stays env-gated.
@@ -597,18 +742,37 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
   Mitigation: L-BFGS-B calls `value_and_grad` at one x per eval today; add a
   regression asserting memo-hit on the final-sync DOFs so any change breaks
   loudly.
+- Risk: loosening Eisenstat-Walker tolerances accepts poor Newton directions and
+  increases backtracking or invalid candidates.
+  Mitigation: keep the final tolerance tight, rely on existing line search, and
+  gate on final Boozer residual plus accepted-trajectory metrics.
+- Risk: HVP rematerialization trades memory for more compute/compile and can be
+  a net slowdown at batch `8`.
+  Mitigation: keep it behind a measured A/B; retain only if it unlocks a larger
+  safe batch or materially lowers peak memory on constrained GPUs.
+- Risk: a multi-entry solve cache reuses stale or lower-fidelity data.
+  Mitigation: exact DOF key, explicit fidelity metadata, and existing rejection
+  rules for failed/cap-bound/lower-fidelity trials.
+- Risk: NDJSON progress output breaks downstream tooling that expects the legacy
+  single JSON file.
+  Mitigation: keep a compatibility summary JSON and update matrix-report readers
+  in the same phase.
+- Risk: `lsmr_j` speedup depends on spectrum and stabilization; worst-case
+  iteration counts can exceed dense assembly.
+  Mitigation: measure the stabilization sweep first and leave the solver
+  experimental unless both parity and trajectory gates pass.
 
 ## Completion Criteria
 
-- [ ] GPU smoke at HEAD shows: 1 K1 solve per eval, production trial
+- [x] GPU smoke shows: 1 K1 solve per eval, production trial
       `newton_polish_policy=run` with no implicit trial BFGS cap,
       trace-wrapper `forward_result_reused` for the post-K2 same-candidate
       check, and final-sync `reused=true` on the same-fidelity non-trace path.
       Historical explicit-`skip` smokes separately prove `newton_iter=0` when
       that experimental policy is requested. Historical explicit cap smokes
-      prove the cap plumbing, but the A100 direct smoke invalidates cap-300 as
-      the production default because it also caps the first `x0` objective
-      evaluation.
+      prove the cap plumbing, and the first-`x0` routing regression is fixed;
+      cap-300 remains non-default because the longer accepted-trajectory quality
+      gate is still open.
 - [x] Cap-limited trial solve smoke shows final-sync `reused=true` when the
       accepted solve did not hit the iteration cap, while the cache still
       rejects failed/cap-bound trial solves and non-iteration fidelity
@@ -620,9 +784,18 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       H100. The first real comparator smoke is correctness-clean but slower, so
       no default flip is justified.
 - [ ] Phases 4–5 landed with regressions, or explicitly rejected with data.
-      Phase 5 plumbing is landed and measured, but default-on cap behavior is
-      explicitly rejected by the direct A100 evidence above; Phase 4 still
-      needs the lower-memory target GPU validation.
+      Phase 5 plumbing and the first-`x0` full-fidelity guard are landed with
+      remote regressions; trial caps remain explicit-only. Phase 4 still needs
+      the lower-memory target GPU validation.
+- [ ] Phase 7 low-risk reductions either landed with focused regressions and
+      remote clean-timing artifacts, or were explicitly rejected with artifact
+      data. At minimum this covers Eisenstat-Walker forcing, accepted-solve cache
+      pinning, progress logging, and remat/chunk A/B.
+- [ ] Clean no-subtimer benchmark artifacts exist for the accepted production
+      path and separate cold compile/setup from steady-state per-eval timing.
+- [ ] Phase 8 behavior-changing solver work remains clearly marked
+      experimental unless `lsmr_j`/dense-LU candidates pass dense-gradient
+      parity, accepted-trajectory quality, wall-time, and memory gates.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
 
@@ -643,3 +816,11 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 - Benchmark-mode final-sync cache interaction is resolved for same-fidelity and
   non-binding iteration-cap trial solves. It remains intentionally disabled for
   true lower-fidelity or failed/cap-bound trial solves.
+- What is the actual `lsmr_j` iteration count across stabilization values on the
+  production seed, and does it behave as a speed path, memory path, or neither?
+- Does objective-level remat make batch `32` memory-safe on both 80GB H100 and
+  40GB A100 with preallocation enabled, or is batch `16` the practical ceiling?
+- After Eisenstat-Walker is fixed, how early can accepted-path L-BFGS hand off
+  to Newton without degrading final objective/physics?
+- How much wall time remains in host progress/reporting once progress logging is
+  append-only and final reporting reuses the accepted solve?
