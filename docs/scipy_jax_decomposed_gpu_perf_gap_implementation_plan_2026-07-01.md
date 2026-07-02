@@ -144,6 +144,14 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   as proof: `55373498` failed during editable-install submodule setup, and
   `55373499` failed the matrix command because the high-resolution donor
   continuation path lacked `MATRIX_WARM_START_RUN_DIR`.
+- Phase-1 Perlmutter GPU job `55380861` was submitted from staged clean
+  executable source at `1d055547e`
+  `/pscratch/sd/j/jungdae/simopt-jax-clean-local-1d055547ebbc-k1matrix-20260702T092557Z-src`
+  with `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
+  `MATRIX_MAXITER=1`, `MATRIX_ASSERT_K1_PROGRESS=1`,
+  `MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE=1`, and
+  `MATRIX_REQUIRE_TRACE_REUSE=1`. It was still `PENDING (Priority)` at the
+  time of this update, so it is a submitted validation run, not result proof.
 - Phase 3 measurement plumbing is implemented and now has a real H100 artifact.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
@@ -335,10 +343,12 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 ## Implementation Plan
 
 1. **Phase 1 — GPU runtime proof of the committed fixes**
-   - [ ] Submit the K1 matrix at `0cf4230cb` (or current HEAD) with
+   - [x] Submit the K1 matrix at `0cf4230cb` (or current HEAD) with
          `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
          `MATRIX_MAXITER=1`:
          `sbatch --export=ALL,REPO_ROOT=<checkout>,RUN_ROOT=<scratch>,MATRIX_CASES=... benchmarks/perlmutter/single_stage_k1_matrix_gpu.slurm`
+         Perlmutter job `55380861` is submitted and pending from executable
+         source `1d055547e`.
    - [x] Assert in progress events: exactly one
          `target_lane_decomposed_k1_forward_returned` per eval (no duplicate
          K1). The H100 trace/default-skip smoke emitted 17 K1 returns for the
@@ -405,17 +415,24 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          document and close this phase as not-a-win. The measured value was
          `1307` actual operator matvecs per Newton iteration at n=663, so
          Option A is the next implementation target.
-   - [ ] Option A: per-iteration dense materialization
+   - [x] Option A: per-iteration dense materialization
          (`_materialize_dense_linear_operator`, `OPT:3669`) + on-device PLU
          solve inside the traceable Newton loop, reusing the factor-once
          dispatch machinery (`BZ:3527-3548`). Env-gated comparator first
-         (mirror the `lsmr_j` precedent), default off.
-   - [ ] Option B (fallback): keep GMRES, precondition with a stale PLU factor
+         (mirror the `lsmr_j` precedent), default off. Implemented at
+         `1d055547e` behind `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=dense_lu`;
+         default remains `operator_gmres`.
+   - [x] Option B (fallback): keep GMRES, precondition with a stale PLU factor
          refreshed every k iterations. Only if Option A's per-iteration
-         assembly cost regresses.
-   - [ ] Equivalence gate: optimizer objective/gradient unchanged
+         assembly cost regresses. Rejected for now: the default-off dense-LU
+         comparator is correctness-clean but slower on the first H100 mpol10
+         smoke, so no fallback/default implementation is justified yet.
+   - [x] Equivalence gate: optimizer objective/gradient unchanged
          (bit-identical where the contract requires; otherwise the repo's
-         ≤1e-12 equivalence harness) before any default flip.
+         ≤1e-12 equivalence harness) before any default flip. No default flip
+         occurred; focused H100 regressions and a real H100 smoke show the
+         comparator preserves final objective/physics for its current
+         experimental scope.
 
 4. **Phase 4 — Chunk-batch byte-budget auto-sizing**
    - [x] Derive the dense-operator chunk batch from the GPU byte budget
