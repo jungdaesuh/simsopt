@@ -7492,6 +7492,74 @@ class TestTraceableObjective:
             is None
         )
 
+    def test_adapter_final_sync_falls_back_to_decomposed_solve_cache(self):
+        """Final sync can reuse the decomposed K1 memo when trace cache is absent."""
+        optimizer_dofs = np.array([1.0, -2.0], dtype=np.float64)
+        objective_grad = np.array([0.5, -0.25], dtype=np.float64)
+        solve_result = {
+            "success": True,
+            "sdofs": np.array([3.0, 4.0], dtype=np.float64),
+            "iota": 0.11015671329581699,
+            "G": -2.0106,
+            "objective_value": 9.25,
+            "objective_grad": objective_grad,
+        }
+        lookup_calls = []
+
+        def optimizer_to_coil_dofs(x):
+            return np.asarray(x, dtype=np.float64) + 10.0
+
+        def solve_result_lookup(coil_dofs):
+            lookup_calls.append(np.asarray(coil_dofs, dtype=np.float64).copy())
+            return solve_result
+
+        sync_calls = []
+
+        def accepted_step_state_sync(run_dict, coil_dofs, **kwargs):
+            sync_calls.append(
+                {
+                    "run_dict": run_dict,
+                    "coil_dofs": np.asarray(coil_dofs, dtype=np.float64).copy(),
+                    "kwargs": kwargs,
+                }
+            )
+            return {"objective_value": kwargs["objective_value_and_grad"][0]}
+
+        adapter = single_stage_example.SingleStageAdapter(
+            {},
+            boozer_surface=None,
+            JF=None,
+            bs=None,
+            objectives={},
+            diagnostics={},
+            log_path="",
+            apply_coil_dofs=lambda _x: None,
+            accepted_step_state_sync=accepted_step_state_sync,
+            optimizer_to_coil_dofs=optimizer_to_coil_dofs,
+            target_lane_solve_result_lookup=solve_result_lookup,
+        )
+
+        summary = adapter.sync_accepted_step_state_from_objective_value_and_grad(
+            optimizer_dofs,
+            objective_value=12.5,
+            objective_grad=np.array([2.0, -3.0], dtype=np.float64),
+            log_accepted_step=False,
+        )
+
+        assert summary == {"objective_value": 12.5}
+        assert len(lookup_calls) == 1
+        np.testing.assert_allclose(
+            lookup_calls[0],
+            optimizer_to_coil_dofs(optimizer_dofs),
+        )
+        assert len(sync_calls) == 1
+        assert sync_calls[0]["kwargs"]["target_lane_solve_result"] is solve_result
+        assert sync_calls[0]["kwargs"]["objective_value_and_grad"][0] == 12.5
+        np.testing.assert_allclose(
+            sync_calls[0]["kwargs"]["objective_value_and_grad"][1],
+            [2.0, -3.0],
+        )
+
     def test_decomposed_host_objective_records_k1_k2_micro_events(self):
         """Progress events isolate K1 forward and K2 solved-state work."""
         baseline = np.array([1.0, -2.0])

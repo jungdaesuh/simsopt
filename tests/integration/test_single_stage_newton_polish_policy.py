@@ -43,6 +43,7 @@ from benchmarks.single_stage_init_parity import (
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
     _build_decomposed_coil_host_value_and_grad,
     _cached_target_lane_objective_evaluation_sync_state,
+    active_boozer_option_overrides,
     build_target_lane_full_state_value_and_grad,
     build_single_stage_target_lane_objective_evaluation_trace_wrapper,
     build_target_lane_trial_boozer_solver_trace_metadata,
@@ -336,13 +337,34 @@ def test_child_trial_override_defaults_to_skip_on_jax_ondevice():
     assert trial_override == "skip"
 
 
-def test_child_trial_override_honors_explicit_run():
+def test_child_trial_override_omits_explicit_run_when_full_policy_runs():
     override = resolve_effective_trial_boozer_newton_polish_policy_override(
         field_backend="jax",
         optimizer_backend="ondevice",
+        target_lane_boozer_newton_polish_policy=None,
+        target_lane_trial_boozer_newton_polish_policy="run",
+    )
+    assert override is None
+
+
+def test_child_trial_override_tracks_explicit_policy_difference():
+    override = resolve_effective_trial_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_boozer_newton_polish_policy="skip",
         target_lane_trial_boozer_newton_polish_policy="run",
     )
     assert override == "run", override
+
+
+def test_child_trial_override_omits_default_skip_when_full_policy_skips():
+    override = resolve_effective_trial_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_boozer_newton_polish_policy="skip",
+        target_lane_trial_boozer_newton_polish_policy=None,
+    )
+    assert override is None
 
 
 def test_child_trial_bfgs_overrides_validate_explicit_budget():
@@ -477,6 +499,64 @@ def test_trial_solve_cache_keeps_trace_reuse_but_disables_final_sync_reuse():
     np.testing.assert_allclose(np.asarray(grad), [0.1, 0.2])
     assert objective.cached_forward_result_for_coil_dofs(coil_dofs)["iota"] == 0.11
     assert objective.target_lane_solve_result_for_coil_dofs(coil_dofs) is None
+
+
+def test_same_fidelity_trial_solve_keeps_final_sync_cache():
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    coil_dofs = [1.0, 2.0]
+    forward_result = {
+        "success": True,
+        "primal_success": True,
+        "sdofs": [3.0, 4.0],
+        "iota": 0.11,
+        "G": 2.0,
+        "x": [5.0, 6.0],
+        "linear_solve_factors": {},
+    }
+    trial_override = resolve_effective_trial_boozer_newton_polish_policy_override(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_boozer_newton_polish_policy="run",
+        target_lane_trial_boozer_newton_polish_policy="run",
+    )
+    overrides = build_target_lane_trial_boozer_overrides(
+        bfgs_tol=None,
+        bfgs_maxiter=None,
+        newton_tol=None,
+        newton_maxiter=None,
+        newton_stab=None,
+        newton_polish_policy=trial_override,
+    )
+
+    def solve_fn(_coil_dofs):
+        return dict(forward_result)
+
+    def value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 7.0, [0.1, 0.2]
+
+    objective = _build_decomposed_coil_host_value_and_grad(
+        solved_pair_type(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        ),
+        baseline_gradient=[0.0, 0.0],
+        cache_solve_result_for_reporting=not bool(
+            active_boozer_option_overrides(overrides)
+        ),
+    )
+
+    value, grad = objective(coil_dofs)
+    solve_result = objective.target_lane_solve_result_for_coil_dofs(coil_dofs)
+
+    assert trial_override is None
+    assert active_boozer_option_overrides(overrides) == {}
+    assert float(np.asarray(value)) == 7.0
+    np.testing.assert_allclose(np.asarray(grad), [0.1, 0.2])
+    assert solve_result is not None
+    assert solve_result["iota"] == 0.11
+    assert solve_result["objective_value"] == 7.0
 
 
 def test_trial_trace_wrapper_reuses_k1_without_final_sync_cache():

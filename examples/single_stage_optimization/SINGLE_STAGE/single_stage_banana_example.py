@@ -10176,9 +10176,10 @@ def resolve_effective_trial_boozer_newton_polish_policy_override(
     field_backend,
     optimizer_backend,
     boozer_optimizer_backend=None,
+    target_lane_boozer_newton_polish_policy=None,
     target_lane_trial_boozer_newton_polish_policy=None,
 ):
-    """Map the trial-only policy onto the BoozerSurfaceJAX option value."""
+    """Return a trial-only BoozerSurfaceJAX policy override, if fidelity differs."""
     effective_boozer_backend = (
         optimizer_backend
         if boozer_optimizer_backend is None
@@ -10186,11 +10187,19 @@ def resolve_effective_trial_boozer_newton_polish_policy_override(
     )
     if field_backend != "jax" or effective_boozer_backend != "ondevice":
         return None
-    return resolve_target_lane_trial_boozer_newton_polish_policy(
+    full_policy = resolve_target_lane_boozer_newton_polish_policy(
+        field_backend,
+        optimizer_backend,
+        target_lane_boozer_newton_polish_policy,
+    )
+    trial_policy = resolve_target_lane_trial_boozer_newton_polish_policy(
         field_backend,
         optimizer_backend,
         target_lane_trial_boozer_newton_polish_policy,
     )
+    if trial_policy == full_policy:
+        return None
+    return trial_policy
 
 
 @contextmanager
@@ -13871,6 +13880,7 @@ class SingleStageAdapter:
         optimizer_to_coil_dofs=_single_stage_optimizer_dofs_array,
         optimizer_gradient_transform=None,
         objective_evaluation_trace_callback=None,
+        target_lane_solve_result_lookup=None,
     ):
         self.run_dict = run_dict
         self.boozer_surface = boozer_surface
@@ -13891,6 +13901,7 @@ class SingleStageAdapter:
         self.optimizer_to_coil_dofs = optimizer_to_coil_dofs
         self.optimizer_gradient_transform = optimizer_gradient_transform
         self.objective_evaluation_trace_callback = objective_evaluation_trace_callback
+        self.target_lane_solve_result_lookup = target_lane_solve_result_lookup
         self._last_objective_evaluation_x = None
         self._last_objective_evaluation_value = None
         self._last_objective_evaluation_gradient = None
@@ -14003,6 +14014,13 @@ class SingleStageAdapter:
             self.run_dict,
             x,
         )
+        if (
+            target_lane_solve_result is None
+            and self.target_lane_solve_result_lookup is not None
+        ):
+            target_lane_solve_result = self.target_lane_solve_result_lookup(
+                self.optimizer_to_coil_dofs(x)
+            )
         if target_lane_solve_result is None:
             return None, None
         objective_value_and_grad = None
@@ -14050,9 +14068,8 @@ class SingleStageAdapter:
             raise RuntimeError(
                 "Target-lane optimizer result reuse requires accepted_step_state_sync."
             )
-        target_lane_solve_result = _cached_target_lane_objective_evaluation_sync_state(
-            self.run_dict,
-            x,
+        target_lane_solve_result, _cached_objective_value_and_grad = (
+            self._cached_target_lane_sync_inputs(x)
         )
         accepted_step_summary = self._sync_target_lane_accepted_step_summary(
             x,
@@ -15813,6 +15830,9 @@ if __name__ == "__main__":
             field_backend=args.backend,
             optimizer_backend=optimizer_backend_record,
             boozer_optimizer_backend=boozer_optimizer_backend_record,
+            target_lane_boozer_newton_polish_policy=(
+                target_lane_boozer_newton_polish_policy_record
+            ),
             target_lane_trial_boozer_newton_polish_policy=(
                 target_lane_trial_boozer_newton_polish_policy_record
             ),
@@ -17458,6 +17478,11 @@ if __name__ == "__main__":
                             curvature_threshold=CURVATURE_THRESHOLD,
                             curvature_weight=CURVATURE_WEIGHT,
                             record_outer_optimizer_event=record_outer_optimizer_event,
+                        )
+                        adapter.target_lane_solve_result_lookup = getattr(
+                            target_value_and_grad_objective,
+                            "target_lane_solve_result_for_coil_dofs",
+                            None,
                         )
                         record_outer_optimizer_event(
                             "target_lane_objective_provider_setup_returned"

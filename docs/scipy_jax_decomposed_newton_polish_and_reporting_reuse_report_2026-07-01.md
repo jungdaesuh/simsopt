@@ -42,9 +42,14 @@ returned with `newton_polish_skipped=true`, `newton_iter=0`, and
 `pre_newton_iter=0`. That same run exposed one remaining cache boundary in the
 trace wrapper: real target-lane inputs arrived as `jax.Array`, while the
 decomposed K1 memo only cached NumPy inputs. The current patch fixes that by
-host-normalizing all non-tracer array inputs before keying the memo. Local and
-remote regressions cover the JAX-array cache hit; a fresh GPU smoke is still
-needed to prove the latest trace-reuse correction at runtime.
+host-normalizing all non-tracer array inputs before keying the memo. RunPod H100
+smokes on 2026-07-02 now prove both runtime cache boundaries:
+trace-enabled default-trial `skip` runs reuse the decomposed K1 forward result
+inside the objective-evaluation trace lane, and a same-fidelity non-trace
+`run/run` smoke reuses the decomposed solved-state payload during final
+reporting (`target_lane_reporting_forward_result_* reused=true`). Default
+trial `skip` runs intentionally do not reuse their lower-fidelity trial solve
+as the final/reporting solved state.
 
 The right fix is not to default to `lsmr_j`, not to switch to `lbfgs-ondevice`,
 and not to copy the CPU path blindly. The right fix is to make the target-lane
@@ -554,6 +559,9 @@ Implemented in the follow-up patch:
 - The target lane now has a separate trial-only Boozer Newton-polish policy,
   defaulting trial solves to `skip` while leaving initialization,
   accepted-step, final, and reference paths on the full `run` policy.
+- Trial polish policy is now recorded as an active override only when it differs
+  from the full target-lane policy. Same-fidelity `run/run` resolves to no
+  active trial polish override, preserving the final-sync solved-state cache.
 - The decomposed K1 `solve_fn` is wrapped so trial Boozer overrides are applied
   when SciPy evaluates each candidate, not only while the objective provider is
   constructed.
@@ -568,6 +576,11 @@ Implemented in the follow-up patch:
   runtime contract instead of relying on implicit child defaults.
 - Focused regressions cover exact-DOF solved-state cache reuse and the
   trial-vs-full polish policy split.
+- Focused H100 remote validation after the same-fidelity override patch passed:
+  `tests/integration/test_single_stage_newton_polish_policy.py -k "child_trial_override or trial_boozer_overrides_use_trial_policy_not_full_policy or trial_solve_cache or same_fidelity_trial_solve"`
+  (`7 passed`) and
+  `tests/integration/test_single_stage_jax_cpu_reference.py -k "adapter_final_sync_falls_back_to_decomposed_solve_cache or decomposed_host_objective_feeds_final_reporting_sync_cache"`
+  (`2 passed`).
 
 Runtime validation from the first follow-up patch:
 
@@ -655,11 +668,31 @@ Runtime boundary:
   `jax.Array` under `jax.transfer_guard("disallow")`. Remote commit
   `425969c7db8a657d96e6d12031c114bcfd4b9162` passed:
   `pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k "trace_wrapper_uses_decomposed_k1_cache_after_value_grad or decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform"`.
-  The stricter local transfer-guard version of the same regression also passed
-  in the final focused validation set.
-  A follow-up interactive allocation (`55364581`) timed out before resources were
-  granted, so this latest trace-reuse correction is regression-tested locally and
-  partially mirrored remotely, but not yet GPU-smoke-proven.
+  RunPod H100 run
+  `/workspace/runpod-k1-runs/direct-jax-m10-h100-edea9ba10-20260702T030856Z`
+  then proved the runtime trace boundary: it exited `0`, wrote
+  `final_artifact_write_returned`, recorded 17 K1 returns and 9 K2 returns, and
+  emitted trace-lane forward-result reuse after K2 for same-candidate checks.
+  Local copies are under `runpod_artifacts_2026-07-02/trace/`.
+- RunPod H100 non-trace/default-skip run
+  `/workspace/runpod-k1-runs/direct-jax-m10-nontrace-h100-edea9ba10-20260702T033009Z`
+  reproduced the intended lower-fidelity boundary: active trial overrides
+  disable final-sync solved-state reuse (`target_lane_reporting_forward_result_*`
+  recorded `reused=false`) because final/reporting must not consume a
+  trial-`skip` solved state as a full-fidelity result. Local copies are under
+  `runpod_artifacts_2026-07-02/nontrace/`.
+- RunPod H100 same-fidelity non-trace run
+  `/workspace/runpod-k1-runs/direct-jax-m10-nontrace-trialrun-nobudget-h100-edea9ba10-20260702T041302Z`
+  proves final-sync solved-state reuse when no trial override is active. It
+  used full `run`, trial `run`, no explicit full BFGS/Newton budget overrides,
+  exited `0`, and recorded every `trial_boozer_overrides` field as `null`.
+  Final sync recorded
+  `target_lane_reporting_forward_result_started reused=true`,
+  `target_lane_reporting_forward_result_returned reused=true`,
+  `target_lane_reporting_value_and_grad_started reused=true`,
+  `target_lane_reporting_value_and_grad_returned reused=true`, and
+  `target_lane_final_sync_returned elapsed_s=1.1226`. Local copies are under
+  `runpod_artifacts_2026-07-02/nontrace_trialrun_nobudget/`.
 - A same-resolution JAX runtime seed-spec projection hang was encountered while
   staging the official warm-start path. The smoke used a manually generated
   direct-DOF runtime seed spec for `iota011_R0935`. That is a separate
@@ -679,12 +712,14 @@ The original target-lane slowdown was mainly a workflow/contract problem:
 - Final reporting recomputed forward state that was already available from the
   optimizer.
 
-The follow-up patch fixes the two intended workflow boundaries for the default
-`scipy-jax-decomposed` path: final sync reuses the exact-DOF solved-state
-payload, and trial probes are wired to use the trial-only `skip` policy at K1
-solve-call time. Perlmutter dense-path smokes confirm final-sync reuse, clean
-process execution, and trial K1 Newton-polish skipping. The latest runtime smoke
-also found a real trace-wrapper cache miss for `jax.Array` inputs; that is now
-fixed and covered by local and remote regressions, but still needs a fresh GPU
-smoke when an interactive GPU allocation is available. A longer accepted-result
-run and an optional `lsmr_j` comparator remain separate follow-ups.
+The follow-up patch fixes the intended workflow boundaries for
+`scipy-jax-decomposed`: trace mode reuses the decomposed K1 forward result for
+same-candidate objective-evaluation replay, same-fidelity non-trace final sync
+reuses the exact-DOF solved-state payload, and trial probes are wired to use the
+trial-only policy at K1 solve-call time. Perlmutter smokes confirmed the
+solve-call `skip` path; RunPod H100 smokes now confirm trace reuse and
+same-fidelity non-trace final-sync reuse. Default trial `skip` remains a
+lower-fidelity trial path, so final reporting correctly reruns/reuses only
+full-fidelity solved state rather than consuming the skipped trial solve.
+A longer accepted-result run and an optional `lsmr_j` comparator remain separate
+follow-ups.

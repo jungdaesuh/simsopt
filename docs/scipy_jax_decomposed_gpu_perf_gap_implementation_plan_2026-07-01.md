@@ -88,7 +88,45 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
 
 Authoritative state as of the 2026-07-02 scoped implementation pass:
 
-- Phase 1 is now assertable but not GPU-proven. The K1 matrix launcher has an
+- Phase 1 now has direct H100 runtime proof for the two cache contracts, with
+  one important fidelity boundary. RunPod H100 run
+  `/workspace/runpod-k1-runs/direct-jax-m10-h100-edea9ba10-20260702T030856Z`
+  (`runpod_artifacts_2026-07-02/trace/`) completed with exit `0`, wrote
+  `final_artifact_write_returned`, and in trace mode emitted 17 K1 returns, 9
+  K2 returns, and objective-evaluation forward-result reuse events after K2 for
+  the same candidates. Default trial `skip` runs intentionally keep final-sync
+  solved-state reuse disabled when trial fidelity differs from final/reporting
+  fidelity; the trace run recorded active trial overrides
+  (`bfgs_maxiter=1500`, `newton_maxiter=40`, `newton_polish_policy=skip`) and
+  final reporting therefore recorded `target_lane_reporting_forward_result_*`
+  with `reused=false`. The same non-trace/default-skip boundary was reproduced
+  in `/workspace/runpod-k1-runs/direct-jax-m10-nontrace-h100-edea9ba10-20260702T033009Z`
+  (`runpod_artifacts_2026-07-02/nontrace/`), where final sync returned in about
+  `27.82 s` but did not reuse the lower-fidelity trial solve.
+- A same-fidelity non-trace H100 proof run completed at
+  `/workspace/runpod-k1-runs/direct-jax-m10-nontrace-trialrun-nobudget-h100-edea9ba10-20260702T041302Z`
+  (`runpod_artifacts_2026-07-02/nontrace_trialrun_nobudget/`, cell
+  `mpol=10-ntor=10-f0530745`). It used
+  `--target-lane-boozer-newton-polish-policy run` and
+  `--target-lane-trial-boozer-newton-polish-policy run` with no explicit full
+  BFGS/Newton budget overrides. Progress recorded
+  `target_lane_trial_boozer_newton_polish_policy_override=null`, every
+  `trial_boozer_overrides` value `null`, four K1 returns, three K2 returns, and
+  final-sync reuse:
+  `target_lane_reporting_forward_result_started reused=true`,
+  `target_lane_reporting_forward_result_returned reused=true`,
+  `target_lane_reporting_value_and_grad_started reused=true`,
+  `target_lane_reporting_value_and_grad_returned reused=true`,
+  `target_lane_final_sync_returned elapsed_s=1.1226`, and exit `0`.
+  This proves the production non-trace path can consume the decomposed K1
+  solved-state memo when trial and final solve fidelity match.
+- The implementation now normalizes no-op trial polish policy overrides:
+  an explicit trial `run` with full `run`, or default trial `skip` with full
+  `skip`, resolves to no active trial-policy override. Remote H100 focused
+  validation passed `7` policy/cache tests and `2` final-sync fallback tests
+  after syncing the patched files to `/workspace/simopt-k1-current`.
+- The K1 matrix launcher remains useful but is no longer the only Phase-1 proof
+  vehicle. It has an
   opt-in progress gate (`MATRIX_ASSERT_K1_PROGRESS=1`) backed by
   `benchmarks/single_stage_k1_progress_assertions.py`. By default it checks K1
   return events, trial Newton skip semantics, and optional final-sync reuse; when
@@ -100,16 +138,12 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   trace-reuse counts, final-sync reuse, and missing-artifact issues before the
   matrix failure gate. Remote Perlmutter validation passed for py-compile, the
   focused synthetic pytest slices, and CLI synthetic progress/report smokes.
-  Fresh GPU submission initially failed when the account was omitted. The
-  valid Perlmutter shape is `sbatch -A m4680_g -C gpu -q shared ...`.
-  Current-HEAD Phase-1 jobs were submitted from source commit
-  `c25e37583f31599d620b02c23539705da82e87dd`. The initial 12h jobs
-  (`55373355`, `55373358`) were superseded and canceled after a 4h walltime
-  backfill probe gave a concrete start estimate. Active short jobs are pending
-  on priority: trace-enabled job `55373498`, non-trace final-sync job
-  `55373499`. Run root:
-  `/pscratch/sd/j/jungdae/simopt_jax_clean_local_runs/phase1-k1-short-c25e37583-20260702T022152Z`.
-  They do not prove the GPU runtime gate until they run and emit artifacts.
+  Fresh Perlmutter GPU submission initially failed when the account was omitted.
+  The valid Perlmutter shape is `sbatch -A m4680_g -C gpu -q shared ...`.
+  Source-commit Phase-1 Perlmutter jobs `55373498` and `55373499` were not used
+  as proof: `55373498` failed during editable-install submodule setup, and
+  `55373499` failed the matrix command because the high-resolution donor
+  continuation path lacked `MATRIX_WARM_START_RUN_DIR`.
 - Phase 3 measurement plumbing is partially implemented at `61d1cb99a`.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
@@ -158,30 +192,43 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 
 ## Implementation Plan
 
-1. **Phase 1 — GPU runtime proof of the committed fixes (no code changes)**
+1. **Phase 1 — GPU runtime proof of the committed fixes**
    - [ ] Submit the K1 matrix at `0cf4230cb` (or current HEAD) with
          `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
          `MATRIX_MAXITER=1`:
          `sbatch --export=ALL,REPO_ROOT=<checkout>,RUN_ROOT=<scratch>,MATRIX_CASES=... benchmarks/perlmutter/single_stage_k1_matrix_gpu.slurm`
-   - [ ] Assert in progress events: exactly one
+   - [x] Assert in progress events: exactly one
          `target_lane_decomposed_k1_forward_returned` per eval (no duplicate
-         K1), and `newton_polish_skipped=true` / `newton_iter=0` on trial
-         evals. Do **not** require `pre_newton_iter=0`: the `skip` policy
-         bypasses Newton polish only; the pre-Newton L-BFGS stage still runs and
-         must report `pre_newton_iter` / `pre_newton_nfev` / `pre_newton_ngev`.
-   - [ ] In trace-enabled runs, assert the wrapper emits
+         K1). The H100 trace/default-skip smoke emitted 17 K1 returns for the
+         17 objective evaluations in `runpod_artifacts_2026-07-02/trace/`.
+         Trial `skip` behavior was proven in the earlier Perlmutter
+         solve-call-correction smoke (`55363238`) with
+         `newton_polish_skipped=true` / `newton_iter=0`; the H100 trace run
+         confirms the cache/reuse side of that path. Do **not** require
+         `pre_newton_iter=0`: the `skip` policy bypasses Newton polish only;
+         the pre-Newton L-BFGS stage still runs and must report
+         `pre_newton_iter` / `pre_newton_nfev` / `pre_newton_ngev`.
+   - [x] In trace-enabled runs, assert the wrapper emits
          `target_lane_optimizer_objective_eval_N_forward_result_reused`
-         (not `..._started`) after K2 for the same candidate.
-   - [ ] Run one case **without** `--record-objective-evaluation-trace` to
+         (not `..._started`) after K2 for the same candidate. Proven by the
+         RunPod H100 trace artifact in `runpod_artifacts_2026-07-02/trace/`.
+   - [x] Run one case **without** `--record-objective-evaluation-trace` to
          prove the production non-trace path populates the sync cache
-         (`build_single_stage_target_lane_objective_evaluation_sync_cache_wrapper`,
-         `EX:13421`) and final sync shows
-         `target_lane_reporting_forward_result_started reused=true`.
-   - [ ] Record per-eval wall deltas against the 2026-06-29 A100 baseline
+         and final sync shows
+         `target_lane_reporting_forward_result_started reused=true`, for a
+         same-fidelity/no-active-trial-override run. Proven by
+         `runpod_artifacts_2026-07-02/nontrace_trialrun_nobudget/`.
+         Default trial-`skip` runs intentionally do **not** reuse the lower
+         fidelity trial solve for final reporting.
+   - [x] Record per-eval wall deltas against the 2026-06-29 A100 baseline
          (warm: 168s / 493s / 141s per eval). Treat the report's post-fix
          K1 33-63s figures as a partial signal only: that run proved final-sync
          reuse but still reported `newton_polish_skipped=false`, so the final
-         `0cf4230cb` smoke is the first valid trial-skip + trace-reuse proof.
+         trace/default-skip H100 smoke is the valid trial-skip + trace-reuse
+         proof. Same-fidelity full-polish H100 eval 2 still cost about `203 s`
+         (`event_elapsed_s` 166.77 -> 369.66) with 539 pre-Newton BFGS steps and
+         27 Newton iterations, reinforcing why default trial `skip` remains the
+         production performance policy.
 
 2. **Phase 2 — Trial-skip trajectory quality gate**
    - [ ] Same seed/targets (iota011_R0935: iota 0.11015671329581699,
@@ -254,14 +301,19 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 
 ## Validation Plan
 
-- [ ] Targeted regressions (run remotely for this workflow; repo tests require
+- [x] Targeted regressions (run remotely for this workflow; repo tests require
       the meta-path workaround from HANDOFF.md §4 — drop
       `ScikitBuildRedirectingFinder`, force `src/`):
-      `tests/integration/test_single_stage_jax_cpu_reference.py -k "trace_wrapper_uses_decomposed_k1_cache_after_value_grad or decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform"`,
-      `tests/integration/test_single_stage_newton_polish_policy.py`,
-      `tests/geo/test_boozersurface_jax_private.py`.
-- [ ] Phase 1 progress-event assertions (listed inline above) on the actual
-      Perlmutter artifacts, not just exit codes.
+      remote H100 validation passed
+      `tests/integration/test_single_stage_newton_polish_policy.py -k "child_trial_override or trial_boozer_overrides_use_trial_policy_not_full_policy or trial_solve_cache or same_fidelity_trial_solve"`
+      (`7 passed`) and
+      `tests/integration/test_single_stage_jax_cpu_reference.py -k "adapter_final_sync_falls_back_to_decomposed_solve_cache or decomposed_host_objective_feeds_final_reporting_sync_cache"`
+      (`2 passed`). Earlier focused remote/Perlmutter validations covered the
+      trace-wrapper and private optimizer slices listed here.
+- [x] Phase 1 progress-event assertions (listed inline above) on actual RunPod
+      H100 artifacts, not just exit codes. Perlmutter matrix artifacts remain a
+      separate harness-validation item because the submitted jobs did not reach
+      the intended K1 matrix run.
 - [ ] `/usr/bin/time` per-case wall comparison across matrix cases; GPU memory
       high-water from `nvidia-smi_before/after` snapshots the harness writes.
 - [ ] Any Phase 3–5 change that can touch the objective path passes the
@@ -294,9 +346,10 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 
 - [ ] GPU smoke at HEAD shows: 1 K1 solve per eval, trial `newton_iter=0`
       with pre-Newton metrics still recorded, trace-wrapper
-      `forward_result_reused` for the post-K2 same-candidate check,
-      final-sync `reused=true` on the non-trace path, and per-eval wall at or
-      below ~50% of the 2026-06-29 warm baseline on the same A100 class.
+      `forward_result_reused` for the post-K2 same-candidate check, and
+      final-sync `reused=true` on the same-fidelity non-trace path. The RunPod
+      H100 artifacts prove these contract pieces except the same-A100 wall-time
+      comparison; the same-A100 per-eval wall target remains open.
 - [ ] Phase 2 quality gate passed and recorded (or `skip` default reverted
       with the evidence written into the report doc).
 - [ ] Phase 3 decision gate resolved either way with measured HVP counts in
