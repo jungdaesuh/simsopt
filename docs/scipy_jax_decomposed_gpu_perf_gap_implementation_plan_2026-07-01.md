@@ -32,8 +32,10 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
   not first-`x0` routing.
 - Reduce the per-Newton-iteration HVP count in the traceable Newton polish
   (`newton_polish_traceable`), measured before designed.
-- Replace the hardcoded dense-operator chunk batch default
-  (`_DENSE_OPERATOR_CHUNK_BATCH_SIZE`) with byte-budget auto-sizing.
+- Replace the hardcoded dense-operator chunk batch default with an
+  activation-aware byte-budget auto-sizer. The current `32 MiB` per-column model
+  preserves the historical batch `8` default but does not yet model the measured
+  HVP tape footprint.
 - Evaluate whether the trial pre-Newton L-BFGS budget can be bounded safely.
   Do not default-enable a cap unless it is proven not to affect incumbent/full-
   fidelity objective evaluations.
@@ -45,9 +47,17 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
   would otherwise evict the single-entry solve cache.
 - Convert progress-event persistence from full-history rewrites to append-only
   or otherwise bounded-cost logging for long optimizer runs.
+- Remove once-per-run duplicate traceable bundle/gradient construction where the
+  current setup builds or executes unused gradient graphs, and avoid reporting
+  recomputation when the same term values can be carried as value-and-grad aux
+  data.
 - Measure `lsmr_j` with a stabilization sweep and trajectory gate before any
   default decision; treat any projected speedup as unproven until the sweep
   collapses the iteration-count uncertainty.
+- Close the workflow only against a clean, instrumentation-free end-state target:
+  same seed/resolution/hardware class, no K1 subtimer replay or objective trace,
+  steady-state per-eval wall recorded separately from cold compile/setup, and no
+  OOM under normal preallocation.
 
 ## Non-Goals
 
@@ -232,8 +242,8 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   touched files and
   `pytest -q tests/geo/test_boozersurface_jax_private.py -k "traceable_forward_result_packs_newton_linear_solver_backend_code or dense_lu_comparator or iteration_diagnostics or matvec_counts"`
   reported `6 passed, 126 deselected`.
-- The first real H100 single-stage comparator smoke was correctness-clean but
-  slower than the operator-GMRES baseline on this mpol10 case. Baseline
+- The first real H100 single-stage comparator smoke was correctness-clean but is
+  not a final dense-vs-GMRES speed decision. Baseline
   `/workspace/runpod-k1-runs/phase5-cap300-finalreuse-h100-20260702T084258Z`
   exited `0` in `5:38.69` wall with K1 spans `33.0 s`, `26.0 s`, `34.6 s`,
   final J `7.164389974566755e-4`, final iota `0.11017554592247202`, final
@@ -245,9 +255,11 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   volume `0.049164231668496566`, and Boozer residual
   `4.573198237229834e-7`. The dense path reduced the reported linear-solve
   matvec budget from `1302` to `663` and improved some later K1 solves, but the
-  first dense materialization cost dominated. Conclusion: keep dense-LU
-  experimental/debug-only until a higher-resolution or repeated-solve case
-  proves a wall-time win.
+  first dense materialization cost dominated the one-smoke wall. Conclusion:
+  keep dense-LU experimental/debug-only, but treat the "slower" result as
+  pre-Eisenstat-Walker and inconclusive for steady-state policy. Re-test after
+  the Eisenstat-Walker fix and include the hybrid candidate: loose operator-GMRES
+  early in Newton, dense-LU for the final tight correction iterations.
 - A follow-up short reporting smoke was launched after adding the explicit
   `newton_linear_solve_backend_code` packer field, but the RunPod endpoint
   disappeared mid-run (`ssh: connect ... Connection refused`) and provider-side
@@ -255,14 +267,17 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   proves the field packer and dispatch; a future real artifact should confirm
   the progress JSON carries backend code `1`/`2` without relying on the matvec
   budget as the discriminator.
-- Phase 4 byte-budget chunk sizing now has a no-explicit-override H100 proof in
+- Phase 4 byte-budget chunk sizing now has a no-explicit-override H100 smoke in
   the same run: `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` and
   `SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU` were unset, preallocation stayed on,
   transfer guard stayed disallow, and K1 progress recorded
   `dense_operator_chunk_batch_size=8` with
-  `max_dense_hessian_bytes=268435456`. This validates the default auto-sizing
-  on the allocated H100 80GB target; a lower-memory A100-40GB validation remains
-  useful when that hardware is available.
+  `max_dense_hessian_bytes=268435456`. This proves the current default preserves
+  the historically safe batch `8`; it does **not** validate the byte model. The
+  source still prices a parallel dense-operator column at `32 MiB`, while the
+  historical batch-32 OOM implies an effective live footprint around `1.5 GiB`
+  per probe before rematerialization. Phase 4 therefore remains open until the
+  activation budget is recalibrated and tested on the target GPU class.
 - The same H100 artifact exposed one remaining reporting-reuse gap:
   `target_lane_reporting_forward_result_started` at `858.75 s` returned at
   `1060.20 s`, so final reporting still paid about `201.4 s` for a K1 forward
@@ -432,9 +447,12 @@ parity/trajectory gates (Phase 8).
   chunk batch, and preallocation. On H100-class hardware the lane already beat
   cpp (1.14×, 2026-06-23 cross-GPU benchmark), so "GPU slower than cpp/cpu" is
   an A100-tier + workflow-multiplier statement, not universal.
-- Run metadata condition estimates hold (`ls_condition_estimate ≈ 6.1e6`;
-  squared-system GMRES stagnation gate documented near the optimizer's adjoint
-  linear-solver dispatch).
+- Condition estimates must be operator-qualified before they drive LSMR or
+  mixed-precision decisions. Current artifacts include `ls_condition_estimate`
+  near `6.1e6`, while code comments and prior structural analysis discuss
+  residual-J and squared-system estimates separately (for example,
+  `kappa(J)` vs `kappa(J^T J)`). Phase 8 must reconcile which operator,
+  stabilization, and estimator each number describes.
 - The dirty working tree stays under concurrent edits; every phase commits
   scoped (`git commit --only -- <paths>`).
 
@@ -495,16 +513,18 @@ parity/trajectory gates (Phase 8).
          accepted-iteration count, total line-search eval count,
          rejected-trial rate, wall time.
          Recorded in the execution-status section above.
-   - [x] Gate result: `skip` did **not** reach equal-or-better J at equal
-         accepted iterations on the first H100 A/B
-         (tolerance: the two trajectories may diverge; judge by objective
-         quality, not step-for-step parity), and the rejected-trial rate does
-         not increase enough to erase the per-trial savings. Both legs stopped
-         after one accepted iteration, but `run` reached the lower final
-         objective (`7.1643e-4` vs `7.1716e-4`) with fewer objective
-         evaluations. Current HEAD therefore reverts the trial Newton-polish
-         default to `run`; the cap-300 BFGS budget remains an explicit
-         experiment, not a default.
+   - [x] First-attempt result recorded: `skip` did **not** reach
+         equal-or-better J on the first H100 A/B. Both legs stopped after one
+         accepted iteration, but `run` reached the lower final objective
+         (`7.1643e-4` vs `7.1716e-4`) with fewer objective evaluations. Current
+         HEAD therefore correctly keeps the trial Newton-polish default at
+         `run`, and the cap-300 BFGS budget remains an explicit experiment.
+   - [ ] Run a powered quality gate before hardening the policy verdict:
+         require multiple accepted iterations by tightening `ftol` or by using
+         an acceptance-count stop, then compare final objective/physics,
+         accepted/rejected eval counts, invalid-state counts, and wall time.
+         Also measure `J_trial(x) - J_full(x)` on the same candidate points so
+         the trial-fidelity tradeoff is quantified instead of treated as binary.
 
 3. **Phase 3 — Structural: cut HVPs per Newton iteration (measure first)**
    - [x] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
@@ -525,11 +545,12 @@ parity/trajectory gates (Phase 8).
          (mirror the `lsmr_j` precedent), default off. Implemented at
          `1d055547e` behind `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=dense_lu`;
          default remains `operator_gmres`.
-   - [x] Option B (fallback): keep GMRES, precondition with a stale PLU factor
-         refreshed every k iterations. Only if Option A's per-iteration
-         assembly cost regresses. Rejected for now: the default-off dense-LU
-         comparator is correctness-clean but slower on the first H100 mpol10
-         smoke, so no fallback/default implementation is justified yet.
+   - [ ] Option B / hybrid follow-up: keep GMRES for loose early Newton
+         corrections and use dense-LU only for tight final iterations, or
+         precondition GMRES with a refreshed PLU factor. Do not decide this from
+         the pre-Eisenstat-Walker dense-LU smoke: that run was correctness-clean
+         but conflated first dense materialization cost with steady-state solve
+         policy. Re-run after the Eisenstat-Walker fix.
    - [x] Equivalence gate: optimizer objective/gradient unchanged
          (bit-identical where the contract requires; otherwise the repo's
          ≤1e-12 equivalence harness) before any default flip. No default flip
@@ -538,26 +559,30 @@ parity/trajectory gates (Phase 8).
          experimental scope.
 
 4. **Phase 4 — Chunk-batch byte-budget auto-sizing**
-   - [x] Derive the dense-operator chunk batch from the GPU byte budget
-        (`SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU`, env name in
-        `src/simsopt_jax/backend/runtime.py`, default `256 MiB`) instead of the
-        hardcoded env default 8; keep
-        `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` as explicit override.
-        Constraint: `_materialize_dense_linear_operator` uses `lax.map`, so the
-        chunk batch remains static inside compiled kernels.
-         Source and focused remote validation have landed; no-explicit-override
-         GPU validation remains open below.
-   - [x] Verify the auto value on the allocated H100 target with
+   - [x] Preserve the historical default behavior when no explicit override is
+         supplied. The current implementation derives
+         `dense_operator_chunk_batch_size=8` from the default
+         `SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU=256 MiB` and keeps
+         `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` as an explicit override.
+         Constraint: `_materialize_dense_linear_operator` uses `lax.map`, so the
+         chunk batch remains static inside compiled kernels.
+   - [x] Verify the default-preservation smoke on the allocated H100 target with
          `XLA_PYTHON_CLIENT_PREALLOCATE=true`, transfer guard disallow, and no
          explicit chunk/budget env overrides. The H100 artifact above exited
          `0` and recorded auto `dense_operator_chunk_batch_size=8` with
          `max_dense_hessian_bytes=268435456`.
-   - [ ] Verify the same auto value on a lower-memory target GPU, including the
-         prior 40GB A100 diagnostic class when available. Historical handoff
-         evidence records batch=32 OOM around a 49.35 GiB effective allocation
-         at mpol10/nphi255 (HANDOFF.md §5); the auto-sizer must be validated on
-         the actual allocated GPU rather than assuming 32 is safe on every
-         nominal-memory class.
+   - [ ] Recalibrate the auto-sizing model so the byte budget is an activation
+         budget, not just a matrix-size budget. The current
+         `_DENSE_OPERATOR_BYTES_PER_PARALLEL_COLUMN = 32 MiB` is contradicted by
+         the historical batch-32 OOM footprint; using the same knob to scale
+         directly to `16/32/64` is unsafe until rematerialization and live-memory
+         telemetry justify the per-probe constant.
+   - [ ] Verify the recalibrated auto value on a lower-memory target GPU,
+         including the prior 40GB A100 diagnostic class when available.
+         Historical handoff evidence records batch=32 OOM around a 49.35 GiB
+         effective allocation at mpol10/nphi255 (HANDOFF.md §5); the auto-sizer
+         must be validated on the actual allocated GPU rather than assuming a
+         nominal-memory class is safe.
 
 5. **Phase 5 — Bounded trial pre-Newton budget**
    - [x] Add a trial-context `bfgs_maxiter`/`bfgs_tol` override alongside the
@@ -617,6 +642,27 @@ parity/trajectory gates (Phase 8).
          full event list on every event. Regression: a synthetic long event
          stream scales O(N) in writes and the matrix-report/progress readers can
          consume the new artifact layout.
+   - [ ] Defer or eliminate duplicate traceable gradient graph construction in
+         setup. The current runtime can build both the primary compiled bundle
+         and an optimizer-only bundle that each construct `_forward_result_for`
+         and `_total_gradient_for`; `general_only_forward=True` does not by
+         itself suppress gradient construction. Gate: fewer cold compile poles
+         without changing value/gradient contracts.
+   - [ ] Remove the eager seeded baseline adjoint when it is not needed for the
+         active optimization path, or make it share the same compiled graph used
+         by the fused value-and-grad path. Current setup executes
+         `compiled_total_gradient_for` at the baseline state before the optimizer
+         needs a candidate gradient. Gate: seeded setup wall drops, and rejected
+         primal-failure fallback still returns the validated baseline gradient.
+   - [ ] Carry reporting term values as aux data where possible instead of
+         recomputing all outer terms and an extra full-surface Biot-Savart in the
+         reporting graph. Gate: final reporting uses the accepted solved state,
+         preserves all reported fields, and avoids an additional surface-field
+         evaluation when the value-and-grad path already computed the same data.
+   - [ ] Investigate merging the separate `dJ_dx` and `direct_grad` reverse
+         sweeps into a joint derivative where dependency flags allow it. Gate:
+         HLO/op-count or timing evidence shows one backward pass replaces two,
+         and term-level gradients remain within the existing parity tolerance.
    - [ ] Add objective-level rematerialization for HVP/dense-assembly paths
          where the residual/geometry tape dominates live memory. The existing
          leaf Biot-Savart kernel is already checkpointed; this task is about the
@@ -633,6 +679,10 @@ parity/trajectory gates (Phase 8).
          fix. Design a progress-based handoff/cap that leaves first-incumbent
          and accepted/final solves full-fidelity unless a separate trajectory
          gate proves the cap safe as a production default.
+   - [ ] Re-run dense-LU vs operator-GMRES after the Eisenstat-Walker fix, and
+         include the hybrid candidate: loose GMRES for early iterations, dense-LU
+         for final tight correction solves. Keep all variants default-off until
+         the clean timing and trajectory gates pass.
 
 8. **Phase 8 — Behavior-changing linear-algebra experiments**
    These can plausibly produce the largest speed and memory wins, but they
@@ -646,6 +696,10 @@ parity/trajectory gates (Phase 8).
          iota/volume, Boozer residual, accepted/rejected eval counts, and wall
          time. This is the measurement that decides whether `lsmr_j` is a speed
          path or only a memory path.
+         Pre-register the interpretation before running: median iterations
+         `<=150` is a speed-and-memory candidate if dense-gradient parity passes;
+         `151..700` is a memory-path candidate only unless wall time also wins;
+         `>700` rejects `lsmr_j` as a speed path for this configuration.
    - [ ] Define the `stab=0` contract before extending `lsmr_j` to the fully
          unstabilized case. The current code requires positive stabilization;
          unstabilized support needs a KKT or two-solve formulation with explicit
@@ -705,8 +759,13 @@ parity/trajectory gates (Phase 8).
       current artifact readers or compatibility shims.
 - [ ] Phase 7 remat/chunk A/B runs without K1 subtimer replay and records K2
       wall plus GPU memory high-water for batches `8/16/32`.
-- [ ] Phase 8 `lsmr_j` sweep produces a table of stabilization, iteration
-      counts, K2 wall, peak memory, and dense-gradient parity before any default
+- [ ] Condition-number reconciliation artifact: for the same candidate and
+      stabilization settings, record which operator each reported condition
+      estimate describes (`J`, `J^T J`, Hessian-with-second-derivative terms,
+      or regularized augmented `[J; sqrt(stab)I]`) before interpreting `lsmr_j`
+      or mixed-precision margins.
+- [ ] Phase 8 `lsmr_j` sweep produces a table of stabilization, iteration counts,
+      K2 wall, peak memory, and dense-gradient parity before any default
       decision.
 - [ ] Any wall-time claim excludes instrumentation replay:
       `MATRIX_TRACE_K1_SUBTIMERS=0`, `--trace-target-lane-k1-subtimers` absent,
@@ -731,8 +790,9 @@ parity/trajectory gates (Phase 8).
   Mitigation: the measure-first decision gate; comparator stays env-gated.
 - Risk: auto-sized chunk batch OOMs under XLA preallocation on lower-memory
   cards.
-  Mitigation: conservative byte model validated against the historical
-  batch=32 / ~49.35 GiB OOM report; explicit env override preserved.
+  Mitigation: treat the current batch `8` smoke as default preservation only;
+  recalibrate the activation footprint before raising the budget-derived batch
+  above `8`, and keep the explicit env override for emergency down-sizing.
 - Risk: concurrent Codex/agent edits in the dirty tree clobber plan work
   (has happened before in this repo's dirty worktree).
   Mitigation: scoped commits per phase (`git commit --only -- <paths>`),
@@ -777,20 +837,27 @@ parity/trajectory gates (Phase 8).
       accepted solve did not hit the iteration cap, while the cache still
       rejects failed/cap-bound trial solves and non-iteration fidelity
       overrides.
-- [x] Phase 2 quality gate recorded: `skip` did not pass, so the trial Newton-
-      polish default is reverted to `run`; trial BFGS caps remain explicit-only.
+- [ ] Phase 2 quality gate is powered by multiple accepted iterations or a
+      tightened stopping rule. The first H100 A/B is recorded and correctly keeps
+      trial Newton `skip` and trial BFGS caps explicit-only, but it is not a
+      production trajectory verdict because both legs stopped after one accepted
+      iteration.
 - [x] Phase 3 decision gate resolved with measured HVP counts in this file.
 - [x] Phase 3 Option A implemented behind a comparator flag and smoke-tested on
-      H100. The first real comparator smoke is correctness-clean but slower, so
-      no default flip is justified.
+      H100. The first real comparator smoke is correctness-clean; it does not
+      justify a default flip, and it also does not close the dense-LU decision
+      because it predates the Eisenstat-Walker fix and conflates first
+      materialization with steady-state behavior.
 - [ ] Phases 4–5 landed with regressions, or explicitly rejected with data.
       Phase 5 plumbing and the first-`x0` full-fidelity guard are landed with
       remote regressions; trial caps remain explicit-only. Phase 4 still needs
-      the lower-memory target GPU validation.
+      activation-budget recalibration and lower-memory target GPU validation.
 - [ ] Phase 7 low-risk reductions either landed with focused regressions and
       remote clean-timing artifacts, or were explicitly rejected with artifact
       data. At minimum this covers Eisenstat-Walker forcing, accepted-solve cache
-      pinning, progress logging, and remat/chunk A/B.
+      pinning, progress logging, duplicate setup-gradient construction, seeded
+      baseline-adjoint setup, reporting recomputation, joint-gradient
+      investigation, and remat/chunk A/B.
 - [ ] Clean no-subtimer benchmark artifacts exist for the accepted production
       path and separate cold compile/setup from steady-state per-eval timing.
 - [ ] Phase 8 behavior-changing solver work remains clearly marked
@@ -798,13 +865,18 @@ parity/trajectory gates (Phase 8).
       parity, accepted-trajectory quality, wall-time, and memory gates.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
+- [ ] End-state target defined and met for the A100-tier production question:
+      clean no-subtimer/no-trace steady-state per-eval wall, cold compile/setup
+      separated, no OOM with normal preallocation, and final objective/physics
+      within the accepted tolerances on the iota011_R0935 mpol10/nphi255 config
+      or the documented successor production config.
 
 ## Open Questions
 
 - Phase 3 dense-LU comparator follow-up: the H100 smoke at mpol10 was
-  correctness-clean but slower than operator-GMRES. Keep it default-off and
-  only revisit for higher-resolution/repeated-solve cases where dense
-  materialization can amortize its first-solve cost.
+  correctness-clean but inconclusive for policy. Keep it default-off, then
+  re-evaluate after Eisenstat-Walker un-clamping and include the hybrid
+  GMRES-early / dense-LU-final candidate.
 - Progress-artifact backend-code confirmation: focused H100 tests prove the new
   packer field, but the post-patch RunPod reporting smoke was interrupted when
   the pod disappeared. The pre-patch real artifact still distinguishes dense
@@ -818,6 +890,9 @@ parity/trajectory gates (Phase 8).
   true lower-fidelity or failed/cap-bound trial solves.
 - What is the actual `lsmr_j` iteration count across stabilization values on the
   production seed, and does it behave as a speed path, memory path, or neither?
+- Which condition estimate should govern LSMR and mixed-precision decisions:
+  residual-J, squared normal operator, Hessian-with-second-derivative terms, or
+  stabilized augmented operator?
 - Does objective-level remat make batch `32` memory-safe on both 80GB H100 and
   40GB A100 with preallocation enabled, or is batch `16` the practical ceiling?
 - After Eisenstat-Walker is fixed, how early can accepted-path L-BFGS hand off
