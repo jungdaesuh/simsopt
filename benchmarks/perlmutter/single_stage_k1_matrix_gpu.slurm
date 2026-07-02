@@ -24,6 +24,8 @@ MATRIX_MAXITER="${MATRIX_MAXITER:-1}"
 MATRIX_OUTER_MAXLS="${MATRIX_OUTER_MAXLS:-4}"
 MATRIX_INITIAL_STEP_SCALE="${MATRIX_INITIAL_STEP_SCALE:-0.35}"
 MATRIX_BOOZER_BFGS_MAXITER="${MATRIX_BOOZER_BFGS_MAXITER:-1500}"
+MATRIX_TRIAL_BOOZER_BFGS_MAXITER="${MATRIX_TRIAL_BOOZER_BFGS_MAXITER:-}"
+MATRIX_TRIAL_BOOZER_BFGS_TOL="${MATRIX_TRIAL_BOOZER_BFGS_TOL:-}"
 MATRIX_NEWTON_MAXITER="${MATRIX_NEWTON_MAXITER:-50}"
 MATRIX_TRIAL_NEWTON_POLISH_POLICY="${MATRIX_TRIAL_NEWTON_POLISH_POLICY:-skip}"
 MATRIX_LSMR_NEWTON_STAB="${MATRIX_LSMR_NEWTON_STAB:-1e-10}"
@@ -163,6 +165,12 @@ payload = {
     "MATRIX_WARM_START_RUN_DIR": os.environ.get("MATRIX_WARM_START_RUN_DIR") or None,
     "MATRIX_IOTA_TARGET": os.environ.get("MATRIX_IOTA_TARGET") or None,
     "MATRIX_VOL_TARGET": os.environ.get("MATRIX_VOL_TARGET") or None,
+    "MATRIX_TRIAL_BOOZER_BFGS_TOL": (
+        os.environ.get("MATRIX_TRIAL_BOOZER_BFGS_TOL") or None
+    ),
+    "MATRIX_TRIAL_BOOZER_BFGS_MAXITER": (
+        os.environ.get("MATRIX_TRIAL_BOOZER_BFGS_MAXITER") or None
+    ),
     "MATRIX_ASSERT_K1_PROGRESS": os.environ.get("MATRIX_ASSERT_K1_PROGRESS") or None,
     "MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE": (
         os.environ.get("MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE") or None
@@ -248,6 +256,19 @@ run_case() {
   if [[ -n "${newton_stab}" ]]; then
     newton_stab_args=(--target-lane-boozer-newton-stab "${newton_stab}")
   fi
+  local trial_bfgs_args=()
+  if [[ -n "${MATRIX_TRIAL_BOOZER_BFGS_TOL}" ]]; then
+    trial_bfgs_args+=(
+      --target-lane-trial-boozer-bfgs-tol
+      "${MATRIX_TRIAL_BOOZER_BFGS_TOL}"
+    )
+  fi
+  if [[ -n "${MATRIX_TRIAL_BOOZER_BFGS_MAXITER}" ]]; then
+    trial_bfgs_args+=(
+      --target-lane-trial-boozer-bfgs-maxiter
+      "${MATRIX_TRIAL_BOOZER_BFGS_MAXITER}"
+    )
+  fi
   local warm_start_args=()
   if [[ -n "${MATRIX_WARM_START_RUN_DIR}" ]]; then
     warm_start_args=(--warm-start-run-dir "${MATRIX_WARM_START_RUN_DIR}")
@@ -283,6 +304,7 @@ run_case() {
         --initial-step-scale "${MATRIX_INITIAL_STEP_SCALE}" \
         --outer-maxls "${MATRIX_OUTER_MAXLS}" \
         --target-lane-boozer-bfgs-maxiter "${MATRIX_BOOZER_BFGS_MAXITER}" \
+        "${trial_bfgs_args[@]}" \
         --target-lane-boozer-newton-polish-policy "${newton_policy}" \
         --target-lane-trial-boozer-newton-polish-policy "${MATRIX_TRIAL_NEWTON_POLISH_POLICY}" \
         --target-lane-boozer-newton-maxiter "${MATRIX_NEWTON_MAXITER}" \

@@ -12,7 +12,9 @@ native cpp/CPU reference. Companion to
 (the diagnosis/fix report). That report closed the workflow-redundancy layer in
 code; this plan covers (1) the still-missing runtime proof of those fixes,
 (2) the trial-policy quality gate, and (3) the remaining structural per-solve
-gap. All file:line citations are anchored at commit `0cf4230cb`.
+gap. Historical file:line citations in the diagnosis section are anchored at
+commit `0cf4230cb`; the execution-status section reflects later implementation
+commits and should be read as the current source-of-truth for completion state.
 
 Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`,
 `OPT` = `src/simsopt_jax/geo/optimizers/optimizer.py`,
@@ -84,7 +86,7 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
 
 ## Execution Status (2026-07-02)
 
-Authoritative state as of commit `61d1cb99a`:
+Authoritative state as of the 2026-07-02 scoped implementation pass:
 
 - Phase 1 is now assertable but not GPU-proven. The K1 matrix launcher has an
   opt-in progress gate (`MATRIX_ASSERT_K1_PROGRESS=1`) backed by
@@ -110,8 +112,13 @@ Authoritative state as of commit `61d1cb99a`:
   iteration count.
 - Phase 4 code for byte-budget chunk sizing has landed, but the required
   no-explicit-override GPU validation has not run yet.
-- Phase 5 trial-budget plumbing has landed with pending GPU sweep jobs from an
-  older source. No accepted-result A/B quality gate has completed yet.
+- Phase 5 trial-budget plumbing has landed in the child single-stage runner,
+  the parent parity wrapper, and the K1 matrix launcher. The launcher now
+  accepts `MATRIX_TRIAL_BOOZER_BFGS_TOL` and
+  `MATRIX_TRIAL_BOOZER_BFGS_MAXITER`, records them in each case manifest, and
+  forwards them as `--target-lane-trial-boozer-bfgs-*` to the child. No
+  accepted-result A/B quality gate or measured 200/300/500 sweep has completed
+  yet.
 - Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
   was validated remotely with a real CLI same-shape copy smoke
   (`payload_equal=true`, identical SHA-256 source/output).
@@ -215,11 +222,13 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          nominal-memory class.
 
 5. **Phase 5 — Bounded trial pre-Newton budget**
-   - [ ] Add a trial-context `bfgs_maxiter`/`bfgs_tol` override alongside the
+   - [x] Add a trial-context `bfgs_maxiter`/`bfgs_tol` override alongside the
          trial polish policy (same plumbing:
-         `build_target_lane_trial_boozer_overrides`, `EX:8644`). Evidence for
-         sizing: init used 701/1500 iterations and still failed 1e-10.
-         Start from a measured sweep (e.g. 200/300/500) on the Phase 2 config.
+         `build_target_lane_trial_boozer_overrides`, `EX:8644`) and expose it
+         through the parent parity wrapper plus the K1 matrix launcher.
+         Evidence for sizing: init used 701/1500 iterations and still failed
+         1e-10.
+   - [ ] Run a measured sweep (e.g. 200/300/500) on the Phase 2 config.
    - [ ] Guard: accepted/final/reference solves keep the full budget;
          policy recorded in progress metadata like `newton_polish_policy`.
 

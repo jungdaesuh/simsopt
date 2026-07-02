@@ -34,8 +34,10 @@ import pytest
 from simsopt_jax_adapters.geo.surface_objectives import _TRACEABLE_RUNTIME_OPTION_KEYS
 
 from benchmarks.single_stage_init_parity import (
+    _append_optional_single_stage_flags,
     _resolve_target_lane_boozer_newton_polish_policy,
     _resolve_target_lane_trial_boozer_newton_polish_policy,
+    _single_stage_full_run_family_id,
     parse_args,
 )
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
@@ -131,6 +133,98 @@ def test_parent_trial_policy_honors_explicit_run():
         args=args,
     )
     assert policy == "run", policy
+
+
+def test_parent_accepts_trial_bfgs_budget_flags():
+    args = _parse(
+        [
+            "--target-lane-trial-boozer-bfgs-tol",
+            "1e-7",
+            "--target-lane-trial-boozer-bfgs-maxiter",
+            "25",
+        ]
+    )
+
+    assert args.target_lane_trial_boozer_bfgs_tol == 1e-7
+    assert args.target_lane_trial_boozer_bfgs_maxiter == 25
+
+
+def test_parent_forwards_trial_bfgs_budget_to_child_command():
+    command: list[str] = []
+
+    _append_optional_single_stage_flags(
+        command,
+        benchmark_mode=False,
+        minimal_artifacts=False,
+        profile_target_lane=False,
+        profile_target_lane_only=False,
+        diagnose_target_lane_scaled_phase1=False,
+        record_target_lane_invalid_state_events=False,
+        profile_target_lane_batch_size=None,
+        enable_compile_diagnostics=False,
+        jax_profile_dir=None,
+        experimental_target_lane_value_and_grad=False,
+        disable_target_lane_success_filter=False,
+        record_objective_evaluation_trace=False,
+        record_target_optimizer_state_trace=False,
+        target_lane_trial_boozer_bfgs_tol=1e-7,
+        target_lane_trial_boozer_bfgs_maxiter=25,
+    )
+
+    assert "--target-lane-trial-boozer-bfgs-tol" in command
+    assert command[
+        command.index("--target-lane-trial-boozer-bfgs-tol") + 1
+    ] == "1e-07"
+    assert "--target-lane-trial-boozer-bfgs-maxiter" in command
+    assert command[
+        command.index("--target-lane-trial-boozer-bfgs-maxiter") + 1
+    ] == "25"
+
+
+def test_run_family_id_includes_full_and_trial_bfgs_budget():
+    base_args = _parse(
+        [
+            "--target-lane-boozer-bfgs-maxiter",
+            "1500",
+            "--target-lane-trial-boozer-bfgs-maxiter",
+            "25",
+        ]
+    )
+    changed_full_args = _parse(
+        [
+            "--target-lane-boozer-bfgs-maxiter",
+            "300",
+            "--target-lane-trial-boozer-bfgs-maxiter",
+            "25",
+        ]
+    )
+    changed_trial_args = _parse(
+        [
+            "--target-lane-boozer-bfgs-maxiter",
+            "1500",
+            "--target-lane-trial-boozer-bfgs-maxiter",
+            "50",
+        ]
+    )
+
+    base_id = _single_stage_full_run_family_id(
+        base_args,
+        runtime_seed_spec_hash="seed",
+        objective_configuration_hash="objective",
+    )
+    changed_full_id = _single_stage_full_run_family_id(
+        changed_full_args,
+        runtime_seed_spec_hash="seed",
+        objective_configuration_hash="objective",
+    )
+    changed_trial_id = _single_stage_full_run_family_id(
+        changed_trial_args,
+        runtime_seed_spec_hash="seed",
+        objective_configuration_hash="objective",
+    )
+
+    assert base_id != changed_full_id
+    assert base_id != changed_trial_id
 
 
 def test_scipy_jax_fullgraph_child_gets_no_ondevice_policy_override():

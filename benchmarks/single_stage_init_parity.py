@@ -495,6 +495,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target-lane-trial-boozer-bfgs-tol",
+        type=float,
+        default=None,
+        help=(
+            "Optional trial-only target-lane Boozer BFGS tolerance override "
+            "passed through to the single-stage runner."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-trial-boozer-bfgs-maxiter",
+        type=int,
+        default=None,
+        help=(
+            "Optional trial-only target-lane Boozer BFGS iteration cap "
+            "override passed through to the single-stage runner."
+        ),
+    )
+    parser.add_argument(
         "--boozer-limited-memory",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1126,6 +1144,16 @@ def _single_stage_full_run_family_id(
             "target_lane_boozer_newton_polish_policy": (
                 _requested_target_lane_boozer_newton_polish_policy(args)
             ),
+            "target_lane_boozer_bfgs_tol": (
+                None
+                if getattr(args, "target_lane_boozer_bfgs_tol", None) is None
+                else float(args.target_lane_boozer_bfgs_tol)
+            ),
+            "target_lane_boozer_bfgs_maxiter": (
+                None
+                if getattr(args, "target_lane_boozer_bfgs_maxiter", None) is None
+                else int(args.target_lane_boozer_bfgs_maxiter)
+            ),
             "target_lane_trial_boozer_newton_polish_policy": (
                 _requested_target_lane_trial_boozer_newton_polish_policy(args)
             ),
@@ -1133,6 +1161,16 @@ def _single_stage_full_run_family_id(
                 None
                 if getattr(args, "target_lane_boozer_newton_stab", None) is None
                 else float(args.target_lane_boozer_newton_stab)
+            ),
+            "target_lane_trial_boozer_bfgs_tol": (
+                None
+                if getattr(args, "target_lane_trial_boozer_bfgs_tol", None) is None
+                else float(args.target_lane_trial_boozer_bfgs_tol)
+            ),
+            "target_lane_trial_boozer_bfgs_maxiter": (
+                None
+                if getattr(args, "target_lane_trial_boozer_bfgs_maxiter", None) is None
+                else int(args.target_lane_trial_boozer_bfgs_maxiter)
             ),
         }
     )
@@ -1251,6 +1289,8 @@ def _append_optional_single_stage_flags(
     trace_target_lane_k1_subtimers: bool = False,
     target_lane_boozer_bfgs_tol: float | None = None,
     target_lane_boozer_bfgs_maxiter: int | None = None,
+    target_lane_trial_boozer_bfgs_tol: float | None = None,
+    target_lane_trial_boozer_bfgs_maxiter: int | None = None,
     target_lane_boozer_newton_tol: float | None = None,
     target_lane_boozer_newton_maxiter: int | None = None,
     target_lane_boozer_newton_stab: float | None = None,
@@ -1324,6 +1364,20 @@ def _append_optional_single_stage_flags(
             [
                 "--target-lane-boozer-bfgs-maxiter",
                 str(int(target_lane_boozer_bfgs_maxiter)),
+            ]
+        )
+    if target_lane_trial_boozer_bfgs_tol is not None:
+        command.extend(
+            [
+                "--target-lane-trial-boozer-bfgs-tol",
+                str(float(target_lane_trial_boozer_bfgs_tol)),
+            ]
+        )
+    if target_lane_trial_boozer_bfgs_maxiter is not None:
+        command.extend(
+            [
+                "--target-lane-trial-boozer-bfgs-maxiter",
+                str(int(target_lane_trial_boozer_bfgs_maxiter)),
             ]
         )
     if target_lane_boozer_newton_tol is not None:
@@ -1634,6 +1688,12 @@ def _run_single_stage_case(
             ),
             target_lane_boozer_bfgs_maxiter=getattr(
                 args, "target_lane_boozer_bfgs_maxiter", None
+            ),
+            target_lane_trial_boozer_bfgs_tol=getattr(
+                args, "target_lane_trial_boozer_bfgs_tol", None
+            ),
+            target_lane_trial_boozer_bfgs_maxiter=getattr(
+                args, "target_lane_trial_boozer_bfgs_maxiter", None
             ),
             target_lane_boozer_newton_tol=getattr(
                 args, "target_lane_boozer_newton_tol", None
@@ -4539,6 +4599,12 @@ def main() -> None:
             ),
             "target_lane_trial_boozer_newton_polish_policy": (
                 _requested_target_lane_trial_boozer_newton_polish_policy(args)
+            ),
+            "target_lane_trial_boozer_bfgs_tol": (
+                args.target_lane_trial_boozer_bfgs_tol
+            ),
+            "target_lane_trial_boozer_bfgs_maxiter": (
+                args.target_lane_trial_boozer_bfgs_maxiter
             ),
             "target_lane_boozer_newton_stab": args.target_lane_boozer_newton_stab,
             "outer_maxiter": int(args.maxiter),
