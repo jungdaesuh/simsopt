@@ -191,7 +191,7 @@ _TARGET_LANE_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "run",
     "skip",
 )
-_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "skip"
+_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT = "run"
 _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "default",
     "run",
@@ -539,9 +539,9 @@ def parse_args() -> argparse.Namespace:
         default=_TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_DEFAULT,
         help=(
             "Policy for the JAX/ondevice Boozer Newton polish in target-lane "
-            "line-search trial solves. Defaults to 'skip' so rejected probes do "
-            "not pay full polish; accepted-step/final reporting keeps the full "
-            "target-lane policy."
+            "optimizer candidate evaluations. Defaults to 'run'; explicit trial "
+            "Boozer BFGS budget flags may be used for experiments, while "
+            "accepted-step/final reporting keeps the full target-lane policy."
         ),
     )
     parser.add_argument(

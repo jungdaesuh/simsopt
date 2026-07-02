@@ -44,18 +44,27 @@ trace wrapper: real target-lane inputs arrived as `jax.Array`, while the
 decomposed K1 memo only cached NumPy inputs. The current patch fixes that by
 host-normalizing all non-tracer array inputs before keying the memo. RunPod H100
 smokes on 2026-07-02 now prove both runtime cache boundaries:
-trace-enabled default-trial `skip` runs reuse the decomposed K1 forward result
-inside the objective-evaluation trace lane, and a same-fidelity non-trace
-`run/run` smoke reuses the decomposed solved-state payload during final
-reporting (`target_lane_reporting_forward_result_* reused=true`). Default
-trial `skip` runs intentionally do not reuse their lower-fidelity trial solve
-as the final/reporting solved state.
+trace-enabled trial-`skip` runs reuse the decomposed K1 forward result inside
+the objective-evaluation trace lane, and a same-fidelity non-trace `run/run`
+smoke reuses the decomposed solved-state payload during final reporting
+(`target_lane_reporting_forward_result_* reused=true`). Trial `skip` runs
+intentionally do not reuse their lower-fidelity trial solve as the
+final/reporting solved state. A later quality A/B did not prove `skip` as a
+safe production default, so the current production default keeps trial Newton
+polish at `run`. A later cap-300 smoke proved the explicit trial-budget
+plumbing but also showed that the current decomposed wrapper applies trial caps
+to SciPy's first `x0` objective evaluation. Trial BFGS caps therefore remain
+explicit-only until incumbent/full-fidelity evaluations can be excluded.
 
 The right fix is not to default to `lsmr_j`, not to switch to `lbfgs-ondevice`,
 and not to copy the CPU path blindly. The right fix is to make the target-lane
 contract explicit:
 
-- Trial candidates get the cheapest solve sufficient for line-search decisions.
+- Current production optimizer candidate evaluations stay same-fidelity by
+  default; cheaper/bounded trial policies are explicit experiments until the
+  objective path can distinguish true probes from incumbent evaluations.
+- Future probe-only trial candidates can use the cheapest solve sufficient for
+  line-search decisions once that classification exists.
 - Accepted/final candidates get the full high-fidelity solve.
 - The final reporting path consumes the already computed accepted/final K1
   forward result when available.
@@ -271,7 +280,9 @@ The target-lane Boozer adapter supports a policy knob:
 The pre-fix policy was too coarse. It was essentially global `run` or `skip`.
 The diagnostics required a context-aware policy:
 
-- Line-search trial candidate: bounded/cheap solve, early escape on failure.
+- Future line-search trial candidate: bounded/cheap solve, early escape on
+  failure after the objective path can distinguish true probes from incumbent
+  full-fidelity evaluations.
 - Accepted/final candidate: full Newton polish.
 - Explicit diagnostic/reference run: allow full polish everywhere when requested.
 
@@ -380,18 +391,22 @@ Acceptance criteria:
 - A unit/integration test fails if final reporting calls a fake second K1 solve.
 - Existing CPU/reference reporting remains unchanged.
 
-### Fix 2: Make Newton Polish Trial-Aware
+### Fix 2: Keep Trial Polish Same-Fidelity Until Probe Classification Exists
 
-Goal: do not pay full Newton polish for every line-search trial. Full polish is
-needed for accepted/final states, not for every rejected probe.
+Goal: avoid shipping a lower-fidelity production default until the decomposed
+objective path can distinguish true line-search probes from incumbent full-
+fidelity evaluations. Full polish remains the production default; cheaper
+candidate policies remain explicit experiments.
 
 Design requirements:
 
 - Preserve high-fidelity accepted/final reporting.
 - Keep a reference/debug mode that can force full polish on every trial.
 - For normal production target lane:
-  - use a cheaper solve or bounded polish for line-search trials;
-  - run full Newton polish only for accepted/final sync.
+  - use same-fidelity `run` for optimizer candidate evaluations;
+  - keep cheaper or bounded trial policies behind explicit flags until probe
+    classification exists;
+  - run full Newton polish for accepted/final sync.
 - The policy must be explicit in results/progress metadata.
 
 Possible policy shape:
@@ -411,12 +426,12 @@ accuracy and speed for all candidates at once.
 
 Acceptance criteria:
 
-- Rejected line-search evals do not run full Newton polish by default.
+- Production defaults do not lower trial fidelity implicitly.
 - Accepted/final states still report full-polish metrics.
 - Progress events clearly distinguish trial solve policy from final solve
   policy.
-- A regression verifies that rejected trial candidates do not invoke the full
-  Newton-polish callable under production policy.
+- A regression verifies that omitted trial BFGS caps do not become active trial
+  overrides via the full target-lane budget.
 
 ### Fix 3: Remove Separate Newton-Stall Escape as a Standalone Fix
 
@@ -524,7 +539,9 @@ become accepted/final state.
 
 2. **Trial-aware Newton polish policy**
    - Add a context-aware policy surface.
-   - Default production trial candidates to bounded/cheap solve.
+   - Keep production trial candidates same-fidelity by default.
+   - Leave bounded/cheap policies explicit-only until true probe classification
+     exists.
    - Keep full polish for accepted/final/reference.
 
 3. **Remove standalone Newton-stall work**
@@ -556,9 +573,10 @@ Implemented in the follow-up patch:
 - Production non-trace `scipy-jax-decomposed` objective evaluations now cache
   the latest exact-DOF solved-state payload into the same sync cache consumed by
   accepted-step/final reporting.
-- The target lane now has a separate trial-only Boozer Newton-polish policy,
-  defaulting trial solves to `skip` while leaving initialization,
-  accepted-step, final, and reference paths on the full `run` policy.
+- The target lane now has a separate trial-only Boozer Newton-polish policy.
+  The default remains full `run`; explicit trial BFGS budget flags remain
+  available for experiments, while explicit `skip` remains available for
+  lower-fidelity experiments.
 - Trial polish policy is now recorded as an active override only when it differs
   from the full target-lane policy. Same-fidelity `run/run` resolves to no
   active trial polish override, preserving the final-sync solved-state cache.
@@ -674,7 +692,7 @@ Runtime boundary:
   `final_artifact_write_returned`, recorded 17 K1 returns and 9 K2 returns, and
   emitted trace-lane forward-result reuse after K2 for same-candidate checks.
   Local copies are under `runpod_artifacts_2026-07-02/trace/`.
-- RunPod H100 non-trace/default-skip run
+- RunPod H100 non-trace/trial-skip run
   `/workspace/runpod-k1-runs/direct-jax-m10-nontrace-h100-edea9ba10-20260702T033009Z`
   reproduced the intended lower-fidelity boundary: active trial overrides
   disable final-sync solved-state reuse (`target_lane_reporting_forward_result_*`
@@ -718,8 +736,11 @@ same-candidate objective-evaluation replay, same-fidelity non-trace final sync
 reuses the exact-DOF solved-state payload, and trial probes are wired to use the
 trial-only policy at K1 solve-call time. Perlmutter smokes confirmed the
 solve-call `skip` path; RunPod H100 smokes now confirm trace reuse and
-same-fidelity non-trace final-sync reuse. Default trial `skip` remains a
-lower-fidelity trial path, so final reporting correctly reruns/reuses only
-full-fidelity solved state rather than consuming the skipped trial solve.
-A longer accepted-result run and an optional `lsmr_j` comparator remain separate
+same-fidelity non-trace final-sync reuse. Trial `skip` remains a lower-fidelity
+experimental path, so final reporting correctly reruns/reuses only full-
+fidelity solved state rather than consuming the skipped trial solve. The
+production default is full trial Newton polish with no implicit trial BFGS cap;
+cap-limited trial budgets remain explicit experiments until the objective path
+can distinguish true line-search probes from incumbent evaluations. A longer
+accepted-result run and an optional `lsmr_j` comparator remain separate
 follow-ups.

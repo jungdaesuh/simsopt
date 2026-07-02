@@ -25,15 +25,18 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
 - Prove at GPU runtime that `0cf4230cb` (jax.Array memo-key normalization,
   `EX:7491-7498`) eliminates both the trace-lane duplicate K1 solve and the
   final-sync K1 re-solve on the production non-trace path.
-- Prove the trial-only Newton-polish `skip` default (`EX:265`) does not degrade
-  optimizer trajectory quality vs `run` on an accepted-result run.
+- Resolve the trial-only Newton-polish policy: either prove `skip` does not
+  degrade optimizer trajectory quality vs `run`, or revert the default and keep
+  lower-fidelity trial policies explicit until the objective wrapper can
+  classify true line-search probes separately from incumbent evaluations.
 - Reduce the per-Newton-iteration HVP count in the traceable Newton polish
   (`newton_polish_traceable`, `OPT:5908`), measured before designed.
 - Replace the hardcoded dense-operator chunk batch default
   (`_DENSE_OPERATOR_CHUNK_BATCH_SIZE`, `OPT:3607`) with byte-budget
   auto-sizing.
-- Bound the trial pre-Newton L-BFGS budget so trial K1 stops paying for a
-  1500-iteration budget that Newton rescues in ~6 iterations anyway.
+- Evaluate whether the trial pre-Newton L-BFGS budget can be bounded safely.
+  Do not default-enable a cap unless it is proven not to affect incumbent/full-
+  fidelity objective evaluations.
 
 ## Non-Goals
 
@@ -63,11 +66,16 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
   `jax.Array`; `0cf4230cb` host-normalizes the key and activates both. Local
   regressions pass; the follow-up GPU smoke (job 55364581) timed out before
   allocation, so **the linchpin commit has no GPU runtime proof yet**.
-- Trial policy plumbing: default `skip` (`EX:265`), resolved at `EX:9963`,
-  applied per K1 solve call via
-  `wrap_target_lane_solved_pair_with_boozer_overrides` (`EX:7384`). Trial K1 at
-  HEAD = pre-Newton L-BFGS only (`BZ:6301`, skip branch `BZ:6324-6354`).
-  Initialization, accepted-step, final-sync, and reference paths keep `run`.
+- Trial policy plumbing: the historical follow-up tried default trial `skip`
+  (`EX:265` at the time), resolved it per K1 solve call via
+  `wrap_target_lane_solved_pair_with_boozer_overrides` (`EX:7384`), and proved
+  the mechanics. The later H100 quality A/B did **not** prove `skip` as a safe
+  production default, so current HEAD reverts the trial Newton-polish default
+  to `run`. A follow-up cap-300 A/B proved useful plumbing but also exposed a
+  contract problem: the decomposed value/grad callable applies trial overrides
+  to SciPy's first `x0` objective evaluation as well as to line-search probes.
+  Therefore trial BFGS caps and `skip` remain explicit experimental flags until
+  incumbent/full-fidelity evaluations can be excluded.
 - Structural cost: traceable Newton polish solves each correction with
   operator-GMRES over HVPs (restart 64 × maxiter 10 + 1 refinement pass,
   `OPT:4207-4210`, `OPT:4735-4821`) — worst case ~1280 HVPs/iteration, each a
@@ -94,12 +102,12 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   (`runpod_artifacts_2026-07-02/trace/`) completed with exit `0`, wrote
   `final_artifact_write_returned`, and in trace mode emitted 17 K1 returns, 9
   K2 returns, and objective-evaluation forward-result reuse events after K2 for
-  the same candidates. Default trial `skip` runs intentionally keep final-sync
+  the same candidates. Trial-`skip` runs intentionally keep final-sync
   solved-state reuse disabled when trial fidelity differs from final/reporting
   fidelity; the trace run recorded active trial overrides
   (`bfgs_maxiter=1500`, `newton_maxiter=40`, `newton_polish_policy=skip`) and
   final reporting therefore recorded `target_lane_reporting_forward_result_*`
-  with `reused=false`. The same non-trace/default-skip boundary was reproduced
+  with `reused=false`. The same non-trace/trial-skip boundary was reproduced
   in `/workspace/runpod-k1-runs/direct-jax-m10-nontrace-h100-edea9ba10-20260702T033009Z`
   (`runpod_artifacts_2026-07-02/nontrace/`), where final sync returned in about
   `27.82 s` but did not reuse the lower-fidelity trial solve.
@@ -121,15 +129,15 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   This proves the production non-trace path can consume the decomposed K1
   solved-state memo when trial and final solve fidelity match.
 - The implementation now normalizes no-op trial polish policy overrides:
-  an explicit trial `run` with full `run`, or default trial `skip` with full
-  `skip`, resolves to no active trial-policy override. Remote H100 focused
-  validation passed `7` policy/cache tests and `2` final-sync fallback tests
-  after syncing the patched files to `/workspace/simopt-k1-current`.
+  default or explicit trial `run` with full `run`, or explicit trial `skip`
+  with full `skip`, resolves to no active trial-policy override. Remote H100
+  focused validation passed `7` policy/cache tests and `2` final-sync fallback
+  tests after syncing the patched files to `/workspace/simopt-k1-current`.
 - The K1 matrix launcher remains useful but is no longer the only Phase-1 proof
   vehicle. It has an
   opt-in progress gate (`MATRIX_ASSERT_K1_PROGRESS=1`) backed by
   `benchmarks/single_stage_k1_progress_assertions.py`. By default it checks K1
-  return events, trial Newton skip semantics, and optional final-sync reuse; when
+  return events, optional trial Newton skip semantics, and optional final-sync reuse; when
   `MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE=1`, it additionally checks
   exactly-one K1 return per `objective_evaluation` and optional trace-forward
   reuse. `MATRIX_TRACE_K1_SUBTIMERS=1` enables the expensive split-K1 replay
@@ -278,11 +286,18 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   Final reporting reuse was `true` and the reporting forward-result span was
   `0.0101 s`, eliminating the earlier cap-300 `~65 s` final K1 recompute.
 
-  Interpretation: cap `300` is the current best measured trial budget. It
-  preserves the final objective/physics envelope of cap `500` while avoiding
-  the expensive rejected-trial Newton work, and after the final-reuse policy
-  patch it no longer pays a final-reporting K1 recompute when the accepted
-  solve did not hit the trial cap. The trial-budget knob is validated as useful.
+  Interpretation: cap `300` is the best measured value within this explicit
+  cap-sweep artifact, and the trial-budget knob is validated as useful for
+  controlled experiments. It is **not** validated as a production default. A
+  later direct RunPod A100 same-fidelity smoke with
+  `--target-lane-trial-boozer-bfgs-maxiter 300` showed why: the cap is applied
+  inside the decomposed solved-pair wrapper before SciPy can distinguish the
+  first incumbent `x0` evaluation from later line-search probes. That first K1
+  evaluation spent `948.3 s` (`pre_newton_iter=300`, `newton_iter=50`) and
+  still returned `primal_success=false`; the next rejected trial spent
+  `304.8 s` (`pre_newton_iter=300`, `newton_iter=17`, stalled). This invalidates
+  cap `300` as an implicit default even though explicit cap sweeps remain
+  useful.
 - Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
   was validated remotely with a real CLI same-shape copy smoke
   (`payload_equal=true`, identical SHA-256 source/output).
@@ -325,13 +340,14 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
     `79.8 s`, including a `68.5 s` reporting forward-result step.
   - Interpretation: the trial-polish cost mechanism is confirmed by the K1
     timings (`run` spends minutes in full K1 polish where `skip` returns in
-    seconds), but the default-`skip` quality gate is not closed by this single
-    short run. Both legs stopped after one accepted iteration on SciPy's loose
-    relative-function-reduction criterion; `run` took far fewer evaluations and
-    reached a slightly lower objective, while `skip` made many cheap rejected
-    probes. Keep `skip` as the performance hypothesis, but require a
-    longer/tighter quality gate or a trial-BFGS-budget sweep before declaring it
-    production-quality superior.
+    seconds), but the trial-`skip` quality gate failed to close. Both legs
+    stopped after one accepted iteration on SciPy's loose relative-function-
+    reduction criterion; `run` took far fewer evaluations and reached a
+    slightly lower objective, while `skip` made many cheap rejected probes.
+    Therefore `skip` remains an explicit experimental flag, not the production
+    default. The later cap-300 A100 direct smoke also shows that BFGS caps must
+    remain explicit-only until the wrapper separates line-search probes from
+    incumbent/full-fidelity evaluations.
 - Two launcher/runtime traps were found during that A/B and are separate from
   the trial-policy comparison:
   - Strict JAX transfer guard (`JAX_TRANSFER_GUARD*`) fails during
@@ -353,7 +369,10 @@ The redundancy fixes are committed but the activating commit is unproven on
 GPU; running validation first is cheap and de-risks everything downstream.
 The trial-`skip` policy is a deliberate contract change (line search now sees
 L-BFGS-only merit values), so it needs a trajectory-quality gate before it can
-be trusted in production sign-off. Only then is structural work justified:
+be trusted in production sign-off. That gate did not pass on the first H100
+A/B, so production defaults now keep trial Newton polish at `run` and leave
+trial BFGS caps explicit-only until incumbent/probe classification exists. Only
+then is structural work justified:
 measure actual GMRES matvec counts first, because Eisenstat–Walker adaptive
 tolerances (`OPT:4466-4495`) may make the worst-case bound irrelevant — if
 measured HVPs/iteration is already below ~n (663), swapping GMRES for a
@@ -384,7 +403,7 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          and K1/reuse progress evidence, but not an accepted-step quality pass.
    - [x] Assert in progress events: exactly one
          `target_lane_decomposed_k1_forward_returned` per eval (no duplicate
-         K1). The H100 trace/default-skip smoke emitted 17 K1 returns for the
+         K1). The H100 trace/explicit-skip smoke emitted 17 K1 returns for the
          17 objective evaluations in `runpod_artifacts_2026-07-02/trace/`.
          Trial `skip` behavior was proven in the earlier Perlmutter
          solve-call-correction smoke (`55363238`) with
@@ -403,17 +422,19 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          `target_lane_reporting_forward_result_started reused=true`, for a
          same-fidelity/no-active-trial-override run. Proven by
          `runpod_artifacts_2026-07-02/nontrace_trialrun_nobudget/`.
-         Default trial-`skip` runs intentionally do **not** reuse the lower
-         fidelity trial solve for final reporting.
+         Explicit trial-`skip` runs intentionally do **not** reuse the lower
+         fidelity trial solve for final reporting. The current production
+         default is same-fidelity trial `run` with no implicit trial BFGS cap.
    - [x] Record per-eval wall deltas against the 2026-06-29 A100 baseline
          (warm: 168s / 493s / 141s per eval). Treat the report's post-fix
          K1 33-63s figures as a partial signal only: that run proved final-sync
-         reuse but still reported `newton_polish_skipped=false`, so the final
-         trace/default-skip H100 smoke is the valid trial-skip + trace-reuse
-         proof. Same-fidelity full-polish H100 eval 2 still cost about `203 s`
+         reuse but still reported `newton_polish_skipped=false`, so the
+         explicit-skip H100 smoke is the valid trial-skip + trace-reuse proof.
+         Same-fidelity full-polish H100 eval 2 still cost about `203 s`
          (`event_elapsed_s` 166.77 -> 369.66) with 539 pre-Newton BFGS steps and
-         27 Newton iterations, reinforcing why default trial `skip` remains the
-         production performance policy.
+         27 Newton iterations, motivating a future incumbent-aware trial budget
+         design. The measured cap-300 path is explicit-only because it currently
+         also affects SciPy's first `x0` evaluation.
 
 2. **Phase 2 — Trial-skip trajectory quality gate**
    - [x] Same seed/targets (iota011_R0935: iota 0.11015671329581699,
@@ -426,15 +447,16 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          accepted-iteration count, total line-search eval count,
          rejected-trial rate, wall time.
          Recorded in the execution-status section above.
-   - [ ] Gate: `skip` reaches equal-or-better J at equal accepted iterations
+   - [x] Gate result: `skip` did **not** reach equal-or-better J at equal
+         accepted iterations on the first H100 A/B
          (tolerance: the two trajectories may diverge; judge by objective
          quality, not step-for-step parity), and the rejected-trial rate does
-         not increase enough to erase the per-trial savings.
-         First H100 A/B does **not** close this gate: both legs stopped after
-         one accepted iteration, but `run` reached the lower final objective
-         (`7.1643e-4` vs `7.1716e-4`) with fewer objective evaluations.
-         The K1 timing mechanism is confirmed; the quality gate needs a
-         longer/tighter run or the Phase 5 trial-BFGS-budget sweep.
+         not increase enough to erase the per-trial savings. Both legs stopped
+         after one accepted iteration, but `run` reached the lower final
+         objective (`7.1643e-4` vs `7.1716e-4`) with fewer objective
+         evaluations. Current HEAD therefore reverts the trial Newton-polish
+         default to `run`; the cap-300 BFGS budget remains an explicit
+         experiment, not a default.
 
 3. **Phase 3 — Structural: cut HVPs per Newton iteration (measure first)**
    - [x] Extend the `1a9deabac`/`945a010b2` diagnostics to record the actual
@@ -500,8 +522,12 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          `/workspace/runpod-k1-runs/phase5-iota011-R0935-bfgs-sweep-h100-20260702T075558Z`.
          Cap `300` is fastest among the three clean exits with effectively
          unchanged final objective and physics.
-   - [x] Guard: accepted/final/reference solves keep the full budget;
-         policy recorded in progress metadata like `newton_polish_policy`.
+   - [ ] Guard: accepted/final/reference solves keep the full budget, and the
+         first SciPy incumbent `x0` objective evaluation is not treated as a
+         low-budget trial. The explicit cap sweep kept final/reference solves
+         on the full budget, but the direct A100 smoke proved the optimizer
+         value/grad wrapper still applies trial overrides to the first `x0`
+         call. This guard is therefore **not** complete.
          The sweep command set only `--target-lane-trial-boozer-bfgs-maxiter`
          per case; accepted/final remained at
          `--target-lane-boozer-bfgs-maxiter 1500`.
@@ -549,6 +575,12 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
   trajectories and mask a quality regression on longer runs.
   Mitigation: Phase 2 A/B gate on final objective/physics, not wall time alone;
   keep `run` reachable via flag for reference runs.
+- Risk: trial BFGS caps are applied too broadly by the decomposed solved-pair
+  wrapper and degrade incumbent/full-fidelity evaluations, not just risky
+  line-search probes.
+  Mitigation: leave caps explicit-only until the wrapper can classify true
+  line-search probes or can route exact-DOF incumbent evaluations through the
+  full-fidelity solved pair.
 - Risk: Phase 3 Option A pays n HVPs of assembly on iterations where
   Eisenstat–Walker GMRES would have converged in far fewer matvecs.
   Mitigation: the measure-first decision gate; comparator stays env-gated.
@@ -568,25 +600,29 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 
 ## Completion Criteria
 
-- [ ] GPU smoke at HEAD shows: 1 K1 solve per eval, trial `newton_iter=0`
-      with pre-Newton metrics still recorded, trace-wrapper
-      `forward_result_reused` for the post-K2 same-candidate check, and
-      final-sync `reused=true` on the same-fidelity non-trace path. The RunPod
-      H100 artifacts prove these contract pieces except the same-A100 wall-time
-      comparison; the same-A100 per-eval wall target remains open.
+- [ ] GPU smoke at HEAD shows: 1 K1 solve per eval, production trial
+      `newton_polish_policy=run` with no implicit trial BFGS cap,
+      trace-wrapper `forward_result_reused` for the post-K2 same-candidate
+      check, and final-sync `reused=true` on the same-fidelity non-trace path.
+      Historical explicit-`skip` smokes separately prove `newton_iter=0` when
+      that experimental policy is requested. Historical explicit cap smokes
+      prove the cap plumbing, but the A100 direct smoke invalidates cap-300 as
+      the production default because it also caps the first `x0` objective
+      evaluation.
 - [x] Cap-limited trial solve smoke shows final-sync `reused=true` when the
       accepted solve did not hit the iteration cap, while the cache still
       rejects failed/cap-bound trial solves and non-iteration fidelity
       overrides.
-- [ ] Phase 2 quality gate passed and recorded (or `skip` default reverted
-      with the evidence written into the report doc).
+- [x] Phase 2 quality gate recorded: `skip` did not pass, so the trial Newton-
+      polish default is reverted to `run`; trial BFGS caps remain explicit-only.
 - [x] Phase 3 decision gate resolved with measured HVP counts in this file.
 - [x] Phase 3 Option A implemented behind a comparator flag and smoke-tested on
       H100. The first real comparator smoke is correctness-clean but slower, so
       no default flip is justified.
 - [ ] Phases 4–5 landed with regressions, or explicitly rejected with data.
-      Phase 5 is landed and measured; Phase 4 still needs the lower-memory
-      target GPU validation.
+      Phase 5 plumbing is landed and measured, but default-on cap behavior is
+      explicitly rejected by the direct A100 evidence above; Phase 4 still
+      needs the lower-memory target GPU validation.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
 
