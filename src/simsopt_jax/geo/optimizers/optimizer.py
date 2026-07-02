@@ -392,12 +392,15 @@ _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR = "_simsopt_traceable_runner_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
+_TRACEABLE_MATVEC_COUNTER_IDS = count(1)
+_TRACEABLE_MATVEC_COUNTERS: dict[int, list[int]] = {}
 _TRACEABLE_RUNNER_CACHE_LOCK = Lock()
 # Explicit traceable cache tokens own semantic reuse; bare callables stay
 # isolated by object identity because their closure state is not comparable.
 _TRACEABLE_LM_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
+_TRACEABLE_NEWTON_MATVEC_COUNT_ENV = "SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS"
 _DEPRECATION_LOGGER = logging.getLogger("simsopt_jax.solve.deprecation")
 _DEPRECATED_SOLVE_JAX_CALLSITE_LOCK = Lock()
 _DEPRECATED_SOLVE_JAX_CALLSITES: set["_DeprecationCallSite"] = set()
@@ -543,6 +546,37 @@ def _lookup_traceable_runner_callable(callable_ref, kind: str):
     return callable_fn
 
 
+def _traceable_newton_matvec_counts_requested() -> bool:
+    value = os.environ.get(_TRACEABLE_NEWTON_MATVEC_COUNT_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _register_traceable_matvec_counter(maxiter: int) -> int:
+    if maxiter <= 0:
+        return 0
+    with _TRACEABLE_CALLBACK_LOCK:
+        token = next(_TRACEABLE_MATVEC_COUNTER_IDS)
+        _TRACEABLE_MATVEC_COUNTERS[token] = [0] * int(maxiter)
+    return token
+
+
+def _unregister_traceable_matvec_counter(token: int) -> None:
+    if token == 0:
+        return
+    with _TRACEABLE_CALLBACK_LOCK:
+        _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
+
+
+def _drain_traceable_matvec_counter(token: int) -> tuple[int, ...] | None:
+    if token == 0:
+        return None
+    with _TRACEABLE_CALLBACK_LOCK:
+        values = _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
+    if values is None:
+        return None
+    return tuple(values)
+
+
 class _StrongTraceableCallableRef:
     __slots__ = ("_callable_fn",)
 
@@ -684,6 +718,15 @@ def _invoke_traceable_lm_callback(token, x) -> None:
 def _invoke_traceable_progress_callback(token, nit, fun, grad_norm) -> None:
     callback = _lookup_traceable_callback(token, "progress")
     callback(nit, fun, grad_norm)
+
+
+def _invoke_traceable_matvec_counter(token, iteration) -> None:
+    token_value = int(np.asarray(token).reshape(()).item())
+    iteration_index = int(np.asarray(iteration).reshape(()).item())
+    with _TRACEABLE_CALLBACK_LOCK:
+        counter = _TRACEABLE_MATVEC_COUNTERS.get(token_value)
+        if counter is not None and 0 <= iteration_index < len(counter):
+            counter[iteration_index] += 1
 
 
 @dataclass(frozen=True)
@@ -5609,6 +5652,7 @@ def _make_traceable_newton_polish_runner(
     materialize_hessian,
     max_dense_hessian_bytes,
     progress_callback_enabled,
+    matvec_count_enabled,
 ):
     cache_key = (
         int(maxiter),
@@ -5617,6 +5661,7 @@ def _make_traceable_newton_polish_runner(
         bool(materialize_hessian),
         max_dense_hessian_bytes,
         bool(progress_callback_enabled),
+        bool(matvec_count_enabled),
     )
     return _cached_traceable_runner(
         _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE,
@@ -5630,6 +5675,7 @@ def _make_traceable_newton_polish_runner(
             bool(materialize_hessian),
             max_dense_hessian_bytes,
             bool(progress_callback_enabled),
+            bool(matvec_count_enabled),
         ),
     )
 
@@ -5642,10 +5688,16 @@ def _build_traceable_newton_polish_runner(
     materialize_hessian,
     max_dense_hessian_bytes,
     progress_callback_enabled,
+    matvec_count_enabled,
 ):
     requested_materialize_hessian = materialize_hessian
 
-    def run_solver(x_init, fn_args, progress_callback_token):
+    def run_solver(
+        x_init,
+        fn_args,
+        progress_callback_token,
+        matvec_counter_token,
+    ):
         objective_fn = _lookup_traceable_runner_callable(
             objective_fn_ref,
             "Newton objective",
@@ -5704,7 +5756,15 @@ def _build_traceable_newton_polish_runner(
             )
 
             def matvec(v):
-                return hvp_fn(state["x"], v) + stab_value * v
+                result = hvp_fn(state["x"], v) + stab_value * v
+                if matvec_count_enabled:
+                    jax.debug.callback(
+                        _invoke_traceable_matvec_counter,
+                        matvec_counter_token,
+                        state["attempted_iterations"],
+                        ordered=False,
+                    )
+                return result
 
             dx, linear_status = _solve_square_array_system_operator_only(
                 matvec,
@@ -5955,13 +6015,35 @@ def _build_traceable_newton_polish_runner(
         }
 
     run_solver.__name__ = "traceable_newton_polish_run_solver"
-    if not progress_callback_enabled:
+    if not progress_callback_enabled and not matvec_count_enabled:
 
         def run_solver_without_callback(x_init, fn_args):
-            return run_solver(x_init, fn_args, 0)
+            return run_solver(x_init, fn_args, 0, 0)
 
         run_solver_without_callback.__name__ = run_solver.__name__
         return jax.jit(run_solver_without_callback)
+    if not progress_callback_enabled:
+
+        def run_solver_with_matvec_counter(
+            x_init,
+            fn_args,
+            matvec_counter_token,
+        ):
+            return run_solver(x_init, fn_args, 0, matvec_counter_token)
+
+        run_solver_with_matvec_counter.__name__ = run_solver.__name__
+        return jax.jit(run_solver_with_matvec_counter)
+    if not matvec_count_enabled:
+
+        def run_solver_with_progress_callback(
+            x_init,
+            fn_args,
+            progress_callback_token,
+        ):
+            return run_solver(x_init, fn_args, progress_callback_token, 0)
+
+        run_solver_with_progress_callback.__name__ = run_solver.__name__
+        return jax.jit(run_solver_with_progress_callback, static_argnums=(2,))
     return jax.jit(run_solver, static_argnums=(2,))
 
 
@@ -5984,6 +6066,7 @@ def newton_polish_traceable(
     crossing back into Python. Newton corrections use the operator-only GMRES
     path; the dense Hessian policy only controls final compatibility metadata.
     """
+    matvec_count_enabled = _traceable_newton_matvec_counts_requested()
     runner = _make_traceable_newton_polish_runner(
         objective_fn,
         int(maxiter),
@@ -5992,23 +6075,68 @@ def newton_polish_traceable(
         bool(materialize_hessian),
         max_dense_hessian_bytes,
         progress_callback is not None,
+        matvec_count_enabled,
     )
     progress_callback_token = _register_traceable_callback(progress_callback)
+    matvec_counter_token = (
+        _register_traceable_matvec_counter(int(maxiter))
+        if matvec_count_enabled
+        else 0
+    )
     normalized_args = _normalize_solver_args(args)
     try:
-        if progress_callback_token == 0:
+        if progress_callback_token == 0 and matvec_counter_token == 0:
             result = runner(x0, normalized_args)
-        else:
+        elif progress_callback_token == 0:
+            result = runner(x0, normalized_args, matvec_counter_token)
+        elif matvec_counter_token == 0:
             result = runner(
                 x0,
                 normalized_args,
                 progress_callback_token,
             )
-        if progress_callback_token != 0:
+        else:
+            result = runner(
+                x0,
+                normalized_args,
+                progress_callback_token,
+                matvec_counter_token,
+            )
+        if progress_callback_token != 0 or matvec_counter_token != 0:
             jax.effects_barrier()
+        matvec_counts = _drain_traceable_matvec_counter(matvec_counter_token)
+        matvec_counter_token = 0
+        if matvec_counts is not None:
+            active = np.asarray(
+                jax.device_get(result["newton_trace_active"]),
+                dtype=bool,
+            )
+            actual = np.full(
+                (int(maxiter),),
+                _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+                dtype=np.int32,
+            )
+            actual[active] = np.asarray(matvec_counts, dtype=np.int32)[active]
+            attempted = int(
+                np.asarray(jax.device_get(result["newton_attempted_iterations"]))
+            )
+            last_actual = (
+                _LINEAR_SOLVE_ITERATIONS_UNKNOWN
+                if attempted <= 0
+                else int(actual[attempted - 1])
+            )
+            result = dict(result)
+            result["newton_trace_linear_solve_matvec_actual"] = jnp.asarray(
+                actual,
+                dtype=jnp.int32,
+            )
+            result["newton_last_linear_solve_matvec_actual"] = _device_int32(
+                last_actual
+            )
         return result
     finally:
         _unregister_traceable_callback(progress_callback_token)
+        _unregister_traceable_matvec_counter(matvec_counter_token)
 
 
 def newton_exact(

@@ -3309,6 +3309,38 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_records_opt_in_matvec_counts(
+        self, monkeypatch
+    ):
+        """Opt-in diagnostics should report actual GMRES operator matvec calls."""
+
+        monkeypatch.setenv(_opt._TRACEABLE_NEWTON_MATVEC_COUNT_ENV, "1")
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=3,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        actual = np.asarray(result["newton_trace_linear_solve_matvec_actual"])
+        active_indices = np.nonzero(active)[0]
+
+        assert active_indices.size >= 1
+        assert np.all(actual[active] > 0)
+        assert np.all(
+            actual[~active] == _opt._LINEAR_SOLVE_ITERATIONS_UNKNOWN
+        )
+        assert int(result["newton_last_linear_solve_matvec_actual"]) == int(
+            actual[active_indices[-1]]
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_accepts_finite_descent_step_with_failed_status(
         self, monkeypatch
     ):
