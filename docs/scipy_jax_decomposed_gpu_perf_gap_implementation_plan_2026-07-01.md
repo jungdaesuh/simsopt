@@ -158,6 +158,38 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   `1307`. At n=663 this is about `1.97 * n` matvecs per Newton iteration,
   which resolves the measure-first Phase 3 gate in favor of a dense
   materialization comparator.
+- Phase 3 Option A is now implemented as a default-off comparator, not a
+  default path. `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=dense_lu` switches the
+  traceable Newton correction solve from operator-GMRES over HVPs to dense
+  materialization plus on-device LU when the dense byte policy permits it;
+  unset/default stays `operator_gmres`. Remote H100 focused validation passed
+  after syncing the patch to `/workspace/simopt-k1-current`: py-compile for the
+  touched files and
+  `pytest -q tests/geo/test_boozersurface_jax_private.py -k "traceable_forward_result_packs_newton_linear_solver_backend_code or dense_lu_comparator or iteration_diagnostics or matvec_counts"`
+  reported `6 passed, 126 deselected`.
+- The first real H100 single-stage comparator smoke was correctness-clean but
+  slower than the operator-GMRES baseline on this mpol10 case. Baseline
+  `/workspace/runpod-k1-runs/phase5-cap300-finalreuse-h100-20260702T084258Z`
+  exited `0` in `5:38.69` wall with K1 spans `33.0 s`, `26.0 s`, `34.6 s`,
+  final J `7.164389974566755e-4`, final iota `0.11017554592247202`, final
+  volume `0.04916423166118373`, and Boozer residual `4.573194822063472e-7`.
+  Dense-LU comparator
+  `/workspace/runpod-k1-runs/phase3-denselu-cap300-h100-20260702T090318Z`
+  exited `0` in `6:32.27` wall with K1 spans `149.0 s`, `21.9 s`, `20.6 s`,
+  final J `7.164393917615716e-4`, final iota `0.11017556043410176`, final
+  volume `0.049164231668496566`, and Boozer residual
+  `4.573198237229834e-7`. The dense path reduced the reported linear-solve
+  matvec budget from `1302` to `663` and improved some later K1 solves, but the
+  first dense materialization cost dominated. Conclusion: keep dense-LU
+  experimental/debug-only until a higher-resolution or repeated-solve case
+  proves a wall-time win.
+- A follow-up short reporting smoke was launched after adding the explicit
+  `newton_linear_solve_backend_code` packer field, but the RunPod endpoint
+  disappeared mid-run (`ssh: connect ... Connection refused`) and provider-side
+  `runpodctl pod list --all` returned no pods. The focused H100 test above
+  proves the field packer and dispatch; a future real artifact should confirm
+  the progress JSON carries backend code `1`/`2` without relying on the matvec
+  budget as the discriminator.
 - Phase 4 byte-budget chunk sizing now has a no-explicit-override H100 proof in
   the same run: `SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE` and
   `SIMSOPT_MAX_DENSE_JACOBIAN_BYTES_GPU` were unset, preallocation stayed on,
@@ -494,17 +526,23 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
 - [ ] Phase 2 quality gate passed and recorded (or `skip` default reverted
       with the evidence written into the report doc).
 - [x] Phase 3 decision gate resolved with measured HVP counts in this file.
-- [ ] Phase 3 Option A implemented behind a comparator flag and equivalence
-      gate green before any default flip.
+- [x] Phase 3 Option A implemented behind a comparator flag and smoke-tested on
+      H100. The first real comparator smoke is correctness-clean but slower, so
+      no default flip is justified.
 - [ ] Phases 4–5 landed with regressions, or explicitly rejected with data.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
 
 ## Open Questions
 
-- Phase 3 Option A implementation result: the H100 gate input is no longer open
-  (`1307` matvecs per Newton iteration at n=663), but the dense-materialization
-  comparator and equivalence gate are still pending.
+- Phase 3 dense-LU comparator follow-up: the H100 smoke at mpol10 was
+  correctness-clean but slower than operator-GMRES. Keep it default-off and
+  only revisit for higher-resolution/repeated-solve cases where dense
+  materialization can amortize its first-solve cost.
+- Progress-artifact backend-code confirmation: focused H100 tests prove the new
+  packer field, but the post-patch RunPod reporting smoke was interrupted when
+  the pod disappeared. The pre-patch real artifact still distinguishes dense
+  vs operator by matvec budget (`663` vs `1302`).
 - Native cpp/CPU per-eval wall at the iota011_R0935 config on Perlmutter CPU
   nodes: no local record exists; needed for the definitive post-fix
   cpp-vs-GPU headline. (`single_stage_fair_compare_gpu.slurm` co-produces the

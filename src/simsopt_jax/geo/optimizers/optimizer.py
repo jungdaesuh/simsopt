@@ -401,6 +401,32 @@ _TRACEABLE_LM_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_MATVEC_COUNT_ENV = "SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS"
+_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV = "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER"
+_TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES = "operator_gmres"
+_TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU = "dense_lu"
+_TRACEABLE_NEWTON_LINEAR_SOLVER_CODES = {
+    _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: 1,
+    _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU: 2,
+}
+
+
+def _resolve_traceable_newton_linear_solver():
+    value = os.environ.get(
+        _TRACEABLE_NEWTON_LINEAR_SOLVER_ENV,
+        _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES,
+    ).strip().lower()
+    if value in ("", "operator", "gmres", "operator-gmres", "operator_gmres"):
+        return _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+    if value in ("dense", "dense-lu", "dense_lu", "lu"):
+        return _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+    raise ValueError(
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV} must be "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES!r} or "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU!r}; got {value!r}."
+    )
+
+
+_TRACEABLE_NEWTON_LINEAR_SOLVER = _resolve_traceable_newton_linear_solver()
 _DEPRECATION_LOGGER = logging.getLogger("simsopt_jax.solve.deprecation")
 _DEPRECATED_SOLVE_JAX_CALLSITE_LOCK = Lock()
 _DEPRECATED_SOLVE_JAX_CALLSITES: set["_DeprecationCallSite"] = set()
@@ -5670,6 +5696,7 @@ def _make_traceable_newton_polish_runner(
     progress_callback_enabled,
     matvec_count_enabled,
 ):
+    linear_solver = _TRACEABLE_NEWTON_LINEAR_SOLVER
     cache_key = (
         int(maxiter),
         float(tol),
@@ -5678,6 +5705,7 @@ def _make_traceable_newton_polish_runner(
         max_dense_hessian_bytes,
         bool(progress_callback_enabled),
         bool(matvec_count_enabled),
+        linear_solver,
     )
     return _cached_traceable_runner(
         _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE,
@@ -5692,6 +5720,7 @@ def _make_traceable_newton_polish_runner(
             max_dense_hessian_bytes,
             bool(progress_callback_enabled),
             bool(matvec_count_enabled),
+            linear_solver,
         ),
     )
 
@@ -5705,6 +5734,7 @@ def _build_traceable_newton_polish_runner(
     max_dense_hessian_bytes,
     progress_callback_enabled,
     matvec_count_enabled,
+    linear_solver,
 ):
     requested_materialize_hessian = materialize_hessian
 
@@ -5741,10 +5771,25 @@ def _build_traceable_newton_polish_runner(
             dtype=jnp.int32,
         )
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
+        traceable_dense_lu_enabled = (
+            linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+            and _dense_square_operator_lu_materialization_allowed(x_init)
+        )
+        linear_solver_code = _device_int32(
+            _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+                if traceable_dense_lu_enabled
+                else _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+            ]
+        )
         linear_solve_matvec_budget = _device_int32(
-            _operator_gmres_matvec_budget(
-                hessian_size,
-                max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+            (
+                hessian_size
+                if traceable_dense_lu_enabled
+                else _operator_gmres_matvec_budget(
+                    hessian_size,
+                    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+                )
             )
         )
         materialize_final_hessian, dense_report = (
@@ -5782,11 +5827,18 @@ def _build_traceable_newton_polish_runner(
                     )
                 return result
 
-            dx, linear_status = _solve_square_array_system_operator_only(
-                matvec,
-                state["grad"],
-                tol=linear_tol,
-            )
+            if traceable_dense_lu_enabled:
+                dx, linear_status = _solve_dense_square_operator_lu_system_with_status(
+                    matvec,
+                    state["grad"],
+                    tol=linear_tol,
+                )
+            else:
+                dx, linear_status = _solve_square_array_system_operator_only(
+                    matvec,
+                    state["grad"],
+                    tol=linear_tol,
+                )
             step_norm = jnp.linalg.norm(dx)
             step_finite = jnp.all(jnp.isfinite(dx))
             candidate = _backtracking_value_grad_step(
@@ -5897,6 +5949,7 @@ def _build_traceable_newton_polish_runner(
                 ]
                 .at[trace_index]
                 .set(accepted_alpha),
+                "newton_linear_solve_backend_code": linear_solver_code,
             }
 
         state = lax.while_loop(
@@ -5939,6 +5992,7 @@ def _build_traceable_newton_polish_runner(
                 "newton_trace_linear_residual_relative": trace_nan,
                 "newton_trace_backtracking_iterations": trace_unknown_int,
                 "newton_trace_accepted_alpha": trace_nan,
+                "newton_linear_solve_backend_code": linear_solver_code,
             },
         )
 
@@ -6001,6 +6055,9 @@ def _build_traceable_newton_polish_runner(
                 "last_backtracking_iterations"
             ],
             "newton_last_accepted_alpha": state["last_accepted_alpha"],
+            "newton_linear_solve_backend_code": state[
+                "newton_linear_solve_backend_code"
+            ],
             "newton_trace_active": state["newton_trace_active"],
             "newton_trace_step_accepted": state["newton_trace_step_accepted"],
             "newton_trace_value_before": state["newton_trace_value_before"],

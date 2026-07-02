@@ -662,6 +662,7 @@ def _pack_traceable_forward_result(
     newton_last_linear_solve_iterations=None,
     newton_last_linear_solve_matvec_budget=None,
     newton_last_linear_solve_matvec_actual=None,
+    newton_linear_solve_backend_code=None,
     newton_last_linear_residual_relative=None,
     newton_last_backtracking_iterations=None,
     newton_last_accepted_alpha=None,
@@ -793,6 +794,12 @@ def _pack_traceable_forward_result(
         ),
         "newton_last_linear_solve_matvec_actual_present": present_field(
             newton_last_linear_solve_matvec_actual
+        ),
+        "newton_linear_solve_backend_code": int_field(
+            newton_linear_solve_backend_code
+        ),
+        "newton_linear_solve_backend_code_present": present_field(
+            newton_linear_solve_backend_code
         ),
         "newton_last_linear_residual_relative": float_field(
             newton_last_linear_residual_relative
@@ -1028,6 +1035,9 @@ def _traceable_general_forward_result(
             ),
             newton_last_linear_solve_matvec_actual=solve_result.get(
                 "newton_last_linear_solve_matvec_actual"
+            ),
+            newton_linear_solve_backend_code=solve_result.get(
+                "newton_linear_solve_backend_code"
             ),
             newton_last_linear_residual_relative=solve_result.get(
                 "newton_last_linear_residual_relative"

@@ -67,6 +67,29 @@ def test_solve_boozer_adjoint_raises_on_failed_operator_runtime():
         _soj._solve_boozer_adjoint(adjoint_state, jnp.ones((2,), dtype=jnp.float64))
 
 
+def test_traceable_forward_result_packs_newton_linear_solver_backend_code():
+    """K1 progress metadata must preserve the traceable Newton backend code."""
+    code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+        _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+    ]
+
+    result = _soj._pack_traceable_forward_result(
+        value=jnp.asarray(1.25, dtype=jnp.float64),
+        x=jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        sdofs=jnp.asarray([1.0], dtype=jnp.float64),
+        iota=jnp.asarray(0.1, dtype=jnp.float64),
+        G=jnp.asarray(-2.0, dtype=jnp.float64),
+        linear_solve_factors=None,
+        success=jnp.asarray(True),
+        primal_success=jnp.asarray(True),
+        adjoint_linear_solve_available=jnp.asarray(False),
+        newton_linear_solve_backend_code=jnp.asarray(code, dtype=jnp.int32),
+    )
+
+    assert bool(result["newton_linear_solve_backend_code_present"]) is True
+    assert int(result["newton_linear_solve_backend_code"]) == code
+
+
 def _assert_plu_tuple_matches(actual, expected) -> None:
     for actual_part, expected_part in zip(actual, expected):
         np.testing.assert_allclose(actual_part, expected_part, atol=1e-14)
@@ -3294,6 +3317,12 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert bool(result["newton_last_linear_solve_success"]) is True
         assert int(result["newton_last_linear_solve_iterations"]) == 7
         assert int(result["newton_last_linear_solve_matvec_budget"]) == 122
+        assert (
+            int(result["newton_linear_solve_backend_code"])
+            == _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+            ]
+        )
         np.testing.assert_allclose(
             np.asarray(result["initial_gradient_norm"]),
             initial_norm,
@@ -3305,6 +3334,130 @@ class TestBoozerSurfaceJAXClassPrivate:
             0.0,
             rtol=0.0,
             atol=1e-12,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_lu_comparator_dispatches(
+        self, monkeypatch
+    ):
+        """Opt-in dense-LU traceable Newton uses the dense direct solve path."""
+
+        observed = {"dense": 0}
+
+        def dense_lu_solve(_matvec, rhs, *, tol):
+            del _matvec, tol
+            observed["dense"] += 1
+            return rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(0, dtype=jnp.int32),
+            )
+
+        def operator_solve(_matvec, _rhs, *, tol):
+            del _matvec, _rhs, tol
+            raise AssertionError("operator-GMRES fallback should not run")
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_dense_square_operator_lu_system_with_status",
+            dense_lu_solve,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_square_array_system_operator_only",
+            operator_solve,
+        )
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=1,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert observed["dense"] == 1
+        assert bool(result["success"]) is True
+        assert int(result["newton_last_linear_solve_iterations"]) == 0
+        assert int(result["newton_last_linear_solve_matvec_budget"]) == x0.size
+        assert (
+            int(result["newton_linear_solve_backend_code"])
+            == _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+            ]
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_lu_comparator_falls_back_when_disallowed(
+        self, monkeypatch
+    ):
+        """Dense-LU request preserves the operator path when byte policy blocks it."""
+
+        observed = {"operator": 0}
+
+        def dense_lu_solve(_matvec, _rhs, *, tol):
+            del _matvec, _rhs, tol
+            raise AssertionError("dense-LU solve should not run")
+
+        def operator_solve(_matvec, rhs, *, tol):
+            del _matvec, tol
+            observed["operator"] += 1
+            return rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(9, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_dense_square_operator_lu_materialization_allowed",
+            lambda _rhs: False,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_dense_square_operator_lu_system_with_status",
+            dense_lu_solve,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_square_array_system_operator_only",
+            operator_solve,
+        )
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=1,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert observed["operator"] == 1
+        assert bool(result["success"]) is True
+        assert int(result["newton_last_linear_solve_iterations"]) == 9
+        assert (
+            int(result["newton_linear_solve_backend_code"])
+            == _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+            ]
         )
 
     @PRIVATE_OPTIMIZER_RUNTIME

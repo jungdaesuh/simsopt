@@ -593,6 +593,7 @@ _K1_FORWARD_SCALAR_PROGRESS_FIELDS = (
     "newton_last_linear_solve_iterations",
     "newton_last_linear_solve_matvec_budget",
     "newton_last_linear_solve_matvec_actual",
+    "newton_linear_solve_backend_code",
     "newton_last_linear_residual_relative",
     "newton_last_backtracking_iterations",
     "newton_last_accepted_alpha",
