@@ -170,6 +170,14 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   `target_lane_reporting_forward_result_started` at `858.75 s` returned at
   `1060.20 s`, so final reporting still paid about `201.4 s` for a K1 forward
   result in this run.
+- That reporting-reuse gap is now closed for cap-limited trial solves whose
+  cap did not bind. RunPod H100 smoke
+  `/workspace/runpod-k1-runs/phase5-cap300-finalreuse-h100-20260702T084258Z`
+  exited `0` with the same cap-300 final objective/physics as the earlier
+  sweep, recorded `target_lane_reporting_forward_result_started reused=true`
+  and `target_lane_reporting_forward_result_returned reused=true`, and reduced
+  the final reporting sync span to `0.0101 s`. The cache still intentionally
+  rejects failed/cap-bound trial solves and non-iteration fidelity overrides.
 - Phase 5 trial-budget plumbing has landed in the child single-stage runner,
   the parent parity wrapper, and the K1 matrix launcher. The launcher now
   accepts `MATRIX_TRIAL_BOOZER_BFGS_TOL` and
@@ -189,13 +197,20 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   | 300 | 532.2 s | 296.5 s | 166.8, 26.0, 34.6 | 26.0 s (`pre_newton_iter=300`, `newton_iter=1`) | 7.164389974566755e-4 | 0.11017554592247202 | 0.04916423166118373 | 4.573194822063472e-7 |
   | 500 | 612.9 s | 376.2 s | 165.8, 106.3, 34.8 | 106.3 s (`pre_newton_iter=500`, `newton_iter=9`) | 7.164368308119462e-4 | 0.11017540985669198 | 0.049164231742263885 | 4.5731775303772417e-7 |
 
+  Follow-up cap-300 final-reuse smoke
+  `/workspace/runpod-k1-runs/phase5-cap300-finalreuse-h100-20260702T084258Z`
+  completed in about `5m38s` wall, with K1 durations `33.0 s`, `26.0 s`,
+  `34.6 s`, phase2 elapsed `161.4 s`, final J
+  `7.164389974566755e-4`, final iota `0.11017554592247202`, final volume
+  `0.04916423166118373`, and Boozer residual `4.573194822063472e-7`.
+  Final reporting reuse was `true` and the reporting forward-result span was
+  `0.0101 s`, eliminating the earlier cap-300 `~65 s` final K1 recompute.
+
   Interpretation: cap `300` is the current best measured trial budget. It
   preserves the final objective/physics envelope of cap `500` while avoiding
-  the expensive rejected-trial Newton work. Cap `200` produced the same
-  optimizer result but paid a one-off `201.8 s` final-reporting forward-result
-  recompute; cap `300`/`500` reporting recompute was about `65 s`. This keeps
-  the reporting-reuse fix on the critical path, but the trial-budget knob is
-  validated as useful.
+  the expensive rejected-trial Newton work, and after the final-reuse policy
+  patch it no longer pays a final-reporting K1 recompute when the accepted
+  solve did not hit the trial cap. The trial-budget knob is validated as useful.
 - Phase 6 same-resolution runtime seed-spec bypass landed at `651639189` and
   was validated remotely with a real CLI same-shape copy smoke
   (`payload_equal=true`, identical SHA-256 source/output).
@@ -426,8 +441,12 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       `tests/integration/test_single_stage_newton_polish_policy.py -k "child_trial_override or trial_boozer_overrides_use_trial_policy_not_full_policy or trial_solve_cache or same_fidelity_trial_solve"`
       (`7 passed`) and
       `tests/integration/test_single_stage_jax_cpu_reference.py -k "adapter_final_sync_falls_back_to_decomposed_solve_cache or decomposed_host_objective_feeds_final_reporting_sync_cache"`
-      (`2 passed`). Earlier focused remote/Perlmutter validations covered the
-      trace-wrapper and private optimizer slices listed here.
+      (`2 passed`). The final-reuse policy patch later passed the focused H100
+      slices
+      `tests/integration/test_single_stage_newton_polish_policy.py -k "trial_solve_cache or same_fidelity or iteration_cap or non_iteration_override"`
+      (`5 passed`) and the same final-sync adapter slice (`2 passed`). Earlier
+      focused remote/Perlmutter validations covered the trace-wrapper and
+      private optimizer slices listed here.
 - [x] Phase 1 progress-event assertions (listed inline above) on actual RunPod
       H100 artifacts, not just exit codes. Perlmutter matrix artifacts remain a
       separate harness-validation item because the submitted jobs did not reach
@@ -468,6 +487,10 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       final-sync `reused=true` on the same-fidelity non-trace path. The RunPod
       H100 artifacts prove these contract pieces except the same-A100 wall-time
       comparison; the same-A100 per-eval wall target remains open.
+- [x] Cap-limited trial solve smoke shows final-sync `reused=true` when the
+      accepted solve did not hit the iteration cap, while the cache still
+      rejects failed/cap-bound trial solves and non-iteration fidelity
+      overrides.
 - [ ] Phase 2 quality gate passed and recorded (or `skip` default reverted
       with the evidence written into the report doc).
 - [x] Phase 3 decision gate resolved with measured HVP counts in this file.
@@ -486,6 +509,6 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
   nodes: no local record exists; needed for the definitive post-fix
   cpp-vs-GPU headline. (`single_stage_fair_compare_gpu.slurm` co-produces the
   reference; one fair-compare run answers it.)
-- Does benchmark-mode's deferred reporting snapshot (`EX:18279-18294`)
-  interact with the now-populated sync cache in any path that skips the
-  final-sync reuse? Verify during Phase 1.
+- Benchmark-mode final-sync cache interaction is resolved for same-fidelity and
+  non-binding iteration-cap trial solves. It remains intentionally disabled for
+  true lower-fidelity or failed/cap-bound trial solves.

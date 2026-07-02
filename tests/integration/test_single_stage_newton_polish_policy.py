@@ -52,6 +52,7 @@ from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example
     resolve_effective_trial_boozer_newton_polish_policy_override,
     resolve_target_lane_trial_boozer_bfgs_maxiter,
     resolve_target_lane_trial_boozer_bfgs_tol,
+    target_lane_trial_solve_result_matches_full_fidelity,
     wrap_target_lane_solved_pair_with_boozer_overrides,
 )
 
@@ -499,6 +500,83 @@ def test_trial_solve_cache_keeps_trace_reuse_but_disables_final_sync_reuse():
     np.testing.assert_allclose(np.asarray(grad), [0.1, 0.2])
     assert objective.cached_forward_result_for_coil_dofs(coil_dofs)["iota"] == 0.11
     assert objective.target_lane_solve_result_for_coil_dofs(coil_dofs) is None
+
+
+def test_trial_iteration_cap_solve_reuses_final_sync_cache_when_cap_does_not_bind():
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    coil_dofs = [1.0, 2.0]
+    forward_result = {
+        "success": True,
+        "primal_success": True,
+        "sdofs": [3.0, 4.0],
+        "iota": 0.11,
+        "G": 2.0,
+        "x": [5.0, 6.0],
+        "linear_solve_factors": {},
+        "pre_newton_iter": 1,
+    }
+    trial_overrides = {"bfgs_maxiter": 300}
+
+    def solve_fn(_coil_dofs):
+        return dict(forward_result)
+
+    def value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 7.0, [0.1, 0.2]
+
+    objective = _build_decomposed_coil_host_value_and_grad(
+        solved_pair_type(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        ),
+        baseline_gradient=[0.0, 0.0],
+        solve_result_cache_policy=(
+            lambda result: target_lane_trial_solve_result_matches_full_fidelity(
+                result,
+                trial_overrides,
+            )
+        ),
+    )
+
+    value, grad = objective(coil_dofs)
+    solve_result = objective.target_lane_solve_result_for_coil_dofs(coil_dofs)
+
+    assert target_lane_trial_solve_result_matches_full_fidelity(
+        forward_result,
+        trial_overrides,
+    )
+    assert float(np.asarray(value)) == 7.0
+    np.testing.assert_allclose(np.asarray(grad), [0.1, 0.2])
+    assert solve_result is not None
+    assert solve_result["iota"] == 0.11
+    assert solve_result["objective_value"] == 7.0
+
+
+def test_trial_iteration_cap_solve_rejects_final_sync_cache_when_cap_binds():
+    forward_result = {
+        "success": False,
+        "primal_success": False,
+        "pre_newton_iter": 300,
+    }
+
+    assert not target_lane_trial_solve_result_matches_full_fidelity(
+        forward_result,
+        {"bfgs_maxiter": 300},
+    )
+
+
+def test_trial_non_iteration_override_disables_final_sync_cache():
+    forward_result = {
+        "success": True,
+        "primal_success": True,
+        "pre_newton_iter": 1,
+    }
+
+    assert not target_lane_trial_solve_result_matches_full_fidelity(
+        forward_result,
+        {"bfgs_tol": 1e-7},
+    )
 
 
 def test_same_fidelity_trial_solve_keeps_final_sync_cache():

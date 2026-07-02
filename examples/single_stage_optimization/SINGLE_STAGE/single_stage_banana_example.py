@@ -611,7 +611,7 @@ _K1_FORWARD_SCALAR_PROGRESS_FIELDS = (
 def _progress_field_present(forward_result, key):
     present_key = f"{key}_present"
     if present_key not in forward_result:
-        return True
+        return key in forward_result
     return host_bool(forward_result[present_key])
 
 
@@ -7608,6 +7608,7 @@ def _build_decomposed_coil_host_value_and_grad(
     k1_subtimer_profile_suite=None,
     record_outer_optimizer_event=None,
     cache_solve_result_for_reporting=True,
+    solve_result_cache_policy=None,
 ):
     """Return host-driven K1/K2 value/grad with fused-lane failure fallback."""
     baseline_gradient_device = runtime_device_put(baseline_gradient)
@@ -7645,7 +7646,12 @@ def _build_decomposed_coil_host_value_and_grad(
         missing_solve_keys = [
             key for key in solve_result_required_keys if key not in forward_result
         ]
-        if missing_solve_keys or not cache_solve_result_for_reporting:
+        cache_reporting_solve_result = bool(cache_solve_result_for_reporting)
+        if cache_reporting_solve_result and solve_result_cache_policy is not None:
+            cache_reporting_solve_result = bool(
+                solve_result_cache_policy(forward_result)
+            )
+        if missing_solve_keys or not cache_reporting_solve_result:
             last_solved_forward_result.pop("solve_result", None)
             return
         solved_forward_result = dict(forward_result)
@@ -7790,6 +7796,32 @@ def _build_decomposed_coil_host_value_and_grad(
         target_lane_solve_result_for_coil_dofs
     )
     return value_and_grad
+
+
+def target_lane_trial_solve_result_matches_full_fidelity(
+    forward_result,
+    trial_boozer_overrides,
+):
+    """Return True when a trial solve was not materially limited by overrides."""
+
+    active_overrides = active_boozer_option_overrides(trial_boozer_overrides)
+    if not active_overrides:
+        return True
+    if not host_bool(forward_result.get("success", False)):
+        return False
+    supported_iteration_caps = {
+        "bfgs_maxiter": "pre_newton_iter",
+        "newton_maxiter": "newton_attempted_iterations",
+    }
+    for override_name, override_value in active_overrides.items():
+        iteration_field = supported_iteration_caps.get(override_name)
+        if iteration_field is None:
+            return False
+        if iteration_field not in forward_result:
+            return False
+        if host_int(forward_result[iteration_field]) >= int(override_value):
+            return False
+    return True
 
 
 def get_traceable_single_stage_alm_runtime_bundle_builder():
@@ -8682,6 +8714,14 @@ def build_target_lane_outer_objectives(
             record_outer_optimizer_event(
                 "target_lane_decomposed_solved_pair_returned"
             )
+        solve_result_cache_policy = None
+        if active_solved_pair_boozer_overrides:
+            solve_result_cache_policy = (
+                lambda forward_result: target_lane_trial_solve_result_matches_full_fidelity(
+                    forward_result,
+                    active_solved_pair_boozer_overrides,
+                )
+            )
         target_value_and_grad_objective = _build_decomposed_coil_host_value_and_grad(
             solved_pair,
             seeded_value_and_grad.optimizer_initial_value_and_grad[1],
@@ -8691,9 +8731,7 @@ def build_target_lane_outer_objectives(
                 else None
             ),
             record_outer_optimizer_event=record_outer_optimizer_event,
-            cache_solve_result_for_reporting=not bool(
-                active_solved_pair_boozer_overrides
-            ),
+            solve_result_cache_policy=solve_result_cache_policy,
         )
         target_optimizer_initial_value_and_grad = (
             seeded_value_and_grad.optimizer_initial_value_and_grad
