@@ -97,9 +97,23 @@ def _device_zero_like(value: object) -> jax.Array:
     return array - array
 
 
-def _array_cache_key(value: object) -> tuple[str, tuple[int, ...], bytes]:
+def _array_cache_key(value: object) -> tuple[str, str, tuple[int, ...], bytes]:
     array = np.asarray(value)
-    return str(array.dtype), tuple(int(axis) for axis in array.shape), array.tobytes()
+    return (
+        "numpy_array",
+        str(array.dtype),
+        tuple(int(axis) for axis in array.shape),
+        array.tobytes(),
+    )
+
+
+def _jax_array_cache_key(value: jax.Array) -> tuple[str, str, tuple[int, ...], int]:
+    return (
+        "jax_array",
+        str(value.dtype),
+        tuple(int(axis) for axis in value.shape),
+        id(value),
+    )
 
 
 def _spec_cache_key(value: object) -> object:
@@ -108,7 +122,7 @@ def _spec_cache_key(value: object) -> object:
     if isinstance(value, np.ndarray):
         return _array_cache_key(value)
     if isinstance(value, jax.Array):
-        return _array_cache_key(value)
+        return _jax_array_cache_key(value)
     if is_dataclass(value):
         return (
             type(value).__module__,

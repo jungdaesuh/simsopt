@@ -2142,6 +2142,35 @@ class TestBiotSavartJAXCoilStateToken:
         assert spec_backed_a._coil_dof_state_token != initial_token
         assert spec_backed_a._coil_dofs_generation == 1
 
+    def test_spec_backed_biotsavart_jax_accepts_device_spec_under_transfer_guard(self):
+        gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
+        if not gpu_devices:
+            pytest.skip("CUDA device required for device-to-host transfer guard coverage")
+        from simsopt_jax_adapters.field.biotsavart_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt_jax.core.specs import make_biot_savart_spec
+
+        device = gpu_devices[0]
+        coils = self._make_two_basic_coils()
+        bs_jax = BiotSavartJAX(list(coils))
+        host_spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        device_spec = jax.tree_util.tree_map(
+            lambda leaf: jax.device_put(leaf, device=device)
+            if isinstance(leaf, (jax.Array, np.ndarray))
+            else leaf,
+            host_spec,
+        )
+
+        with jax.transfer_guard("disallow"):
+            spec_backed = SpecBackedBiotSavartJAX(device_spec)
+
+        assert len(spec_backed.coils) == len(coils)
+
     def test_spec_backed_biotsavart_jax_advances_layout_version_on_fix(self):
         from simsopt_jax_adapters.field.biotsavart_backend import (
             BiotSavartJAX,

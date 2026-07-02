@@ -1950,8 +1950,8 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
     the traceable scalar objective canonicalizes that known integration family
     before building its fixed residual mask.
     """
-    quadpoints_phi = np.asarray(booz_jax.quadpoints_phi, dtype=float)
-    quadpoints_theta = np.asarray(booz_jax.quadpoints_theta, dtype=float)
+    quadpoints_phi = _host_array(booz_jax.quadpoints_phi, dtype=float)
+    quadpoints_theta = _host_array(booz_jax.quadpoints_theta, dtype=float)
 
     mpol = int(booz_jax.mpol)
     ntor = int(booz_jax.ntor)
@@ -2187,7 +2187,7 @@ def _traceable_contract_leaf_signature(leaf):
             return (
                 "device_array_scalar",
                 str(leaf.dtype),
-                np.asarray(jax.device_get(leaf)).reshape(()).item(),
+                _host_array(leaf).reshape(()).item(),
             )
         return (
             "device_array_meta",
