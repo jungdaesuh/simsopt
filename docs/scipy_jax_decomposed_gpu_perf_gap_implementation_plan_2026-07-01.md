@@ -132,26 +132,47 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   return events, trial Newton skip semantics, and optional final-sync reuse; when
   `MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE=1`, it additionally checks
   exactly-one K1 return per `objective_evaluation` and optional trace-forward
-  reuse. The launcher also emits `k1_matrix_report.json` via
+  reuse. `MATRIX_TRACE_K1_SUBTIMERS=1` enables the expensive split-K1 replay
+  diagnostics; timing comparisons should leave it unset. The launcher now runs
+  K1 assertions over all reference/target progress files instead of the first
+  file returned by `find`. It also emits `k1_matrix_report.json` via
   `python -m benchmarks.single_stage_k1_matrix_report`, a pure artifact reader that
-  rolls up per-case exit status, assertion status, progress-file summaries,
-  trace-reuse counts, final-sync reuse, and missing-artifact issues before the
-  matrix failure gate. Remote Perlmutter validation passed for py-compile, the
-  focused synthetic pytest slices, and CLI synthetic progress/report smokes.
+  rolls up per-case exit status, assertion status, reference/target progress
+  file summaries, trace-reuse counts, final-sync reuse, and missing-artifact
+  issues before the matrix failure gate. Remote Perlmutter validation passed for
+  py-compile, the focused synthetic pytest slices, and CLI synthetic
+  progress/report smokes.
   Fresh Perlmutter GPU submission initially failed when the account was omitted.
   The valid Perlmutter shape is `sbatch -A m4680_g -C gpu -q shared ...`.
   Source-commit Phase-1 Perlmutter jobs `55373498` and `55373499` were not used
   as proof: `55373498` failed during editable-install submodule setup, and
   `55373499` failed the matrix command because the high-resolution donor
   continuation path lacked `MATRIX_WARM_START_RUN_DIR`.
-- Phase-1 Perlmutter GPU job `55380861` was submitted from staged clean
-  executable source at `1d055547e`
-  `/pscratch/sd/j/jungdae/simopt-jax-clean-local-1d055547ebbc-k1matrix-20260702T092557Z-src`
-  with `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
+- Phase-1 Perlmutter A100-40GB shared-interactive job `55381297` completed
+  from executable source `e359bfd81d6f` at
+  `/pscratch/sd/j/jungdae/simopt-jax-clean-local-k1matrix-e359bfd81d6f-20260702T100821Z-interactive/55381297`.
+  It selected `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
   `MATRIX_MAXITER=1`, `MATRIX_ASSERT_K1_PROGRESS=1`,
   `MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE=1`, and
-  `MATRIX_REQUIRE_TRACE_REUSE=1`. It was still `PENDING (Priority)` at the
-  time of this update, so it is a submitted validation run, not result proof.
+  `MATRIX_REQUIRE_TRACE_REUSE=1`. Both selected cases wrote `summary.json`
+  with no top-level runtime error, strict GPU provenance (`backend=gpu`,
+  `devices=["cuda:0"]`, transfer guard `disallow`), and final metric parity
+  (`final_iota_abs_diff=0.0`, `final_volume_rel_diff=2.8e-16`,
+  `field_error_rel_diff=3.2e-15`). Both cases still recorded `passed=false`
+  because neither the reference leg nor the target leg accepted an optimizer
+  step (`optimizer_status=2` on both); treat this as K1/reuse harness evidence,
+  not an accepted-trajectory quality pass. The target leg timing improved from
+  baseline to dense-skip: total wall `617.6 s -> 300.8 s` and outer optimizer
+  `277.6 s -> 132.5 s`. The reference leg remained about `38 min` because this
+  run forced `--trace-target-lane-k1-subtimers`, whose replay dominated wall
+  time.
+- The same Perlmutter run exposed a report-aggregation bug: each matrix case
+  now contains both `reference_outputs` and `target_outputs` progress files,
+  but `benchmarks/single_stage_k1_matrix_report.py` assumed exactly one
+  `outer_optimizer_progress.json`. Commit `0f6c94955` fixes the report reader
+  to summarize all progress files while preserving `target_outputs` as the
+  primary progress view. The patched reader successfully regenerated
+  `k1_matrix_report.json` against the `55381297` artifacts.
 - Phase 3 measurement plumbing is implemented and now has a real H100 artifact.
   `SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS=1` records actual operator matvec
   callback counts into `newton_trace_linear_solve_matvec_actual` and
@@ -347,8 +368,9 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
          `MATRIX_CASES=baseline_dense_run_chunk8,dense_skip_chunk8`,
          `MATRIX_MAXITER=1`:
          `sbatch --export=ALL,REPO_ROOT=<checkout>,RUN_ROOT=<scratch>,MATRIX_CASES=... benchmarks/perlmutter/single_stage_k1_matrix_gpu.slurm`
-         Perlmutter job `55380861` is submitted and pending from executable
-         source `1d055547e`.
+         Perlmutter shared-interactive job `55381297` completed on A100-40GB
+         from executable source `e359bfd81d6f`. It produced per-case summaries
+         and K1/reuse progress evidence, but not an accepted-step quality pass.
    - [x] Assert in progress events: exactly one
          `target_lane_decomposed_k1_forward_returned` per eval (no duplicate
          K1). The H100 trace/default-skip smoke emitted 17 K1 returns for the
@@ -497,11 +519,15 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       focused remote/Perlmutter validations covered the trace-wrapper and
       private optimizer slices listed here.
 - [x] Phase 1 progress-event assertions (listed inline above) on actual RunPod
-      H100 artifacts, not just exit codes. Perlmutter matrix artifacts remain a
-      separate harness-validation item because the submitted jobs did not reach
-      the intended K1 matrix run.
+      H100 artifacts, not just exit codes. Perlmutter job `55381297` also
+      exercised the matrix harness on A100-40GB and wrote reference/target
+      progress files for both selected cases; the cases themselves remain
+      failed optimizer probes because no step was accepted.
 - [ ] `/usr/bin/time` per-case wall comparison across matrix cases; GPU memory
       high-water from `nvidia-smi_before/after` snapshots the harness writes.
+      Job `55381297` produced a partial comparison, but it forced
+      `--trace-target-lane-k1-subtimers`; rerun with
+      `MATRIX_TRACE_K1_SUBTIMERS=0` for fair wall timing.
 - [ ] Any Phase 3–5 change that can touch the objective path passes the
       equivalence gate before default-on; env-gated until then.
 
@@ -547,6 +573,8 @@ materialize-once-per-iteration + direct-solve scheme is not a win.
       H100. The first real comparator smoke is correctness-clean but slower, so
       no default flip is justified.
 - [ ] Phases 4–5 landed with regressions, or explicitly rejected with data.
+      Phase 5 is landed and measured; Phase 4 still needs the lower-memory
+      target GPU validation.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
 

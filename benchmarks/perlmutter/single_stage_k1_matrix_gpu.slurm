@@ -43,6 +43,7 @@ TARGET_CASE_TIMEOUT_SECONDS="${TARGET_CASE_TIMEOUT_SECONDS:-7200}"
 MATRIX_DISABLE_SUCCESS_FILTER="${MATRIX_DISABLE_SUCCESS_FILTER:-0}"
 MATRIX_ASSERT_K1_PROGRESS="${MATRIX_ASSERT_K1_PROGRESS:-0}"
 MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE="${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE:-0}"
+MATRIX_TRACE_K1_SUBTIMERS="${MATRIX_TRACE_K1_SUBTIMERS:-0}"
 MATRIX_REQUIRE_TRACE_REUSE="${MATRIX_REQUIRE_TRACE_REUSE:-0}"
 MATRIX_REQUIRE_FINAL_SYNC_REUSE="${MATRIX_REQUIRE_FINAL_SYNC_REUSE:-0}"
 
@@ -175,6 +176,7 @@ payload = {
     "MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE": (
         os.environ.get("MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE") or None
     ),
+    "MATRIX_TRACE_K1_SUBTIMERS": os.environ.get("MATRIX_TRACE_K1_SUBTIMERS") or None,
     "MATRIX_REQUIRE_TRACE_REUSE": os.environ.get("MATRIX_REQUIRE_TRACE_REUSE") or None,
     "MATRIX_REQUIRE_FINAL_SYNC_REUSE": (
         os.environ.get("MATRIX_REQUIRE_FINAL_SYNC_REUSE") or None
@@ -192,8 +194,11 @@ assert_case_progress() {
     return 0
   fi
   local progress_json
-  progress_json="$(find "${case_dir}/cases" -name outer_optimizer_progress.json -type f -print -quit)"
-  if [[ -z "${progress_json}" ]]; then
+  local progress_jsons=()
+  while IFS= read -r progress_json; do
+    progress_jsons+=("${progress_json}")
+  done < <(find "${case_dir}/cases" -name outer_optimizer_progress.json -type f | sort)
+  if [[ "${#progress_jsons[@]}" == "0" ]]; then
     echo "Missing outer_optimizer_progress.json for ${case_label}" >&2
     return 1
   fi
@@ -201,22 +206,45 @@ assert_case_progress() {
   if [[ "${MATRIX_TRIAL_NEWTON_POLISH_POLICY}" == "skip" ]]; then
     expect_skip="true"
   fi
-  local assertion_args=(
-    --progress-json "${progress_json}"
-    --require-k1-forward-events
-    --expect-newton-skip "${expect_skip}"
-    --output-json "${case_dir}/k1_progress_assertions.json"
-  )
-  if [[ "${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE}" == "1" ]]; then
-    assertion_args+=(--require-k1-per-objective)
-  fi
-  if [[ "${MATRIX_REQUIRE_TRACE_REUSE}" == "1" ]]; then
-    assertion_args+=(--require-trace-forward-reuse)
-  fi
-  if [[ "${MATRIX_REQUIRE_FINAL_SYNC_REUSE}" == "1" ]]; then
-    assertion_args+=(--require-final-sync-reuse)
-  fi
-  python benchmarks/single_stage_k1_progress_assertions.py "${assertion_args[@]}"
+  local assertion_dir="${case_dir}/k1_progress_assertions"
+  mkdir -p "${assertion_dir}"
+  local assertion_status=0
+  local progress_label
+  local assertion_args
+  for progress_json in "${progress_jsons[@]}"; do
+    progress_label="$(
+      python - "${case_dir}" "${progress_json}" <<'PY'
+import pathlib
+import re
+import sys
+
+case_dir = pathlib.Path(sys.argv[1])
+progress_json = pathlib.Path(sys.argv[2])
+relative_parts = progress_json.relative_to(case_dir).parts
+label = relative_parts[1] if len(relative_parts) >= 4 and relative_parts[0] == "cases" else progress_json.parent.name
+print(re.sub(r"[^A-Za-z0-9_.-]+", "_", label))
+PY
+    )"
+    assertion_args=(
+      --progress-json "${progress_json}"
+      --require-k1-forward-events
+      --expect-newton-skip "${expect_skip}"
+      --output-json "${assertion_dir}/${progress_label}.json"
+    )
+    if [[ "${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE}" == "1" ]]; then
+      assertion_args+=(--require-k1-per-objective)
+    fi
+    if [[ "${MATRIX_REQUIRE_TRACE_REUSE}" == "1" ]]; then
+      assertion_args+=(--require-trace-forward-reuse)
+    fi
+    if [[ "${MATRIX_REQUIRE_FINAL_SYNC_REUSE}" == "1" ]]; then
+      assertion_args+=(--require-final-sync-reuse)
+    fi
+    if ! python benchmarks/single_stage_k1_progress_assertions.py "${assertion_args[@]}"; then
+      assertion_status=1
+    fi
+  done
+  return "${assertion_status}"
 }
 
 run_case() {
@@ -251,6 +279,10 @@ run_case() {
   local trace_args=()
   if [[ "${MATRIX_RECORD_OBJECTIVE_EVALUATION_TRACE}" == "1" ]]; then
     trace_args=(--record-objective-evaluation-trace)
+  fi
+  local subtimer_args=()
+  if [[ "${MATRIX_TRACE_K1_SUBTIMERS}" == "1" ]]; then
+    subtimer_args=(--trace-target-lane-k1-subtimers)
   fi
   local newton_stab_args=()
   if [[ -n "${newton_stab}" ]]; then
@@ -292,7 +324,7 @@ run_case() {
         --boozer-optimizer-backend ondevice \
         "${limited_memory_args[@]}" \
         --record-jax-compile-diagnostics \
-        --trace-target-lane-k1-subtimers \
+        "${subtimer_args[@]}" \
         "${trace_args[@]}" \
         --benchmark-mode \
         --minimal-artifacts \
