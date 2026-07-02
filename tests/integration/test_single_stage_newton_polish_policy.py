@@ -28,6 +28,7 @@ from collections import namedtuple
 import sys
 from unittest import mock
 
+import numpy as np
 import pytest
 
 from simsopt_jax_adapters.geo.surface_objectives import _TRACEABLE_RUNTIME_OPTION_KEYS
@@ -38,9 +39,16 @@ from benchmarks.single_stage_init_parity import (
     parse_args,
 )
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+    _build_decomposed_coil_host_value_and_grad,
+    _cached_target_lane_objective_evaluation_sync_state,
+    build_target_lane_full_state_value_and_grad,
+    build_single_stage_target_lane_objective_evaluation_trace_wrapper,
+    build_target_lane_trial_boozer_solver_trace_metadata,
     build_target_lane_trial_boozer_overrides,
     resolve_effective_boozer_newton_polish_policy_override,
     resolve_effective_trial_boozer_newton_polish_policy_override,
+    resolve_target_lane_trial_boozer_bfgs_maxiter,
+    resolve_target_lane_trial_boozer_bfgs_tol,
     wrap_target_lane_solved_pair_with_boozer_overrides,
 )
 
@@ -243,6 +251,38 @@ def test_child_trial_override_honors_explicit_run():
     assert override == "run", override
 
 
+def test_child_trial_bfgs_overrides_validate_explicit_budget():
+    tol = resolve_target_lane_trial_boozer_bfgs_tol(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_trial_boozer_bfgs_tol=1e-7,
+    )
+    maxiter = resolve_target_lane_trial_boozer_bfgs_maxiter(
+        field_backend="jax",
+        optimizer_backend="ondevice",
+        target_lane_trial_boozer_bfgs_maxiter=25,
+    )
+
+    assert tol == 1e-7
+    assert maxiter == 25
+
+
+def test_child_trial_bfgs_overrides_reject_invalid_budget():
+    with pytest.raises(ValueError, match="target_lane_trial_boozer_bfgs_tol"):
+        resolve_target_lane_trial_boozer_bfgs_tol(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            target_lane_trial_boozer_bfgs_tol=0.0,
+        )
+
+    with pytest.raises(ValueError, match="target_lane_trial_boozer_bfgs_maxiter"):
+        resolve_target_lane_trial_boozer_bfgs_maxiter(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            target_lane_trial_boozer_bfgs_maxiter=0,
+        )
+
+
 def test_trial_boozer_overrides_use_trial_policy_not_full_policy():
     """The temporary trial solve override is independent of full solve fidelity."""
     full_override = resolve_effective_boozer_newton_polish_policy_override(
@@ -266,6 +306,162 @@ def test_trial_boozer_overrides_use_trial_policy_not_full_policy():
 
     assert full_override == "run"
     assert overrides["newton_polish_policy"] == "skip"
+
+
+def test_trial_boozer_overrides_carry_trial_bfgs_budget():
+    overrides = build_target_lane_trial_boozer_overrides(
+        bfgs_tol=1e-6,
+        bfgs_maxiter=12,
+        newton_tol=None,
+        newton_maxiter=None,
+        newton_stab=None,
+        newton_polish_policy="skip",
+    )
+
+    assert overrides["bfgs_tol"] == 1e-6
+    assert overrides["bfgs_maxiter"] == 12
+    assert overrides["newton_polish_policy"] == "skip"
+
+
+def test_trial_boozer_metadata_reports_trial_bfgs_budget():
+    class BoozerSurface:
+        def __init__(self):
+            self.res = {"type": "ls"}
+            self.options = {
+                "bfgs_tol": 1e-12,
+                "bfgs_maxiter": 1500,
+                "newton_polish_policy": "run",
+            }
+
+    metadata = build_target_lane_trial_boozer_solver_trace_metadata(
+        BoozerSurface(),
+        {
+            "bfgs_tol": 1e-6,
+            "bfgs_maxiter": 12,
+            "newton_polish_policy": "skip",
+        },
+    )
+
+    assert metadata["bfgs_tol"] == 1e-6
+    assert metadata["bfgs_maxiter"] == 12
+    assert metadata["newton_polish_policy"] == "skip"
+
+
+def test_trial_solve_cache_keeps_trace_reuse_but_disables_final_sync_reuse():
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    coil_dofs = [1.0, 2.0]
+    forward_result = {
+        "success": True,
+        "primal_success": True,
+        "sdofs": [3.0, 4.0],
+        "iota": 0.11,
+        "G": 2.0,
+        "x": [5.0, 6.0],
+        "linear_solve_factors": {},
+    }
+
+    def solve_fn(_coil_dofs):
+        return dict(forward_result)
+
+    def value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 7.0, [0.1, 0.2]
+
+    objective = _build_decomposed_coil_host_value_and_grad(
+        solved_pair_type(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        ),
+        baseline_gradient=[0.0, 0.0],
+        cache_solve_result_for_reporting=False,
+    )
+
+    value, grad = objective(coil_dofs)
+
+    assert float(np.asarray(value)) == 7.0
+    np.testing.assert_allclose(np.asarray(grad), [0.1, 0.2])
+    assert objective.cached_forward_result_for_coil_dofs(coil_dofs)["iota"] == 0.11
+    assert objective.target_lane_solve_result_for_coil_dofs(coil_dofs) is None
+
+
+def test_trial_trace_wrapper_reuses_k1_without_final_sync_cache():
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    optimizer_dofs = np.array([1.0, 2.0])
+    forward_result = {
+        "success": True,
+        "primal_success": True,
+        "sdofs": [3.0, 4.0],
+        "iota": 0.11,
+        "G": 2.0,
+        "x": [5.0, 6.0],
+        "linear_solve_factors": {},
+    }
+
+    def solve_fn(_coil_dofs):
+        return dict(forward_result)
+
+    def value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 7.0, [0.1, 0.2]
+
+    objective = _build_decomposed_coil_host_value_and_grad(
+        solved_pair_type(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        ),
+        baseline_gradient=[0.0, 0.0],
+        cache_solve_result_for_reporting=False,
+    )
+
+    def unexpected_forward_result(_coil_dofs):
+        raise AssertionError("trace wrapper should reuse the decomposed K1 result")
+
+    run_dict = {}
+    traced_objective = build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+        target_value_and_grad_objective=objective,
+        target_forward_result=unexpected_forward_result,
+        optimizer_to_coil_dofs=lambda x: x,
+        run_dict=run_dict,
+    )
+
+    value, grad = traced_objective(optimizer_dofs)
+
+    assert float(np.asarray(value)) == 7.0
+    np.testing.assert_allclose(np.asarray(grad), [0.1, 0.2])
+    assert (
+        _cached_target_lane_objective_evaluation_sync_state(
+            run_dict,
+            optimizer_dofs,
+        )
+        is None
+    )
+
+
+def test_full_state_wrapper_preserves_trial_reporting_cache_contract():
+    def value_and_grad_objective(_coil_dofs):
+        return 1.0, np.array([0.1, 0.2])
+
+    value_and_grad_objective.cache_solve_result_for_reporting = False
+
+    class OptimizerDofMap:
+        def jax_coil_dofs_from_optimizer_dofs(self, optimizer_dofs):
+            return optimizer_dofs
+
+        def jax_full_gradient_from_coil_gradient(
+            self,
+            _optimizer_dofs,
+            coil_gradient,
+        ):
+            return coil_gradient
+
+    full_state_objective = build_target_lane_full_state_value_and_grad(
+        value_and_grad_objective,
+        OptimizerDofMap(),
+    )
+
+    assert full_state_objective.cache_solve_result_for_reporting is False
 
 
 def test_traceable_runtime_cache_key_includes_newton_polish_policy():

@@ -3601,12 +3601,44 @@ def jax_least_squares_optimistix(
 # Chunk size for assembling dense Jacobian/Hessian operators column-by-column via
 # ``lax.map``.  Bounded batches stop XLA from constant-folding the full identity
 # matrix (the mpol10 "pole-1" compile hang) and cap peak memory to ``batch_size``
-# parallel JVP/HVPs.  Default 8 is OOM-safe at high resolution; raise it (e.g. 32-64)
-# on a large GPU to recover parallelism and cut per-eval wall time.  Read once at
-# import because ``lax.map`` requires a static (compile-time) ``batch_size``.
-_DENSE_OPERATOR_CHUNK_BATCH_SIZE = max(
-    1, int(os.environ.get("SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE", "8"))
-)
+# parallel JVP/HVPs.  Read once at import because ``lax.map`` requires a static
+# (compile-time) ``batch_size``.  An explicit
+# ``SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE`` still wins; otherwise CUDA lanes
+# derive the default from the backend dense-operator byte budget, preserving the
+# historically safe batch=8 at the default 256 MiB budget while letting larger
+# validated budgets scale to 16/32/64 without a second knob.
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV = "SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE"
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK = 8
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX = 64
+_DENSE_OPERATOR_BYTES_PER_PARALLEL_COLUMN = 32 * 1024 * 1024
+
+
+def _dense_operator_chunk_batch_size_from_budget(max_dense_operator_bytes):
+    if max_dense_operator_bytes is None:
+        return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
+    return max(
+        1,
+        min(
+            _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX,
+            int(max_dense_operator_bytes)
+            // _DENSE_OPERATOR_BYTES_PER_PARALLEL_COLUMN,
+        ),
+    )
+
+
+def _resolve_dense_operator_chunk_batch_size():
+    env_value = os.environ.get(_DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV)
+    if env_value is not None:
+        return max(1, int(env_value))
+    policy = get_backend_policy()
+    if policy.jax_platform not in {"cuda", "gpu"}:
+        return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
+    return _dense_operator_chunk_batch_size_from_budget(
+        policy.max_dense_jacobian_bytes
+    )
+
+
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE = _resolve_dense_operator_chunk_batch_size()
 
 
 def dense_operator_chunk_batch_size():
@@ -4208,6 +4240,14 @@ def _gmres_iteration_limits(n):
     restart = max(5, min(n, 64))
     maxiter = 10
     return restart, maxiter
+
+
+def _operator_gmres_matvec_budget(n, *, max_refinement_steps):
+    """Return the worst-case operator matvec budget for the current GMRES path."""
+
+    restart, maxiter = _gmres_iteration_limits(n)
+    per_solve_budget = 1 + maxiter * (restart + 1)
+    return int(per_solve_budget * (1 + int(max_refinement_steps)))
 
 
 def _run_operator_gmres(matvec, rhs, *, tol):
@@ -5633,6 +5673,12 @@ def _build_traceable_newton_polish_runner(
             dtype=jnp.int32,
         )
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
+        linear_solve_matvec_budget = _device_int32(
+            _operator_gmres_matvec_budget(
+                hessian_size,
+                max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+            )
+        )
         materialize_final_hessian, dense_report = (
             _resolve_dense_hessian_materialization(
                 requested_materialize_hessian,
@@ -5716,6 +5762,7 @@ def _build_traceable_newton_polish_runner(
                 "last_step_finite": step_finite,
                 "last_linear_solve_success": linear_status.success,
                 "last_linear_solve_iterations": linear_status.iterations,
+                "last_linear_solve_matvec_budget": linear_solve_matvec_budget,
                 "last_linear_residual_relative": linear_status.residual_relative,
                 "last_backtracking_iterations": candidate["iteration"],
                 "last_accepted_alpha": accepted_alpha,
@@ -5754,6 +5801,11 @@ def _build_traceable_newton_polish_runner(
                 ]
                 .at[trace_index]
                 .set(linear_status.iterations),
+                "newton_trace_linear_solve_matvec_budget": state[
+                    "newton_trace_linear_solve_matvec_budget"
+                ]
+                .at[trace_index]
+                .set(linear_solve_matvec_budget),
                 "newton_trace_linear_residual_relative": state[
                     "newton_trace_linear_residual_relative"
                 ]
@@ -5791,6 +5843,7 @@ def _build_traceable_newton_polish_runner(
                     _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
                     dtype=jnp.int32,
                 ),
+                "last_linear_solve_matvec_budget": linear_solve_matvec_budget,
                 "last_linear_residual_relative": _optimizer_scalar(jnp.nan, dtype=dtype),
                 "last_backtracking_iterations": jnp.asarray(
                     _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
@@ -5806,6 +5859,7 @@ def _build_traceable_newton_polish_runner(
                 "newton_trace_step_finite": trace_false,
                 "newton_trace_linear_solve_success": trace_false,
                 "newton_trace_linear_solve_iterations": trace_unknown_int,
+                "newton_trace_linear_solve_matvec_budget": trace_unknown_int,
                 "newton_trace_linear_residual_relative": trace_nan,
                 "newton_trace_backtracking_iterations": trace_unknown_int,
                 "newton_trace_accepted_alpha": trace_nan,
@@ -5861,6 +5915,9 @@ def _build_traceable_newton_polish_runner(
             "newton_last_linear_solve_iterations": state[
                 "last_linear_solve_iterations"
             ],
+            "newton_last_linear_solve_matvec_budget": state[
+                "last_linear_solve_matvec_budget"
+            ],
             "newton_last_linear_residual_relative": state[
                 "last_linear_residual_relative"
             ],
@@ -5882,6 +5939,9 @@ def _build_traceable_newton_polish_runner(
             ],
             "newton_trace_linear_solve_iterations": state[
                 "newton_trace_linear_solve_iterations"
+            ],
+            "newton_trace_linear_solve_matvec_budget": state[
+                "newton_trace_linear_solve_matvec_budget"
             ],
             "newton_trace_linear_residual_relative": state[
                 "newton_trace_linear_residual_relative"

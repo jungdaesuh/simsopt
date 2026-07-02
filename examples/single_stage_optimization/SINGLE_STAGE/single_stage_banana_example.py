@@ -589,6 +589,7 @@ _K1_FORWARD_SCALAR_PROGRESS_FIELDS = (
     "newton_stop_reason_code",
     "newton_last_step_norm",
     "newton_last_linear_solve_iterations",
+    "newton_last_linear_solve_matvec_budget",
     "newton_last_linear_residual_relative",
     "newton_last_backtracking_iterations",
     "newton_last_accepted_alpha",
@@ -1133,6 +1134,8 @@ def build_single_stage_problem_contract(
     target_lane_boozer_newton_tol_record,
     target_lane_boozer_newton_maxiter_record,
     target_lane_boozer_newton_stab_record,
+    target_lane_trial_boozer_bfgs_tol_record=None,
+    target_lane_trial_boozer_bfgs_maxiter_record=None,
     target_lane_boozer_newton_polish_policy_record=None,
     target_lane_trial_boozer_newton_polish_policy_record=None,
     single_stage_search_policy=None,
@@ -1296,6 +1299,12 @@ def build_single_stage_problem_contract(
             ),
             "target_lane_boozer_bfgs_tol": target_lane_boozer_bfgs_tol_record,
             "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
+            "target_lane_trial_boozer_bfgs_tol": (
+                target_lane_trial_boozer_bfgs_tol_record
+            ),
+            "target_lane_trial_boozer_bfgs_maxiter": (
+                target_lane_trial_boozer_bfgs_maxiter_record
+            ),
             "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,
             "target_lane_boozer_newton_maxiter": target_lane_boozer_newton_maxiter_record,
             "target_lane_boozer_newton_stab": target_lane_boozer_newton_stab_record,
@@ -1466,6 +1475,8 @@ def build_single_stage_results_envelope(
     target_lane_boozer_newton_tol_record,
     target_lane_boozer_newton_maxiter_record,
     target_lane_boozer_newton_stab_record,
+    target_lane_trial_boozer_bfgs_tol_record=None,
+    target_lane_trial_boozer_bfgs_maxiter_record=None,
     target_lane_boozer_newton_polish_policy_record=None,
     target_lane_trial_boozer_newton_polish_policy_record=None,
     single_stage_search_policy=None,
@@ -1588,6 +1599,12 @@ def build_single_stage_results_envelope(
             use_target_lane_vg=use_target_lane_vg,
             target_lane_boozer_bfgs_tol_record=target_lane_boozer_bfgs_tol_record,
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
+            target_lane_trial_boozer_bfgs_tol_record=(
+                target_lane_trial_boozer_bfgs_tol_record
+            ),
+            target_lane_trial_boozer_bfgs_maxiter_record=(
+                target_lane_trial_boozer_bfgs_maxiter_record
+            ),
             target_lane_boozer_newton_tol_record=target_lane_boozer_newton_tol_record,
             target_lane_boozer_newton_maxiter_record=target_lane_boozer_newton_maxiter_record,
             target_lane_boozer_newton_stab_record=target_lane_boozer_newton_stab_record,
@@ -5154,8 +5171,9 @@ def parse_args():
         if "TARGET_LANE_BOOZER_BFGS_TOL" in os.environ
         else None,
         help=(
-            "Temporary Boozer LS tolerance override used only while evaluating "
-            "target-lane outer-loop trial points."
+            "Full-fidelity target-lane Boozer LS tolerance override. Trial "
+            "solves inherit this unless --target-lane-trial-boozer-bfgs-tol "
+            "is set."
         ),
     )
     parser.add_argument(
@@ -5165,8 +5183,32 @@ def parse_args():
         if "TARGET_LANE_BOOZER_BFGS_MAXITER" in os.environ
         else None,
         help=(
-            "Temporary Boozer LS iteration cap used only while evaluating "
-            "target-lane outer-loop trial points."
+            "Full-fidelity target-lane Boozer LS iteration cap. Trial solves "
+            "inherit this unless --target-lane-trial-boozer-bfgs-maxiter is set."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-trial-boozer-bfgs-tol",
+        type=float,
+        default=float(os.environ["TARGET_LANE_TRIAL_BOOZER_BFGS_TOL"])
+        if "TARGET_LANE_TRIAL_BOOZER_BFGS_TOL" in os.environ
+        else None,
+        help=(
+            "Trial-only Boozer LS tolerance override for line-search probes. "
+            "Accepted, final, and reference target-lane solves keep "
+            "--target-lane-boozer-bfgs-tol."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-trial-boozer-bfgs-maxiter",
+        type=int,
+        default=int(os.environ["TARGET_LANE_TRIAL_BOOZER_BFGS_MAXITER"])
+        if "TARGET_LANE_TRIAL_BOOZER_BFGS_MAXITER" in os.environ
+        else None,
+        help=(
+            "Trial-only Boozer LS iteration cap for line-search probes. "
+            "Accepted, final, and reference target-lane solves keep "
+            "--target-lane-boozer-bfgs-maxiter."
         ),
     )
     parser.add_argument(
@@ -7387,9 +7429,7 @@ def wrap_target_lane_solved_pair_with_boozer_overrides(
     option_overrides,
 ):
     """Apply target-lane Boozer overrides when the split K1 solve is evaluated."""
-    applied_overrides = {
-        key: value for key, value in (option_overrides or {}).items() if value is not None
-    }
+    applied_overrides = active_boozer_option_overrides(option_overrides)
     if not applied_overrides:
         return solved_pair
 
@@ -7401,6 +7441,13 @@ def wrap_target_lane_solved_pair_with_boozer_overrides(
             return solved_pair.solve_fn(coil_dofs)
 
     return solved_pair._replace(solve_fn=solve_fn)
+
+
+def active_boozer_option_overrides(option_overrides):
+    """Return Boozer option overrides that actually alter a trial solve."""
+    return {
+        key: value for key, value in (option_overrides or {}).items() if value is not None
+    }
 
 
 def get_traceable_single_stage_seeded_value_and_grad_builder():
@@ -7463,6 +7510,7 @@ def _build_decomposed_coil_host_value_and_grad(
     *,
     k1_subtimer_profile_suite=None,
     record_outer_optimizer_event=None,
+    cache_solve_result_for_reporting=True,
 ):
     """Return host-driven K1/K2 value/grad with fused-lane failure fallback."""
     baseline_gradient_device = runtime_device_put(baseline_gradient)
@@ -7500,7 +7548,7 @@ def _build_decomposed_coil_host_value_and_grad(
         missing_solve_keys = [
             key for key in solve_result_required_keys if key not in forward_result
         ]
-        if missing_solve_keys:
+        if missing_solve_keys or not cache_solve_result_for_reporting:
             last_solved_forward_result.pop("solve_result", None)
             return
         solved_forward_result = dict(forward_result)
@@ -7626,8 +7674,13 @@ def _build_decomposed_coil_host_value_and_grad(
         cached_forward_result_for_coil_dofs
     )
     value_and_grad.reuse_forward_result_for = reuse_forward_result_for
+    value_and_grad.cache_solve_result_for_reporting = bool(
+        cache_solve_result_for_reporting
+    )
 
     def target_lane_solve_result_for_coil_dofs(coil_dofs):
+        if not cache_solve_result_for_reporting:
+            return None
         cached = last_solved_forward_result.get("solve_result")
         cached_coil_dofs = last_solved_forward_result.get("coil_dofs")
         if cached is not None and cached_coil_dofs is not None:
@@ -8520,10 +8573,13 @@ def build_target_lane_outer_objectives(
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
+        active_solved_pair_boozer_overrides = active_boozer_option_overrides(
+            solved_pair_boozer_overrides
+        )
         solved_pair = wrap_target_lane_solved_pair_with_boozer_overrides(
             boozer_surface,
             solved_pair,
-            solved_pair_boozer_overrides,
+            active_solved_pair_boozer_overrides,
         )
         if record_outer_optimizer_event is not None:
             record_outer_optimizer_event(
@@ -8538,6 +8594,9 @@ def build_target_lane_outer_objectives(
                 else None
             ),
             record_outer_optimizer_event=record_outer_optimizer_event,
+            cache_solve_result_for_reporting=not bool(
+                active_solved_pair_boozer_overrides
+            ),
         )
         target_optimizer_initial_value_and_grad = (
             seeded_value_and_grad.optimizer_initial_value_and_grad
@@ -8668,6 +8727,8 @@ def build_target_lane_trial_boozer_solver_trace_metadata(
     """Return run-level target-lane Boozer metadata for replay-grade traces."""
     metadata = summarize_boozer_solver_trace_metadata(boozer_surface)
     for metadata_key, override_key in (
+        ("bfgs_tol", "bfgs_tol"),
+        ("bfgs_maxiter", "bfgs_maxiter"),
         ("newton_tol", "newton_tol"),
         ("newton_maxiter", "newton_maxiter"),
         ("newton_stab", "newton_stab"),
@@ -9854,7 +9915,7 @@ def resolve_target_lane_boozer_bfgs_tol(
     optimizer_backend,
     target_lane_boozer_bfgs_tol=None,
 ):
-    """Resolve an explicit Boozer LS tolerance override for target-lane trials."""
+    """Resolve an explicit Boozer LS tolerance override for full solves."""
     if target_lane_boozer_bfgs_tol is None:
         return None
     resolved = float(target_lane_boozer_bfgs_tol)
@@ -9868,12 +9929,42 @@ def resolve_target_lane_boozer_bfgs_maxiter(
     optimizer_backend,
     target_lane_boozer_bfgs_maxiter=None,
 ):
-    """Resolve an explicit Boozer LS iteration cap for target-lane trials."""
+    """Resolve an explicit Boozer LS iteration cap for full solves."""
     if target_lane_boozer_bfgs_maxiter is None:
         return None
     resolved = int(target_lane_boozer_bfgs_maxiter)
     if resolved < 1:
         raise ValueError("target_lane_boozer_bfgs_maxiter must be at least 1.")
+    return resolved
+
+
+def resolve_target_lane_trial_boozer_bfgs_tol(
+    field_backend,
+    optimizer_backend,
+    target_lane_trial_boozer_bfgs_tol=None,
+):
+    """Resolve an explicit Boozer LS tolerance override for trial solves."""
+    if target_lane_trial_boozer_bfgs_tol is None:
+        return None
+    resolved = float(target_lane_trial_boozer_bfgs_tol)
+    if resolved <= 0.0:
+        raise ValueError("target_lane_trial_boozer_bfgs_tol must be positive.")
+    return resolved
+
+
+def resolve_target_lane_trial_boozer_bfgs_maxiter(
+    field_backend,
+    optimizer_backend,
+    target_lane_trial_boozer_bfgs_maxiter=None,
+):
+    """Resolve an explicit Boozer LS iteration cap override for trial solves."""
+    if target_lane_trial_boozer_bfgs_maxiter is None:
+        return None
+    resolved = int(target_lane_trial_boozer_bfgs_maxiter)
+    if resolved < 1:
+        raise ValueError(
+            "target_lane_trial_boozer_bfgs_maxiter must be at least 1."
+        )
     return resolved
 
 
@@ -10379,6 +10470,7 @@ def build_target_lane_full_state_value_and_grad(
     for attribute_name in (
         "cached_forward_result_for_coil_dofs",
         "reuse_forward_result_for",
+        "cache_solve_result_for_reporting",
         "target_lane_solve_result_for_coil_dofs",
     ):
         attribute = getattr(value_and_grad_objective, attribute_name, None)
@@ -13177,6 +13269,13 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
         "cached_forward_result_for_coil_dofs",
         None,
     )
+    cache_trace_solve_result_for_reporting = bool(
+        getattr(
+            target_value_and_grad_objective,
+            "cache_solve_result_for_reporting",
+            True,
+        )
+    )
 
     def record_progress_event(label, **fields):
         if progress_event_callback is not None:
@@ -13371,18 +13470,21 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
                 forward_result = dict(forward_result)
                 forward_result["objective_value"] = objective_value
                 forward_result["objective_grad"] = optimizer_gradient
-            if target_lane_solve_result is None:
-                target_lane_solve_result = (
-                    single_stage_target_lane_accepted_step_solve_result(forward_result)
+            if cache_trace_solve_result_for_reporting:
+                if target_lane_solve_result is None:
+                    target_lane_solve_result = (
+                        single_stage_target_lane_accepted_step_solve_result(
+                            forward_result
+                        )
+                    )
+                _cache_target_lane_objective_evaluation_sync_state(
+                    run_dict,
+                    optimizer_dofs=candidate_x,
+                    solve_result=target_lane_solve_result,
+                    forward_result=(
+                        forward_result if value_and_grad_from_forward_result else None
+                    ),
                 )
-            _cache_target_lane_objective_evaluation_sync_state(
-                run_dict,
-                optimizer_dofs=candidate_x,
-                solve_result=target_lane_solve_result,
-                forward_result=(
-                    forward_result if value_and_grad_from_forward_result else None
-                ),
-            )
             if value_and_grad_from_forward_result:
                 cache_wrapper_forward_result(
                     candidate_x,
@@ -15588,6 +15690,22 @@ if __name__ == "__main__":
         )
         else None
     )
+    target_lane_trial_boozer_bfgs_tol_record = (
+        args.target_lane_trial_boozer_bfgs_tol
+        if single_stage_boozer_budget_overrides_apply(
+            args.backend,
+            boozer_optimizer_backend_record,
+        )
+        else None
+    )
+    target_lane_trial_boozer_bfgs_maxiter_record = (
+        args.target_lane_trial_boozer_bfgs_maxiter
+        if single_stage_boozer_budget_overrides_apply(
+            args.backend,
+            boozer_optimizer_backend_record,
+        )
+        else None
+    )
     target_lane_boozer_newton_tol_record = (
         args.target_lane_boozer_newton_tol
         if single_stage_boozer_budget_overrides_apply(
@@ -15640,6 +15758,20 @@ if __name__ == "__main__":
             target_lane_trial_boozer_newton_polish_policy=(
                 target_lane_trial_boozer_newton_polish_policy_record
             ),
+        )
+    )
+    target_lane_trial_boozer_bfgs_tol_override = (
+        resolve_target_lane_trial_boozer_bfgs_tol(
+            args.backend,
+            optimizer_backend_record,
+            target_lane_trial_boozer_bfgs_tol_record,
+        )
+    )
+    target_lane_trial_boozer_bfgs_maxiter_override = (
+        resolve_target_lane_trial_boozer_bfgs_maxiter(
+            args.backend,
+            optimizer_backend_record,
+            target_lane_trial_boozer_bfgs_maxiter_record,
         )
     )
     boozer_optimizer_backend_hash_record = (
@@ -15743,6 +15875,10 @@ if __name__ == "__main__":
         str(effective_initial_phase_settings["initial_step_maxiter"]),
         str(target_lane_boozer_bfgs_tol_record),
         str(target_lane_boozer_bfgs_maxiter_record),
+        str(target_lane_trial_boozer_bfgs_tol_record),
+        str(target_lane_trial_boozer_bfgs_maxiter_record),
+        str(target_lane_trial_boozer_bfgs_tol_override),
+        str(target_lane_trial_boozer_bfgs_maxiter_override),
         str(target_lane_boozer_newton_tol_record),
         str(target_lane_boozer_newton_maxiter_record),
         str(target_lane_boozer_newton_stab_record),
@@ -16589,8 +16725,16 @@ if __name__ == "__main__":
         print("Preparing target-lane init objective/runtime bundle...")
         target_lane_bundle_setup_start_s = _perf_counter_s()
         target_lane_trial_boozer_overrides = build_target_lane_trial_boozer_overrides(
-            bfgs_tol=target_lane_boozer_bfgs_tol_record,
-            bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
+            bfgs_tol=(
+                target_lane_trial_boozer_bfgs_tol_override
+                if target_lane_trial_boozer_bfgs_tol_override is not None
+                else target_lane_boozer_bfgs_tol_record
+            ),
+            bfgs_maxiter=(
+                target_lane_trial_boozer_bfgs_maxiter_override
+                if target_lane_trial_boozer_bfgs_maxiter_override is not None
+                else target_lane_boozer_bfgs_maxiter_record
+            ),
             newton_tol=target_lane_boozer_newton_tol_record,
             newton_maxiter=target_lane_boozer_newton_maxiter_record,
             newton_stab=target_lane_boozer_newton_stab_record,
@@ -17127,8 +17271,16 @@ if __name__ == "__main__":
         if CONSTRAINT_METHOD != "alm":
             target_lane_trial_boozer_overrides = (
                 build_target_lane_trial_boozer_overrides(
-                    bfgs_tol=target_lane_boozer_bfgs_tol_record,
-                    bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
+                    bfgs_tol=(
+                        target_lane_trial_boozer_bfgs_tol_override
+                        if target_lane_trial_boozer_bfgs_tol_override is not None
+                        else target_lane_boozer_bfgs_tol_record
+                    ),
+                    bfgs_maxiter=(
+                        target_lane_trial_boozer_bfgs_maxiter_override
+                        if target_lane_trial_boozer_bfgs_maxiter_override is not None
+                        else target_lane_boozer_bfgs_maxiter_record
+                    ),
                     newton_tol=target_lane_boozer_newton_tol_record,
                     newton_maxiter=target_lane_boozer_newton_maxiter_record,
                     newton_stab=target_lane_boozer_newton_stab_record,
@@ -18852,6 +19004,12 @@ if __name__ == "__main__":
             use_target_lane_vg=use_target_lane_vg,
             target_lane_boozer_bfgs_tol_record=target_lane_boozer_bfgs_tol_record,
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
+            target_lane_trial_boozer_bfgs_tol_record=(
+                target_lane_trial_boozer_bfgs_tol_record
+            ),
+            target_lane_trial_boozer_bfgs_maxiter_record=(
+                target_lane_trial_boozer_bfgs_maxiter_record
+            ),
             target_lane_boozer_newton_tol_record=target_lane_boozer_newton_tol_record,
             target_lane_boozer_newton_maxiter_record=target_lane_boozer_newton_maxiter_record,
             target_lane_boozer_newton_stab_record=target_lane_boozer_newton_stab_record,
@@ -19031,6 +19189,22 @@ if __name__ == "__main__":
         "requested_initial_step_maxiter": args.initial_step_maxiter,
         "target_lane_boozer_bfgs_tol": target_lane_boozer_bfgs_tol_record,
         "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
+        "target_lane_trial_boozer_bfgs_tol": (
+            target_lane_trial_boozer_bfgs_tol_record
+        ),
+        "target_lane_trial_boozer_bfgs_maxiter": (
+            target_lane_trial_boozer_bfgs_maxiter_record
+        ),
+        "effective_target_lane_trial_boozer_bfgs_tol": (
+            target_lane_trial_boozer_bfgs_tol_override
+            if target_lane_trial_boozer_bfgs_tol_override is not None
+            else target_lane_boozer_bfgs_tol_record
+        ),
+        "effective_target_lane_trial_boozer_bfgs_maxiter": (
+            target_lane_trial_boozer_bfgs_maxiter_override
+            if target_lane_trial_boozer_bfgs_maxiter_override is not None
+            else target_lane_boozer_bfgs_maxiter_record
+        ),
         "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,
         "target_lane_boozer_newton_maxiter": target_lane_boozer_newton_maxiter_record,
         "target_lane_boozer_newton_stab": target_lane_boozer_newton_stab_record,

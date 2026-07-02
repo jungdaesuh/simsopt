@@ -3125,6 +3125,18 @@ class TestBoozerSurfaceJAXClassPrivate:
     def test_gmres_iteration_limits_bound_hvp_work(self):
         assert _opt._gmres_iteration_limits(39) == (39, 10)
         assert _opt._gmres_iteration_limits(663) == (64, 10)
+        assert (
+            _opt._operator_gmres_matvec_budget(663, max_refinement_steps=1)
+            == 1302
+        )
+
+    def test_dense_operator_chunk_batch_size_tracks_byte_budget(self):
+        mib = 1024 * 1024
+        assert _opt._dense_operator_chunk_batch_size_from_budget(None) == 8
+        assert _opt._dense_operator_chunk_batch_size_from_budget(16 * mib) == 1
+        assert _opt._dense_operator_chunk_batch_size_from_budget(256 * mib) == 8
+        assert _opt._dense_operator_chunk_batch_size_from_budget(512 * mib) == 16
+        assert _opt._dense_operator_chunk_batch_size_from_budget(4096 * mib) == 64
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -3260,6 +3272,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert bool(result["newton_trace_step_finite"][0]) is True
         assert bool(result["newton_trace_linear_solve_success"][0]) is True
         assert int(result["newton_trace_linear_solve_iterations"][0]) == 7
+        assert int(result["newton_trace_linear_solve_matvec_budget"][0]) == 122
         np.testing.assert_allclose(
             np.asarray(result["newton_trace_linear_residual_relative"])[0],
             2.5e-13,
@@ -3280,6 +3293,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert bool(result["newton_last_step_accepted"]) is True
         assert bool(result["newton_last_linear_solve_success"]) is True
         assert int(result["newton_last_linear_solve_iterations"]) == 7
+        assert int(result["newton_last_linear_solve_matvec_budget"]) == 122
         np.testing.assert_allclose(
             np.asarray(result["initial_gradient_norm"]),
             initial_norm,
