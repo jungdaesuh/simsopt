@@ -58,9 +58,11 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
 - Remove long-tail host/runtime overhead that becomes visible after the main
   K1/K2 reductions: repeated scalar progress transfers, duplicate solved-payload
   assembly, dense-factor telemetry dumps, and tiny-program cache churn.
-- Extend the existing `_traceable_predict_x_from_baseline` warm-start predictor
-  into a current-incumbent/factor-reused sensitivity predictor if it can reduce
-  pre-Newton/Newton iterations without changing the converged solved state.
+- Extend the existing `_traceable_predict_warmstart_x` warm-start predictor
+  (wrapped by `_warmstart_for` and exposed as `"warmstart_predict"` in
+  `surface_objectives_traceable.py`) into a current-incumbent/factor-reused
+  sensitivity predictor if it can reduce pre-Newton/Newton iterations without
+  changing the converged solved state.
 - Measure `lsmr_j` with a stabilization sweep and trajectory gate before any
   default decision; treat any projected speedup as unproven until the sweep
   collapses the iteration-count uncertainty.
@@ -732,18 +734,38 @@ parity/trajectory gates (Phase 8).
          leaf Biot-Savart kernel is already checkpointed; this task is about the
          higher-level `jvp(grad(fn))` HVP closure. Gate with a correctness test
          and remote memory telemetry; do not keep the change if it increases
-         compile/runtime more than the larger-batch win it unlocks.
+         compile/runtime more than the larger-batch win it unlocks. Treat
+         `jax.checkpoint` policies (dot/residual-saving variants) as a tuning
+         axis alongside on/off; the leaf Biot-Savart kernel comment already
+         anticipates policy selection.
    - [ ] A/B dense operator chunk batches `8`, `16`, and `32` with
          `XLA_PYTHON_CLIENT_PREALLOCATE=true`, transfer guard disallow, and no
          K1 subtimer replay. Batch `32` only becomes a candidate if the remat
          path keeps memory within the allocated GPU budget. Record K2 wall,
          device memory high-water, and whether XLA emits any OOM or remat
          regressions.
+   - [ ] A/B the XLA command-buffer / CUDA-graph flag family on a clean
+         no-subtimer run. The steady-state cost profile is long sequences of
+         small sequential device steps (dense assembly in 83 chunks at batch 8,
+         GMRES budgets up to 1302 matvecs, on-device L-BFGS iterations), so
+         per-launch overhead is a first-order term. The math is bitwise
+         identical; dynamic control flow may simply prevent capture. Gate:
+         record per-eval wall with the flags on vs off, and close the item with
+         a recorded null result if capture does not engage.
    - [ ] Revisit accepted-path L-BFGS handoff only after the Eisenstat-Walker
          fix. Design a progress-based handoff/cap that leaves first-incumbent
          and accepted/final solves full-fidelity unless a separate trajectory
          gate proves the cap safe as a production default.
-   - [ ] Extend the existing `_traceable_predict_x_from_baseline` predictor into
+   - [ ] Evaluate a grid-sequenced (coarse-to-fine) accepted-path warmup after
+         the Eisenstat-Walker fix: run the pre-Newton L-BFGS stage on a reduced
+         quadrature grid and hand off to the full-resolution Newton polish, so
+         the converged solved state stays defined by the full-fidelity
+         `newton_tol` solve. Same gate class as the handoff/predictor items:
+         identical converged physics within tolerance, fewer full-resolution
+         iterations overall, and the extra compiled resolution variant accounted
+         against the cold-compile budget.
+   - [ ] Extend the existing `_traceable_predict_warmstart_x` predictor (the
+         baseline-anchored `_warmstart_for` / `"warmstart_predict"` closure) into
          a current-incumbent/factor-reused sensitivity predictor. The missing
          opportunity is not "add a predictor from scratch"; it is to reuse the
          current solved Jacobian/factor and batched RHS sensitivities so each
@@ -755,6 +777,13 @@ parity/trajectory gates (Phase 8).
          include the hybrid candidate: loose GMRES for early iterations, dense-LU
          for final tight correction solves. Keep all variants default-off until
          the clean timing and trajectory gates pass.
+   - [ ] Opt-in multi-device sharding of dense-operator probe assembly on
+         multi-GPU nodes (for example 4x A100 Perlmutter allocations). The dense
+         columns are independent probes gathered without any cross-device
+         reduction, so sharding the probe batch is bit-identical to the
+         single-device assembly; the factor solve stays on one device. Gate:
+         identical assembled operator bytes, recorded assembly-wall scaling,
+         and single-device behavior unchanged by default.
 
 8. **Phase 8 — Behavior-changing linear-algebra experiments**
    These can plausibly produce the largest speed and memory wins, but they
@@ -781,6 +810,13 @@ parity/trajectory gates (Phase 8).
          fp64 iterative-refinement residual check. Gate: same dense-gradient
          parity, same linear-solve success semantics, lower wall or compile cost,
          and no loss of robustness on ill-conditioned candidates.
+   - [ ] Evaluate the rectangular residual-Jacobian direct route as the third
+         sibling beside `lsmr_j` (iterative, unsquared) and dense factorization
+         of the squared operator: materialize `J` with first-order JVP probes
+         (cheaper per probe than HVP columns, conditioned at `kappa(J)` rather
+         than its square) and solve the regularized least-squares system with
+         QR. Same parity, trajectory, memory, and default-off gates as the other
+         Phase 8 candidates.
    - [ ] Add a mixed-precision dense-factor experiment only after the
          condition-number reconciliation is complete. Candidate: fp32/TF32
          factorization with fp64 residual evaluation and iterative refinement.
