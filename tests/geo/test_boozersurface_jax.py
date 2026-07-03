@@ -4743,6 +4743,39 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-10,
         )
 
+    def test_hvp_objective_remat_gate_preserves_dense_hessian(self, monkeypatch):
+        """The HVP remat comparator must not change the assembled Hessian."""
+        checkpoint_calls = []
+        original_checkpoint = _opt.jax.checkpoint
+
+        def recording_checkpoint(fn, *args, **kwargs):
+            checkpoint_calls.append(fn)
+            return original_checkpoint(fn, *args, **kwargs)
+
+        monkeypatch.setattr(_opt, "_HVP_OBJECTIVE_REMAT", True)
+        monkeypatch.setattr(_opt.jax, "checkpoint", recording_checkpoint)
+
+        def obj(x):
+            return (
+                0.5 * jnp.dot(x, jnp.array([3.0, 5.0, 7.0]) * x)
+                + 0.2 * x[0] * x[2]
+                + 5.0e-4 * jnp.sum(jnp.cos(x) ** 2)
+            )
+
+        x = jnp.asarray([0.2, -0.4, 0.8], dtype=jnp.float64)
+        hvp_fn = _opt._hessian_vector_product_fn(obj)
+
+        remat_dense = _opt._materialize_dense_hessian(hvp_fn, x)
+        dense_oracle = jax.jacfwd(jax.grad(obj))(x)
+
+        assert len(checkpoint_calls) == 1
+        np.testing.assert_allclose(
+            np.asarray(remat_dense),
+            np.asarray(dense_oracle),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
     def test_newton_polish_dense_hessian_symmetrizes_numerical_asymmetry(self):
         """Dense-compatible Hessian artifacts mirror the upper triangle.
 

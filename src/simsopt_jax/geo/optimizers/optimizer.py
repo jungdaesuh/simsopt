@@ -385,6 +385,10 @@ _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
 _CACHEABLE_LINEAR_OPERATOR_ATTR = "_simsopt_cache_jit_linear_operator"
 _CACHED_HVP_ATTR = "_simsopt_cached_jit_hvp"
 _CACHED_JVP_ATTR = "_simsopt_cached_jit_jvp"
+_HVP_OBJECTIVE_REMAT_ENV = "SIMSOPT_HVP_OBJECTIVE_REMAT"
+_HVP_OBJECTIVE_REMAT = os.environ.get(
+    _HVP_OBJECTIVE_REMAT_ENV, "0"
+).strip().lower() not in ("", "0", "false", "off", "no")
 _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK = ContextVar(
     "simsopt_target_optimizer_diagnostic_event_callback",
     default=None,
@@ -3818,7 +3822,8 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
 
 def _hessian_vector_product_fn(objective_fn):
     def build_compiled(fn):
-        grad_fn = jax.grad(fn, argnums=0)
+        objective_for_hvp = jax.checkpoint(fn) if _HVP_OBJECTIVE_REMAT else fn
+        grad_fn = jax.grad(objective_for_hvp, argnums=0)
 
         def hvp(x, v, *fn_args):
             def grad_for_x(x_inner):
