@@ -270,6 +270,7 @@ _TARGET_LANE_TRIAL_BOOZER_NEWTON_POLISH_POLICY_CHOICES = (
     "run",
     "skip",
 )
+_TARGET_LANE_REPORTING_SOLVE_RESULT_CACHE_MAX_ENTRIES = 32
 _KERNELIZED_BOOZER_BUDGET_BACKENDS = frozenset(
     {"ondevice", _JAX_HOST_CONTROL_OUTER_OPTIMIZER_BACKEND}
 )
@@ -7668,6 +7669,37 @@ def _build_decomposed_coil_host_value_and_grad(
     # on by ``evaluation_index``); keying by coil DOFs means a reuse can only ever
     # serve the solve computed for that exact candidate.
     last_solved_forward_result = {}
+    reporting_solve_result_cache = []
+
+    def coil_dofs_cache_key(coil_dofs):
+        return np.array(
+            host_array(coil_dofs, dtype=np.float64),
+            dtype=np.float64,
+            copy=True,
+        )
+
+    def store_reporting_solve_result(coil_dofs_key, solve_result):
+        cache_entry = (coil_dofs_key.copy(), solve_result)
+        for index, (cached_coil_dofs, _cached_solve_result) in enumerate(
+            reporting_solve_result_cache
+        ):
+            if np.array_equal(coil_dofs_key, cached_coil_dofs):
+                reporting_solve_result_cache[index] = cache_entry
+                return
+        reporting_solve_result_cache.append(cache_entry)
+        if (
+            len(reporting_solve_result_cache)
+            > _TARGET_LANE_REPORTING_SOLVE_RESULT_CACHE_MAX_ENTRIES
+        ):
+            del reporting_solve_result_cache[0]
+
+    def cached_reporting_solve_result_for_coil_dofs(coil_dofs):
+        probe = np.asarray(host_array(coil_dofs, dtype=np.float64))
+        for cached_coil_dofs, solve_result in reversed(reporting_solve_result_cache):
+            if np.array_equal(probe, cached_coil_dofs):
+                return solve_result
+        return None
+
     solve_result_required_keys = frozenset(("sdofs", "iota", "G"))
 
     def record_decomposed_event(label, **fields):
@@ -7684,11 +7716,7 @@ def _build_decomposed_coil_host_value_and_grad(
     ):
         if _contains_jax_tracer(coil_dofs):
             return
-        cached_coil_dofs = np.array(
-            host_array(coil_dofs, dtype=np.float64),
-            dtype=np.float64,
-            copy=True,
-        )
+        cached_coil_dofs = coil_dofs_cache_key(coil_dofs)
         last_solved_forward_result["coil_dofs"] = cached_coil_dofs
         last_solved_forward_result["forward_result"] = forward_result
         missing_solve_keys = [
@@ -7707,11 +7735,11 @@ def _build_decomposed_coil_host_value_and_grad(
             solved_forward_result["objective_value"] = objective_value
         if objective_grad is not None:
             solved_forward_result["objective_grad"] = objective_grad
-        last_solved_forward_result["solve_result"] = (
-            single_stage_target_lane_accepted_step_solve_result(
-                solved_forward_result
-            )
+        solve_result = single_stage_target_lane_accepted_step_solve_result(
+            solved_forward_result
         )
+        last_solved_forward_result["solve_result"] = solve_result
+        store_reporting_solve_result(cached_coil_dofs, solve_result)
 
     def value_and_grad(coil_dofs):
         nonlocal evaluation_index
@@ -7838,7 +7866,7 @@ def _build_decomposed_coil_host_value_and_grad(
             probe = np.asarray(host_array(coil_dofs, dtype=np.float64))
             if np.array_equal(probe, cached_coil_dofs):
                 return cached
-        return None
+        return cached_reporting_solve_result_for_coil_dofs(coil_dofs)
 
     value_and_grad.target_lane_solve_result_for_coil_dofs = (
         target_lane_solve_result_for_coil_dofs

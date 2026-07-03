@@ -674,7 +674,9 @@ parity/trajectory gates (Phase 8).
          the current fidelity policy: failed, cap-bound, or lower-fidelity trial
          solves must not be reused for final reporting. Regression: a rejected
          trailing trial does not evict the accepted solve and final sync records
-         `reused=true` for same-fidelity accepted DOFs.
+         `reused=true` for same-fidelity accepted DOFs. Implementation and
+         focused regression are in place; keep this open until the remote unit
+         slice and K1 artifact gate pass.
    - [ ] Convert progress-event persistence to append-only NDJSON or an
          equivalent bounded-cost format. Keep the current summary JSON available
          for existing artifact readers, but stop re-sanitizing and rewriting the

@@ -8227,6 +8227,73 @@ class TestTraceableObjective:
         assert len(fallback_calls) == 1
         assert len(solve_calls) == 1
 
+    def test_decomposed_reporting_cache_preserves_prior_full_fidelity_solve(self):
+        """A trailing cap-bound trial must not evict final-sync solve reuse."""
+        baseline = np.array([1.0, -2.0])
+        accepted = np.array([0.5, -0.25])
+        trailing_trial = np.array([9.0, 9.0])
+        candidate_gradient = jnp.asarray([3.0, -5.0], dtype=jnp.float64)
+        trial_overrides = {"bfgs_maxiter": 300}
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            is_trial = bool(
+                np.array_equal(np.asarray(jax.device_get(arr)), trailing_trial)
+            )
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(19.0 if is_trial else 7.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "iota": jnp.asarray(0.99 if is_trial else 0.31, dtype=jnp.float64),
+                "G": jnp.asarray(12.0 if is_trial else 11.0, dtype=jnp.float64),
+                "sdofs": arr,
+                "linear_solve_factors": None,
+                "pre_newton_iter": jnp.asarray(300 if is_trial else 1),
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+            solve_result_cache_policy=(
+                lambda result: (
+                    single_stage_example.target_lane_trial_solve_result_matches_full_fidelity(
+                        result,
+                        trial_overrides,
+                    )
+                )
+            ),
+        )
+
+        host_fun(accepted)
+        accepted_solve_result = host_fun.target_lane_solve_result_for_coil_dofs(
+            accepted
+        )
+        assert accepted_solve_result is not None
+        assert float(jax.device_get(accepted_solve_result["iota"])) == pytest.approx(
+            0.31
+        )
+
+        host_fun(trailing_trial)
+
+        assert host_fun.target_lane_solve_result_for_coil_dofs(trailing_trial) is None
+        assert host_fun.cached_forward_result_for_coil_dofs(trailing_trial) is not None
+        preserved_solve_result = host_fun.target_lane_solve_result_for_coil_dofs(
+            accepted
+        )
+        assert preserved_solve_result is accepted_solve_result
+        assert float(
+            jax.device_get(preserved_solve_result["objective_value"])
+        ) == pytest.approx(7.0)
+
     def test_decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform(self):
         """Reuse hits through the SAME optimizer->coil transform the wrapper uses.
 
