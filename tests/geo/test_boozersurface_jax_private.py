@@ -3157,9 +3157,15 @@ class TestBoozerSurfaceJAXClassPrivate:
         mib = 1024 * 1024
         assert _opt._dense_operator_chunk_batch_size_from_budget(None) == 8
         assert _opt._dense_operator_chunk_batch_size_from_budget(16 * mib) == 1
+        assert _opt._dense_operator_chunk_batch_size_from_budget(255 * mib) == 7
         assert _opt._dense_operator_chunk_batch_size_from_budget(256 * mib) == 8
-        assert _opt._dense_operator_chunk_batch_size_from_budget(512 * mib) == 16
-        assert _opt._dense_operator_chunk_batch_size_from_budget(4096 * mib) == 64
+        assert _opt._dense_operator_chunk_batch_size_from_budget(512 * mib) == 8
+        assert _opt._dense_operator_chunk_batch_size_from_budget(4096 * mib) == 8
+        assert _opt._dense_operator_chunk_batch_size_from_budget(24 * 1024 * mib) == 8
+        assert _opt._dense_operator_chunk_batch_size_from_budget(48 * 1024 * mib) == 16
+        assert _opt._dense_operator_chunk_batch_size_from_budget(96 * 1024 * mib) == 32
+        assert _opt._dense_operator_chunk_batch_size_from_budget(192 * 1024 * mib) == 64
+        assert _opt._dense_operator_chunk_batch_size_from_budget(256 * 1024 * mib) == 64
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME

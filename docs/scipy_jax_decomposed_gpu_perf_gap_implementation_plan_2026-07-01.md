@@ -37,9 +37,10 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
 - Reduce the per-Newton-iteration HVP count in the traceable Newton polish
   (`newton_polish_traceable`), measured before designed.
 - Replace the hardcoded dense-operator chunk batch default with an
-  activation-aware byte-budget auto-sizer. The current `32 MiB` per-column model
-  preserves the historical batch `8` default but does not yet model the measured
-  HVP tape footprint.
+  activation-aware byte-budget auto-sizer. The current implementation preserves
+  the historical batch `8` default with the legacy `32 MiB` small-budget model,
+  then uses a conservative `3072 MiB` activation footprint for larger budgets;
+  live remat/chunk telemetry still has to validate or revise that safety factor.
 - Evaluate whether the trial pre-Newton L-BFGS budget can be bounded safely.
   Do not default-enable a cap unless it is proven not to affect incumbent/full-
   fidelity objective evaluations.
@@ -308,10 +309,12 @@ Authoritative state as of the 2026-07-02 scoped implementation pass:
   `dense_operator_chunk_batch_size=8` with
   `max_dense_hessian_bytes=268435456`. This proves the current default preserves
   the historically safe batch `8`; it does **not** validate the byte model. The
-  source still prices a parallel dense-operator column at `32 MiB`, while the
-  historical batch-32 OOM implies an effective live footprint around `1.5 GiB`
-  per probe before rematerialization. Phase 4 therefore remains open until the
-  activation budget is recalibrated and tested on the target GPU class.
+  auto-sizer now preserves the small/default-budget legacy behavior but uses a
+  conservative activation-footprint constant (`3072 MiB` per parallel probe)
+  when larger byte budgets try to scale beyond batch `8`. That prevents a
+  "safe-looking" multi-GiB budget from jumping straight to the known-bad
+  batch-32 shape, but Phase 4 remains open until the activation budget is tested
+  on the target GPU class.
 - The same H100 artifact exposed one remaining reporting-reuse gap:
   `target_lane_reporting_forward_result_started` at `858.75 s` returned at
   `1060.20 s`, so final reporting still paid about `201.4 s` for a K1 forward
@@ -610,11 +613,12 @@ parity/trajectory gates (Phase 8).
          `0` and recorded auto `dense_operator_chunk_batch_size=8` with
          `max_dense_hessian_bytes=268435456`.
    - [ ] Recalibrate the auto-sizing model so the byte budget is an activation
-         budget, not just a matrix-size budget. The current
-         `_DENSE_OPERATOR_BYTES_PER_PARALLEL_COLUMN = 32 MiB` is contradicted by
-         the historical batch-32 OOM footprint; using the same knob to scale
-         directly to `16/32/64` is unsafe until rematerialization and live-memory
-         telemetry justify the per-probe constant.
+         budget, not just a matrix-size budget. Local implementation now keeps
+         the default `256 MiB -> batch 8` behavior but switches above the default
+         budget to `_DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN =
+         3072 MiB`, a 2x safety factor over the historical batch-32 OOM scale
+         and the stale `32 MiB` output-column model. Keep this item open until
+         live remat/chunk telemetry validates or revises that constant.
    - [ ] Verify the recalibrated auto value on a lower-memory target GPU,
          including the prior 40GB A100 diagnostic class when available.
          Historical handoff evidence records batch=32 OOM around a 49.35 GiB

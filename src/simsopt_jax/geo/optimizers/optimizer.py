@@ -3689,25 +3689,39 @@ def jax_least_squares_optimistix(
 # matrix (the mpol10 "pole-1" compile hang) and cap peak memory to ``batch_size``
 # parallel JVP/HVPs.  Read once at import because ``lax.map`` requires a static
 # (compile-time) ``batch_size``.  An explicit
-# ``SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE`` still wins; otherwise CUDA lanes
-# derive the default from the backend dense-operator byte budget, preserving the
-# historically safe batch=8 at the default 256 MiB budget while letting larger
-# validated budgets scale to 16/32/64 without a second knob.
+# ``SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE`` still wins. Otherwise CUDA lanes
+# derive the static batch from the backend byte budget. Small/default budgets
+# preserve the historical batch=8 behavior, while larger budgets use the
+# measured dense-HVP activation footprint rather than the much smaller output
+# matrix column size. That keeps a "safe-looking" multi-GiB budget from
+# auto-selecting batch 64 before rematerialization/memory telemetry justify it.
 _DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV = "SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE"
 _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK = 8
 _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX = 64
-_DENSE_OPERATOR_BYTES_PER_PARALLEL_COLUMN = 32 * 1024 * 1024
+_DENSE_OPERATOR_DEFAULT_BUDGET_BYTES = 256 * 1024 * 1024
+_DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN = 32 * 1024 * 1024
+_DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN = 3072 * 1024 * 1024
 
 
 def _dense_operator_chunk_batch_size_from_budget(max_dense_operator_bytes):
     if max_dense_operator_bytes is None:
         return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
+    max_dense_operator_bytes = int(max_dense_operator_bytes)
+    if max_dense_operator_bytes <= _DENSE_OPERATOR_DEFAULT_BUDGET_BYTES:
+        return max(
+            1,
+            min(
+                _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
+                max_dense_operator_bytes
+                // _DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN,
+            ),
+        )
     return max(
-        1,
+        _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
         min(
             _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX,
-            int(max_dense_operator_bytes)
-            // _DENSE_OPERATOR_BYTES_PER_PARALLEL_COLUMN,
+            max_dense_operator_bytes
+            // _DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN,
         ),
     )
 
