@@ -748,10 +748,12 @@ parity/trajectory gates (Phase 8).
          no-subtimer run. The steady-state cost profile is long sequences of
          small sequential device steps (dense assembly in 83 chunks at batch 8,
          GMRES budgets up to 1302 matvecs, on-device L-BFGS iterations), so
-         per-launch overhead is a first-order term. The math is bitwise
-         identical; dynamic control flow may simply prevent capture. Gate:
-         record per-eval wall with the flags on vs off, and close the item with
-         a recorded null result if capture does not engage.
+         per-launch overhead is a first-order term. The intended numerical
+         program is unchanged, but bitwise equality is not assumed; dynamic
+         control flow may simply prevent capture. Gate: record per-eval wall
+         with the flags on vs off, compare objective/gradient outputs under the
+         existing parity tolerances, and close the item with a recorded null
+         result if capture does not engage or parity fails.
    - [ ] Revisit accepted-path L-BFGS handoff only after the Eisenstat-Walker
          fix. Design a progress-based handoff/cap that leaves first-incumbent
          and accepted/final solves full-fidelity unless a separate trajectory
@@ -780,10 +782,11 @@ parity/trajectory gates (Phase 8).
    - [ ] Opt-in multi-device sharding of dense-operator probe assembly on
          multi-GPU nodes (for example 4x A100 Perlmutter allocations). The dense
          columns are independent probes gathered without any cross-device
-         reduction, so sharding the probe batch is bit-identical to the
-         single-device assembly; the factor solve stays on one device. Gate:
-         identical assembled operator bytes, recorded assembly-wall scaling,
-         and single-device behavior unchanged by default.
+         reduction, so sharding the probe batch is an algebraically equivalent
+         candidate rather than a changed solver; the factor solve stays on one
+         device. Gate: prove identical assembled operator bytes, record
+         assembly-wall scaling, and keep single-device behavior unchanged by
+         default.
 
 8. **Phase 8 — Behavior-changing linear-algebra experiments**
    These can plausibly produce the largest speed and memory wins, but they
