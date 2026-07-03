@@ -111,6 +111,9 @@ _DEBUG_NANS_ENV = "SIMSOPT_JAX_DEBUG_NANS"
 _DISABLE_JIT_ENV = "SIMSOPT_JAX_DISABLE_JIT"
 _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
+_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS_ENV = (
+    "SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
+)
 _JAX_COMPILATION_CACHE_DIR_ENV = "JAX_COMPILATION_CACHE_DIR"
 _COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
 _QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
@@ -163,6 +166,7 @@ _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
     _TRANSFER_GUARD_ENV,
     _COMPILATION_CACHE_DIR_ENV,
+    _PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS_ENV,
 )
 _EXPLICIT_SELECTOR_ENV_VARS = (
     _MODE_ENV,
@@ -178,6 +182,10 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_DISABLE_JIT_ENV, "disable_jit"),
     (_TRANSFER_GUARD_ENV, "transfer_guard"),
     (_COMPILATION_CACHE_DIR_ENV, "compilation_cache_dir"),
+    (
+        _PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS_ENV,
+        "persistent_cache_min_compile_time_secs",
+    ),
     (_GPU_PREALLOCATE_ENV, "xla_gpu_preallocate"),
     (_GPU_MEM_FRACTION_ENV, "xla_gpu_mem_fraction"),
     (_GPU_ALLOCATOR_ENV, "xla_gpu_allocator"),
@@ -517,6 +525,7 @@ class BackendConfig:
     disable_jit: bool = False
     transfer_guard: str | None = None
     compilation_cache_dir: str | None = None
+    persistent_cache_min_compile_time_secs: float = 0.0
     xla_gpu_preallocate: bool | None = None
     xla_gpu_mem_fraction: float | None = None
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None
@@ -643,6 +652,7 @@ class BackendPolicy:
     disable_jit: bool
     transfer_guard: str | None
     compilation_cache_dir: str | None
+    persistent_cache_min_compile_time_secs: float
 
 
 @dataclass(frozen=True)
@@ -1400,6 +1410,13 @@ def _validate_mem_fraction_value(value: object, *, source: str) -> float:
     return fraction
 
 
+def _validate_nonnegative_float_value(value: object, *, source: str) -> float:
+    resolved = float(value)
+    if not np.isfinite(resolved) or resolved < 0.0:
+        raise ValueError(f"{source}={value!r} must be finite and non-negative")
+    return resolved
+
+
 def _config_from_mode(
     mode: str,
     *,
@@ -1408,6 +1425,7 @@ def _config_from_mode(
     disable_jit: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
+    persistent_cache_min_compile_time_secs: float | None = None,
     xla_gpu_preallocate: bool | None = None,
     xla_gpu_mem_fraction: float | None = None,
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
@@ -1455,6 +1473,19 @@ def _config_from_mode(
         env_names=(_COMPILATION_CACHE_DIR_ENV, _JAX_COMPILATION_CACHE_DIR_ENV),
         parse_env=lambda value, source: value,
         read_default=lambda: _default_compilation_cache_dir(mode),
+    )
+    resolved_persistent_cache_min_compile_time_secs = _resolve_kwarg(
+        persistent_cache_min_compile_time_secs,
+        parse_explicit=lambda value: _validate_nonnegative_float_value(
+            value,
+            source="persistent_cache_min_compile_time_secs",
+        ),
+        env_names=(_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS_ENV,),
+        parse_env=lambda value, source: _validate_nonnegative_float_value(
+            value,
+            source=source,
+        ),
+        read_default=lambda: 0.0,
     )
     resolved_xla_gpu_preallocate = _resolve_kwarg(
         xla_gpu_preallocate,
@@ -1521,6 +1552,9 @@ def _config_from_mode(
         disable_jit=resolved_disable_jit,
         transfer_guard=resolved_transfer_guard,
         compilation_cache_dir=resolved_compilation_cache_dir,
+        persistent_cache_min_compile_time_secs=(
+            resolved_persistent_cache_min_compile_time_secs
+        ),
         xla_gpu_preallocate=resolved_xla_gpu_preallocate,
         xla_gpu_mem_fraction=resolved_xla_gpu_mem_fraction,
         xla_gpu_allocator=resolved_xla_gpu_allocator,
@@ -1625,6 +1659,9 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         disable_jit=config.disable_jit,
         transfer_guard=config.transfer_guard,
         compilation_cache_dir=config.compilation_cache_dir,
+        persistent_cache_min_compile_time_secs=(
+            config.persistent_cache_min_compile_time_secs
+        ),
     )
 
 
@@ -2423,7 +2460,10 @@ def apply_jax_runtime_config() -> None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     if config.compilation_cache_dir is not None:
         jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
-        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+        jax.config.update(
+            "jax_persistent_cache_min_compile_time_secs",
+            config.persistent_cache_min_compile_time_secs,
+        )
         jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
         # Follow JAX's documented GPU persistent-cache setting. Wider XLA cache
         # modes can force nvlink through container CUDA toolkits that differ
@@ -2469,6 +2509,7 @@ def set_backend(
     disable_jit: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
+    persistent_cache_min_compile_time_secs: float | None = None,
     xla_gpu_preallocate: bool | None = None,
     xla_gpu_mem_fraction: float | None = None,
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
@@ -2491,6 +2532,7 @@ def set_backend(
         disable_jit=disable_jit,
         transfer_guard=transfer_guard,
         compilation_cache_dir=compilation_cache_dir,
+        persistent_cache_min_compile_time_secs=persistent_cache_min_compile_time_secs,
         xla_gpu_preallocate=xla_gpu_preallocate,
         xla_gpu_mem_fraction=xla_gpu_mem_fraction,
         xla_gpu_allocator=xla_gpu_allocator,
@@ -2521,6 +2563,7 @@ def use_runtime(
     disable_jit: bool | None = None,
     transfer_guard: str | None = None,
     compilation_cache_dir: str | None = None,
+    persistent_cache_min_compile_time_secs: float | None = None,
     xla_gpu_preallocate: bool | None = None,
     xla_gpu_mem_fraction: float | None = None,
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
@@ -2535,6 +2578,7 @@ def use_runtime(
         disable_jit=True if debug else disable_jit,
         transfer_guard="disallow" if debug else transfer_guard,
         compilation_cache_dir=compilation_cache_dir,
+        persistent_cache_min_compile_time_secs=persistent_cache_min_compile_time_secs,
         xla_gpu_preallocate=xla_gpu_preallocate,
         xla_gpu_mem_fraction=xla_gpu_mem_fraction,
         xla_gpu_allocator=xla_gpu_allocator,

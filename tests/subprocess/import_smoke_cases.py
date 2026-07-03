@@ -781,6 +781,7 @@ def case_programmatic_backend_selection_configures_jax_runtime() -> None:
     assert cfg.debug_nans is True
     assert cfg.transfer_guard == "log"
     assert cfg.compilation_cache_dir == "/tmp/simsopt-jax-cache"
+    assert cfg.persistent_cache_min_compile_time_secs == 0.0
     assert policy.mode == "jax_cpu_parity"
     assert policy.parity_mode is True
     assert policy.chunk_policy == "stable_default"
@@ -790,6 +791,7 @@ def case_programmatic_backend_selection_configures_jax_runtime() -> None:
     assert policy.debug_nans is True
     assert policy.transfer_guard == "log"
     assert policy.compilation_cache_dir == "/tmp/simsopt-jax-cache"
+    assert policy.persistent_cache_min_compile_time_secs == 0.0
     assert backend.get_backend_mode() == "jax_cpu_parity"
     assert backend.is_backend_strict() is True
     assert backend.get_point_chunk_size("jax_cpu_parity") == 256
@@ -802,6 +804,44 @@ def case_programmatic_backend_selection_configures_jax_runtime() -> None:
     assert jax.config.jax_compilation_cache_dir == "/tmp/simsopt-jax-cache"
     assert jax.config.jax_persistent_cache_min_compile_time_secs == 0.0
     assert jax.config.jax_persistent_cache_min_entry_size_bytes == -1
+
+
+def case_backend_persistent_cache_min_compile_time_env_override() -> None:
+    import os
+
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_parity"
+    os.environ["SIMSOPT_BACKEND_STRICT"] = "1"
+    os.environ["SIMSOPT_JAX_COMPILATION_CACHE_DIR"] = "/tmp/simsopt-jax-cache"
+    os.environ["SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "1.25"
+
+    import simsopt_jax.config as simsopt_config
+
+    cfg = simsopt_config.get_backend_config()
+    policy = simsopt_config.get_backend_policy()
+    assert cfg.persistent_cache_min_compile_time_secs == 1.25
+    assert policy.persistent_cache_min_compile_time_secs == 1.25
+    simsopt_config.apply_jax_runtime_config()
+
+    import jax
+
+    assert jax.config.jax_persistent_cache_min_compile_time_secs == 1.25
+
+
+def case_backend_persistent_cache_min_compile_time_rejects_nonfinite() -> None:
+    import os
+
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_parity"
+    os.environ["SIMSOPT_BACKEND_STRICT"] = "1"
+    os.environ["SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "nan"
+
+    import simsopt_jax.config as simsopt_config
+
+    try:
+        simsopt_config.get_backend_config()
+    except ValueError as exc:
+        assert "must be finite and non-negative" in str(exc)
+    else:
+        raise AssertionError("non-finite persistent cache threshold was accepted")
 
 
 def case_programmatic_backend_persistent_cache_writes_small_kernel() -> None:

@@ -698,10 +698,13 @@ parity/trajectory gates (Phase 8).
          useful and bounded-size, and matrix readers do not require full factors.
    - [ ] A/B the persistent-cache minimum compile threshold instead of forcing
          `jax_persistent_cache_min_compile_time_secs=0.0` for all programs.
-         Gate: record cache hit/miss counts, cache directory growth, cold setup
-         wall, and warm setup wall; keep the setting that improves warm reuse
-         without persisting tiny eager programs that cost more to deserialize
-         than to compile.
+         Runtime plumbing is available through
+         `SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS`; the default
+         remains `0.0` to preserve existing small-kernel cache behavior, and
+         the measurement gate remains open. Gate: record cache hit/miss counts,
+         cache directory growth, cold setup wall, and warm setup wall; keep the
+         setting that improves warm reuse without persisting tiny eager programs
+         that cost more to deserialize than to compile.
    - [ ] Defer or eliminate duplicate traceable gradient graph construction in
          setup. The current runtime can build both the primary compiled bundle
          and an optimizer-only bundle that each construct `_forward_result_for`

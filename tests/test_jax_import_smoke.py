@@ -84,6 +84,7 @@ _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_JAX_DISABLE_JIT",
     "SIMSOPT_JAX_TRANSFER_GUARD",
     "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
+    "SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS",
     "SIMSOPT_JAX_GPU_PREALLOCATE",
     "SIMSOPT_JAX_GPU_MEM_FRACTION",
     "SIMSOPT_JAX_GPU_ALLOCATOR",
@@ -725,6 +726,24 @@ def test_programmatic_backend_selection_configures_jax_runtime():
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_programmatic_backend_selection_configures_jax_runtime",),
         failure_message="programmatic backend config failed",
+    )
+
+
+def test_backend_persistent_cache_min_compile_time_env_override():
+    """The runtime should expose JAX's persistent-cache compile-time threshold."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_backend_persistent_cache_min_compile_time_env_override",),
+        failure_message="persistent cache min compile-time override failed",
+    )
+
+
+def test_backend_persistent_cache_min_compile_time_rejects_nonfinite():
+    """Persistent-cache compile-time thresholds should be finite values."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_backend_persistent_cache_min_compile_time_rejects_nonfinite",),
+        failure_message="persistent cache min compile-time validation failed",
     )
 
 
