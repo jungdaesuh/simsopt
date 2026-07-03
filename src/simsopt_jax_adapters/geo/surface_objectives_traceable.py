@@ -1710,66 +1710,116 @@ def _build_traceable_objective_compiled_bundle_from_state(
             objective_kwargs=objective_kwargs,
         )
 
-    compiled_total_gradient_for = jax.jit(_total_gradient_for)
+    def _build_compiled_total_gradient_for():
+        return jax.jit(_total_gradient_for)
 
-    def _value_and_grad_for(coil_dofs):
-        result = jitted_forward_result_for(coil_dofs)
+    def _build_value_and_grad_for(compiled_total_gradient_for):
+        def _value_and_grad_for(coil_dofs):
+            result = jitted_forward_result_for(coil_dofs)
 
-        def _total_gradient_at(candidate_coil_dofs, candidate_x, linear_solve_factors):
-            return compiled_total_gradient_for(
+            def _total_gradient_at(
                 candidate_coil_dofs,
                 candidate_x,
                 linear_solve_factors,
-            )
+            ):
+                return compiled_total_gradient_for(
+                    candidate_coil_dofs,
+                    candidate_x,
+                    linear_solve_factors,
+                )
 
-        def _accepted_candidate_gradient(_):
-            return _total_gradient_at(
-                coil_dofs,
-                result["x"],
-                result["linear_solve_factors"],
-            )
-
-        def _rejected_candidate_gradient(_):
-            return lax.cond(
-                result["primal_success"],
-                lambda _: _total_gradient_at(
+            def _accepted_candidate_gradient(_):
+                return _total_gradient_at(
                     coil_dofs,
                     result["x"],
                     result["linear_solve_factors"],
-                ),
-                lambda _: _total_gradient_at(
-                    baseline_coil_dofs,
-                    baseline_x,
-                    baseline_linear_solve_factors,
-                ),
+                )
+
+            def _rejected_candidate_gradient(_):
+                return lax.cond(
+                    result["primal_success"],
+                    lambda _: _total_gradient_at(
+                        coil_dofs,
+                        result["x"],
+                        result["linear_solve_factors"],
+                    ),
+                    lambda _: _total_gradient_at(
+                        baseline_coil_dofs,
+                        baseline_x,
+                        baseline_linear_solve_factors,
+                    ),
+                    operand=None,
+                )
+
+            grad, linear_solve_success = lax.cond(
+                result["success"],
+                _accepted_candidate_gradient,
+                _rejected_candidate_gradient,
                 operand=None,
             )
+            return result["value"], _traceable_adjoint_gradient_or_nan(
+                grad,
+                linear_solve_success,
+            )
 
-        grad, linear_solve_success = lax.cond(
-            result["success"],
-            _accepted_candidate_gradient,
-            _rejected_candidate_gradient,
-            operand=None,
+        return _value_and_grad_for
+
+    def _build_compiled_value_and_grad_for(compiled_total_gradient_for):
+        jitted_value_and_grad_for = jax.jit(
+            _build_value_and_grad_for(compiled_total_gradient_for),
+            **jit_kwargs,
         )
-        return result["value"], _traceable_adjoint_gradient_or_nan(
-            grad,
-            linear_solve_success,
+        return _optimizer_jax._mark_cacheable_jit_value_and_grad(
+            _make_traceable_runtime_jax_array_boundary(
+                jitted_value_and_grad_for,
+                "compiled_value_and_grad_for",
+            )
         )
 
     jit_kwargs = {}
     if get_backend_policy().supports_buffer_donation:
         jit_kwargs["donate_argnums"] = (0,)
-    jitted_value_and_grad_for = jax.jit(_value_and_grad_for, **jit_kwargs)
     compiled_forward_result_for = _make_traceable_runtime_jax_array_boundary(
         jitted_forward_result_for,
         "compiled_forward_result_for",
     )
-    compiled_value_and_grad_for = _optimizer_jax._mark_cacheable_jit_value_and_grad(
-        _make_traceable_runtime_jax_array_boundary(
-            jitted_value_and_grad_for,
-            "compiled_value_and_grad_for",
+    if general_only_forward:
+        compiled_total_gradient_impl = None
+        compiled_value_and_grad_impl = None
+
+        def _lazy_compiled_total_gradient_for(
+            coil_dofs,
+            solved_x,
+            solved_linear_solve_factors,
+        ):
+            nonlocal compiled_total_gradient_impl
+            if compiled_total_gradient_impl is None:
+                compiled_total_gradient_impl = _build_compiled_total_gradient_for()
+            return compiled_total_gradient_impl(
+                coil_dofs,
+                solved_x,
+                solved_linear_solve_factors,
+            )
+
+        def _lazy_compiled_value_and_grad_for(coil_dofs):
+            nonlocal compiled_total_gradient_impl, compiled_value_and_grad_impl
+            if compiled_value_and_grad_impl is None:
+                if compiled_total_gradient_impl is None:
+                    compiled_total_gradient_impl = _build_compiled_total_gradient_for()
+                compiled_value_and_grad_impl = _build_compiled_value_and_grad_for(
+                    compiled_total_gradient_impl
+                )
+            return compiled_value_and_grad_impl(coil_dofs)
+
+        compiled_total_gradient_for = _lazy_compiled_total_gradient_for
+        compiled_value_and_grad_for = _optimizer_jax._mark_cacheable_jit_value_and_grad(
+            _lazy_compiled_value_and_grad_for
         )
-    )
+    else:
+        compiled_total_gradient_for = _build_compiled_total_gradient_for()
+        compiled_value_and_grad_for = _build_compiled_value_and_grad_for(
+            compiled_total_gradient_for
+        )
 
     return {
         "state": state,

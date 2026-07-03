@@ -1267,6 +1267,113 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     )
 
 
+def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
+    observed_jit_names: list[str] = []
+    mark_calls: list[object] = []
+    original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad
+
+    def recording_jit(fun=None, **_kwargs):
+        def wrapped(inner):
+            observed_jit_names.append(inner.__name__)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    def counting_mark(fun):
+        mark_calls.append(fun)
+        return original_mark(fun)
+
+    def fake_general_forward_result(_booz_jax, _coil_set_spec_from_dofs, **kwargs):
+        coil_dofs = kwargs["coil_dofs"]
+        return {
+            "value": jnp.sum(coil_dofs),
+            "x": jnp.asarray([1.0], dtype=jnp.float64),
+            "sdofs": jnp.asarray([1.0], dtype=jnp.float64),
+            "iota": jnp.asarray(0.1, dtype=jnp.float64),
+            "G": None,
+            "linear_solve_factors": None,
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "adjoint_linear_solve_available": jnp.asarray(True, dtype=bool),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module.jax,
+        "jit",
+        recording_jit,
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_mark_cacheable_jit_value_and_grad",
+        counting_mark,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_general_forward_result",
+        fake_general_forward_result,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_forward_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "general-only bundle must not use the public same-coils path"
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_total_gradient_with_status",
+        lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
+            2.0 * kwargs["coil_dofs"],
+            jnp.asarray(True, dtype=bool),
+        ),
+    )
+
+    state = {
+        **_minimal_traceable_objective_state(),
+        "baseline_coil_dofs": jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+        "baseline_x": jnp.asarray([1.0], dtype=jnp.float64),
+    }
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        object(),
+        state,
+        general_only_forward=True,
+    )
+
+    assert observed_jit_names == ["_forward_result_for"]
+    assert len(mark_calls) == 1
+    assert (
+        getattr(
+            bundle["compiled_value_and_grad_for"],
+            optimizer_jax_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
+            False,
+        )
+        is True
+    )
+
+    grad, success = bundle["compiled_total_gradient_for"](
+        jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        jnp.asarray([3.0], dtype=jnp.float64),
+        None,
+    )
+    assert observed_jit_names == ["_forward_result_for", "_total_gradient_for"]
+    np.testing.assert_allclose(np.asarray(grad), np.asarray([2.0, -4.0]))
+    assert bool(np.asarray(success))
+
+    value, value_grad = bundle["compiled_value_and_grad_for"](
+        jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    )
+    assert observed_jit_names == [
+        "_forward_result_for",
+        "_total_gradient_for",
+        "_value_and_grad_for",
+    ]
+    assert len(mark_calls) == 2
+    np.testing.assert_allclose(np.asarray(value), np.asarray(-1.0))
+    np.testing.assert_allclose(np.asarray(value_grad), np.asarray([2.0, -4.0]))
+
+
 def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
     monkeypatch,
 ) -> None:
