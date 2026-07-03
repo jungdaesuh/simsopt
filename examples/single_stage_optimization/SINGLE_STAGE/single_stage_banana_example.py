@@ -1191,12 +1191,21 @@ def build_jax_runtime_cache_metadata():
         "jax_platform": backend_config.jax_platform,
         "compilation_cache_policy": backend_policy.compilation_cache_policy,
         "compilation_cache_dir": backend_config.compilation_cache_dir,
+        "persistent_cache_min_compile_time_secs": (
+            backend_config.persistent_cache_min_compile_time_secs
+        ),
         "jax_compilation_cache_dir": jax.config.jax_compilation_cache_dir,
+        "jax_persistent_cache_min_compile_time_secs": (
+            jax.config.jax_persistent_cache_min_compile_time_secs
+        ),
         "env_SIMSOPT_JAX_COMPILATION_CACHE_DIR": os.environ.get(
             "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
         ),
         "env_JAX_COMPILATION_CACHE_DIR": os.environ.get(
             "JAX_COMPILATION_CACHE_DIR"
+        ),
+        "env_SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": os.environ.get(
+            "SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
         ),
     }
 
@@ -19457,6 +19466,9 @@ if __name__ == "__main__":
         ],
         "JAX_COMPILATION_CACHE_POLICY": jax_runtime_cache_metadata[
             "compilation_cache_policy"
+        ],
+        "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": jax_runtime_cache_metadata[
+            "persistent_cache_min_compile_time_secs"
         ],
         "STAGE2_SOURCE": stage2_source,
         "STAGE2_SOURCE_REQUESTED": args.stage2_source,

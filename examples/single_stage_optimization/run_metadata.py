@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from simsopt_jax.config import (
+    get_backend_config,
     get_backend_mode,
     get_backend_policy,
     get_compilation_cache_dir,
@@ -48,7 +49,8 @@ def build_runtime_provenance(
     jaxlib_version: str,
 ) -> dict[str, Any]:
     gpu_memory_mb = query_active_gpu_memory_mb()
-    backend_policy = get_backend_policy()
+    backend_config = get_backend_config()
+    backend_policy = get_backend_policy(backend_config.mode)
     provenance = {
         "title": title,
         "generated_at_utc": datetime.now(timezone.utc)
@@ -77,6 +79,12 @@ def build_runtime_provenance(
         "jax_platform_request": get_jax_platform(),
         "compilation_cache_policy": get_compilation_cache_policy(),
         "compilation_cache_dir": get_compilation_cache_dir(),
+        "persistent_cache_min_compile_time_secs": (
+            backend_config.persistent_cache_min_compile_time_secs
+        ),
+        "jax_persistent_cache_min_compile_time_secs": (
+            jax_module.config.jax_persistent_cache_min_compile_time_secs
+        ),
         "environment": {
             "SIMSOPT_BACKEND_MODE": os.environ.get("SIMSOPT_BACKEND_MODE"),
             "SIMSOPT_BACKEND_STRICT": os.environ.get("SIMSOPT_BACKEND_STRICT"),
@@ -85,6 +93,9 @@ def build_runtime_provenance(
             ),
             "JAX_PLATFORMS": os.environ.get("JAX_PLATFORMS"),
             "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": os.environ.get(
+                "SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
+            ),
         },
     }
     if gpu_memory_mb is not None:

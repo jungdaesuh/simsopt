@@ -422,6 +422,7 @@ def _explicit_coil_spec(coil):
 from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
     single_stage_banana_example as single_stage_example,
 )
+from examples.single_stage_optimization import run_metadata as run_metadata_module  # noqa: E402
 
 _IMMUTABLE_SPEC_REQUIRED_PATTERN = (
     "BiotSavartJAX coil cotangent projection requires immutable JAX "
@@ -8197,7 +8198,48 @@ class TestTraceableObjective:
             == backend_policy.compilation_cache_policy
         )
         assert metadata["compilation_cache_dir"] == backend_config.compilation_cache_dir
+        assert (
+            metadata["persistent_cache_min_compile_time_secs"]
+            == backend_config.persistent_cache_min_compile_time_secs
+        )
+        assert (
+            metadata["jax_persistent_cache_min_compile_time_secs"]
+            == jax.config.jax_persistent_cache_min_compile_time_secs
+        )
         assert "jax_compilation_cache_dir" in metadata
+
+    def test_shared_runtime_provenance_records_persistent_cache_threshold(self):
+        """Shared run metadata keeps backend and JAX cache thresholds auditable."""
+        backend_config = simsopt_config.get_backend_config()
+
+        metadata = run_metadata_module.build_runtime_provenance(
+            title="test",
+            repo_root=REPO_ROOT,
+            script_path=REPO_ROOT
+            / "examples"
+            / "single_stage_optimization"
+            / "SINGLE_STAGE"
+            / "single_stage_banana_example.py",
+            output_root=REPO_ROOT,
+            argv=[],
+            jax_module=jax,
+            jaxlib_version=str(jaxlib.__version__),
+        )
+
+        assert (
+            metadata["persistent_cache_min_compile_time_secs"]
+            == backend_config.persistent_cache_min_compile_time_secs
+        )
+        assert (
+            metadata["jax_persistent_cache_min_compile_time_secs"]
+            == jax.config.jax_persistent_cache_min_compile_time_secs
+        )
+        assert (
+            metadata["environment"][
+                "SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
+            ]
+            == os.environ.get("SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS")
+        )
 
     def test_decomposed_host_objective_reuses_k1_forward_result_for_trace(self):
         """Trace reuse serves the K1 solve and skips a second forward solve."""
