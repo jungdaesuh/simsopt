@@ -55,9 +55,19 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
   current setup builds or executes unused gradient graphs, and avoid reporting
   recomputation when the same term values can be carried as value-and-grad aux
   data.
+- Remove long-tail host/runtime overhead that becomes visible after the main
+  K1/K2 reductions: repeated scalar progress transfers, duplicate solved-payload
+  assembly, dense-factor telemetry dumps, and tiny-program cache churn.
+- Extend the existing `_traceable_predict_x_from_baseline` warm-start predictor
+  into a current-incumbent/factor-reused sensitivity predictor if it can reduce
+  pre-Newton/Newton iterations without changing the converged solved state.
 - Measure `lsmr_j` with a stabilization sweep and trajectory gate before any
   default decision; treat any projected speedup as unproven until the sweep
   collapses the iteration-count uncertainty.
+- Treat mixed precision as a default-off Phase 8 experiment only after the
+  condition-number reconciliation identifies which operator controls the error
+  margin; require fp64 residual checks and trajectory parity before any policy
+  change.
 - Close the workflow only against a clean, instrumentation-free end-state target:
   same seed/resolution/hardware class, no K1 subtimer replay or objective trace,
   steady-state per-eval wall recorded separately from cold compile/setup, and no
@@ -83,6 +93,16 @@ Abbreviations: `EX` = `examples/single_stage_optimization/SINGLE_STAGE/single_st
   unless the claim is specifically about instrumentation overhead.
 - Default-enabling `lsmr_j`, traceable dense-LU Newton, trial Newton `skip`, or
   trial BFGS caps without the trajectory/equivalence gates in this file.
+- Making diagnostic trace/objective-trace lanes cheap. Production benchmark
+  timing excludes those lanes; trace-mode affordability can be a separate
+  tooling project.
+- Cleaning up ALM/proximity host evaluators. Those are real inherited CPU paths,
+  but they are outside the `scipy-jax-decomposed` target lane this plan closes.
+- Parallel trial evaluation or outer-optimizer replacement. SciPy L-BFGS-B's
+  line search remains serial here.
+- Kernel-level Biot-Savart or surface-evaluation rewrites without a measured
+  kernel bottleneck. The current evidence points at orchestration and
+  linear-algebra routing, not the leaf kernels.
 
 ## Current Context
 
@@ -658,6 +678,28 @@ parity/trajectory gates (Phase 8).
          full event list on every event. Regression: a synthetic long event
          stream scales O(N) in writes and the matrix-report/progress readers can
          consume the new artifact layout.
+   - [ ] Batch scalar progress materialization in
+         `_summarize_k1_forward_result_for_progress` and related reporting
+         helpers. The current path performs many small `host_array` /
+         `jax.device_get` transfers per evaluation. Gate: one batched host
+         materialization or a reduced transfer count, identical progress fields,
+         and no transfer-guard violations.
+   - [ ] Avoid duplicate `cache_last_solved_payload` work inside one objective
+         evaluation. The current decomposed helper can build and store the
+         solved payload before K2 and then rebuild it on the success/rejection
+         branch. Gate: one authoritative solved-payload assembly per candidate
+         while preserving final-sync reuse and primal-failure fallback behavior.
+   - [ ] Compact dense-factor telemetry in progress/reporting JSON. When
+         dense-LU or exact-factor comparators are active, record shape, dtype,
+         norm, condition/status, and small scalar diagnostics instead of dumping
+         full `P`/`L`/`U` arrays with `.tolist()`. Gate: progress artifacts stay
+         useful and bounded-size, and matrix readers do not require full factors.
+   - [ ] A/B the persistent-cache minimum compile threshold instead of forcing
+         `jax_persistent_cache_min_compile_time_secs=0.0` for all programs.
+         Gate: record cache hit/miss counts, cache directory growth, cold setup
+         wall, and warm setup wall; keep the setting that improves warm reuse
+         without persisting tiny eager programs that cost more to deserialize
+         than to compile.
    - [ ] Defer or eliminate duplicate traceable gradient graph construction in
          setup. The current runtime can build both the primary compiled bundle
          and an optimizer-only bundle that each construct `_forward_result_for`
@@ -679,6 +721,12 @@ parity/trajectory gates (Phase 8).
          sweeps into a joint derivative where dependency flags allow it. Gate:
          HLO/op-count or timing evidence shows one backward pass replaces two,
          and term-level gradients remain within the existing parity tolerance.
+   - [ ] Restore the `minimum_distance` floor on the inherited empty-candidate
+         `cdist` fallback in `CurveCurveDistance.shortest_distance` and
+         `CurveSurfaceDistance.shortest_distance`. This is a reference/setup
+         guard rather than a target-lane speed lever; gate with focused tests for
+         candidate and no-candidate cases so the fallback cannot become a latent
+         full-distance cliff.
    - [ ] Add objective-level rematerialization for HVP/dense-assembly paths
          where the residual/geometry tape dominates live memory. The existing
          leaf Biot-Savart kernel is already checkpointed; this task is about the
@@ -695,6 +743,14 @@ parity/trajectory gates (Phase 8).
          fix. Design a progress-based handoff/cap that leaves first-incumbent
          and accepted/final solves full-fidelity unless a separate trajectory
          gate proves the cap safe as a production default.
+   - [ ] Extend the existing `_traceable_predict_x_from_baseline` predictor into
+         a current-incumbent/factor-reused sensitivity predictor. The missing
+         opportunity is not "add a predictor from scratch"; it is to reuse the
+         current solved Jacobian/factor and batched RHS sensitivities so each
+         trial starts closer to the implicit solved state. Gate: fewer
+         pre-Newton L-BFGS/Newton iterations, identical converged solved-state
+         physics within tolerance, and no reuse of failed or lower-fidelity
+         factors.
    - [ ] Re-run dense-LU vs operator-GMRES after the Eisenstat-Walker fix, and
          include the hybrid candidate: loose GMRES for early iterations, dense-LU
          for final tight correction solves. Keep all variants default-off until
@@ -720,6 +776,18 @@ parity/trajectory gates (Phase 8).
          unstabilized case. The current code requires positive stabilization;
          unstabilized support needs a KKT or two-solve formulation with explicit
          success/failure semantics, not a silent fallback.
+   - [ ] If the dense adjoint route remains a speed or parity candidate, compare
+         the current `jnp.linalg.lstsq` dense solve with LU/QR plus the existing
+         fp64 iterative-refinement residual check. Gate: same dense-gradient
+         parity, same linear-solve success semantics, lower wall or compile cost,
+         and no loss of robustness on ill-conditioned candidates.
+   - [ ] Add a mixed-precision dense-factor experiment only after the
+         condition-number reconciliation is complete. Candidate: fp32/TF32
+         factorization with fp64 residual evaluation and iterative refinement.
+         Gate: operator condition number within the registered margin, fp64
+         residual below the dense baseline tolerance, dense-gradient parity,
+         accepted-trajectory quality, and opt-in only on hardware where the
+         memory/wall benefit is real.
    - [ ] Add a trajectory gate for any behavior-changing solver: compare dense
          default vs candidate over at least one short accepted-result run and one
          longer run. Required fields: final J, final iota, final volume, final
@@ -773,8 +841,19 @@ parity/trajectory gates (Phase 8).
       lower-fidelity trial solves.
 - [ ] Phase 7 progress-log regression proves bounded/O(N) writes and verifies
       current artifact readers or compatibility shims.
+- [ ] Phase 7 host-progress regression records fewer device-to-host transfers
+      for the same progress fields, and `cache_last_solved_payload` regression
+      proves one solved-payload assembly per candidate without weakening final
+      sync.
+- [ ] Phase 7 telemetry regression proves dense-factor progress artifacts are
+      compact and bounded-size under dense-LU/exact-factor comparators.
+- [ ] Phase 7 persistent-cache threshold A/B records cache directory growth plus
+      cold/warm setup wall before changing the default threshold.
 - [ ] Phase 7 remat/chunk A/B runs without K1 subtimer replay and records K2
       wall plus GPU memory high-water for batches `8/16/32`.
+- [ ] Phase 7 predictor A/B records pre-Newton L-BFGS iterations, Newton
+      iterations, K1 wall, final residual/iota/volume, and factor-reuse metadata
+      for baseline predictor vs current-incumbent/factor-reused predictor.
 - [ ] Condition-number reconciliation artifact: for the same candidate and
       stabilization settings, record which operator each reported condition
       estimate describes (`J`, `J^T J`, Hessian-with-second-derivative terms,
@@ -783,6 +862,9 @@ parity/trajectory gates (Phase 8).
 - [ ] Phase 8 `lsmr_j` sweep produces a table of stabilization, iteration counts,
       K2 wall, peak memory, and dense-gradient parity before any default
       decision.
+- [ ] Phase 8 dense-solve and mixed-precision experiments report operator
+      condition number, fp64 residual after refinement, gradient parity, accepted
+      trajectory quality, peak memory, and wall time before any default decision.
 - [ ] Any wall-time claim excludes instrumentation replay:
       `MATRIX_TRACE_K1_SUBTIMERS=0`, `--trace-target-lane-k1-subtimers` absent,
       and `--record-objective-evaluation-trace` absent unless the benchmark is
@@ -833,10 +915,20 @@ parity/trajectory gates (Phase 8).
   single JSON file.
   Mitigation: keep a compatibility summary JSON and update matrix-report readers
   in the same phase.
+- Risk: current-incumbent sensitivity prediction reuses a stale or failed
+  linearization and seeds a trial from the wrong implicit state.
+  Mitigation: key the factor on exact incumbent DOFs and fidelity metadata,
+  reject failed/lower-fidelity factors, and gate on converged solved-state
+  physics rather than iteration count alone.
 - Risk: `lsmr_j` speedup depends on spectrum and stabilization; worst-case
   iteration counts can exceed dense assembly.
   Mitigation: measure the stabilization sweep first and leave the solver
   experimental unless both parity and trajectory gates pass.
+- Risk: mixed precision hides a linear-solve error that only appears in the
+  final objective trajectory.
+  Mitigation: require fp64 residual/iterative-refinement checks, condition-number
+  margins, dense-gradient parity, and accepted-trajectory gates; keep the path
+  default-off until all pass.
 
 ## Completion Criteria
 
@@ -871,14 +963,18 @@ parity/trajectory gates (Phase 8).
 - [ ] Phase 7 low-risk reductions either landed with focused regressions and
       remote clean-timing artifacts, or were explicitly rejected with artifact
       data. At minimum this covers Eisenstat-Walker forcing, accepted-solve cache
-      pinning, progress logging, duplicate setup-gradient construction, seeded
+      pinning, progress logging, batched progress transfers, duplicate
+      solved-payload assembly, compact dense-factor telemetry, persistent-cache
+      threshold A/B, duplicate setup-gradient construction, seeded
       baseline-adjoint setup, reporting recomputation, joint-gradient
-      investigation, and remat/chunk A/B.
+      investigation, inherited distance-floor fallback, current-incumbent
+      predictor A/B, and remat/chunk A/B.
 - [ ] Clean no-subtimer benchmark artifacts exist for the accepted production
       path and separate cold compile/setup from steady-state per-eval timing.
 - [ ] Phase 8 behavior-changing solver work remains clearly marked
-      experimental unless `lsmr_j`/dense-LU candidates pass dense-gradient
-      parity, accepted-trajectory quality, wall-time, and memory gates.
+      experimental unless `lsmr_j`/dense-LU/dense-solve/mixed-precision
+      candidates pass dense-gradient parity, accepted-trajectory quality,
+      wall-time, and memory gates.
 - [ ] Report doc and handoff updated with runtime results; memory update filed
       only when that workflow is explicitly requested by the operator.
 - [ ] End-state target defined and met for the A100-tier production question:
@@ -918,5 +1014,15 @@ parity/trajectory gates (Phase 8).
   40GB A100 with preallocation enabled, or is batch `16` the practical ceiling?
 - After Eisenstat-Walker is fixed, how early can accepted-path L-BFGS hand off
   to Newton without degrading final objective/physics?
+- Does a current-incumbent/factor-reused predictor reduce pre-Newton L-BFGS and
+  Newton iterations beyond the existing baseline predictor without changing the
+  converged solved state?
+- Which persistent-cache minimum compile threshold avoids tiny-program cache
+  churn while preserving the useful warm-cache wins?
+- If the dense adjoint route survives the post-Eisenstat-Walker comparison, can
+  LU/QR plus fp64 iterative refinement replace dense `lstsq` without weakening
+  solve-status semantics?
+- Does mixed precision pass the reconciled condition-number and fp64 residual
+  gates strongly enough to justify a hardware-specific opt-in?
 - How much wall time remains in host progress/reporting once progress logging is
   append-only and final reporting reuses the accepted solve?
