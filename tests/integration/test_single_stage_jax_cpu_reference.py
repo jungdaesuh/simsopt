@@ -7729,6 +7729,42 @@ class TestTraceableObjective:
         assert returned_fields["dense_newton_steps_materialized"] is False
         assert events[2][1]["branch"] == "success"
 
+    def test_linear_solve_factor_summary_is_compact(self):
+        """Dense factor telemetry records bounded stats, not full matrices."""
+        P = np.eye(3, dtype=np.float64)
+        L = np.tril(np.ones((3, 3), dtype=np.float64))
+        U = np.diag(np.asarray([2.0, 0.0, -4.0], dtype=np.float64))
+
+        summary = single_stage_example._summarize_single_stage_linear_solve_factors(
+            (P, L, U)
+        )
+
+        assert summary["available"] is True
+        for factor_name in ("P", "L", "U"):
+            factor_summary = summary[factor_name]
+            assert "values" not in factor_summary
+            assert factor_summary["shape"] == [3, 3]
+            assert factor_summary["dtype"] == "float64"
+            assert factor_summary["size"] == 9
+            assert factor_summary["all_finite"] is True
+            assert factor_summary["nonfinite_count"] == 0
+            assert factor_summary["inf_norm"] is not None
+            assert factor_summary["fro_norm"] is not None
+        assert summary["U"]["diagonal_abs_min"] == pytest.approx(0.0)
+        assert summary["U"]["diagonal_abs_max"] == pytest.approx(4.0)
+        assert summary["U"]["zero_diagonal_count"] == 1
+
+        nonfinite_summary = (
+            single_stage_example._summarize_single_stage_linear_solve_factors(
+                (P, L, np.diag(np.asarray([2.0, np.nan, -4.0], dtype=np.float64)))
+            )
+        )
+        assert nonfinite_summary["U"]["all_finite"] is False
+        assert nonfinite_summary["U"]["nonfinite_count"] == 1
+        assert nonfinite_summary["U"]["first_nonfinite_classification"] == "nan"
+        assert nonfinite_summary["U"]["inf_norm"] is None
+        assert nonfinite_summary["U"]["fro_norm"] is None
+
     def test_traceable_forward_result_packs_newton_progress_fields(self):
         """Packed K1 results must preserve Newton diagnostics for progress logs."""
         forward_result = (

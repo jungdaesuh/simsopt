@@ -17,9 +17,12 @@ tests pin that contract.
 
 from __future__ import annotations
 
+import pytest
+
 from benchmarks.single_stage_init_parity import (
     _OUTER_LOOP_REQUIRED_RESULT_KEYS,
     _TARGET_OUTER_OPTIMIZER_METHOD,
+    _compare_same_candidate_layer_decomposition,
     evaluate_single_stage_init_parity,
 )
 
@@ -78,6 +81,68 @@ def _has_iota_failure(failures) -> bool:
 
 def _has_no_step_failure(failures) -> bool:
     return any("did not accept an optimizer step" in f for f in failures)
+
+
+def _compact_factor_summary(*, inf_norm: float, fro_norm: float) -> dict[str, object]:
+    return {
+        "shape": [3, 3],
+        "dtype": "float64",
+        "size": 9,
+        "all_finite": True,
+        "nonfinite_count": 0,
+        "first_nonfinite_index": None,
+        "first_nonfinite_classification": None,
+        "inf_norm": inf_norm,
+        "fro_norm": fro_norm,
+        "diagonal_abs_min": 1.0,
+        "diagonal_abs_max": inf_norm,
+        "zero_diagonal_count": 0,
+    }
+
+
+def test_compact_factor_layers_compare_without_reconstructing_values():
+    """Parity readers compare compact factor stats without requiring values."""
+    layer_fields = (
+        (
+            "linear_solve_factors",
+            (
+                ("compact_array", ("linear_solve_factors", "P")),
+                ("compact_array", ("linear_solve_factors", "L")),
+                ("compact_array", ("linear_solve_factors", "U")),
+            ),
+        ),
+    )
+    cpu_decomposition = {
+        "linear_solve_factors": {
+            "P": _compact_factor_summary(inf_norm=1.0, fro_norm=3.0),
+            "L": _compact_factor_summary(inf_norm=2.0, fro_norm=4.0),
+            "U": _compact_factor_summary(inf_norm=8.0, fro_norm=9.0),
+        }
+    }
+    jax_decomposition = {
+        "linear_solve_factors": {
+            "P": _compact_factor_summary(inf_norm=1.0, fro_norm=3.0),
+            "L": _compact_factor_summary(inf_norm=2.0, fro_norm=4.0),
+            "U": _compact_factor_summary(inf_norm=8.5, fro_norm=9.0),
+        }
+    }
+    failures = []
+
+    summary = _compare_same_candidate_layer_decomposition(
+        failures,
+        field_name="boozer_solve_decomposition",
+        layer_fields=layer_fields,
+        cpu_decomposition=cpu_decomposition,
+        jax_decomposition=jax_decomposition,
+        pair_index=1,
+        line_search_evaluation=2,
+    )
+
+    assert failures == []
+    assert summary["recorded"] is True
+    assert summary["max_abs_diff"] == pytest.approx(0.5)
+    assert summary["layer_references"]["linear_solve_factors"] == pytest.approx(8.0)
+    assert summary["max_abs_diff"] != float("inf")
 
 
 def test_end_state_drift_fails_when_both_lanes_converged():

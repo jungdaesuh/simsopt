@@ -264,9 +264,9 @@ _IOTA_DECOMPOSITION_LAYER_FIELDS = (
     (
         "linear_solve_factors",
         (
-            ("vector", ("linear_solve_factors", "P")),
-            ("vector", ("linear_solve_factors", "L")),
-            ("vector", ("linear_solve_factors", "U")),
+            ("compact_array", ("linear_solve_factors", "P")),
+            ("compact_array", ("linear_solve_factors", "L")),
+            ("compact_array", ("linear_solve_factors", "U")),
         ),
     ),
     ("dJ_ds", (("vector", ("dJ_ds",)),)),
@@ -318,9 +318,9 @@ _BOOZER_SOLVE_DECOMPOSITION_LAYER_FIELDS = (
     (
         "linear_solve_factors",
         (
-            ("vector", ("linear_solve_factors", "P")),
-            ("vector", ("linear_solve_factors", "L")),
-            ("vector", ("linear_solve_factors", "U")),
+            ("compact_array", ("linear_solve_factors", "P")),
+            ("compact_array", ("linear_solve_factors", "L")),
+            ("compact_array", ("linear_solve_factors", "U")),
         ),
     ),
 )
@@ -3176,8 +3176,53 @@ def _summary_reference_abs(summary: dict[str, Any] | None) -> float:
     vector = _summary_vector(summary)
     if vector is not None:
         return 0.0 if vector.size == 0 else float(np.max(np.abs(vector)))
+    if summary is not None and "values" not in summary:
+        inf_norm = summary.get("inf_norm")
+        if inf_norm is not None:
+            return abs(float(inf_norm))
     scalar = _summary_scalar(summary)
     return 0.0 if scalar is None else abs(float(scalar))
+
+
+_COMPACT_ARRAY_NUMERIC_FIELDS = (
+    "inf_norm",
+    "fro_norm",
+    "diagonal_abs_min",
+    "diagonal_abs_max",
+    "zero_diagonal_count",
+    "nonfinite_count",
+)
+_COMPACT_ARRAY_EXACT_FIELDS = (
+    "size",
+    "all_finite",
+    "first_nonfinite_index",
+    "first_nonfinite_classification",
+)
+
+
+def _path_compact_array_abs_diff(
+    cpu_summary: dict[str, Any] | None,
+    jax_summary: dict[str, Any] | None,
+) -> float:
+    if cpu_summary is None or jax_summary is None:
+        return float("inf")
+    if cpu_summary.get("shape") != jax_summary.get("shape"):
+        return float("inf")
+    if cpu_summary.get("dtype") != jax_summary.get("dtype"):
+        return float("inf")
+    for key in _COMPACT_ARRAY_EXACT_FIELDS:
+        if cpu_summary.get(key) != jax_summary.get(key):
+            return float("inf")
+    max_diff = 0.0
+    for key in _COMPACT_ARRAY_NUMERIC_FIELDS:
+        cpu_value = cpu_summary.get(key)
+        jax_value = jax_summary.get(key)
+        if cpu_value is None and jax_value is None:
+            continue
+        if cpu_value is None or jax_value is None:
+            return float("inf")
+        max_diff = max(max_diff, abs(float(jax_value) - float(cpu_value)))
+    return max_diff
 
 
 def _layer_decomposition_summary(
@@ -3289,6 +3334,8 @@ def _compare_same_candidate_layer_decomposition(
                 field_diff = 0.0
             elif kind == "scalar":
                 field_diff = _path_scalar_abs_diff(cpu_summary, jax_summary)
+            elif kind == "compact_array":
+                field_diff = _path_compact_array_abs_diff(cpu_summary, jax_summary)
             else:
                 field_diff = _path_vector_abs_diff(cpu_summary, jax_summary)
             layer_diff = max(layer_diff, field_diff)

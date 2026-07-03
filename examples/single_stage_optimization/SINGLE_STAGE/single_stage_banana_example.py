@@ -840,6 +840,47 @@ def _summarize_host_array(array):
     return summary
 
 
+def _summarize_compact_numeric_array(array):
+    """Return bounded numeric telemetry without serializing array contents."""
+    host = np.asarray(host_array(array))
+    flat = host.reshape(-1)
+    finite_mask = np.isfinite(flat)
+    all_finite = bool(np.all(finite_mask))
+    first_nonfinite_index = None
+    first_nonfinite_classification = None
+    if not all_finite:
+        first_nonfinite_index = int(np.flatnonzero(~finite_mask)[0])
+        first_nonfinite_classification = _classify_nonfinite_scalar(
+            float(flat[first_nonfinite_index])
+        )
+    summary = {
+        "shape": [int(size) for size in host.shape],
+        "dtype": str(host.dtype),
+        "size": int(host.size),
+        "all_finite": all_finite,
+        "nonfinite_count": int(host.size - int(np.count_nonzero(finite_mask))),
+        "first_nonfinite_index": first_nonfinite_index,
+        "first_nonfinite_classification": first_nonfinite_classification,
+        "inf_norm": None
+        if (not all_finite or flat.size == 0)
+        else float(np.max(np.abs(flat))),
+        "fro_norm": None
+        if (not all_finite or flat.size == 0)
+        else float(np.linalg.norm(flat)),
+    }
+    if host.ndim == 2 and host.shape[0] == host.shape[1]:
+        diagonal_abs = np.abs(np.diag(host))
+        finite_diagonal = diagonal_abs[np.isfinite(diagonal_abs)]
+        summary["diagonal_abs_min"] = (
+            None if finite_diagonal.size == 0 else float(np.min(finite_diagonal))
+        )
+        summary["diagonal_abs_max"] = (
+            None if finite_diagonal.size == 0 else float(np.max(finite_diagonal))
+        )
+        summary["zero_diagonal_count"] = int(np.count_nonzero(diagonal_abs == 0.0))
+    return summary
+
+
 _COMPACT_PROGRESS_SEQUENCE_LIMIT = 32
 
 
@@ -13097,9 +13138,9 @@ def _summarize_single_stage_linear_solve_factors(factors):
     P, L, U = factors
     return {
         "available": True,
-        "P": _summarize_host_array(P),
-        "L": _summarize_host_array(L),
-        "U": _summarize_host_array(U),
+        "P": _summarize_compact_numeric_array(P),
+        "L": _summarize_compact_numeric_array(L),
+        "U": _summarize_compact_numeric_array(U),
     }
 
 

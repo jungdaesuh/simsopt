@@ -701,6 +701,8 @@ parity/trajectory gates (Phase 8).
          norm, condition/status, and small scalar diagnostics instead of dumping
          full `P`/`L`/`U` arrays with `.tolist()`. Gate: progress artifacts stay
          useful and bounded-size, and matrix readers do not require full factors.
+         Implementation and focused regression are in place; keep this open
+         until the remote unit slice and dense-factor artifact gate pass.
    - [ ] A/B the persistent-cache minimum compile threshold instead of forcing
          `jax_persistent_cache_min_compile_time_secs=0.0` for all programs.
          Runtime plumbing is available through
