@@ -50,6 +50,8 @@ if str(_REPO_ROOT) not in sys.path:
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
+from benchmarks.validation_ladder_common import load_json
+
 
 PLAN_DOC = "docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md"
 DEFAULT_ARTIFACT_DIR = Path(".artifacts/parity/20260507-boozer-deriv-input-repro-m1")
@@ -132,8 +134,7 @@ def _load_objective_evaluation_events(progress_path: Path) -> list[dict[str, Any
         raise FileNotFoundError(
             f"Candidate source progress JSON not found: {progress_path}"
         )
-    with progress_path.open() as fh:
-        payload = json.load(fh)
+    payload = load_json(progress_path)
     events = payload.get("events", [])
     return [
         dict(event) for event in events if event.get("label") == "objective_evaluation"

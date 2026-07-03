@@ -54,6 +54,36 @@ def _write_case_progress(
     )
 
 
+def _write_case_progress_ndjson(
+    case_dir: Path,
+    output_label: str,
+    progress_events: list[dict[str, object]],
+) -> None:
+    progress_json = (
+        case_dir
+        / "cases"
+        / output_label
+        / "mpol=10-ntor=10-test"
+        / "outer_optimizer_progress.json"
+    )
+    events_path = progress_json.with_name(f"{progress_json.name}.events.ndjson")
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        "".join(f"{json.dumps(event)}\n" for event in progress_events),
+        encoding="utf-8",
+    )
+    _write_json(
+        progress_json,
+        {
+            "current_event": progress_events[-1]["label"],
+            "event_count": len(progress_events),
+            "events_format": "ndjson",
+            "events_path": events_path.name,
+            "events": [],
+        },
+    )
+
+
 def _progress_payload() -> dict[str, object]:
     return {
         "events": [
@@ -143,6 +173,30 @@ def test_matrix_report_summarizes_reference_and_target_progress_files(
         "reference_outputs",
         "target_outputs",
     ]
+
+
+def test_matrix_report_reads_ndjson_progress_sidecar(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    case_dir = _write_case(
+        artifact_dir,
+        "dense_skip_chunk8",
+        exit_code=0,
+        assertion_exit_code=0,
+    )
+    _write_case_progress_ndjson(
+        case_dir,
+        "target_outputs",
+        list(_progress_payload()["events"]),
+    )
+    _write_json(artifact_dir / "matrix_exit_summary.json", {"dense_skip_chunk8": 0})
+
+    report = matrix_report.build_report(artifact_dir)
+
+    assert report["failed_cases"] == []
+    progress = report["cases"][0]["progress"]
+    assert progress["objective_evaluation_count"] == 1
+    assert progress["k1_forward_returned_count"] == 1
+    assert progress["trace_forward_result"] == {"reused": 1, "recomputed": 0}
 
 
 def test_matrix_report_records_failed_and_missing_progress_cases(

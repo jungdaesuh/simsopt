@@ -7,13 +7,15 @@ import argparse
 import json
 from pathlib import Path
 
+from benchmarks.validation_ladder_common import load_json
+
 
 class ProgressAssertionError(AssertionError):
     """Progress telemetry does not satisfy the requested K1 contract."""
 
 
 def load_events(progress_json: Path) -> list[dict[str, object]]:
-    payload = json.loads(progress_json.read_text(encoding="utf-8"))
+    payload = load_json(progress_json)
     if not isinstance(payload, dict):
         raise ProgressAssertionError(f"Progress JSON is not an object: {progress_json}")
     events = payload.get("events")

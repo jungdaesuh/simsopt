@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import sys
 from unittest import mock
 
@@ -10,6 +12,8 @@ import pytest
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
     HIGH_MPOL_OUTER_FTOL_FLOOR,
     _single_stage_hardware_status_progress_fields,
+    build_event_progress_recorder,
+    load_single_stage_objective_evaluation_replay_events,
     parse_args,
     resolve_single_stage_outer_ftol,
     should_evaluate_pending_target_lane_initial_objective,
@@ -129,3 +133,36 @@ def test_reporting_snapshot_diagnostic_rejects_other_skip_modes():
     ):
         with pytest.raises(ValueError, match="cannot be combined"):
             parse_args()
+
+
+def test_event_progress_recorder_uses_ndjson_sidecar(tmp_path: Path):
+    progress_json = tmp_path / "outer_optimizer_progress.json"
+    record_event = build_event_progress_recorder(progress_json)
+
+    for index in range(5):
+        record_event(
+            "objective_evaluation",
+            objective={"value": float(index)},
+            candidate={"dofs": [float(index)]},
+        )
+
+    payload = json.loads(progress_json.read_text(encoding="utf-8"))
+    sidecar_path = tmp_path / payload["events_path"]
+    sidecar_events = [
+        json.loads(line)
+        for line in sidecar_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert payload["events_format"] == "ndjson"
+    assert payload["events"] == []
+    assert payload["event_count"] == 5
+    assert payload["latest_event"]["event_index"] == 4
+    assert [event["event_index"] for event in sidecar_events] == [0, 1, 2, 3, 4]
+    replay_events = load_single_stage_objective_evaluation_replay_events(progress_json)
+    assert [event["candidate"]["dofs"] for event in replay_events] == [
+        [0.0],
+        [1.0],
+        [2.0],
+        [3.0],
+        [4.0],
+    ]

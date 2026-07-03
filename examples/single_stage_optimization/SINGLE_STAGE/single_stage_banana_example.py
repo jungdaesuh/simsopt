@@ -12113,6 +12113,35 @@ def write_json_file(path, payload):
     os.replace(tmp_path, path)
 
 
+def _event_progress_sidecar_path(progress_json_path):
+    return f"{os.fspath(progress_json_path)}.events.ndjson"
+
+
+def _load_event_progress_events(progress_json_path):
+    progress_json_path = os.fspath(progress_json_path)
+    with open(progress_json_path, encoding="utf-8") as infile:
+        payload = json.load(infile)
+    if payload.get("events_format") != "ndjson":
+        return list(payload["events"])
+
+    events_path = payload.get("events_path")
+    if not isinstance(events_path, str) or not events_path:
+        raise ValueError(f"Progress JSON is missing events_path: {progress_json_path}")
+    if not os.path.isabs(events_path):
+        events_path = os.path.join(os.path.dirname(progress_json_path), events_path)
+
+    events = []
+    with open(events_path, encoding="utf-8") as infile:
+        for line_number, line in enumerate(infile, start=1):
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError(
+                    f"Progress event {line_number} is not an object: {events_path}"
+                )
+            events.append(event)
+    return events
+
+
 def build_stage_progress_recorder(path):
     """Build a small JSON progress recorder for long-running staged workflows."""
     completed_stages = []
@@ -12135,26 +12164,44 @@ def build_stage_progress_recorder(path):
 
 
 def build_event_progress_recorder(path):
-    """Build a JSON event recorder that preserves chronological history."""
-    events = []
+    """Build a bounded-cost JSON progress summary plus NDJSON event stream."""
+    path = os.fspath(path)
+    events_path = _event_progress_sidecar_path(path)
+    events_path_label = os.path.basename(events_path)
+    output_dir = os.path.dirname(path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(events_path, "w", encoding="utf-8"):
+        pass
+
+    event_count = 0
     event_lock = Lock()
     started_s = _perf_counter_s()
 
     def record_event(label, **extra):
+        nonlocal event_count
         with event_lock:
             event = {
                 "label": label,
-                "event_index": int(len(events)),
+                "event_index": int(event_count),
                 "event_elapsed_s": float(_perf_counter_s() - started_s),
                 **dict(extra),
             }
-            events.append(event)
+            sanitized_event = sanitize_diagnostic_payload(event)
+            with open(events_path, "a", encoding="utf-8") as outfile:
+                json.dump(sanitized_event, outfile, allow_nan=False)
+                outfile.write("\n")
+            event_count += 1
             write_json_file(
                 path,
                 {
                     "current_event": label,
-                    "event_count": int(len(events)),
-                    "events": list(events),
+                    "event_count": int(event_count),
+                    "events_format": "ndjson",
+                    "events_path": events_path_label,
+                    "events_inline_count": 0,
+                    "events": [],
+                    "latest_event": event,
                 },
             )
 
@@ -13206,10 +13253,10 @@ def summarize_single_stage_iota_penalty_decomposition(
 
 def load_single_stage_objective_evaluation_replay_events(progress_json_path):
     """Load the objective-evaluation events used by the same-candidate replay gate."""
-    with open(progress_json_path) as f:
-        payload = json.load(f)
     return [
-        event for event in payload["events"] if event["label"] == "objective_evaluation"
+        event
+        for event in _load_event_progress_events(progress_json_path)
+        if event["label"] == "objective_evaluation"
     ]
 
 

@@ -821,8 +821,29 @@ def write_json(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
 
 def load_json(path: str | os.PathLike[str]) -> dict[str, Any]:
     """Load a JSON payload."""
-    with Path(path).open("r", encoding="utf-8") as infile:
-        return json.load(infile)
+    source_path = Path(path)
+    with source_path.open("r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    if isinstance(payload, dict) and payload.get("events_format") == "ndjson":
+        events_path = payload.get("events_path")
+        if not isinstance(events_path, str) or not events_path:
+            raise ValueError(f"Progress JSON is missing events_path: {source_path}")
+        sidecar_path = Path(events_path)
+        if not sidecar_path.is_absolute():
+            sidecar_path = source_path.parent / sidecar_path
+        events: list[dict[str, Any]] = []
+        with sidecar_path.open("r", encoding="utf-8") as infile:
+            for line_number, line in enumerate(infile, start=1):
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError(
+                        f"Progress event {line_number} is not an object: "
+                        f"{sidecar_path}"
+                    )
+                events.append(event)
+        payload = dict(payload)
+        payload["events"] = events
+    return payload
 
 
 def _stream_subprocess_pipe(

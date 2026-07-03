@@ -682,7 +682,9 @@ parity/trajectory gates (Phase 8).
          for existing artifact readers, but stop re-sanitizing and rewriting the
          full event list on every event. Regression: a synthetic long event
          stream scales O(N) in writes and the matrix-report/progress readers can
-         consume the new artifact layout.
+         consume the new artifact layout. Implementation and focused regression
+         are in place; keep this open until the remote unit slice and progress
+         artifact-reader gate pass.
    - [ ] Batch scalar progress materialization in
          `_summarize_k1_forward_result_for_progress` and related reporting
          helpers. The current path performs many small `host_array` /
