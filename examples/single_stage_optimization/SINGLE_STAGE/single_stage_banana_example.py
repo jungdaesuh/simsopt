@@ -7752,7 +7752,6 @@ def _build_decomposed_coil_host_value_and_grad(
             evaluation_index=current_evaluation_index,
         )
         forward_result = solved_pair.solve_fn(coil_dofs_device)
-        cache_last_solved_payload(coil_dofs, forward_result)
         success = host_bool(forward_result["success"])
         record_decomposed_event(
             "target_lane_decomposed_k1_forward_returned",

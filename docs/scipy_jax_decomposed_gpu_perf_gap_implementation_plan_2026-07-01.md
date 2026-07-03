@@ -694,6 +694,8 @@ parity/trajectory gates (Phase 8).
          solved payload before K2 and then rebuild it on the success/rejection
          branch. Gate: one authoritative solved-payload assembly per candidate
          while preserving final-sync reuse and primal-failure fallback behavior.
+         Implementation and focused regression are in place; keep this open
+         until the remote unit slice and K1 artifact gate pass.
    - [ ] Compact dense-factor telemetry in progress/reporting JSON. When
          dense-LU or exact-factor comparators are active, record shape, dtype,
          norm, condition/status, and small scalar diagnostics instead of dumping

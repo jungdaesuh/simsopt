@@ -8294,6 +8294,58 @@ class TestTraceableObjective:
             jax.device_get(preserved_solve_result["objective_value"])
         ) == pytest.approx(7.0)
 
+    def test_decomposed_reporting_cache_builds_one_authoritative_payload(self):
+        """Solved-payload assembly waits until K2 value/grad are available."""
+        baseline = np.array([1.0, -2.0])
+        candidate_gradient = jnp.asarray([3.0, -5.0], dtype=jnp.float64)
+        policy_calls = []
+
+        def solve_fn(coil_dofs):
+            arr = jnp.asarray(coil_dofs)
+            return {
+                "success": jnp.asarray(True),
+                "primal_success": jnp.asarray(True),
+                "value": jnp.asarray(19.0, dtype=jnp.float64),
+                "x": arr + 1.0,
+                "iota": jnp.asarray(0.31, dtype=jnp.float64),
+                "G": jnp.asarray(11.0, dtype=jnp.float64),
+                "sdofs": arr,
+                "linear_solve_factors": None,
+                "pre_newton_iter": jnp.asarray(1),
+            }
+
+        def value_grad_from_solved(coil_dofs, solved_x, linear_solve_factors):
+            del coil_dofs, solved_x, linear_solve_factors
+            return jnp.asarray(7.0, dtype=jnp.float64), candidate_gradient
+
+        def solve_result_cache_policy(forward_result):
+            policy_calls.append(forward_result)
+            return True
+
+        pair = TraceableObjectiveSolvedPair(
+            solve_fn=solve_fn,
+            value_grad_from_solved=value_grad_from_solved,
+        )
+        host_fun = single_stage_example._build_decomposed_coil_host_value_and_grad(
+            pair,
+            baseline,
+            solve_result_cache_policy=solve_result_cache_policy,
+        )
+
+        candidate = np.array([0.5, -0.25])
+        host_fun(candidate)
+        solve_result = host_fun.target_lane_solve_result_for_coil_dofs(candidate)
+
+        assert len(policy_calls) == 1
+        assert solve_result is not None
+        assert float(jax.device_get(solve_result["objective_value"])) == pytest.approx(
+            7.0
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(solve_result["objective_grad"])),
+            np.asarray(candidate_gradient),
+        )
+
     def test_decomposed_trace_reuse_hits_through_real_optimizer_to_coil_transform(self):
         """Reuse hits through the SAME optimizer->coil transform the wrapper uses.
 
