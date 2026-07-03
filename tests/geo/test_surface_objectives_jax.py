@@ -6489,7 +6489,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     )
     np.testing.assert_allclose(total_grad, np.asarray([1.0, 2.0], dtype=np.float64))
     assert bool(np.asarray(linear_solve_success))
-    assert vjp_calls["count"] == 3
+    assert vjp_calls["count"] == 2
 
 
 def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(

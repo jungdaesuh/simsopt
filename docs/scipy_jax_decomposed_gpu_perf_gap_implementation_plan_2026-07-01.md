@@ -758,6 +758,12 @@ parity/trajectory gates (Phase 8).
          sweeps into a joint derivative where dependency flags allow it. Gate:
          HLO/op-count or timing evidence shows one backward pass replaces two,
          and term-level gradients remain within the existing parity tolerance.
+         Local implementation note: the fully dependent objective path now uses
+         one explicit two-primal `jax.vjp` seed to compute `dJ_dx` and
+         `direct_grad` together, while the x-only and coil-only dependency
+         branches keep their previous one-sided strict-VJP behavior. Keep this
+         item open until the remote parity/timing gate confirms the compile and
+         memory tradeoff is positive.
    - [x] Preserve the value-returning empty-candidate `cdist` fallback in
          `CurveCurveDistance.shortest_distance` and
          `CurveSurfaceDistance.shortest_distance`. Do **not** replace the empty

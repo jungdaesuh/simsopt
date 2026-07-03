@@ -1310,15 +1310,36 @@ def _traceable_objective_gradient_parts(
             )
         )
 
+    direct_grad = None
     if not depends_on_x_inner:
         dJ_dx = _runtime_zeros_like(solved_x)
         adjoint = _runtime_zeros_like(solved_x)
         linear_solve_success = _runtime_bool(True)
     else:
-        dJ_dx = _strict_scalar_grad(
-            lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
-            solved_x,
-        )
+        if depends_on_coil_dofs:
+            def _evaluate_objective_of_x_and_coils(
+                current_x_inner,
+                current_coil_dofs,
+            ):
+                return _evaluate_objective(
+                    current_x_inner,
+                    current_coil_dofs,
+                    coil_set_spec_from_dofs(current_coil_dofs),
+                )
+
+            objective_value, pullback = jax.vjp(
+                _evaluate_objective_of_x_and_coils,
+                solved_x,
+                coil_dofs,
+            )
+            dJ_dx, direct_grad = pullback(
+                _explicit_scalar_pullback_seed(objective_value)
+            )
+        else:
+            dJ_dx = _strict_scalar_grad(
+                lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
+                solved_x,
+            )
 
         def negligible_adjoint_rhs(_):
             return _runtime_zeros_like(solved_x), _runtime_bool(True)
@@ -1353,7 +1374,7 @@ def _traceable_objective_gradient_parts(
         # these constant-in-coils scalars under strict transfer guard because
         # null tangent paths instantiate host scalar zeros.
         direct_grad = _runtime_zeros_like(coil_dofs)
-    else:
+    elif direct_grad is None:
         direct_grad = _strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)
 
     if not depends_on_x_inner:
@@ -4309,6 +4330,7 @@ from .surface_objectives import (
     _curve_stacks_from_grouped_spec,
     _curve_surface_point_pair_batches_from_stacks,
     _evaluate_traceable_weighted_single_stage_outer_term,
+    _explicit_scalar_pullback_seed,
     _resolved_boozer_solved_runtime_state,
     _runtime_bool,
     _runtime_float64_array,
