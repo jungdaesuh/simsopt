@@ -665,7 +665,8 @@ parity/trajectory gates (Phase 8).
          a near-converged residual still gets the tight cap. Remote gate: K1
          matvec counts drop on early Newton iterations while final Boozer
          residual, final iota, final volume, and objective remain within the
-         existing tolerances.
+         existing tolerances. Implementation and focused regression are in place;
+         keep this open until the remote unit slice and K1 artifact gate pass.
    - [ ] Pin accepted solved states in the decomposed solve cache. Replace or
          extend the single-entry `last_solved_forward_result` cache with a small
          exact-DOF-keyed cache that preserves the last accepted/final solve even

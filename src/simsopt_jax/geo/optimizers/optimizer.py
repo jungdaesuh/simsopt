@@ -375,6 +375,7 @@ _EISENSTAT_WALKER_GAMMA = 0.9
 # Eisenstat & Walker (1996) eq. (2.6).
 _EISENSTAT_WALKER_MIN_ETA = 1.0e-12
 _EISENSTAT_WALKER_MAX_ETA = 0.5
+_EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR = 100.0
 _NEWTON_BACKTRACKING_MAX_STEPS = 8
 _HAGER_HIGHAM_CONDITION_ITERATIONS = 5
 _LINEAR_SOLVE_ITERATIONS_UNKNOWN = -1
@@ -4527,6 +4528,31 @@ def _linear_solve_status(solution, residual, rhs, *, tol, iterations):
     )
 
 
+def _linear_solve_status_with_relative_tolerance(
+    solution,
+    residual,
+    rhs,
+    *,
+    tolerance,
+    iterations,
+):
+    residual_norm = jnp.linalg.norm(residual)
+    residual_relative = residual_norm / _linear_solve_residual_scale(rhs)
+    tolerance_value = _optimizer_scalar(tolerance, dtype=rhs.dtype)
+    success = (
+        _linear_solve_finite(solution, residual)
+        & jnp.isfinite(residual_norm)
+        & jnp.isfinite(residual_relative)
+        & (residual_relative <= tolerance_value)
+    )
+    return _LinearSolveStatus(
+        success=success,
+        residual=residual_norm,
+        residual_relative=residual_relative,
+        iterations=_linear_solve_status_iterations(iterations),
+    )
+
+
 def _dense_linear_solve_status(matvec, solution, rhs, *, tol):
     residual = rhs - matvec(solution)
     return _linear_solve_status(
@@ -4596,9 +4622,9 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     γ=0.9, α=2. The returned value is the **relative** linear residual
     tolerance (`||A·dx + r_k|| ≤ η · ||r_k||`) consumed directly as
     `tol=` by `jax.scipy.sparse.linalg.gmres`, which interprets `tol` as
-    relative to `||rhs||`. A fixed strict cap from the legacy contract
-    bounds the value from above so the linear solve never undercuts the
-    Newton convergence target.
+    relative to `||rhs||`. The legacy strict cap applies only near the
+    Newton convergence target; away from the target, the E-W forcing term
+    is allowed to choose loose early linear solves.
     """
     dtype = norm.dtype
     tol_value = _optimizer_scalar(tol, dtype=dtype)
@@ -4619,9 +4645,22 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     ratio = norm / denominator
     eta = gamma * (ratio * ratio)
     eta = jnp.clip(eta, eta_min, eta_max)
+    near_convergence = (
+        norm
+        <= _device_scalar(
+            _EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR,
+            dtype=dtype,
+        )
+        * tol_value
+    )
+    capped_eta = jnp.where(
+        near_convergence,
+        jnp.minimum(strict_cap, eta),
+        eta,
+    )
     return jnp.maximum(
         _device_scalar(1e-14, dtype=dtype),
-        jnp.minimum(strict_cap, eta),
+        capped_eta,
     )
 
 
@@ -5164,6 +5203,17 @@ def _solve_square_array_system_operator_only(
         residual=jnp.max(column_statuses.residual),
         residual_relative=jnp.max(column_statuses.residual_relative),
         iterations=jnp.max(column_statuses.iterations),
+    )
+
+
+def _solve_traceable_newton_operator_gmres_with_status(matvec, rhs, *, tol):
+    solution, residual, info = _gmres_solve_array_system(matvec, rhs, tol=tol)
+    return solution, _linear_solve_status_with_relative_tolerance(
+        solution,
+        residual,
+        rhs,
+        tolerance=tol,
+        iterations=_linear_solve_iteration_count(info),
     )
 
 
@@ -5788,7 +5838,7 @@ def _build_traceable_newton_polish_runner(
                 if traceable_dense_lu_enabled
                 else _operator_gmres_matvec_budget(
                     hessian_size,
-                    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+                    max_refinement_steps=0,
                 )
             )
         )
@@ -5834,7 +5884,7 @@ def _build_traceable_newton_polish_runner(
                     tol=linear_tol,
                 )
             else:
-                dx, linear_status = _solve_square_array_system_operator_only(
+                dx, linear_status = _solve_traceable_newton_operator_gmres_with_status(
                     matvec,
                     state["grad"],
                     tol=linear_tol,
@@ -6384,7 +6434,6 @@ def _build_traceable_exact_newton_runner(
                 state["residual"],
                 tol=linear_tol_iteration,
             )
-            linear_residual_norm = jnp.linalg.norm(linear_residual)
             linear_residual_rel = _relative_residual_norm(
                 linear_residual,
                 state["residual"],
@@ -6421,7 +6470,7 @@ def _build_traceable_exact_newton_runner(
 
             dx, correction_rel = lax.cond(
                 jnp.all(jnp.isfinite(dx))
-                & (linear_residual_norm > linear_tol_iteration),
+                & (linear_residual_rel > linear_tol_iteration),
                 add_correction,
                 lambda current_dx: (
                     current_dx,

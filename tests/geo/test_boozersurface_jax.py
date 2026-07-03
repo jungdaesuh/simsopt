@@ -2603,17 +2603,57 @@ class TestOptimizerAdapter:
             )
         )
 
-    def test_eisenstat_walker_tolerance_preserves_strict_newton_cap(self):
-        """Phase 5 forcing must not loosen the established Newton solve cap."""
+    def test_eisenstat_walker_tolerance_is_loose_away_from_newton_target(self):
+        """Early Newton iterations should use the E-W forcing term."""
         norm = jnp.asarray(8.0, dtype=jnp.float64)
 
         linear_tol = _opt._eisenstat_walker_choice2_tolerance(
             norm,
             norm,
-            tol=1.0e-14,
+            tol=1.0e-11,
         )
 
-        assert float(np.asarray(linear_tol)) == pytest.approx(1.0e-14)
+        assert float(np.asarray(linear_tol)) == pytest.approx(
+            _opt._EISENSTAT_WALKER_MAX_ETA
+        )
+
+    def test_eisenstat_walker_tolerance_preserves_strict_cap_near_target(self):
+        """Near the Newton target, the legacy strict cap still applies."""
+        norm = jnp.asarray(5.0e-10, dtype=jnp.float64)
+
+        linear_tol = _opt._eisenstat_walker_choice2_tolerance(
+            norm,
+            norm,
+            tol=1.0e-11,
+        )
+
+        assert float(np.asarray(linear_tol)) == pytest.approx(1.0e-12)
+
+    def test_traceable_newton_gmres_uses_eisenstat_tolerance_without_policy_cap(
+        self, monkeypatch
+    ):
+        """Traceable Newton should pass the E-W tolerance directly to GMRES."""
+        calls = []
+
+        def fake_run_operator_gmres(matvec, rhs, *, tol):
+            calls.append(float(np.asarray(tol)))
+            solution = jnp.asarray([0.75, 1.0], dtype=rhs.dtype)
+            return solution, 0
+
+        monkeypatch.setattr(_opt, "_run_operator_gmres", fake_run_operator_gmres)
+        rhs = jnp.ones((2,), dtype=jnp.float64)
+
+        solution, status = _opt._solve_traceable_newton_operator_gmres_with_status(
+            lambda value: value,
+            rhs,
+            tol=jnp.asarray(_opt._EISENSTAT_WALKER_MAX_ETA, dtype=jnp.float64),
+        )
+
+        assert len(calls) == 1
+        assert calls[0] == pytest.approx(_opt._EISENSTAT_WALKER_MAX_ETA)
+        np.testing.assert_allclose(np.asarray(solution), np.asarray([0.75, 1.0]))
+        assert float(np.asarray(status.residual_relative)) > 1.0e-10
+        assert bool(np.asarray(status.success)) is True
 
     def test_newton_exact_traceable_backtracks_oversized_newton_step(self):
         """Phase 5 exact traceable Newton backtracks residual-increasing steps."""
