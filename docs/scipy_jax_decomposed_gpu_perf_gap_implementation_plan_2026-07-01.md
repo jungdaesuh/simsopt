@@ -723,12 +723,15 @@ parity/trajectory gates (Phase 8).
          sweeps into a joint derivative where dependency flags allow it. Gate:
          HLO/op-count or timing evidence shows one backward pass replaces two,
          and term-level gradients remain within the existing parity tolerance.
-   - [ ] Restore the `minimum_distance` floor on the inherited empty-candidate
-         `cdist` fallback in `CurveCurveDistance.shortest_distance` and
-         `CurveSurfaceDistance.shortest_distance`. This is a reference/setup
-         guard rather than a target-lane speed lever; gate with focused tests for
-         candidate and no-candidate cases so the fallback cannot become a latent
-         full-distance cliff.
+   - [x] Preserve the value-returning empty-candidate `cdist` fallback in
+         `CurveCurveDistance.shortest_distance` and
+         `CurveSurfaceDistance.shortest_distance`. Do **not** replace the empty
+         fallback with `minimum_distance`: the exact clearance margin feeds
+         hardware/status margins. Current code already hoists sampled point
+         clouds before the brute-force fallback, applies `downsample` on the
+         curve-surface path, and `tests/geo/test_curve_objectives.py` covers
+         empty- and non-empty-candidate brute-force equality. No target-lane
+         code change is required for this item.
    - [ ] Add objective-level rematerialization for HVP/dense-assembly paths
          where the residual/geometry tape dominates live memory. The existing
          leaf Biot-Savart kernel is already checkpointed; this task is about the
@@ -1006,8 +1009,8 @@ parity/trajectory gates (Phase 8).
       solved-payload assembly, compact dense-factor telemetry, persistent-cache
       threshold A/B, duplicate setup-gradient construction, seeded
       baseline-adjoint setup, reporting recomputation, joint-gradient
-      investigation, inherited distance-floor fallback, current-incumbent
-      predictor A/B, and remat/chunk A/B.
+      investigation, value-preserving distance fallback contract,
+      current-incumbent predictor A/B, and remat/chunk A/B.
 - [ ] Clean no-subtimer benchmark artifacts exist for the accepted production
       path and separate cold compile/setup from steady-state per-eval timing.
 - [ ] Phase 8 behavior-changing solver work remains clearly marked
