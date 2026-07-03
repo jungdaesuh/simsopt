@@ -1367,6 +1367,95 @@ def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
     }
 
 
+def test_traceable_solved_pair_reuses_compiled_bundle_adjoint_kernel(
+    monkeypatch,
+) -> None:
+    observed_jit_names: list[str] = []
+    gradient_calls: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+
+    def recording_jit(fun=None, **_kwargs):
+        def wrapped(inner):
+            observed_jit_names.append(inner.__name__)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    def reject_standalone_builder(*_args, **_kwargs):
+        raise AssertionError(
+            "decomposed solved-pair must reuse the optimizer compiled bundle"
+        )
+
+    def fake_total_objective(solved_x, coil_dofs, coil_set_spec, objective_kwargs):
+        assert coil_set_spec[0] == "coil-set"
+        assert objective_kwargs["sentinel"] == 23
+        return jnp.sum(solved_x) + jnp.sum(coil_dofs)
+
+    def compiled_total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
+        gradient_calls.append((tuple(coil_dofs.shape), tuple(solved_x.shape)))
+        assert solved_linear_solve_factors == "factors"
+        return 4.0 * coil_dofs, jnp.asarray(True, dtype=bool)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module.jax,
+        "jit",
+        recording_jit,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_build_traceable_solved_state_value_and_grad_from_state",
+        reject_standalone_builder,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_evaluate_traceable_total_objective",
+        fake_total_objective,
+    )
+
+    state = {
+        **_minimal_traceable_objective_state(),
+        "objective_kwargs": {"sentinel": 23},
+        "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
+    }
+    compiled_bundle = {
+        "state": state,
+        "compiled_forward_result_for": lambda coil_dofs: {
+            "value": jnp.sum(coil_dofs),
+            "x": jnp.asarray([3.0], dtype=jnp.float64),
+            "linear_solve_factors": "factors",
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+        },
+        "compiled_total_gradient_for": compiled_total_gradient_for,
+    }
+    runtime_entry = {
+        "optimizer_compiled_bundle": compiled_bundle,
+        "optimizer_solved_pair": None,
+    }
+
+    pair = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_solved_pair(
+        runtime_entry,
+        object(),
+    )
+    cached_pair = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_solved_pair(
+        runtime_entry,
+        object(),
+    )
+    value, grad = pair.value_grad_from_solved(
+        jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        jnp.asarray([4.0], dtype=jnp.float64),
+        "factors",
+    )
+
+    assert pair is cached_pair
+    assert pair.solve_fn is compiled_bundle["compiled_forward_result_for"]
+    assert observed_jit_names == ["_solved_state_value_and_grad_for"]
+    assert gradient_calls == [((2,), (1,))]
+    np.testing.assert_allclose(np.asarray(value), np.asarray(7.0))
+    np.testing.assert_allclose(np.asarray(grad), np.asarray([4.0, 8.0]))
+
+
 def test_solved_pair_matches_fused_value_and_grad():
     """The decomposed (solve_fn, value_grad_from_solved) pair is a faithful
     numerical split of the fused make_traceable_objective_value_and_grad.

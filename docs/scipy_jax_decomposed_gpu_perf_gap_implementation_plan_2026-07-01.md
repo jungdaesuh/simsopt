@@ -721,7 +721,13 @@ parity/trajectory gates (Phase 8).
          and an optimizer-only bundle that each construct `_forward_result_for`
          and `_total_gradient_for`; `general_only_forward=True` does not by
          itself suppress gradient construction. Gate: fewer cold compile poles
-         without changing value/gradient contracts.
+         without changing value/gradient contracts. Local implementation note:
+         the decomposed solved-pair now builds `value_grad_from_solved` from the
+         optimizer compiled bundle so it reuses that bundle's
+         `compiled_total_gradient_for` instead of constructing a separate
+         solved-state adjoint kernel. A focused regression pins the route; keep
+         this item open until clean remote artifacts show the expected compile
+         pole reduction.
    - [ ] Remove the eager seeded baseline adjoint when it is not needed for the
          active optimization path, or make it share the same compiled graph used
          by the fused value-and-grad path. Current setup executes

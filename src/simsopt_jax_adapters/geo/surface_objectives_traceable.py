@@ -1822,6 +1822,40 @@ def _build_traceable_solved_state_value_and_grad_from_state(booz_jax, state):
     return jax.jit(_solved_state_value_and_grad_for)
 
 
+def _build_traceable_solved_state_value_and_grad_from_compiled_bundle(compiled_bundle):
+    """Build solved-state value/grad while reusing the bundle's adjoint kernel."""
+    state = compiled_bundle["state"]
+    objective_kwargs = state["objective_kwargs"]
+    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+    compiled_total_gradient_for = compiled_bundle["compiled_total_gradient_for"]
+
+    def _solved_state_value_and_grad_for(
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+    ):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        solved_x = _as_jax_float64(solved_x)
+        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+        value = _evaluate_traceable_total_objective(
+            solved_x,
+            coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        )
+        grad, linear_solve_success = compiled_total_gradient_for(
+            coil_dofs,
+            solved_x,
+            _traceable_runtime_deviceify_tree(solved_linear_solve_factors),
+        )
+        return value, _traceable_adjoint_gradient_or_nan(
+            grad,
+            linear_solve_success,
+        )
+
+    return jax.jit(_solved_state_value_and_grad_for)
+
+
 def _traceable_runtime_option_signature(booz_jax, state):
     """Capture the solver options that affect traceable runtime compilation."""
     option_state = {
@@ -2149,9 +2183,8 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
         optimizer_solved_pair = TraceableObjectiveSolvedPair(
             solve_fn=optimizer_compiled_bundle["compiled_forward_result_for"],
             value_grad_from_solved=(
-                _build_traceable_solved_state_value_and_grad_from_state(
-                    booz_jax,
-                    optimizer_compiled_bundle["state"],
+                _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
+                    optimizer_compiled_bundle
                 )
             ),
         )
