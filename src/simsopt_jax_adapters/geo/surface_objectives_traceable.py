@@ -9,6 +9,7 @@ compatibility with existing callers.
 
 from dataclasses import dataclass
 from functools import partial
+from threading import Lock
 from typing import NamedTuple
 
 import jax
@@ -2355,47 +2356,59 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
             baseline_coil_dofs=baseline_coil_dofs,
             baseline_return=baseline_value,
         )
-        baseline_coil_dofs_jax = _traceable_runtime_deviceify_tree(
-            state["baseline_coil_dofs"]
-        )
-        baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
-        baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
-            state["baseline_linear_solve_factors"]
-        )
-        baseline_value_jax = _traceable_runtime_deviceify_tree(state["baseline_value"])
-        with jax.transfer_guard_host_to_device("allow"):
-            baseline_gradient, baseline_linear_solve_success = (
-                _traceable_total_gradient_with_status(
-                    booz_jax,
-                    state["coil_set_spec_from_dofs"],
-                    coil_dofs=baseline_coil_dofs_jax,
-                    solved_x=baseline_x,
-                    solved_linear_solve_factors=baseline_linear_solve_factors,
-                    linearization_kind=state["linearization_kind"],
-                    linear_solve_tol=state["linear_solve_tol"],
-                    linear_solve_stab=state["linear_solve_stab"],
-                    objective_kwargs=state["objective_kwargs"],
+        baseline_value_and_grad = None
+        baseline_value_and_grad_lock = Lock()
+
+        def compute_baseline_value_and_grad():
+            baseline_coil_dofs_jax = _traceable_runtime_deviceify_tree(
+                state["baseline_coil_dofs"]
+            )
+            baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
+            baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
+                state["baseline_linear_solve_factors"]
+            )
+            with jax.transfer_guard_host_to_device("allow"):
+                baseline_gradient, baseline_linear_solve_success = (
+                    _traceable_total_gradient_with_status(
+                        booz_jax,
+                        state["coil_set_spec_from_dofs"],
+                        coil_dofs=baseline_coil_dofs_jax,
+                        solved_x=baseline_x,
+                        solved_linear_solve_factors=baseline_linear_solve_factors,
+                        linearization_kind=state["linearization_kind"],
+                        linear_solve_tol=state["linear_solve_tol"],
+                        linear_solve_stab=state["linear_solve_stab"],
+                        objective_kwargs=state["objective_kwargs"],
+                    )
                 )
-            )
-        baseline_gradient = _traceable_adjoint_gradient_or_nan(
-            baseline_gradient,
-            baseline_linear_solve_success,
-        )
-        with jax.transfer_guard_device_to_host("allow"):
-            baseline_gradient = _host_array(
+            baseline_gradient = _traceable_adjoint_gradient_or_nan(
                 baseline_gradient,
-                dtype=np.float64,
+                baseline_linear_solve_success,
             )
-            baseline_value_for_value_and_grad = float(
-                _host_scalar(baseline_value_jax, dtype=np.float64)
+            with jax.transfer_guard_device_to_host("allow"):
+                return (
+                    baseline_value,
+                    _host_array(
+                        baseline_gradient,
+                        dtype=np.float64,
+                    ),
+                )
+
+        def baseline_value_and_grad_return():
+            nonlocal baseline_value_and_grad
+            if baseline_value_and_grad is None:
+                with baseline_value_and_grad_lock:
+                    if baseline_value_and_grad is None:
+                        baseline_value_and_grad = compute_baseline_value_and_grad()
+            baseline_value_for_value_and_grad, baseline_gradient = (
+                baseline_value_and_grad
             )
+            return baseline_value_for_value_and_grad, baseline_gradient.copy()
+
         runtime_entry["host_value_and_grad"] = _make_traceable_host_value_and_grad(
             compiled_bundle["compiled_value_and_grad_for"],
             baseline_coil_dofs=baseline_coil_dofs,
-            baseline_return=lambda: (
-                baseline_value_for_value_and_grad,
-                baseline_gradient.copy(),
-            ),
+            baseline_return=baseline_value_and_grad_return,
         )
         runtime_entry["host_reporting_metrics"] = (
             _make_traceable_lazy_host_reporting_metrics(runtime_entry)

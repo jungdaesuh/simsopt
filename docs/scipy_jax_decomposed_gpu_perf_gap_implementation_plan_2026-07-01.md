@@ -738,8 +738,14 @@ parity/trajectory gates (Phase 8).
          active optimization path, or make it share the same compiled graph used
          by the fused value-and-grad path. Current setup executes
          `compiled_total_gradient_for` at the baseline state before the optimizer
-         needs a candidate gradient. Gate: seeded setup wall drops, and rejected
-         primal-failure fallback still returns the validated baseline gradient.
+         needs a candidate gradient. Contract note: the public seeded optimizer
+         helper still returns a concrete `(value, grad)` tuple and therefore
+         remains eager; host-wrapper baseline peels now defer their baseline
+         adjoint until the exact-baseline `host_value_and_grad` path is actually
+         called, and memoize the host result while returning a fresh gradient
+         copy. Gate: seeded setup wall drops where the public seed is not needed,
+         and rejected primal-failure fallback still returns the validated
+         baseline gradient.
    - [ ] Carry reporting term values as aux data where possible instead of
          recomputing all outer terms and an extra full-surface Biot-Savart in the
          reporting graph. Gate: final reporting uses the accepted solved state,

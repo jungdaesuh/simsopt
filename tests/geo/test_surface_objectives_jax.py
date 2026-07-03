@@ -6085,13 +6085,19 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         "host_reporting_metrics": None,
     }
 
+    baseline_gradient_calls = []
+
+    def baseline_gradient_with_status(*_args, **_kwargs):
+        baseline_gradient_calls.append(True)
+        return (
+            jnp.asarray([0.5, -0.75], dtype=jnp.float64),
+            jnp.asarray(True, dtype=bool),
+        )
+
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
-        lambda *_args, **_kwargs: (
-            jnp.asarray([0.5, -0.75], dtype=jnp.float64),
-            jnp.asarray(True, dtype=bool),
-        ),
+        baseline_gradient_with_status,
     )
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
@@ -6131,15 +6137,19 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         runtime_entry,
         object(),
     )
+    assert baseline_gradient_calls == []
 
     assert runtime_entry["host_objective"](baseline_coil_dofs.copy()) == pytest.approx(
         1.25
     )
+    assert baseline_gradient_calls == []
     value, grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.tolist())
+    assert baseline_gradient_calls == [True]
     assert value == pytest.approx(1.25)
     np.testing.assert_allclose(grad, np.asarray([0.5, -0.75], dtype=np.float64))
     grad[0] = 99.0
     _, second_grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.copy())
+    assert baseline_gradient_calls == [True]
     np.testing.assert_allclose(second_grad, np.asarray([0.5, -0.75], dtype=np.float64))
     assert runtime_entry["host_reporting_metrics"](
         baseline_coil_dofs.copy(),
@@ -6208,21 +6218,29 @@ def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
         "host_reporting_metrics": None,
     }
 
+    baseline_gradient_calls = []
+
+    def failed_baseline_gradient_with_status(*_args, **_kwargs):
+        baseline_gradient_calls.append(True)
+        return (
+            jnp.asarray(failed_gradient, dtype=jnp.float64),
+            jnp.asarray(False, dtype=bool),
+        )
+
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
         "_traceable_total_gradient_with_status",
-        lambda *_args, **_kwargs: (
-            jnp.asarray(failed_gradient, dtype=jnp.float64),
-            jnp.asarray(False, dtype=bool),
-        ),
+        failed_baseline_gradient_with_status,
     )
 
     surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_host_wrappers(
         runtime_entry,
         object(),
     )
+    assert baseline_gradient_calls == []
 
     value, grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.copy())
+    assert baseline_gradient_calls == [True]
     _assert_primal_value_with_nonfinite_gradient(value, grad, 1.25)
 
 
