@@ -7,11 +7,16 @@ from pathlib import Path
 import sys
 from unittest import mock
 
+import numpy as np
 import pytest
 
+from examples.single_stage_optimization.SINGLE_STAGE import (
+    single_stage_banana_example as single_stage_example,
+)
 from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
     HIGH_MPOL_OUTER_FTOL_FLOOR,
     _single_stage_hardware_status_progress_fields,
+    _summarize_k1_forward_result_for_progress,
     build_event_progress_recorder,
     load_single_stage_objective_evaluation_replay_events,
     parse_args,
@@ -166,3 +171,49 @@ def test_event_progress_recorder_uses_ndjson_sidecar(tmp_path: Path):
         [3.0],
         [4.0],
     ]
+
+
+def test_k1_progress_summary_batches_scalar_materialization(monkeypatch):
+    calls = []
+
+    def fake_device_get(value):
+        calls.append(value)
+        return value
+
+    monkeypatch.setattr(single_stage_example.jax, "device_get", fake_device_get)
+
+    fields = _summarize_k1_forward_result_for_progress(
+        {
+            "primal_success": True,
+            "primal_success_present": True,
+            "newton_iter": 3,
+            "newton_iter_present": True,
+            "final_gradient_norm": np.inf,
+            "final_gradient_norm_present": True,
+        }
+    )
+
+    assert len(calls) == 1
+    assert set(calls[0]) == {
+        "primal_success",
+        "primal_success_present",
+        "newton_iter",
+        "newton_iter_present",
+        "final_gradient_norm",
+        "final_gradient_norm_present",
+    }
+    assert fields["primal_success"] is True
+    assert fields["newton_iter"] == 3
+    assert fields["final_gradient_norm_finite"] is False
+    assert fields["final_gradient_norm_classification"] == "+inf"
+
+
+def test_k1_progress_summary_accepts_sparse_absent_optional_fields():
+    fields = _summarize_k1_forward_result_for_progress(
+        {
+            "newton_matvec_counter_token_present": False,
+            "newton_attempted_iterations_present": False,
+        }
+    )
+
+    assert fields == {}

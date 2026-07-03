@@ -690,7 +690,9 @@ parity/trajectory gates (Phase 8).
          helpers. The current path performs many small `host_array` /
          `jax.device_get` transfers per evaluation. Gate: one batched host
          materialization or a reduced transfer count, identical progress fields,
-         and no transfer-guard violations.
+         and no transfer-guard violations. Implementation and focused regression
+         are in place for the K1 forward-result progress summarizer; keep this
+         open until remote transfer-count and artifact-reader gates pass.
    - [ ] Avoid duplicate `cache_last_solved_payload` work inside one objective
          evaluation. The current decomposed helper can build and store the
          solved payload before K2 and then rebuild it on the success/rejection

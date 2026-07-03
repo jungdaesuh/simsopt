@@ -610,15 +610,8 @@ _K1_FORWARD_SCALAR_PROGRESS_FIELDS = (
 )
 
 
-def _progress_field_present(forward_result, key):
-    present_key = f"{key}_present"
-    if present_key not in forward_result:
-        return key in forward_result
-    return host_bool(forward_result[present_key])
-
-
-def _host_scalar_progress_value(value):
-    host = np.asarray(host_array(value))
+def _host_scalar_progress_value_from_host(value):
+    host = np.asarray(value)
     if host.shape != ():
         return None, None
     scalar = host.item()
@@ -639,19 +632,67 @@ def _host_scalar_progress_value(value):
     return str(scalar), None
 
 
-def _traceable_newton_matvec_progress_fields(forward_result):
-    if not _progress_field_present(forward_result, "newton_matvec_counter_token"):
+def _host_scalar_progress_value(value):
+    return _host_scalar_progress_value_from_host(host_array(value))
+
+
+def _k1_progress_value_keys(forward_result):
+    keys = []
+
+    def add_key(key):
+        if key in forward_result and forward_result[key] is not None:
+            keys.append(key)
+        present_key = f"{key}_present"
+        if present_key in forward_result:
+            keys.append(present_key)
+
+    for key in _K1_FORWARD_BOOL_PROGRESS_FIELDS:
+        add_key(key)
+    for code_key in _K1_FORWARD_CODE_PROGRESS_FIELDS.values():
+        add_key(code_key)
+    for key in _K1_FORWARD_SCALAR_PROGRESS_FIELDS:
+        add_key(key)
+    add_key("newton_matvec_counter_token")
+    return keys
+
+
+def _host_k1_progress_values(forward_result):
+    values = {
+        key: forward_result[key]
+        for key in _k1_progress_value_keys(forward_result)
+    }
+    if not values:
         return {}
-    token_value, _classification = _host_scalar_progress_value(
-        forward_result["newton_matvec_counter_token"]
+    with jax.transfer_guard_device_to_host("allow"):
+        return jax.device_get(values)
+
+
+def _progress_field_present_from_host(forward_result, host_values, key):
+    present_key = f"{key}_present"
+    if present_key not in forward_result:
+        return key in forward_result
+    return bool(np.asarray(host_values[present_key]).reshape(()).item())
+
+
+def _traceable_newton_matvec_progress_fields(forward_result, host_values=None):
+    if host_values is None:
+        host_values = _host_k1_progress_values(forward_result)
+    if not _progress_field_present_from_host(
+        forward_result,
+        host_values,
+        "newton_matvec_counter_token",
+    ):
+        return {}
+    token_value, _classification = _host_scalar_progress_value_from_host(
+        host_values["newton_matvec_counter_token"]
     )
     if token_value is None:
         return {}
     counts = traceable_newton_matvec_counts_from_token(int(token_value))
     if counts is None:
         return {}
-    attempted_value, _classification = _host_scalar_progress_value(
-        forward_result["newton_attempted_iterations"]
+    attempted_value, _classification = _host_scalar_progress_value_from_host(
+        host_values["newton_attempted_iterations"]
     )
     if attempted_value is None:
         return {}
@@ -678,13 +719,14 @@ def _traceable_newton_matvec_progress_fields(forward_result):
 def _summarize_k1_forward_result_for_progress(forward_result):
     """Return bounded scalar metadata for K1 progress events."""
     fields = {}
+    host_values = _host_k1_progress_values(forward_result)
     for key in _K1_FORWARD_BOOL_PROGRESS_FIELDS:
         if (
             key in forward_result
             and forward_result[key] is not None
-            and _progress_field_present(forward_result, key)
+            and _progress_field_present_from_host(forward_result, host_values, key)
         ):
-            fields[key] = bool(host_bool(forward_result[key]))
+            fields[key] = bool(np.asarray(host_values[key]).reshape(()).item())
     for key in _K1_FORWARD_STRING_PROGRESS_FIELDS:
         if key in forward_result and forward_result[key] is not None:
             fields[key] = str(forward_result[key])
@@ -694,10 +736,14 @@ def _summarize_k1_forward_result_for_progress(forward_result):
         if (
             code_key in forward_result
             and forward_result[code_key] is not None
-            and _progress_field_present(forward_result, code_key)
+            and _progress_field_present_from_host(
+                forward_result,
+                host_values,
+                code_key,
+            )
         ):
-            scalar, classification = _host_scalar_progress_value(
-                forward_result[code_key]
+            scalar, classification = _host_scalar_progress_value_from_host(
+                host_values[code_key]
             )
             if classification is None and scalar is not None:
                 label = _TRACEABLE_FORWARD_METADATA_LABELS[key].get(int(scalar))
@@ -707,15 +753,17 @@ def _summarize_k1_forward_result_for_progress(forward_result):
         if (
             key in forward_result
             and forward_result[key] is not None
-            and _progress_field_present(forward_result, key)
+            and _progress_field_present_from_host(forward_result, host_values, key)
         ):
-            scalar, classification = _host_scalar_progress_value(forward_result[key])
+            scalar, classification = _host_scalar_progress_value_from_host(
+                host_values[key]
+            )
             if scalar is not None:
                 fields[key] = scalar
             elif classification is not None:
                 fields[f"{key}_finite"] = False
                 fields[f"{key}_classification"] = classification
-    fields.update(_traceable_newton_matvec_progress_fields(forward_result))
+    fields.update(_traceable_newton_matvec_progress_fields(forward_result, host_values))
     return fields
 
 
