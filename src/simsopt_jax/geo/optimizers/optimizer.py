@@ -389,6 +389,10 @@ _HVP_OBJECTIVE_REMAT_ENV = "SIMSOPT_HVP_OBJECTIVE_REMAT"
 _HVP_OBJECTIVE_REMAT = os.environ.get(
     _HVP_OBJECTIVE_REMAT_ENV, "0"
 ).strip().lower() not in ("", "0", "false", "off", "no")
+_HVP_OBJECTIVE_REMAT_POLICY_ENV = "SIMSOPT_HVP_OBJECTIVE_REMAT_POLICY"
+_HVP_OBJECTIVE_REMAT_POLICY = os.environ.get(
+    _HVP_OBJECTIVE_REMAT_POLICY_ENV, "default"
+).strip().lower().replace("-", "_")
 _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK = ContextVar(
     "simsopt_target_optimizer_diagnostic_event_callback",
     default=None,
@@ -3820,9 +3824,30 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
     return jnp.swapaxes(cols, 0, 1)
 
 
+def _checkpoint_hvp_objective(fn):
+    """Apply the opt-in HVP objective remat policy for dense-operator A/B runs."""
+    if not _HVP_OBJECTIVE_REMAT:
+        return fn
+    if _HVP_OBJECTIVE_REMAT_POLICY in ("", "default"):
+        return jax.checkpoint(fn)
+    if _HVP_OBJECTIVE_REMAT_POLICY in (
+        "dots",
+        "dots_with_no_batch_dims_saveable",
+    ):
+        return jax.checkpoint(
+            fn,
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable,
+        )
+    raise ValueError(
+        f"{_HVP_OBJECTIVE_REMAT_POLICY_ENV} must be 'default' or "
+        f"'dots_with_no_batch_dims_saveable'; got "
+        f"{_HVP_OBJECTIVE_REMAT_POLICY!r}."
+    )
+
+
 def _hessian_vector_product_fn(objective_fn):
     def build_compiled(fn):
-        objective_for_hvp = jax.checkpoint(fn) if _HVP_OBJECTIVE_REMAT else fn
+        objective_for_hvp = _checkpoint_hvp_objective(fn)
         grad_fn = jax.grad(objective_for_hvp, argnums=0)
 
         def hvp(x, v, *fn_args):

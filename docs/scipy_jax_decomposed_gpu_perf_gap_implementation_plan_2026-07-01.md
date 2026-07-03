@@ -783,8 +783,10 @@ parity/trajectory gates (Phase 8).
          axis alongside on/off; the leaf Biot-Savart kernel comment already
          anticipates policy selection. Local implementation note: the scalar
          objective feeding `_hessian_vector_product_fn` can now be wrapped with
-         `jax.checkpoint` via `SIMSOPT_HVP_OBJECTIVE_REMAT=1`, default-off until
-         the clean remote memory/timing gate proves the remat tradeoff positive.
+         `jax.checkpoint` via `SIMSOPT_HVP_OBJECTIVE_REMAT=1`, with
+         `SIMSOPT_HVP_OBJECTIVE_REMAT_POLICY` selecting the default or
+         dot-saveable policy, default-off until the clean remote memory/timing
+         gate proves the remat tradeoff positive.
    - [ ] A/B dense operator chunk batches `8`, `16`, and `32` with
          `XLA_PYTHON_CLIENT_PREALLOCATE=true`, transfer guard disallow, and no
          K1 subtimer replay. Batch `32` only becomes a candidate if the remat

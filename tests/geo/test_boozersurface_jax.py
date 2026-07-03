@@ -4743,16 +4743,21 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-10,
         )
 
-    def test_hvp_objective_remat_gate_preserves_dense_hessian(self, monkeypatch):
+    def test_hvp_objective_remat_policy_preserves_dense_hessian(self, monkeypatch):
         """The HVP remat comparator must not change the assembled Hessian."""
         checkpoint_calls = []
         original_checkpoint = _opt.jax.checkpoint
 
         def recording_checkpoint(fn, *args, **kwargs):
-            checkpoint_calls.append(fn)
+            checkpoint_calls.append((fn, kwargs))
             return original_checkpoint(fn, *args, **kwargs)
 
         monkeypatch.setattr(_opt, "_HVP_OBJECTIVE_REMAT", True)
+        monkeypatch.setattr(
+            _opt,
+            "_HVP_OBJECTIVE_REMAT_POLICY",
+            "dots_with_no_batch_dims_saveable",
+        )
         monkeypatch.setattr(_opt.jax, "checkpoint", recording_checkpoint)
 
         def obj(x):
@@ -4769,12 +4774,25 @@ class TestBoozerSurfaceJAXClass:
         dense_oracle = jax.jacfwd(jax.grad(obj))(x)
 
         assert len(checkpoint_calls) == 1
+        assert checkpoint_calls[0][1] == {
+            "policy": _opt.jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+        }
         np.testing.assert_allclose(
             np.asarray(remat_dense),
             np.asarray(dense_oracle),
             rtol=1e-10,
             atol=1e-10,
         )
+
+    def test_hvp_objective_remat_rejects_unknown_policy(self, monkeypatch):
+        monkeypatch.setattr(_opt, "_HVP_OBJECTIVE_REMAT", True)
+        monkeypatch.setattr(_opt, "_HVP_OBJECTIVE_REMAT_POLICY", "unknown")
+
+        with pytest.raises(
+            ValueError,
+            match="SIMSOPT_HVP_OBJECTIVE_REMAT_POLICY",
+        ):
+            _opt._hessian_vector_product_fn(lambda x: jnp.dot(x, x))
 
     def test_newton_polish_dense_hessian_symmetrizes_numerical_asymmetry(self):
         """Dense-compatible Hessian artifacts mirror the upper triangle.
