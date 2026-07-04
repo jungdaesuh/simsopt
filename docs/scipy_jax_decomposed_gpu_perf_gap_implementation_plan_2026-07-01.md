@@ -1,7 +1,7 @@
 # scipy-jax-decomposed GPU Perf Gap Closure Plan
 
 **Status:** In progress
-**Last updated:** 2026-07-02
+**Last updated:** 2026-07-04
 
 ## Purpose
 
@@ -136,7 +136,7 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
 - Structural cost: traceable Newton polish solves each correction with
   operator-GMRES over HVPs (restart 64 × maxiter 10 + 1 refinement pass;
   current symbols:
-  `_solve_square_array_system_operator_only`,
+  `_solve_traceable_newton_operator_gmres_with_status`,
   `_traceable_forward_result_newton_polish_traceable`) — the current H100
   artifact records a budget of `1302` and actual telemetry of `1307` matvec
   callbacks per Newton iteration, each a full fwd+bwd BiotSavart pass over the
@@ -153,6 +153,138 @@ Perlmutter jobs 55353209 / 55358522 / 55363238, and code reads at `0cf4230cb`):
   with cases `baseline_dense_run_chunk8`, `lbfgs_run_chunk8`,
   `dense_skip_chunk8`, `dense_run_lsmrj_chunk8`, `dense_run_chunk16`,
   selectable via `MATRIX_CASES`.
+
+## Execution Status (2026-07-04 review-and-commit pass)
+
+A verified delta review (Crucible at `d8d1a86d6` plus a same-day follow-up
+re-verification at `3c7a9d787`) confirmed the checklist bookkeeping in this
+file and converted the 2026-07-03 working-tree items into scoped commits.
+Everything below the SHAs is local/source/test fact; the remote GPU gates in
+the checklist remain open.
+
+- The two Crucible majors are fixed and committed: `d3650596c` restored the
+  trial Newton-polish `run` default in the three production launchers, and
+  `139c05880` restored the dropped near-target iterative-refinement pass as an
+  Eisenstat-Walker-gated step (details in the Phase 7 item below). `139c05880`
+  also carries the hybrid comparator plumbing, the corrected
+  `newton_polish_traceable` docstring, and the matvec-counter DRY cleanup.
+- `3c7a9d787` committed the raw outer-term reporting aux and the
+  explicit-anchor/current-incumbent warmstart predictor hooks in the traceable
+  suite; `f83179c76` committed the remaining 2026-07-03 working-tree items
+  (first-`x0` full-fidelity routing with the trial-budget scoping, full-vs-trial
+  trace metadata, profiler current-incumbent instrumentation, and the
+  reporting raw-term reuse in the example) with their focused regressions. The
+  2026-07-03 section's "working tree" phrasing is superseded by these commits.
+- The review found one further incomplete-fleet-revert instance beyond the
+  launchers: `benchmarks/perlmutter/build_single_stage_matrix.py` still set
+  `target_lane_trial_boozer_newton_polish_policy="skip"` in `BUDGETS`, exported
+  non-empty per cell as `PROD_TRIAL_NEWTON_POLISH_POLICY` and therefore
+  overriding the launcher `:-run` fallback on every headline matrix cell.
+  Fixed at `986a144bc` with a per-cell manifest regression proven red against
+  the old value. Grep target for future default reverts: launchers AND
+  builders/submitters that export the same knob.
+- Local validation for this pass: the plan's cited focused slices all
+  reproduce exactly (90 passed total across the eight slices, including the
+  full policy file at 40), the committed-HEAD state is self-contained (29
+  focused tests pass in a clean worktree with no dirty files), and the matrix
+  manifest (11) and fair-compare launcher contract (7) files pass after the
+  builder fix.
+
+## Execution Status (2026-07-03 local-only continuation)
+
+The 2026-07-03 continuation stayed inside the operator's local-only boundary:
+no RunPod, no Perlmutter, and no end-to-end runs. Local validation used the
+repo bootstrap workaround from `HANDOFF.md` with the sibling JAX conda env,
+dropping the `ScikitBuildRedirectingFinder` and forcing this checkout's `src/`.
+
+- Current `HEAD` includes local implementations for the Phase 7 low-risk
+  reductions that were already committed before this continuation:
+  Eisenstat-Walker forcing uncap (`9bd9661b9`), accepted solved-state cache
+  pinning (`a5a37997b`), append/compat progress logging (`6718968ef`), batched
+  K1 progress scalar pulls (`c1965b1a8`), duplicate solved-payload elimination
+  (`28bac01c0`), compact dense-factor telemetry (`3b48841ba`), persistent-cache
+  threshold provenance (`4b7574d2f`), deferred setup-gradient construction
+  (`3b24fa5f5` and `004684265`), deferred host baseline adjoint peels
+  (`e690422a2`), fused explicit objective VJPs (`37970302a`), and HVP
+  objective rematerialization with selectable checkpoint policy (`e830ed006`,
+  `d8d1a86d6`). These remain local/source/test facts until clean remote
+  artifacts close their timing and memory gates.
+- The working tree now keeps the decomposed trial BFGS cap scoped to
+  line-search/probe evaluations after the first SciPy `x0` candidate. The base
+  solved pair is preserved for the exact first candidate, the trial-wrapped
+  solved pair is used after that, final-sync cache policy still rejects
+  failed/cap-bound/lower-fidelity trial solves, and trace metadata records full
+  Boozer settings for the first full-fidelity solve before switching to trial
+  metadata for later probes.
+- The working tree also adds the default-off traceable Newton hybrid comparator
+  `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=hybrid_final_dense_lu`. It keeps
+  operator-GMRES for loose early corrections and switches to dense-LU only when
+  the same Eisenstat-Walker near-target predicate that applies the strict cap is
+  true; if dense materialization is blocked, it falls back to operator-GMRES.
+  The trace now records the actual per-iteration Newton linear-solve backend
+  code so hybrid artifacts can separate loose-GMRES from final dense-LU solves.
+- The working tree now carries raw single-stage outer-term scalar aux data in
+  traceable forward results and passes those aux terms through final solved-state
+  reporting when available. This removes the second raw outer-term evaluation on
+  that path, with fallback recomputation preserved for older/missing payloads.
+  It does not yet eliminate the separate final reporting full-surface field and
+  distance evaluation; keep the remote timing/artifact gate open.
+- The working tree also starts the current-incumbent predictor A/B path locally:
+  `_traceable_predict_warmstart_x` now delegates to an explicit-anchor predictor,
+  and the profile suite exposes `current_incumbent_warmstart_predict`. The
+  callable can consume a supplied incumbent `(coil_dofs, x, factors)` when an
+  eligibility flag is true and falls back to the baseline anchor otherwise. The
+  target-lane profiler now times that callable, and memory analysis lowers it
+  with the same solved payload and success-gated anchor; focused tests cover
+  both successful and failed forward-result anchor flags. This is profile/A-B
+  plumbing only; it does not flip the production predictor or prove
+  iteration-count wins.
+- Local validation passed:
+  `python -m py_compile examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/integration/test_single_stage_newton_polish_policy.py`;
+  focused helper slice
+  `tests/integration/test_single_stage_newton_polish_policy.py -k "first_x0 or decomposed_builder_rejects_full_state_lifting or trial_iteration_cap_solve_reuses_final_sync_cache_when_cap_does_not_bind or trial_iteration_cap_solve_rejects_final_sync_cache_when_cap_binds or trial_non_iteration_override_disables_final_sync_cache or same_fidelity_trial_solve_keeps_final_sync_cache"`
+  (`7 passed, 33 deselected`);
+  full policy helper file
+  `tests/integration/test_single_stage_newton_polish_policy.py`
+  (`40 passed`);
+  and focused decomposed host-objective/reference helper slice
+  `tests/integration/test_single_stage_jax_cpu_reference.py -k "(decomposed_host_objective or adapter_final_sync_falls_back_to_decomposed_solve_cache or decomposed_reporting_cache or decomposed_trace_reuse or trace_wrapper_uses_decomposed_k1_cache) and not runs_end_to_end"`
+  (`14 passed, 194 deselected`). The hybrid comparator continuation added
+  py-compile coverage for `OPT`, `BZ`,
+  `src/simsopt_jax_adapters/geo/surface_objectives_traceable.py`, and
+  `tests/geo/test_boozersurface_jax_private.py`; the focused private optimizer
+  slice
+  `tests/geo/test_boozersurface_jax_private.py -k "traceable_dense_lu_comparator or traceable_newton_linear_solver_resolver_accepts_hybrid_alias or traceable_hybrid or materialized_policy_keeps_operator_step or reports_iteration_diagnostics or finite_descent_step or nonfinite_linear_step or backtracks_norm_increasing"`
+  passed (`10 passed, 125 deselected`), and the focused single-stage
+  progress/reporting slice
+  `tests/integration/test_single_stage_jax_cpu_reference.py -k "traceable_forward_result_packs_newton_progress_fields or target_lane_final_reporting_reuses_forward_outer_raw_terms or decomposed_reporting_cache or decomposed_host_objective_feeds_final_reporting_sync_cache"`
+  passed (`5 passed, 204 deselected`). The raw-term reporting boundary slice
+  `tests/geo/test_surface_objectives_jax.py -k "traceable_runtime_public_boundaries_defers_reporting_metrics_until_used or traceable_reporting_metrics_from_solution_bundle_reuses_outer_raw_terms"`
+  passed (`2 passed, 348 deselected`). The focused warmstart/predictor slice
+  `tests/geo/test_surface_objectives_jax.py -k "warmstart or predictor"`
+  passed (`9 passed, 341 deselected`). The final py-compile coverage also
+  included `src/simsopt_jax_adapters/geo/surface_objectives.py`,
+  `tests/geo/test_surface_objectives_jax.py`, and
+  `tests/integration/test_single_stage_jax_cpu_reference.py`. The HVP remat
+  correctness/config slice
+  `tests/geo/test_boozersurface_jax_private.py -k "hessian_vector_product or hvp_objective_remat"`
+  passed (`5 passed, 135 deselected`) after py-compile coverage for
+  `src/simsopt_jax/geo/optimizers/optimizer.py` and
+  `tests/geo/test_boozersurface_jax_private.py`. The profile-runner
+  current-incumbent A/B instrumentation slice
+  `tests/integration/test_single_stage_jax_cpu_reference.py -k "target_lane_profile_records_pre_newton_phase or target_lane_memory_analysis_profiles_current_incumbent_predictor"`
+  passed (`2 passed, 208 deselected`) after py-compile coverage for
+  `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`
+  and `tests/integration/test_single_stage_jax_cpu_reference.py`; this slice
+  now also asserts failed forward results pass `anchor_eligible=false` into the
+  current-incumbent profiler. Earlier in this local
+  continuation, the full local `tests/geo/test_boozersurface_jax_private.py`
+  file passed (`130 passed, 5 skipped`; deprecation warnings only).
+  `git diff --check` passed.
+
+The open checklist items that require GPU timing, lower-memory validation,
+trajectory quality, or production wall-time evidence remain open; local unit
+tests are not evidence for those gates.
 
 ## Execution Status (2026-07-02)
 
@@ -591,7 +723,12 @@ parity/trajectory gates (Phase 8).
          precondition GMRES with a refreshed PLU factor. Do not decide this from
          the pre-Eisenstat-Walker dense-LU smoke: that run was correctness-clean
          but conflated first dense materialization cost with steady-state solve
-         policy. Re-run after the Eisenstat-Walker fix.
+         policy. Default-off hybrid comparator plumbing is committed at
+         `139c05880`
+         behind `SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER=hybrid_final_dense_lu`,
+         with focused local regressions for near-target dense-LU selection and
+         dense-materialization fallback. Keep this item open until a clean
+         remote timing/trajectory gate reruns after the Eisenstat-Walker fix.
    - [x] Equivalence gate: optimizer objective/gradient unchanged
          (bit-identical where the contract requires; otherwise the repo's
          ≤1e-12 equivalence harness) before any default flip. No default flip
@@ -671,6 +808,20 @@ parity/trajectory gates (Phase 8).
          residual, final iota, final volume, and objective remain within the
          existing tolerances. Implementation and focused regression are in place;
          keep this open until the remote unit slice and K1 artifact gate pass.
+         2026-07-04 Crucible correction: the original uncap commit
+         (`9bd9661b9`) had also silently dropped the single iterative-refinement
+         pass from the default operator-GMRES correction solve, which was the
+         sole mechanism reaching the tight near-target tolerance (measured
+         rel-residual 3.1e-14 -> 3.4e-10 at kappa=625, n=663; the removed
+         tolerance floor was proven non-load-bearing). Restored at
+         `139c05880` as a near-target-gated refinement: an unconverged
+         single-pass correction in
+         the Eisenstat-Walker strict-cap region now receives one bounded
+         refinement pass (`_refine_traceable_newton_operator_gmres_solution`),
+         so early loose solves keep the uncap's matvec win while the final
+         tight tolerance is actually achieved. Regressions:
+         `test_traceable_newton_gmres_refinement_recovers_tight_tolerance`,
+         `test_newton_polish_traceable_refines_unconverged_gmres_near_target`.
    - [ ] Pin accepted solved states in the decomposed solve cache. Replace or
          extend the single-entry `last_solved_forward_result` cache with a small
          exact-DOF-keyed cache that preserves the last accepted/final solve even
@@ -754,6 +905,15 @@ parity/trajectory gates (Phase 8).
          reporting graph. Gate: final reporting uses the accepted solved state,
          preserves all reported fields, and avoids an additional surface-field
          evaluation when the value-and-grad path already computed the same data.
+         Implementation note (`3c7a9d787`, example-side reuse `f83179c76`):
+         packed traceable forward results now carry
+         raw outer-term scalar aux data and final solved-state reporting consumes
+         that aux data when available, falling back to recomputation for older or
+         missing payloads. This removes the second raw outer-term evaluation on
+         the accepted solved-state reporting path, but it does not yet remove the
+         separate full-surface field/distance reporting evaluation; keep this
+         item open until remote timing/artifact gates prove impact or more aux
+         data covers those fields.
    - [ ] Investigate merging the separate `dJ_dx` and `direct_grad` reverse
          sweeps into a joint derivative where dependency flags allow it. Gate:
          HLO/op-count or timing evidence shows one backward pass replaces two,
@@ -786,7 +946,10 @@ parity/trajectory gates (Phase 8).
          `jax.checkpoint` via `SIMSOPT_HVP_OBJECTIVE_REMAT=1`, with
          `SIMSOPT_HVP_OBJECTIVE_REMAT_POLICY` selecting the default or
          dot-saveable policy, default-off until the clean remote memory/timing
-         gate proves the remat tradeoff positive.
+         gate proves the remat tradeoff positive. Focused local tests now prove
+         the default-off selector leaves the objective callable untouched,
+         default, `dots`, and dot-saveable remat policies preserve HVP values
+         with extra objective arguments, and unknown policies fail loudly.
    - [ ] A/B dense operator chunk batches `8`, `16`, and `32` with
          `XLA_PYTHON_CLIENT_PREALLOCATE=true`, transfer guard disallow, and no
          K1 subtimer replay. Batch `32` only becomes a candidate if the remat
@@ -823,7 +986,17 @@ parity/trajectory gates (Phase 8).
          trial starts closer to the implicit solved state. Gate: fewer
          pre-Newton L-BFGS/Newton iterations, identical converged solved-state
          physics within tolerance, and no reuse of failed or lower-fidelity
-         factors.
+         factors. Implementation note (`3c7a9d787`, profiler instrumentation
+         `f83179c76`): the baseline predictor has been
+         factored through an explicit-anchor helper, and the profile suite now
+         exposes `current_incumbent_warmstart_predict` for A/B probes. It selects
+         a caller-supplied incumbent anchor only when the supplied eligibility
+         flag is true; otherwise it falls back to the baseline anchor. The
+         target-lane profile runner now records the current-incumbent predictor
+         timing and memory-analysis shape when the suite exposes it, using the
+         profiled solved payload and a success-gated anchor flag; focused tests
+         cover both accepted and failed forward-result flags. Keep this item open
+         until the live A/B records iteration-count and solved-physics evidence.
    - [ ] Re-run dense-LU vs operator-GMRES after the Eisenstat-Walker fix, and
          include the hybrid candidate: loose GMRES for early iterations, dense-LU
          for final tight correction solves. Keep all variants default-off until
