@@ -87,3 +87,30 @@ def test_launcher_records_mixed_parity_timing_label():
     assert "mixed-parity-reference" in script
     assert "FAIR_SUPPORTS_PERFORMANCE_HEADLINE" in script
     assert "benchmark_timing_label.json" in script
+
+
+def test_trial_newton_polish_default_is_run_across_production_launchers():
+    # The trial-`skip` policy failed the Phase-2 H100 trajectory-quality A/B and
+    # dce46907b reverted the child + k1-matrix defaults to `run`. The launchers
+    # pass --target-lane-trial-boozer-newton-polish-policy unconditionally, so a
+    # `skip` launcher default would silently re-enable the rejected policy and
+    # (via the same-fidelity rule) disable final-sync solved-state reuse on the
+    # headline lanes. Env overrides remain available for explicit experiments.
+    launchers = {
+        "fair_compare": LAUNCHER,
+        "production_cpu": REPO_ROOT
+        / "benchmarks" / "perlmutter" / "single_stage_production_cpu.slurm",
+        "production_gpu": REPO_ROOT
+        / "benchmarks" / "perlmutter" / "single_stage_production_gpu.slurm",
+    }
+    for label, path in launchers.items():
+        script = path.read_text(encoding="utf-8")
+        match = re.search(
+            r"_TRIAL_NEWTON_POLISH_POLICY:-(\w+)\}", script
+        )
+        assert match is not None, f"{label}: trial polish default not found"
+        assert match.group(1) == "run", (
+            f"{label}: trial Newton-polish launcher default is "
+            f"'{match.group(1)}', expected 'run' (rejected experimental "
+            "policies must be explicit opt-in, not launcher defaults)"
+        )

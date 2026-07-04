@@ -43,7 +43,7 @@ PROD_NPHI="${PROD_NPHI:-}"
 PROD_NTHETA="${PROD_NTHETA:-}"
 PROD_WARM_START_RUN_DIR="${PROD_WARM_START_RUN_DIR:-}"
 PROD_NEWTON_POLISH_POLICY="${PROD_NEWTON_POLISH_POLICY:-run}"
-PROD_TRIAL_NEWTON_POLISH_POLICY="${PROD_TRIAL_NEWTON_POLISH_POLICY:-skip}"
+PROD_TRIAL_NEWTON_POLISH_POLICY="${PROD_TRIAL_NEWTON_POLISH_POLICY:-run}"
 # Persistent JAX/XLA compilation cache. Keep this OUTSIDE ${JOB_ROOT} so the one
 # slow cold XLA:GPU compile (~73 min on the RunPod cu1290 image; diagnosed
 # "once-slow" in docs/jax_scipy_jax_gpu_compile_diagnostic_next.md) is paid once
