@@ -3905,6 +3905,50 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_exact_traceable_retries_loose_gmres_rejection_at_strict_cap(
+        self, monkeypatch
+    ):
+        """The exact-Newton runner shares the strict-cap retry safeguard.
+
+        Mirror of the LS-polish regression: a rejected loose E-W direction
+        must schedule one strict-cap retry instead of stalling (pre-fix the
+        first loose rejection ended the solve with success=False, nit=0).
+        """
+        tol = 1e-3
+        strict_cap = _opt._eisenstat_walker_strict_cap(
+            jnp.asarray(tol, dtype=jnp.float64), dtype=jnp.float64
+        )
+
+        def tol_sensitive_exact_solve(_jvp_fn, _x, rhs, *, tol):
+            loose = tol > strict_cap
+            dx = jnp.where(loose, -rhs, rhs)
+            # Zero linear residual keeps the in-loop refinement correction
+            # out of the picture so only the retry safeguard is exercised.
+            return dx, jnp.zeros_like(rhs), jnp.asarray(0, dtype=jnp.int32)
+
+        monkeypatch.setattr(
+            _opt,
+            "_gmres_solve_exact_newton_system",
+            tol_sensitive_exact_solve,
+        )
+
+        result = _opt.newton_exact_traceable(
+            lambda x: x,
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+            maxiter=6,
+            tol=tol,
+        )
+
+        assert bool(result["success"]) is True, (
+            "loose-direction rejection must not terminate the exact solve"
+        )
+        assert int(result["nit"]) == 1
+        np.testing.assert_allclose(
+            np.asarray(result["x"]), np.zeros(2), atol=1e-15
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_records_opt_in_matvec_counts(
         self, monkeypatch
     ):

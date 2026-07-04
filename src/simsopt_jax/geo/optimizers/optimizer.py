@@ -6714,10 +6714,21 @@ def _build_traceable_exact_newton_runner(
             )
 
         def body_fun(state):
-            linear_tol_iteration = _eisenstat_walker_choice2_tolerance(
+            strict_cap_tol = _eisenstat_walker_strict_cap(
+                tol_value, dtype=state["x"].dtype
+            )
+            eisenstat_walker_tol = _eisenstat_walker_choice2_tolerance(
                 state["norm"],
                 state["previous_norm"],
                 tol=tol_value,
+            )
+            # Same inexact-Newton safeguard as the LS polish runner: a
+            # rejected loose E-W direction earns one strict-cap retry
+            # iteration before the loop may stall.
+            linear_tol_iteration = jnp.where(
+                state["retry_linear_solve_at_strict_cap"],
+                jnp.minimum(eisenstat_walker_tol, strict_cap_tol),
+                eisenstat_walker_tol,
             )
             dx, linear_residual, _ = _gmres_solve_exact_newton_system(
                 jvp_fn,
@@ -6777,6 +6788,12 @@ def _build_traceable_exact_newton_runner(
                 state["norm"],
             )
             accepted = candidate["accepted"]
+            loose_finite_direction = (
+                (linear_tol_iteration > strict_cap_tol)
+                & jnp.all(jnp.isfinite(dx))
+            )
+            retry_at_strict_cap = (~accepted) & loose_finite_direction
+            stalled = (~accepted) & (~loose_finite_direction)
             return {
                 "x": lax.select(accepted, candidate["x"], state["x"]),
                 "residual": lax.select(
@@ -6791,7 +6808,8 @@ def _build_traceable_exact_newton_runner(
                     state["previous_norm"],
                 ),
                 "nit": lax.select(accepted, state["nit"] + 1, state["nit"]),
-                "stalled": ~accepted,
+                "stalled": stalled,
+                "retry_linear_solve_at_strict_cap": retry_at_strict_cap,
                 "exact_newton_linear_residual_rel": lax.select(
                     accepted,
                     linear_residual_rel,
@@ -6814,6 +6832,7 @@ def _build_traceable_exact_newton_runner(
                 "previous_norm": norm0,
                 "nit": jnp.asarray(0, dtype=jnp.int32),
                 "stalled": jnp.asarray(False),
+                "retry_linear_solve_at_strict_cap": jnp.asarray(False),
                 "exact_newton_linear_residual_rel": jnp.asarray(
                     jnp.nan,
                     dtype=dtype,
