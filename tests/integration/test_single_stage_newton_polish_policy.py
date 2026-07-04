@@ -801,6 +801,22 @@ def test_trial_iteration_cap_solve_rejects_final_sync_cache_when_cap_binds():
     )
 
 
+def test_trial_solve_with_unrecorded_iterations_disables_final_sync_cache():
+    # The traceable forward contract packs unrecorded iteration counts as the
+    # int32.min sentinel; the gate must treat "unrecorded" as "cannot certify
+    # full fidelity" rather than comparing the sentinel against the cap.
+    forward_result = {
+        "success": True,
+        "primal_success": True,
+        "pre_newton_iter": np.asarray(np.iinfo(np.int32).min, dtype=np.int32),
+    }
+
+    assert not target_lane_trial_solve_result_matches_full_fidelity(
+        forward_result,
+        {"bfgs_maxiter": 300},
+    )
+
+
 def test_trial_non_iteration_override_disables_final_sync_cache():
     forward_result = {
         "success": True,

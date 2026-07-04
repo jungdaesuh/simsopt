@@ -8043,7 +8043,15 @@ def target_lane_trial_solve_result_matches_full_fidelity(
             return False
         if iteration_field not in forward_result:
             return False
-        if host_int(forward_result[iteration_field]) >= int(override_value):
+        # The traceable forward contract packs unrecorded counts as the
+        # int32.min sentinel, which the progress decoder maps to None; an
+        # unrecorded count cannot certify that the cap did not bind.
+        iteration_count, _ = _host_scalar_progress_value(
+            forward_result[iteration_field]
+        )
+        if iteration_count is None:
+            return False
+        if int(iteration_count) >= int(override_value):
             return False
     return True
 

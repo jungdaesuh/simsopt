@@ -102,6 +102,8 @@ def test_trial_newton_polish_default_is_run_across_production_launchers():
         / "benchmarks" / "perlmutter" / "single_stage_production_cpu.slurm",
         "production_gpu": REPO_ROOT
         / "benchmarks" / "perlmutter" / "single_stage_production_gpu.slurm",
+        "k1_matrix": REPO_ROOT
+        / "benchmarks" / "perlmutter" / "single_stage_k1_matrix_gpu.slurm",
     }
     for label, path in launchers.items():
         script = path.read_text(encoding="utf-8")

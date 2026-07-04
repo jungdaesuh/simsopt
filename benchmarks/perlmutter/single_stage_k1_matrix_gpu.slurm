@@ -196,10 +196,17 @@ assert_case_progress() {
   local progress_json
   local progress_jsons=()
   while IFS= read -r progress_json; do
-    progress_jsons+=("${progress_json}")
+    # K1 forward events are decomposed-lane telemetry. Native lanes
+    # (cpu_outputs, seed_outputs) legitimately record none, so requiring
+    # them there would fail healthy fixture/native-reference runs.
+    case "${progress_json}" in
+      */reference_outputs/*|*/target_outputs/*)
+        progress_jsons+=("${progress_json}")
+        ;;
+    esac
   done < <(find "${case_dir}/cases" -name outer_optimizer_progress.json -type f | sort)
   if [[ "${#progress_jsons[@]}" == "0" ]]; then
-    echo "Missing outer_optimizer_progress.json for ${case_label}" >&2
+    echo "Missing decomposed-lane outer_optimizer_progress.json for ${case_label}" >&2
     return 1
   fi
   local expect_skip="false"

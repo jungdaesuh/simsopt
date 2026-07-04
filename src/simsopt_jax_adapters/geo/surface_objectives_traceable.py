@@ -1308,7 +1308,10 @@ def _traceable_total_gradient_with_status(
 
 def _traceable_adjoint_rhs_exactly_zero(rhs):
     rhs = jnp.asarray(rhs)
-    return jnp.all(rhs == 0)
+    # `rhs == 0` promotes the Python scalar through an eager host-to-device
+    # transfer, which strict transfer-guard runtimes disallow; `jnp.any`
+    # performs the identical exact-zero test on device.
+    return jnp.logical_not(jnp.any(rhs))
 
 
 def _traceable_objective_gradient_parts(

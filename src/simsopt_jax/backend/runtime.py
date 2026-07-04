@@ -2460,6 +2460,9 @@ def apply_jax_runtime_config() -> None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     if config.compilation_cache_dir is not None:
         jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
+        # The threshold only has meaning for the persistent cache, so
+        # SIMSOPT_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS is a no-op unless
+        # a compilation cache dir is also configured.
         jax.config.update(
             "jax_persistent_cache_min_compile_time_secs",
             config.persistent_cache_min_compile_time_secs,

@@ -629,7 +629,12 @@ def _is_jax_tracer(value) -> bool:
 
 
 def traceable_newton_matvec_counts_from_token(token: int) -> tuple[int, ...] | None:
-    """Read and unregister one opt-in traceable Newton matvec counter token."""
+    """Read and unregister one opt-in traceable Newton matvec counter token.
+
+    Counts accumulate over every execution of the traced computation holding
+    the token (there is no per-execution reset), and the registry entry is
+    retained until this drain runs — drain once per measurement window.
+    """
 
     return _drain_traceable_matvec_counter(token)
 
