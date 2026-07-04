@@ -182,3 +182,28 @@ def test_submit_exports_boozer_backend_only_for_fullgraph():
                                            warm_start=None))
     # empty value dropped from the export -> reduced lane uses the child default
     assert "PROD_BOOZER_OPTIMIZER_BACKEND" not in reduced_kv
+
+
+def test_trial_newton_polish_default_is_run_in_every_matrix_cell():
+    # The trial-`skip` policy failed the Phase-2 H100 trajectory-quality A/B;
+    # dce46907b/d3650596c reverted the child + launcher defaults to `run`, but
+    # this builder's BUDGETS value is exported per cell as a non-empty
+    # PROD_TRIAL_NEWTON_POLISH_POLICY and therefore OVERRIDES the launcher
+    # `:-run` fallback. A `skip` here silently re-enables the rejected policy
+    # (and, via the same-fidelity rule, disables final-sync solved-state reuse)
+    # on the headline production matrix. Explicit skip experiments must opt in
+    # per submission, not via the matrix default.
+    manifest = build_manifest("testsha")
+    for cell in manifest["cells"]:
+        assert cell["env"]["PROD_TRIAL_NEWTON_POLISH_POLICY"] == "run", (
+            f"{cell['id']}: matrix trial Newton-polish policy is "
+            f"'{cell['env']['PROD_TRIAL_NEWTON_POLISH_POLICY']}', expected "
+            "'run' (rejected experimental policies must not ride the matrix "
+            "default)"
+        )
+    [cell] = select(manifest["cells"], status=None, tier="mpol2", dim=11,
+                    platform="cpu", ids=None)
+    kv = _export_kv(sbatch_command(cell, tiers=manifest["tiers"],
+                                   repo_root="/tmp/co", run_root_base="/tmp/runs",
+                                   warm_start=None))
+    assert kv["PROD_TRIAL_NEWTON_POLISH_POLICY"] == "run"

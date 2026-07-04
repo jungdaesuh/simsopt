@@ -66,7 +66,10 @@ BUDGETS = {
     "target_lane_boozer_bfgs_maxiter": 1500,
     "target_lane_boozer_newton_maxiter": 50,
     "target_lane_boozer_newton_polish_policy": "run",
-    "target_lane_trial_boozer_newton_polish_policy": "skip",
+    # Trial `skip` failed the Phase-2 H100 trajectory-quality A/B (2026-07-02);
+    # this value is exported non-empty and overrides the launcher `:-run`
+    # default, so it must stay `run` unless a gate proves otherwise.
+    "target_lane_trial_boozer_newton_polish_policy": "run",
 }
 
 MIXED_PARITY_TIMING_NOTE = (
