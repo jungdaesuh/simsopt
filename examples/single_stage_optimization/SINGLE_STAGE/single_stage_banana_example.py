@@ -153,6 +153,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (
     make_traceable_objective_value_and_grad,
     make_traceable_solved_state_value_and_grad,
     make_traceable_single_stage_alm_runtime_bundle,
+    traceable_forward_result_outer_raw_terms,
 )
 from simsopt_jax.geo.optimizers.optimizer import (
     Driver,
@@ -5437,9 +5438,9 @@ def parse_args():
         else None,
         help=(
             "Explicit Boozer LS tolerance override for decomposed target-lane "
-            "optimizer candidate evaluations, including the first x0 evaluation "
-            "and later line-search candidates. Accepted, final, and reference "
-            "target-lane solves keep --target-lane-boozer-bfgs-tol."
+            "line-search/probe evaluations after the first x0 evaluation. "
+            "The first x0, accepted, final, and reference target-lane solves "
+            "keep --target-lane-boozer-bfgs-tol."
         ),
     )
     parser.add_argument(
@@ -5450,9 +5451,9 @@ def parse_args():
         else None,
         help=(
             "Explicit Boozer LS iteration cap override for decomposed target-lane "
-            "optimizer candidate evaluations, including the first x0 evaluation "
-            "and later line-search candidates. Accepted, final, and reference "
-            "target-lane solves keep --target-lane-boozer-bfgs-maxiter."
+            "line-search/probe evaluations after the first x0 evaluation. "
+            "The first x0, accepted, final, and reference target-lane solves "
+            "keep --target-lane-boozer-bfgs-maxiter."
         ),
     )
     parser.add_argument(
@@ -7752,6 +7753,8 @@ def _build_decomposed_coil_host_value_and_grad(
     solved_pair,
     baseline_gradient,
     *,
+    first_candidate_solved_pair=None,
+    first_candidate_coil_dofs=None,
     k1_subtimer_profile_suite=None,
     record_outer_optimizer_event=None,
     cache_solve_result_for_reporting=True,
@@ -7768,6 +7771,20 @@ def _build_decomposed_coil_host_value_and_grad(
     # serve the solve computed for that exact candidate.
     last_solved_forward_result = {}
     reporting_solve_result_cache = []
+    solve_result_required_keys = frozenset(("sdofs", "iota", "G"))
+    last_solve_fidelity = None
+    first_candidate_pending = bool(
+        first_candidate_solved_pair is not None and first_candidate_coil_dofs is not None
+    )
+    first_candidate_key = (
+        None
+        if first_candidate_coil_dofs is None
+        else np.array(
+            host_array(first_candidate_coil_dofs, dtype=np.float64),
+            dtype=np.float64,
+            copy=True,
+        )
+    )
 
     def coil_dofs_cache_key(coil_dofs):
         return np.array(
@@ -7798,8 +7815,6 @@ def _build_decomposed_coil_host_value_and_grad(
                 return solve_result
         return None
 
-    solve_result_required_keys = frozenset(("sdofs", "iota", "G"))
-
     def record_decomposed_event(label, **fields):
         if record_outer_optimizer_event is None:
             return
@@ -7811,6 +7826,7 @@ def _build_decomposed_coil_host_value_and_grad(
         *,
         objective_value=None,
         objective_grad=None,
+        force_reporting_solve_result=False,
     ):
         if _contains_jax_tracer(coil_dofs):
             return
@@ -7821,7 +7837,11 @@ def _build_decomposed_coil_host_value_and_grad(
             key for key in solve_result_required_keys if key not in forward_result
         ]
         cache_reporting_solve_result = bool(cache_solve_result_for_reporting)
-        if cache_reporting_solve_result and solve_result_cache_policy is not None:
+        if (
+            cache_reporting_solve_result
+            and solve_result_cache_policy is not None
+            and not force_reporting_solve_result
+        ):
             cache_reporting_solve_result = bool(
                 solve_result_cache_policy(forward_result)
             )
@@ -7840,22 +7860,37 @@ def _build_decomposed_coil_host_value_and_grad(
         store_reporting_solve_result(cached_coil_dofs, solve_result)
 
     def value_and_grad(coil_dofs):
-        nonlocal evaluation_index
+        nonlocal evaluation_index, first_candidate_pending, last_solve_fidelity
         evaluation_index += 1
         current_evaluation_index = evaluation_index
+        selected_solved_pair = solved_pair
+        solve_fidelity = "trial"
+        if (
+            first_candidate_pending
+            and first_candidate_key is not None
+            and not _contains_jax_tracer(coil_dofs)
+        ):
+            probe_key = coil_dofs_cache_key(coil_dofs)
+            if np.array_equal(probe_key, first_candidate_key):
+                selected_solved_pair = first_candidate_solved_pair
+                solve_fidelity = "first_candidate_full"
+                first_candidate_pending = False
+        last_solve_fidelity = solve_fidelity
         coil_dofs_device = runtime_device_put(coil_dofs)
         k1_start_s = _perf_counter_s()
         record_decomposed_event(
             "target_lane_decomposed_k1_forward_started",
             evaluation_index=current_evaluation_index,
+            solve_fidelity=solve_fidelity,
         )
-        forward_result = solved_pair.solve_fn(coil_dofs_device)
+        forward_result = selected_solved_pair.solve_fn(coil_dofs_device)
         success = host_bool(forward_result["success"])
         record_decomposed_event(
             "target_lane_decomposed_k1_forward_returned",
             evaluation_index=current_evaluation_index,
             elapsed_s=float(_perf_counter_s() - k1_start_s),
             success=bool(success),
+            solve_fidelity=solve_fidelity,
             **_summarize_k1_forward_result_for_progress(forward_result),
         )
         _record_decomposed_k1_subtimers(
@@ -7872,8 +7907,9 @@ def _build_decomposed_coil_host_value_and_grad(
                 "target_lane_decomposed_k2_value_grad_started",
                 evaluation_index=current_evaluation_index,
                 branch=branch,
+                solve_fidelity=solve_fidelity,
             )
-            value_and_gradient = solved_pair.value_grad_from_solved(
+            value_and_gradient = selected_solved_pair.value_grad_from_solved(
                 coil_dofs_device,
                 forward_result["x"],
                 forward_result["linear_solve_factors"],
@@ -7883,6 +7919,7 @@ def _build_decomposed_coil_host_value_and_grad(
                 evaluation_index=current_evaluation_index,
                 branch=branch,
                 elapsed_s=float(_perf_counter_s() - k2_start_s),
+                solve_fidelity=solve_fidelity,
             )
             return value_and_gradient
 
@@ -7893,6 +7930,9 @@ def _build_decomposed_coil_host_value_and_grad(
                 forward_result,
                 objective_value=objective_value,
                 objective_grad=gradient,
+                force_reporting_solve_result=(
+                    solve_fidelity == "first_candidate_full"
+                ),
             )
             return objective_value, gradient
         primal_success = host_bool(forward_result["primal_success"])
@@ -7900,6 +7940,7 @@ def _build_decomposed_coil_host_value_and_grad(
             "target_lane_decomposed_primal_success_gate",
             evaluation_index=current_evaluation_index,
             primal_success=bool(primal_success),
+            solve_fidelity=solve_fidelity,
         )
         if primal_success:
             _, gradient = value_grad_from_candidate("primal_success_rejected")
@@ -7908,17 +7949,22 @@ def _build_decomposed_coil_host_value_and_grad(
                 forward_result,
                 objective_value=forward_result["value"],
                 objective_grad=gradient,
+                force_reporting_solve_result=(
+                    solve_fidelity == "first_candidate_full"
+                ),
             )
             return forward_result["value"], gradient
         record_decomposed_event(
             "target_lane_decomposed_baseline_gradient_returned",
             evaluation_index=current_evaluation_index,
+            solve_fidelity=solve_fidelity,
         )
         cache_last_solved_payload(
             coil_dofs,
             forward_result,
             objective_value=forward_result["value"],
             objective_grad=baseline_gradient_device,
+            force_reporting_solve_result=(solve_fidelity == "first_candidate_full"),
         )
         return forward_result["value"], baseline_gradient_device
 
@@ -7968,6 +8014,11 @@ def _build_decomposed_coil_host_value_and_grad(
     value_and_grad.target_lane_solve_result_for_coil_dofs = (
         target_lane_solve_result_for_coil_dofs
     )
+
+    def last_solve_fidelity_for_trace():
+        return last_solve_fidelity
+
+    value_and_grad.last_solve_fidelity_for_trace = last_solve_fidelity_for_trace
     return value_and_grad
 
 
@@ -8121,11 +8172,13 @@ def build_single_stage_target_lane_accepted_step_sync(
             reused_solved_state=bool(has_solved_state),
         )
         if has_solved_state:
+            outer_raw_terms = traceable_forward_result_outer_raw_terms(solve_result)
             traceable_reporting_metrics = reporting_metrics_from_solution_fn(
                 coil_dofs,
                 solve_result["x"],
                 solve_result["success"],
                 include_distance_metrics=include_distance_metrics,
+                outer_raw_terms=outer_raw_terms,
             )
         else:
             traceable_reporting_metrics = reporting_metrics_fn(
@@ -8826,9 +8879,16 @@ def build_target_lane_outer_objectives(
     profile_progress_json_path=None,
     stablehlo_dir=None,
     solved_pair_boozer_overrides=None,
+    first_candidate_coil_dofs=None,
     record_outer_optimizer_event=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
+    if use_decomposed_solved_pair and full_state_optimizer_dof_map is not None:
+        raise ValueError(
+            "The decomposed scipy-jax target lane expects compact coil DOFs; "
+            "full-state target-lane lifting is only valid for array-native "
+            "target optimizers."
+        )
     target_scalar_objective = None
     target_value_and_grad_objective = None
     target_optimizer_initial_value_and_grad = None
@@ -8878,7 +8938,13 @@ def build_target_lane_outer_objectives(
         active_solved_pair_boozer_overrides = active_boozer_option_overrides(
             solved_pair_boozer_overrides
         )
-        solved_pair = wrap_target_lane_solved_pair_with_boozer_overrides(
+        first_candidate_solved_pair = (
+            solved_pair
+            if active_solved_pair_boozer_overrides
+            and first_candidate_coil_dofs is not None
+            else None
+        )
+        trial_solved_pair = wrap_target_lane_solved_pair_with_boozer_overrides(
             boozer_surface,
             solved_pair,
             active_solved_pair_boozer_overrides,
@@ -8896,8 +8962,10 @@ def build_target_lane_outer_objectives(
                 )
             )
         target_value_and_grad_objective = _build_decomposed_coil_host_value_and_grad(
-            solved_pair,
+            trial_solved_pair,
             seeded_value_and_grad.optimizer_initial_value_and_grad[1],
+            first_candidate_solved_pair=first_candidate_solved_pair,
+            first_candidate_coil_dofs=first_candidate_coil_dofs,
             k1_subtimer_profile_suite=(
                 runtime_bundle["profile_suite"]
                 if trace_target_lane_k1_subtimers
@@ -9749,6 +9817,7 @@ def prepare_target_lane_outer_objectives(
     profile_progress_json_path=None,
     stablehlo_dir=None,
     solved_pair_boozer_overrides=None,
+    first_candidate_coil_dofs=None,
     disable_success_filter: bool,
     non_qs_weight,
     residual_weight,
@@ -9835,6 +9904,7 @@ def prepare_target_lane_outer_objectives(
         profile_progress_json_path=profile_progress_json_path,
         stablehlo_dir=stablehlo_dir,
         solved_pair_boozer_overrides=solved_pair_boozer_overrides,
+        first_candidate_coil_dofs=first_candidate_coil_dofs,
         record_outer_optimizer_event=record_outer_optimizer_event,
     )
     if target_scalar_objective is None:
@@ -11205,12 +11275,28 @@ def profile_traceable_target_lane_memory_analysis(
     coil_dofs,
     solved_x,
     solved_linear_solve_factors,
+    *,
+    current_incumbent_anchor_eligible=True,
 ):
     """Compile target-lane profile callables and report XLA memory footprints."""
+    current_incumbent_anchor_eligible = jnp.asarray(
+        current_incumbent_anchor_eligible,
+        dtype=bool,
+    )
     memory_analysis_specs = (
         ("forward_result", (coil_dofs,)),
         ("forward_value", (coil_dofs,)),
         ("warmstart_predict", (coil_dofs,)),
+        (
+            "current_incumbent_warmstart_predict",
+            (
+                coil_dofs,
+                coil_dofs,
+                solved_x,
+                solved_linear_solve_factors,
+                current_incumbent_anchor_eligible,
+            ),
+        ),
         ("pre_newton_solve_from_warmstart", (coil_dofs, solved_x)),
         ("inner_solve", (coil_dofs,)),
         ("newton_polish_from_pre_newton", (coil_dofs, solved_x)),
@@ -11377,6 +11463,13 @@ def should_record_single_stage_jax_compile_diagnostics(
     )
 
 
+def _target_lane_profile_anchor_eligible(forward_result):
+    """Return whether a profiled solved state is safe as an incumbent anchor."""
+    if "success" not in forward_result:
+        return jnp.asarray(False, dtype=bool)
+    return jnp.asarray(host_bool(forward_result["success"]), dtype=bool)
+
+
 def profile_traceable_target_lane_objective(
     profile_suite,
     coil_dofs,
@@ -11459,6 +11552,18 @@ def profile_traceable_target_lane_objective(
         )
     solved_x = forward_result["x"]
     solved_linear_solve_factors = forward_result["linear_solve_factors"]
+    current_incumbent_anchor_eligible = _target_lane_profile_anchor_eligible(
+        forward_result
+    )
+    if "current_incumbent_warmstart_predict" in profile_suite:
+        _, profiled["current_incumbent_warmstart_predict"] = profile_named(
+            "current_incumbent_warmstart_predict",
+            coil_dofs,
+            coil_dofs,
+            solved_x,
+            solved_linear_solve_factors,
+            current_incumbent_anchor_eligible,
+        )
     _, profiled["surface_geometry"] = profile_named(
         "surface_geometry",
         solved_x,
@@ -11502,6 +11607,7 @@ def profile_traceable_target_lane_objective(
             coil_dofs,
             solved_x,
             solved_linear_solve_factors,
+            current_incumbent_anchor_eligible=current_incumbent_anchor_eligible,
         )
     profiled["solve_success"] = host_bool(solve_result["success"])
     if progress_json_path is not None:
@@ -12934,6 +13040,9 @@ def single_stage_target_lane_accepted_step_solve_result(forward_result):
     ):
         if key in forward_result:
             solve_result[key] = forward_result[key]
+    for key, value in forward_result.items():
+        if key == "outer_raw_terms_present" or key.startswith("outer_raw_term_"):
+            solve_result[key] = value
     return solve_result
 
 
@@ -13635,6 +13744,7 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
     value_and_grad_from_forward_result=False,
     forward_result_value_and_grad=None,
     boozer_solver_metadata=None,
+    full_boozer_solver_metadata=None,
     progress_event_callback=None,
     progress_event_phase="target_lane",
 ):
@@ -13659,6 +13769,11 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
             "cache_solve_result_for_reporting",
             True,
         )
+    )
+    last_solve_fidelity_for_trace = getattr(
+        target_value_and_grad_objective,
+        "last_solve_fidelity_for_trace",
+        None,
     )
 
     def record_progress_event(label, **fields):
@@ -13878,6 +13993,12 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
                     target_lane_solve_result,
                 )
         if record_event is not None:
+            event_boozer_solver_metadata = boozer_solver_metadata
+            if (
+                last_solve_fidelity_for_trace is not None
+                and last_solve_fidelity_for_trace() == "first_candidate_full"
+            ):
+                event_boozer_solver_metadata = full_boozer_solver_metadata
             record_event(
                 build_single_stage_target_lane_objective_evaluation_trace_event(
                     source_event={
@@ -13891,7 +14012,7 @@ def build_single_stage_target_lane_objective_evaluation_trace_wrapper(
                     objective_value=objective_value,
                     optimizer_gradient=optimizer_gradient,
                     forward_result=forward_result,
-                    boozer_solver_metadata=boozer_solver_metadata,
+                    boozer_solver_metadata=event_boozer_solver_metadata,
                 )
             )
         record_progress_event(
@@ -16903,6 +17024,7 @@ if __name__ == "__main__":
     target_lane_profile = None
     target_lane_optimizer_initial_value_and_grad = None
     target_lane_objective_trace_forward_result = None
+    target_lane_full_boozer_solver_metadata = None
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -17155,6 +17277,12 @@ if __name__ == "__main__":
                 target_lane_trial_boozer_overrides,
             )
         )
+        target_lane_full_boozer_solver_metadata = (
+            build_target_lane_trial_boozer_solver_trace_metadata(
+                boozer_surface,
+                {},
+            )
+        )
         target_lane_trial_boozer_override_active = any(
             value is not None for value in target_lane_trial_boozer_overrides.values()
         )
@@ -17187,78 +17315,77 @@ if __name__ == "__main__":
                 run_dict,
                 record_outer_optimizer_event=record_outer_optimizer_event,
             )
-            (
-                target_scalar_objective,
-                target_value_and_grad_objective,
-                target_lane_optimizer_initial_value_and_grad,
-                target_lane_profile,
-                target_lane_success_filter,
-            ) = prepare_target_lane_outer_objectives(
+        (
+            target_scalar_objective,
+            target_value_and_grad_objective,
+            target_lane_optimizer_initial_value_and_grad,
+            target_lane_profile,
+            target_lane_success_filter,
+        ) = prepare_target_lane_outer_objectives(
+            boozer_surface,
+            bs,
+            banana_curve,
+            VV,
+            iota_target,
+            use_target_lane=use_target_lane,
+            use_value_and_grad=use_target_lane_vg,
+            use_decomposed_solved_pair=use_decomposed_solved_pair,
+            use_full_state_optimizer=use_target_lane_full_state_optimizer,
+            full_state_optimizer_dof_map=(
+                full_graph_optimizer_dof_map
+                if use_target_lane_full_state_optimizer
+                else None
+            ),
+            profile_optimizer_dofs=(
+                dofs if use_target_lane_full_state_optimizer else None
+            ),
+            profile_target_lane=args.profile_target_lane,
+            profile_target_lane_memory_analysis=(
+                args.profile_target_lane_memory_analysis
+            ),
+            trace_target_lane_k1_subtimers=args.trace_target_lane_k1_subtimers,
+            profile_batch_size=args.profile_target_lane_batch_size,
+            profile_progress_json_path=args.target_lane_profile_progress_json,
+            stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+            solved_pair_boozer_overrides=target_lane_trial_boozer_overrides,
+            first_candidate_coil_dofs=target_lane_optimizer_to_coil_dofs(dofs),
+            disable_success_filter=args.disable_target_lane_success_filter,
+            non_qs_weight=NON_QS_WEIGHT,
+            residual_weight=RES_WEIGHT,
+            iota_weight=IOTAS_WEIGHT,
+            length_weight=LENGTH_WEIGHT,
+            length_target=length_target,
+            cc_dist=CC_DIST,
+            cc_weight=CC_WEIGHT,
+            cs_dist=CS_DIST,
+            cs_weight=CS_WEIGHT,
+            ss_dist=SS_DIST,
+            surf_dist_weight=SURF_DIST_WEIGHT,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            curvature_weight=CURVATURE_WEIGHT,
+            record_outer_optimizer_event=record_outer_optimizer_event,
+        )
+        target_lane_outer_objective_config = (
+            build_target_lane_outer_objective_config(
                 boozer_surface,
                 bs,
                 banana_curve,
                 VV,
-                iota_target,
-                use_target_lane=use_target_lane,
-                use_value_and_grad=use_target_lane_vg,
-                use_decomposed_solved_pair=use_decomposed_solved_pair,
-                use_full_state_optimizer=use_target_lane_full_state_optimizer,
-                full_state_optimizer_dof_map=(
-                    full_graph_optimizer_dof_map
-                    if use_target_lane_full_state_optimizer
-                    else None
-                ),
-                profile_optimizer_dofs=dofs
-                if use_target_lane_full_state_optimizer
-                else None,
-                profile_target_lane=args.profile_target_lane,
-                profile_target_lane_memory_analysis=(
-                    args.profile_target_lane_memory_analysis
-                ),
-                trace_target_lane_k1_subtimers=(
-                    args.trace_target_lane_k1_subtimers
-                ),
-                profile_batch_size=args.profile_target_lane_batch_size,
-                profile_progress_json_path=args.target_lane_profile_progress_json,
-                stablehlo_dir=args.dump_target_lane_stablehlo_dir,
-                solved_pair_boozer_overrides=target_lane_trial_boozer_overrides,
-                disable_success_filter=args.disable_target_lane_success_filter,
                 non_qs_weight=NON_QS_WEIGHT,
                 residual_weight=RES_WEIGHT,
                 iota_weight=IOTAS_WEIGHT,
                 length_weight=LENGTH_WEIGHT,
                 length_target=length_target,
-                cc_dist=CC_DIST,
-                cc_weight=CC_WEIGHT,
-                cs_dist=CS_DIST,
-                cs_weight=CS_WEIGHT,
-                ss_dist=SS_DIST,
-                surf_dist_weight=SURF_DIST_WEIGHT,
+                curve_curve_threshold=CC_DIST,
+                curve_curve_weight=CC_WEIGHT,
+                curve_surface_threshold=CS_DIST,
+                curve_surface_weight=CS_WEIGHT,
+                surface_vessel_threshold=SS_DIST,
+                surface_vessel_weight=SURF_DIST_WEIGHT,
                 curvature_threshold=CURVATURE_THRESHOLD,
                 curvature_weight=CURVATURE_WEIGHT,
-                record_outer_optimizer_event=record_outer_optimizer_event,
             )
-            target_lane_outer_objective_config = (
-                build_target_lane_outer_objective_config(
-                    boozer_surface,
-                    bs,
-                    banana_curve,
-                    VV,
-                    non_qs_weight=NON_QS_WEIGHT,
-                    residual_weight=RES_WEIGHT,
-                    iota_weight=IOTAS_WEIGHT,
-                    length_weight=LENGTH_WEIGHT,
-                    length_target=length_target,
-                    curve_curve_threshold=CC_DIST,
-                    curve_curve_weight=CC_WEIGHT,
-                    curve_surface_threshold=CS_DIST,
-                    curve_surface_weight=CS_WEIGHT,
-                    surface_vessel_threshold=SS_DIST,
-                    surface_vessel_weight=SURF_DIST_WEIGHT,
-                    curvature_threshold=CURVATURE_THRESHOLD,
-                    curvature_weight=CURVATURE_WEIGHT,
-                )
-            )
+        )
         _record_timing(
             timings,
             "target_lane_bundle_setup_s",
@@ -17309,7 +17436,7 @@ if __name__ == "__main__":
                     optimizer_initial_value_and_grad=(
                         target_lane_optimizer_initial_value_and_grad
                     ),
-                    boozer_solver_metadata=target_lane_trial_boozer_solver_metadata,
+                    boozer_solver_metadata=target_lane_full_boozer_solver_metadata,
                 )
             )
             _record_timing(
@@ -17704,6 +17831,12 @@ if __name__ == "__main__":
                     target_lane_trial_boozer_overrides,
                 )
             )
+            target_lane_full_boozer_solver_metadata = (
+                build_target_lane_trial_boozer_solver_trace_metadata(
+                    boozer_surface,
+                    {},
+                )
+            )
             target_lane_trial_boozer_override_active = any(
                 value is not None
                 for value in target_lane_trial_boozer_overrides.values()
@@ -17736,88 +17869,91 @@ if __name__ == "__main__":
                     use_host_jax_outer_objective=use_host_jax_outer_objective,
                 )
             ) as jax_compile_diagnostics_recorder:
-                with temporary_boozer_surface_option_overrides(
-                    boozer_surface,
-                    **target_lane_trial_boozer_overrides,
+                with maybe_trace_single_stage_phase(
+                    "single_stage.target_lane_bundle_setup",
+                    enabled=jax_profile_enabled and use_target_lane,
                 ):
-                    with maybe_trace_single_stage_phase(
-                        "single_stage.target_lane_bundle_setup",
-                        enabled=jax_profile_enabled and use_target_lane,
-                    ):
-                        record_outer_optimizer_event(
-                            "target_lane_objective_provider_setup_started"
-                        )
-                        if use_target_lane:
+                    record_outer_optimizer_event(
+                        "target_lane_objective_provider_setup_started"
+                    )
+                    if use_target_lane:
+                        with temporary_boozer_surface_option_overrides(
+                            boozer_surface,
+                            **target_lane_trial_boozer_overrides,
+                        ):
                             _materialize_target_lane_boozer_linearization(
                                 boozer_surface,
                                 run_dict,
                                 record_outer_optimizer_event=record_outer_optimizer_event,
                             )
-                        (
-                            target_scalar_objective,
-                            target_value_and_grad_objective,
-                            target_lane_optimizer_initial_value_and_grad,
-                            target_lane_profile,
-                            target_lane_success_filter,
-                        ) = prepare_target_lane_outer_objectives(
-                            boozer_surface,
-                            bs,
-                            banana_curve,
-                            VV,
-                            iota_target,
-                            use_target_lane=use_target_lane,
-                            use_value_and_grad=use_target_lane_vg,
-                            use_decomposed_solved_pair=use_decomposed_solved_pair,
-                            use_full_state_optimizer=(use_target_lane_full_state_optimizer),
-                            full_state_optimizer_dof_map=(
-                                full_graph_optimizer_dof_map
-                                if use_target_lane_full_state_optimizer
-                                else None
-                            ),
-                            profile_optimizer_dofs=dofs
+                    (
+                        target_scalar_objective,
+                        target_value_and_grad_objective,
+                        target_lane_optimizer_initial_value_and_grad,
+                        target_lane_profile,
+                        target_lane_success_filter,
+                    ) = prepare_target_lane_outer_objectives(
+                        boozer_surface,
+                        bs,
+                        banana_curve,
+                        VV,
+                        iota_target,
+                        use_target_lane=use_target_lane,
+                        use_value_and_grad=use_target_lane_vg,
+                        use_decomposed_solved_pair=use_decomposed_solved_pair,
+                        use_full_state_optimizer=(
+                            use_target_lane_full_state_optimizer
+                        ),
+                        full_state_optimizer_dof_map=(
+                            full_graph_optimizer_dof_map
                             if use_target_lane_full_state_optimizer
-                            else None,
-                            profile_target_lane=args.profile_target_lane,
-                            profile_target_lane_memory_analysis=(
-                                args.profile_target_lane_memory_analysis
-                            ),
-                            trace_target_lane_k1_subtimers=(
-                                args.trace_target_lane_k1_subtimers
-                            ),
-                            profile_batch_size=args.profile_target_lane_batch_size,
-                            profile_progress_json_path=(
-                                args.target_lane_profile_progress_json
-                            ),
-                            stablehlo_dir=args.dump_target_lane_stablehlo_dir,
-                            solved_pair_boozer_overrides=(
-                                target_lane_trial_boozer_overrides
-                            ),
-                            disable_success_filter=(
-                                args.disable_target_lane_success_filter
-                            ),
-                            non_qs_weight=NON_QS_WEIGHT,
-                            residual_weight=RES_WEIGHT,
-                            iota_weight=IOTAS_WEIGHT,
-                            length_weight=LENGTH_WEIGHT,
-                            length_target=length_target,
-                            cc_dist=CC_DIST,
-                            cc_weight=CC_WEIGHT,
-                            cs_dist=CS_DIST,
-                            cs_weight=CS_WEIGHT,
-                            ss_dist=SS_DIST,
-                            surf_dist_weight=SURF_DIST_WEIGHT,
-                            curvature_threshold=CURVATURE_THRESHOLD,
-                            curvature_weight=CURVATURE_WEIGHT,
-                            record_outer_optimizer_event=record_outer_optimizer_event,
-                        )
-                        adapter.target_lane_solve_result_lookup = getattr(
-                            target_value_and_grad_objective,
-                            "target_lane_solve_result_for_coil_dofs",
-                            None,
-                        )
-                        record_outer_optimizer_event(
-                            "target_lane_objective_provider_setup_returned"
-                        )
+                            else None
+                        ),
+                        profile_optimizer_dofs=(
+                            dofs if use_target_lane_full_state_optimizer else None
+                        ),
+                        profile_target_lane=args.profile_target_lane,
+                        profile_target_lane_memory_analysis=(
+                            args.profile_target_lane_memory_analysis
+                        ),
+                        trace_target_lane_k1_subtimers=(
+                            args.trace_target_lane_k1_subtimers
+                        ),
+                        profile_batch_size=args.profile_target_lane_batch_size,
+                        profile_progress_json_path=(
+                            args.target_lane_profile_progress_json
+                        ),
+                        stablehlo_dir=args.dump_target_lane_stablehlo_dir,
+                        solved_pair_boozer_overrides=(
+                            target_lane_trial_boozer_overrides
+                        ),
+                        first_candidate_coil_dofs=target_lane_optimizer_to_coil_dofs(
+                            dofs
+                        ),
+                        disable_success_filter=args.disable_target_lane_success_filter,
+                        non_qs_weight=NON_QS_WEIGHT,
+                        residual_weight=RES_WEIGHT,
+                        iota_weight=IOTAS_WEIGHT,
+                        length_weight=LENGTH_WEIGHT,
+                        length_target=length_target,
+                        cc_dist=CC_DIST,
+                        cc_weight=CC_WEIGHT,
+                        cs_dist=CS_DIST,
+                        cs_weight=CS_WEIGHT,
+                        ss_dist=SS_DIST,
+                        surf_dist_weight=SURF_DIST_WEIGHT,
+                        curvature_threshold=CURVATURE_THRESHOLD,
+                        curvature_weight=CURVATURE_WEIGHT,
+                        record_outer_optimizer_event=record_outer_optimizer_event,
+                    )
+                    adapter.target_lane_solve_result_lookup = getattr(
+                        target_value_and_grad_objective,
+                        "target_lane_solve_result_for_coil_dofs",
+                        None,
+                    )
+                    record_outer_optimizer_event(
+                        "target_lane_objective_provider_setup_returned"
+                    )
                 record_outer_optimizer_event(
                     "target_lane_reporting_provider_setup_started"
                 )
@@ -17943,7 +18079,7 @@ if __name__ == "__main__":
                                     target_lane_optimizer_initial_value_and_grad
                                 ),
                                 boozer_solver_metadata=(
-                                    target_lane_trial_boozer_solver_metadata
+                                    target_lane_full_boozer_solver_metadata
                                 ),
                             )
                         )
@@ -18528,6 +18664,9 @@ if __name__ == "__main__":
                                 ),
                                 boozer_solver_metadata=(
                                     target_lane_trial_boozer_solver_metadata
+                                ),
+                                full_boozer_solver_metadata=(
+                                    target_lane_full_boozer_solver_metadata
                                 ),
                                 progress_event_callback=record_outer_optimizer_event,
                                 progress_event_phase="target_lane_optimizer",

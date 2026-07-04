@@ -17,10 +17,11 @@ defaults to ``"run"`` on every platform -- matching the production GPU lane,
 which already passes ``--target-lane-boozer-newton-polish-policy run`` and
 converges the inner ondevice Newton via the strict-clean traceable path. The
 trial-only policy is resolved separately and also defaults to ``"run"``.
-Trial BFGS caps remain explicit-only until the objective wrapper can distinguish
-line-search probes from incumbent/full-fidelity evaluations. These tests pin
-both contracts at the benchmark parent (which builds the child command) and the
-example child (which maps the policies onto the BoozerSurfaceJAX options).
+Trial BFGS caps remain explicit-only after the objective wrapper separates the
+first incumbent ``x0`` solve from later line-search probes; a production default
+still needs the trajectory gate. These tests pin both contracts at the benchmark
+parent (which builds the child command) and the example child (which maps the
+policies onto the BoozerSurfaceJAX options).
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example
     _build_decomposed_coil_host_value_and_grad,
     _cached_target_lane_objective_evaluation_sync_state,
     active_boozer_option_overrides,
+    build_target_lane_outer_objectives,
     build_target_lane_full_state_value_and_grad,
     build_single_stage_target_lane_objective_evaluation_trace_wrapper,
     build_resolved_target_lane_trial_boozer_overrides,
@@ -613,6 +615,177 @@ def test_trial_iteration_cap_solve_reuses_final_sync_cache_when_cap_does_not_bin
     assert solve_result is not None
     assert solve_result["iota"] == 0.11
     assert solve_result["objective_value"] == 7.0
+
+
+def test_first_x0_uses_full_fidelity_before_trial_iteration_cap():
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    initial_coil_dofs = np.array([1.0, 2.0])
+    probe_coil_dofs = np.array([1.1, 2.0])
+    full_calls = []
+    trial_calls = []
+
+    def full_solve_fn(coil_dofs):
+        full_calls.append(np.asarray(coil_dofs, dtype=float))
+        return {
+            "success": True,
+            "primal_success": True,
+            "sdofs": [3.0, 4.0],
+            "iota": 0.11,
+            "G": 2.0,
+            "x": [5.0, 6.0],
+            "linear_solve_factors": {},
+            "pre_newton_iter": 1500,
+        }
+
+    def full_value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 11.0, [0.3, 0.4]
+
+    def trial_solve_fn(coil_dofs):
+        trial_calls.append(np.asarray(coil_dofs, dtype=float))
+        return {
+            "success": True,
+            "primal_success": True,
+            "sdofs": [7.0, 8.0],
+            "iota": 0.12,
+            "G": 2.1,
+            "x": [9.0, 10.0],
+            "linear_solve_factors": {},
+            "pre_newton_iter": 300,
+        }
+
+    def trial_value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 13.0, [0.5, 0.6]
+
+    trial_overrides = {"bfgs_maxiter": 300}
+    objective = _build_decomposed_coil_host_value_and_grad(
+        solved_pair_type(
+            solve_fn=trial_solve_fn,
+            value_grad_from_solved=trial_value_grad_from_solved,
+        ),
+        baseline_gradient=[0.0, 0.0],
+        first_candidate_solved_pair=solved_pair_type(
+            solve_fn=full_solve_fn,
+            value_grad_from_solved=full_value_grad_from_solved,
+        ),
+        first_candidate_coil_dofs=initial_coil_dofs,
+        solve_result_cache_policy=(
+            lambda result: target_lane_trial_solve_result_matches_full_fidelity(
+                result,
+                trial_overrides,
+            )
+        ),
+    )
+
+    initial_value, initial_grad = objective(initial_coil_dofs)
+    initial_solve_result = objective.target_lane_solve_result_for_coil_dofs(
+        initial_coil_dofs
+    )
+
+    assert len(full_calls) == 1
+    assert len(trial_calls) == 0
+    assert float(np.asarray(initial_value)) == 11.0
+    np.testing.assert_allclose(np.asarray(initial_grad), [0.3, 0.4])
+    assert not target_lane_trial_solve_result_matches_full_fidelity(
+        {"success": True, "primal_success": True, "pre_newton_iter": 1500},
+        trial_overrides,
+    )
+    assert initial_solve_result is not None
+    assert initial_solve_result["iota"] == 0.11
+    assert initial_solve_result["objective_value"] == 11.0
+
+    probe_value, probe_grad = objective(probe_coil_dofs)
+
+    assert len(full_calls) == 1
+    assert len(trial_calls) == 1
+    assert float(np.asarray(probe_value)) == 13.0
+    np.testing.assert_allclose(np.asarray(probe_grad), [0.5, 0.6])
+    assert objective.target_lane_solve_result_for_coil_dofs(probe_coil_dofs) is None
+
+
+def test_decomposed_builder_rejects_full_state_lifting():
+    with pytest.raises(ValueError, match="compact coil DOFs"):
+        build_target_lane_outer_objectives(
+            None,
+            None,
+            0.11,
+            use_value_and_grad=True,
+            use_decomposed_solved_pair=True,
+            profile_target_lane=False,
+            full_state_optimizer_dof_map=object(),
+        )
+
+
+def test_first_x0_trace_uses_full_metadata_before_trial_metadata():
+    solved_pair_type = namedtuple(
+        "SolvedPair", ["solve_fn", "value_grad_from_solved"]
+    )
+    initial_coil_dofs = np.array([1.0, 2.0])
+    probe_coil_dofs = np.array([1.1, 2.0])
+    events = []
+
+    def full_solve_fn(_coil_dofs):
+        return {
+            "success": True,
+            "primal_success": True,
+            "sdofs": [3.0, 4.0],
+            "iota": 0.11,
+            "G": 2.0,
+            "x": [5.0, 6.0],
+            "linear_solve_factors": {},
+            "pre_newton_iter": 1500,
+        }
+
+    def trial_solve_fn(_coil_dofs):
+        return {
+            "success": True,
+            "primal_success": True,
+            "sdofs": [7.0, 8.0],
+            "iota": 0.12,
+            "G": 2.1,
+            "x": [9.0, 10.0],
+            "linear_solve_factors": {},
+            "pre_newton_iter": 300,
+        }
+
+    def full_value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 11.0, [0.3, 0.4]
+
+    def trial_value_grad_from_solved(_coil_dofs, _x, _linear_solve_factors):
+        return 13.0, [0.5, 0.6]
+
+    objective = _build_decomposed_coil_host_value_and_grad(
+        solved_pair_type(
+            solve_fn=trial_solve_fn,
+            value_grad_from_solved=trial_value_grad_from_solved,
+        ),
+        baseline_gradient=[0.0, 0.0],
+        first_candidate_solved_pair=solved_pair_type(
+            solve_fn=full_solve_fn,
+            value_grad_from_solved=full_value_grad_from_solved,
+        ),
+        first_candidate_coil_dofs=initial_coil_dofs,
+    )
+
+    def unexpected_forward_result(_coil_dofs):
+        raise AssertionError("trace wrapper should reuse the decomposed K1 result")
+
+    traced_objective = build_single_stage_target_lane_objective_evaluation_trace_wrapper(
+        target_value_and_grad_objective=objective,
+        target_forward_result=unexpected_forward_result,
+        optimizer_to_coil_dofs=lambda x: x,
+        run_dict={},
+        record_event=events.append,
+        boozer_solver_metadata={"bfgs_maxiter": 300},
+        full_boozer_solver_metadata={"bfgs_maxiter": 1500},
+    )
+
+    traced_objective(initial_coil_dofs)
+    traced_objective(probe_coil_dofs)
+
+    assert events[0]["boozer_solver_metadata"]["bfgs_maxiter"] == 1500
+    assert events[1]["boozer_solver_metadata"]["bfgs_maxiter"] == 300
 
 
 def test_trial_iteration_cap_solve_rejects_final_sync_cache_when_cap_binds():

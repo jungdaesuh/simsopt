@@ -7534,6 +7534,113 @@ class TestTraceableObjective:
             is None
         )
 
+    def test_target_lane_final_reporting_reuses_forward_outer_raw_terms(
+        self,
+        monkeypatch,
+    ):
+        """Final reporting receives raw outer terms from the accepted K1 payload."""
+        term_specs = (
+            surface_objectives_traceable_jax._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
+        outer_raw_terms = {
+            term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
+            for index, (term_name, _weight_key) in enumerate(term_specs)
+        }
+        forward_result = {
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "x": jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+            "sdofs": jnp.asarray([3.0, 4.0], dtype=jnp.float64),
+            "iota": jnp.asarray(0.31, dtype=jnp.float64),
+            "G": jnp.asarray(-2.0, dtype=jnp.float64),
+            "objective_value": jnp.asarray(5.5, dtype=jnp.float64),
+            "outer_raw_terms_present": jnp.asarray(True, dtype=bool),
+        }
+        for term_name, term_value in outer_raw_terms.items():
+            forward_result[f"outer_raw_term_{term_name}"] = term_value
+        solve_result = (
+            single_stage_example.single_stage_target_lane_accepted_step_solve_result(
+                forward_result
+            )
+        )
+        captured = {}
+
+        def reporting_metrics_from_solution(
+            coil_dofs,
+            solved_x,
+            solver_success,
+            *,
+            include_distance_metrics=True,
+            outer_raw_terms=None,
+        ):
+            captured["coil_dofs"] = coil_dofs
+            captured["solved_x"] = solved_x
+            captured["solver_success"] = solver_success
+            captured["include_distance_metrics"] = include_distance_metrics
+            captured["outer_raw_terms"] = outer_raw_terms
+            return {"traceable_metric": jnp.asarray(1.0, dtype=jnp.float64)}
+
+        runtime_bundle = {
+            "reporting_metrics": lambda *_args, **_kwargs: pytest.fail(
+                "solved-state reporting should use the accepted solve payload"
+            ),
+            "reporting_metrics_from_solution": reporting_metrics_from_solution,
+            "objective": lambda *_args, **_kwargs: pytest.fail(
+                "objective should be reused from the solve payload"
+            ),
+            "value_and_grad": lambda *_args, **_kwargs: pytest.fail(
+                "value_and_grad should not run for read-only final reporting"
+            ),
+        }
+        monkeypatch.setattr(
+            single_stage_example,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            lambda: (lambda *_args, **_kwargs: runtime_bundle),
+        )
+        monkeypatch.setattr(
+            single_stage_example,
+            "_hostify_traceable_reporting_metrics",
+            lambda _metrics, *, include_distance_metrics: {
+                "include_distance_metrics": include_distance_metrics,
+            },
+        )
+
+        sync = single_stage_example.build_single_stage_target_lane_accepted_step_sync(
+            object(),
+            object(),
+            0.31,
+            outer_objective_config={},
+            success_filter=None,
+        )
+        summary = sync(
+            {},
+            np.asarray([7.0, 8.0], dtype=np.float64),
+            benchmark_mode=True,
+            update_run_state=False,
+            target_lane_solve_result=solve_result,
+        )
+
+        assert summary["objective_value"] == pytest.approx(5.5)
+        assert captured["include_distance_metrics"] is False
+        assert bool(np.asarray(captured["solver_success"])) is True
+        np.testing.assert_allclose(
+            np.asarray(captured["coil_dofs"], dtype=np.float64),
+            np.asarray([7.0, 8.0], dtype=np.float64),
+        )
+        np.testing.assert_allclose(
+            np.asarray(captured["solved_x"], dtype=np.float64),
+            np.asarray([1.0, 2.0], dtype=np.float64),
+        )
+        captured_raw_terms = captured["outer_raw_terms"]
+        assert captured_raw_terms is not None
+        raw_terms_present, raw_terms = captured_raw_terms
+        assert bool(np.asarray(raw_terms_present)) is True
+        for term_name, expected_value in outer_raw_terms.items():
+            np.testing.assert_allclose(
+                np.asarray(raw_terms[term_name], dtype=np.float64),
+                np.asarray(expected_value, dtype=np.float64),
+            )
+
     def test_adapter_final_sync_falls_back_to_decomposed_solve_cache(self):
         """Final sync can reuse the decomposed K1 memo when trace cache is absent."""
         optimizer_dofs = np.array([1.0, -2.0], dtype=np.float64)
@@ -7768,6 +7875,13 @@ class TestTraceableObjective:
 
     def test_traceable_forward_result_packs_newton_progress_fields(self):
         """Packed K1 results must preserve Newton diagnostics for progress logs."""
+        term_specs = (
+            surface_objectives_traceable_jax._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
+        outer_raw_terms = {
+            term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
+            for index, (term_name, _weight_key) in enumerate(term_specs)
+        }
         forward_result = (
             surface_objectives_traceable_jax._pack_traceable_forward_result(
                 value=jnp.asarray(7.0, dtype=jnp.float64),
@@ -7807,6 +7921,7 @@ class TestTraceableObjective:
                 newton_last_accepted_alpha=jnp.asarray(1.0, dtype=jnp.float64),
                 final_gradient_norm=jnp.asarray(1.0e-11, dtype=jnp.float64),
                 final_gradient_inf_norm=jnp.asarray(8.0e-12, dtype=jnp.float64),
+                outer_raw_terms=outer_raw_terms,
             )
         )
 
@@ -7831,6 +7946,19 @@ class TestTraceableObjective:
         assert fields["newton_last_accepted_alpha"] == pytest.approx(1.0)
         assert fields["final_gradient_norm"] == pytest.approx(1.0e-11)
         assert fields["final_gradient_inf_norm"] == pytest.approx(8.0e-12)
+        packed_raw_terms = (
+            surface_objectives_traceable_jax.traceable_forward_result_outer_raw_terms(
+                forward_result
+            )
+        )
+        assert packed_raw_terms is not None
+        raw_terms_present, raw_terms = packed_raw_terms
+        assert bool(np.asarray(raw_terms_present)) is True
+        for term_name, expected_value in outer_raw_terms.items():
+            np.testing.assert_allclose(
+                np.asarray(raw_terms[term_name], dtype=np.float64),
+                np.asarray(expected_value, dtype=np.float64),
+            )
 
     def test_decomposed_host_objective_records_opt_in_k1_subtimers(self):
         """Opt-in K1 replay profiling records split subphase timings per eval."""
@@ -8122,6 +8250,8 @@ class TestTraceableObjective:
         solved_x = jnp.asarray([0.1, 0.2, 0.3], dtype=jnp.float64)
         warmstart_x = jnp.asarray([0.4, 0.5, 0.6], dtype=jnp.float64)
         pre_newton_x = jnp.asarray([0.7, 0.8, 0.9], dtype=jnp.float64)
+        forward_success = {"value": True}
+        current_incumbent_calls = []
 
         def solved_total_gradient(
             _coil_dofs,
@@ -8130,16 +8260,36 @@ class TestTraceableObjective:
         ):
             return jnp.asarray([3.0, 4.0], dtype=jnp.float64)
 
+        def current_incumbent_warmstart_predict(
+            current_coil_dofs,
+            anchor_coil_dofs,
+            anchor_x,
+            anchor_linear_solve_factors,
+            anchor_eligible,
+        ):
+            current_incumbent_calls.append(
+                (
+                    current_coil_dofs,
+                    anchor_coil_dofs,
+                    anchor_x,
+                    anchor_linear_solve_factors,
+                    anchor_eligible,
+                )
+            )
+            return {"x": anchor_x, "success": anchor_eligible}
+
         profile_suite = {
             "forward_result": lambda _coil_dofs: {
                 "x": solved_x,
                 "linear_solve_factors": None,
+                "success": jnp.asarray(forward_success["value"]),
             },
             "forward_value": lambda _coil_dofs: jnp.asarray(1.0, dtype=jnp.float64),
             "warmstart_predict": lambda _coil_dofs: {
                 "x": warmstart_x,
                 "success": jnp.asarray(True),
             },
+            "current_incumbent_warmstart_predict": current_incumbent_warmstart_predict,
             "pre_newton_solve_from_warmstart": lambda _coil_dofs, _warmstart_x: {
                 "x": pre_newton_x,
                 "success": jnp.asarray(True),
@@ -8181,7 +8331,108 @@ class TestTraceableObjective:
         assert "pre_newton_solve_from_warmstart" in profile
         assert "inner_solve" in profile
         assert "newton_polish_from_pre_newton" in profile
+        assert "current_incumbent_warmstart_predict" in profile
         assert profile["solve_success"] is True
+        assert len(current_incumbent_calls) == 2
+        for call in current_incumbent_calls:
+            (
+                current_coil_dofs,
+                anchor_coil_dofs,
+                anchor_x,
+                anchor_linear_solve_factors,
+                anchor_eligible,
+            ) = call
+            np.testing.assert_allclose(
+                np.asarray(current_coil_dofs),
+                np.asarray(coil_dofs),
+            )
+            np.testing.assert_allclose(
+                np.asarray(anchor_coil_dofs),
+                np.asarray(coil_dofs),
+            )
+            np.testing.assert_allclose(np.asarray(anchor_x), np.asarray(solved_x))
+            assert anchor_linear_solve_factors is None
+            assert bool(np.asarray(anchor_eligible)) is True
+
+        forward_success["value"] = False
+        current_incumbent_calls.clear()
+        profile = single_stage_example.profile_traceable_target_lane_objective(
+            profile_suite,
+            coil_dofs,
+        )
+
+        assert "current_incumbent_warmstart_predict" in profile
+        assert len(current_incumbent_calls) == 2
+        for call in current_incumbent_calls:
+            assert bool(np.asarray(call[-1])) is False
+
+    def test_target_lane_memory_analysis_profiles_current_incumbent_predictor(
+        self,
+        monkeypatch,
+    ):
+        """Memory analysis includes the current-incumbent predictor when exposed."""
+        coil_dofs = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+        solved_x = jnp.asarray([0.1, 0.2, 0.3], dtype=jnp.float64)
+        calls = []
+
+        def fake_memory_analysis_stats(fn, *args):
+            calls.append((fn, args))
+            return {
+                "arg_count": len(args),
+                "anchor_eligible": bool(np.asarray(args[-1])),
+            }
+
+        def current_incumbent_warmstart_predict(
+            current_coil_dofs,
+            anchor_coil_dofs,
+            anchor_x,
+            anchor_linear_solve_factors,
+            anchor_eligible,
+        ):
+            del (
+                current_coil_dofs,
+                anchor_coil_dofs,
+                anchor_x,
+                anchor_linear_solve_factors,
+                anchor_eligible,
+            )
+            return {"x": solved_x, "success": jnp.asarray(True)}
+
+        monkeypatch.setattr(
+            single_stage_example,
+            "_compiled_memory_analysis_stats",
+            fake_memory_analysis_stats,
+        )
+
+        profile_suite = {
+            "current_incumbent_warmstart_predict": current_incumbent_warmstart_predict,
+        }
+        memory_analysis = single_stage_example.profile_traceable_target_lane_memory_analysis(
+            profile_suite,
+            coil_dofs,
+            solved_x,
+            None,
+            current_incumbent_anchor_eligible=jnp.asarray(False),
+        )
+
+        assert memory_analysis == {
+            "current_incumbent_warmstart_predict": {
+                "arg_count": 5,
+                "anchor_eligible": False,
+            },
+        }
+        assert calls == [
+            (
+                current_incumbent_warmstart_predict,
+                (
+                    coil_dofs,
+                    coil_dofs,
+                    solved_x,
+                    None,
+                    jnp.asarray(False, dtype=bool),
+                ),
+            )
+        ]
 
     def test_jax_runtime_cache_metadata_uses_runtime_policy_ssot(self):
         """Cache metadata records the resolved backend config and policy."""
