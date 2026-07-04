@@ -614,11 +614,26 @@ def _unregister_traceable_matvec_counter(token: int) -> None:
         _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
 
 
-def _drain_traceable_matvec_counter(token: int) -> tuple[int, ...] | None:
+def _drain_traceable_matvec_counter(
+    token: int, *, rearm: bool = False
+) -> tuple[int, ...] | None:
+    """Read one matvec counter; ``rearm`` resets it instead of removing it.
+
+    Eager per-call tokens are popped (one-shot, no registry growth). Traced
+    kernels bake their token in at trace time and re-execute against the
+    same entry, so their consumer must rearm with a fresh zeroed window or
+    every execution after the first is silently dropped by the callback's
+    missing-entry guard.
+    """
     if token == 0:
         return None
     with _TRACEABLE_CALLBACK_LOCK:
-        values = _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
+        if rearm:
+            values = _TRACEABLE_MATVEC_COUNTERS.get(token)
+            if values is not None:
+                _TRACEABLE_MATVEC_COUNTERS[token] = [0] * len(values)
+        else:
+            values = _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
     if values is None:
         return None
     return tuple(values)
@@ -629,14 +644,16 @@ def _is_jax_tracer(value) -> bool:
 
 
 def traceable_newton_matvec_counts_from_token(token: int) -> tuple[int, ...] | None:
-    """Read and unregister one opt-in traceable Newton matvec counter token.
+    """Read one opt-in traceable Newton matvec counter and rearm it.
 
-    Counts accumulate over every execution of the traced computation holding
-    the token (there is no per-execution reset), and the registry entry is
-    retained until this drain runs — drain once per measurement window.
+    A traced kernel bakes its token in at trace time and re-executes against
+    the same registry entry, so this drain resets the entry to a zeroed
+    window instead of removing it: each drain returns the counts accumulated
+    since the previous drain, and later executions of the same compiled
+    kernel keep counting. Drain once per measurement window.
     """
 
-    return _drain_traceable_matvec_counter(token)
+    return _drain_traceable_matvec_counter(token, rearm=True)
 
 
 class _StrongTraceableCallableRef:

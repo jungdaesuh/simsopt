@@ -3949,6 +3949,43 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_traceable_matvec_counts_rearm_across_kernel_executions(self):
+        """Draining counts must rearm the token for later kernel executions.
+
+        Traced decomposed K1 kernels bake the counter token in at trace
+        time and re-execute against the same registry entry. The pre-fix
+        destructive drain popped the entry after the first evaluation, so
+        the callback's missing-entry guard silently dropped every later
+        execution's counts (observed on A100: only the first K1 event of a
+        run carried matvec actuals). Pre-fix this test's second drain
+        returns None.
+        """
+        token = _opt._register_traceable_matvec_counter(3)
+        try:
+            _opt._invoke_traceable_matvec_counter(token, 0)
+            _opt._invoke_traceable_matvec_counter(token, 0)
+            _opt._invoke_traceable_matvec_counter(token, 1)
+            first = _opt.traceable_newton_matvec_counts_from_token(token)
+            assert first == (2, 1, 0)
+            # Second execution window of the same compiled kernel.
+            _opt._invoke_traceable_matvec_counter(token, 0)
+            second = _opt.traceable_newton_matvec_counts_from_token(token)
+            assert second == (1, 0, 0)
+        finally:
+            _opt._unregister_traceable_matvec_counter(token)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_eager_matvec_counter_drain_keeps_one_shot_pop_semantics(self):
+        """The eager per-call drain still removes its token (no registry
+        growth for eager solves that allocate one token per call)."""
+        token = _opt._register_traceable_matvec_counter(2)
+        _opt._invoke_traceable_matvec_counter(token, 0)
+        assert _opt._drain_traceable_matvec_counter(token) == (1, 0)
+        assert _opt._drain_traceable_matvec_counter(token) is None
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_records_opt_in_matvec_counts(
         self, monkeypatch
     ):
@@ -4010,7 +4047,12 @@ class TestBoozerSurfaceJAXClassPrivate:
         active_indices = np.nonzero(active)[0]
         counts = _opt.traceable_newton_matvec_counts_from_token(int(token))
         assert counts is not None
-        assert _opt.traceable_newton_matvec_counts_from_token(int(token)) is None
+        # Rearm contract: the drain zeroes the window instead of removing it,
+        # so a second drain with no interleaved kernel execution reports an
+        # all-zero window (later executions of the compiled kernel keep
+        # counting into the rearmed entry).
+        second = _opt.traceable_newton_matvec_counts_from_token(int(token))
+        assert second is not None and not any(second)
         actual = np.full(
             active.shape,
             _opt._LINEAR_SOLVE_ITERATIONS_UNKNOWN,
