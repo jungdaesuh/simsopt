@@ -3,8 +3,7 @@
 This document is the user-facing contract for the Columbia `simsopt-jax`
 backend lane as of 2026-06-02.
 
-It is intentionally narrower than the architecture notes in
-[`gpu_jax_pro.md`](/Users/suhjungdae/code/columbia/simsopt-jax/gpu_jax_pro.md).
+It is intentionally narrower than the broader JAX backend architecture notes.
 Use this file for:
 
 - backend selection
@@ -262,7 +261,7 @@ Adjoint and warm-start linear solve note:
 All commands below assume:
 
 ```bash
-cd /Users/suhjungdae/code/columbia/simsopt-jax
+cd /path/to/simsopt
 ```
 
 ### Stage 2 on the default CPU reference lane
@@ -485,15 +484,15 @@ behavior by themselves.
 The benchmark/productization SSOT now includes:
 
 - manifest:
-  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/manifests/stable_hardware_weekly_tier5.json`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/manifests/stable_hardware_weekly_tier5.json)
+  - [`benchmarks/manifests/stable_hardware_weekly_tier5.json`](../benchmarks/manifests/stable_hardware_weekly_tier5.json)
 - standardized markdown report template:
-  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/reports/STANDARD_REPORT_TEMPLATE.md`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/reports/STANDARD_REPORT_TEMPLATE.md)
+  - [`benchmarks/reports/STANDARD_REPORT_TEMPLATE.md`](../benchmarks/reports/STANDARD_REPORT_TEMPLATE.md)
 - report renderer:
-  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/render_benchmark_report.py`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/render_benchmark_report.py)
+  - [`benchmarks/render_benchmark_report.py`](../benchmarks/render_benchmark_report.py)
 - scheduled reporting workflow:
-  - [`/Users/suhjungdae/code/columbia/simsopt-jax/.github/workflows/jax_benchmark_reporting.yml`](/Users/suhjungdae/code/columbia/simsopt-jax/.github/workflows/jax_benchmark_reporting.yml)
+  - [`.github/workflows/jax_benchmark_reporting.yml`](../.github/workflows/jax_benchmark_reporting.yml)
 - legacy compatibility wrapper:
-  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/gpu_benchmark.py`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/gpu_benchmark.py)
+  - [`benchmarks/gpu_benchmark.py`](../benchmarks/gpu_benchmark.py)
 
 The scheduled benchmark workflow assumes a dedicated self-hosted runner for the
 stable benchmark lane. If that runner is not provisioned, use
@@ -601,9 +600,3 @@ This file does not claim:
 - bitwise-identical cross-device results
 - full PM / wireframe / greedy coverage
 - that every legacy mutable compatibility path is already removed
-
-Use the roadmap docs for the broader status:
-
-- [`/Users/suhjungdae/code/columbia/analysis/jax_backend_master_updates_2026-03-31.md`](/Users/suhjungdae/code/columbia/analysis/jax_backend_master_updates_2026-03-31.md)
-- [`/Users/suhjungdae/code/columbia/analysis/jax_combined_backend_10_10_plan.md`](/Users/suhjungdae/code/columbia/analysis/jax_combined_backend_10_10_plan.md)
-- [`/Users/suhjungdae/code/columbia/simsopt-jax/gpu_jax_pro.md`](/Users/suhjungdae/code/columbia/simsopt-jax/gpu_jax_pro.md)

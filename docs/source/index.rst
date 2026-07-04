@@ -68,6 +68,9 @@ optimization.  Others include `STELLOPT
    overview
    installation
    containers
+   jax_gpu_setup
+   jax_migration
+   jax_acceptance
    optimizable
    geo
    fields
