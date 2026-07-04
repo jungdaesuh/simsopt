@@ -1,4 +1,5 @@
 *~
+.handoffs/
 *.a
 *.so
 *.o
@@ -69,4 +70,11 @@ tests/boundary*
 
 # Version file
 src/simsopt/_version.py
+
+# Local dev artifacts (kept out of the repo and the PR)
+GPD/
+/HANDOFF.md
+a100_run_artifacts_*/
+runpod_artifacts_*/
+examples/single_stage_optimization/STAGE_2/outputs-*/
 
