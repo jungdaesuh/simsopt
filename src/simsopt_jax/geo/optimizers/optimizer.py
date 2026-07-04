@@ -6013,10 +6013,24 @@ def _build_traceable_newton_polish_runner(
 
         def body_fun(state):
             stab_value = _optimizer_scalar(stab, dtype=state["x"].dtype)
-            linear_tol = _eisenstat_walker_choice2_tolerance(
+            strict_cap_tol = _eisenstat_walker_strict_cap(
+                tol_value, dtype=state["x"].dtype
+            )
+            eisenstat_walker_tol = _eisenstat_walker_choice2_tolerance(
                 state["norm"],
                 state["previous_norm"],
                 tol=tol_value,
+            )
+            # Inexact-Newton safeguard: after a backtracking failure on a
+            # loose Eisenstat-Walker direction, the retry iteration solves at
+            # the strict cap before the loop may declare a stall.  A crude
+            # loose-tolerance direction failing the line search is not
+            # evidence of a true stall (the pre-uncap clamped solver would
+            # have converged); only a tight-direction failure is.
+            linear_tol = jnp.where(
+                state["retry_linear_solve_at_strict_cap"],
+                jnp.minimum(eisenstat_walker_tol, strict_cap_tol),
+                eisenstat_walker_tol,
             )
 
             def matvec(v):
@@ -6055,10 +6069,13 @@ def _build_traceable_newton_polish_runner(
                 # (restarted GMRES plateaus on round-off above it).  Away
                 # from the target the loose E-W tolerance is met in one
                 # pass and no refinement cost is paid.
-                near_target_refinement = _eisenstat_walker_strict_cap_applies(
-                    state["norm"],
-                    tol_value,
-                    dtype=state["x"].dtype,
+                near_target_refinement = (
+                    _eisenstat_walker_strict_cap_applies(
+                        state["norm"],
+                        tol_value,
+                        dtype=state["x"].dtype,
+                    )
+                    | state["retry_linear_solve_at_strict_cap"]
                 ) & (~linear_status.success)
 
                 def refined_solve(_inner):
@@ -6143,6 +6160,20 @@ def _build_traceable_newton_polish_runner(
                 state["norm"],
             )
             accepted = candidate["accepted"]
+            # A rejected step only stalls the loop when the direction was
+            # already solved at (or below) the strict cap; a rejected loose
+            # operator-GMRES direction schedules one strict-cap retry
+            # iteration instead.  Dense-LU directions are tolerance-exact, so
+            # their rejections stall immediately as before.
+            # Non-finite directions keep the immediate fail-loud stall; only a
+            # finite crude direction earns the strict-cap retry.
+            loose_operator_direction = (
+                (linear_tol > strict_cap_tol)
+                & (active_linear_solver_code == operator_linear_solver_code)
+                & step_finite
+            )
+            retry_at_strict_cap = (~accepted) & loose_operator_direction
+            stalled = (~accepted) & (~loose_operator_direction)
             next_nit = state["nit"] + 1
             next_attempted_iterations = state["attempted_iterations"] + 1
             accepted_alpha = lax.select(
@@ -6176,7 +6207,8 @@ def _build_traceable_newton_polish_runner(
                     state["previous_norm"],
                 ),
                 "nit": lax.select(accepted, next_nit, state["nit"]),
-                "stalled": ~accepted,
+                "stalled": stalled,
+                "retry_linear_solve_at_strict_cap": retry_at_strict_cap,
                 "attempted_iterations": next_attempted_iterations,
                 "last_step_accepted": accepted,
                 "last_step_norm": step_norm,
@@ -6261,6 +6293,7 @@ def _build_traceable_newton_polish_runner(
                 "previous_norm": norm0,
                 "nit": jnp.asarray(0, dtype=jnp.int32),
                 "stalled": jnp.asarray(False),
+                "retry_linear_solve_at_strict_cap": jnp.asarray(False),
                 "attempted_iterations": jnp.asarray(0, dtype=jnp.int32),
                 "last_step_accepted": jnp.asarray(False),
                 "last_step_norm": _optimizer_scalar(jnp.nan, dtype=dtype),

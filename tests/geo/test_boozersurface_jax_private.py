@@ -3837,6 +3837,74 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_retries_loose_gmres_rejection_at_strict_cap(
+        self, monkeypatch
+    ):
+        """A rejected loose E-W direction retries at the strict cap, not stall.
+
+        Regression for the A100 init stall found validating the E-W uncap:
+        the first Newton iteration solves at the loose Eisenstat-Walker
+        tolerance (eta ~0.5); a crude direction that fails backtracking used
+        to set ``stalled`` and exit with zero iterations (pre-fix this test
+        fails with success=False, attempted=1). The safeguard must rerun the
+        rejected iteration at the strict cap and only stall on a rejected
+        tight direction.
+        """
+        tol = 1e-3
+        strict_cap = _opt._eisenstat_walker_strict_cap(
+            jnp.asarray(tol, dtype=jnp.float64), dtype=jnp.float64
+        )
+
+        def tol_sensitive_solve(_matvec, rhs, *, tol):
+            # Loose solves return an ascent direction (backtracking rejects);
+            # strict-cap solves return the exact Newton step for the
+            # identity-Hessian objective below.
+            loose = tol > strict_cap
+            dx = jnp.where(loose, -rhs, rhs)
+            return dx, _opt._LinearSolveStatus(
+                success=~loose,
+                residual=jnp.where(loose, 1.0, 0.0).astype(jnp.float64),
+                residual_relative=jnp.where(loose, 0.5, 0.0).astype(
+                    jnp.float64
+                ),
+                iterations=jnp.asarray(7, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_traceable_newton_operator_gmres_with_status",
+            tol_sensitive_solve,
+        )
+
+        x0 = jnp.asarray([1.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=6,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result["success"]) is True, (
+            "loose-direction rejection must not terminate the polish"
+        )
+        assert int(result["newton_attempted_iterations"]) == 2
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        accepted = np.asarray(result["newton_trace_step_accepted"])[active]
+        np.testing.assert_array_equal(
+            accepted, np.asarray([False, True], dtype=bool)
+        )
+        linear_tols = np.asarray(result["newton_trace_linear_tol"])[active]
+        assert linear_tols[0] > float(strict_cap), (
+            "first iteration must use the loose E-W tolerance"
+        )
+        assert linear_tols[1] <= float(strict_cap), (
+            "retry iteration must solve at (or below) the strict cap"
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_records_opt_in_matvec_counts(
         self, monkeypatch
     ):
@@ -4023,7 +4091,9 @@ class TestBoozerSurfaceJAXClassPrivate:
         np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
         assert int(result["nit"]) == 0
         assert bool(result["success"]) is False
-        assert int(result["newton_attempted_iterations"]) == 1
+        # The loose E-W rejection schedules one strict-cap retry iteration
+        # (inexact-Newton safeguard) before the tight rejection stalls.
+        assert int(result["newton_attempted_iterations"]) == 2
         assert bool(result["newton_stalled"]) is True
         assert bool(result["newton_last_step_accepted"]) is False
         assert int(result["newton_last_backtracking_iterations"]) == 8
