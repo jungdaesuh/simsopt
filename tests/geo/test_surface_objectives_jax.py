@@ -384,6 +384,7 @@ def _make_test_exact_failure_profile_suite(
         },
     }
     exact_failure_booz = types.SimpleNamespace(
+        boozer_type="exact",
         _unpack_decision_vector_jax=lambda x, optimize_G, coil_set_spec: (
             x[:-1],
             x[-1],
@@ -2221,6 +2222,135 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
     assert not np.allclose(np.asarray(predicted), baseline_x_np)
 
 
+def test_traceable_warmstart_prediction_uses_explicit_anchor_state(monkeypatch):
+    anchor_x = jnp.asarray([1.5, -2.5], dtype=jnp.float64)
+    anchor_coil_dofs = jnp.asarray([0.25, -0.75], dtype=jnp.float64)
+    coil_dofs = jnp.asarray([0.75, -0.25], dtype=jnp.float64)
+    anchor_factors = (
+        jnp.eye(2, dtype=jnp.float64),
+        2.0 * jnp.eye(2, dtype=jnp.float64),
+        jnp.asarray([0, 1], dtype=jnp.int32),
+    )
+    dx = jnp.asarray([0.125, -0.375], dtype=jnp.float64)
+    calls = {}
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {},
+    )
+
+    def fake_inner_stationarity_coil_jvp(
+        x_inner,
+        current_coil_dofs,
+        coil_dofs_tangent,
+        _coil_set_spec_from_dofs,
+        **_objective_kwargs,
+    ):
+        np.testing.assert_allclose(np.asarray(x_inner), np.asarray(anchor_x))
+        np.testing.assert_allclose(
+            np.asarray(current_coil_dofs),
+            np.asarray(anchor_coil_dofs),
+        )
+        np.testing.assert_allclose(
+            np.asarray(coil_dofs_tangent),
+            np.asarray(coil_dofs - anchor_coil_dofs),
+        )
+        calls["jvp"] = True
+        return jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+
+    def fake_solve_linearization(
+        _booz_jax,
+        solved_x,
+        rhs,
+        coil_set_spec,
+        _objective_kwargs,
+        *,
+        linear_solve_factors,
+        linearization_kind,
+        linear_solve_tol,
+        linear_solve_stab,
+        transpose,
+    ):
+        np.testing.assert_allclose(np.asarray(solved_x), np.asarray(anchor_x))
+        np.testing.assert_allclose(np.asarray(rhs), np.asarray([-0.25, 0.5]))
+        np.testing.assert_allclose(
+            np.asarray(coil_set_spec),
+            np.asarray(anchor_coil_dofs),
+        )
+        assert linear_solve_factors is anchor_factors
+        assert linearization_kind == "hessian"
+        assert linear_solve_tol == 1.0e-7
+        assert linear_solve_stab == 0.25
+        assert transpose is False
+        calls["solve"] = True
+        return dx, _mock_linear_solve_status(True)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_inner_stationarity_coil_jvp",
+        fake_inner_stationarity_coil_jvp,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_linearization",
+        fake_solve_linearization,
+    )
+
+    predicted, success = (
+        surfaceobjectives_traceable_jax_module._traceable_predict_warmstart_from_anchor(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            anchor_coil_dofs=anchor_coil_dofs,
+            anchor_x=anchor_x,
+            anchor_linear_solve_factors=anchor_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-7,
+            linear_solve_stab=0.25,
+            predictor_kind="ls",
+            objective_kwargs={},
+        )
+    )
+
+    assert calls == {"jvp": True, "solve": True}
+    assert bool(np.asarray(success)) is True
+    np.testing.assert_allclose(np.asarray(predicted), np.asarray(anchor_x + dx))
+
+
+def test_traceable_predictor_factor_selection_uses_only_eligible_anchor():
+    baseline_factors = (
+        jnp.eye(2, dtype=jnp.float64),
+        2.0 * jnp.eye(2, dtype=jnp.float64),
+        jnp.asarray([0, 1], dtype=jnp.int32),
+    )
+    anchor_factors = (
+        3.0 * jnp.eye(2, dtype=jnp.float64),
+        4.0 * jnp.eye(2, dtype=jnp.float64),
+        jnp.asarray([1, 0], dtype=jnp.int32),
+    )
+
+    ineligible = (
+        surfaceobjectives_traceable_jax_module._traceable_select_predictor_linear_solve_factors(
+            jnp.asarray(False, dtype=bool),
+            baseline_linear_solve_factors=baseline_factors,
+            anchor_linear_solve_factors=anchor_factors,
+        )
+    )
+    eligible = (
+        surfaceobjectives_traceable_jax_module._traceable_select_predictor_linear_solve_factors(
+            jnp.asarray(True, dtype=bool),
+            baseline_linear_solve_factors=baseline_factors,
+            anchor_linear_solve_factors=anchor_factors,
+        )
+    )
+
+    for selected, expected in zip(ineligible, baseline_factors):
+        np.testing.assert_allclose(np.asarray(selected), np.asarray(expected))
+    for selected, expected in zip(eligible, anchor_factors):
+        np.testing.assert_allclose(np.asarray(selected), np.asarray(expected))
+
+
 def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch):
     solved_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     rhs = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
@@ -2727,6 +2857,50 @@ def test_traceable_profile_suite_warmstart_predict_surfaces_exact_failure(
     assert bool(np.asarray(warmstart["success"])) is False
     np.testing.assert_allclose(
         np.asarray(warmstart["x"]),
+        np.asarray(baseline_x + failed_dx),
+    )
+
+
+def test_traceable_profile_suite_current_incumbent_warmstart_requires_eligible_anchor(
+    monkeypatch,
+):
+    baseline_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    anchor_x = jnp.asarray([1.5, -1.25], dtype=jnp.float64)
+    failed_dx = jnp.asarray([0.125, -0.375], dtype=jnp.float64)
+    profile_suite = _make_test_exact_failure_profile_suite(
+        monkeypatch,
+        baseline_x,
+        failed_dx,
+    )
+    predict_from_current_incumbent = profile_suite[
+        "current_incumbent_warmstart_predict"
+    ]
+    coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    anchor_coil_dofs = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+
+    eligible_warmstart = predict_from_current_incumbent(
+        coil_dofs,
+        anchor_coil_dofs,
+        anchor_x,
+        None,
+        jnp.asarray(True, dtype=bool),
+    )
+    ineligible_warmstart = predict_from_current_incumbent(
+        coil_dofs,
+        anchor_coil_dofs,
+        anchor_x,
+        None,
+        jnp.asarray(False, dtype=bool),
+    )
+
+    assert bool(np.asarray(eligible_warmstart["anchor_used"])) is True
+    assert bool(np.asarray(ineligible_warmstart["anchor_used"])) is False
+    np.testing.assert_allclose(
+        np.asarray(eligible_warmstart["x"]),
+        np.asarray(anchor_x + failed_dx),
+    )
+    np.testing.assert_allclose(
+        np.asarray(ineligible_warmstart["x"]),
         np.asarray(baseline_x + failed_dx),
     )
 
@@ -5356,12 +5530,18 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
     def ensure_reporting_from_solution(entry):
         reporting_from_solution_calls.append(entry)
         entry["reporting_metrics_from_solution"] = (
-            lambda coil_dofs, solved_x, solver_success, *, include_distance_metrics=True: (
+            lambda coil_dofs,
+            solved_x,
+            solver_success,
+            *,
+            include_distance_metrics=True,
+            outer_raw_terms=None: (
                 "reporting_metrics_from_solution",
                 coil_dofs,
                 solved_x,
                 bool(solver_success),
                 include_distance_metrics,
+                outer_raw_terms,
             )
         )
         return entry
@@ -5416,8 +5596,127 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         ("as_jax_float64", "solved_x"),
         False,
         False,
+        None,
     )
     assert reporting_from_solution_calls == [runtime_entry]
+
+    outer_raw_terms = (object(), object())
+    assert runtime_entry["public_reporting_metrics_from_solution"](
+        "coil_dofs",
+        "solved_x",
+        True,
+        include_distance_metrics=True,
+        outer_raw_terms=outer_raw_terms,
+    ) == (
+        "reporting_metrics_from_solution",
+        ("as_jax_float64", "coil_dofs"),
+        ("as_jax_float64", "solved_x"),
+        True,
+        True,
+        outer_raw_terms,
+    )
+    assert reporting_from_solution_calls == [runtime_entry, runtime_entry]
+
+
+def test_traceable_reporting_metrics_from_solution_bundle_reuses_outer_raw_terms(
+    monkeypatch,
+):
+    compiled_bundle = object()
+    build_calls = []
+
+    def make_without_raw_terms(current_bundle, *, include_distance_metrics):
+        build_calls.append(
+            ("without_raw_terms", current_bundle, include_distance_metrics)
+        )
+
+        def reporting_metrics_from_solution(coil_dofs, solved_x, solver_success):
+            return (
+                "without_raw_terms",
+                include_distance_metrics,
+                coil_dofs,
+                solved_x,
+                bool(solver_success),
+            )
+
+        return reporting_metrics_from_solution
+
+    def make_with_raw_terms(current_bundle, *, include_distance_metrics):
+        build_calls.append(
+            ("with_raw_terms", current_bundle, include_distance_metrics)
+        )
+
+        def reporting_metrics_from_solution(
+            coil_dofs,
+            solved_x,
+            solver_success,
+            raw_terms_present,
+            raw_terms,
+        ):
+            return (
+                "with_raw_terms",
+                include_distance_metrics,
+                coil_dofs,
+                solved_x,
+                bool(solver_success),
+                raw_terms_present,
+                raw_terms,
+            )
+
+        return reporting_metrics_from_solution
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_traceable_reporting_metrics_from_solution",
+        make_without_raw_terms,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_traceable_reporting_metrics_from_solution_with_raw_terms",
+        make_with_raw_terms,
+    )
+
+    reporting_metrics_from_solution = (
+        surfaceobjectives_traceable_jax_module._make_traceable_reporting_metrics_from_solution_bundle(
+            compiled_bundle
+        )
+    )
+
+    assert build_calls == [
+        ("without_raw_terms", compiled_bundle, True),
+        ("without_raw_terms", compiled_bundle, False),
+        ("with_raw_terms", compiled_bundle, True),
+        ("with_raw_terms", compiled_bundle, False),
+    ]
+    assert reporting_metrics_from_solution(
+        "coil_dofs",
+        "solved_x",
+        True,
+        include_distance_metrics=False,
+    ) == (
+        "without_raw_terms",
+        False,
+        "coil_dofs",
+        "solved_x",
+        True,
+    )
+
+    raw_terms_present = object()
+    raw_terms = object()
+    assert reporting_metrics_from_solution(
+        "coil_dofs",
+        "solved_x",
+        False,
+        include_distance_metrics=True,
+        outer_raw_terms=(raw_terms_present, raw_terms),
+    ) == (
+        "with_raw_terms",
+        True,
+        "coil_dofs",
+        "solved_x",
+        False,
+        raw_terms_present,
+        raw_terms,
+    )
 
 
 def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_used(

@@ -75,6 +75,7 @@ __all__ = [
     "make_traceable_objective_value_and_grad",
     "make_traceable_solved_state_value_and_grad",
     "make_traceable_single_stage_alm_runtime_bundle",
+    "traceable_forward_result_outer_raw_terms",
 ]
 
 
@@ -330,6 +331,44 @@ def _evaluate_traceable_total_objective(
         coil_set_spec,
         **_traceable_total_objective_kwargs(objective_kwargs),
     )
+
+
+def _traceable_weighted_terms_total(weighted_terms):
+    total = None
+    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        if total is None:
+            total = weighted_terms[term_name]
+        else:
+            total = total + weighted_terms[term_name]
+    return total
+
+
+def _evaluate_traceable_total_objective_with_raw_terms(
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    objective_kwargs,
+):
+    """Return total objective and reusable raw outer terms when available."""
+    outer_objective_config = objective_kwargs.get("outer_objective_config")
+    if outer_objective_config is None:
+        return _evaluate_traceable_total_objective(
+            x_inner,
+            coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        ), None
+    raw_terms = _traceable_single_stage_outer_term_values(
+        x_inner,
+        coil_dofs,
+        coil_set_spec,
+        **_traceable_total_objective_kwargs(objective_kwargs),
+    )
+    weighted_terms = _traceable_weighted_single_stage_outer_term_values(
+        raw_terms,
+        outer_objective_config=outer_objective_config,
+    )
+    return _traceable_weighted_terms_total(weighted_terms), raw_terms
 
 
 def _traceable_directional_inner_stationarity(
@@ -676,6 +715,7 @@ def _pack_traceable_forward_result(
     dense_newton_steps_materialized=None,
     final_gradient_norm=None,
     final_gradient_inf_norm=None,
+    outer_raw_terms=None,
 ):
     """Return the normalized traceable forward-result contract."""
     missing_int = jnp.asarray(np.iinfo(np.int32).min, dtype=jnp.int32)
@@ -702,7 +742,7 @@ def _pack_traceable_forward_result(
             else jnp.asarray(value, dtype=jnp.float64)
         )
 
-    return {
+    packed = {
         "value": value,
         "x": x,
         "sdofs": sdofs,
@@ -851,6 +891,25 @@ def _pack_traceable_forward_result(
         "final_gradient_inf_norm": float_field(final_gradient_inf_norm),
         "final_gradient_inf_norm_present": present_field(final_gradient_inf_norm),
     }
+    packed["outer_raw_terms_present"] = present_field(outer_raw_terms)
+    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        packed[f"outer_raw_term_{term_name}"] = float_field(
+            None if outer_raw_terms is None else outer_raw_terms[term_name]
+        )
+    return packed
+
+
+def traceable_forward_result_outer_raw_terms(forward_result):
+    """Return optional raw outer-term aux data carried by a forward result."""
+    if "outer_raw_terms_present" not in forward_result:
+        return None
+    return (
+        forward_result["outer_raw_terms_present"],
+        {
+            term_name: forward_result[f"outer_raw_term_{term_name}"]
+            for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        },
+    )
 
 
 def _traceable_result_linear_solve_factors(solve_result, linearization_kind):
@@ -971,7 +1030,10 @@ def _traceable_general_forward_result(
                 lambda _: _runtime_bool(False),
                 operand=None,
             )
-        objective_value = _evaluate_traceable_total_objective(
+        (
+            objective_value,
+            outer_raw_terms,
+        ) = _evaluate_traceable_total_objective_with_raw_terms(
             solve_result["x"],
             coil_dofs,
             coil_set_spec,
@@ -1068,6 +1130,7 @@ def _traceable_general_forward_result(
             ),
             final_gradient_norm=solve_result.get("final_gradient_norm"),
             final_gradient_inf_norm=solve_result.get("final_gradient_inf_norm"),
+            outer_raw_terms=outer_raw_terms,
         )
 
     if linearization_kind != "exact_jacobian":
@@ -1402,6 +1465,100 @@ def _traceable_objective_gradient_parts(
     return direct_grad, implicit_grad, total_grad, linear_solve_success
 
 
+def _traceable_predict_warmstart_from_anchor(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    anchor_coil_dofs,
+    anchor_x,
+    anchor_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    predictor_kind,
+    objective_kwargs,
+):
+    """Predict a warm start from one eligible solved anchor state."""
+    delta = coil_dofs - anchor_coil_dofs
+
+    if predictor_kind == "exact":
+        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
+
+        def anchor_residual_of_coils(cd):
+            return _boozer_exact_residual(
+                anchor_x,
+                coil_set_spec=coil_set_spec_from_dofs(cd),
+                **exact_residual_kwargs,
+            )
+
+        forcing = jax.jvp(
+            anchor_residual_of_coils,
+            (anchor_coil_dofs,),
+            (delta,),
+        )[1]
+    else:
+        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+        forcing = _traceable_inner_stationarity_coil_jvp(
+            anchor_x,
+            anchor_coil_dofs,
+            delta,
+            coil_set_spec_from_dofs,
+            **inner_objective_kwargs,
+        )
+
+    dx, linear_solve_status = _traceable_solve_linearization(
+        booz_jax,
+        anchor_x,
+        -forcing,
+        coil_set_spec_from_dofs(anchor_coil_dofs),
+        objective_kwargs,
+        linear_solve_factors=anchor_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        transpose=False,
+    )
+    linear_solve_success = _optimizer_jax._linear_solve_status_success(
+        linear_solve_status
+    )
+    predicted_x = anchor_x + dx
+    preserve_failed_predictor = (
+        predictor_kind == "exact" or linearization_kind == "exact_jacobian"
+    )
+    if preserve_failed_predictor:
+        return predicted_x, linear_solve_success
+    return (
+        lax.cond(
+            linear_solve_success,
+            lambda _: predicted_x,
+            lambda _: anchor_x,
+            operand=None,
+        ),
+        linear_solve_success,
+    )
+
+
+def _traceable_select_predictor_linear_solve_factors(
+    anchor_eligible,
+    *,
+    baseline_linear_solve_factors,
+    anchor_linear_solve_factors,
+):
+    """Return factors from the eligible anchor without reusing failed factors."""
+    if baseline_linear_solve_factors is None:
+        return None
+    return jax.tree.map(
+        lambda anchor_value, baseline_value: lax.select(
+            anchor_eligible,
+            anchor_value,
+            baseline_value,
+        ),
+        anchor_linear_solve_factors,
+        baseline_linear_solve_factors,
+    )
+
+
 def _traceable_predict_warmstart_x(
     booz_jax,
     coil_set_spec_from_dofs,
@@ -1417,62 +1574,18 @@ def _traceable_predict_warmstart_x(
     objective_kwargs,
 ):
     """Predict a coil-dependent warm start via a first-order implicit step."""
-    delta = coil_dofs - baseline_coil_dofs
-
-    if predictor_kind == "exact":
-        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
-
-        def baseline_residual_of_coils(cd):
-            return _boozer_exact_residual(
-                baseline_x,
-                coil_set_spec=coil_set_spec_from_dofs(cd),
-                **exact_residual_kwargs,
-            )
-
-        forcing = jax.jvp(
-            baseline_residual_of_coils,
-            (baseline_coil_dofs,),
-            (delta,),
-        )[1]
-    else:
-        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
-        forcing = _traceable_inner_stationarity_coil_jvp(
-            baseline_x,
-            baseline_coil_dofs,
-            delta,
-            coil_set_spec_from_dofs,
-            **inner_objective_kwargs,
-        )
-
-    dx, linear_solve_status = _traceable_solve_linearization(
+    return _traceable_predict_warmstart_from_anchor(
         booz_jax,
-        baseline_x,
-        -forcing,
-        coil_set_spec_from_dofs(baseline_coil_dofs),
-        objective_kwargs,
-        linear_solve_factors=baseline_linear_solve_factors,
+        coil_set_spec_from_dofs,
+        coil_dofs=coil_dofs,
+        anchor_coil_dofs=baseline_coil_dofs,
+        anchor_x=baseline_x,
+        anchor_linear_solve_factors=baseline_linear_solve_factors,
         linearization_kind=linearization_kind,
         linear_solve_tol=linear_solve_tol,
         linear_solve_stab=linear_solve_stab,
-        transpose=False,
-    )
-    linear_solve_success = _optimizer_jax._linear_solve_status_success(
-        linear_solve_status
-    )
-    predicted_x = baseline_x + dx
-    preserve_failed_predictor = (
-        predictor_kind == "exact" or linearization_kind == "exact_jacobian"
-    )
-    if preserve_failed_predictor:
-        return predicted_x, linear_solve_success
-    return (
-        lax.cond(
-            linear_solve_success,
-            lambda _: predicted_x,
-            lambda _: baseline_x,
-            operand=None,
-        ),
-        linear_solve_success,
+        predictor_kind=predictor_kind,
+        objective_kwargs=objective_kwargs,
     )
 
 
@@ -2153,6 +2266,7 @@ def _make_traceable_lazy_reporting_metrics_from_solution_boundary(runtime_entry)
         solver_success,
         *,
         include_distance_metrics=True,
+        outer_raw_terms=None,
     ):
         reporting_metrics_from_solution = (
             _ensure_traceable_runtime_reporting_metrics_from_solution(runtime_entry)[
@@ -2164,6 +2278,7 @@ def _make_traceable_lazy_reporting_metrics_from_solution_boundary(runtime_entry)
             _as_jax_float64(solved_x),
             jnp.asarray(solver_success, dtype=bool),
             include_distance_metrics=include_distance_metrics,
+            outer_raw_terms=outer_raw_terms,
         )
 
     return reporting_metrics_from_solution_for
@@ -2674,6 +2789,8 @@ def _traceable_reporting_metrics_from_solution(
     solver_success,
     optimize_G,
     include_distance_metrics,
+    raw_terms=None,
+    raw_terms_present=None,
 ):
     """Compute reporting metrics for one explicit solved state."""
     outer_objective_config = objective_kwargs["outer_objective_config"]
@@ -2685,12 +2802,24 @@ def _traceable_reporting_metrics_from_solution(
     coil_dof_extraction_spec = objective_kwargs["coil_dof_extraction_spec"]
     banana_curve_index = int(outer_objective_config["banana_curve_index"])
     coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
-    raw_terms = _traceable_single_stage_outer_term_values(
-        solved_x,
-        coil_dofs,
-        coil_set_spec,
-        **_traceable_total_objective_kwargs(objective_kwargs),
-    )
+
+    def compute_raw_terms():
+        return _traceable_single_stage_outer_term_values(
+            solved_x,
+            coil_dofs,
+            coil_set_spec,
+            **_traceable_total_objective_kwargs(objective_kwargs),
+        )
+
+    if raw_terms is None:
+        raw_terms = compute_raw_terms()
+    elif raw_terms_present is not None:
+        raw_terms = lax.cond(
+            jnp.asarray(raw_terms_present, dtype=bool),
+            lambda _: raw_terms,
+            lambda _: compute_raw_terms(),
+            operand=None,
+        )
     sdofs, iota, G = _split_x_inner_runtime(solved_x, optimize_G)
     surface_gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -2846,6 +2975,40 @@ def _make_traceable_reporting_metrics_from_solution(
     return jax.jit(reporting_metrics_from_solution)
 
 
+def _make_traceable_reporting_metrics_from_solution_with_raw_terms(
+    compiled_bundle, *, include_distance_metrics
+):
+    """Build solved-state reporting metrics that can reuse raw outer-term values."""
+    (
+        objective_kwargs,
+        optimize_G,
+        coil_set_spec_from_dofs,
+    ) = _traceable_reporting_metrics_context(compiled_bundle)
+
+    def reporting_metrics_from_solution(
+        coil_dofs,
+        solved_x,
+        solver_success,
+        raw_terms_present,
+        raw_terms,
+    ):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        solved_x = _as_jax_float64(solved_x)
+        return _traceable_reporting_metrics_from_solution(
+            objective_kwargs,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solver_success=jnp.asarray(solver_success, dtype=bool),
+            optimize_G=optimize_G,
+            include_distance_metrics=include_distance_metrics,
+            raw_terms=raw_terms,
+            raw_terms_present=raw_terms_present,
+        )
+
+    return jax.jit(reporting_metrics_from_solution)
+
+
 def _make_traceable_reporting_metrics_bundle(compiled_bundle):
     """Build the pure reporting-metrics selector for one compiled bundle."""
     reporting_metrics = _make_traceable_reporting_metrics(
@@ -2880,6 +3043,18 @@ def _make_traceable_reporting_metrics_from_solution_bundle(compiled_bundle):
             include_distance_metrics=False,
         )
     )
+    reporting_metrics_from_solution_with_raw_terms = (
+        _make_traceable_reporting_metrics_from_solution_with_raw_terms(
+            compiled_bundle,
+            include_distance_metrics=True,
+        )
+    )
+    reporting_metrics_from_solution_without_distances_with_raw_terms = (
+        _make_traceable_reporting_metrics_from_solution_with_raw_terms(
+            compiled_bundle,
+            include_distance_metrics=False,
+        )
+    )
 
     def reporting_metrics_from_solution_for(
         coil_dofs,
@@ -2887,13 +3062,28 @@ def _make_traceable_reporting_metrics_from_solution_bundle(compiled_bundle):
         solver_success,
         *,
         include_distance_metrics=True,
+        outer_raw_terms=None,
     ):
+        if outer_raw_terms is None:
+            selected_reporting_metrics = (
+                reporting_metrics_from_solution
+                if include_distance_metrics
+                else reporting_metrics_from_solution_without_distances
+            )
+            return selected_reporting_metrics(coil_dofs, solved_x, solver_success)
+        raw_terms_present, raw_terms = outer_raw_terms
         selected_reporting_metrics = (
-            reporting_metrics_from_solution
+            reporting_metrics_from_solution_with_raw_terms
             if include_distance_metrics
-            else reporting_metrics_from_solution_without_distances
+            else reporting_metrics_from_solution_without_distances_with_raw_terms
         )
-        return selected_reporting_metrics(coil_dofs, solved_x, solver_success)
+        return selected_reporting_metrics(
+            coil_dofs,
+            solved_x,
+            solver_success,
+            raw_terms_present,
+            raw_terms,
+        )
 
     return reporting_metrics_from_solution_for
 
@@ -3639,6 +3829,52 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             "success": warmstart_linear_solve_success,
         }
 
+    def _current_incumbent_warmstart_for(
+        coil_dofs,
+        anchor_coil_dofs,
+        anchor_x,
+        anchor_linear_solve_factors,
+        anchor_eligible,
+    ):
+        anchor_eligible = jnp.asarray(anchor_eligible, dtype=bool)
+        selected_anchor_coil_dofs = lax.select(
+            anchor_eligible,
+            _as_jax_float64(anchor_coil_dofs),
+            baseline_coil_dofs,
+        )
+        selected_anchor_x = lax.select(
+            anchor_eligible,
+            _as_jax_float64(anchor_x),
+            baseline_x,
+        )
+        selected_anchor_linear_solve_factors = (
+            _traceable_select_predictor_linear_solve_factors(
+                anchor_eligible,
+                baseline_linear_solve_factors=baseline_linear_solve_factors,
+                anchor_linear_solve_factors=anchor_linear_solve_factors,
+            )
+        )
+        warmstart_x, warmstart_linear_solve_success = (
+            _traceable_predict_warmstart_from_anchor(
+                booz_jax,
+                coil_set_spec_from_dofs,
+                coil_dofs=coil_dofs,
+                anchor_coil_dofs=selected_anchor_coil_dofs,
+                anchor_x=selected_anchor_x,
+                anchor_linear_solve_factors=selected_anchor_linear_solve_factors,
+                linearization_kind=linearization_kind,
+                linear_solve_tol=linear_solve_tol,
+                linear_solve_stab=linear_solve_stab,
+                predictor_kind=predictor_kind,
+                objective_kwargs=objective_kwargs,
+            )
+        )
+        return {
+            "x": warmstart_x,
+            "success": warmstart_linear_solve_success,
+            "anchor_used": anchor_eligible,
+        }
+
     def _pre_newton_solve_for(coil_dofs, warmstart_x):
         coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
         return booz_jax._run_traceable_pre_newton_stage(
@@ -3687,6 +3923,12 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             "newton_last_linear_solve_iterations": _runtime_int32_scalar(
                 newton_result["newton_last_linear_solve_iterations"]
             ),
+            "newton_last_linear_solve_matvec_budget": _runtime_int32_scalar(
+                newton_result["newton_last_linear_solve_matvec_budget"]
+            ),
+            "newton_linear_solve_backend_code": _runtime_int32_scalar(
+                newton_result["newton_linear_solve_backend_code"]
+            ),
             "newton_last_linear_residual_relative": newton_result[
                 "newton_last_linear_residual_relative"
             ],
@@ -3716,6 +3958,12 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             ],
             "newton_trace_linear_solve_iterations": newton_result[
                 "newton_trace_linear_solve_iterations"
+            ],
+            "newton_trace_linear_solve_backend_code": newton_result[
+                "newton_trace_linear_solve_backend_code"
+            ],
+            "newton_trace_linear_solve_matvec_budget": newton_result[
+                "newton_trace_linear_solve_matvec_budget"
             ],
             "newton_trace_linear_residual_relative": newton_result[
                 "newton_trace_linear_residual_relative"
@@ -3870,11 +4118,17 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     )
     compiled_solved_total_objective_for = jax.jit(_solved_total_objective_for)
     compiled_solved_total_gradient_for = jax.jit(_total_gradient_for)
+    compiled_current_incumbent_warmstart_for = jax.jit(
+        _current_incumbent_warmstart_for
+    )
 
     profile_suite = {
         "forward_result": compiled_forward_result_for,
         "forward_value": compiled_forward_value_for,
         "warmstart_predict": compiled_warmstart_for,
+        "current_incumbent_warmstart_predict": (
+            compiled_current_incumbent_warmstart_for
+        ),
         "inner_solve": compiled_inner_solve_for,
         "surface_geometry": compiled_surface_geometry_for,
         "field_eval": compiled_field_for,
