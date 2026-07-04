@@ -413,9 +413,11 @@ _TRACEABLE_NEWTON_MATVEC_COUNT_ENV = "SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_ENV = "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES = "operator_gmres"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU = "dense_lu"
+_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU = "hybrid_final_dense_lu"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES = {
     _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: 1,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU: 2,
+    _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU: 3,
 }
 
 
@@ -428,10 +430,20 @@ def _resolve_traceable_newton_linear_solver():
         return _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
     if value in ("dense", "dense-lu", "dense_lu", "lu"):
         return _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+    if value in (
+        "hybrid",
+        "hybrid-final-dense-lu",
+        "hybrid_final_dense_lu",
+        "final-dense-lu",
+        "final_dense_lu",
+    ):
+        return _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
     raise ValueError(
         f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV} must be "
-        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES!r} or "
-        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU!r}; got {value!r}."
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES!r}, "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU!r}, or "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU!r}; got "
+        f"{value!r}."
     )
 
 
@@ -619,13 +631,7 @@ def _is_jax_tracer(value) -> bool:
 def traceable_newton_matvec_counts_from_token(token: int) -> tuple[int, ...] | None:
     """Read and unregister one opt-in traceable Newton matvec counter token."""
 
-    if token == 0:
-        return None
-    with _TRACEABLE_CALLBACK_LOCK:
-        values = _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
-    if values is None:
-        return None
-    return tuple(values)
+    return _drain_traceable_matvec_counter(token)
 
 
 class _StrongTraceableCallableRef:
@@ -4658,6 +4664,27 @@ def _forward_error_success(residual_rel, condition_estimate, *, tol):
     return jnp.isfinite(ferr) & (ferr <= gate)
 
 
+def _eisenstat_walker_strict_cap(tol_value, *, dtype):
+    return jnp.minimum(
+        _device_scalar(1e-10, dtype=dtype),
+        jnp.maximum(
+            tol_value * _device_scalar(0.1, dtype=dtype),
+            _device_scalar(1e-14, dtype=dtype),
+        ),
+    )
+
+
+def _eisenstat_walker_strict_cap_applies(norm, tol_value, *, dtype):
+    return (
+        norm
+        <= _device_scalar(
+            _EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR,
+            dtype=dtype,
+        )
+        * tol_value
+    )
+
+
 def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     """Return the Eisenstat-Walker Choice-2 relative linear-solve tolerance.
 
@@ -4672,13 +4699,7 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     """
     dtype = norm.dtype
     tol_value = _optimizer_scalar(tol, dtype=dtype)
-    strict_cap = jnp.minimum(
-        _device_scalar(1e-10, dtype=dtype),
-        jnp.maximum(
-            tol_value * _device_scalar(0.1, dtype=dtype),
-            _device_scalar(1e-14, dtype=dtype),
-        ),
-    )
+    strict_cap = _eisenstat_walker_strict_cap(tol_value, dtype=dtype)
     gamma = _device_scalar(_EISENSTAT_WALKER_GAMMA, dtype=dtype)
     eta_min = _device_scalar(_EISENSTAT_WALKER_MIN_ETA, dtype=dtype)
     eta_max = _device_scalar(_EISENSTAT_WALKER_MAX_ETA, dtype=dtype)
@@ -4689,13 +4710,10 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     ratio = norm / denominator
     eta = gamma * (ratio * ratio)
     eta = jnp.clip(eta, eta_min, eta_max)
-    near_convergence = (
-        norm
-        <= _device_scalar(
-            _EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR,
-            dtype=dtype,
-        )
-        * tol_value
+    near_convergence = _eisenstat_walker_strict_cap_applies(
+        norm,
+        tol_value,
+        dtype=dtype,
     )
     capped_eta = jnp.where(
         near_convergence,
@@ -5258,6 +5276,57 @@ def _solve_traceable_newton_operator_gmres_with_status(matvec, rhs, *, tol):
         rhs,
         tolerance=tol,
         iterations=_linear_solve_iteration_count(info),
+    )
+
+
+def _refine_traceable_newton_operator_gmres_solution(
+    matvec,
+    rhs,
+    solution,
+    status,
+    *,
+    tol,
+):
+    """One bounded iterative-refinement pass for an unconverged traceable
+    Newton operator-GMRES correction.
+
+    Restarted operator-GMRES plateaus on round-off above the Eisenstat-Walker
+    strict cap; a single fresh Krylov solve on the residual recovers the tight
+    near-target tolerance (measured: rel-residual 3e-10 -> 3e-14 at n=663,
+    kappa=625).  A non-finite correction is discarded, keeping the original
+    solution; iteration counts always accumulate so matvec telemetry stays
+    honest.
+    """
+    residual = rhs - matvec(solution)
+    correction, correction_residual, correction_info = _gmres_solve_array_system(
+        matvec,
+        residual,
+        tol=tol,
+    )
+    correction_finite = _linear_solve_finite(correction, correction_residual)
+    refined_solution = lax.cond(
+        correction_finite,
+        lambda _: solution + correction,
+        lambda _: solution,
+        operand=None,
+    )
+    refined_residual = rhs - matvec(refined_solution)
+    refined_iterations = _combine_linear_solve_iteration_counts(
+        status.iterations,
+        _linear_solve_iteration_count(correction_info),
+    )
+    refined_status = _linear_solve_status_with_relative_tolerance(
+        refined_solution,
+        refined_residual,
+        rhs,
+        tolerance=tol,
+        iterations=refined_iterations,
+    )
+    return lax.cond(
+        correction_finite,
+        lambda _: (refined_solution, refined_status),
+        lambda _: (solution, status._replace(iterations=refined_iterations)),
+        operand=None,
     )
 
 
@@ -5865,26 +5934,61 @@ def _build_traceable_newton_polish_runner(
             dtype=jnp.int32,
         )
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
+        dense_lu_materialization_allowed = (
+            _dense_square_operator_lu_materialization_allowed(x_init)
+        )
         traceable_dense_lu_enabled = (
             linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
-            and _dense_square_operator_lu_materialization_allowed(x_init)
+            and dense_lu_materialization_allowed
         )
-        linear_solver_code = _device_int32(
+        traceable_hybrid_dense_lu_enabled = (
+            linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
+            and dense_lu_materialization_allowed
+        )
+        operator_linear_solver_code = _device_int32(
             _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
-                _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
-                if traceable_dense_lu_enabled
-                else _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+                _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
             ]
         )
-        linear_solve_matvec_budget = _device_int32(
-            (
-                hessian_size
-                if traceable_dense_lu_enabled
-                else _operator_gmres_matvec_budget(
-                    hessian_size,
-                    max_refinement_steps=0,
-                )
+        dense_linear_solver_code = _device_int32(
+            _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+            ]
+        )
+        hybrid_linear_solver_code = _device_int32(
+            _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
+            ]
+        )
+        initial_linear_solver_code = (
+            dense_linear_solver_code
+            if traceable_dense_lu_enabled
+            else (
+                hybrid_linear_solver_code
+                if traceable_hybrid_dense_lu_enabled
+                else operator_linear_solver_code
             )
+        )
+        dense_linear_solve_matvec_budget = _device_int32(hessian_size)
+        operator_linear_solve_matvec_budget = _device_int32(
+            _operator_gmres_matvec_budget(
+                hessian_size,
+                max_refinement_steps=0,
+            )
+        )
+        # Near-target refinement ceiling: one extra residual matvec plus one
+        # more full GMRES solve on top of the single-pass budget.
+        operator_refined_linear_solve_matvec_budget = _device_int32(
+            _operator_gmres_matvec_budget(
+                hessian_size,
+                max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+            )
+            + 1
+        )
+        initial_linear_solve_matvec_budget = (
+            dense_linear_solve_matvec_budget
+            if traceable_dense_lu_enabled
+            else operator_linear_solve_matvec_budget
         )
         materialize_final_hessian, dense_report = (
             _resolve_dense_hessian_materialization(
@@ -5921,18 +6025,108 @@ def _build_traceable_newton_polish_runner(
                     )
                 return result
 
-            if traceable_dense_lu_enabled:
+            def dense_lu_solve(_):
                 dx, linear_status = _solve_dense_square_operator_lu_system_with_status(
                     matvec,
                     state["grad"],
                     tol=linear_tol,
                 )
-            else:
+                return (
+                    dx,
+                    linear_status,
+                    dense_linear_solver_code,
+                    dense_linear_solve_matvec_budget,
+                )
+
+            def operator_gmres_solve(_):
                 dx, linear_status = _solve_traceable_newton_operator_gmres_with_status(
                     matvec,
                     state["grad"],
                     tol=linear_tol,
                 )
+                # In the Eisenstat-Walker strict-cap region an unconverged
+                # single-pass GMRES correction gets one bounded refinement
+                # pass, so the tight final tolerance is actually achieved
+                # (restarted GMRES plateaus on round-off above it).  Away
+                # from the target the loose E-W tolerance is met in one
+                # pass and no refinement cost is paid.
+                near_target_refinement = _eisenstat_walker_strict_cap_applies(
+                    state["norm"],
+                    tol_value,
+                    dtype=state["x"].dtype,
+                ) & (~linear_status.success)
+
+                def refined_solve(_inner):
+                    refined_dx, refined_status = (
+                        _refine_traceable_newton_operator_gmres_solution(
+                            matvec,
+                            state["grad"],
+                            dx,
+                            linear_status,
+                            tol=linear_tol,
+                        )
+                    )
+                    return (
+                        refined_dx,
+                        refined_status,
+                        operator_refined_linear_solve_matvec_budget,
+                    )
+
+                def single_pass_solve(_inner):
+                    return (
+                        dx,
+                        linear_status,
+                        operator_linear_solve_matvec_budget,
+                    )
+
+                (
+                    dx_final,
+                    linear_status_final,
+                    active_matvec_budget,
+                ) = lax.cond(
+                    near_target_refinement,
+                    refined_solve,
+                    single_pass_solve,
+                    operand=None,
+                )
+                return (
+                    dx_final,
+                    linear_status_final,
+                    operator_linear_solver_code,
+                    active_matvec_budget,
+                )
+
+            if traceable_dense_lu_enabled:
+                (
+                    dx,
+                    linear_status,
+                    active_linear_solver_code,
+                    active_linear_solve_matvec_budget,
+                ) = dense_lu_solve(None)
+            elif traceable_hybrid_dense_lu_enabled:
+                use_dense_lu_iteration = _eisenstat_walker_strict_cap_applies(
+                    state["norm"],
+                    tol_value,
+                    dtype=state["x"].dtype,
+                )
+                (
+                    dx,
+                    linear_status,
+                    active_linear_solver_code,
+                    active_linear_solve_matvec_budget,
+                ) = lax.cond(
+                    use_dense_lu_iteration,
+                    dense_lu_solve,
+                    operator_gmres_solve,
+                    operand=None,
+                )
+            else:
+                (
+                    dx,
+                    linear_status,
+                    active_linear_solver_code,
+                    active_linear_solve_matvec_budget,
+                ) = operator_gmres_solve(None)
             step_norm = jnp.linalg.norm(dx)
             step_finite = jnp.all(jnp.isfinite(dx))
             candidate = _backtracking_value_grad_step(
@@ -5984,7 +6178,7 @@ def _build_traceable_newton_polish_runner(
                 "last_step_finite": step_finite,
                 "last_linear_solve_success": linear_status.success,
                 "last_linear_solve_iterations": linear_status.iterations,
-                "last_linear_solve_matvec_budget": linear_solve_matvec_budget,
+                "last_linear_solve_matvec_budget": active_linear_solve_matvec_budget,
                 "last_linear_residual_relative": linear_status.residual_relative,
                 "last_backtracking_iterations": candidate["iteration"],
                 "last_accepted_alpha": accepted_alpha,
@@ -6023,11 +6217,16 @@ def _build_traceable_newton_polish_runner(
                 ]
                 .at[trace_index]
                 .set(linear_status.iterations),
+                "newton_trace_linear_solve_backend_code": state[
+                    "newton_trace_linear_solve_backend_code"
+                ]
+                .at[trace_index]
+                .set(active_linear_solver_code),
                 "newton_trace_linear_solve_matvec_budget": state[
                     "newton_trace_linear_solve_matvec_budget"
                 ]
                 .at[trace_index]
-                .set(linear_solve_matvec_budget),
+                .set(active_linear_solve_matvec_budget),
                 "newton_trace_linear_residual_relative": state[
                     "newton_trace_linear_residual_relative"
                 ]
@@ -6043,7 +6242,7 @@ def _build_traceable_newton_polish_runner(
                 ]
                 .at[trace_index]
                 .set(accepted_alpha),
-                "newton_linear_solve_backend_code": linear_solver_code,
+                "newton_linear_solve_backend_code": active_linear_solver_code,
             }
 
         state = lax.while_loop(
@@ -6066,7 +6265,9 @@ def _build_traceable_newton_polish_runner(
                     _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
                     dtype=jnp.int32,
                 ),
-                "last_linear_solve_matvec_budget": linear_solve_matvec_budget,
+                "last_linear_solve_matvec_budget": (
+                    initial_linear_solve_matvec_budget
+                ),
                 "last_linear_residual_relative": _optimizer_scalar(jnp.nan, dtype=dtype),
                 "last_backtracking_iterations": jnp.asarray(
                     _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
@@ -6082,11 +6283,12 @@ def _build_traceable_newton_polish_runner(
                 "newton_trace_step_finite": trace_false,
                 "newton_trace_linear_solve_success": trace_false,
                 "newton_trace_linear_solve_iterations": trace_unknown_int,
+                "newton_trace_linear_solve_backend_code": trace_unknown_int,
                 "newton_trace_linear_solve_matvec_budget": trace_unknown_int,
                 "newton_trace_linear_residual_relative": trace_nan,
                 "newton_trace_backtracking_iterations": trace_unknown_int,
                 "newton_trace_accepted_alpha": trace_nan,
-                "newton_linear_solve_backend_code": linear_solver_code,
+                "newton_linear_solve_backend_code": initial_linear_solver_code,
             },
         )
 
@@ -6167,6 +6369,9 @@ def _build_traceable_newton_polish_runner(
             "newton_trace_linear_solve_iterations": state[
                 "newton_trace_linear_solve_iterations"
             ],
+            "newton_trace_linear_solve_backend_code": state[
+                "newton_trace_linear_solve_backend_code"
+            ],
             "newton_trace_linear_solve_matvec_budget": state[
                 "newton_trace_linear_solve_matvec_budget"
             ],
@@ -6230,8 +6435,12 @@ def newton_polish_traceable(
 
     This variant keeps all loop state and step decisions inside JAX control
     flow so higher-level traced objectives can invoke the Newton stage without
-    crossing back into Python. Newton corrections use the operator-only GMRES
-    path; the dense Hessian policy only controls final compatibility metadata.
+    crossing back into Python. Newton corrections default to operator GMRES;
+    in the Eisenstat-Walker strict-cap region an unconverged single-pass
+    correction receives one bounded iterative-refinement pass so the tight
+    final tolerance is actually achieved. Explicit env-gated comparator modes
+    can route corrections through dense LU.
+    The dense Hessian policy only controls final compatibility metadata.
     """
     matvec_count_enabled = _traceable_newton_matvec_counts_requested()
     runner = _make_traceable_newton_polish_runner(
