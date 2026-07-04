@@ -21,6 +21,9 @@ JAX_CACHE_WHEEL_SPEC="${JAX_CACHE_WHEEL_SPEC:-etils}"
 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT:-1.9.4.dev0}"
 LOG_DIR="${JOB_RESULTS}/logs"
 ARTIFACT_DIR="${JOB_RESULTS}/artifacts"
+BENCHMARK_TIMING_CLASSIFICATION="${BENCHMARK_TIMING_CLASSIFICATION:-mixed-parity-reference}"
+BENCHMARK_SUPPORTS_PERFORMANCE_HEADLINE="${BENCHMARK_SUPPORTS_PERFORMANCE_HEADLINE:-0}"
+BENCHMARK_HEADLINE_TIMING_CLASSIFICATION="${BENCHMARK_HEADLINE_TIMING_CLASSIFICATION:-}"
 FIXTURE_DIR="benchmarks/fixtures/single_stage_seed_iota15"
 FIXTURE_STAGE2_BS="${FIXTURE_DIR}/biot_savart_opt.json"
 
@@ -36,6 +39,12 @@ case "${results_root_real}/" in
 esac
 
 mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+printf '%s\n' "${BENCHMARK_TIMING_CLASSIFICATION}" > "${JOB_RESULTS}/timing_classification.txt"
+printf '{"timing_classification":"%s","supports_performance_headline":%s,"headline_timing_classification":"%s"}\n' \
+  "${BENCHMARK_TIMING_CLASSIFICATION}" \
+  "${BENCHMARK_SUPPORTS_PERFORMANCE_HEADLINE}" \
+  "${BENCHMARK_HEADLINE_TIMING_CLASSIFICATION}" \
+  > "${JOB_RESULTS}/benchmark_timing_label.json"
 exec > >(tee "${LOG_DIR}/driver_stdout.log")
 exec 2> >(tee "${LOG_DIR}/driver_stderr.log" >&2)
 cd "${REPO_ROOT}"
