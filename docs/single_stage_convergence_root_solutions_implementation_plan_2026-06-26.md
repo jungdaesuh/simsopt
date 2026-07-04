@@ -109,8 +109,10 @@ blocker. This file is the SSOT for fixing those.
 - **Scope is single-stage-driver, not core JAX**: `success_filter` / `_traceable_rejected_objective_value`
   / `baseline_coil_gradient` appear only in the single-stage example + its adapter rejection path; the
   **Stage-2 JAX lane does not use any of it** (grep-confirmed). Core kernels are sound and broadly used.
-- **The reduced lane already converges on CPU** (`scipy-jax`, 153 iters → iota ≈ target; the `rc=1`
-  was a dimension-mismatch parity fail, not a convergence fail — `HANDOFF-ss-11-51-matrix.md`).
+- **The legacy reduced lane already converged on CPU** (`scipy-jax`, 153 iters → iota ≈ target;
+  the `rc=1` was a dimension-mismatch parity fail, not a convergence fail —
+  `HANDOFF-ss-11-51-matrix.md`). Plain single-stage `scipy-jax` is now deprecated; keep that
+  result as historical evidence and use `scipy-jax-decomposed` for new production single-stage runs.
 - **Prior high-mpol GPU parity evidence is external to this checkout.** Earlier run notes reported
   finite m18/m36 `dJ` and C++-matching forward iota to 16 digits, but no
   `HANDOFF-mpol-homotopy-ladder-push.md` file is present in this repo. Treat that as background
@@ -126,12 +128,12 @@ blocker. This file is the SSOT for fixing those.
   finest points gives dir0 ≈1.0% relative error, dir1 ≈3.8%, and dir2 ≈13.8%; dir2 barely improves
   over its raw finest-eps error. This supports "FD gate likely mis-calibrated" and does **not**
   certify the production adjoint.
-- **The current FD harness loses the decisive solve-status channel.**
-  `_pack_traceable_forward_result()` returns `value`, `x`, `sdofs`, `iota`, `G`, `success`,
-  `primal_success`, and `adjoint_linear_solve_available`, but
-  `compute_traceable_single_stage_fd_ladder()` currently calls only `objective(x0 ± eps*d)`.
-  Rejected or primal-failed plus/minus evaluations are therefore folded into FD values and can
-  masquerade as gradient failures.
+- **The FD harness now records the decisive solve-status channel, but production certification is
+  still open.** `_pack_traceable_forward_result()` returns `value`, `x`, `sdofs`, `iota`, `G`,
+  `success`, `primal_success`, and `adjoint_linear_solve_available`, and
+  `compute_traceable_single_stage_fd_ladder()` now records plus/minus `forward_result(...)`
+  diagnostics. The remaining Phase-1 blocker is the unresolved production mpol10 direction-2
+  verdict, not missing FD solve-status telemetry.
 
 > File:line anchors below are from the analysis at HEAD `4704d5671`; the example/adapter files are
 > large and line numbers drift — **re-confirm with grep at implementation time** (anchors given as
@@ -269,47 +271,49 @@ blocker. This file is the SSOT for fixing those.
          `.artifacts/single_stage_convergence/phase1_fd/run_20260627T181848Z/adjoint_fd_cuda_runtime_seed_mpol10_ntor10_nphi255_ntheta64.json`.
          It does not certify the adjoint: dir0 Richardson is ≈1.0%, dir1 ≈3.8%, and dir2 ≈13.8%.
          The result supports a coarse-FD/mis-instrumented-gate hypothesis and leaves dir2 undecided.
-         Current local support-gate refresh (2026-06-27):
+         Prior local support-gate refresh (2026-06-27, before the status-aware FD patch):
          `PYTHONNOUSERSITE=1 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
          /Users/suhjungdae/code/columbia/.venv-simsopt-uv/bin/python -m pytest
          tests/test_adjoint_fd_validation_contract.py tests/test_compile_breadth_probe_contract.py
          tests/test_check_cached_kernel_callback_compatibility.py -q` -> `43 passed in 2.54s`.
-         This validates harness contracts only; it is not a production certificate.
+         This validates harness contracts only; it is not a production certificate. After the
+         status-aware FD patch, only static checks have been run locally; runtime/tests should run on
+         RunPod per the current execution constraint.
 2. Preserve plus/minus forward-solve diagnostics in the FD ladder.
-   - [ ] Change `compute_traceable_single_stage_fd_ladder()` to accept the runtime bundle's
-         `forward_result` callable in addition to `objective` and `value_and_grad`.
-   - [ ] For every central-FD plus/minus evaluation, call `forward_result(x0 ± eps*d)` and record
+   - [x] Change `compute_traceable_single_stage_fd_ladder()` to accept the runtime bundle's
+         `forward_result` callable and `value_and_grad`.
+   - [x] For every central-FD plus/minus evaluation, call `forward_result(x0 ± eps*d)` and record
          `value`, `success`, `primal_success`, `adjoint_linear_solve_available`, `iota`, and `G`.
          Use `forward_result["value"]` for the FD numerator so diagnostics and measured value are
          tied to the exact same traceable solve.
-   - [ ] Classify any eps record with rejected or primal-failed plus/minus sides as
+   - [x] Classify any eps record with rejected or primal-failed plus/minus sides as
          `invalid_fd_window` or `inner_solve_failed`, not `gradient_failed`.
-   - [ ] Add contract tests proving rejected plus/minus evaluations are surfaced in the JSON and do
+   - [x] Add contract tests proving rejected plus/minus evaluations are surfaced in the JSON and do
          not satisfy the gradient-certification gate.
 3. Replace the weak coarse-to-finest gate with a real asymptotic-window gate.
-   - [ ] Compute per-direction observed order from adjacent accepted eps intervals, using only eps
+   - [x] Compute per-direction observed order from adjacent accepted eps intervals, using only eps
          records whose plus/minus `success` and `primal_success` flags are true.
-   - [ ] Compute Richardson extrapolation from the two finest accepted eps points and compare the
+   - [x] Compute Richardson extrapolation from the two finest accepted eps points and compare the
          extrapolated directional derivative to the adjoint directional derivative.
-   - [ ] Pass a direction only when either the finest accepted raw FD already satisfies tolerance or
+   - [x] Pass a direction only when either the finest accepted raw FD already satisfies tolerance or
          Richardson/order evidence satisfies tolerance. A monotone decrease alone must not pass.
-   - [ ] Emit a stable per-direction status such as `accepted`, `needs_smaller_eps`,
+   - [x] Emit a stable per-direction status such as `accepted`, `needs_smaller_eps`,
          `invalid_fd_window`, or `gradient_mismatch`, plus the numeric reason.
 4. Make the eps ladder config/noise adaptive.
-   - [ ] Replace the hard lower window floor `6e-4` with a scale/noise-aware rule. The default ladder
+   - [x] Replace the hard lower window floor `6e-4` with a scale/noise-aware rule. The default ladder
          may still start at `3e-3`, but the gate must be able to descend below `7.5e-4` when
          forward-result success flags are clean and roundoff/noise has not appeared.
-   - [ ] Add or update a RunPod command path for the next production ladder, for example
+   - [x] Add or update a RunPod command path for the next production ladder, for example
          `7.5e-4 3.75e-4 1.875e-4 9.375e-5`, while documenting that RunPod is the execution
          environment and not the reason those eps values are mathematically valid.
-   - [ ] Store the selected ladder, objective scale, gradient norm, and any measured noise/roundoff
+   - [x] Store the selected ladder, objective scale, gradient norm, and any measured noise/roundoff
          floor in the artifact so the eps choice is reviewable.
 5. Add eps-free supplementary checks.
-   - [ ] Add an operator dot-product/transpose test using the runtime adjoint state:
+   - [x] Add an operator dot-product/transpose test using the runtime adjoint state:
          verify `<A v, w> == <v, A^T w>` for representative random vectors through
          `apply_forward` / `apply_transpose`. This certifies the linear transpose wiring and should
          be reported separately from the nonlinear gradient FD gate.
-   - [ ] Investigate JVP-vs-VJP on the exact runtime objective path. If the public custom-VJP scalar
+   - [x] Investigate JVP-vs-VJP on the exact runtime objective path. If the public custom-VJP scalar
          objective cannot support forward-mode JVP, record that limitation and do not block Phase 1
          on an inapplicable check. If it is supported or a suitable exact-AD internal path exists,
          add a directional JVP/VJP agreement check to decide whether dir2 is a real adjoint
@@ -321,8 +325,8 @@ blocker. This file is the SSOT for fixing those.
    - [ ] Do not mark Phase 1 green until every sampled direction has either an accepted asymptotic FD
          window or an explicit non-FD certificate that covers the same derivative path.
 
-### Phase 2 — Get a real converged GPU result via the reduced lane (ranked #1)
-1. Run `--optimizer-backend scipy-jax` (reduced) on GPU at **mpol ≤ 6** (compiles feasibly).
+### Phase 2 — Get a real converged GPU result via the decomposed production lane (ranked #1)
+1. Run `--optimizer-backend scipy-jax-decomposed` on GPU at **mpol ≤ 6** (compiles feasibly).
    - [ ] Persistent compile cache on a **network volume** (`JAX_COMPILATION_CACHE_DIR=/workspace/...`,
          not `/tmp`); confirm warm-cache hit on a second run.
    - [ ] Record the convergence table (see Validation). Gate acceptance on the Phase-1 gradient
@@ -460,16 +464,17 @@ blocker. This file is the SSOT for fixing those.
          `benchmarks/compile_breadth_probe.py` records `JAX_LOG_COMPILES` and `XLA_FLAGS` under
          `compile_environment`. The actual Phase-5 proof still requires an emitted GPU JSON artifact;
          no separate static literal-pinning test is kept for the probe.
-   - [x] Preserve partial compile-breadth artifacts during the sweep. Current dirty-tree local result:
+   - [x] Preserve partial compile-breadth artifacts during the sweep. Prior dirty-tree local result:
          `benchmarks/compile_breadth_probe.py` atomically checkpoints the output JSON before and after
          each resolution with `status`, `active_resolution`, `completed_mpol`, `compile_environment`,
-         and `results_by_mpol`. Focused gate `tests/test_compile_breadth_probe_contract.py` passes
-         and proves an in-progress mpol8 sweep preserves the completed mpol6 record; it also proves a
-         failed temp-file write leaves the previous checkpoint JSON intact.
-   - [ ] Add fail-closed exception finalization around each `_probe_resolution()` call so a runtime
+         and `results_by_mpol`. The focused gate
+         `tests/test_compile_breadth_probe_contract.py` previously proved an in-progress mpol8 sweep
+         preserves the completed mpol6 record and that a failed temp-file write leaves the previous
+         checkpoint JSON intact; tests have not been rerun locally after the fail-closed patch.
+   - [x] Add fail-closed exception finalization around each `_probe_resolution()` call so a runtime
          failure rewrites the checkpoint with a terminal failure status and the exception class/message.
-         The current H100 run proves this is missing: the process exited 1, but the last JSON still says
-         `status: "running"` with active mpol6 and no completed results.
+         The prior H100 JSON with `status: "running"` is stale historical evidence from before this
+         source fix; it is not a successful compile-breadth measurement.
 
 ### Phase 6 — Re-audit the `newton_polish` host-materialization contract (Root Cause 4)
 1. Verify whether the historical contradiction still exists.
@@ -509,11 +514,14 @@ blocker. This file is the SSOT for fixing those.
 - [ ] **Phase-1 gradient certificate** passes on RunPod at production mpol10 runtime-seed scale with
       success-clean plus/minus `forward_result` records for every accepted eps, observed-order or
       Richardson acceptance for every sampled direction, and no direction left in `needs_smaller_eps`.
-- [ ] **FD diagnostic classification** reports rejected or primal-failed plus/minus probes as
+- [x] **FD diagnostic classification** reports rejected or primal-failed plus/minus probes as
       `invalid_fd_window` / `inner_solve_failed`, not as a gradient mismatch.
 - [ ] **Supplemental transpose certificate** reports dot-product agreement at solver tolerance for
-      the runtime adjoint linear operator path.
-- [ ] **Exact-AD feasibility check** either adds a JVP/VJP agreement check on the exact runtime
+      the runtime adjoint linear operator path. Source support is installed, but the first RunPod
+      adaptive runtime-seed attempt showed `BoozerSurfaceJAX.get_adjoint_runtime_state()` is
+      unavailable for that value-only seed path; the artifact now records this as non-blocking
+      `unsupported` instead of failing before the FD ladder.
+- [x] **Exact-AD feasibility check** either adds a JVP/VJP agreement check on the exact runtime
       objective path or records why the public `jax.custom_vjp` boundary makes that check
       inapplicable.
 - [x] **FD cert harness** (Phase 1 support gate) defaults to mpol 8, rejects lower-mpol certification

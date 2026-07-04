@@ -1,7 +1,10 @@
 # Beta Quickstart — Banana Coil Optimization on JAX
 
 Minimal recipes for running banana coil optimization with the JAX backend.
-Bare `--backend jax` uses the regular `scipy-jax` optimizer lane by default.
+Bare `--backend jax` uses the regular `scipy-jax` optimizer lane in Stage 2
+and the decomposed `scipy-jax-decomposed` optimizer lane in single-stage by default.
+The plain single-stage `scipy-jax` lane is deprecated; keep it only for legacy
+reduced-lane diagnostics.
 Add `--optimizer-backend ondevice` only when you explicitly want the compiled
 on-device L-BFGS-B stress lane. Pick a device, copy the matching block, run.
 
@@ -12,11 +15,12 @@ production artifacts), see [`README.md`](./README.md) in this folder.
 
 ## What gets run
 
-Both scripts default to the regular **SciPy-controlled JAX objective** optimizer
-(`scipy-jax`, method `lbfgs-scipy-jax`) when you pass `--backend jax`.
-This keeps the outer optimizer on the host while evaluating the objective and
-derivatives through JAX/XLA on the selected backend. Explicit `--optimizer-backend
-ondevice` remains available for the compiled `lbfgs-ondevice` stress lane.
+Both scripts keep the outer optimizer on the host while evaluating the objective
+and derivatives through JAX/XLA on the selected backend. Stage 2 defaults to
+`scipy-jax` (`lbfgs-scipy-jax`); single-stage defaults to
+`scipy-jax-decomposed` (`lbfgs-scipy-jax-decomposed`). Explicit
+`--optimizer-backend ondevice` remains available for the compiled
+`lbfgs-ondevice` stress lane; explicit single-stage `scipy-jax` is deprecated.
 
 | Script | What it optimizes |
 |---|---|
@@ -121,8 +125,8 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
 
 | Device | Dtype | Optimizer | Notes |
 |---|---|---|---|
-| CUDA (`jax_gpu_fast`) | float64 | default `scipy-jax`; explicit `ondevice` = `lbfgs-ondevice` | Production speed lane for objective/gradient evaluation. Default sharding=`hybrid` (multi-device-capable). The companion `jax_gpu_parity` mode pins sharding=`none` (single-device) until a multi-GPU parity/speedup proof is recorded. |
-| CPU (`jax_cpu_fast`) | float64 | default `scipy-jax`; explicit `ondevice` = `lbfgs-ondevice` | Host SciPy control with XLA-CPU objective evaluation by default. The explicit on-device lane is available but compile-heavy on CPU. |
+| CUDA (`jax_gpu_fast`) | float64 | Stage 2 default `scipy-jax`; single-stage default `scipy-jax-decomposed`; explicit `ondevice` = `lbfgs-ondevice` | Production speed lane for objective/gradient evaluation. Default sharding=`hybrid` (multi-device-capable). The companion `jax_gpu_parity` mode pins sharding=`none` (single-device) until a multi-GPU parity/speedup proof is recorded. |
+| CPU (`jax_cpu_fast`) | float64 | Stage 2 default `scipy-jax`; single-stage default `scipy-jax-decomposed`; explicit `ondevice` = `lbfgs-ondevice` | Host SciPy control with XLA-CPU objective evaluation by default. The explicit on-device lane is available but compile-heavy on CPU. |
 
 ---
 

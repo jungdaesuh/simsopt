@@ -8,10 +8,12 @@ The JAX modules do **not** replace the CPU modules.  Both coexist.
 The CPU path remains the default and the correctness oracle.
 
 The trusted least-squares backend remains the native CPU/reference lane
-with ``optimizer_backend="scipy"``.
-High-level JAX backend flows default to ``optimizer_backend="scipy-jax"``:
-SciPy keeps host control of L-BFGS-B while the objective and inner Boozer solve
-run through the JAX target-lane value/grad path. Explicit ``ondevice`` and
+with ``optimizer_backend="scipy"``.  Stage 2 JAX flows default to
+``optimizer_backend="scipy-jax"``.  Single-stage JAX flows default to
+``optimizer_backend="scipy-jax-decomposed"``: SciPy keeps host control of
+L-BFGS-B while solved-state forward work is split from the JAX target-lane
+value/grad pass. Explicit single-stage ``scipy-jax`` is deprecated and retained
+only for legacy reduced-lane diagnostics. Explicit ``ondevice`` and
 ``scipy-jax-fullgraph`` remain available for target-lane stress tests, but CPU
 ``ondevice`` is memory-intensive and emits a warning.
 

@@ -205,9 +205,11 @@ Single-stage traceable target-lane contract:
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
-When `backend="jax"` is active, the implicit outer optimizer lane is
-`scipy-jax`: SciPy keeps host control of L-BFGS-B while the objective and inner
-Boozer solve run through the JAX target-lane value/grad path. Explicit
+For single-stage with `backend="jax"`, the implicit outer optimizer lane is
+`scipy-jax-decomposed`: SciPy keeps host control of L-BFGS-B while the JAX
+target lane splits solved-state forward work from the value/gradient pass.
+Plain single-stage `scipy-jax` is deprecated and retained only for legacy
+reduced-lane diagnostics. Explicit
 `scipy-jax-fullgraph` is the full-graph stress/parity route. Explicit
 `ondevice` selects the in-tree SciPy-compatible L-BFGS-B state machine on the
 target lane; it uses stepwise compiled macro-step kernels and keeps SciPy-style
@@ -339,14 +341,15 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend scipy-jax \
+  --optimizer-backend scipy-jax-decomposed \
   --jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
   --init-only
 ```
 
 This is the JAX CPU comparison lane. Do not treat it as a replacement for the
 public CPU/reference `scipy` oracle lane. Use `scipy-jax-fullgraph` only for
-full-graph stress/parity checks. The CUDA target lane remains `ondevice`:
+full-graph stress/parity checks. Use plain single-stage `scipy-jax` only for
+legacy reduced-lane diagnostics.
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
@@ -392,7 +395,7 @@ JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend scipy-jax \
+  --optimizer-backend scipy-jax-decomposed \
   --jax-runtime-seed-spec /path/to/single_stage_jax_runtime_spec.json \
   --init-only
 ```
