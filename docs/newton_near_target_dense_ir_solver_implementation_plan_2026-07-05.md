@@ -129,9 +129,10 @@ all trace to this).
    - [x] Full private suite: 142 passed, 5 skipped. Ruff clean.
    - [x] e2e: hybrid mode completes eval-1 K1 in 1552.2 s (table above).
 2. Close-out
-   - [ ] Commit scoped (`optimizer.py` + private test file) once the
-         hybrid e2e run exits, with measured numbers in the message.
-   - [ ] Push to fork.
+   - [x] Commit scoped (`optimizer.py` + private test file): `37b65c7af`,
+         measured numbers in the message. (e2e run exited 124 at its
+         3500 s cap mid-eval-2; eval-1 gate numbers locked beforehand.)
+   - [x] Push to fork (`e250656c5..37b65c7af`).
 
 ### Phase A — `hybrid_final_dense_ir`: factor-once + iterative refinement (~1–2 days)
 
