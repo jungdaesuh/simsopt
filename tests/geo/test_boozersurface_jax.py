@@ -8950,7 +8950,15 @@ class TestBoozerSurfaceJAXExactPath:
         G = jnp.asarray(0.05, dtype=jnp.float64)
 
         def fake_minimize(_fun, x0, **_kwargs):
-            return types.SimpleNamespace(x_k=x0)
+            # Minimal stand-in honoring the private L-BFGS state contract
+            # consumed by run_code_traceable (x_k, converged, failed, k);
+            # optional telemetry attrs go through the tolerant accessor.
+            return types.SimpleNamespace(
+                x_k=x0,
+                converged=jnp.asarray(False),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(0, dtype=jnp.int32),
+            )
 
         def fake_newton_polish(
             obj_fn,
