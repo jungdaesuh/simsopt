@@ -1352,6 +1352,21 @@ native cpp leg (laneC) is the honest CPU comparator, and it is measured.
 Optional completeness path: batch-queue A5 (`-q shared`,
 CASE_TIMEOUT>=36000) if a post-fix CPU-leg wall is ever needed.
 
+Paired local calibration (same machine/seed/spec/flags, 255x64) sharpens
+the attribution: at `67bdde1a7` (refinement in, strict-cap retry OUT) the
+K1 forward completes at **593/659/475/477/485s per eval**; at HEAD the
+first K1 exceeds 3170s with newton-maxiter capped at 5. So `139c05880`'s
+refined near-target solves were already the ~600s/eval baseline, and the
+**>=5x multiplier is specific to the strict-cap retry commits**
+(`8d4a1103b`/`db6906fc9`): on CPU the retry keeps near-target Newton in a
+reject/retry churn (each attempted iteration ~1300 refined matvecs) that
+pre-fix stall-exited after 1-2 iterations, while the GPU accepts the
+strict direction quickly (CPU/GPU ULP branch divergence, same family as
+the original init-stall asymmetry). Root-fix direction (parked, user
+decision): precondition near-target GMRES with the K2-shared dense
+(lu,piv) factors — collapses 651/1308-matvec solves to O(10), keeps the
+operator seam and tolerance semantics, helps GPU accepted evals too.
+
 ### Open user decisions
 
 1. Native-leg parity thresholds: machine-precision (jax-vs-jax) thresholds
