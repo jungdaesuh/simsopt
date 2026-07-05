@@ -3905,6 +3905,106 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_hybrid_routes_strict_cap_retry_to_dense_lu(
+        self, monkeypatch
+    ):
+        """Hybrid mode serves the strict-cap retry with the dense-LU solver.
+
+        The retry exists to hand the line search one quality direction
+        before the loop may stall.  Strict-cap operator GMRES runs to
+        essentially the full Krylov dimension on the squared-conditioned
+        Hessian (the measured ~1300-matvec grind that priced the jax-CPU
+        reference lane out at 255x64), while the dense direction is
+        tolerance-exact at roughly half that matvec cost.  In hybrid mode a
+        far-from-target rejection must therefore route its retry iteration
+        through dense-LU, leaving no strict-tolerance GMRES entry point.
+        """
+        tol = 1e-3
+        strict_cap = _opt._eisenstat_walker_strict_cap(
+            jnp.asarray(tol, dtype=jnp.float64), dtype=jnp.float64
+        )
+        operator_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+        ]
+        dense_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+        ]
+
+        def rejecting_operator_solve(_matvec, rhs, *, tol):
+            # Always an ascent direction: any operator iteration is rejected,
+            # so a retry served by the operator branch could never succeed.
+            del tol
+            return -rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(7, dtype=jnp.int32),
+            )
+
+        def exact_dense_solve(_matvec, rhs, *, tol):
+            # Exact Newton step for the identity-Hessian objective below.
+            del tol
+            return rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(0, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_dense_square_operator_lu_materialization_allowed",
+            lambda _rhs: True,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_traceable_newton_operator_gmres_with_status",
+            rejecting_operator_solve,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_dense_square_operator_lu_system_with_status",
+            exact_dense_solve,
+        )
+
+        x0 = jnp.asarray([1.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=5,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result["success"]) is True, (
+            "the dense-served retry direction must rescue the rejected "
+            "loose operator iteration"
+        )
+        assert int(result["newton_attempted_iterations"]) == 2
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        accepted = np.asarray(result["newton_trace_step_accepted"])[active]
+        np.testing.assert_array_equal(
+            accepted, np.asarray([False, True], dtype=bool)
+        )
+        backend_codes = np.asarray(
+            result["newton_trace_linear_solve_backend_code"]
+        )[active]
+        np.testing.assert_array_equal(
+            backend_codes,
+            np.asarray([operator_code, dense_code], dtype=np.int32),
+        )
+        linear_tols = np.asarray(result["newton_trace_linear_tol"])[active]
+        assert linear_tols[0] > float(strict_cap)
+        assert linear_tols[1] <= float(strict_cap)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_exact_traceable_retries_loose_gmres_rejection_at_strict_cap(
         self, monkeypatch
     ):

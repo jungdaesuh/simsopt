@@ -6142,10 +6142,21 @@ def _build_traceable_newton_polish_runner(
                     active_linear_solve_matvec_budget,
                 ) = dense_lu_solve(None)
             elif traceable_hybrid_dense_lu_enabled:
-                use_dense_lu_iteration = _eisenstat_walker_strict_cap_applies(
-                    state["norm"],
-                    tol_value,
-                    dtype=state["x"].dtype,
+                # The strict-cap retry exists to hand the line search one
+                # quality direction before the loop may stall; strict-cap
+                # operator GMRES runs to essentially the full Krylov
+                # dimension on the squared-conditioned Hessian, while the
+                # dense direction is tolerance-exact at about half that
+                # matvec cost.  Routing the retry through dense-LU leaves
+                # hybrid mode with no strict-tolerance GMRES entry point,
+                # and a rejected dense retry still stalls immediately.
+                use_dense_lu_iteration = (
+                    _eisenstat_walker_strict_cap_applies(
+                        state["norm"],
+                        tol_value,
+                        dtype=state["x"].dtype,
+                    )
+                    | state["retry_linear_solve_at_strict_cap"]
                 )
                 (
                     dx,
