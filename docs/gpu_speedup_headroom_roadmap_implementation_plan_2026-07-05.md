@@ -59,7 +59,9 @@ Perlmutter GPU validation campaign" close-out in
   accepted eval `[192, 1308, 1308, 1308]` — near-target refined GMRES
   dominates accepted-eval cost. Budget formulas: single-pass 651, refined
   1302 (+1), n-independent (`optimizer.py:4396-4407`).
-- K1 near-target Newton system size n=663 at mpol/ntor 10, κ≈625
+- K1 near-target Newton system size n=663 at mpol/ntor 10; κ≈625 here is
+  κ(J), the well-conditioned Jacobian — the factored Newton operator is
+  κ(J)²≈3.9e5, which is what M4's fp32 discussion refers to
   (`optimizer.py:5316` "measured ... at n=663, kappa=625"; the dense-LU
   call site `:6064` passes the Newton gradient as rhs, so the build is
   rhs-sized; measured B4 dense-mode budget drop 1302→663 in the perf-gap
@@ -176,12 +178,13 @@ re-measures it iso-config before it is allowed to justify anything).
    - [ ] If flags insufficient: macro-step batching of bfgs iterations
          (k iterations per launch) behind env knob — design-review first.
          NAMED PRIOR: the 422 GiB ondevice compile blowup was graph
-         BREADTH, and the recorded follow-up warns a stepwise driver
-         "can still be an expensive macro-kernel when each per-step
-         kernel encloses the full pipeline"; the recorded gate is
-         macro-step breadth exclusion (see the pole2 compile-breadth
-         plan). Any macro-step design must pass a compile-breadth probe
-         before it touches the ondevice L-BFGS state machine.
+         BREADTH, and the torax-style host-controlled kernelization plan
+         warns a stepwise driver "can still be an expensive macro-kernel
+         when each per-step kernel encloses the full pipeline"; its
+         companion pole2 compile-breadth plan carries the recorded
+         macro-step breadth-exclusion gate. Any macro-step design must
+         pass a compile-breadth probe before it touches the ondevice
+         L-BFGS state machine.
    - [ ] Gate: measured ms/iteration on A100 bfgs pre-stage ↓ ≥2× with
          parity fixture bit-identical.
 5. **M4 — Mixed-precision inner kernels with fp64 refinement (stretch;

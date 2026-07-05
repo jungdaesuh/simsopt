@@ -110,7 +110,7 @@ all trace to this).
   fail-loud stall. (Validated implicitly by `dense_lu` mode converging
   B4 init in 1 iteration to 2.47e-14.)
 - The ~3.5 MB `(factors, piv)` loop carry at n=663 is negligible against
-  the 26.5 GiB GPU / CPU footprints (measured B6).
+  the 25.8 GiB (26,469 MiB) GPU / CPU footprints (measured B6).
 - Local Apple-silicon CPU walls are a faithful relative proxy for the
   Perlmutter CPU leg (validated: same code ratio pre/post fix on both).
 
