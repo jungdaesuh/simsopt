@@ -135,12 +135,19 @@ re-measures it iso-config before it is allowed to justify anything).
    - [ ] Gate: attribution doc appended to this plan; M2/M3 priorities
          re-ranked from data (their estimates below are provisional).
 2. **M1 — dense-IR near-target solver (delegated)**
-   - [ ] Execute Phases A/B of the dense-IR plan (separate doc). Expected
-         from this roadmap's view: accepted eval 93.8 s → ~50–60 s (Newton
-         matvec chains 3×1308 → one 663-column build + ~3×3; K2's 27.5 s
-         is untouched and is most of what remains), churn/refinement
-         taxes gone.
+   - [~] Execute Phases A/B of the dense-IR plan (separate doc). Phase A
+         v1 SHIPPED `ad3cc28b7` (2026-07-05) and validated on local CPU:
+         near-target iteration pattern measured `[189, 3]` — one loose
+         E-W operator iteration (unchanged by design) + one 3-matvec IR
+         iteration with the 663-column build uncounted; eval-1 K1
+         799.3 s success vs hybrid 1552.2 s vs operator REJECTED.
+         Expected from this roadmap's view on GPU: accepted eval
+         93.8 s → ~50–60 s (Newton matvec chains 3×1308 → one
+         663-column build + ~3×3; K2's 27.5 s is untouched and is most
+         of what remains), churn/refinement taxes gone. Phase B
+         (self-deciding default) still open.
    - [ ] Record post-M1 per-eval walls (same M0 harness) — new baseline.
+         GPU B7 lane blocked on sshproxy re-auth.
 3. **M2 — Speculative line-search batching (~1.5–2× on optimizer wall)**
    - [ ] Scout the seam: where the decomposed lane's value/grad provider
          meets scipy L-BFGS-B's dcsrch (single_stage objective wrapper /

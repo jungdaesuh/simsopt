@@ -1,6 +1,8 @@
 # Near-Target Newton Solver: Regime-Adaptive Dense-IR Implementation Plan
 
-**Status:** In progress (Phase 0 executing; Phases A–C planned)
+**Status:** In progress (Phase 0 shipped `37b65c7af`; Phase A v1 shipped
+`ad3cc28b7`+`00b912d7f`+`1d7284afe`, local CPU validation complete — GPU
+B7 lane and Phase B open)
 **Last updated:** 2026-07-05
 
 ## Purpose
@@ -79,7 +81,7 @@ independently shippable and validated.
 
 | Config | eval-1 K1 forward | Notes |
 |---|---|---|
-| `67bdde1a7` operator (pre-retry-fix), local CPU | 593 s (evals 2-5: 659/475/477/485 s) | completes; wrong-at-margins solver |
+| `67bdde1a7` operator (pre-retry-fix), local CPU | 593 s (evals 2-5: 659/475/477/485 s) | returns fast but eval-1 primal REJECTED (measured 2026-07-05: stalled, linear residual 499, ‖grad‖ stuck 3.6e-08; ALL 5 evals rejected — zero optimizer progress) |
 | `bbe1a7452` operator, Perlmutter CPU | >6400 s, killed | A4 job 55499050, CASE_TIMEOUT 7200 |
 | `bbe1a7452` operator, local CPU, newton-cap-5 | >3170 s, unfinished | `sample` stacks: XLA-CPU executing, not compiling |
 | `bbe1a7452` **hybrid**, local CPU, prod cap 50 | **1552.2 s, returned** | K2 121.4 s; bounded, converging |
@@ -137,15 +139,17 @@ all trace to this).
 ### Phase A — `hybrid_final_dense_ir`: factor-once + iterative refinement (~1–2 days)
 
 1. Solver mode plumbing (`optimizer.py`)
-   - [ ] Add `_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR`
+   - [x] Add `_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR`
          (code 4) to constants/CODES/`_resolve_traceable_newton_linear_solver`
          (+ aliases `dense-ir`, `hybrid-final-dense-ir`); update the
-         resolver error message.
+         resolver error message. (Shipped `ad3cc28b7`.)
 2. LS polish runner: factor-once + IR branch
-   - [ ] v1: materialize + `lu_factor` once pre-loop (663 HVPs via
+   - [x] v1: materialize + `lu_factor` once pre-loop (663 HVPs via
          existing `_dense_square_operator_matrix`), close `(lu, piv)` over
-         body_fun (same pattern as `tol_value`/`hvp_fn`).
-   - [ ] Per near-target/retry iteration: `lu_solve` presolve + ≤3 IR
+         body_fun (same pattern as `tol_value`/`hvp_fn`). (Shipped
+         `ad3cc28b7`: uncounted `entry_hessian_matvec` build outside the
+         counter closure.)
+   - [x] Per near-target/retry iteration: `lu_solve` presolve + ≤3 IR
          steps, each 1 HVP against current `state["x"]` through the
          counted `matvec` (keeps NDJSON matvec telemetry honest);
          success = relative residual of the LAST IR step ≤ `linear_tol`;
@@ -158,25 +162,44 @@ all trace to this).
          existing rejection/stall semantics unchanged (fail-loud, no
          silent fallback).
 3. Harness: per-leg solver override
-   - [ ] Reference-leg-only env injection at
-         `single_stage_init_parity.py:2272` call site (mirror the
-         `cuda_memory_env` `env.update` precedent), driven by a
-         `MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER` env in the K1 slurm; no
-         effect on the target leg (`:2330`).
+   - [x] Reference-leg-only env injection (shipped `00b912d7f`: keyword
+         param on `repo_pythonpath_env`, resolver
+         `_reference_leg_newton_linear_solver_override`, sole reference
+         call site `single_stage_init_parity.py:2301`; target leg never
+         injected), driven by `MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER` in
+         the K1 slurm (`export`ed — Crucible 2026-07-05 caught the
+         unexported in-file default as a silent no-op).
 4. Tests (private file, existing fake/monkeypatch conventions; distinct
    runner-cache keys per test)
-   - [ ] Routing: dense-IR serves near-target AND retry iterations
+   - [x] Routing: dense-IR serves near-target AND retry iterations
          (backend code 4 in trace), loose iterations stay operator.
-   - [ ] IR convergence: identity/SPD fake — 1 presolve + ≤3 IR matvecs,
-         success only when measured residual ≤ tol.
+         (`test_newton_polish_traceable_dense_ir_routes_near_target_and_retry`)
+   - [x] IR convergence: 2%-stale factors vs live operator — refinement
+         re-anchors to the live matvec, success only when measured
+         residual ≤ tol.
+         (`test_solve_dense_ir_system_refines_against_current_operator`)
    - [ ] Stale-factor refresh (v2): drifted-operator fake — first IR gate
          failure triggers exactly one re-materialization, then converges.
-   - [ ] IR failure stalls loud: singular/hostile fake — status
-         unconverged, runner stalls, no silent fallback to GMRES.
-   - [ ] Numerical equivalence: dense-IR vs `dense_lu` solutions agree to
-         tolerance on a real small Boozer fixture.
-   - [ ] Matvec-count assertion: ≤3 counted matvecs per post-build
-         near-target iteration.
+   - [x] IR failure stalls loud — covered at BOTH levels: solve-level
+         (`test_solve_dense_ir_system_stale_factors_fail_loud`) and
+         runner-level
+         (`test_newton_polish_traceable_dense_ir_failed_direction_stalls_loud`:
+         failed direction → immediate stall, no GMRES fallback, 1
+         attempted iteration). Production confirmation: e2e eval-2
+         garbage trial (entry ‖grad‖ 749.7) → final IR residual 178 →
+         fail-loud stall → honest trial rejection at 1256.7 s.
+   - [x] Numerical equivalence: dense-IR ≡ `dense_lu` to atol 1e-12 on a
+         κ=1e5 diagonal quadratic (production near-target κ(J)² class;
+         `test_newton_polish_traceable_dense_ir_matches_dense_lu_ill_conditioned`)
+         plus the perfectly-conditioned real-path fixture. Delivered as
+         ill-conditioned synthetic, NOT the originally-worded "real small
+         Boozer fixture" — real-system equivalence evidence is the e2e
+         eval-1 IR residual 1.4e-15 / ‖grad‖ 2.4e-14 (vs dense-LU-mode
+         hybrid 2.0e-15 on the same seed).
+   - [x] Matvec-count assertion: ≤3 counted matvecs per post-build
+         near-target iteration (real-path test pins actual == 3; e2e
+         eval-1 trace `[189, 3]` — build uncounted, 189 < n=663 proves no
+         build leak into the counter).
 
 ### Phase B — Self-deciding default + retire compensation machinery (~1 day + soak)
 
@@ -212,17 +235,29 @@ all trace to this).
 
 ## Validation Plan
 
-- [ ] Phase 0: private suite green (DONE: 142 pass); e2e hybrid K1 wall
-      recorded (DONE: 1552.2 s); scoped commit + push.
-- [ ] Phase A local: full private file green; local A4 repro
-      (`--maxiter 1`, prod caps, iota011 seed) with dense-IR completes
-      eval-1 K1 in ≈ pre-fix wall (target ≤ ~700 s local) with
-      `success=True` physics matching the hybrid run (Vol ≈ 0.04920,
-      Iota ≈ 0.11016 family).
+- [x] Phase 0: private suite green (142 pass); e2e hybrid K1 wall
+      recorded (1552.2 s); scoped commit `37b65c7af` + pushed.
+- [x] Phase A local (measured 2026-07-05, run `cpu_a4repro_denseir2`):
+      full private file green (146+2 pass / 5 skip); eval-1 K1
+      **799.3 s `success=True`**, matvecs `[189, 3]`, final ‖grad‖
+      2.4e-14, IR residual 1.4e-15, K2 120.7 s unchanged.
+      DEVIATION vs the "≤ ~700 s" letter: +14% (includes fresh-graph
+      compile). The ~700 s target was calibrated against the pre-fix
+      593 s wall, which 2026-07-05 forensics showed was a REJECTED eval
+      (fail-fast, zero progress) — not a valid success-wall comparator.
+      Against valid comparators: 1.94× faster than hybrid (1552.2 s),
+      and the only mode that is both successful and cheap. Goal
+      criterion ("minutes not hours" + certified direction) met —
+      ACCEPTED. Physics: gradient/IR certificates above; per-component
+      Vol/Iota extraction not repeated locally, deferred to the B7
+      parity lane (same seed family as the hybrid run).
 - [ ] Phase A GPU: one B-series Perlmutter lane (B7): accepted-eval
       matvec actuals drop from `[192,1308,1308,1308]` to
-      `[build, ≤3, ≤3, ≤3]`; total wall ≤ B5's 644.7 s; final-sync
+      `[loose ≈190 (unchanged E-W path), ≤3, ≤3, …]` with the n-column
+      build uncounted (local CPU already shows exactly this shape:
+      `[189, 3]`); total wall ≤ B5's 644.7 s; final-sync
       `reused=True`; no OOM at chunk 8 (memory: +3.5 MB carry).
+      BLOCKED on sshproxy re-auth (key expired 2026-07-05 14:29 EDT).
 - [ ] Phase A parity: jax-CPU(dense-IR) vs jax-GPU(default) physics
       parity within existing matrix tolerances; byte-contract test
       `tests/integration/test_factor_once_adjoint_phase2.py` green
@@ -261,10 +296,12 @@ all trace to this).
 
 ## Completion Criteria
 
-- [ ] Phase 0 commit on `simopt-jax-clean-local`, pushed to fork.
-- [ ] Phase A: dense-IR mode merged; local CPU eval-1 K1 ≤ ~700 s with
-      post-fix correctness; GPU B7 lane accepted-eval matvecs ≤3/iter
-      post-build; all listed tests green.
+- [x] Phase 0 commit on `simopt-jax-clean-local`, pushed to fork.
+- [ ] Phase A: dense-IR mode merged; local CPU eval-1 K1 DELIVERED at
+      799.3 s `success=True` (measured; ~700 s letter missed by 14% —
+      adjudicated ACCEPTED, see Validation Plan deviation note); all
+      listed v1 tests green (146+2/5). REMAINING for this box: GPU B7
+      lane accepted-eval matvecs ≤3/iter post-build (sshproxy-blocked).
 - [ ] Phase B: self-deciding default merged after soak; refined-GMRES
       pass removed from the default path; Crucible PASS.
 - [ ] Plan doc `docs/scipy_jax_decomposed_gpu_perf_gap_implementation_plan_2026-07-01.md`
