@@ -348,7 +348,7 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
 This is the JAX CPU comparison lane. Do not treat it as a replacement for the
 public CPU/reference `scipy` oracle lane. Use `scipy-jax-fullgraph` only for
 full-graph stress/parity checks. Use plain single-stage `scipy-jax` only for
-legacy reduced-lane diagnostics.
+legacy reduced-lane diagnostics. The CUDA target lane remains `ondevice`:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
