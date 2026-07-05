@@ -2,12 +2,10 @@
 
 The production fast path in :mod:`simsopt_jax.core.biotsavart` uses
 ``einsum`` / pairwise reductions and computes ``r_inv3`` as
-``r_inv * inv(r2)``. The C++ oracle in ``legacy native C++ source biot_savart_impl.h``
+``r_inv * inv(r2)``. The C++ oracle in ``src/simsoptpp/biot_savart_impl.h``
 uses a sequential ``lax.fori_loop``-equivalent over quadrature points and
-``r_inv * r_inv * r_inv``. Per
-``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md`` Phase 3,
-this module supplies parity twins that mirror the C++ algebra
-operator-for-operator:
+``r_inv * r_inv * r_inv``. This module supplies parity twins that mirror
+the C++ algebra operator-for-operator:
 
 * ``diff = point - gamma`` with the C++ sign convention;
 * ``norm_diff_3_inv = r_inv * r_inv * r_inv``;
@@ -16,7 +14,7 @@ operator-for-operator:
 * ``fak = 1e-7 / num_quad_points`` applied once at output;
 * ``B = sum_c (currents[c] * B_per_coil[c])`` accumulated sequentially.
 
-Pure JAX, no ``legacy native extension`` import (M1 contract). Only the parity backend
+Pure JAX, no ``simsoptpp`` import (M1 contract). Only the parity backend
 routes through these kernels.
 """
 

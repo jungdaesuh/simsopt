@@ -484,8 +484,7 @@ def _traceable_solve_hessian_linearization(
 def _traceable_plu_unpack_triple(linear_solve_factors):
     """Return ``(P, L, U)`` from a 3- or 5-tuple ``linear_solve_factors``.
 
-    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
-    §5.3) packs the LS forward path's ``(lu, piv)`` factors alongside
+    The LS forward path packs its ``(lu, piv)`` factors alongside
     the public ``(P, L, U)`` triple as a 5-tuple
     ``(P, L, U, lu, piv)`` so that the byte-shared dispatch can route
     forward and adjoint solves through ``jsp_linalg.lu_solve``. The
@@ -526,8 +525,7 @@ def _traceable_solve_plu_linearization(
 ):
     """Solve a dense PLU snapshot with a residual-quality success contract.
 
-    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
-    §5.3): when ``linear_solve_factors`` is a 5-tuple
+    When ``linear_solve_factors`` is a 5-tuple
     ``(P, L, U, lu, piv)``, the forward and adjoint solves consume the
     same packed ``(lu, piv)`` factor bytes via ``jsp_linalg.lu_solve``.
     The legacy 3-tuple ``(P, L, U)`` form preserves the existing
@@ -2574,8 +2572,7 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
     def f_fwd(coil_dofs):
         coil_dofs = _as_jax_float64(coil_dofs)
         result = compiled_forward_result_for(coil_dofs)
-        # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
-        # §5.3 / §6): stop_gradient on the cached factor state so the
+        # stop_gradient on the cached factor state so the
         # IFT adjoint backward pass cannot retrace into the linear-solve
         # factorization graph.
         return result["value"], (
@@ -4447,8 +4444,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
 
     def _objective_fwd(coil_dofs, multipliers, penalty):
         evaluation = compiled_evaluation_for(coil_dofs, multipliers, penalty)
-        # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
-        # §5.3 / §6): stop_gradient on the cached factor state so the
+        # stop_gradient on the cached factor state so the
         # IFT adjoint backward pass cannot retrace into the linear-solve
         # factorization graph.
         return evaluation["total"], (

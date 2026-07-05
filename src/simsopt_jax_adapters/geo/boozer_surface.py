@@ -197,8 +197,7 @@ _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS = frozenset(SOLVE_QUALITY_LS_FIELDS)
 _BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS = frozenset(SOLVE_QUALITY_EXACT_FIELDS)
 
 
-# Per docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2: exact
-# Newton solves the linearization through the operator GMRES seam in
+# Exact Newton solves the linearization through the operator GMRES seam in
 # ``simsopt_jax.geo.optimizers.optimizer`` (``_run_operator_gmres``); dense PLU storage
 # is reporting metadata only.
 EXACT_FACTORIZATION_BACKEND: str = "operator-gmres"
@@ -390,8 +389,7 @@ _BOOZER_TRACEABLE_RESULT_KEYS = frozenset(
     }
 )
 # Lowercase ``lu_piv`` is the private traceable companion to the public
-# lowercase ``plu`` triple (see
-# docs/parity_scientific_equivalence_contract_2026-05-09.md §5.3).
+# lowercase ``plu`` triple.
 # Traceable consumers may still receive only the legacy ``(P, L, U)``
 # triple, so lowercase ``lu_piv`` is neither required nor forbidden.
 # Uppercase ``LU_PIV`` is a public result-dict key and remains forbidden
@@ -487,9 +485,8 @@ _BOOZER_RESULT_RECORD_TYPES = {
             }
         ),
     ),
-    # ``LU_PIV`` is the Phase 2 packed-factor companion to the public
-    # ``PLU`` triple (see
-    # docs/parity_scientific_equivalence_contract_2026-05-09.md §5.3).
+    # ``LU_PIV`` is the packed-factor companion to the public
+    # ``PLU`` triple.
     # It is optional metadata: schema consumers that supply only the
     # legacy ``PLU`` triple without packed factors stay supported, so
     # ``LU_PIV`` is intentionally absent from both required and
@@ -1828,9 +1825,8 @@ def _surface_geometry_and_derivatives_from_dofs(
             * ``"cpu_ordered"`` — route through
               :mod:`simsopt_jax.geo.surface_fourier_cpu_ordered`. Mirrors the
               C++ ``surfacexyztensorfourier.h`` accumulation order; used by
-              the strict bit-identity census ladder
-              (``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md``
-              Phase 2). Today this kernel set is implemented for
+              the strict bit-identity census ladder. Today this kernel set is
+              implemented for
               ``surface_kind in {"generic", "xyztensorfourier"}``; other
               surface kinds fall back to ``"production"`` and the census will
               keep flagging the residual drift.
@@ -2050,8 +2046,7 @@ def _boozer_penalty_value_and_grad_inputs_cpu_ordered(
 
     The same factoring backs both the production
     ``_boozer_penalty_value_and_grad_cpu_ordered`` and the bit-identity
-    census reproducer; see
-    ``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md`` Phase 1.
+    census reproducer.
 
     The returned ``_BoozerPenaltyVectorizedInputs`` is a JAX pytree, so this
     helper is safe to call inside a traced computation. The census layer
@@ -3443,7 +3438,6 @@ def _none_solve_quality_fields(field_names: tuple[str, ...]) -> dict[str, None]:
 def _ls_hessian_symmetry_rel(H) -> float | None:
     """Return ``‖H − H.T‖_F / ‖H‖_F`` for the LS solve-quality ladder.
 
-    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §3.1.
     Returns ``None`` when ``H`` is unavailable or has zero Frobenius norm;
     a non-finite norm propagates so the parity arbiter can flag a
     NaN/Inf-laden Hessian instead of treating it as "field unavailable".
@@ -3515,11 +3509,10 @@ def _ls_factorization_backend(
 ) -> str | None:
     """Return the LS factorization backend string for the result dict.
 
-    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §3.1.
     Returns ``None`` when ``H`` is absent. When ``shared_dispatch`` is
-    ``True`` the Phase 2 factor-once dispatch is active: the forward and
+    ``True`` the factor-once dispatch is active: the forward and
     adjoint solves consume the same packed ``(lu, piv)`` factor bytes by
-    construction (see §5.3), and the field reports
+    construction, and the field reports
     ``"dense-plu-shared"``.
 
     The ``optimizer_backend == "scipy"`` branch reports ``lapack-dgetrf``
@@ -3561,9 +3554,9 @@ def _ls_linear_solve_backend(
 def _ls_factor_once_dispatch_eligible(H, *, max_dense_jacobian_bytes) -> bool:
     """Return whether ``decision_size**2 * 8 <= max_dense_jacobian_bytes``.
 
-    Phase 2 (`docs/parity_scientific_equivalence_contract_2026-05-09.md`
-    §5.3) shares ``(lu, piv)`` between LS forward and adjoint solves only
-    when the dense factor fits inside the byte budget. Above the budget,
+    The factor-once dispatch shares ``(lu, piv)`` between LS forward and
+    adjoint solves only when the dense factor fits inside the byte budget.
+    Above the budget,
     the runtime stays on the existing operator-only adjoint path so the
     CLAUDE.md exact-lane scaling-limit guarantees keep holding for large
     problems. ``H`` must already be a real materialized matrix; ``None``
@@ -4579,10 +4572,8 @@ class BoozerSurfaceJAX(Optimizable):
             self.options["optimizer_backend"],
             self.res.get("LU_PIV"),
         ):
-            # Phase 2 factor-once dispatch (see
-            # docs/parity_scientific_equivalence_contract_2026-05-09.md
-            # §5.3): forward and adjoint solves consume the same packed
-            # ``(lu, piv)`` so their factor bytes are bit-identical by
+            # Factor-once dispatch: forward and adjoint solves consume the
+            # same packed ``(lu, piv)`` so their factor bytes are bit-identical by
             # construction. The public PLU triple stays load-bearing for
             # the ``linear_solve_factors`` reporting field. The
             # ``optimizer_backend == "scipy"`` lane is intentionally
@@ -6405,8 +6396,7 @@ class BoozerSurfaceJAX(Optimizable):
         hessian = newton_result["hessian"]
         if hessian is not None:
             finite = finite & jnp.all(jnp.isfinite(hessian))
-            # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
-            # §5.3): factor once via lu_factor on the traceable lane so
+            # Factor once via lu_factor on the traceable lane so
             # the public PLU triple is derived from the same packed
             # factors that the IFT adjoint consumes. Failed-solve
             # propagation keeps the all-NaN ``(P, L, U)`` contract from
@@ -7024,8 +7014,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         self._set_surface_dofs(sdofs_final)
         H = result["hessian"]
-        # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
-        # §5.3): factor once via lu_factor when the dense factor fits in
+        # Factor once via lu_factor when the dense factor fits in
         # the byte budget so the LS forward and adjoint solves share the
         # same packed (lu, piv) bytes by construction. The public PLU
         # triple is derived from the same factorization.
@@ -7129,8 +7118,7 @@ class BoozerSurfaceJAX(Optimizable):
                 linearization_residency=linearization_residency,
             ),
             **_ls_newton_reporting_fields(result),
-            # Scientific-equivalence ladder reporting fields per
-            # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.1.
+            # Scientific-equivalence ladder reporting fields.
             # action_max / step_abs_diff are populated by the parity
             # arbiter; condition_estimate is populated when dense H exists.
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
@@ -7595,8 +7583,7 @@ class BoozerSurfaceJAX(Optimizable):
                 linearization_residency=self.options["linearization_residency"],
             ),
             **exact_reporting,
-            # Scientific-equivalence ladder reporting fields per
-            # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2.
+            # Scientific-equivalence ladder reporting fields.
             # action_max / linear_residual / refinement_correction /
             # adjoint_solve_residual are populated by the parity arbiter or
             # downstream optimizer plumbing; condition_estimate is populated

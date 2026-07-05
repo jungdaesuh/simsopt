@@ -6,7 +6,7 @@ rectangular-grid kernel exposed by
 :mod:`simsopt_jax.core.regular_grid_interp` (item 13).
 
 The C++ ``InterpolatedField`` class
-(``legacy native C++ source magneticfield_interpolated.h``):
+(``src/simsoptpp/magneticfield_interpolated.h``):
 
 1. Samples a source :class:`MagneticField` on a cylindrical grid in
    :math:`(r, \\phi, z)` at construction time.
@@ -129,7 +129,7 @@ def _cart_to_cyl(points_cart: jax.Array) -> tuple[jax.Array, jax.Array, jax.Arra
     """Convert Cartesian ``(x, y, z)`` points to cylindrical ``(r, phi, z)``.
 
     The C++ implementation uses ``simsopt_cyl_from_cart`` (see
-    ``legacy native C++ source magneticfield.h``) which calls ``std::atan2``. JAX's
+    ``src/simsoptpp/magneticfield.h``) which calls ``std::atan2``. JAX's
     ``jnp.arctan2`` matches ``std::atan2`` on the principal branch.
 
     Returns three flat ``(N,)`` arrays.
@@ -179,7 +179,7 @@ def _fold_symmetry(
     stellarator symmetry) and ``+1`` otherwise.
 
     Matches ``exploit_symmetries_points`` in
-    ``legacy native C++ source magneticfield_interpolated.h``. Note in particular
+    ``src/simsoptpp/magneticfield_interpolated.h``. Note in particular
     that the stellsym branch first negates ``z`` and applies
     ``phi -> 2*pi - phi`` before the ``nfp`` modulo reduction — this
     ordering is significant because the modulo step uses the
@@ -199,7 +199,7 @@ def _unfold_B_cyl(B_cyl_fold: jax.Array, sign_br: jax.Array) -> jax.Array:
     """Undo the stellsym ``B_r`` sign flip on cylindrical ``B``.
 
     Matches ``apply_symmetries_to_B_cyl`` in
-    ``legacy native C++ source magneticfield_interpolated.h``.
+    ``src/simsoptpp/magneticfield_interpolated.h``.
     """
 
     B_r = B_cyl_fold[:, 0] * sign_br
@@ -230,7 +230,7 @@ def _cyl_vector_to_cart(field_cyl: jax.Array, phi: jax.Array) -> jax.Array:
     """Rotate a cylindrical vector field to Cartesian using the original ``phi``.
 
     Matches the C++ ``_B_impl`` and ``_GradAbsB_impl`` in
-    ``legacy native C++ source magneticfield_interpolated.h``. The unfolded ``phi``
+    ``src/simsoptpp/magneticfield_interpolated.h``. The unfolded ``phi``
     (i.e. the original ``arctan2(y, x)`` of the query point) is used —
     not the folded ``phi`` that addressed the interpolant.
     """

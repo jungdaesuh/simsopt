@@ -2,7 +2,7 @@
 Pure JAX implementation of the Biot-Savart magnetic field computation.
 
 This module provides JIT-compilable, autodiff-compatible functions that
-replace the C++ ``legacy native extension.BiotSavart`` kernel for GPU execution.
+replace the C++ ``simsoptpp.BiotSavart`` kernel for GPU execution.
 
 All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.

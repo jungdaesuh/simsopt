@@ -1,4 +1,4 @@
-"""JAX port of ``legacy native extension::MwPGP_algorithm`` (Tier P4 item 25).
+"""JAX port of ``simsoptpp::MwPGP_algorithm`` (Tier P4 item 25).
 
 This module implements the Mixed-Active-Set Projected Gradient (MwPGP) solver
 for the convex permanent-magnet optimization sub-problem
@@ -19,7 +19,7 @@ Reference: Bouchala et al., *On the solution of convex QPQC problems with
 elliptic and other separable constraints with strong curvature*, Applied
 Mathematics and Computation 247 (2014) 848-864.
 
-Upstream oracle: ``legacy native extension/permanent_magnet_optimization.cpp`` lines 11-324.
+Upstream oracle: ``src/simsoptpp/permanent_magnet_optimization.cpp`` lines 11-324.
 
 Algorithm contract
 ------------------
@@ -782,7 +782,7 @@ def gpmo_baseline_candidate_costs(
     """Return baseline GPMO plus/minus candidate costs.
 
     Mirrors ``GPMO_baseline`` in
-    ``legacy native extension/permanent_magnet_optimization.cpp:1270-1292``. The returned
+    ``src/simsoptpp/permanent_magnet_optimization.cpp:1270-1292``. The returned
     vector has shape ``(6 N,)`` with all ``+`` candidates first followed by all
     ``-`` candidates, matching the C++ ``std::min_element`` tie order.
     """
@@ -1055,7 +1055,7 @@ def gpmo_arbvec_candidate_costs(
     """Return arbitrary-vector GPMO plus/minus candidate costs.
 
     Mirrors ``GPMO_ArbVec`` in
-    ``legacy native extension/permanent_magnet_optimization.cpp:1168-1195``. Candidate
+    ``src/simsoptpp/permanent_magnet_optimization.cpp:1168-1195``. Candidate
     order is dipole-major, polarization-vector-minor, with all plus candidates
     followed by all minus candidates.
     """
@@ -2224,7 +2224,7 @@ def gpmo_multi_candidate_costs(
     """Return multi-neighbour GPMO plus/minus candidate costs.
 
     Mirrors ``GPMO_multi`` in
-    ``legacy native extension/permanent_magnet_optimization.cpp:630-667``. The candidate
+    ``src/simsoptpp/permanent_magnet_optimization.cpp:630-667``. The candidate
     vector has shape ``(6 N,)`` with plus candidates followed by minus
     candidates, preserving the C++ ``std::min_element`` tie order.
     """

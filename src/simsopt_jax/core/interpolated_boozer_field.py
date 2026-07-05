@@ -3,7 +3,7 @@ piecewise-polynomial interpolant in :math:`(s, \\theta, \\zeta)`.
 
 Item N02 of the JAX port. Mirrors the C++ template class
 ``InterpolatedBoozerField`` declared at
-``legacy native C++ source boozermagneticfield_interpolated.h``: each Boozer scalar
+``src/simsoptpp/boozermagneticfield_interpolated.h``: each Boozer scalar
 field is fit on a regular grid using uniform-Lagrange tensor-product
 basis, with the same flux-function / symmetry-exploiting split as the
 C++ kernel.
@@ -44,7 +44,7 @@ execution artifacts; the host specs remain the source of truth.
 
 References:
 
-- ``legacy native C++ source boozermagneticfield_interpolated.h``
+- ``src/simsoptpp/boozermagneticfield_interpolated.h``
 - ``src/simsopt_jax/core/regular_grid_interp.py``
 - ``src/simsopt_jax/core/boozer_radial_interp.py`` (item-32 precedent for
   the frozen-state pattern)

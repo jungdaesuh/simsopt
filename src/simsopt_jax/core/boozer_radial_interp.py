@@ -1,7 +1,7 @@
 """JAX port of ``boozerradialinterpolant.cpp`` (Tier P5 item 32).
 
 This module re-implements the six Fourier helper kernels defined in
-``legacy native C++ source boozerradialinterpolant.cpp`` (upstream sha
+``src/simsoptpp/boozerradialinterpolant.cpp`` (upstream sha
 ``1b0cc3a96063197cdbdd01559e04c25456fbe6ff``):
 
 - :func:`compute_kmnc_kmns` — non-stellsym K Fourier projection on a
@@ -246,7 +246,7 @@ def compute_kmns(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of ``legacy native extension.compute_kmns`` (stellsym).
+    """JAX port of ``simsoptpp.compute_kmns`` (stellsym).
 
     Returns ``kmns`` of shape ``(num_modes, num_surf)``.
 
@@ -312,7 +312,7 @@ def compute_kmnc_kmns(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of ``legacy native extension.compute_kmnc_kmns`` (non-stellsym).
+    """JAX port of ``simsoptpp.compute_kmnc_kmns`` (non-stellsym).
 
     Returns ``kmnc_kmns`` of shape ``(2, num_modes, num_surf)`` where
     ``[0]`` is the cos coefficients and ``[1]`` is the sin coefficients.
@@ -387,7 +387,7 @@ def fourier_transform_odd(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of ``legacy native extension.fourier_transform_odd``.
+    """JAX port of ``simsoptpp.fourier_transform_odd``.
 
     Per-mode sin coefficient projection with point-sum normalisation::
 
@@ -414,7 +414,7 @@ def fourier_transform_even(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of ``legacy native extension.fourier_transform_even``.
+    """JAX port of ``simsoptpp.fourier_transform_even``.
 
     Per-mode cos coefficient projection with point-sum normalisation::
 
@@ -440,7 +440,7 @@ def inverse_fourier_transform_odd_1d(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of the 1D branch of ``legacy native extension.inverse_fourier_transform_odd``.
+    """JAX port of the 1D branch of ``simsoptpp.inverse_fourier_transform_odd``.
 
     For a single-vector coefficient ``kmns`` of shape ``(num_modes,)``,
     returns ``K[ip] = sum_{im>=1} kmns[im] * sin(angle[ip, im])``.
@@ -459,7 +459,7 @@ def inverse_fourier_transform_odd_2d(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of the 2D branch of ``legacy native extension.inverse_fourier_transform_odd``.
+    """JAX port of the 2D branch of ``simsoptpp.inverse_fourier_transform_odd``.
 
     For a per-point coefficient table ``kmns`` of shape
     ``(num_modes, num_points)``, returns
@@ -503,7 +503,7 @@ def inverse_fourier_transform_even_1d(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of the 1D branch of ``legacy native extension.inverse_fourier_transform_even``.
+    """JAX port of the 1D branch of ``simsoptpp.inverse_fourier_transform_even``.
 
     For a single-vector coefficient ``kmnc`` of shape ``(num_modes,)``,
     returns ``K[ip] = sum_{im>=0} kmnc[im] * cos(angle[ip, im])``.
@@ -520,7 +520,7 @@ def inverse_fourier_transform_even_2d(
     thetas: jax.Array,
     zetas: jax.Array,
 ) -> jax.Array:
-    """JAX port of the 2D branch of ``legacy native extension.inverse_fourier_transform_even``.
+    """JAX port of the 2D branch of ``simsoptpp.inverse_fourier_transform_even``.
 
     For a per-point coefficient table ``kmnc`` of shape
     ``(num_modes, num_points)``, returns

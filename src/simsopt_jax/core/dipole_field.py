@@ -1,7 +1,7 @@
-"""Pure JAX port of ``legacy native C++ source dipole_field.cpp``.
+"""Pure JAX port of ``src/simsoptpp/dipole_field.cpp``.
 
 The functions in this module mirror the raw C++ kernels exposed through
-``legacy native extension``. Inputs are Cartesian arrays unless ``dipole_field_Bn`` is given
+``simsoptpp``. Inputs are Cartesian arrays unless ``dipole_field_Bn`` is given
 ``coordinate_flag="cylindrical"`` or ``"toroidal"``, matching the permanent
 magnet optimization matrix convention in the C++ oracle. Numeric inputs are
 converted to float64 before evaluation, matching the double-precision C++
@@ -172,7 +172,7 @@ def dipole_field_B(
 ) -> jax.Array:
     """Magnetic field from Cartesian point dipoles.
 
-    Mirrors ``legacy native extension.dipole_field_B``:
+    Mirrors ``simsoptpp.dipole_field_B``:
     ``mu0 / (4*pi) * sum(3 * dot(m, r) * r / |r|^5 - m / |r|^3)``.
     """
 
@@ -208,7 +208,7 @@ def dipole_field_A(
 ) -> jax.Array:
     """Vector potential from Cartesian point dipoles.
 
-    Mirrors ``legacy native extension.dipole_field_A``:
+    Mirrors ``simsoptpp.dipole_field_A``:
     ``mu0 / (4*pi) * sum(cross(m, r) / |r|^3)``.
     """
 
@@ -269,7 +269,7 @@ def dipole_field_dB(
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction. Mirrors the C++
         ``dipole_field_dB`` array assignments and
         ``DipoleField.dB_by_dX()``.
@@ -290,7 +290,7 @@ def dipole_field_dB_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Arra
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). See :func:`dipole_field_dB`.
+        ``simsoptpp`` C++ storage order). See :func:`dipole_field_dB`.
     """
     return dipole_field_dB(points, spec.dipole_points, spec.dipole_moments)
 
@@ -341,7 +341,7 @@ def dipole_field_dA(
     dA : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dA[p, l, j] = ∂_j A_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the A-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the A-field component;
         axis 2 is the spatial derivative direction. Mirrors the C++
         ``dipole_field_dA`` array assignments.
     """
@@ -361,7 +361,7 @@ def dipole_field_dA_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Arra
     dA : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dA[p, l, j] = ∂_j A_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). See :func:`dipole_field_dA`.
+        ``simsoptpp`` C++ storage order). See :func:`dipole_field_dA`.
     """
     return dipole_field_dA(points, spec.dipole_points, spec.dipole_moments)
 
@@ -540,7 +540,7 @@ def dipole_field_Bn(
 ) -> jax.Array:
     """Permanent-magnet normal-field matrix from the C++ oracle.
 
-    ``b`` is accepted for signature parity with ``legacy native extension.dipole_field_Bn``;
+    ``b`` is accepted for signature parity with ``simsoptpp.dipole_field_Bn``;
     the C++ implementation checks its storage order but does not use its
     contents in the returned matrix.
 

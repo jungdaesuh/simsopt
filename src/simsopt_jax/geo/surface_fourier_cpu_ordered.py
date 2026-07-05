@@ -3,11 +3,10 @@
 Production hot-path kernels in :mod:`simsopt_jax.geo.surface_fourier` use
 ``einsum``/matmul (``V @ coeffs.T @ W.T``) which lower to XLA reductions whose
 floating-point accumulation order does not match the C++ oracle in
-``legacy native C++ source surfacexyztensorfourier.h``. The
-``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md`` Phase 2
-ladder requires per-build, per-host bit identity between CPU and JAX boundary
-inputs to the Boozer LS callback, so this module supplies parallel kernels
-that mirror the C++ accumulation order operator-for-operator:
+``src/simsoptpp/surfacexyztensorfourier.h``. Per-build, per-host bit
+identity between CPU and JAX boundary inputs to the Boozer LS callback
+requires matching the C++ accumulation order, so this module supplies
+parallel kernels that mirror it operator-for-operator:
 
 * loop nesting ``k1 → k2 → m → n`` with serial scalar accumulators
   (``lax.fori_loop`` over ``(m, n)``);
@@ -21,7 +20,7 @@ These twins are diagnostic-grade: only the parity backend
 :func:`simsopt_jax.backend.is_parity_mode`) routes through them. The production
 fast paths in :mod:`simsopt_jax.geo.surface_fourier` are unchanged.
 
-Pure JAX, no ``legacy native extension`` import (M1 contract).
+Pure JAX, no ``simsoptpp`` import (M1 contract).
 """
 
 from __future__ import annotations

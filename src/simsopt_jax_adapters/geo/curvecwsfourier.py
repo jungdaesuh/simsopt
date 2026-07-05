@@ -226,7 +226,6 @@ class CurveCWSFourierCPP(Curve, sopp.Curve):
             np.zeros((order,)),
         ]
 
-        # self.quadpoints = quadpoints
         self.surf = surf
 
         if isinstance(surf, SurfaceRZFourier):

@@ -1,8 +1,8 @@
 """JAX port of ``regular_grid_interpolant_3d`` (Tier P1 item 13).
 
 This module re-implements the C++ ``RegularGridInterpolant3D`` kernel
-(see ``legacy native C++ source regular_grid_interpolant_3d.h`` and
-``legacy native C++ source regular_grid_interpolant_3d_impl.h``) as a JAX-compatible
+(see ``src/simsoptpp/regular_grid_interpolant_3d.h`` and
+``src/simsoptpp/regular_grid_interpolant_3d_impl.h``) as a JAX-compatible
 piecewise polynomial interpolant on a rectangular cuboid mesh in three
 dimensions. The interpolant is vector-valued and uses tensor-product
 1D Lagrange polynomials on each cell.

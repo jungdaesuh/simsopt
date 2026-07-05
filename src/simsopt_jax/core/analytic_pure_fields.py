@@ -341,7 +341,7 @@ def toroidal_dB(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction.
     """
     R0, B0 = _toroidal_scalars(spec)
@@ -368,7 +368,7 @@ def toroidal_dA(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
     dA : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dA[p, l, j] = ∂_j A_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the A-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the A-field component;
         axis 2 is the spatial derivative direction. CPU-oracle layout;
         see ``toroidal_dB`` for the parity rationale.
     """
@@ -525,7 +525,7 @@ def poloidal_dB(spec: PoloidalFieldSpec, points: jax.Array) -> jax.Array:
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction. CPU-oracle layout;
         see ``toroidal_dB`` for the parity rationale.
     """

@@ -1,4 +1,4 @@
-"""JAX port of ``legacy native extension/tracing.cpp`` (Tier P1 item 14).
+"""JAX port of ``src/simsoptpp/tracing.cpp`` (Tier P1 item 14).
 
 This module implements an in-repo JAX Dormand-Prince RK4(5) integrator
 with a PI step controller and a bracketed Illinois false-position event
@@ -10,7 +10,7 @@ The implemented scope covers:
 - the 4-state Cartesian vacuum guiding-centre RHS shipped under the
   item-14 follow-up (state ``[x, y, z, v_par]``, drift terms following
   the upstream ``GuidingCenterVacuumRHS::operator()`` definition in
-  ``legacy native extension/tracing.cpp``). The driver :func:`trace_guiding_center`
+  ``src/simsoptpp/tracing.cpp``). The driver :func:`trace_guiding_center`
   shares the same DOPRI5 + PI controller pattern as
   :func:`trace_fieldline`, and
 - the three 4-state Boozer-coordinate guiding-centre RHS variants
@@ -494,7 +494,7 @@ jax.tree_util.register_dataclass(
 class MinRStoppingCriterion:
     """Stop when ``sqrt(x^2 + y^2) <= crit_r``.
 
-    Mirrors :class:`legacy native extension.MinRStoppingCriterion`. Pure JAX: the
+    Mirrors :class:`simsoptpp.MinRStoppingCriterion`. Pure JAX: the
     predicate is evaluated on the post-step Cartesian state.
     """
 
@@ -528,7 +528,7 @@ class ToroidalTransitStoppingCriterion:
 
     The transit count is unwrapped from the continuous-branch ``phi``
     accumulator the driver maintains for the phi-plane crossing scan.
-    Matches :class:`legacy native extension.ToroidalTransitStoppingCriterion` with
+    Matches :class:`simsoptpp.ToroidalTransitStoppingCriterion` with
     ``flux=False``.
     """
 
@@ -539,7 +539,7 @@ class ToroidalTransitStoppingCriterion:
 class IterStoppingCriterion:
     """Stop after the integrator has run ``max_iter`` steps.
 
-    Matches :class:`legacy native extension.IterationStoppingCriterion`. The driver
+    Matches :class:`simsoptpp.IterationStoppingCriterion`. The driver
     counts every loop iteration (including rejected steps) to match
     the upstream semantics.
     """
@@ -575,7 +575,7 @@ class MaxToroidalFluxStoppingCriterion:
 class LevelsetStoppingCriterion:
     """Stop when the JAX surface classifier reports the trajectory is outside.
 
-    Mirrors :class:`legacy native extension.LevelsetStoppingCriterion`. The
+    Mirrors :class:`simsoptpp.LevelsetStoppingCriterion`. The
     ``classifier_fn`` is a JAX-traceable callable ``classifier_fn(x, y, z) ->
     sign`` produced by
     :func:`simsopt_jax.core.surface_classifier.make_levelset_classifier`
@@ -609,7 +609,7 @@ def _stopping_criterion_should_stop(
     flux-coordinate criteria ``MinToroidalFluxStoppingCriterion`` /
     ``MaxToroidalFluxStoppingCriterion`` fire on ``s``; on the
     Cartesian path they remain inactive (matching the upstream
-    ``legacy native extension/tracing.cpp`` flux-only contract).
+    ``src/simsoptpp/tracing.cpp`` flux-only contract).
     """
 
     if isinstance(criterion, MinRStoppingCriterion):
@@ -638,7 +638,7 @@ def _stopping_criterion_should_stop(
     if isinstance(criterion, LevelsetStoppingCriterion):
         # Surface classifier returns +1 inside, -1 outside; stop on the
         # accepted step that crosses to < 0 (matches upstream
-        # ``legacy native extension/tracing.cpp::LevelsetStoppingCriterion``).
+        # ``src/simsoptpp/tracing.cpp::LevelsetStoppingCriterion``).
         position = jnp.stack([x, y, z]).reshape(1, 3).astype(dtype)
         sign = criterion.classifier_fn(position)[0]
         return sign < _device_array(0.0, dtype)
@@ -660,7 +660,7 @@ def _continuous_phi(
 ) -> jax.Array:
     """Continuous-branch ``atan2(y, x)`` near ``phi_near``.
 
-    Mirrors the C++ ``get_phi`` helper in ``legacy native extension/tracing.cpp``:
+    Mirrors the C++ ``get_phi`` helper in ``src/simsoptpp/tracing.cpp``:
     pick the integer multiple of ``2*pi`` so the unwrapped ``phi`` is
     within ``pi`` of ``phi_near``. Used so the per-step ``phi_last`` /
     ``phi_current`` accumulator continuously tracks the trajectory and
@@ -708,7 +708,7 @@ def _continuous_angle(
     Companion to :func:`_continuous_phi` for the Boozer-coordinate
     state where ``zeta`` is already a scalar angle (not a Cartesian
     ``atan2(y, x)``). The C++ ``get_phi`` helper has a single
-    ``get_angle`` equivalent in ``legacy native extension/tracing.cpp`` driving the
+    ``get_angle`` equivalent in ``src/simsoptpp/tracing.cpp`` driving the
     ``zeta - zeta_target`` modulo-``2*pi`` detection on the Boozer
     route. We replicate the same logic: pick the integer multiple of
     ``2*pi`` so the unwrapped angle lies within ``pi`` of ``angle_near``.
@@ -1864,7 +1864,7 @@ def guiding_center_vacuum_rhs(
 
     State is ``y = (x, y, z, v_par)``. The drift-kinetic equations
     (matching the upstream ``GuidingCenterVacuumRHS::operator()`` in
-    ``legacy native extension/tracing.cpp``) are
+    ``src/simsoptpp/tracing.cpp``) are
 
     .. math::
 
@@ -2888,7 +2888,7 @@ def guiding_center_vacuum_boozer_rhs(
 
     State is ``y = (s, theta, zeta, v_par)``. The equations of motion
     follow the upstream ``GuidingCenterVacuumBoozerRHS::operator()`` in
-    ``legacy native extension/tracing.cpp``:
+    ``src/simsoptpp/tracing.cpp``:
 
     .. math::
 
@@ -2962,7 +2962,7 @@ def guiding_center_no_k_boozer_rhs(
 
     State is ``y = (s, theta, zeta, v_par)``. The equations of motion
     follow ``GuidingCenterNoKBoozerRHS::operator()`` in
-    ``legacy native extension/tracing.cpp``. The non-vacuum case uses ``G(s)`` and
+    ``src/simsoptpp/tracing.cpp``. The non-vacuum case uses ``G(s)`` and
     ``I(s)`` profiles but assumes ``K(s, theta, zeta) = 0``. The upstream
     equation contains the physical banana-tip singularity ``mu / v_par``;
     this faithful port does not regularize AD through ``v_par = 0``.
@@ -3048,7 +3048,7 @@ def guiding_center_boozer_rhs(
 
     State is ``y = (s, theta, zeta, v_par)``. The equations of motion
     follow ``GuidingCenterBoozerRHS::operator()`` in
-    ``legacy native extension/tracing.cpp`` — the non-vacuum, ``K != 0`` case with
+    ``src/simsoptpp/tracing.cpp`` — the non-vacuum, ``K != 0`` case with
     ``C``, ``F``, ``D`` algebraic coefficients folded in. The upstream
     equation contains the physical banana-tip singularity ``mu / v_par``;
     this faithful port does not regularize AD through ``v_par = 0``.
@@ -3804,7 +3804,7 @@ class FullorbitTracingSpec:
     the trajectory carry has shape ``(max_steps + 1, 7)`` (columns
     ``(t, x, y, z, vx, vy, vz)``). The integrator follows the upstream
     ``FullorbitRHS::operator()`` vacuum branch in
-    ``legacy native extension/tracing.cpp``. The ``phi_hits`` buffer has shape
+    ``src/simsoptpp/tracing.cpp``. The ``phi_hits`` buffer has shape
     ``(max_phi_hits, 8)`` and records phi-plane Poincaré crossings and
     stopping-criterion fires (columns ``[t_hit, idx, x, y, z, vx, vy,
     vz]``); see :class:`FullorbitTracingResult` for the row layout.
@@ -3894,7 +3894,7 @@ def fullorbit_vacuum_rhs(
 
     State is ``y = (x, y, z, vx, vy, vz)``. The Lorentz equation of
     motion in vacuum (no E field; matching the upstream
-    ``FullorbitRHS::operator()`` in ``legacy native extension/tracing.cpp``) is
+    ``FullorbitRHS::operator()`` in ``src/simsoptpp/tracing.cpp``) is
 
     .. math::
 

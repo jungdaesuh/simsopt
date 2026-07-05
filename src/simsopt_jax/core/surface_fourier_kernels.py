@@ -334,7 +334,7 @@ def _eval_hat_paired(V, W, coeffs):
 # ``(m <= mpol, n <= ntor)`` cos-cos block by
 # ``E(phi, theta) = sin(nfp*phi/2)^2 + sin(theta/2)^2`` whenever
 # ``clamped_dims[dim]`` is true for that Cartesian component (see
-# ``legacy native C++ source surfacexyztensorfourier.h:903-913``). The JAX kernel
+# ``src/simsoptpp/surfacexyztensorfourier.h:903-913``). The JAX kernel
 # computes the unclamped hat first, then adds a correction term
 # ``hat_block * (E - 1)`` for each clamped dim, where ``hat_block`` is
 # the sub-evaluation over the cos-cos coefficient quadrant only.
@@ -358,7 +358,7 @@ def _bc_enforcer_grid(quadpoints_phi, quadpoints_theta, nfp):
     quadpoints_phi/theta in [0, 1); the function uses
     ``phi = 2*pi*quadpoints_phi`` internally to match the
     ``cache_enforcer`` build at
-    ``legacy native C++ source surfacexyztensorfourier.h:889-898``.
+    ``src/simsoptpp/surfacexyztensorfourier.h:889-898``.
     """
     phi_arg, theta_arg, _, _, _ = _bc_enforcer_angles(
         quadpoints_phi, quadpoints_theta, nfp
@@ -542,7 +542,7 @@ def surface_gamma(
             ``E(phi, theta) = sin(nfp*phi/2)^2 + sin(theta/2)^2`` on the
             ``(m <= mpol, n <= ntor)`` cos-cos coefficient block. Matches
             ``SurfaceXYZTensorFourier::apply_bc_enforcer`` at
-            ``legacy native C++ source surfacexyztensorfourier.h:903``.
+            ``src/simsoptpp/surfacexyztensorfourier.h:903``.
 
     Returns:
         gamma: (nphi, ntheta, 3)  Cartesian [x, y, z].
@@ -623,7 +623,7 @@ def surface_gammadash1_lin(
     # through :func:`surface_gamma_lin`, which encodes the clamped BC
     # enforcer multiplicatively. This keeps the analytic and clamped
     # derivative formulas consistent with the C++ basis_fun_dphi/dtheta
-    # product rule at ``legacy native C++ source surfacexyztensorfourier.h:966-1010``.
+    # product rule at ``src/simsoptpp/surfacexyztensorfourier.h:966-1010``.
     if any(_normalize_clamped_dims(clamped_dims)):
 
         def _eval_single(qp_scalar):

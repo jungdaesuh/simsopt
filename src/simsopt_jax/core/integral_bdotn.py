@@ -1,5 +1,5 @@
 """
-Pure JAX replacement for ``legacy native extension.integral_BdotN``.
+Pure JAX replacement for ``simsoptpp.integral_BdotN``.
 
 Computes quadratic-flux-like surface integrals used in Stage-2 coil
 optimization.  The three supported definitions are:

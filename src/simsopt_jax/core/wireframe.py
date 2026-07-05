@@ -2,8 +2,8 @@
 
 This module ports the field-kernel portion of the C++ wireframe implementation:
 
-* ``legacy native extension/wireframe_field_impl.h``
-* ``legacy native extension/magneticfield_wireframe.cpp``
+* ``src/simsoptpp/wireframe_field_impl.h``
+* ``src/simsoptpp/magneticfield_wireframe.cpp``
 
 The upstream optimiser (``wireframe_optimization.cpp``, GSCO) is item 31 and
 lives in ``src/simsopt_jax/solve/wireframe.py``; this module owns
@@ -33,8 +33,8 @@ Layout
       dB_by_dX(p, k, 1) = fak * dB_dX_i[k].y;   // d_y B_k
       dB_by_dX(p, k, 2) = fak * dB_dX_i[k].z;   // d_z B_k
 
-  and what ``legacy native extension.WireframeField.dB_by_dX()`` returns. The same
-  layout is used by ``legacy native extension.BiotSavart``; the abstract simsopt-jax
+  and what ``simsoptpp.WireframeField.dB_by_dX()`` returns. The same
+  layout is used by ``simsoptpp.BiotSavart``; the abstract simsopt-jax
   convention quoted in ``CLAUDE.md`` (``dB[p, j, l] = d_j B_l``) names
   the same array with swapped axis labels, but the storage is
   component-first regardless.
@@ -180,7 +180,7 @@ def wireframe_segment_dB_by_dX(
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction. See the module
         head docstring for the C++ ``dB_by_dX(p, k, m)`` alignment.
     """
@@ -202,7 +202,7 @@ def wireframe_segment_B_and_dB_by_dX(
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction.
     """
     return _wireframe_segment_B_and_dB_by_dX_from_arrays(
@@ -310,7 +310,7 @@ def wireframe_segment_dB_by_dX_contributions(
     dB : jax.Array
         Shape ``(n_segments, n_points, 3, 3)``. Axis convention on the
         trailing 3x3 block: ``dB[i, p, l, j] = ∂_j B_l(x_p)`` for
-        segment ``i`` (component-first; matches the legacy native extension C++
+        segment ``i`` (component-first; matches the ``simsoptpp`` C++
         storage order). Axis 2 is the B-field component; axis 3 is
         the spatial derivative direction.
     """
@@ -521,7 +521,7 @@ def wireframe_dB_by_dX(
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction.
     """
     return _wireframe_dB_jit(
@@ -545,7 +545,7 @@ def wireframe_B_and_dB_by_dX(
     dB : jax.Array
         Shape ``(n_points, 3, 3)``. Axis convention:
         ``dB[p, l, j] = ∂_j B_l(x_p)`` (component-first; matches the
-        legacy native extension C++ storage order). Axis 1 is the B-field component;
+        ``simsoptpp`` C++ storage order). Axis 1 is the B-field component;
         axis 2 is the spatial derivative direction.
     """
     return _wireframe_B_and_dB_jit(

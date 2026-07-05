@@ -867,7 +867,7 @@ def pair_linking_number_pure(
     """Gauss linking-number contribution for a single ordered curve pair.
 
     Mirrors the C++ ``compute_linking_number`` inner pair contribution at
-    ``legacy native C++ source python_distance.cpp:181-211``. Inputs are the dense
+    ``src/simsoptpp/python_distance.cpp:181-211``. Inputs are the dense
     quadrature samples (``gamma``/``gammadash``) and the per-curve
     quadrature step (``dphi``). The returned value is the rounded
     absolute Gauss integral divided by ``4 * pi`` and is a non-negative

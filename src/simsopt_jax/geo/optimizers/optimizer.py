@@ -3805,7 +3805,7 @@ _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
 _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 
 # Opt-in dense direct factorization for the EXACT-Jacobian adjoint transpose
-# solve ``J^T λ = g``.  At high mode counts (m18: ``J`` is 2055x2055) the
+# solve ``J^T λ = g``.  At high mode counts (``J`` reaches 2055x2055) the
 # UNPRECONDITIONED operator-GMRES path (``restart=64``/``maxiter=10`` = 640
 # matvecs) stagnates at ``residual_relative ~ 1`` because the Krylov subspace
 # never resolves the spectrum, and the monotonic-rejection refinement loop then
@@ -3815,7 +3815,7 @@ _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 # iterative refinement (GMRES-IR with a direct preconditioner): it solves to
 # machine precision in O(n^3) where the matrix-free Krylov method stalls.  The
 # 34 MB dense ``J^T`` is far under the ``max_dense_jacobian_bytes`` policy at
-# m18, but the materialization stays guarded by that policy.  Read once at
+# these high mode counts, but the materialization stays guarded by that policy.  Read once at
 # import (selects a static trace-time branch); default OFF so the operator-GMRES
 # path remains the baseline for A/B comparison.
 _EXACT_ADJOINT_DENSE_LU = os.environ.get(
@@ -4031,8 +4031,7 @@ def _solve_dense_newton_step(H, grad, *, refine):
 def _factor_dense_hessian(H, *, optimizer_backend):
     """Factor a dense LS Hessian once and return packed ``(lu, piv)``.
 
-    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §5.3
-    (Phase 2 adjoint factor-once hybrid). The resulting factors are reused
+    The resulting factors are reused
     for both forward and adjoint solves so the bytes are bit-identical by
     construction.
 
