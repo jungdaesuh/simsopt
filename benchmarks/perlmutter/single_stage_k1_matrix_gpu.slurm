@@ -34,7 +34,7 @@ MATRIX_LSMR_NEWTON_STAB="${MATRIX_LSMR_NEWTON_STAB:-1e-10}"
 # jax-CPU reference leg alone; the jax-GPU target leg keeps its own selector. Empty
 # means unset. Accepted codes are resolved by the child (operator_gmres, dense_lu,
 # hybrid_final_dense_lu, hybrid_final_dense_ir), which fails loud on an unknown value.
-MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER="${MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER:-}"
+export MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER="${MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER:-}"
 MATRIX_MPOL="${MATRIX_MPOL:-10}"
 MATRIX_NTOR="${MATRIX_NTOR:-10}"
 MATRIX_NPHI="${MATRIX_NPHI:-64}"

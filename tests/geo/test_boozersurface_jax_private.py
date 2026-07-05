@@ -4151,6 +4151,71 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_failed_direction_stalls_loud(
+        self, monkeypatch
+    ):
+        """A failed dense-IR direction stalls the runner — no GMRES fallback.
+
+        Runner-level mirror of the solve-level fail-loud test: when the
+        dense-IR solve reports a failed residual gate and a rejected
+        direction, the runner must stall immediately (dense directions are
+        tolerance-exact, so there is no loose-operator retry lane to fall
+        back to) instead of silently rerouting to strict-tolerance GMRES.
+        """
+        tol = 1e-6
+        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ]
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR,
+        )
+
+        def failing_dense_ir_solve(_matvec, _lu_piv, rhs, *, tol):
+            del tol
+            return -rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(False),
+                residual=jnp.asarray(1.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(1.0e3, dtype=jnp.float64),
+                iterations=jnp.asarray(2, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_dense_ir_system_with_status",
+            failing_dense_ir_solve,
+        )
+
+        # ||grad(x0)|| = 4e-5 <= 100*tol: the first iteration routes through
+        # the dense-IR branch, whose stubbed failure must end the solve.
+        x0 = jnp.full((5,), 2e-5, dtype=jnp.float64) / np.sqrt(5.0)
+        result = _opt.newton_polish_traceable(
+            lambda x: jnp.dot(x, x),
+            x0,
+            maxiter=3,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result["success"]) is False
+        assert bool(result["newton_stalled"]) is True
+        assert bool(result["newton_last_linear_solve_success"]) is False
+        assert int(result["newton_attempted_iterations"]) == 1, (
+            "a rejected dense-IR direction must stall immediately, not churn "
+            "through the remaining Newton budget"
+        )
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        backend_codes = np.asarray(
+            result["newton_trace_linear_solve_backend_code"]
+        )[active]
+        np.testing.assert_array_equal(
+            backend_codes, np.asarray([dense_ir_code], dtype=np.int32)
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_dense_ir_near_target_real_path(
         self, monkeypatch
     ):
@@ -4223,6 +4288,88 @@ class TestBoozerSurfaceJAXClassPrivate:
             np.asarray(result_dense["x"]),
             rtol=0.0,
             atol=1e-12,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_matches_dense_lu_ill_conditioned(
+        self, monkeypatch
+    ):
+        """dense-IR ≡ dense-LU on a kappa=1e5 system, the regime IR exists for.
+
+        The production near-target polish solves kappa(H) = kappa(J)^2 ~ 4e5
+        systems; the perfectly-conditioned real-path fixture cannot expose a
+        refinement defect there. A diagonal quadratic with eigenvalues
+        spanning 1..1e5 makes the LU presolve carry ~kappa*eps error that the
+        refinement passes must clean, and the two modes must still agree to
+        1e-12 on O(1) solution components.
+        """
+        tol = 1e-6
+        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ]
+        hessian_diag = jnp.asarray(
+            np.logspace(0.0, 5.0, 6), dtype=jnp.float64
+        )
+        minimum = jnp.ones((6,), dtype=jnp.float64)
+
+        def objective(x):
+            delta = x - minimum
+            return 0.5 * jnp.dot(delta, hessian_diag * delta)
+
+        # grad(x0) = 4e-5 * ones/sqrt(6): inside the near-target band
+        # (<= 100*tol) and above tol, so iteration 1 routes dense-IR with
+        # real kappa=1e5 factors.
+        gradient_scale = 4e-5 / np.sqrt(6.0)
+        x0 = minimum + gradient_scale / hessian_diag
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR,
+        )
+        result_ir = _opt.newton_polish_traceable(
+            objective,
+            x0,
+            maxiter=6,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result_ir["success"]) is True
+        assert int(result_ir["nit"]) == 1
+        active = np.asarray(result_ir["newton_trace_active"], dtype=bool)
+        backend_codes = np.asarray(
+            result_ir["newton_trace_linear_solve_backend_code"]
+        )[active]
+        np.testing.assert_array_equal(
+            backend_codes, np.asarray([dense_ir_code], dtype=np.int32)
+        )
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU,
+        )
+        result_lu = _opt.newton_polish_traceable(
+            objective,
+            x0,
+            maxiter=6,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result_lu["success"]) is True
+        np.testing.assert_allclose(
+            np.asarray(result_ir["x"]),
+            np.asarray(result_lu["x"]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result_ir["x"]), np.asarray(minimum), atol=1e-9
         )
 
     @PRIVATE_OPTIMIZER_RUNTIME

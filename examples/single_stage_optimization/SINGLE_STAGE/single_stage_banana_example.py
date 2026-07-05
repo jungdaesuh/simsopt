@@ -12398,10 +12398,10 @@ def resolve_warm_start_boozer_init_overrides(
     The target-lane trial budget is intentionally aggressive, but warm-start
     initialization seeds the baseline traceable runtime state and implicit-diff
     factorization. Keep that baseline solve on a stricter floor so gradient
-    diagnostics do not start from an under-resolved anchor. The BFGS and
-    Newton iteration budgets are floored here so an aggressive trial-lane cap
-    (shared through the same flag) cannot starve the init solve below the
-    least-squares defaults. Only force the
+    diagnostics do not start from an under-resolved anchor. The iteration
+    budgets are floored here so an aggressive trial-lane cap (shared through
+    the same flag) cannot starve the init solve: Newton at the least-squares
+    default, BFGS at its historical guard floor of 128. Only force the
     historical quasi-Newton LS path for legacy warm starts that cannot replay
     an explicit surface state. When explicit surface DOFs are available, keep
     the caller-selected LS algorithm so the continuation baseline matches the
