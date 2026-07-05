@@ -127,6 +127,7 @@ from simsopt_jax_adapters.geo.boozer_surface import (
     BoozerSurfaceJAX,
     SOLVE_QUALITY_EXACT_FIELDS,
     SOLVE_QUALITY_LS_FIELDS,
+    _DEFAULT_OPTIONS_LS,
     build_boozer_surface_runtime_state,
     default_least_squares_algorithm_for_backend,
 )
@@ -12390,13 +12391,17 @@ def resolve_warm_start_boozer_init_overrides(
     boozer_least_squares_algorithm_explicit,
     target_lane_boozer_bfgs_tol,
     target_lane_boozer_bfgs_maxiter,
+    target_lane_boozer_newton_maxiter,
 ):
     """Choose a conservative Boozer init policy for warm-started baselines.
 
     The target-lane trial budget is intentionally aggressive, but warm-start
     initialization seeds the baseline traceable runtime state and implicit-diff
     factorization. Keep that baseline solve on a stricter floor so gradient
-    diagnostics do not start from an under-resolved anchor. Only force the
+    diagnostics do not start from an under-resolved anchor. The BFGS and
+    Newton iteration budgets are floored here so an aggressive trial-lane cap
+    (shared through the same flag) cannot starve the init solve below the
+    least-squares defaults. Only force the
     historical quasi-Newton LS path for legacy warm starts that cannot replay
     an explicit surface state. When explicit surface DOFs are available, keep
     the caller-selected LS algorithm so the continuation baseline matches the
@@ -12436,12 +12441,19 @@ def resolve_warm_start_boozer_init_overrides(
     if target_lane_boozer_bfgs_maxiter is not None:
         bfgs_maxiter_override = max(int(target_lane_boozer_bfgs_maxiter), 128)
 
+    newton_maxiter_override = None
+    if target_lane_boozer_newton_maxiter is not None:
+        newton_maxiter_override = max(
+            int(target_lane_boozer_newton_maxiter),
+            _DEFAULT_OPTIONS_LS["newton_maxiter"],
+        )
+
     return {
         "least_squares_algorithm_override": least_squares_algorithm_override,
         "bfgs_tol_override": bfgs_tol_override,
         "bfgs_maxiter_override": bfgs_maxiter_override,
         "newton_tol_override": None,
-        "newton_maxiter_override": None,
+        "newton_maxiter_override": newton_maxiter_override,
         "newton_stab_override": None,
         "newton_polish_policy_override": None,
     }
@@ -16363,6 +16375,7 @@ if __name__ == "__main__":
         ),
         target_lane_boozer_bfgs_tol=target_lane_boozer_bfgs_tol_record,
         target_lane_boozer_bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
+        target_lane_boozer_newton_maxiter=target_lane_boozer_newton_maxiter_record,
     )
     effective_boozer_init_overrides = dict(base_boozer_init_overrides)
     for key, value in warm_start_boozer_init_overrides.items():

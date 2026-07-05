@@ -339,6 +339,21 @@ _BOOZER_NEWTON_DIAGNOSTIC_RESULT_KEYS: tuple[str, ...] = (
     "newton_trace_accepted_alpha",
 )
 
+# Curated Newton stop/stall discriminators surfaced into the boozer-init
+# progress JSON so a starved or stalled init is diagnosable post hoc. A subset
+# of ``_BOOZER_NEWTON_DIAGNOSTIC_RESULT_KEYS`` chosen for the stage payload;
+# unlike the full reporting set these are emitted only when already present on
+# the solve result (no None-stuffing).
+_BOOZER_NEWTON_STAGE_DISCRIMINATOR_KEYS: tuple[str, ...] = (
+    "newton_stop_reason_code",
+    "newton_attempted_iterations",
+    "newton_stalled",
+    "newton_last_step_finite",
+    "newton_last_linear_solve_success",
+    "newton_last_linear_residual_relative",
+    "newton_last_backtracking_iterations",
+)
+
 _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
     {
         "hessian_materialized",
@@ -3351,6 +3366,21 @@ def _exact_newton_reporting_fields(result):
         "dense_jacobian_shape": result.get("dense_jacobian_shape"),
         "dense_jacobian_bytes": result.get("dense_jacobian_bytes"),
         "max_dense_jacobian_bytes": result.get("max_dense_jacobian_bytes"),
+    }
+
+
+def _newton_stage_discriminator_fields(result):
+    """Surface Newton stop/stall discriminators already present on a result.
+
+    Data-driven: only keys carried on ``result`` are returned, cast to
+    JSON-safe host scalars via :func:`host_scalar`. Absent keys are omitted
+    without fabricating defaults so a stage payload never advertises a
+    discriminator the solver did not actually produce.
+    """
+    return {
+        key: _host_scalar(result[key])
+        for key in _BOOZER_NEWTON_STAGE_DISCRIMINATOR_KEYS
+        if key in result
     }
 
 
@@ -7882,5 +7912,6 @@ class BoozerSurfaceJAX(Optimizable):
                 gradient_key="jacobian",
                 residual_key="residual",
             ),
+            **_newton_stage_discriminator_fields(res),
         )
         return res

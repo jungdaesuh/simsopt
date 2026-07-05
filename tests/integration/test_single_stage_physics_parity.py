@@ -2973,6 +2973,108 @@ def test_host_jax_boozer_budget_flags_drive_kernelized_init_overrides():
     assert overrides["newton_tol_override"] is None
 
 
+def test_warm_start_boozer_init_floors_newton_maxiter_at_ls_default():
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+    from simsopt_jax_adapters.geo.boozer_surface import _DEFAULT_OPTIONS_LS
+
+    ls_default_newton_maxiter = _DEFAULT_OPTIONS_LS["newton_maxiter"]
+    assert ls_default_newton_maxiter == 40
+
+    def effective_init_newton_maxiter(target_lane_boozer_newton_maxiter):
+        # Mirror the run_code merge: warm-start floors override the base
+        # overrides for any non-None value.
+        base = single_stage_example.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="jax",
+            optimizer_backend="host-jax",
+            boozer_optimizer_backend="host-jax",
+            boozer_limited_memory=False,
+            target_lane_boozer_bfgs_tol=None,
+            target_lane_boozer_bfgs_maxiter=1500,
+            target_lane_boozer_newton_tol=None,
+            target_lane_boozer_newton_maxiter=target_lane_boozer_newton_maxiter,
+            target_lane_boozer_newton_stab=None,
+        )
+        warm_start = single_stage_example.resolve_warm_start_boozer_init_overrides(
+            warm_start_state={"iota": 0.1},
+            explicit_surface_warm_start=True,
+            field_backend="jax",
+            optimizer_backend="host-jax",
+            boozer_optimizer_backend="host-jax",
+            boozer_least_squares_algorithm="lm",
+            boozer_least_squares_algorithm_explicit=True,
+            target_lane_boozer_bfgs_tol=None,
+            target_lane_boozer_bfgs_maxiter=1500,
+            target_lane_boozer_newton_maxiter=target_lane_boozer_newton_maxiter,
+        )
+        effective = dict(base)
+        for key, value in warm_start.items():
+            if value is not None:
+                effective[key] = value
+        return effective["newton_maxiter_override"]
+
+    # Aggressive trial-lane budget can no longer starve the warm-start init.
+    assert effective_init_newton_maxiter(5) == ls_default_newton_maxiter
+    # Explicit higher caps (e.g. the K1 matrix's 50) pass through unchanged.
+    assert effective_init_newton_maxiter(50) == 50
+    # Flag unset leaves the downstream least-squares default in force.
+    assert effective_init_newton_maxiter(None) is None
+
+
+def test_newton_stage_discriminator_fields_carries_present_keys_json_safe():
+    import json
+
+    from simsopt_jax_adapters.geo.boozer_surface import (
+        _newton_stage_discriminator_fields,
+    )
+
+    # Host dtypes as produced after a solve; np scalars are not JSON-native,
+    # so a successful json.dumps proves the helper casts to Python scalars.
+    res = {
+        "newton_stop_reason_code": np.int32(3),
+        "newton_attempted_iterations": np.int32(7),
+        "newton_stalled": np.bool_(False),
+        "newton_last_step_finite": np.bool_(True),
+        "newton_last_linear_solve_success": np.bool_(True),
+        "newton_last_linear_residual_relative": np.float64(1.5e-9),
+        "newton_last_backtracking_iterations": np.int32(2),
+        # Unrelated result keys must be ignored.
+        "success": True,
+        "iter": 7,
+        "fun": 1.0,
+    }
+    fields = _newton_stage_discriminator_fields(res)
+
+    assert set(fields) == {
+        "newton_stop_reason_code",
+        "newton_attempted_iterations",
+        "newton_stalled",
+        "newton_last_step_finite",
+        "newton_last_linear_solve_success",
+        "newton_last_linear_residual_relative",
+        "newton_last_backtracking_iterations",
+    }
+    assert fields["newton_stop_reason_code"] == 3
+    assert fields["newton_attempted_iterations"] == 7
+    assert fields["newton_stalled"] is False
+    assert fields["newton_last_step_finite"] is True
+    assert fields["newton_last_linear_solve_success"] is True
+    assert fields["newton_last_linear_residual_relative"] == pytest.approx(1.5e-9)
+    assert fields["newton_last_backtracking_iterations"] == 2
+    json.dumps(fields)
+
+
+def test_newton_stage_discriminator_fields_omits_absent_keys():
+    from simsopt_jax_adapters.geo.boozer_surface import (
+        _newton_stage_discriminator_fields,
+    )
+
+    # A result that never carried the discriminators yields no payload keys,
+    # with no KeyError and no None-stuffing.
+    assert _newton_stage_discriminator_fields({"success": True, "iter": 0}) == {}
+
+
 def test_target_lane_newton_stab_rejects_parity_mode():
     from examples.single_stage_optimization.SINGLE_STAGE import (
         single_stage_banana_example as single_stage_example,
