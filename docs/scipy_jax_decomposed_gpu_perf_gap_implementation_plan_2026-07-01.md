@@ -1287,3 +1287,78 @@ parity/trajectory gates (Phase 8).
   gates strongly enough to justify a hardware-specific opt-in?
 - How much wall time remains in host progress/reporting once progress logging is
   append-only and final reporting reuses the accepted solve?
+
+## 2026-07-04 Perlmutter GPU validation campaign — gate close-out
+
+All runs on A100-PCIE-40GB (`shared_interactive`), checkout `bbe1a7452`,
+255x64 / mpol=10 / ntor=10, iota011_R0935 warm-start seed unless noted.
+Artifacts: `/pscratch/sd/j/jungdae/k1_matrix_runs/crucible-gates-*`.
+
+### Gates closed (with artifacts)
+
+- **Headline (acceptance bar)**: jax-GPU optimizer wall **695.3s vs native
+  cpp 2551.8s = 3.7x** (laneC, same node, 255x64, maxls 4). Surface
+  rel-diff 0.0; iota diff 4.53e-5 is the documented native fresh-re-solve
+  boundary, not a jax error. Vs jax-CPU (July-2 twin 55382657, same matrix
+  config): 5877.3s vs B5-class GPU 644.7s — and the twin is a *lower bound*
+  on today's CPU cost (see below), so >=9x is conservative.
+- **E-W matvec actuals (direct numbers, laneB6 NDJSON)**: early loose
+  Newton iterations cost **5-23 matvecs** vs the old ~1307 clamp
+  (57-260x per-iteration reduction); near-target accepted eval:
+  **[192, 1308, 1308, 1308]** — refinement bounded by the refined budget
+  (~1303 + overhead, n=663). x0 K1 event: all -1 sentinels (no operator
+  GMRES on the init path).
+- **Counter rearm (`bbe1a7452`) live on GPU**: all 3 K1 kernel executions
+  carry actuals windows (pre-fix: only the first).
+- **True GPU memory**: peak **26,469 MiB** (PREALLOCATE=false, 5s
+  nvidia-smi samples, 133 samples, laneB6) on the 40GB card at chunk 8 —
+  the ~30GiB figure seen previously is the preallocator pool, not
+  footprint. No OOM across 7 runs.
+- **Final-sync reuse**: `reused=True` on the GPU default path (B4+B5);
+  NDJSON progress sidecars live; auto-chunk=8 on A100-40GB.
+- **Steady-state per-eval**: trial eval 31.2s (860 pre-Newton + 50 Newton),
+  accepted 66.3s+27.5s K2, vs June-29 m3 warm 168/493/141s → 4-6x.
+
+### Production fixes landed during the campaign (all pushed)
+
+- `8d4a1103b` — retry rejected loose E-W Newton directions at the strict
+  cap (LS polish runner); cures the GPU init stall (iter=0 fail →
+  iter=6, ||grad||=9.735e-12, matching June-29 gold) and the Lane-A
+  accepted-step replay death (same bug, second site).
+- `db6906fc9` — same safeguard for the exact-Newton runner.
+- `bbe1a7452` — matvec-counter drain/rearm split (traced consumer rearms a
+  zeroed window; eager path keeps one-shot pop).
+
+### A4 (paired pre/post-fix CPU-reference matrix) — infeasible, root-caused
+
+Job 55499050 failed: the jax-CPU reference leg hit CASE_TIMEOUT 7200s with
+**eval-1 K1 forward >6400s and unfinished** (startup 742s). Local repro
+(same seed/spec/flags, Apple-silicon CPU): K1 unfinished in 53 min even
+with newton-maxiter capped at 5; native stack samples show XLA-CPU kernel
+*execution* (serial while-loop), not compilation. Root cause is cost, not
+defect: near-target Newton iterations now run ~1300 matvecs each
+(single-pass 651 + refined 651 per `139c05880`), and the strict-cap retry
+(`8d4a1103b`) adds one such iteration where the old solver stall-exited
+cheaply-but-wrongly. One HVP at 255x64 on CPU is ~0.4-0.5s → ~600s per
+near-target Newton iteration (vs ~15s on A100). Corroboration: A3
+(db6906fc9, **launcher-default 64x32** — its earlier "maxls=20" blame was
+wrong) shows K1 evals of 585-2503s vs old Lane A ~40-150s/eval at the same
+resolution; A4 setup-phase 463.6s vs A3 66.3s is exactly the 8x resolution
+ratio (no setup regression). The rearm commit is exonerated (host-side
+dict semantics only). Conclusion: the fidelity fixes price the jax-CPU
+reference lane out of interactive budgets at 255x64 under any available
+solver knob (in-loop dense-LU still materializes via ~n matvecs); the
+native cpp leg (laneC) is the honest CPU comparator, and it is measured.
+Optional completeness path: batch-queue A5 (`-q shared`,
+CASE_TIMEOUT>=36000) if a post-fix CPU-leg wall is ever needed.
+
+### Open user decisions
+
+1. Native-leg parity thresholds: machine-precision (jax-vs-jax) thresholds
+   flag the documented 4.5e-5 native fresh-re-solve iota delta as FAIL —
+   add a native-mode tolerance band, or keep red-as-flag?
+2. Formally-green run: near-converged seed + maxls 4 accepts no step, so
+   `passed=false` everywhere despite clean physics/timing; a powered gate
+   needs tightened ftol or a farther seed (multi-hour lane).
+3. Optional batch-queue A5 for the post-fix jax-CPU wall (20h queue,
+   zero-babysit) — worth it, or close with the twin as lower bound?
