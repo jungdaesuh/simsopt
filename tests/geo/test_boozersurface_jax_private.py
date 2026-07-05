@@ -4005,6 +4005,228 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_routes_near_target_and_retry(
+        self, monkeypatch
+    ):
+        """dense-IR mode serves near-target iterations and strict-cap retries.
+
+        Mirrors the hybrid routing contract: far-from-target iterations run
+        loose operator GMRES; a rejected loose direction's retry (and any
+        near-target iteration) is served by the factor-once dense-IR solve,
+        so the mode has no strict-tolerance GMRES entry point.
+        """
+        tol = 1e-3
+        operator_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+        ]
+        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ]
+
+        def rejecting_operator_solve(_matvec, rhs, *, tol):
+            del tol
+            return -rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(7, dtype=jnp.int32),
+            )
+
+        def exact_dense_ir_solve(_matvec, _lu_piv, rhs, *, tol):
+            del tol
+            return rhs, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(2, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_traceable_newton_operator_gmres_with_status",
+            rejecting_operator_solve,
+        )
+        monkeypatch.setattr(
+            _opt,
+            "_solve_dense_ir_system_with_status",
+            exact_dense_ir_solve,
+        )
+
+        x0 = jnp.asarray([1.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=3,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result["success"]) is True, (
+            "the dense-IR-served retry direction must rescue the rejected "
+            "loose operator iteration"
+        )
+        assert int(result["newton_attempted_iterations"]) == 2
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        accepted = np.asarray(result["newton_trace_step_accepted"])[active]
+        np.testing.assert_array_equal(
+            accepted, np.asarray([False, True], dtype=bool)
+        )
+        backend_codes = np.asarray(
+            result["newton_trace_linear_solve_backend_code"]
+        )[active]
+        np.testing.assert_array_equal(
+            backend_codes,
+            np.asarray([operator_code, dense_ir_code], dtype=np.int32),
+        )
+        budgets = np.asarray(
+            result["newton_trace_linear_solve_matvec_budget"]
+        )[active]
+        assert int(budgets[1]) == _opt._DENSE_IR_NEWTON_MATVEC_BUDGET
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_solve_dense_ir_system_refines_against_current_operator(self):
+        """IR re-anchors chord factors to the live operator each step.
+
+        Factors are taken from a stale operator 2% away from the live one;
+        two refinement passes contract the error by ~(0.02)^2 so the
+        measured relative residual clears a 1e-4 gate, while the returned
+        status reflects the live-operator residual, not the stale factors.
+        """
+        matrix_live = jnp.diag(jnp.asarray([2.0, 3.0, 4.0, 5.0]))
+        matrix_stale = 1.02 * matrix_live
+        lu_piv = _opt.jsp_linalg.lu_factor(matrix_stale)
+        rhs = jnp.asarray([1.0, -2.0, 3.0, -4.0], dtype=jnp.float64)
+
+        solution, status = _opt._solve_dense_ir_system_with_status(
+            lambda v: matrix_live @ v,
+            lu_piv,
+            rhs,
+            tol=1e-4,
+        )
+
+        assert bool(status.success) is True
+        np.testing.assert_allclose(
+            np.asarray(matrix_live @ solution),
+            np.asarray(rhs),
+            rtol=0.0,
+            atol=1e-4,
+        )
+        assert int(status.iterations) == _opt._DENSE_IR_NEWTON_REFINEMENT_STEPS
+        exact = jnp.linalg.solve(matrix_live, rhs)
+        np.testing.assert_allclose(
+            np.asarray(solution), np.asarray(exact), rtol=1e-5
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_solve_dense_ir_system_stale_factors_fail_loud(self):
+        """Non-contractive stale factors surface as a failed residual gate.
+
+        Factors of I against a live operator 3*I break the IR contraction
+        (spectral radius 2): the measured relative residual must fail the
+        gate loudly (finite, success=False) instead of silently returning a
+        garbage direction as converged.
+        """
+        matrix_live = 3.0 * jnp.eye(3, dtype=jnp.float64)
+        lu_piv = _opt.jsp_linalg.lu_factor(jnp.eye(3, dtype=jnp.float64))
+        rhs = jnp.asarray([1.0, 2.0, 3.0], dtype=jnp.float64)
+
+        _solution, status = _opt._solve_dense_ir_system_with_status(
+            lambda v: matrix_live @ v,
+            lu_piv,
+            rhs,
+            tol=1e-10,
+        )
+
+        assert bool(status.success) is False
+        assert np.isfinite(float(status.residual_relative))
+        assert float(status.residual_relative) > 1e-10
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_near_target_real_path(
+        self, monkeypatch
+    ):
+        """Real dense-IR end-to-end: near-target start converges in one
+        exact iteration, matches dense-LU mode, and counts <=3 matvecs.
+
+        The factor-once materialization runs outside the Newton loop, so the
+        per-iteration matvec telemetry must show only the IR budget (2
+        refinement passes + 1 final residual), not the n-column build.
+        """
+        tol = 1e-6
+        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ]
+        monkeypatch.setenv(_opt._TRACEABLE_NEWTON_MATVEC_COUNT_ENV, "1")
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR,
+        )
+
+        def objective(x):
+            return jnp.dot(x, x)  # H = 2 I
+
+        # ||grad(x0)|| = 2*|x0| = 4e-5: inside the near-target band
+        # (<= 100*tol = 1e-4) and above tol, so the FIRST iteration routes
+        # through the dense-IR branch with real factors.
+        x0 = jnp.full((5,), 2e-5, dtype=jnp.float64) / np.sqrt(5.0)
+        result = _opt.newton_polish_traceable(
+            objective,
+            x0,
+            maxiter=4,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        assert bool(result["success"]) is True
+        assert int(result["nit"]) == 1
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        backend_codes = np.asarray(
+            result["newton_trace_linear_solve_backend_code"]
+        )[active]
+        np.testing.assert_array_equal(
+            backend_codes, np.asarray([dense_ir_code], dtype=np.int32)
+        )
+        actual = np.asarray(
+            result["newton_trace_linear_solve_matvec_actual"]
+        )[active]
+        assert int(actual[0]) == _opt._DENSE_IR_NEWTON_MATVEC_BUDGET, (
+            "per-iteration counts must show only the IR matvecs; the "
+            "factor-once build must not be charged to the iteration"
+        )
+
+        monkeypatch.setattr(
+            _opt,
+            "_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU,
+        )
+        result_dense = _opt.newton_polish_traceable(
+            objective,
+            x0,
+            maxiter=4,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result["x"]),
+            np.asarray(result_dense["x"]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_exact_traceable_retries_loose_gmres_rejection_at_strict_cap(
         self, monkeypatch
     ):

@@ -414,10 +414,12 @@ _TRACEABLE_NEWTON_LINEAR_SOLVER_ENV = "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES = "operator_gmres"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU = "dense_lu"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU = "hybrid_final_dense_lu"
+_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR = "hybrid_final_dense_ir"
 _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES = {
     _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: 1,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU: 2,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU: 3,
+    _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR: 4,
 }
 
 
@@ -438,11 +440,19 @@ def _resolve_traceable_newton_linear_solver():
         "final_dense_lu",
     ):
         return _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
+    if value in (
+        "dense-ir",
+        "dense_ir",
+        "hybrid-final-dense-ir",
+        "hybrid_final_dense_ir",
+    ):
+        return _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
     raise ValueError(
         f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV} must be "
         f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES!r}, "
-        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU!r}, or "
-        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU!r}; got "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU!r}, "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU!r}, or "
+        f"{_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR!r}; got "
         f"{value!r}."
     )
 
@@ -3804,6 +3814,13 @@ _ADJOINT_LINEAR_SOLVER = (
 _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
 _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 
+# Factor-once dense-IR Newton corrections: two refinement passes against the
+# current-iterate operator plus one final residual check.  Three HVP matvecs
+# per Newton iteration replace the 651/1302-matvec strict-tolerance GMRES
+# solves once the per-call factorization is amortized.
+_DENSE_IR_NEWTON_REFINEMENT_STEPS = 2
+_DENSE_IR_NEWTON_MATVEC_BUDGET = _DENSE_IR_NEWTON_REFINEMENT_STEPS + 1
+
 # Opt-in dense direct factorization for the EXACT-Jacobian adjoint transpose
 # solve ``J^T λ = g``.  At high mode counts (``J`` reaches 2055x2055) the
 # UNPRECONDITIONED operator-GMRES path (``restart=64``/``maxiter=10`` = 640
@@ -5251,6 +5268,34 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
     )
 
 
+def _solve_dense_ir_system_with_status(matvec, lu_piv, rhs, *, tol):
+    """Newton correction from cached LU factors plus iterative refinement.
+
+    ``lu_piv`` holds factors of the operator frozen at the runner's entry
+    point (a chord); each refinement step re-anchors to the CURRENT iterate
+    by evaluating the residual through ``matvec`` (one HVP per step), so the
+    returned status carries the measured backward error against the live
+    operator, not the stale factors.  Two refinement passes plus one final
+    residual evaluation cost ``_DENSE_IR_NEWTON_MATVEC_BUDGET`` matvecs.
+    Stale factors that break contraction surface as a failed relative-
+    residual gate and flow into the caller's rejection/stall semantics —
+    there is no fallback solve.
+    """
+    rhs = jnp.asarray(rhs)
+    solution = jsp_linalg.lu_solve(lu_piv, rhs)
+    for _ in range(_DENSE_IR_NEWTON_REFINEMENT_STEPS):
+        residual = rhs - matvec(solution)
+        solution = solution + jsp_linalg.lu_solve(lu_piv, residual)
+    final_residual = rhs - matvec(solution)
+    return solution, _linear_solve_status_with_relative_tolerance(
+        solution,
+        final_residual,
+        rhs,
+        tolerance=tol,
+        iterations=_device_int32(_DENSE_IR_NEWTON_REFINEMENT_STEPS),
+    )
+
+
 def _solve_square_array_system_operator_only(
     matvec,
     rhs,
@@ -5966,6 +6011,10 @@ def _build_traceable_newton_polish_runner(
             linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
             and dense_lu_materialization_allowed
         )
+        traceable_dense_ir_enabled = (
+            linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+            and dense_lu_materialization_allowed
+        )
         operator_linear_solver_code = _device_int32(
             _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
                 _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
@@ -5981,14 +6030,26 @@ def _build_traceable_newton_polish_runner(
                 _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
             ]
         )
+        dense_ir_linear_solver_code = _device_int32(
+            _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+            ]
+        )
         initial_linear_solver_code = (
             dense_linear_solver_code
             if traceable_dense_lu_enabled
             else (
                 hybrid_linear_solver_code
                 if traceable_hybrid_dense_lu_enabled
-                else operator_linear_solver_code
+                else (
+                    dense_ir_linear_solver_code
+                    if traceable_dense_ir_enabled
+                    else operator_linear_solver_code
+                )
             )
+        )
+        dense_ir_linear_solve_matvec_budget = _device_int32(
+            _DENSE_IR_NEWTON_MATVEC_BUDGET
         )
         dense_linear_solve_matvec_budget = _device_int32(hessian_size)
         operator_linear_solve_matvec_budget = _device_int32(
@@ -6019,6 +6080,22 @@ def _build_traceable_newton_polish_runner(
                 max_dense_hessian_bytes,
             )
         )
+
+        if traceable_dense_ir_enabled:
+            # Factor once per runner call at the entry iterate (a chord).
+            # The materialization matvecs run OUTSIDE the Newton loop and
+            # bypass the per-iteration counter, so matvec telemetry stays
+            # per-iteration honest (<= _DENSE_IR_NEWTON_MATVEC_BUDGET).
+            stab_at_entry = _optimizer_scalar(stab, dtype=dtype)
+
+            def entry_hessian_matvec(vector):
+                return hvp_fn(x_init, vector) + stab_at_entry * vector
+
+            dense_ir_lu_piv = jsp_linalg.lu_factor(
+                _dense_square_operator_matrix(entry_hessian_matvec, grad0)
+            )
+        else:
+            dense_ir_lu_piv = None
 
         def cond_fun(state):
             return (
@@ -6166,6 +6243,47 @@ def _build_traceable_newton_polish_runner(
                 ) = lax.cond(
                     use_dense_lu_iteration,
                     dense_lu_solve,
+                    operator_gmres_solve,
+                    operand=None,
+                )
+            elif traceable_dense_ir_enabled:
+
+                def dense_ir_solve(_):
+                    dx_ir, ir_status = _solve_dense_ir_system_with_status(
+                        matvec,
+                        dense_ir_lu_piv,
+                        state["grad"],
+                        tol=linear_tol,
+                    )
+                    return (
+                        dx_ir,
+                        ir_status,
+                        dense_ir_linear_solver_code,
+                        dense_ir_linear_solve_matvec_budget,
+                    )
+
+                # Same routing as hybrid: exact-by-refinement directions for
+                # near-target iterations AND for the strict-cap retry; loose
+                # far-from-target iterations stay on single-pass operator
+                # GMRES.  A rejected dense-IR direction stalls immediately
+                # (active code is not the operator code), so the mode has no
+                # strict-tolerance GMRES entry point and no retry churn.
+                use_dense_ir_iteration = (
+                    _eisenstat_walker_strict_cap_applies(
+                        state["norm"],
+                        tol_value,
+                        dtype=state["x"].dtype,
+                    )
+                    | state["retry_linear_solve_at_strict_cap"]
+                )
+                (
+                    dx,
+                    linear_status,
+                    active_linear_solver_code,
+                    active_linear_solve_matvec_budget,
+                ) = lax.cond(
+                    use_dense_ir_iteration,
+                    dense_ir_solve,
                     operator_gmres_solve,
                     operand=None,
                 )
