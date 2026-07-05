@@ -198,9 +198,9 @@ def test_modB_derivs_3vector_apply_even_symmetry_parity():
     direct evaluation at points BOTH inside (no flip) AND outside (flip)
     the fundamental angular domain.
 
-    This closes the Crucible MAJOR test-gap finding: ``_apply_symmetry``'s
-    3-vector branches previously lacked oracle-backed numerical
-    coverage.
+    This provides oracle-backed numerical coverage of ``_apply_symmetry``'s
+    3-vector branches, which are exercised only when stellsym-flipped
+    samples fold back into the fundamental angular domain.
     """
     # Use the QH fixture (N=2) — has non-trivial zeta dependence so the
     # `apply_even` negation of component 2 (dmodBdzeta) is observable.

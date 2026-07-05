@@ -38,7 +38,9 @@ Run (on the pod, per platform), then collate::
         PYTHONPATH="$REPO/src:$REPO" python -m benchmarks.single_stage_objective_parity_matrix \\
         --seeds <seed_dir> ... --lane-label jax-cpu --out /tmp/matrix_cpu.json
 
-    # cuda platform: cpp + jax-gpu  (see HANDOFF for the full cuda env / ptxas note)
+    # cuda platform: cpp + jax-gpu.  Mirror the cpu-lane env but set
+    # JAX_PLATFORMS=cuda; ptxas must be on PATH and match the installed
+    # jaxlib CUDA version, or XLA compilation fails.
     ... JAX_PLATFORMS=cuda ... --lane-label jax-gpu --out /tmp/matrix_gpu.json
 
     python -m benchmarks.single_stage_objective_parity_matrix \\

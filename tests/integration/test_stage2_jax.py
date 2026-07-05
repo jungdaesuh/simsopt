@@ -1413,13 +1413,10 @@ class TestShortOptimizationRun:
         j_cpu, nit_cpu = _build_and_run(use_jax=False)
         j_jax, nit_jax = _build_and_run(use_jax=True)
 
-        print(f"CPU: J={j_cpu:.8e}, nit={nit_cpu}")
-        print(f"JAX: J={j_jax:.8e}, nit={nit_jax}")
-
         rel_diff = relative_error(j_jax, j_cpu)
         assert rel_diff < _SHORT_RUN_CONVERGENCE_RTOL, (
             f"Short-run final objectives differ by {rel_diff:.2%}: "
-            f"CPU={j_cpu:.6e}, JAX={j_jax:.6e}"
+            f"CPU={j_cpu:.6e} (nit={nit_cpu}), JAX={j_jax:.6e} (nit={nit_jax})"
         )
 
 
@@ -1587,18 +1584,17 @@ class TestOptimizerTrajectoryParity:
         traj_rel_err = np.max(
             np.abs(traj_cpu - traj_jax) / np.maximum(np.abs(traj_cpu), 1e-30)
         )
-        print(f"Trajectory: {min_len} iters, max rel err = {traj_rel_err:.2e}")
         assert traj_rel_err < _TRAJECTORY_OBJ_PARITY_RTOL, (
-            f"Trajectory diverged: max rel err = {traj_rel_err:.2e} "
+            f"Trajectory diverged over {min_len} iters: "
+            f"max rel err = {traj_rel_err:.2e} "
             f"(threshold {_TRAJECTORY_OBJ_PARITY_RTOL:.0e})"
         )
 
         obj_rel_err = relative_error(jax_r["final_obj"], cpu["final_obj"])
-        print(
-            f"Final objective: CPU={cpu['final_obj']:.8e}, "
+        assert obj_rel_err < _TRAJECTORY_OBJ_PARITY_RTOL, (
+            f"Final objective diverged: CPU={cpu['final_obj']:.8e}, "
             f"JAX={jax_r['final_obj']:.8e}, rel_err={obj_rel_err:.2e}"
         )
-        assert obj_rel_err < _TRAJECTORY_OBJ_PARITY_RTOL
 
     def test_physics_quantities_at_convergence(self, trajectory_results):
         """P29 convergence check: max|B.n|/|B| and coil lengths agree to 3+
@@ -1615,12 +1611,9 @@ class TestOptimizerTrajectoryParity:
         cpu, jax_r = trajectory_results
 
         bn_rel = relative_error(jax_r["max_BdotN_over_B"], cpu["max_BdotN_over_B"])
-        print(
-            f"|B.n|/|B|: CPU={cpu['max_BdotN_over_B']:.6e}, "
-            f"JAX={jax_r['max_BdotN_over_B']:.6e}, rel_err={bn_rel:.2e}"
-        )
         assert bn_rel < _PHYSICS_CONVERGENCE_RTOL, (
-            f"|B.n|/|B| diverged: rel_err={bn_rel:.2e}"
+            f"|B.n|/|B| diverged: CPU={cpu['max_BdotN_over_B']:.6e}, "
+            f"JAX={jax_r['max_BdotN_over_B']:.6e}, rel_err={bn_rel:.2e}"
         )
 
         assert len(cpu["coil_lengths"]) == len(jax_r["coil_lengths"]), (
@@ -1629,9 +1622,8 @@ class TestOptimizerTrajectoryParity:
         )
         for i, (lc, lj) in enumerate(zip(cpu["coil_lengths"], jax_r["coil_lengths"])):
             rel = relative_error(lj, lc)
-            print(f"Coil {i} length: CPU={lc:.6f}, JAX={lj:.6f}, rel={rel:.2e}")
             assert rel < _PHYSICS_CONVERGENCE_RTOL, (
-                f"Coil {i} length diverged: rel={rel:.2e}"
+                f"Coil {i} length diverged: CPU={lc:.6f}, JAX={lj:.6f}, rel={rel:.2e}"
             )
 
     def test_basin_stability(self):
@@ -1660,16 +1652,12 @@ class TestOptimizerTrajectoryParity:
         np.testing.assert_allclose(cpu["initial_dofs"], jax_r["initial_dofs"])
 
         obj_rel = relative_error(jax_r["final_obj"], cpu["final_obj"])
-        print(
-            f"Basin stability: CPU={cpu['final_obj']:.8e}, "
-            f"JAX={jax_r['final_obj']:.8e}, rel_err={obj_rel:.2e}"
-        )
         assert obj_rel < _BASIN_OBJ_CONVERGENCE_RTOL, (
-            f"Perturbed runs diverged: rel_err={obj_rel:.2e}"
+            f"Perturbed runs diverged: CPU={cpu['final_obj']:.8e}, "
+            f"JAX={jax_r['final_obj']:.8e}, rel_err={obj_rel:.2e}"
         )
 
         dof_l2 = _stage2_relative_l2_error(cpu["final_dofs"], jax_r["final_dofs"])
-        print(f"Basin stability DOFs L2 relative error = {dof_l2:.2e}")
         assert dof_l2 < _BASIN_DOF_L2_RTOL, (
             f"Perturbed final DOFs diverged: L2 rel={dof_l2:.2e}"
         )
