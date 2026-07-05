@@ -318,6 +318,81 @@ def test_repo_pythonpath_env_preserves_explicit_cpu_callback_lane(monkeypatch):
     assert env["JAX_PLATFORMS"] == "cuda,cpu"
 
 
+_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV = "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER"
+
+
+def test_repo_pythonpath_env_injects_reference_leg_newton_linear_solver(monkeypatch):
+    """The reference leg forces the solver into its child env; the target leg does not.
+
+    The two matrix legs differ only by whether the ``traceable_newton_linear_solver``
+    override is supplied to the env builder. The reference call site passes the
+    resolved value; the target call site omits the argument entirely, so a
+    native-CPU target can never inherit the reference-only override.
+    """
+    monkeypatch.delenv(_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV, raising=False)
+
+    reference_env = repo_pythonpath_env(
+        platform="cpu",
+        traceable_newton_linear_solver="dense_lu",
+    )
+    target_env = repo_pythonpath_env(platform="cuda")
+
+    assert reference_env[_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV] == "dense_lu"
+    assert _TRACEABLE_NEWTON_LINEAR_SOLVER_ENV not in target_env
+
+
+def test_repo_pythonpath_env_newton_solver_override_none_preserves_inheritance(
+    monkeypatch,
+):
+    """A ``None`` override injects nothing and never scrubs an inherited value."""
+    monkeypatch.setenv(_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV, "operator_gmres")
+    inherited_env = repo_pythonpath_env(
+        platform="cpu",
+        traceable_newton_linear_solver=None,
+    )
+    assert inherited_env[_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV] == "operator_gmres"
+
+    monkeypatch.delenv(_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV, raising=False)
+    absent_env = repo_pythonpath_env(
+        platform="cpu",
+        traceable_newton_linear_solver=None,
+    )
+    assert _TRACEABLE_NEWTON_LINEAR_SOLVER_ENV not in absent_env
+
+
+def test_reference_leg_newton_linear_solver_override_resolves_matrix_knob(monkeypatch):
+    """The MATRIX knob maps to a pass-through value (non-empty) or ``None``.
+
+    The resolver stays deliberately non-validating: the child process's solver
+    resolver in ``simsopt_jax.geo.optimizers.optimizer`` is the single source of
+    truth for the accepted vocabulary and fails loud on unknown codes, so the
+    harness forwards the value verbatim.
+    """
+    from benchmarks.single_stage_init_parity import (
+        _reference_leg_newton_linear_solver_override,
+    )
+
+    monkeypatch.setenv(
+        "MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER", "hybrid_final_dense_ir"
+    )
+    assert _reference_leg_newton_linear_solver_override() == "hybrid_final_dense_ir"
+
+    monkeypatch.delenv(_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV, raising=False)
+    reference_env = repo_pythonpath_env(
+        platform="cpu",
+        traceable_newton_linear_solver=_reference_leg_newton_linear_solver_override(),
+    )
+    target_env = repo_pythonpath_env(platform="cuda")
+    assert reference_env[_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV] == "hybrid_final_dense_ir"
+    assert _TRACEABLE_NEWTON_LINEAR_SOLVER_ENV not in target_env
+
+    monkeypatch.delenv("MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER", raising=False)
+    assert _reference_leg_newton_linear_solver_override() is None
+
+    monkeypatch.setenv("MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER", "")
+    assert _reference_leg_newton_linear_solver_override() is None
+
+
 def _run_single_stage_script(
     *,
     backend: str,

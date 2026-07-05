@@ -63,6 +63,9 @@ _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLIC
 _SIMSOPT_BACKEND_MODE_ENV_VAR = "SIMSOPT_BACKEND_MODE"
 _SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
 _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
+_SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV_VAR = (
+    "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER"
+)
 _SIMSOPT_EXAMPLE_PARITY_PLATFORM_ENV_VAR = "SIMSOPT_EXAMPLE_PARITY_JAX_PLATFORM"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _GPU_BACKEND_MODES = frozenset({"jax_gpu_fast", "jax_gpu_parity"})
@@ -300,12 +303,25 @@ def repo_pythonpath_env(
     clear_backend_guardrails: bool = False,
     deterministic_gpu_reductions: bool = False,
     cuda_memory_env: dict[str, str] | None = None,
+    traceable_newton_linear_solver: str | None = None,
 ) -> dict[str, str]:
-    """Return an environment that resolves in-repo imports for subprocess probes."""
+    """Return an environment that resolves in-repo imports for subprocess probes.
+
+    ``traceable_newton_linear_solver`` is an explicit, caller-supplied override
+    for the child's ``SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER`` selector. When
+    non-``None`` the value is forced into the returned child env verbatim; the
+    child process's resolver is the single source of truth for the accepted
+    vocabulary and raises on unknown codes. ``None`` (the default) injects
+    nothing and leaves any inherited value untouched.
+    """
     env = dict(os.environ)
     _apply_platform_env(env, platform)
     if platform == "cuda" and cuda_memory_env is not None:
         env.update(cuda_memory_env)
+    if traceable_newton_linear_solver is not None:
+        env[_SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER_ENV_VAR] = (
+            traceable_newton_linear_solver
+        )
     env.pop(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, None)
     env.pop(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR, None)
     env.pop(_TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR, None)

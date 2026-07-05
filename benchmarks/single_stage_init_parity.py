@@ -1544,6 +1544,7 @@ def _run_single_stage_case(
     output_root: Path | None = None,
     jax_runtime_seed_spec: Path | None = None,
     replay_objective_evaluation_trace: Path | None = None,
+    traceable_newton_linear_solver: str | None = None,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = _resolve_single_stage_child_platform(
@@ -1738,6 +1739,7 @@ def _run_single_stage_case(
             clear_backend_guardrails=(backend != "jax"),
             deterministic_gpu_reductions=deterministic_gpu_reductions,
             cuda_memory_env=CHILD_CUDA_MEMORY_ENV,
+            traceable_newton_linear_solver=traceable_newton_linear_solver,
         )
         run_python_script(
             script_path,
@@ -2219,6 +2221,25 @@ def _strict_transfer_optimizer_support(
     }
 
 
+# Reference-leg-only override for the child's traceable Newton linear solver.
+# Setting SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER in the harness environment would
+# reach BOTH legs through repo_pythonpath_env's os.environ inheritance; this knob
+# is read only at the jax-CPU reference call site so the jax-GPU target leg keeps
+# its own selector.
+_MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER_ENV = "MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER"
+
+
+def _reference_leg_newton_linear_solver_override() -> str | None:
+    """Resolve the reference-leg traceable Newton linear-solver override.
+
+    Returns the non-empty value of ``MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER`` or
+    ``None`` when the knob is unset or empty. The value is forwarded verbatim:
+    the child process's resolver is the single source of truth for the accepted
+    vocabulary and fails loud on unknown codes.
+    """
+    return os.environ.get(_MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER_ENV) or None
+
+
 def _run_single_stage_case_pair(
     args: argparse.Namespace,
     *,
@@ -2277,6 +2298,9 @@ def _run_single_stage_case_pair(
             load_surface_gamma=compare_surface_geometry,
             output_root=case_root / "reference_outputs",
             jax_runtime_seed_spec=jax_seed_spec,
+            traceable_newton_linear_solver=(
+                _reference_leg_newton_linear_solver_override()
+            ),
         )
     else:
         if _needs_shared_init_seed(args, reference_backend=reference_backend):
