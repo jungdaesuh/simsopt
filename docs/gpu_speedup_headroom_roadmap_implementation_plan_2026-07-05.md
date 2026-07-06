@@ -154,6 +154,17 @@ re-measures it iso-config before it is allowed to justify anything).
          dense-IR fresh compile; total 613.0 vs B5 644.7 s; ‖grad‖
          1.81e-15. M1 mechanism fully delivered; remaining accepted-
          eval headroom belongs to M2 (line-search batch) and M3 (K2).
+   - [x] **Post-M1 cpp headline — MEASURED (lane B8, job 55559869,
+         2026-07-06, laneC/A5b config maxiter 20 / maxls 4 /
+         255×64): GPU-vs-native-cpp optimizer wall 2376.1 → 324.5 s
+         = 7.3× (was 4.5× with operator GMRES, A5b 528.7 s);
+         script totals 2547.1 → 414.5 s = 6.1× (was 3.7×).**
+         Same bfgs path as A5b legs (pre=701, shared seed spec);
+         accepted eval 70.8 s (K1 43.4 `[180, 3]` grad 1.51e-14 +
+         K2 27.4); converged same basin (Vol 0.049164,
+         Iota 0.110198). Caveats: cpp pairing is cross-run
+         (laneC, same node class); warm compile cache (optimizer
+         wall insensitive; cold adds ~1-2 min to script total).
 3. **M2 — Speculative line-search batching (~1.5–2× on optimizer wall)**
    - [ ] Scout the seam: where the decomposed lane's value/grad provider
          meets scipy L-BFGS-B's dcsrch (single_stage objective wrapper /
