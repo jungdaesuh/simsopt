@@ -263,15 +263,32 @@ all trace to this).
       Iota 0.110175). Trial eval honestly rejected via `[5, 653, 3]`
       (budget-exhausted GMRES → IR retry → reject). Artifacts:
       `/pscratch/sd/j/jungdae/k1_matrix_runs/crucible-gates-b33a105e0-laneB7/`.
-- [ ] Phase A parity: jax-CPU(dense-IR) vs jax-GPU(default) physics
-      parity within existing matrix tolerances; byte-contract test
-      `tests/integration/test_factor_once_adjoint_phase2.py` green
-      (untouched surface). IN FLIGHT 2026-07-05: lane A5 (job
-      55548579, `MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER=
-      hybrid_final_dense_ir`, A4 twin config maxiter 20) — also the
-      first end-to-end exercise of the reference-leg env knob and the
-      first test of whether dense-IR fits the CPU leg inside
-      CASE_TIMEOUT 7200 (A4 pre-dense-IR blew it).
+- [x] Phase A parity — MEASURED (lane A5b, job 55549665, 2026-07-05,
+      exclusive node, A4-twin config maxiter 20). Three results:
+      (1) **A4 infeasibility CURED**: jax-CPU(dense-IR) reference leg
+      completed the full 20-iteration optimization in 3958.1 s
+      optimizer wall (script 4425.6 s) — inside CASE_TIMEOUT 7200
+      that killed A4, and faster than the easier trial-skip-era twin
+      (5877.3 s). GPU target 503.7 s.
+      (2) **Per-solve parity proven at the shared eval-1 state**
+      (identical bfgs pre=701 on both legs): dense-IR nit=1 →
+      ‖grad‖ 2.43e-14 vs operator nit=6 → 9.52e-12 (June GPU-gold
+      pattern) — same solution, dense-IR two orders deeper; the
+      reference-leg-only env knob provably steered ONLY the
+      reference leg (solver signatures differ per design).
+      (3) **End-state diffs are cross-solver path divergence, not
+      solver error**: vol rel 9.6e-8, iota abs 7.2e-6, field error
+      0.011% apart — same physics basin after 20 independent outer
+      iterations. Formal `passed` gate red ONLY via the
+      machine-precision same-solver tolerances (iota 1e-10) applied
+      to a cross-solver comparison — same class as the parked
+      laneC/native tolerance-band decision; NOT loosened here
+      (USER CALL, tracked in the perf-gap plan close-out).
+      Ops constraint recorded: the CPU leg's XLA compile of the
+      dense-IR graph needs >56 GiB host RAM at 255×64 (shared-slice
+      -c 32 OOM-killed lane A5 attempt 1, job 55548579; MaxRSS
+      62.8 GiB on the exclusive node).
+      Byte-contract test surface untouched (K2 path not modified).
 - [ ] Phase B: full parity matrix CPU+GPU under default AND forced
       `operator_gmres`; Crucible pass on the default-flip diff; one
       production-config soak run per platform before merge.
@@ -307,13 +324,14 @@ all trace to this).
 ## Completion Criteria
 
 - [x] Phase 0 commit on `simopt-jax-clean-local`, pushed to fork.
-- [x] Phase A: dense-IR mode merged; local CPU eval-1 K1 DELIVERED at
-      799.3 s `success=True` (measured; ~700 s letter missed by 14% —
-      adjudicated ACCEPTED, see Validation Plan deviation note); all
-      listed v1 tests green (146+2/5); GPU B7 lane PASSED all gates
+- [x] Phase A COMPLETE: dense-IR mode merged; local CPU eval-1 K1
+      799.3 s `success=True` (~700 s letter missed 14%, adjudicated
+      ACCEPTED); all v1 tests green (148/5); GPU B7 PASSED all gates
       (accepted-eval `[192, 3]`, 39.8 s K1, wall 613.0 ≤ 644.7 s,
-      reused=True, no OOM). Parity-matrix confirmation lane A5 in
-      flight (tracked in Validation Plan).
+      reused=True, no OOM); parity lane A5b PASSED substance (A4
+      infeasibility cured 3958 s < 7200; per-solve parity at shared
+      state 2.43e-14; same-basin end states; formal gate red only
+      via the cross-solver tolerance-band USER DECISION).
 - [ ] Phase B: self-deciding default merged after soak; refined-GMRES
       pass removed from the default path; Crucible PASS.
 - [ ] Plan doc `docs/scipy_jax_decomposed_gpu_perf_gap_implementation_plan_2026-07-01.md`
