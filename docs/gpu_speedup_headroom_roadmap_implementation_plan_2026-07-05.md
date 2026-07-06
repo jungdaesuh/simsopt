@@ -146,8 +146,14 @@ re-measures it iso-config before it is allowed to justify anything).
          663-column build + ~3×3; K2's 27.5 s is untouched and is most
          of what remains), churn/refinement taxes gone. Phase B
          (self-deciding default) still open.
-   - [ ] Record post-M1 per-eval walls (same M0 harness) — new baseline.
-         GPU B7 lane blocked on sshproxy re-auth.
+   - [x] Record post-M1 per-eval walls — MEASURED (lane B7, job
+         55547957, 2026-07-05, A100, B5-twin config): accepted eval
+         **93.8 → 67.3 s** (K1 66.3 → 39.8 s with actuals
+         `[192, 3]`; K2 27.5 s unchanged = 41% of the accepted eval,
+         the M3 target); trial 54.9 s (honest reject); x0 242 s incl.
+         dense-IR fresh compile; total 613.0 vs B5 644.7 s; ‖grad‖
+         1.81e-15. M1 mechanism fully delivered; remaining accepted-
+         eval headroom belongs to M2 (line-search batch) and M3 (K2).
 3. **M2 — Speculative line-search batching (~1.5–2× on optimizer wall)**
    - [ ] Scout the seam: where the decomposed lane's value/grad provider
          meets scipy L-BFGS-B's dcsrch (single_stage objective wrapper /

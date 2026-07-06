@@ -251,17 +251,27 @@ all trace to this).
       ACCEPTED. Physics: gradient/IR certificates above; per-component
       Vol/Iota extraction not repeated locally, deferred to the B7
       parity lane (same seed family as the hybrid run).
-- [ ] Phase A GPU: one B-series Perlmutter lane (B7): accepted-eval
-      matvec actuals drop from `[192,1308,1308,1308]` to
-      `[loose ≈190 (unchanged E-W path), ≤3, ≤3, …]` with the n-column
-      build uncounted (local CPU already shows exactly this shape:
-      `[189, 3]`); total wall ≤ B5's 644.7 s; final-sync
-      `reused=True`; no OOM at chunk 8 (memory: +3.5 MB carry).
-      BLOCKED on sshproxy re-auth (key expired 2026-07-05 14:29 EDT).
+- [x] Phase A GPU (measured 2026-07-05, lane B7, job 55547957,
+      A100-40GB @b33a105e0, config = B5 twin): ALL GATES PASSED.
+      Accepted-eval matvec actuals **`[192, 3]`** (was B6
+      `[192,1308,1308,1308]`), K1 39.8 s (was 66.3 s), final ‖grad‖
+      1.81e-15, K2 27.5 s unchanged → accepted eval 93.8 → 67.3 s
+      (1.39×, now K2-dominated as forecast). Total wall **613.0 s ≤
+      B5's 644.7 s** including the fresh dense-IR graph compile.
+      Final-sync `reuses_objective_value_and_grad=True` (12.3 s). No
+      OOM at auto-chunk, exit 0, L-BFGS-B converged (Vol 0.049164,
+      Iota 0.110175). Trial eval honestly rejected via `[5, 653, 3]`
+      (budget-exhausted GMRES → IR retry → reject). Artifacts:
+      `/pscratch/sd/j/jungdae/k1_matrix_runs/crucible-gates-b33a105e0-laneB7/`.
 - [ ] Phase A parity: jax-CPU(dense-IR) vs jax-GPU(default) physics
       parity within existing matrix tolerances; byte-contract test
       `tests/integration/test_factor_once_adjoint_phase2.py` green
-      (untouched surface).
+      (untouched surface). IN FLIGHT 2026-07-05: lane A5 (job
+      55548579, `MATRIX_REFERENCE_NEWTON_LINEAR_SOLVER=
+      hybrid_final_dense_ir`, A4 twin config maxiter 20) — also the
+      first end-to-end exercise of the reference-leg env knob and the
+      first test of whether dense-IR fits the CPU leg inside
+      CASE_TIMEOUT 7200 (A4 pre-dense-IR blew it).
 - [ ] Phase B: full parity matrix CPU+GPU under default AND forced
       `operator_gmres`; Crucible pass on the default-flip diff; one
       production-config soak run per platform before merge.
@@ -297,11 +307,13 @@ all trace to this).
 ## Completion Criteria
 
 - [x] Phase 0 commit on `simopt-jax-clean-local`, pushed to fork.
-- [ ] Phase A: dense-IR mode merged; local CPU eval-1 K1 DELIVERED at
+- [x] Phase A: dense-IR mode merged; local CPU eval-1 K1 DELIVERED at
       799.3 s `success=True` (measured; ~700 s letter missed by 14% —
       adjudicated ACCEPTED, see Validation Plan deviation note); all
-      listed v1 tests green (146+2/5). REMAINING for this box: GPU B7
-      lane accepted-eval matvecs ≤3/iter post-build (sshproxy-blocked).
+      listed v1 tests green (146+2/5); GPU B7 lane PASSED all gates
+      (accepted-eval `[192, 3]`, 39.8 s K1, wall 613.0 ≤ 644.7 s,
+      reused=True, no OOM). Parity-matrix confirmation lane A5 in
+      flight (tracked in Validation Plan).
 - [ ] Phase B: self-deciding default merged after soak; refined-GMRES
       pass removed from the default path; Crucible PASS.
 - [ ] Plan doc `docs/scipy_jax_decomposed_gpu_perf_gap_implementation_plan_2026-07-01.md`
