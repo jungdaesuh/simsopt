@@ -213,6 +213,14 @@ re-measures it iso-config before it is allowed to justify anything).
          parity fixture bit-identical.
 5. **M4 — Mixed-precision inner kernels with fp64 refinement (stretch;
    requires NEW scope that no earlier phase delivers)**
+   → PLANNED 2026-07-07: full phased plan (P0 dtype scout → P1 fp32
+   factors in dense-IR → P2 fp32 loose phase w/ E-W handoff → P3 LSMR-IR
+   adjoint → P4 fp32 kernels → P5 RTX-5090 validation) in
+   `docs/mixed_precision_upgrade_implementation_plan_2026-07-07.md`;
+   driven by the RTX 5090 32 GB / FP64-1:64 user requirement. Note the
+   theory update: κ(H)·2⁻²⁴ ≈ 0.023 < 1, so the SHIPPED dense-IR gate
+   machinery can certify fp32 factors on the κ² system directly (P1) —
+   the J-based κ≈625 route remains the true-fp32 endgame (P3).
    - [ ] Prerequisite, explicitly beyond M1: a κ≈625-class inner solve —
          the J-based LSMR/QR route, which the dense-IR plan lists as a
          documented-only escape hatch (its Non-Goals). M1 factors H
