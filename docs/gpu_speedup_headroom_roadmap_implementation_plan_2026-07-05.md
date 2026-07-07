@@ -1,15 +1,20 @@
 # GPU Speedup Headroom Roadmap: from 3.7× toward the silicon ceiling
 
-**Status:** Draft
-**Last updated:** 2026-07-05
+**Status:** In progress (M1 delivered — 7.3× measured; M0/M2/M3 open;
+M4 planned in its own doc; M5 stretch)
+**Last updated:** 2026-07-07
 
 ## Purpose
 
-Turn the 2026-07-05 headroom analysis into an executable roadmap. Current
-measured state: jax-GPU beats native cpp by 3.7× (optimizer wall 695.3 s vs
-2551.8 s, A100-PCIE-40GB, 255×64, mpol/ntor 10, laneC 2026-07-04) while the
-raw FP64 silicon ratio between that GPU and the shared-EPYC cpp slice is
-~25–50×. The gap is algorithm-shape (serial taxes), not physics. This plan
+Turn the 2026-07-05 headroom analysis into an executable roadmap. Starting
+state (laneC, 2026-07-04, A100-PCIE-40GB, 255×64, mpol/ntor 10): jax-GPU
+beat native cpp 4.5× on optimizer wall (529.3 s vs 2376.1 s) / 3.7× on
+script totals (682.8 s vs 2547.1 s — the "3.7×" headline was the
+script-total framing). Current measured state after M1 (lane B8,
+2026-07-06, same config, dense-IR): **7.3× optimizer wall (324.5 s vs
+2376.1 s) / 6.1× script (414.5 s vs 2547.1 s)**. The raw FP64 silicon
+ratio between that GPU and the shared-EPYC cpp slice is ~25–50×; the
+remaining gap is algorithm-shape (serial taxes), not physics. This plan
 sequences the levers that close it and defines the measurements that must
 precede each one.
 
@@ -19,19 +24,31 @@ Frame targets as **absolute per-eval walls** (the cpp denominator is a
 tunable single-node OpenMP code; ratios drift):
 
 - Accepted eval (K1+K2) on A100: 93.8 s at the B5 baseline (66.3+27.5) →
-  **≤ 60 s** post-M1 (matching M1's own ~50–60 s estimate) → **< 45 s**
-  post-M3. Hard floor: K2's untouched 27.5 s wall — no phase in M0–M5
-  touches K2 (Phase-C territory), so sub-30 s accepted evals are
-  explicitly out of scope here.
-- Trial eval on A100: 31.2 s at the B5 baseline → **< 20 s**; line-search
-  phase for a maxls=4 outer iteration ≈ **~1 eval-wall** (batched, M2),
-  not ~4. M2 moves the line-search phase and optimizer wall — it does not
-  move a single accepted-eval wall.
+  post-M1 MEASURED **67.3 s** (B7: K1 39.8 + K2 27.5; B8 maxls-4 config:
+  70.8 s). The original "≤ 60 s post-M1" letter MISSED by ~12%: the
+  matvec-chain collapse delivered in full (`[192, 3]`), but K1's
+  bfgs-pre-stage + fixed overheads (~36 s of the 39.8 s) were never
+  M1's lever — they are M3's. Post-M3 target **< 45 s** stands and is
+  now sharper: it requires M3 to take K1 39.8 → ≤ 17.5 s (≥2.3× on the
+  bfgs-dominated residual), on top of K2's untouched 27.5 s hard floor —
+  no phase in M0–M5 touches K2 (Phase-C territory), so sub-30 s accepted
+  evals are explicitly out of scope here.
+- Trial eval on A100: the B5 "31.2 s" baseline is a clamped-era artifact
+  (nit=50 at loose tolerances). The dense-IR-era trial does genuine
+  far-from-target Newton work and MEASURES 54.9 s (B7) / 62.6 s (B8) —
+  a trial-lane regression vs B5 that is the price of the fidelity fixes,
+  not an M1 defect. The "< 20 s" target is SUSPENDED until M0
+  attribution re-derives it; the trial lever is M2 (batching) and
+  possibly M3. Line-search phase for a maxls=4 outer iteration ≈
+  **~1 eval-wall** (batched, M2), not ~4. M2 moves the line-search phase
+  and optimizer wall — it does not move a single accepted-eval wall.
 - A written per-eval time attribution (≥80 % of wall accounted) BEFORE any
   tuning lever beyond dense-IR is pulled.
-- Net effect: ≥8–15× vs the frozen laneC cpp baseline on the same A100;
-  20–40× additionally requires H100-class FP64 + mixed precision +
-  multi-GPU (kept as stretch, gated on the measurements below).
+- Net effect: ≥8–15× vs the frozen laneC cpp baseline on the same A100 —
+  **7.3× already measured post-M1 alone (B8, 2026-07-06)**, so the band
+  floor needs only ~10% more from M2/M3; 20–40× additionally requires
+  H100-class FP64 + mixed precision + multi-GPU (kept as stretch, gated
+  on the measurements below).
 
 ## Non-Goals
 
@@ -49,28 +66,40 @@ Primary source for the laneC/B5/B6 numbers below: the "2026-07-04
 Perlmutter GPU validation campaign" close-out in
 `docs/scipy_jax_decomposed_gpu_perf_gap_implementation_plan_2026-07-01.md`.
 
-- laneC (2026-07-04, same node): cpp 2551.8 s vs jax-GPU 695.3 s = 3.7×;
-  physics parity (surface rel-diff 0.0; iota delta 4.53e-5 = documented
-  native fresh-re-solve boundary).
+- laneC (2026-07-04, same node; artifact `crucible-gates-67bdde1a7-laneC/
+  summary.json`, re-extracted 2026-07-06): cpp optimizer wall 2376.1 s /
+  script total 2547.1 s vs jax-GPU 529.3 s / 682.8 s → 4.5× optimizer,
+  3.7× script. (The close-out's "2551.8 vs 695.3" pairing used a
+  different accounting; this doc quotes the summary.json fields.)
+  Physics parity: surface rel-diff 0.0; iota delta 4.53e-5 = documented
+  native fresh-re-solve boundary.
+- lane B8 (2026-07-06, laneC-twin config, dense-IR on the GPU lane):
+  optimizer wall 324.5 s / script 414.5 s → **7.3× / 6.1× vs the frozen
+  laneC cpp artifact** (cross-run pairing, same node class; warm compile
+  cache — optimizer wall insensitive). Full detail in M1 below.
 - B5/B6 per-eval walls (A100): x0 200 s (incl. compile) + 48 s K2; trial
   31.2 s (860 pre-Newton + 50 Newton); accepted 66.3 s + 27.5 s K2;
   final-sync reuse 13.6 s.
 - B6 NDJSON matvec actuals: trial Newton iters 5–23 matvecs (loose E-W);
   accepted eval `[192, 1308, 1308, 1308]` — near-target refined GMRES
-  dominates accepted-eval cost. Budget formulas: single-pass 651, refined
-  1302 (+1), n-independent (`optimizer.py:4396-4407`).
-- K1 near-target Newton system size n=663 at mpol/ntor 10; κ≈625 here is
-  κ(J), the well-conditioned Jacobian — the factored Newton operator is
+  dominated accepted-eval cost pre-M1 (post-M1 measured `[192, 3]`, B7).
+  Budget formulas: single-pass 651, refined 1302 (+1), n-independent
+  (`_operator_gmres_matvec_budget`, `optimizer.py:4419`).
+- K1 near-target Newton system size n=663 at mpol/ntor 10 (n≈2055 at
+  mpol/ntor 18, measured 2026-07-06); κ≈625 here is κ(J), the
+  well-conditioned Jacobian — the factored Newton operator is
   κ(J)²≈3.9e5, which is what M4's fp32 discussion refers to
-  (`optimizer.py:5316` "measured ... at n=663, kappa=625"; the dense-LU
-  call site `:6064` passes the Newton gradient as rhs, so the build is
-  rhs-sized; measured B4 dense-mode budget drop 1302→663 in the perf-gap
+  (`optimizer.py:5362` "measured ... at n=663, kappa=625"; the dense
+  solve helpers materialize rhs-sized (`:5163`, `:5217`) and the polish
+  runner passes the Newton gradient as rhs, so the build is rhs-sized;
+  measured B4 dense-mode budget drop 1302→663 in the perf-gap
   close-out). Dense build = 663 HVP columns in batch-8 `lax.map` chunks
-  (`optimizer.py:5119-5141`, chunk const `:3777`) ≈ one single-pass GMRES
-  budget (651) ≈ HALF a refined solve (1302) — and embarrassingly
-  parallel where the Krylov chain is serial. (The "mpol10 → N=1323"
-  comment at `:5133` is the K2 adjoint dimension — the pole-1
-  compile-hang context — not this system.)
+  (`_dense_square_operator_matrix`, `optimizer.py:5136`; chunk const
+  `:3744`) ≈ one single-pass GMRES budget (651) ≈ HALF a refined solve
+  (1302) — and embarrassingly parallel where the Krylov chain is serial.
+  (The "mpol10 → N=1323" comment at `:5150` is the K2 adjoint dimension
+  — the pole-1 compile-hang context — not this system. Line anchors
+  re-pinned at `0a7c87040`-era HEAD; the dense-IR commit shifted them.)
 - Cross-era GPU juxtaposition (two separate records, NOT one measurement):
   H100 ≈32 s/eval is the 2026-06-23 cross-GPU record (nphi127 warm steady,
   pre-fidelity-fix code; that record contains NO A100 datapoint, and it
@@ -141,11 +170,12 @@ re-measures it iso-config before it is allowed to justify anything).
          E-W operator iteration (unchanged by design) + one 3-matvec IR
          iteration with the 663-column build uncounted; eval-1 K1
          799.3 s success vs hybrid 1552.2 s vs operator REJECTED.
-         Expected from this roadmap's view on GPU: accepted eval
+         This roadmap's pre-measurement estimate was accepted eval
          93.8 s → ~50–60 s (Newton matvec chains 3×1308 → one
-         663-column build + ~3×3; K2's 27.5 s is untouched and is most
-         of what remains), churn/refinement taxes gone. Phase B
-         (self-deciding default) still open.
+         663-column build + ~3×3; K2's 27.5 s untouched) — SUPERSEDED
+         by the measured 67.3 s in the next item (the estimate
+         under-counted K1's bfgs/fixed residual, which is M3 scope).
+         Phase B (self-deciding default) still open.
    - [x] Record post-M1 per-eval walls — MEASURED (lane B7, job
          55547957, 2026-07-05, A100, B5-twin config): accepted eval
          **93.8 → 67.3 s** (K1 66.3 → 39.8 s with actuals
@@ -213,32 +243,24 @@ re-measures it iso-config before it is allowed to justify anything).
          parity fixture bit-identical.
 5. **M4 — Mixed-precision inner kernels with fp64 refinement (stretch;
    requires NEW scope that no earlier phase delivers)**
-   → PLANNED 2026-07-07: full phased plan (P0 dtype scout → P1 fp32
-   factors in dense-IR → P2 fp32 loose phase w/ E-W handoff → P3 LSMR-IR
-   adjoint → P4 fp32 kernels → P5 RTX-5090 validation) in
-   `docs/mixed_precision_upgrade_implementation_plan_2026-07-07.md`;
-   driven by the RTX 5090 32 GB / FP64-1:64 user requirement. Note the
-   theory update: κ(H)·2⁻²⁴ ≈ 0.023 < 1, so the SHIPPED dense-IR gate
-   machinery can certify fp32 factors on the κ² system directly (P1) —
-   the J-based κ≈625 route remains the true-fp32 endgame (P3).
-   - [ ] Prerequisite, explicitly beyond M1: a κ≈625-class inner solve —
-         the J-based LSMR/QR route, which the dense-IR plan lists as a
-         documented-only escape hatch (its Non-Goals). M1 factors H
-         (κ≈κ(J)²≈3.9e5) and its IR is fp64-refining-fp64; neither
-         delivers what fp32 needs, and whole-solve fp32 on the κ² system
-         is a recorded dead end (NaNs, 2026-06-24 campaign). M4 begins
-         with that solver as a scoped work item or does not begin.
-   - [ ] Alternative narrow path (falsify cheaply first): fp32 HVP sweeps
-         certified per-step by fp64 IR against H — the contraction bound
-         κ·ε_fp32 ≈ 3.9e5 × 6e-8 ≈ 0.02 suggests viability, but the
-         recorded fp32 NaNs traced to factorization dynamic range, so
-         this is an assumption to test in isolation before scoping.
-   - [ ] Scope once unblocked: fp32/TF32 for HVP sweeps + inner products
-         ONLY where an fp64 IR pass certifies the final residual (m18
-         pattern); K2 dense factorization stays fp64.
-   - [ ] Gate: converged states match fp64-only run within existing parity
-         tolerances on the matrix; NaN-free across the production seed set;
-         measured ≥1.5× on the HVP-heavy phases.
+   → SSOT for M4 scope is now
+   `docs/mixed_precision_upgrade_implementation_plan_2026-07-07.md`
+   (P0 dtype scout → P1 fp32 factors in dense-IR → P2 fp32 loose phase
+   w/ E-W handoff → P3 LSMR-IR adjoint → P4 fp32 kernels → P5 RTX-5090
+   validation), driven by the RTX 5090 32 GB / FP64-1:64 user
+   requirement. The two scoping bullets this section previously carried
+   are superseded there: the "J-based-solve-first or does not begin"
+   precondition is retired by the IR theory check (κ(H)·2⁻²⁴ ≈ 0.023 < 1
+   ⇒ the SHIPPED dense-IR backward-error gate certifies fp32 FACTORS on
+   the κ² system directly = P1; the recorded 2026-06-24 fp32 NaNs were
+   whole-solve fp32, a different regime), and the J-based κ≈625 LSMR
+   route remains the true-fp32 endgame as P3 (lineax LSMR already wired,
+   `solve/dispatch.py:517`).
+   - [ ] Execute the mixed-precision plan P0–P4; report per-phase gates
+         there. Gate mirrored here: converged states match the fp64-only
+         run within existing parity tolerances on the matrix; NaN-free
+         across the production seed set; measured ≥1.5× on the HVP-heavy
+         phases; fp64 mode byte-identical (P0 hash gate).
 6. **M5 — Multi-GPU sharding un-pin (stretch)**
    - [ ] Produce the "multi-GPU parity/speedup proof" the BETA_QUICKSTART
          gate requires: 2-GPU hybrid-sharding run vs single-GPU — parity
@@ -258,9 +280,15 @@ re-measures it iso-config before it is allowed to justify anything).
 - [ ] M0/M1/M2/M3 walls measured with the SAME instrument (K1 NDJSON
       per-eval events + one profiler trace), same seed (iota011), same
       salloc geometry; record in this doc's table.
-- [ ] Absolute-wall targets on A100-PCIE-40GB: accepted eval ≤ 60 s
-      (post-M1), < 45 s (post-M3); trial < 20 s; line-search phase ≈ one
-      eval-wall (post-M2). K2's 27.5 s floor stands until Phase-C scope.
+- [x] Post-M1 accepted-eval wall MEASURED: 67.3 s (B7; the "≤ 60 s"
+      letter missed ~12% — adjudicated in Goals: M1's lever delivered
+      fully, the residual is M3 scope).
+- [ ] Absolute-wall targets on A100-PCIE-40GB still open: accepted eval
+      < 45 s (post-M3 ⇒ K1 39.8 → ≤ 17.5 s); trial target SUSPENDED
+      pending M0 re-derivation (measured 54.9–62.6 s dense-IR-era; the
+      B5 31.2 s baseline was a clamped-era artifact); line-search phase
+      ≈ one eval-wall (post-M2). K2's 27.5 s floor stands until Phase-C
+      scope.
 - [ ] Final: one full production-config run (maxiter 20) on A100 comparing
       total optimizer wall vs the frozen laneC artifacts; report both the
       ratio and absolute walls.
@@ -296,7 +324,9 @@ re-measures it iso-config before it is allowed to justify anything).
 - [ ] Post-M1..M3 measured: accepted < 45 s, line-search ≈ 1 eval-wall,
       A100, production seed — or a written reason the target moved.
 - [ ] ≥8× vs frozen laneC cpp baseline demonstrated on one full
-      production-config A100 run, with parity gates green.
+      production-config A100 run, with parity gates green. CURRENT
+      POSITION: 7.3× measured on exactly such a run (B8, maxiter 20,
+      2026-07-06) — M1 alone; the remaining ~10% belongs to M2/M3.
 - [ ] Stretch phases (M4/M5) either landed with their gates or explicitly
       parked with measured justification.
 
