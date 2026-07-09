@@ -3,4 +3,15 @@ coverage:
     project:
       default:
         target: auto
-        threshold: 0.05%
+        threshold: 0.5%
+        informational: false
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+        informational: false
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
