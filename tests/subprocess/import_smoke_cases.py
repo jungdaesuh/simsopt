@@ -416,15 +416,23 @@ def case_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path() -> None
 
     _FakeEditableFinder.__module__ = "__editable___simsopt_demo"
     fake_finder = _FakeEditableFinder()
+
+    class _FakeScikitBuildEditableFinder(_FakeEditableFinder):
+        pass
+
+    _FakeScikitBuildEditableFinder.__module__ = "_editable_skbc_simsopt"
+    scikit_build_finder = _FakeScikitBuildEditableFinder()
     sys.meta_path.insert(0, fake_finder)
+    sys.meta_path.insert(0, scikit_build_finder)
 
     bootstrap_local_simsopt(src_root)
 
     assert fake_finder not in sys.meta_path
+    assert scikit_build_finder not in sys.meta_path
     assert not any(
         type(finder).__module__ == "_simsopt_editable"
         or (
-            type(finder).__module__.startswith("__editable__")
+            type(finder).__module__.startswith(("__editable__", "_editable_"))
             and "simsopt" in type(finder).__module__.lower()
         )
         for finder in sys.meta_path

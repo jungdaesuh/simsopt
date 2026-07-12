@@ -417,7 +417,7 @@ def _is_simsopt_editable_finder(finder: object) -> bool:
     finder_module = type(finder).__module__
     if finder_module == "_simsopt_editable":
         return True
-    if not finder_module.startswith("__editable__"):
+    if not finder_module.startswith(("__editable__", "_editable_")):
         return False
     return "simsopt" in finder_module.lower()
 
