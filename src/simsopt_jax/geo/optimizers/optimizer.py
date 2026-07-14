@@ -4567,6 +4567,17 @@ def _dense_matrix_nonsingular_threshold(size, dtype):
     return _device_scalar(threshold, dtype=dtype)
 
 
+def _dense_matrix_condition_estimate_numerically_safe(
+    condition_estimate,
+    *,
+    size,
+    dtype,
+):
+    condition_estimate = jnp.asarray(condition_estimate, dtype=dtype)
+    threshold = _dense_matrix_nonsingular_threshold(size, dtype)
+    return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+
+
 def _dense_matrix_solve_numerically_safe(
     matrix,
     solution,
@@ -4575,6 +4586,7 @@ def _dense_matrix_solve_numerically_safe(
     tol,
     lu_piv=None,
     solve_dtype=None,
+    condition_estimate=None,
 ):
     """Whether a dense adjoint solve is numerically trustworthy at ``solve_dtype``.
 
@@ -4600,15 +4612,24 @@ def _dense_matrix_solve_numerically_safe(
     solve is accepted.  ``solve_dtype`` (the caller's rhs dtype) selects the lane
     so the gate keys on the intended working precision even when the operator is
     materialized at the runtime float64 policy dtype.
+
+    ``condition_estimate`` reuses an existing certificate when the caller
+    already computed one from the same matrix or factors.
     """
-    matrix = jnp.asarray(matrix)
     if solve_dtype is None:
         solve_dtype = matrix.dtype
     solve_dtype = np.dtype(solve_dtype)
     size = int(matrix.shape[0])
-    condition_estimate = _dense_matrix_condition_estimate(matrix, lu_piv=lu_piv)
-    threshold = _dense_matrix_nonsingular_threshold(size, solve_dtype)
-    nonsingular = jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+    if condition_estimate is None:
+        condition_estimate = _dense_matrix_condition_estimate(
+            jnp.asarray(matrix),
+            lu_piv=lu_piv,
+        )
+    nonsingular = _dense_matrix_condition_estimate_numerically_safe(
+        condition_estimate,
+        size=size,
+        dtype=solve_dtype,
+    )
     if solve_dtype != np.dtype(np.float32):
         return nonsingular
     matrix = jnp.asarray(matrix, dtype=solve_dtype)
