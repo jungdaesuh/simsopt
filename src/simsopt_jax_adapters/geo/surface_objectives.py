@@ -182,6 +182,7 @@ def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
 __all__ = [
     "AreaJAX",
     "AspectRatioJAX",
+    "BoozerAdjointLinearSolveError",
     "BoozerResidualJAX",
     "IotasJAX",
     "MajorRadiusJAX",
@@ -232,6 +233,10 @@ _MISSING_STREAMING_GROUP_VJP_ERROR = (
     "BoozerSurfaceJAX objective wrappers require a streaming grouped-adjoint "
     "callback; the legacy full-pytree adjoint fallback is no longer supported."
 )
+
+
+class BoozerAdjointLinearSolveError(RuntimeError):
+    """Raised when a Boozer implicit-adjoint solve fails its residual gate."""
 
 
 class SurfaceSurfaceDistance(Optimizable):
@@ -2035,7 +2040,7 @@ def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
     solution, status = solve_with_status(rhs)
     if not _host_bool(_optimizer_jax._linear_solve_status_success(status)):
         status_detail = _linear_solve_status_failure_detail(status)
-        raise RuntimeError(
+        raise BoozerAdjointLinearSolveError(
             "Boozer adjoint linear solve failed on the JAX runtime-state path "
             f"({adjoint_state.linearization_kind}; {status_detail})."
         )

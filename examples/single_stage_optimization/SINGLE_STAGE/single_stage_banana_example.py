@@ -44,6 +44,7 @@ from banana_opt.jax_banana_drivers import (
     DriverLog,
     MU0,
     banana_geometry_diagnostics,
+    boozer_solver_grid_shape,
     build_jax_boozer_surface,
     build_single_stage_objective,
     build_surface,
@@ -63,6 +64,7 @@ from banana_opt.jax_banana_drivers import (
 from banana_opt.jax_banana_types import (
     BoozerSolveState,
     DEFAULT_BANANA_ORDER,
+    DEFAULT_BOOZER_CONSTRAINT_WEIGHT,
     DEFAULT_PROXY_RZ,
     HBT_BANANA_WS,
     SingleStageWeights,
@@ -100,7 +102,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ntor", type=int, default=8)
     parser.add_argument("--nphi", type=int, default=65)
     parser.add_argument("--ntheta", type=int, default=64)
-    parser.add_argument("--constraint-weight", type=float, default=None)
+    parser.add_argument(
+        "--constraint-weight",
+        type=float,
+        default=DEFAULT_BOOZER_CONSTRAINT_WEIGHT,
+    )
 
     parser.add_argument("--biotsavart-file", default=None)
     parser.add_argument("--banana-dofs", default=None)
@@ -214,10 +220,15 @@ def _run_dir(args: argparse.Namespace) -> Path:
     return Path(args.output_root)
 
 
-def _boozer_exact_grid(args: argparse.Namespace) -> tuple[int, int]:
-    if HBT_BANANA_WS.stellsym:
-        return 2 * int(args.ntor) + 1, 2 * int(args.mpol) + 1
-    return int(args.nphi), int(args.ntheta)
+def _boozer_grid(args: argparse.Namespace) -> tuple[int, int]:
+    return boozer_solver_grid_shape(
+        mpol=args.mpol,
+        ntor=args.ntor,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+        stellsym=HBT_BANANA_WS.stellsym,
+        constraint_weight=args.constraint_weight,
+    )
 
 
 def _seed_spec_paths(path: Path) -> SeedPaths:
@@ -361,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
 
     biotsavart, surface = _load_seed_inputs(args)
     biotsavart_jax = BiotSavartJAX(biotsavart.coils)
-    boozer_nphi, boozer_ntheta = _boozer_exact_grid(args)
+    boozer_nphi, boozer_ntheta = _boozer_grid(args)
     boozersurface = build_jax_boozer_surface(
         biotsavart_jax=biotsavart_jax,
         surface=surface,

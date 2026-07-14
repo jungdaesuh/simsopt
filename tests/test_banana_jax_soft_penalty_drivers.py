@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,20 +16,27 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 pytest.importorskip("simsoptpp")
 
+from examples.single_stage_optimization.banana_opt import (  # noqa: E402
+    jax_banana_drivers as banana_drivers,
+)
 from examples.single_stage_optimization.banana_opt.jax_banana_drivers import (  # noqa: E402
     GlobalRadiusCurvatureJAX,
     EllipseWidthJAX,
     PoloidalExtentJAX,
     banana_base_curve,
+    boozer_solver_grid_shape,
     build_biotsavart,
     build_boozer_surface_copy,
+    minimize_single_stage_soft_penalty,
     read_banana_dofs,
 )
 from examples.single_stage_optimization.banana_opt.jax_banana_types import (  # noqa: E402
     BANANA_TARGETS,
     DEFAULT_BANANA_DOFS,
+    DEFAULT_BOOZER_CONSTRAINT_WEIGHT,
     DEFAULT_PROXY_RZ,
     HBT_BANANA_WS,
+    BoozerSolveState,
     SingleStageWeights,
     Stage2Weights,
 )
@@ -75,6 +83,98 @@ def _assert_finite_positive_gradient(objective) -> None:
     assert gradient.shape == np.asarray(objective.x).shape
     assert np.all(np.isfinite(gradient))
     assert np.linalg.norm(gradient) > 0.0
+
+
+def test_boozer_solver_grid_distinguishes_penalty_and_exact_modes():
+    common = {
+        "mpol": 2,
+        "ntor": 3,
+        "nphi": 19,
+        "ntheta": 16,
+        "stellsym": True,
+    }
+
+    assert DEFAULT_BOOZER_CONSTRAINT_WEIGHT == pytest.approx(1.0)
+    assert boozer_solver_grid_shape(
+        **common,
+        constraint_weight=DEFAULT_BOOZER_CONSTRAINT_WEIGHT,
+    ) == (19, 16)
+    assert boozer_solver_grid_shape(
+        **common,
+        constraint_weight=None,
+    ) == (7, 5)
+
+
+def test_single_stage_minimizer_penalizes_rejected_boozer_candidates(monkeypatch):
+    class FakeObjective:
+        def __init__(self):
+            self.x = np.asarray([1.0, -2.0])
+            self.gradient_calls = 0
+
+        def J(self) -> float:
+            return float(np.dot(self.x, self.x))
+
+        def dJ(self) -> np.ndarray:
+            self.gradient_calls += 1
+            if self.gradient_calls == 2:
+                raise banana_drivers.BoozerAdjointLinearSolveError(
+                    "expected rejected candidate"
+                )
+            return 2.0 * self.x
+
+    class FakeSurface:
+        def __init__(self):
+            self.dofs = np.asarray([0.5, 0.25])
+
+        def get_dofs(self) -> np.ndarray:
+            return self.dofs.copy()
+
+        def set_dofs(self, dofs: np.ndarray) -> None:
+            self.dofs = np.asarray(dofs, dtype=float).copy()
+
+    class FakeBoozerSurface:
+        def __init__(self):
+            self.calls = 0
+            self.res = None
+            self.surface = FakeSurface()
+
+        def run_code(self, iota: float, G: float):
+            self.calls += 1
+            success = self.calls != 2
+            self.res = {
+                "success": success,
+                "iota": iota + 0.01,
+                "G": G,
+            }
+            return self.res
+
+    objective = FakeObjective()
+    boozersurface = FakeBoozerSurface()
+    messages: list[str] = []
+
+    def fake_minimize(fun, x0, **kwargs):
+        del kwargs
+        baseline_value, baseline_gradient = fun(x0)
+        rejected_value, rejected_gradient = fun(x0 + 1.0)
+        rejected_adjoint_value, rejected_adjoint_gradient = fun(x0 + 0.5)
+        assert rejected_value > baseline_value
+        assert rejected_adjoint_value > baseline_value
+        np.testing.assert_array_equal(rejected_gradient, baseline_gradient)
+        np.testing.assert_array_equal(rejected_adjoint_gradient, baseline_gradient)
+        return SimpleNamespace(x=np.asarray(x0, dtype=float))
+
+    monkeypatch.setattr(banana_drivers, "minimize", fake_minimize)
+    _, tracker = minimize_single_stage_soft_penalty(
+        objective=objective,
+        boozersurface=boozersurface,
+        initial_state=BoozerSolveState(iota=0.15, G=-2.0),
+        maxiter=1,
+        log=messages.append,
+    )
+
+    assert tracker.evaluations == 3
+    assert any("rejected_boozer_solve=true" in message for message in messages)
+    assert any("rejected_boozer_adjoint=true" in message for message in messages)
 
 
 def test_banana_geometry_jax_objectives_have_finite_gradients():

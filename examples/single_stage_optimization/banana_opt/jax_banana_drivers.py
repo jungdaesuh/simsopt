@@ -35,6 +35,7 @@ from simsopt_jax_adapters.geo.curve_objectives import (
     LpCurveCurvatureJAX,
 )
 from simsopt_jax_adapters.geo.surface_objectives import (
+    BoozerAdjointLinearSolveError,
     BoozerResidualJAX,
     IotasJAX,
     NonQuasiSymmetricRatioJAX,
@@ -1091,11 +1092,23 @@ def require_successful_boozer_solve(
     boozersurface: BoozerSurfaceJAX,
     state: BoozerSolveState,
 ) -> BoozerSolveState:
-    result = boozersurface.run_code(state.iota, state.G)
-    if not bool(result["success"]):
+    solved_state = _boozer_solve_state_or_none(boozersurface, state)
+    if solved_state is None:
         raise RuntimeError(
             "Boozer solve failed during JAX banana single-stage optimization"
         )
+    return solved_state
+
+
+def _boozer_solve_state_or_none(
+    boozersurface: BoozerSurfaceJAX,
+    state: BoozerSolveState,
+) -> BoozerSolveState | None:
+    result = boozersurface.run_code(state.iota, state.G)
+    if result is None:
+        result = boozersurface.res
+    if result is None or not bool(result["success"]):
+        return None
     return BoozerSolveState(
         iota=float(result["iota"]),
         G=float(result["G"]),
@@ -1114,13 +1127,66 @@ def minimize_single_stage_soft_penalty(
     evaluations = 0
     iterations = 0
     solve_state = initial_state
+    last_successful_value: float | None = None
+    last_successful_gradient: np.ndarray | None = None
+    last_successful_surface_dofs: np.ndarray | None = None
+
+    def reject_candidate(
+        *,
+        reason: str,
+        candidate_value: float | None = None,
+    ) -> tuple[float, np.ndarray]:
+        nonlocal evaluations
+        if (
+            last_successful_value is None
+            or last_successful_gradient is None
+            or last_successful_surface_dofs is None
+        ):
+            raise RuntimeError(
+                "Initial Boozer value/gradient evaluation failed during JAX banana "
+                "single-stage optimization"
+            )
+        boozersurface.surface.set_dofs(last_successful_surface_dofs)
+        penalty = max(abs(last_successful_value), 1.0)
+        finite_candidate = (
+            last_successful_value
+            if candidate_value is None or not np.isfinite(candidate_value)
+            else candidate_value
+        )
+        value = max(finite_candidate, last_successful_value + penalty) + penalty
+        gradient = last_successful_gradient.copy()
+        evaluations += 1
+        log(
+            "eval="
+            f"{evaluations}, iter={iterations}, rejected_{reason}=true, "
+            f"J={value:.16e}, |grad|={np.linalg.norm(gradient):.16e}"
+        )
+        return value, gradient
 
     def value_and_gradient(dofs: np.ndarray) -> tuple[float, np.ndarray]:
         nonlocal evaluations, solve_state
+        nonlocal last_successful_value, last_successful_gradient
+        nonlocal last_successful_surface_dofs
         objective.x = dofs
-        solve_state = require_successful_boozer_solve(boozersurface, solve_state)
+        candidate_state = _boozer_solve_state_or_none(boozersurface, solve_state)
+        if candidate_state is None:
+            return reject_candidate(reason="boozer_solve")
+
         value = float(objective.J())
-        gradient = np.asarray(objective.dJ(), dtype=float)
+        try:
+            gradient = np.asarray(objective.dJ(), dtype=float)
+        except BoozerAdjointLinearSolveError:
+            return reject_candidate(
+                reason="boozer_adjoint",
+                candidate_value=value,
+            )
+        solve_state = candidate_state
+        last_successful_value = value
+        last_successful_gradient = gradient.copy()
+        last_successful_surface_dofs = np.asarray(
+            boozersurface.surface.get_dofs(),
+            dtype=float,
+        ).copy()
         evaluations += 1
         log(
             "eval="
@@ -1180,6 +1246,23 @@ def build_jax_boozer_surface(
         constraint_weight=constraint_weight,
         options={"verbose": False},
     )
+
+
+def boozer_solver_grid_shape(
+    *,
+    mpol: int,
+    ntor: int,
+    nphi: int,
+    ntheta: int,
+    stellsym: bool,
+    constraint_weight: float | None,
+) -> tuple[int, int]:
+    """Return overdetermined LS or minimal exact Boozer quadrature dimensions."""
+    if constraint_weight is not None:
+        return int(nphi), int(ntheta)
+    if stellsym:
+        return 2 * int(ntor) + 1, 2 * int(mpol) + 1
+    return int(nphi), int(ntheta)
 
 
 def save_chainable_boozer_surface(
