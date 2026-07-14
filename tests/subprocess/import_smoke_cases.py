@@ -110,7 +110,7 @@ def strip_simsopt_editable_finders() -> None:
         for finder in sys.meta_path
         if type(finder).__module__ != "_simsopt_editable"
         and (
-            not type(finder).__module__.startswith("__editable__")
+            not type(finder).__module__.startswith(("__editable__", "_editable_"))
             or "simsopt" not in type(finder).__module__.lower()
         )
     ]
