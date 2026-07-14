@@ -4457,6 +4457,15 @@ class BoozerSurfaceJAX(Optimizable):
             )
             return runtime_device_put(array, device=compute_device)
 
+        def dense_condition_estimate(matrix, *, lu_piv=None):
+            condition_estimate = self.res.get("ls_condition_estimate")
+            if condition_estimate is None:
+                condition_estimate = _dense_condition_estimate_or_none(
+                    matrix,
+                    lu_piv=lu_piv,
+                )
+            return stage_linearization_factor(condition_estimate, dtype=x.dtype)
+
         def pack_callbacks(
             apply_forward,
             apply_transpose,
@@ -4541,6 +4550,10 @@ class BoozerSurfaceJAX(Optimizable):
             lu_device = stage_linearization_factor(lu_piv[0], dtype=x.dtype)
             piv_device = stage_linearization_factor(lu_piv[1], dtype=jnp.int32)
             H_dev = stage_linearization_factor(self.res["hessian"], dtype=x.dtype)
+            condition_estimate = dense_condition_estimate(
+                H_dev,
+                lu_piv=(lu_device, piv_device),
+            )
 
             def apply_forward(rhs):
                 return H_dev @ jnp.asarray(rhs, dtype=x.dtype)
@@ -4578,7 +4591,17 @@ class BoozerSurfaceJAX(Optimizable):
                         tol=tol_host,
                     )
                 )
-                return status._replace(success=status.success | backward_error_success)
+                solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+                    matrix,
+                    solution,
+                    rhs,
+                    tol=tol_host,
+                    solve_dtype=x.dtype,
+                    condition_estimate=condition_estimate,
+                )
+                return status._replace(
+                    success=(status.success | backward_error_success) & solve_safe
+                )
 
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
@@ -4611,6 +4634,7 @@ class BoozerSurfaceJAX(Optimizable):
                 np.asarray(factor, dtype=np.float64) for factor in self.res["PLU"]
             )
             H_host = P_host @ L_host @ U_host
+            condition_estimate = dense_condition_estimate(H_host)
 
             @_with_host_bridge_transfer_guard
             def apply_forward(rhs):
@@ -4644,15 +4668,15 @@ class BoozerSurfaceJAX(Optimizable):
                 solved = P_host @ z
                 return jnp.asarray(solved, dtype=x.dtype)
 
-            # Acceptance is governed by the scale-invariant backward error
-            # (``status.success | backward_error_success``), matching the
+            # Acceptance combines the scale-invariant backward-error result
+            # with the cached condition certificate, matching the
             # ``dense-plu-shared`` branch above. The bare relative-residual gate
             # is scale-sensitive: on the kappa ~ 4e5 LS Hessian the adjoint
             # transpose solve is backward-stable (eta ~ n*eps) yet its relative
             # residual ||b - A x|| / ||b|| is amplified by ||A|| ||x|| / ||b||
-            # and false-rejects an accurate solve. The backward-error gate is
-            # condition-independent and fails closed only on genuinely
-            # singular/garbage solves.
+            # and false-rejects an accurate solve. The condition certificate is
+            # the independent guard against backward-stable but forward-wrong
+            # near-singular solves.
             @_with_host_bridge_transfer_guard
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
@@ -4671,8 +4695,16 @@ class BoozerSurfaceJAX(Optimizable):
                         tol=tol_host,
                     )
                 )
+                solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+                    H_host,
+                    solved,
+                    rhs_device,
+                    tol=tol_host,
+                    solve_dtype=x.dtype,
+                    condition_estimate=condition_estimate,
+                )
                 return solved, status._replace(
-                    success=status.success | backward_error_success
+                    success=(status.success | backward_error_success) & solve_safe
                 )
 
             @_with_host_bridge_transfer_guard
@@ -4693,8 +4725,16 @@ class BoozerSurfaceJAX(Optimizable):
                         tol=tol_host,
                     )
                 )
+                solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+                    H_host.T,
+                    solved,
+                    rhs_device,
+                    tol=tol_host,
+                    solve_dtype=x.dtype,
+                    condition_estimate=condition_estimate,
+                )
                 return solved, status._replace(
-                    success=status.success | backward_error_success
+                    success=(status.success | backward_error_success) & solve_safe
                 )
 
             return pack_callbacks(

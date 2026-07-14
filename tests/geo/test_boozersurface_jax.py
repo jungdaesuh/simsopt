@@ -6345,6 +6345,88 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(backward_error_matrices[0], H)
         np.testing.assert_allclose(backward_error_matrices[1], H.T)
 
+    @pytest.mark.parametrize("optimizer_backend", ("scipy", "ondevice"))
+    def test_plu_runtime_status_rejects_near_singular_forward_error(
+        self,
+        optimizer_backend,
+    ):
+        """PLU runtime callbacks must enforce the FP64 condition certificate."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = optimizer_backend
+        booz.need_to_run_code = False
+        n = booz._pack_decision_vector(0.3, 0.05).size
+        rng = np.random.default_rng(10)
+        eigenvectors, _ = np.linalg.qr(rng.standard_normal((n, n)))
+        eigenvalues = np.geomspace(1.0, 1.0e-14, n)
+        hessian_np = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+        true_solution_np = eigenvectors[:, -1]
+        rhs = jnp.asarray(hessian_np @ true_solution_np, dtype=jnp.float64)
+        hessian = jnp.asarray(hessian_np, dtype=jnp.float64)
+
+        if optimizer_backend == "ondevice":
+            lu_piv = _opt._factor_dense_hessian(
+                hessian,
+                optimizer_backend="ondevice",
+            )
+            plu = _opt._plu_from_lu_piv(lu_piv)
+            raw_solution = _opt._lu_solve_dense_hessian(
+                lu_piv,
+                rhs,
+                transpose=False,
+            )
+        else:
+            lu_piv = None
+            P, L, U = scipy.linalg.lu(hessian_np)
+            plu = tuple(jnp.asarray(factor, dtype=jnp.float64) for factor in (P, L, U))
+            y = scipy.linalg.solve_triangular(
+                L,
+                P.T @ np.asarray(rhs),
+                lower=True,
+            )
+            raw_solution = scipy.linalg.solve_triangular(U, y, lower=False)
+
+        condition_estimate = float(
+            np.asarray(
+                _opt._dense_matrix_condition_estimate(
+                    hessian,
+                    lu_piv=lu_piv,
+                )
+            )
+        )
+        raw_relative_error = np.linalg.norm(
+            np.asarray(raw_solution) - true_solution_np
+        ) / np.linalg.norm(true_solution_np)
+        assert condition_estimate > (
+            _opt._FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE
+        )
+        assert raw_relative_error > 1.0e-4
+
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "hessian": hessian,
+            "PLU": plu,
+            "LU_PIV": lu_piv,
+            "dense_linear_solve_factors_available": True,
+            "ls_condition_estimate": condition_estimate,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        forward, forward_status = adjoint_state.solve_forward_with_status(rhs)
+        transpose, transpose_status = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert not bool(np.asarray(forward_status.success))
+        assert not bool(np.asarray(transpose_status.success))
+        assert np.all(np.isnan(np.asarray(forward)))
+        assert np.all(np.isnan(np.asarray(transpose)))
+
     def test_scipy_plu_runtime_callbacks_allow_host_bridge_under_strict_guard(self):
         """The explicit scipy PLU callback bridge must mark its host transfers."""
         booz = _make_mock_boozer_surface()
@@ -6405,12 +6487,14 @@ class TestBoozerSurfaceJAXClass:
             "PLU": plu,
             "LU_PIV": lu_piv,
             "dense_linear_solve_factors_available": True,
+            "ls_condition_estimate": 2.0,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
         adjoint_state = booz.get_adjoint_runtime_state()
         rhs = jnp.arange(1, n + 1, dtype=jnp.float64)
-        solved = adjoint_state.solve_forward(rhs)
+        with jax.transfer_guard("disallow"):
+            solved, status = adjoint_state.solve_forward_with_status(rhs)
         expected = _opt._lu_solve_dense_hessian(
             lu_piv,
             rhs,
@@ -6421,6 +6505,7 @@ class TestBoozerSurfaceJAXClass:
         assert adjoint_state.linear_solve_factors is not None
         assert len(adjoint_state.linear_solve_factors) == 5
         assert adjoint_state.dense_linear_solve_factors_available is True
+        assert bool(np.asarray(status.success))
         np.testing.assert_array_equal(np.asarray(solved), np.asarray(expected))
         np.testing.assert_array_equal(
             np.asarray(adjoint_state.linear_solve_factors[3]),
@@ -6466,7 +6551,7 @@ class TestBoozerSurfaceJAXClass:
         raw_solved = adjoint_state.solve_forward(rhs)
         solved, status = adjoint_state.solve_forward_with_status(rhs)
 
-        assert np.all(np.isfinite(np.asarray(raw_solved)))
+        assert np.all(np.isnan(np.asarray(raw_solved)))
         assert not bool(np.asarray(status))
         assert np.all(np.isnan(np.asarray(solved)))
         assert float(np.asarray(status.residual_relative)) > 1e-10
