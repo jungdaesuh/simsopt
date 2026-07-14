@@ -4235,6 +4235,12 @@ def _linear_solve_finite(solution, residual):
 # eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
 # solves of large, moderately ill-conditioned systems.
 _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
+# Float64 dense solves still need a condition cap below the theoretical
+# ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
+# system can have machine-small residual but a 1e-4-scale wrong solution at
+# condition estimates around 2e13. Production Boozer adjoint estimates are
+# documented at least two orders below this cap.
+_FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE = 1.0e12
 
 
 def _effective_linear_solve_tolerance(rhs, tol):
@@ -4555,7 +4561,10 @@ def _dense_matrix_nonsingular_threshold(size, dtype):
     dtype = np.dtype(dtype)
     eps = float(np.finfo(dtype).eps)
     dimension_factor = np.sqrt(float(size)) if dtype == np.dtype(np.float32) else size
-    return _device_scalar(1.0 / (dimension_factor * eps), dtype=dtype)
+    threshold = 1.0 / (dimension_factor * eps)
+    if dtype == np.dtype(np.float64):
+        threshold = min(threshold, _FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE)
+    return _device_scalar(threshold, dtype=dtype)
 
 
 def _dense_matrix_solve_numerically_safe(
@@ -4574,10 +4583,11 @@ def _dense_matrix_solve_numerically_safe(
     (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
     the solve returns a finite wrong answer with a small residual).  The
     condition screen ``isfinite(cond) & (cond < threshold)`` lets a degenerate
-    operator fail closed: float64 production uses the LAPACK rank-tolerance
-    reciprocal ``1 / (n * eps)`` (~1e12 at ``n ~ 2000``), cleanly separating the
-    well-conditioned production ``J^T`` (cond ~ 1e3-1e6) from a numerically
-    singular one (cond >~ 1e15).
+    operator fail closed: float64 production uses the smaller of the LAPACK
+    rank-tolerance reciprocal ``1 / (n * eps)`` and an explicit 1e12 cap,
+    cleanly separating the well-conditioned production ``J^T`` (cond ~ 1e3-1e6,
+    with 1-norm estimates still far below the cap) from numerically singular
+    systems where residual-only success hides a wrong forward solution.
 
     The forward-error *bound* ``cond * residual_rel`` is deliberately applied to
     float32 only.  At large ``n`` (the float64 production regime) the 1-norm

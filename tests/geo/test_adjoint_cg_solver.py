@@ -296,6 +296,25 @@ def _float32_forward_error_problem():
     return matrix, matvec, rhs, true_solution_np
 
 
+def _float64_near_singular_forward_error_problem():
+    """Consistent float64 system whose residual hides a bad forward solution."""
+    n = 8
+    rng = np.random.default_rng(10)
+    left, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    right, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    singular_values = np.geomspace(1.0, 1.0e-13, n)
+    matrix_np = left @ np.diag(singular_values) @ right.T
+    true_solution_np = rng.standard_normal(n)
+    rhs_np = matrix_np @ true_solution_np
+    matrix = jnp.asarray(matrix_np, dtype=jnp.float64)
+    rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+
+    def matvec(v):
+        return matrix @ v
+
+    return matrix, matvec, rhs, true_solution_np
+
+
 def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
     """The committed LU+IR solver matches an independent dense oracle on a
     non-symmetric operator (the regime where the GMRES baseline stagnates)."""
@@ -534,6 +553,31 @@ def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
     assert relative_error > 1.0e-4
     assert not bool(status.success)
     assert np.all(np.isnan(np.asarray(direct_solution)))
+
+
+@pytest.mark.parametrize(
+    "solver",
+    (
+        _optimizer._solve_dense_square_operator_lu_system_with_status,
+        _optimizer._solve_dense_square_operator_least_squares_system_with_status,
+    ),
+    ids=("lu", "lstsq"),
+)
+def test_float64_dense_status_fails_closed_on_near_singular_forward_error(solver):
+    """Tiny residual is not enough when float64 conditioning destroys the solution."""
+    matrix, matvec, rhs, true_solution = _float64_near_singular_forward_error_problem()
+
+    solution, status = solver(matvec, rhs, tol=1.0e-12)
+
+    condition_estimate = float(
+        np.asarray(_optimizer._dense_matrix_condition_estimate(matrix))
+    )
+    relative_error = np.linalg.norm(
+        np.asarray(solution) - true_solution
+    ) / np.linalg.norm(true_solution)
+    assert condition_estimate > 1.0e12
+    assert relative_error > 1.0e-4
+    assert not bool(status.success)
 
 
 def test_dense_lu_status_fails_closed_on_singular_operator():
