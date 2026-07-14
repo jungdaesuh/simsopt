@@ -6668,7 +6668,7 @@ class TestBoozerSurfaceJAXClass:
 
         assert booz._linear_solve_tolerance() == pytest.approx(1.0e-11)
 
-    def test_effective_linear_solve_tolerance_lifts_large_float64_floor(
+    def test_dense_backward_error_tolerance_lifts_large_float64_floor(
         self, request
     ):
         from simsopt_jax.backend import get_backend_config, set_backend
@@ -6679,8 +6679,13 @@ class TestBoozerSurfaceJAXClass:
         small_rhs = jnp.ones((16,), dtype=jnp.float64)
         large_rhs = jnp.ones((1024,), dtype=jnp.float64)
 
-        small_tol = _opt._effective_linear_solve_tolerance(small_rhs, 1.0e-16)
-        large_tol = _opt._effective_linear_solve_tolerance(large_rhs, 1.0e-16)
+        generic_tol = _opt._effective_linear_solve_tolerance(large_rhs, 1.0e-16)
+        small_tol = _opt._effective_dense_backward_error_tolerance(
+            small_rhs, 1.0e-16
+        )
+        large_tol = _opt._effective_dense_backward_error_tolerance(
+            large_rhs, 1.0e-16
+        )
         eps = np.finfo(np.float64).eps
         factor = _opt._DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR
         expected_small = factor * small_rhs.shape[0] * eps
@@ -6701,6 +6706,7 @@ class TestBoozerSurfaceJAXClass:
         )
         assert float(np.asarray(small_tol)) > 1.0e-14
         assert float(np.asarray(large_tol)) > float(np.asarray(small_tol))
+        assert float(np.asarray(generic_tol)) == pytest.approx(1.0e-14)
 
     def test_get_adjoint_runtime_state_hessian_apply_uses_column_batched_rhs(
         self, monkeypatch

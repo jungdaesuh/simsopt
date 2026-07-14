@@ -78,6 +78,7 @@ from simsopt_jax_adapters.geo.curve_objectives import (  # type: ignore[import-u
     cs_distance_pure,
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier  # type: ignore[import-untyped]
+from simsopt_jax.geo.optimizers import optimizer as _optimizer_module  # type: ignore[import-untyped]
 from simsopt_jax.geo.optimizers.optimizer import (  # type: ignore[import-untyped]
     _mark_cacheable_jit_value_and_grad,
     private_optimizer_runtime_is_supported,
@@ -1861,6 +1862,58 @@ def _parse_optimizer_method(method: str) -> OptimizerMethod:
     raise ValueError(f"unsupported optimizer method {method!r}")
 
 
+def _require_two_cpu_devices_for_dense_condition_case():
+    devices = jax.devices("cpu")
+    if len(devices) < 2:
+        _skip_case(
+            "dense-condition placement regression needs at least two CPU devices"
+        )
+    return devices[0], devices[1]
+
+
+def _run_dense_condition_estimate_cross_device_factors_case() -> None:
+    matrix_device, factor_device = _require_two_cpu_devices_for_dense_condition_case()
+    diagonal = np.geomspace(1.0, 1.0e-5, 48)
+    expected_condition = float(diagonal.max() / diagonal.min())
+    matrix = jax.device_put(
+        jnp.diag(jnp.asarray(diagonal, dtype=jnp.float64)),
+        device=matrix_device,
+    )
+    lu, piv = jax.scipy.linalg.lu_factor(matrix)
+    factors_on_other_device = (
+        jax.device_put(lu, device=factor_device),
+        jax.device_put(piv, device=factor_device),
+    )
+
+    estimate = _optimizer_module._dense_matrix_condition_estimate(
+        matrix,
+        lu_piv=factors_on_other_device,
+    )
+    estimate_value = float(jax.device_get(estimate))
+
+    assert np.isfinite(estimate_value)
+    relative_error = abs(estimate_value - expected_condition) / expected_condition
+    assert relative_error < 1.0e-6, (estimate_value, expected_condition)
+
+
+def _run_dense_condition_threshold_nondefault_device_case() -> None:
+    _, certificate_device = _require_two_cpu_devices_for_dense_condition_case()
+    certificate = jax.device_put(
+        np.asarray(1.0e5, dtype=np.float64),
+        device=certificate_device,
+    )
+
+    with jax.transfer_guard("disallow"):
+        safe = _optimizer_module._dense_matrix_condition_estimate_numerically_safe(
+            certificate,
+            size=48,
+            dtype=np.dtype(np.float64),
+        )
+
+    assert safe.device == certificate_device
+    assert bool(jax.device_get(safe))
+
+
 def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "compile-count":
         _run_compile_count_case(_parse_optimizer_method(args.method))
@@ -1943,6 +1996,12 @@ def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "grouped-host-spec-vjp":
         _run_grouped_biot_savart_host_spec_vjp_case()
         return
+    if args.case == "dense-condition-estimate-cross-device-factors":
+        _run_dense_condition_estimate_cross_device_factors_case()
+        return
+    if args.case == "dense-condition-threshold-nondefault-device":
+        _run_dense_condition_threshold_nondefault_device_case()
+        return
     raise ValueError(f"unsupported subprocess case {args.case!r}")
 
 
@@ -1983,6 +2042,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("grouped-gpu-current-arrays")
     subparsers.add_parser("grouped-host-scalar-currents")
     subparsers.add_parser("grouped-host-spec-vjp")
+    subparsers.add_parser("dense-condition-estimate-cross-device-factors")
+    subparsers.add_parser("dense-condition-threshold-nondefault-device")
 
     args = parser.parse_args(argv)
 
