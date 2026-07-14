@@ -112,7 +112,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache, wraps
+from functools import lru_cache, partial, wraps
 from itertools import count
 import logging
 import sys
@@ -4230,7 +4230,7 @@ def _linear_solve_finite(solution, residual):
 
 
 # Growth-factor margin on the ``n * eps`` LU backward-error bound used by
-# ``_effective_linear_solve_tolerance``. Keeps the acceptance gate a tiny
+# ``_effective_dense_backward_error_tolerance``. Keeps the acceptance gate a tiny
 # multiple of attainable backward-stability (so degenerate solves with
 # eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
 # solves of large, moderately ill-conditioned systems.
@@ -4247,37 +4247,9 @@ def _effective_linear_solve_tolerance(rhs, tol):
     dtype = rhs.dtype
     policy = get_backend_policy()
     tol_value = _optimizer_scalar(tol, dtype=dtype)
-    # Dimension-aware backward-error floor. A backward-stable dense LU solve of
-    # an n-by-n system has backward error
-    #   eta = ||b - A x|| / (||A|| ||x|| + ||b||) <~ c * n * eps
-    # (Higham, "Accuracy and Stability of Numerical Algorithms", 2nd ed.,
-    # Thm 9.4; the LU growth factor is absorbed into the constant ``c``). The
-    # fixed precision-independent 1e-14 policy floor sits *below* this attainable
-    # bound, so an accurate solve of a moderately ill-conditioned system -- e.g.
-    # the kappa ~ 4e5 least-squares Boozer Hessian (n ~ 2e3), whose adjoint
-    # transpose solve lands at residual_relative ~ 1e-12 -- is false-rejected
-    # even though the resulting gradient is correct to ~1e-7. Lift the floor to
-    # the textbook ``c * n * eps`` scale so the acceptance gate tracks attainable
-    # backward-stability instead of a fixed constant; ``c`` (the
-    # ``_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR`` growth-factor margin) is
-    # sized so the n ~ 2e3 production solve clears its ~1e-12 residual with ~30x
-    # headroom. With ``c = 64`` (float64) the dimension floor exceeds the 1e-14
-    # policy floor for every ``n >= 1`` (crossover at ``n ~ 0.7``), so it binds
-    # at all sizes and the 1e-14 floor is effectively superseded: even small
-    # ``n`` is loosened modestly (n=16 -> ~2.3e-13). A genuinely singular or
-    # garbage solve (eta ~ O(1)) still fails closed by many orders, and the
-    # numerical-singularity condition screen in ``_dense_matrix_solve_numerically_safe``
-    # is the independent guard against backward-stable-but-forward-garbage solves.
-    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    system_size = _device_scalar(rhs.shape[0], dtype=dtype)
-    dimension_floor = (
-        _device_scalar(_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR, dtype=dtype)
-        * system_size
-        * eps
-    )
-    tolerance_floor = jnp.maximum(
-        _device_scalar(policy.linear_solve_tolerance_floor, dtype=dtype),
-        dimension_floor,
+    tolerance_floor = _device_scalar(
+        policy.linear_solve_tolerance_floor,
+        dtype=dtype,
     )
     tolerance_cap = (
         _device_scalar(jnp.inf, dtype=dtype)
@@ -4285,6 +4257,27 @@ def _effective_linear_solve_tolerance(rhs, tol):
         else _device_scalar(policy.linear_solve_tolerance_cap, dtype=dtype)
     )
     return jnp.minimum(tolerance_cap, jnp.maximum(tolerance_floor, tol_value))
+
+
+def _effective_dense_backward_error_tolerance(rhs, tol):
+    """Return the dense-LU backward-error tolerance, including its ``n * eps`` floor."""
+    dtype = rhs.dtype
+    policy = get_backend_policy()
+    effective_tolerance = _effective_linear_solve_tolerance(rhs, tol)
+    dimension_floor = (
+        _device_scalar(_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR, dtype=dtype)
+        * _device_scalar(rhs.shape[0], dtype=dtype)
+        * _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    )
+    tolerance_cap = (
+        _device_scalar(jnp.inf, dtype=dtype)
+        if policy.linear_solve_tolerance_cap is None
+        else _device_scalar(policy.linear_solve_tolerance_cap, dtype=dtype)
+    )
+    return jnp.minimum(
+        tolerance_cap,
+        jnp.maximum(effective_tolerance, dimension_floor),
+    )
 
 
 def _linear_solve_residual_scale(rhs):
@@ -4381,7 +4374,10 @@ def _dense_matrix_backward_error_success(matrix, solution, rhs, *, tol):
     residual_norm = jnp.linalg.norm(residual)
     scale = jnp.linalg.norm(matrix) * jnp.linalg.norm(solution) + jnp.linalg.norm(rhs)
     eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    threshold = _effective_linear_solve_tolerance(rhs, tol) * jnp.maximum(scale, eps)
+    threshold = _effective_dense_backward_error_tolerance(rhs, tol) * jnp.maximum(
+        scale,
+        eps,
+    )
     return (
         _linear_solve_finite(solution, residual)
         & jnp.isfinite(residual_norm)
@@ -4526,6 +4522,13 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
         lu_piv = jsp_linalg.lu_factor(matrix)
     lu, piv = lu_piv
 
+    # Externally supplied factors may have been moved to the configured
+    # linearization-residency device while ``matrix`` remains on the compute
+    # device. Keep the matrix norm and inverse-norm estimate co-located with the
+    # concrete factors; under tracing the enclosing computation owns placement.
+    if not isinstance(lu, jax.core.Tracer):
+        matrix = jax.device_put(matrix, lu.sharding)
+
     def solve(rhs):
         return jsp_linalg.lu_solve((lu, piv), rhs, trans=0)
 
@@ -4567,6 +4570,7 @@ def _dense_matrix_nonsingular_threshold(size, dtype):
     return _device_scalar(threshold, dtype=dtype)
 
 
+@partial(jax.jit, static_argnames=("size", "dtype"))
 def _dense_matrix_condition_estimate_numerically_safe(
     condition_estimate,
     *,

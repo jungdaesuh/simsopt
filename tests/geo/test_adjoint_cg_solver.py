@@ -23,6 +23,11 @@ Three opt-in adjoint paths are covered here:
    (flag-and-transpose only), and the numerical-singularity fail-closed guard.
 """
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -35,6 +40,26 @@ from simsopt_jax.geo.optimizers import optimizer as _optimizer
 
 _LINEAX_LSMR_AVAILABLE = hasattr(lineax, "LSMR")
 _LINEAX_LSMR_SKIP_REASON = "lineax>=0.1.1 is required for LSMR comparator tests"
+
+
+def _run_jax_runtime_case(case):
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "tests" / "subprocess" / "jax_runtime_cases.py"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get(
+        "PYTHONPATH", ""
+    )
+    env["JAX_ENABLE_X64"] = "True"
+    env["JAX_PLATFORMS"] = "cpu"
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    return subprocess.run(
+        (sys.executable, str(script), case),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=env,
+    )
 
 
 def _spd_problem(n=12, seed=0):
@@ -117,6 +142,38 @@ def test_default_selector_does_not_use_cg():
     """The default selector keeps the established (non-CG) path."""
     assert _optimizer._ADJOINT_LINEAR_SOLVER != "cg"
     assert _optimizer._ADJOINT_LINEAR_SOLVER != "lsmr_j"
+
+
+def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():
+    """A dense-LU backward-error allowance must not weaken GMRES acceptance."""
+    n = 32
+    rng = np.random.default_rng(6)
+    orthogonal, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    matrix_np = (
+        orthogonal
+        @ np.diag(np.geomspace(1.0, 1.0e-12, n))
+        @ orthogonal.T
+    )
+    true_solution = rng.normal(size=n)
+    rhs_np = matrix_np @ true_solution
+    matrix = jnp.asarray(matrix_np, dtype=jnp.float64)
+    rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+
+    _solution, status = _optimizer._solve_square_vector_system_operator_only(
+        lambda vector: matrix @ vector,
+        rhs,
+        tol=1.0e-14,
+        max_refinement_steps=2,
+    )
+
+    effective_tolerance = _optimizer._effective_linear_solve_tolerance(
+        rhs,
+        1.0e-14,
+    )
+    assert float(np.asarray(effective_tolerance)) == pytest.approx(1.0e-14)
+    assert not bool(status.success) or float(
+        np.asarray(status.residual_relative)
+    ) <= float(np.asarray(effective_tolerance))
 
 
 # --- Experimental LSMR-on-J comparator for regularized normal systems ---
@@ -472,6 +529,22 @@ def test_dense_condition_estimate_preserves_float32_under_transfer_guard():
 
     assert estimate.dtype == jnp.float32
     assert float(np.asarray(estimate)) == pytest.approx(1.0e5, rel=1.0e-5)
+
+
+def test_dense_condition_estimate_tolerates_cross_device_factors():
+    """The matrix and externally placed LU factors may reside on different devices."""
+    result = _run_jax_runtime_case("dense-condition-estimate-cross-device-factors")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '"skipped": true' not in result.stdout, result.stdout
+
+
+def test_dense_condition_threshold_follows_nondefault_certificate_device():
+    """The numerical-safety threshold must follow the certificate device."""
+    result = _run_jax_runtime_case("dense-condition-threshold-nondefault-device")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '"skipped": true' not in result.stdout, result.stdout
 
 
 def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
