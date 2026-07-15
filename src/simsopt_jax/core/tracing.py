@@ -73,6 +73,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import PartitionSpec as P
+from jax.typing import ArrayLike
 
 from ._device_scalars import two_pi as _device_two_pi
 from .boozer_radial_field import (
@@ -119,8 +120,12 @@ from .interpolated_boozer_field import (
 )
 from .sharding import (
     maybe_shard_trajectory_batch_inputs,
+    replicate_tree_on_mesh,
     trajectory_batch_sharding_config,
 )
+
+
+TracingStateInput = jax.Array | list[ArrayLike] | tuple[ArrayLike, ...]
 
 __all__ = [
     "FieldlineTracingSpec",
@@ -138,6 +143,7 @@ __all__ = [
     "MinToroidalFluxStoppingCriterion",
     "MinZStoppingCriterion",
     "ToroidalTransitStoppingCriterion",
+    "TracingStateInput",
     "bracket_root_jax",
     "dopri5_step",
     "fieldline_rhs",
@@ -291,10 +297,34 @@ def _device_zeros(shape: tuple[int, ...], dtype):
 
 
 def _as_device_array(value, dtype) -> jax.Array:
-    """Return ``value`` as a JAX array without implicit host-to-device staging."""
+    """Return ``value`` as a JAX array without implicit host staging.
+
+    Sequences containing tracers stay local to the enclosing transform. Eager
+    sequences containing concrete JAX arrays explicitly normalize every leaf
+    to the default placement used by the tracing kernels.
+    """
 
     if isinstance(value, (jax.Array, jax.core.Tracer)):
         return jnp.asarray(value, dtype=dtype)
+    if isinstance(value, (list, tuple)):
+        leaves = jax.tree.leaves(value)
+        if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+            return jnp.asarray(value, dtype=dtype)
+        concrete_arrays = tuple(leaf for leaf in leaves if isinstance(leaf, jax.Array))
+        if concrete_arrays:
+            target_sharding = _device_array(0, dtype).sharding
+
+            def stage_leaf(leaf):
+                if isinstance(leaf, jax.Array):
+                    return jax.device_put(
+                        jnp.asarray(leaf, dtype=dtype), target_sharding
+                    )
+                return jax.device_put(
+                    np.asarray(leaf, dtype=np.dtype(dtype)),
+                    target_sharding,
+                )
+
+            return jnp.asarray(jax.tree.map(stage_leaf, value), dtype=dtype)
     return _device_array(value, dtype)
 
 
@@ -1211,7 +1241,7 @@ def _apply_stopping_criteria_events(
 
 def trace_fieldline(
     spec: FieldlineTracingSpec,
-    y0: jax.Array,
+    y0: TracingStateInput,
     magnetic_field_fn: Callable[[jax.Array], jax.Array],
     phis: jax.Array | None = None,
     stopping_criteria: tuple = (),
@@ -1223,7 +1253,8 @@ def trace_fieldline(
     spec
         Tracing contract; see :class:`FieldlineTracingSpec`.
     y0
-        Initial Cartesian position ``[3]``. Treated as float64.
+        Initial Cartesian position ``[3]`` as an array or flat list/tuple of
+        array-like scalar components. Treated as float64.
     magnetic_field_fn
         JAX-traceable callable mapping a Cartesian point ``[3]`` to the
         magnetic field ``B(x)`` of shape ``[3]``.
@@ -1873,7 +1904,7 @@ def guiding_center_vacuum_rhs(
 
 def trace_guiding_center(
     spec: GuidingCenterTracingSpec,
-    y0: jax.Array,
+    y0: TracingStateInput,
     magnetic_field_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     m: float,
     q: float,
@@ -1888,8 +1919,8 @@ def trace_guiding_center(
     spec
         Tracing contract; see :class:`GuidingCenterTracingSpec`.
     y0
-        Initial state ``[x, y, z, v_par]`` (length 4). Treated as
-        float64.
+        Initial state ``[x, y, z, v_par]`` (length 4) as an array or flat
+        list/tuple of array-like scalar components. Treated as float64.
     magnetic_field_fn
         JAX-traceable callable mapping a Cartesian point ``[3]`` to the
         pair ``(B, dB_by_dX)`` where ``B`` has shape ``[3]`` and
@@ -3168,7 +3199,7 @@ def trace_guiding_center_boozer(
     h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
     k0 = jax.lax.cond(
         initial_axis_invalid,
-        lambda _: jnp.zeros((4,), dtype=dtype),
+        lambda _: jnp.zeros_like(y0_arr),
         lambda _: rhs(t0, y0_arr),
         operand=None,
     )
@@ -3596,31 +3627,36 @@ def trace_guiding_centers_boozer_batched(
     mus_arr = _as_device_array(mus, jnp.float64).reshape((-1,))
     m_arr = _as_device_array(m, jnp.float64)
     q_arr = _as_device_array(q, jnp.float64)
-    zetas_arr = None if zetas is None else _as_device_array(zetas, jnp.float64)
+    zetas_arr = (
+        _device_zeros((0,), jnp.float64)
+        if zetas is None
+        else _as_device_array(zetas, jnp.float64).reshape((-1,))
+    )
     boozer_field_arg = _batched_boozer_field_jit_arg(boozer_field)
     stopping_criteria = tuple(stopping_criteria)
 
-    def trace_one(y0, dtmax, mu) -> GuidingCenterTracingResult:
-        return trace_guiding_center_boozer(
-            replace(spec, dtmax=dtmax),
-            y0,
-            boozer_field_arg,
-            m=m_arr,
-            q=q_arr,
-            mu=mu,
-            mode=mode,
-            zetas=zetas_arr,
-            stopping_criteria=stopping_criteria,
-        )
+    frozen_state, _psi0 = _resolve_boozer_field_state(boozer_field_arg)
+    shardable_field = isinstance(
+        frozen_state, (BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState)
+    )
+    shardable_criteria = not any(
+        isinstance(criterion, LevelsetStoppingCriterion)
+        for criterion in stopping_criteria
+    )
 
     config = trajectory_batch_sharding_config(y0s_arr)
-    if config is not None:
+    if config is not None and shardable_field and shardable_criteria:
         y0s_arr, dtmaxs_arr, mus_arr = maybe_shard_trajectory_batch_inputs(
             y0s_arr,
             dtmaxs_arr,
             mus_arr,
             config=config,
         )
+        shared_state = replicate_tree_on_mesh(
+            (spec, boozer_field_arg, m_arr, q_arr, zetas_arr),
+            mesh=config.mesh,
+        )
+        shared_state_specs = jax.tree.map(lambda _leaf: P(), shared_state)
 
         @partial(
             jax.shard_map,
@@ -3629,6 +3665,7 @@ def trace_guiding_centers_boozer_batched(
                 P(config.axis_name, None),
                 P(config.axis_name),
                 P(config.axis_name),
+                shared_state_specs,
             ),
             out_specs=GuidingCenterTracingResult(
                 trajectory=P(config.axis_name, None, None),
@@ -3641,15 +3678,35 @@ def trace_guiding_centers_boozer_batched(
             ),
             check_vma=True,
         )
-        def trace_shard(y0s_block, dtmaxs_block, mus_block):
+        def trace_shard(
+            y0s_block,
+            dtmaxs_block,
+            mus_block,
+            shared_state_block,
+        ):
+            spec_block, field_block, m_block, q_block, zetas_block = shared_state_block
+
+            def trace_one(inputs):
+                y0, dtmax, mu = inputs
+                return trace_guiding_center_boozer(
+                    replace(spec_block, dtmax=dtmax),
+                    y0,
+                    field_block,
+                    m=m_block,
+                    q=q_block,
+                    mu=mu,
+                    mode=mode,
+                    zetas=zetas_block,
+                    stopping_criteria=stopping_criteria,
+                )
+
             return jax.lax.map(
-                lambda inputs: trace_one(*inputs),
+                trace_one,
                 (y0s_block, dtmaxs_block, mus_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr, mus_arr)
+        return trace_shard(y0s_arr, dtmaxs_arr, mus_arr, shared_state)
 
-    frozen_state, _psi0 = _resolve_boozer_field_state(boozer_field_arg)
     if isinstance(
         frozen_state, (BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState)
     ):

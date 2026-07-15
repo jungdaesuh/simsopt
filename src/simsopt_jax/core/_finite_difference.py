@@ -38,7 +38,7 @@ def _as_runtime_array(value: object) -> jax.Array:
 
 
 def _index_range(size: int) -> jax.Array:
-    return _runtime_device_put(np.arange(int(size), dtype=np.int32))
+    return jax.lax.iota(jnp.int32, int(size))
 
 
 def _device_zero_like(value: jax.Array) -> jax.Array:

@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import textwrap
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +20,11 @@ from simsopt_jax.core._finite_difference import (
     forward_jacobian_vmap,
 )
 
-REPO_SRC = str(Path(__file__).resolve().parents[3] / "src")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_SRC = str(REPO_ROOT / "src")
+FINITE_DIFFERENCE_RUNTIME_CASES = (
+    REPO_ROOT / "tests" / "subprocess" / "finite_difference_runtime_cases.py"
+)
 
 
 def test_forward_jacobian_vmap_matches_jacfwd_for_linear_residual():
@@ -232,63 +235,20 @@ def test_forward_jacobian_shard_map_jit_rejects_materialized_zero_abs_step():
 
 def test_forward_jacobian_shard_map_fake_two_device_transfer_guard_clean():
     """Fake-CPU two-device mesh proves no implicit mesh transfers in shard_map."""
-    code = r"""
-import sys
-sys.path.insert(0, REPO_SRC)
-
-import jax
-import jax.numpy as jnp
-import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
-from simsopt_jax.core._finite_difference import forward_jacobian_shard_map
-
-mesh = Mesh(np.asarray(jax.devices()[:2]), ("dof",))
-replicated = NamedSharding(mesh, P())
-matrix = jax.device_put(
-    jnp.array(((1.0, 2.0, 3.0), (-1.0, 0.5, 4.0)), dtype=jnp.float64),
-    replicated,
-)
-
-def residual(x):
-    return matrix @ x
-
-compiled = jax.jit(
-    lambda x: forward_jacobian_shard_map(
-        residual,
-        x,
-        abs_step=2.0**-30,
-        mesh=mesh,
-    )
-)
-x0 = jax.device_put(jnp.array([0.2, -0.3, 0.4], dtype=jnp.float64), replicated)
-compiled(x0).block_until_ready()
-
-with jax.transfer_guard("disallow"):
-    jacobian = compiled(x0)
-    jacobian.block_until_ready()
-
-np.testing.assert_allclose(
-    np.asarray(jacobian),
-    np.asarray(matrix),
-    rtol=5e-7,
-    atol=5e-7,
-)
-"""
     env = {
         "HOME": os.environ["HOME"],
         "JAX_ENABLE_X64": "True",
-        "JAX_PLATFORM_NAME": "cpu",
+        "JAX_PLATFORMS": "cpu",
         "PATH": os.environ["PATH"],
         "PYTHONNOUSERSITE": "1",
-        "PYTHONPATH": REPO_SRC,
+        "PYTHONPATH": os.pathsep.join((str(REPO_ROOT), REPO_SRC)),
         "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
     }
     subprocess.run(
         [
             sys.executable,
-            "-c",
-            textwrap.dedent(code).replace("REPO_SRC", repr(REPO_SRC)),
+            str(FINITE_DIFFERENCE_RUNTIME_CASES),
+            "forward-jacobian-shard-map-two-device",
         ],
         check=True,
         env=env,

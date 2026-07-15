@@ -39,10 +39,10 @@ def block_jax_leaves(value) -> None:
 
 
 def optimistix_result_metadata(result) -> tuple[bool, str, str]:
-    with jax.transfer_guard_host_to_device("allow"):
-        result_text = str(result)
-        result_message = str(optx.RESULTS[result])
-        successful = bool(result == optx.RESULTS.successful)
+    host_result = jax.device_get(result)
+    result_text = str(host_result)
+    result_message = str(optx.RESULTS[host_result])
+    successful = result_text == str(optx.RESULTS.successful)
     return successful, result_text, result_message
 
 

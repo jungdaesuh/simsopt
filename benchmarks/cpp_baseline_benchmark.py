@@ -36,6 +36,13 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.benchmark_config import available_config_labels, resolve_configs
 from benchmarks.benchmark_problem import build_synthetic_boozer_problem
+from benchmarks.run_code_benchmark_common import (
+    BenchmarkRepeatResult,
+    BenchmarkTimingResult,
+    assess_benchmark_timing,
+    summarize_benchmark_repeat,
+    summarize_result_fun,
+)
 
 
 def get_git_sha() -> str:
@@ -109,19 +116,6 @@ def build_simsopt() -> Path:
     return REPO_ROOT
 
 
-def summarize_result_fun(res):
-    fun = res.get("fun")
-    if fun is not None:
-        return float(fun)
-    residual = res.get("residual")
-    if residual is None:
-        return float("nan")
-    arr = np.asarray(residual)
-    if arr.ndim == 0:
-        return float(arr)
-    return 0.5 * float(np.mean(np.square(arr)))
-
-
 def make_cpu_boozer_surface(config):
     from simsopt.field import BiotSavart
     from simsopt.geo import BoozerSurface
@@ -186,8 +180,14 @@ def time_run_code_stage_split(config):
 
 
 def run_benchmarks(*, configs, repeats):
+    if repeats < 1:
+        raise ValueError("repeats must be >= 1")
     sys.path.insert(0, str(REPO_ROOT / "src"))
     print(f"Repo SHA: {get_git_sha()}")
+    print(
+        "Diagnostic timings are always reported. Outcome comparability within one "
+        "timing set does not establish an external performance claim."
+    )
 
     for config in configs:
         print(f"\n{'=' * 70}")
@@ -211,7 +211,8 @@ def run_benchmarks(*, configs, repeats):
         ls_time, newton_time, stage_res = time_run_code_stage_split(config)
         print(
             f"    stage split sample: LS {ls_time * 1e3:.1f}ms, "
-            f"Newton {newton_time * 1e3:.1f}ms"
+            f"Newton {newton_time * 1e3:.1f}ms  "
+            f"success={stage_res['success']}  iter={stage_res['iter']}"
         )
         if not stage_res["success"]:
             print(
@@ -219,21 +220,34 @@ def run_benchmarks(*, configs, repeats):
                 "not as a parity or replacement verdict"
             )
 
-        repeat_times = []
-        repeat_res = res
+        repeat_results: list[BenchmarkRepeatResult] = []
         for _ in range(repeats):
             elapsed, repeat_res = time_run_code(config)
-            repeat_times.append(elapsed)
+            repeat_results.append(summarize_benchmark_repeat(elapsed, repeat_res))
 
-        times = np.asarray(repeat_times)
+        timing_result = BenchmarkTimingResult(repeats=tuple(repeat_results))
+        times = np.asarray(timing_result.elapsed_seconds)
         print(
             f"    repeat fresh solve: {np.median(times) * 1e3:.1f}ms median, "
             f"{np.mean(times) * 1e3:.1f}ms mean ± {np.std(times) * 1e3:.1f}ms"
         )
-        print(
-            f"    repeat final fun: {summarize_result_fun(repeat_res):.6e}  "
-            f"iota={float(repeat_res['iota']):.6f}"
-        )
+        for repeat_index, repeat in enumerate(timing_result.repeats, start=1):
+            print(
+                f"    repeat {repeat_index}: {repeat.elapsed_seconds * 1e3:.1f}ms  "
+                f"success={repeat.success}  iter={repeat.iterations}  "
+                f"fun={repeat.final_fun:.6e}  iota={repeat.final_iota:.6f}"
+            )
+        assessment = assess_benchmark_timing(timing_result, role="C++")
+        if assessment.diagnostic_comparable:
+            print(
+                "    diagnostic outcome comparability: yes; all timed repeats converged "
+                "with finite, mutually comparable outcomes"
+            )
+        else:
+            print(
+                "    diagnostic outcome comparability: no; "
+                + "; ".join(assessment.reasons)
+            )
 
     print(f"\n{'=' * 70}")
     print("CPU INFO")

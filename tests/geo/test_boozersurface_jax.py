@@ -6675,7 +6675,11 @@ class TestBoozerSurfaceJAXClass:
 
         previous_backend = get_backend_config()
         request.addfinalizer(lambda: _restore_backend_config(previous_backend))
-        set_backend("jax_cpu_parity", configure_runtime=False)
+        parity_mode = {
+            "cpu": "jax_cpu_parity",
+            "gpu": "jax_gpu_parity",
+        }[jax.default_backend()]
+        set_backend(parity_mode, configure_runtime=False)
         small_rhs = jnp.ones((16,), dtype=jnp.float64)
         large_rhs = jnp.ones((1024,), dtype=jnp.float64)
 

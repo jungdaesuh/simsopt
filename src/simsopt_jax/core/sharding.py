@@ -35,6 +35,7 @@ __all__ = [
     "maybe_shard_surface_quadrature_inputs",
     "maybe_shard_trajectory_batch_inputs",
     "place_active_replicated",
+    "replicate_tree_on_mesh",
     "seed_batch_sharding_config",
     "seed_batch_sharding_summary",
     "surface_quadrature_sharding_config",
@@ -232,6 +233,21 @@ def place_active_replicated(value, *, dtype=None, mode: str | None = None):
             return value
         return runtime_device_put(value, dtype=dtype)
     return _place_array(value, sharding, dtype=dtype)
+
+
+def replicate_tree_on_mesh(tree, *, mesh: Mesh):
+    """Replicate every array leaf in ``tree`` across ``mesh``."""
+
+    replicated_sharding = NamedSharding(mesh, P())
+
+    def place_leaf(leaf):
+        if _array_leaf_ndim(leaf) is None:
+            return leaf
+        return _place_array(leaf, replicated_sharding)
+
+    with jax.transfer_guard_host_to_device("allow"):
+        with jax.transfer_guard_device_to_device("allow"):
+            return jax.tree.map(place_leaf, tree)
 
 
 def _place_leading_axis_arrays(arrays, *, mesh: Mesh, axis_name: str):

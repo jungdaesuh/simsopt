@@ -23,7 +23,8 @@ hand-built signed-distance interpolant to exercise the JAX evaluation
 path without depending on the full ``simsopt.geo.surface.SurfaceClassifier``
 construction pipeline.
 
-All tests run under ``JAX_PLATFORMS=cpu`` with ``JAX_ENABLE_X64=True``.
+Tests run with ``JAX_ENABLE_X64=True``. JAX paths use the configured backend;
+upstream C++ and other native reference oracles remain host-side.
 """
 
 from __future__ import annotations
@@ -827,6 +828,114 @@ def _assert_trace_batches_match(
         )
 
 
+def _strict_transfer_safe_unit_y_field(point: jax.Array) -> jax.Array:
+    """Return a device-derived unit-y field without eager host constants."""
+
+    zero = jnp.sum(point - point)
+    one = jnp.exp(zero)
+    return jnp.stack((zero, one, zero))
+
+
+def test_trace_fieldline_accepts_mixed_tracer_and_python_state_under_jit():
+    """A public trace call may assemble state from traced and host scalars."""
+
+    def field_fn(point: jax.Array) -> jax.Array:
+        zero = point[0] - point[0]
+        return jnp.stack((zero, zero + 1.0, zero))
+
+    spec = FieldlineTracingSpec(
+        tmax=0.02,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        dtmax=0.01,
+        max_steps=32,
+    )
+
+    @jax.jit
+    def trace_from_x(x):
+        return trace_fieldline(spec, (x, 0.0, 0.0), field_fn)
+
+    result = trace_from_x(jnp.asarray(1.0, dtype=jnp.float64))
+
+    assert int(np.asarray(result.status)) == 0
+    np.testing.assert_allclose(
+        np.asarray(result.trajectory[-1, 1:4]),
+        np.asarray([1.0, 0.02, 0.0]),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test_trace_fieldline_accepts_mixed_device_and_host_state_under_transfer_guard():
+    """Mixed concrete-device and host state avoids implicit device-to-host transfer."""
+
+    spec = FieldlineTracingSpec(
+        tmax=0.02,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        dtmax=0.01,
+        max_steps=32,
+    )
+    x_device = jax.device_put(np.asarray(1.0, dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        result = trace_fieldline(
+            spec,
+            (x_device, 0.0, 0.0),
+            _strict_transfer_safe_unit_y_field,
+        )
+        result.trajectory.block_until_ready()
+        result.status.block_until_ready()
+
+    assert int(np.asarray(result.status)) == 0
+    np.testing.assert_allclose(
+        np.asarray(result.trajectory[-1, 1:4]),
+        np.asarray([1.0, 0.02, 0.0]),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test_trace_fieldline_normalizes_mixed_eager_state_to_default_device():
+    """A nondefault eager leaf is explicitly normalized before tracing."""
+
+    devices = jax.devices()
+    if len(devices) < 2:
+        pytest.skip("requires at least two devices")
+    default_array = jax.device_put(np.asarray(0.0, dtype=np.float64))
+    default_device = next(iter(default_array.devices()))
+    nondefault_device = next(device for device in devices if device != default_device)
+    x_nondefault = jax.device_put(
+        np.asarray(1.0, dtype=np.float64),
+        nondefault_device,
+    )
+    spec = FieldlineTracingSpec(
+        tmax=0.02,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        dtmax=0.01,
+        max_steps=32,
+    )
+
+    with jax.transfer_guard("disallow"):
+        result = trace_fieldline(
+            spec,
+            (x_nondefault, 0.0, 0.0),
+            _strict_transfer_safe_unit_y_field,
+        )
+        result.trajectory.block_until_ready()
+        result.status.block_until_ready()
+
+    assert result.trajectory.devices() == {default_device}
+    assert int(np.asarray(result.status)) == 0
+    np.testing.assert_allclose(
+        np.asarray(result.trajectory[-1, 1:4]),
+        np.asarray([1.0, 0.02, 0.0]),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
 def test_trace_fieldline_jaxpr_uses_scan_and_supports_reverse_mode_ad():
     """The adaptive fieldline driver lowers to scan and remains differentiable."""
 
@@ -994,9 +1103,9 @@ def test_trajectory_batch_sharding_summary_surfaces_axis_contract():
 def test_trace_fieldline_batch_shard_map_matches_single_device_vmap(monkeypatch):
     """The trace-batch shard_map route preserves the unsharded vmap contract."""
 
-    devices = jax.devices("cpu")
+    devices = jax.devices()
     if len(devices) < 2:
-        pytest.skip("requires at least two CPU devices")
+        pytest.skip("requires at least two devices")
 
     field_fn = _toroidal_field_jax(R0=1.0, B0=0.7)
     spec = FieldlineTracingSpec(
@@ -1147,6 +1256,7 @@ def test_trace_fieldline_batch_shard_map_matches_single_device_vmap(monkeypatch)
         ],
         dtype=jnp.float64,
     )
+    boozer_zetas = jnp.asarray([0.0], dtype=jnp.float64)
 
     def run_boozer_guiding_centers():
         return trace_guiding_centers_boozer_batched(
@@ -1158,6 +1268,7 @@ def test_trace_fieldline_batch_shard_map_matches_single_device_vmap(monkeypatch)
             m=1.0,
             q=1.0,
             mode="vacuum",
+            zetas=boozer_zetas,
         )
 
     sharded_boozer = _run_trace_batch_with_config(
@@ -1165,12 +1276,57 @@ def test_trace_fieldline_batch_shard_map_matches_single_device_vmap(monkeypatch)
         config,
         run_boozer_guiding_centers,
     )
+    sharded_boozer.trajectory.block_until_ready()
+    sharded_boozer.phi_hits_count.block_until_ready()
+    assert sharded_boozer.trajectory.devices() == set(devices[:2])
     reference_boozer = _run_trace_batch_with_config(
         monkeypatch,
         None,
         run_boozer_guiding_centers,
     )
-    _assert_trace_batches_match(sharded_boozer, reference_boozer)
+    _assert_trace_batches_match(
+        sharded_boozer,
+        reference_boozer,
+        check_phi_hits_count=True,
+    )
+
+    classifier_sign = jax.device_put(
+        np.asarray(1.0, dtype=np.float64),
+        devices[0],
+    )
+
+    def classifier(points: jax.Array) -> jax.Array:
+        return jnp.broadcast_to(classifier_sign, (points.shape[0],))
+
+    def run_boozer_with_levelset():
+        return trace_guiding_centers_boozer_batched(
+            gc_spec,
+            boozer_y0s,
+            dtmaxs,
+            mus,
+            boozer_field,
+            m=1.0,
+            q=1.0,
+            mode="vacuum",
+            stopping_criteria=(LevelsetStoppingCriterion(classifier_fn=classifier),),
+        )
+
+    fallback_boozer = _run_trace_batch_with_config(
+        monkeypatch,
+        config,
+        run_boozer_with_levelset,
+    )
+    fallback_boozer.trajectory.block_until_ready()
+    assert fallback_boozer.trajectory.devices() == {devices[0]}
+    reference_fallback_boozer = _run_trace_batch_with_config(
+        monkeypatch,
+        None,
+        run_boozer_with_levelset,
+    )
+    _assert_trace_batches_match(
+        fallback_boozer,
+        reference_fallback_boozer,
+    )
 
 
 # ---------------------------------------------------------------------------
