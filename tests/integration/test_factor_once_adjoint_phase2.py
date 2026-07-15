@@ -26,8 +26,10 @@ on-device LS path that requires the simsoptpp-backed editable install.
 
 from __future__ import annotations
 
-import sys
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import jax
 import jax.numpy as jnp
@@ -39,6 +41,11 @@ jax.config.update("jax_enable_x64", True)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
+_FACTOR_DENSE_HESSIAN_BYTE_PARITY_SELECTOR = (
+    "tests/integration/test_factor_once_adjoint_phase2.py::"
+    "test_factor_dense_hessian_scipy_and_jax_branches_share_bytes"
+)
+_FACTOR_DENSE_HESSIAN_CPU_CHILD_ENV = "SIMSOPT_TEST_FACTOR_DENSE_HESSIAN_CPU_CHILD"
 _REPO_ROOT_STR = str(_REPO_ROOT)
 if _REPO_ROOT_STR not in sys.path:
     sys.path.insert(0, _REPO_ROOT_STR)
@@ -73,6 +80,34 @@ def _pivoting_hessian() -> jnp.ndarray:
             [1.0, 0.0, 0.0, 5.0],
         ],
         dtype=jnp.float64,
+    )
+
+
+def _run_factor_dense_hessian_byte_parity_on_cpu() -> subprocess.CompletedProcess[str]:
+    """Re-run this test selector in an exact CPU-only child process."""
+    env = dict(os.environ)
+    env["JAX_ENABLE_X64"] = "True"
+    env["JAX_PLATFORMS"] = "cpu"
+    env["PYTHONPATH"] = str(_SRC_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    env["SIMSOPT_BACKEND_MODE"] = "jax_cpu_parity"
+    env["SIMSOPT_BACKEND_STRICT"] = "1"
+    env[_FACTOR_DENSE_HESSIAN_CPU_CHILD_ENV] = "1"
+    env.pop("SIMSOPT_JAX_TRANSFER_GUARD", None)
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=1"
+    return subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            _FACTOR_DENSE_HESSIAN_BYTE_PARITY_SELECTOR,
+        ),
+        check=False,
+        capture_output=True,
+        cwd=_REPO_ROOT,
+        env=env,
+        text=True,
+        timeout=180,
     )
 
 
@@ -112,12 +147,45 @@ def test_factor_dense_hessian_scipy_and_jax_branches_share_bytes():
     regardless of the default backend; cross-vendor numerical equivalence is a
     separate concern not asserted here.
     """
-    with jax.default_device(jax.devices("cpu")[0]):
+    try:
+        cpu_device = jax.devices("cpu")[0]
+    except RuntimeError:
+        if os.environ.get(_FACTOR_DENSE_HESSIAN_CPU_CHILD_ENV) == "1":
+            raise
+        result = _run_factor_dense_hessian_byte_parity_on_cpu()
+        assert result.returncode == 0, (
+            "CPU subprocess failed byte-identical dense-Hessian factor proof.\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+        return
+
+    with jax.default_device(cpu_device):
         H = _spd_hessian(8, seed=42)
         lu_p, piv_p = opt_jax._factor_dense_hessian(H, optimizer_backend="scipy")
         lu_j, piv_j = opt_jax._factor_dense_hessian(H, optimizer_backend="ondevice")
         assert np.array_equal(np.asarray(lu_p), np.asarray(lu_j))
         assert np.array_equal(np.asarray(piv_p), np.asarray(piv_j))
+
+
+def test_factor_dense_hessian_cpu_child_failure_does_not_spawn_grandchild(
+    monkeypatch,
+):
+    """A failed CPU-only child reports its backend error without recursing."""
+
+    def fail_cpu_enumeration(platform):
+        assert platform == "cpu"
+        raise RuntimeError("sentinel CPU unavailable")
+
+    def forbid_subprocess_run(*_args, **_kwargs):
+        pytest.fail("CPU fallback child must not spawn a grandchild")
+
+    monkeypatch.setenv(_FACTOR_DENSE_HESSIAN_CPU_CHILD_ENV, "1")
+    monkeypatch.setattr(jax, "devices", fail_cpu_enumeration)
+    monkeypatch.setattr(subprocess, "run", forbid_subprocess_run)
+
+    with pytest.raises(RuntimeError, match="sentinel CPU unavailable"):
+        test_factor_dense_hessian_scipy_and_jax_branches_share_bytes()
 
 
 def test_factor_dense_hessian_returns_none_on_missing_input():

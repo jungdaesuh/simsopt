@@ -562,6 +562,8 @@ _NATIVE_CPU_REFERENCE_TEST_FILES = frozenset(
 
 _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
     {
+        "jax/solve/test_value_grad_contract.py::test_optax_lbfgs_uses_explicit_vjp_for_io_callback_value_grad",
+        "jax/solve/test_value_grad_contract.py::test_simsopt_bfgs_uses_explicit_value_grad_under_strict_transfer_guard",
         "geo/test_boozer_derivatives_jax.py::TestBoozerDirectCppOracles::",
         "geo/test_boozer_derivatives_jax.py::TestBoozerResidualJacobianComposed::test_jacobian_matches_cpp_dresidual_dc_oracle",
         "geo/test_boozer_derivatives_jax.py::TestBoozerHessianComposed::test_hessian_matches_cpp_boozer_residual_ds2_oracle",

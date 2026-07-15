@@ -353,8 +353,8 @@ def _float32_forward_error_problem():
     return matrix, matvec, rhs, true_solution_np
 
 
-def _float64_near_singular_forward_error_problem():
-    """Consistent float64 system whose residual hides a bad forward solution."""
+def _float64_near_singular_backward_stable_problem():
+    """Consistent float64 system beyond the dense condition-safety limit."""
     n = 8
     rng = np.random.default_rng(10)
     left, _ = np.linalg.qr(rng.standard_normal((n, n)))
@@ -369,7 +369,7 @@ def _float64_near_singular_forward_error_problem():
     def matvec(v):
         return matrix @ v
 
-    return matrix, matvec, rhs, true_solution_np
+    return matrix, matvec, rhs
 
 
 def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
@@ -636,20 +636,35 @@ def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
     ),
     ids=("lu", "lstsq"),
 )
-def test_float64_dense_status_fails_closed_on_near_singular_forward_error(solver):
-    """Tiny residual is not enough when float64 conditioning destroys the solution."""
-    matrix, matvec, rhs, true_solution = _float64_near_singular_forward_error_problem()
+def test_float64_dense_status_fails_closed_beyond_condition_safety_limit(solver):
+    """A backward-stable solve beyond the float64 condition cap must fail closed."""
+    matrix, matvec, rhs = _float64_near_singular_backward_stable_problem()
 
     solution, status = solver(matvec, rhs, tol=1.0e-12)
 
     condition_estimate = float(
         np.asarray(_optimizer._dense_matrix_condition_estimate(matrix))
     )
-    relative_error = np.linalg.norm(
-        np.asarray(solution) - true_solution
-    ) / np.linalg.norm(true_solution)
-    assert condition_estimate > 1.0e12
-    assert relative_error > 1.0e-4
+    condition_safety_limit = float(
+        np.asarray(
+            _optimizer._dense_matrix_nonsingular_threshold(
+                matrix.shape[0], matrix.dtype
+            )
+        )
+    )
+    backward_error_accepted = bool(
+        np.asarray(
+            _optimizer._dense_matrix_backward_error_success(
+                matrix,
+                solution,
+                rhs,
+                tol=1.0e-12,
+            )
+        )
+    )
+
+    assert backward_error_accepted
+    assert condition_estimate > condition_safety_limit
     assert not bool(status.success)
 
 

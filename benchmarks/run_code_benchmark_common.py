@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
+from itertools import combinations
 import os
 from pathlib import Path
 import subprocess
@@ -17,6 +19,7 @@ from benchmarks.validation_ladder_common import (
     current_compilation_cache_metadata,
     describe_compile_behavior,
 )
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_BENCHMARK_JAX_VERSION = os.environ.get(
@@ -33,11 +36,63 @@ SOLVER_VERBOSE = os.environ.get("SIMSOPT_BENCHMARK_SOLVER_VERBOSE", "").lower() 
 }
 
 
+@dataclass(frozen=True)
+class BenchmarkRepeatResult:
+    """One fresh solve's wall time and final solver outcome."""
+
+    elapsed_seconds: float
+    success: bool
+    iterations: int
+    final_fun: float
+    final_iota: float
+
+
+@dataclass(frozen=True)
+class BenchmarkTimingResult:
+    """Every timed fresh-solve repeat retained for diagnostics."""
+
+    repeats: tuple[BenchmarkRepeatResult, ...]
+
+    @property
+    def elapsed_seconds(self) -> tuple[float, ...]:
+        return tuple(repeat.elapsed_seconds for repeat in self.repeats)
+
+    @property
+    def median_seconds(self) -> float:
+        return float(np.median(self.elapsed_seconds))
+
+
+@dataclass(frozen=True)
+class BenchmarkBackendResult:
+    """Typed timings and solver outcomes for one optimizer backend."""
+
+    first_call: BenchmarkRepeatResult
+    least_squares_seconds: float
+    newton_seconds: float
+    stage_split: BenchmarkRepeatResult
+    timed_repeats: BenchmarkTimingResult
+
+
+@dataclass(frozen=True)
+class BenchmarkTimingRatioAssessment:
+    """Exploratory ratio for two internally comparable timed repeat sets."""
+
+    observed_ratio: float | None
+    time_reduction_percent: float | None
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BenchmarkTimingAssessment:
+    """Whether one timed repeat set has internally comparable outcomes."""
+
+    diagnostic_comparable: bool
+    reasons: tuple[str, ...]
+
+
 def _validate_requested_backends(backends: tuple[str, ...]) -> None:
     unknown = tuple(
-        backend
-        for backend in backends
-        if backend not in BENCHMARK_BACKEND_CHOICES
+        backend for backend in backends if backend not in BENCHMARK_BACKEND_CHOICES
     )
     if not unknown:
         return
@@ -213,6 +268,127 @@ def summarize_result_fun(res: dict) -> float:
     return 0.5 * float(np.mean(np.square(arr)))
 
 
+def summarize_benchmark_repeat(
+    elapsed_seconds: float,
+    res: dict,
+) -> BenchmarkRepeatResult:
+    """Pair one fresh-solve wall time with its claim-relevant outcome."""
+    return BenchmarkRepeatResult(
+        elapsed_seconds=elapsed_seconds,
+        success=bool(res["success"]),
+        iterations=int(res["iter"]),
+        final_fun=summarize_result_fun(res),
+        final_iota=float(res["iota"]),
+    )
+
+
+def _repeat_validity_reasons(
+    timing_result: BenchmarkTimingResult,
+    *,
+    role: str,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if not timing_result.repeats:
+        reasons.append(f"{role} has no timed repeats")
+    for repeat_index, repeat in enumerate(timing_result.repeats, start=1):
+        repeat_label = f"{role} repeat {repeat_index}"
+        if not repeat.success:
+            reasons.append(f"{repeat_label} solver did not converge")
+        if not np.isfinite(repeat.elapsed_seconds) or repeat.elapsed_seconds <= 0.0:
+            reasons.append(f"{repeat_label} wall time is not finite and positive")
+        if not np.isfinite(repeat.final_fun):
+            reasons.append(f"{repeat_label} final objective is not finite")
+        if not np.isfinite(repeat.final_iota):
+            reasons.append(f"{repeat_label} final iota is not finite")
+    return tuple(reasons)
+
+
+def _repeat_outcome_comparison_reasons(
+    repeat_results: tuple[BenchmarkRepeatResult, ...],
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+
+    tolerances = parity_ladder_tolerances("gpu-runtime")
+    whole_solve_rtol = float(tolerances["whole_solve_value_rtol"])
+    whole_solve_atol = float(tolerances["whole_solve_value_atol"])
+    final_fun_values = tuple(repeat.final_fun for repeat in repeat_results)
+    if all(np.isfinite(value) for value in final_fun_values) and not all(
+        np.isclose(
+            left,
+            right,
+            rtol=whole_solve_rtol,
+            atol=whole_solve_atol,
+        )
+        for left, right in combinations(final_fun_values, 2)
+    ):
+        reasons.append(
+            "repeat final objectives are not mutually comparable under the "
+            "whole-solve parity tolerance"
+        )
+
+    final_iota_values = tuple(repeat.final_iota for repeat in repeat_results)
+    if all(np.isfinite(value) for value in final_iota_values) and not all(
+        np.isclose(
+            left,
+            right,
+            rtol=whole_solve_rtol,
+            atol=whole_solve_atol,
+        )
+        for left, right in combinations(final_iota_values, 2)
+    ):
+        reasons.append(
+            "repeat final iotas are not mutually comparable under the "
+            "whole-solve parity tolerance"
+        )
+    return tuple(reasons)
+
+
+def assess_benchmark_timing(
+    timing_result: BenchmarkTimingResult,
+    *,
+    role: str,
+) -> BenchmarkTimingAssessment:
+    """Validate internal outcome comparability for one diagnostic timing set."""
+    reasons = _repeat_validity_reasons(timing_result, role=role)
+    reasons += _repeat_outcome_comparison_reasons(timing_result.repeats)
+    return BenchmarkTimingAssessment(
+        diagnostic_comparable=not reasons,
+        reasons=reasons,
+    )
+
+
+def assess_benchmark_diagnostic_ratio(
+    reference: BenchmarkTimingResult,
+    candidate: BenchmarkTimingResult,
+) -> BenchmarkTimingRatioAssessment:
+    """Return an exploratory within-process timing ratio when outcomes match.
+
+    Every repeat must converge with finite data, and all repeat objectives and
+    iotas must mutually agree under the checked-in whole-solve tolerance. This
+    diagnostic does not establish a performance claim: it has no independent
+    paired process blocks or confidence interval.
+    """
+    reasons = _repeat_validity_reasons(reference, role="reference")
+    reasons += _repeat_validity_reasons(candidate, role="candidate")
+    reasons += _repeat_outcome_comparison_reasons(reference.repeats + candidate.repeats)
+
+    if reasons:
+        return BenchmarkTimingRatioAssessment(
+            observed_ratio=None,
+            time_reduction_percent=None,
+            reasons=reasons,
+        )
+    observed_ratio = reference.median_seconds / candidate.median_seconds
+    time_reduction_percent = (
+        1.0 - candidate.median_seconds / reference.median_seconds
+    ) * 100.0
+    return BenchmarkTimingRatioAssessment(
+        observed_ratio=observed_ratio,
+        time_reduction_percent=time_reduction_percent,
+        reasons=(),
+    )
+
+
 def time_run_code(
     config: BenchmarkConfig, optimizer_backend: str, *, option_overrides=None
 ):
@@ -283,20 +459,19 @@ def benchmark_backend(
     *,
     repeats: int,
     option_overrides: dict | None = None,
-):
+) -> BenchmarkBackendResult:
     _progress(f"  backend={optimizer_backend}")
     compile_time, compile_res = time_run_code(
         config,
         optimizer_backend,
         option_overrides=option_overrides,
     )
-    ls_time, newton_time, _ = time_run_code_stage_split(
+    ls_time, newton_time, stage_res = time_run_code_stage_split(
         config,
         optimizer_backend,
         option_overrides=option_overrides,
     )
-    repeat_times = []
-    repeat_res = compile_res
+    repeat_results: list[BenchmarkRepeatResult] = []
     for repeat_index in range(repeats):
         _progress(
             f"    [{optimizer_backend}] repeat fresh solve {repeat_index + 1}/{repeats}"
@@ -306,9 +481,15 @@ def benchmark_backend(
             optimizer_backend,
             option_overrides=option_overrides,
         )
-        repeat_times.append(elapsed)
+        repeat_results.append(summarize_benchmark_repeat(elapsed, repeat_res))
     _progress(f"    [{optimizer_backend}] repeats finished")
-    return compile_time, ls_time, newton_time, np.asarray(repeat_times), repeat_res
+    return BenchmarkBackendResult(
+        first_call=summarize_benchmark_repeat(compile_time, compile_res),
+        least_squares_seconds=ls_time,
+        newton_seconds=newton_time,
+        stage_split=summarize_benchmark_repeat(ls_time + newton_time, stage_res),
+        timed_repeats=BenchmarkTimingResult(repeats=tuple(repeat_results)),
+    )
 
 
 def run_benchmarks(
@@ -321,7 +502,6 @@ def run_benchmarks(
 ) -> None:
     if repeats < 1:
         raise ValueError("repeats must be >= 1")
-    summaries: dict[str, dict[str, float]] = {}
 
     _progress(f"\n{'=' * 70}")
     _progress(title)
@@ -329,6 +509,11 @@ def run_benchmarks(
     _progress(
         "Diagnostic benchmark only: short solver budgets on a synthetic problem. "
         "Use benchmarks/run_code_parity_probe.py for CPU/JAX correctness parity."
+    )
+    _progress(
+        "Raw timings and matched-outcome ratios are exploratory within-process "
+        "diagnostics. Performance claims require independent paired process blocks, "
+        "scientific acceptance gates, and a preregistered confidence interval."
     )
 
     for config in configs:
@@ -340,18 +525,21 @@ def run_benchmarks(
         )
         _progress(f"{'=' * 70}")
 
-        backend_summary: dict[str, float] = {}
+        backend_summary: dict[str, BenchmarkTimingResult] = {}
         for optimizer_backend in backends:
-            compile_time, ls_time, newton_time, repeat_times, res = benchmark_backend(
+            backend_result = benchmark_backend(
                 config,
                 optimizer_backend,
                 repeats=repeats,
                 option_overrides=option_overrides,
             )
-            backend_summary[optimizer_backend] = float(np.median(repeat_times))
+            timing_result = backend_result.timed_repeats
+            backend_summary[optimizer_backend] = timing_result
+            repeat_times = np.asarray(timing_result.elapsed_seconds)
             _progress(
-                f"    first call:  {compile_time:.3f}s  "
-                f"success={res['success']}  iter={res['iter']}"
+                f"    first call:  {backend_result.first_call.elapsed_seconds:.3f}s  "
+                f"success={backend_result.first_call.success}  "
+                f"iter={backend_result.first_call.iterations}"
             )
             _progress(
                 f"    repeat fresh solve: {np.median(repeat_times) * 1e3:.1f}ms median, "
@@ -359,41 +547,47 @@ def run_benchmarks(
                 f"{np.std(repeat_times) * 1e3:.1f}ms"
             )
             _progress(
-                f"    stage split sample: LS {ls_time * 1e3:.1f}ms, "
-                f"Newton {newton_time * 1e3:.1f}ms"
+                "    stage split sample: LS "
+                f"{backend_result.least_squares_seconds * 1e3:.1f}ms, "
+                f"Newton {backend_result.newton_seconds * 1e3:.1f}ms  "
+                f"success={backend_result.stage_split.success}  "
+                f"iter={backend_result.stage_split.iterations}"
             )
-            _progress(
-                f"    final fun:   {summarize_result_fun(res):.6e}  "
-                f"iota={float(res['iota']):.6f}"
-            )
-            if not res["success"]:
+            for repeat_index, repeat in enumerate(timing_result.repeats, start=1):
                 _progress(
-                    "    warning: unconverged solve; treat timing as diagnostic only, "
-                    "not as a parity or replacement verdict"
+                    f"    repeat {repeat_index}: {repeat.elapsed_seconds * 1e3:.1f}ms  "
+                    f"success={repeat.success}  iter={repeat.iterations}  "
+                    f"fun={repeat.final_fun:.6e}  iota={repeat.final_iota:.6f}"
+                )
+            if not all(repeat.success for repeat in timing_result.repeats):
+                _progress(
+                    "    warning: at least one timed repeat did not converge; treat "
+                    "all repeat timings as diagnostic only"
                 )
 
-        summaries[config.label] = backend_summary
         if "scipy" in backend_summary and "ondevice" in backend_summary:
-            speedup = backend_summary["scipy"] / backend_summary["ondevice"]
-            _progress(f"  repeat fresh-solve speedup (ondevice/scipy): {speedup:.2f}x")
+            comparison = assess_benchmark_diagnostic_ratio(
+                backend_summary["scipy"],
+                backend_summary["ondevice"],
+            )
+            if comparison.observed_ratio is not None:
+                assert comparison.time_reduction_percent is not None
+                _progress(
+                    "  diagnostic timing ratio only (not a performance claim): "
+                    "scipy median / ondevice median = "
+                    f"{comparison.observed_ratio:.2f}x; ondevice time reduction "
+                    f"vs scipy = {comparison.time_reduction_percent:.2f}%"
+                )
+            else:
+                _progress(
+                    "  diagnostic timing ratio unavailable; timed outcomes are not "
+                    f"mutually comparable: {'; '.join(comparison.reasons)}"
+                )
     if "scipy" in backends and "ondevice" in backends:
-        break_even = next(
-            (
-                label
-                for label, values in summaries.items()
-                if values["ondevice"] <= values["scipy"]
-            ),
-            None,
-        )
         _progress(f"\n{'=' * 70}")
-        _progress("BREAK-EVEN SUMMARY")
+        _progress("DIAGNOSTIC TIMING STATUS")
         _progress(f"{'=' * 70}")
-        if break_even is None:
-            _progress(
-                "No tested configuration reached ondevice <= scipy repeat fresh-solve time."
-            )
-        else:
-            _progress(
-                "First tested configuration with ondevice <= scipy "
-                f"repeat fresh-solve time: {break_even}"
-            )
+        _progress(
+            "No performance or break-even verdict is emitted by this within-process "
+            "diagnostic benchmark."
+        )

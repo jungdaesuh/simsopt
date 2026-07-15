@@ -1,4 +1,4 @@
-import contextlib
+from importlib.metadata import version as package_version
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +18,104 @@ from simsopt_jax.solve import (
     ScipyBFGSOptions,
     SimsoptBFGSOptions,
 )
+
+
+_OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_VERSION = "0.1.0"
+_OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_REASON = (
+    f"Optimistix {_OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_VERSION} and upstream "
+    "main _iterate.py route solver status through "
+    "Equinox _enum.py comparisons and where(), whose ensure_compile_time_eval path "
+    "captures CUDA scalar status/predicate arrays during cold compilation."
+)
+
+
+def _optimistix_lm_gpu_full_transfer_guard_xfail_applies(
+    *, default_backend: str, optimistix_version: str
+) -> bool:
+    return (
+        default_backend == "gpu"
+        and optimistix_version == _OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_VERSION
+    )
+
+
+def _optimistix_lbfgs_gpu_full_transfer_guard_xfail_applies(
+    *, gpu_available: bool, optimistix_version: str
+) -> bool:
+    return (
+        gpu_available
+        and optimistix_version == _OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_VERSION
+    )
+
+
+def _optimistix_gpu_available() -> bool:
+    try:
+        return bool(jax.devices("gpu"))
+    except RuntimeError:
+        return False
+
+
+_INSTALLED_OPTIMISTIX_VERSION = package_version("optimistix")
+_OPTIMISTIX_LM_GPU_FULL_TRANSFER_GUARD_XFAIL_APPLIES = (
+    _optimistix_lm_gpu_full_transfer_guard_xfail_applies(
+        default_backend=jax.default_backend(),
+        optimistix_version=_INSTALLED_OPTIMISTIX_VERSION,
+    )
+)
+_OPTIMISTIX_LBFGS_GPU_FULL_TRANSFER_GUARD_XFAIL_APPLIES = (
+    _optimistix_lbfgs_gpu_full_transfer_guard_xfail_applies(
+        gpu_available=_optimistix_gpu_available(),
+        optimistix_version=_INSTALLED_OPTIMISTIX_VERSION,
+    )
+)
+
+
+def _assert_known_optimistix_gpu_transfer_guard_failure(
+    error: jax.errors.JaxRuntimeError,
+) -> None:
+    message = str(error)
+    assert "Disallowed device-to-host transfer: shape=()" in message
+    assert "device=cuda:" in message
+    assert "dtype=S32" in message or "dtype=PRED" in message
+
+
+@pytest.mark.parametrize(
+    ("default_backend", "optimistix_version", "expected"),
+    [
+        ("gpu", "0.1.0", True),
+        ("cpu", "0.1.0", False),
+        ("gpu", "0.1.1", False),
+    ],
+)
+def test_optimistix_lm_gpu_full_transfer_guard_xfail_is_release_scoped(
+    default_backend, optimistix_version, expected
+):
+    assert (
+        _optimistix_lm_gpu_full_transfer_guard_xfail_applies(
+            default_backend=default_backend,
+            optimistix_version=optimistix_version,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("gpu_available", "optimistix_version", "expected"),
+    [
+        (True, "0.1.0", True),
+        (False, "0.1.0", False),
+        (True, "0.1.1", False),
+    ],
+)
+def test_optimistix_lbfgs_gpu_full_transfer_guard_xfail_is_release_scoped(
+    gpu_available, optimistix_version, expected
+):
+    assert (
+        _optimistix_lbfgs_gpu_full_transfer_guard_xfail_applies(
+            gpu_available=gpu_available,
+            optimistix_version=optimistix_version,
+        )
+        is expected
+    )
 
 
 def test_scipy_driver_passes_host_numpy_array_to_value_grad():
@@ -309,20 +407,32 @@ def test_optimistix_driver_runs_under_strict_host_to_device_transfer_guard():
     assert result.x.shape == (2,)
 
 
+@pytest.mark.xfail(
+    condition=_OPTIMISTIX_LM_GPU_FULL_TRANSFER_GUARD_XFAIL_APPLIES,
+    raises=jax.errors.JaxRuntimeError,
+    strict=True,
+    reason=_OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_REASON,
+)
 def test_optimistix_driver_runs_under_strict_transfer_guard():
     dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
     x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype))
 
-    with jax.transfer_guard("disallow"):
-        result = least_squares(
-            lambda x: x,
-            x0,
-            driver=Driver.OPTIMISTIX_LM,
-            options=OptimistixLMOptions(
-                maxiter=1,
-                materialize_dense_linearization=False,
-            ),
-        )
+    try:
+        with jax.transfer_guard("disallow"):
+            result = least_squares(
+                lambda x: x,
+                x0,
+                driver=Driver.OPTIMISTIX_LM,
+                options=OptimistixLMOptions(
+                    maxiter=1,
+                    materialize_dense_linearization=False,
+                ),
+            )
+    except jax.errors.JaxRuntimeError as error:
+        if jax.default_backend() != "gpu":
+            raise
+        _assert_known_optimistix_gpu_transfer_guard_failure(error)
+        raise
 
     assert result.driver is Driver.OPTIMISTIX_LM
     assert result.x.shape == (2,)
@@ -346,12 +456,10 @@ def test_optimistix_lbfgs_runs_under_strict_host_to_device_transfer_guard():
 
 
 @pytest.mark.xfail(
+    condition=_OPTIMISTIX_LBFGS_GPU_FULL_TRANSFER_GUARD_XFAIL_APPLIES,
     raises=jax.errors.JaxRuntimeError,
     strict=True,
-    reason=(
-        "Optimistix/Equinox scalar predicate handling is not CUDA "
-        "device-to-host transfer clean under full jax.transfer_guard('disallow')."
-    ),
+    reason=_OPTIMISTIX_GPU_FULL_TRANSFER_GUARD_XFAIL_REASON,
 )
 def test_optimistix_lbfgs_gpu_full_transfer_guard_upstream_predicate_xfail():
     try:
@@ -362,17 +470,24 @@ def test_optimistix_lbfgs_gpu_full_transfer_guard_upstream_predicate_xfail():
     x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=dtype), device)
     two = jax.device_put(np.asarray(2.0, dtype=dtype), device)
 
-    with jax.transfer_guard("disallow"):
-        minimize(
-            lambda x: (jnp.vdot(x, x), two * x),
-            x0,
-            driver=Driver.OPTIMISTIX_LBFGS,
-            options=OptimistixLBFGSOptions(maxiter=1),
-        )
+    try:
+        with jax.transfer_guard("disallow"):
+            minimize(
+                lambda x: (jnp.vdot(x, x), two * x),
+                x0,
+                driver=Driver.OPTIMISTIX_LBFGS,
+                options=OptimistixLBFGSOptions(maxiter=1),
+            )
+    except jax.errors.JaxRuntimeError as error:
+        _assert_known_optimistix_gpu_transfer_guard_failure(error)
+        raise
 
 
-def test_optimistix_metadata_uses_host_to_device_transfer_guard(monkeypatch):
-    events = []
+def test_optimistix_metadata_explicitly_materializes_result(monkeypatch):
+    device_result = jax.device_put(dispatch.optx.RESULTS.successful)
+    strict_transfer_guard = jax.transfer_guard("disallow")
+    materialized = []
+    real_device_get = minimize_runtime.jax.device_get
 
     def broad_transfer_guard(_level):
         raise AssertionError("optimistix metadata must not use broad transfer_guard")
@@ -382,10 +497,14 @@ def test_optimistix_metadata_uses_host_to_device_transfer_guard(monkeypatch):
             "optimistix metadata must not allow device-to-host broadly"
         )
 
-    @contextlib.contextmanager
-    def host_to_device_transfer_guard(level):
-        events.append(level)
-        yield
+    def host_to_device_transfer_guard(_level):
+        raise AssertionError(
+            "optimistix metadata must not allow host-to-device transfers"
+        )
+
+    def recording_device_get(result):
+        materialized.append(result)
+        return real_device_get(result)
 
     monkeypatch.setattr(dispatch.jax, "transfer_guard", broad_transfer_guard)
     monkeypatch.setattr(
@@ -398,15 +517,18 @@ def test_optimistix_metadata_uses_host_to_device_transfer_guard(monkeypatch):
         "transfer_guard_host_to_device",
         host_to_device_transfer_guard,
     )
+    monkeypatch.setattr(minimize_runtime.jax, "device_get", recording_device_get)
 
-    successful, result_text, result_message = dispatch._optimistix_result_metadata(
-        dispatch.optx.RESULTS.successful,
-    )
+    with strict_transfer_guard:
+        successful, result_text, result_message = dispatch._optimistix_result_metadata(
+            device_result,
+        )
 
     assert successful is True
     assert result_text
     assert result_message == ""
-    assert events == ["allow"]
+    assert len(materialized) == 1
+    assert materialized[0] is device_result
 
 
 def test_optimistix_success_uses_zero_status():
