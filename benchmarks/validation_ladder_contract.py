@@ -380,7 +380,7 @@ GROUPED_ADJOINT_MEMORY_BUDGETS: dict[str, dict[str, dict[str, float | None]]] = 
     }
 }
 
-# Stage 2 floors mirror docs/source/jax_acceptance.rst.
+# Stable-hardware Stage 2 performance floors.
 TIER5_PERFORMANCE_BUDGETS: dict[str, dict[str, dict[str, float | None]]] = {
     "stable_hardware_weekly": {
         "tier2_stage2_e2e": {
@@ -432,7 +432,7 @@ EVIDENCE_ARTIFACT_COMPILE_SCOPES: dict[str, str] = {
         "Local CPU cold-compile timing for a target-lane least-squares method. "
         "Records elapsed seconds after ``jax.clear_caches()`` with explicit "
         "result synchronization. Does NOT certify CUDA first-compile "
-        "performance — that gate is governed by ``docs/source/jax_acceptance.rst``."
+        "performance or the stable-hardware performance budget."
     ),
 }
 

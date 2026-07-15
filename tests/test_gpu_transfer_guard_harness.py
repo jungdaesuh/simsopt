@@ -84,6 +84,12 @@ def test_stale_signoff_default_dry_run_inventory_is_current(tmp_path):
     assert summary["missing_integration_paths"] == 0
     assert summary["focused_abort_repro_selectors_with_missing_paths"] == []
     assert summary["focused_lane_selectors_with_missing_paths"] == []
+    assert Path(summary["batch_paths_dir"]).relative_to(REPO_ROOT) == Path(
+        "tests/data/jax_gpu_signoff/batches"
+    )
+    assert "new_failed_selector_count" not in summary
+    assert not (tmp_path / "failed_selector_comparison.json").exists()
+    assert not (tmp_path / "failed_selector_comparison.md").exists()
     assert summary["failures"] == []
 
 
