@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed CUDA rerun harness for the 2026-06-05 stale-test cleanup plan."""
+"""Fail-closed CUDA integration signoff for the JAX backend."""
 
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-_DEFAULT_INTEGRATION_PATHS = Path("docs/jax_gpu_integration_test_paths_2026-06-05.txt")
-_DEFAULT_BATCH_PATHS_DIR = Path("docs/jax_gpu_integration_batches_2026-06-05")
-_DEFAULT_BASELINE_SELECTORS = Path("docs/jax_gpu_failed_selectors_2026-06-05.txt")
+_DEFAULT_INTEGRATION_PATHS = Path(
+    "tests/data/jax_gpu_signoff/integration_test_paths.txt"
+)
+_DEFAULT_BATCH_PATHS_DIR = Path("tests/data/jax_gpu_signoff/batches")
 _DEFAULT_RESULTS_DIR = Path(".artifacts/jax_gpu_failed_stale_tests_signoff")
 _DEFAULT_CHUNK_COUNT = 21
 _DEFAULT_TIMEOUT_SECONDS = 7200
@@ -495,56 +496,6 @@ def _write_selectors(
     path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
 
 
-def _selector_rows(path: Path) -> set[str]:
-    rows: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#") or line.startswith("batch\t"):
-            continue
-        rows.add(line)
-    return rows
-
-
-def _write_selector_comparison(
-    *,
-    baseline_path: Path,
-    current_path: Path,
-    json_path: Path,
-    markdown_path: Path,
-) -> tuple[int, int]:
-    baseline_rows = _selector_rows(baseline_path)
-    current_rows = _selector_rows(current_path)
-    cleared = sorted(baseline_rows - current_rows)
-    new = sorted(current_rows - baseline_rows)
-    payload: dict[str, object] = {
-        "baseline_path": str(baseline_path),
-        "current_path": str(current_path),
-        "baseline_count": len(baseline_rows),
-        "current_count": len(current_rows),
-        "cleared_count": len(cleared),
-        "new_count": len(new),
-        "cleared": cleared,
-        "new": new,
-    }
-    json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    markdown_path.write_text(
-        "\n".join(
-            (
-                "# JAX GPU Failed Selector Comparison",
-                "",
-                f"- Baseline selectors: `{len(baseline_rows)}`",
-                f"- Current selectors: `{len(current_rows)}`",
-                f"- Cleared selectors: `{len(cleared)}`",
-                f"- New selectors: `{len(new)}`",
-                "",
-                "See the JSON artifact for selector-level rows.",
-                "",
-            )
-        ),
-        encoding="utf-8",
-    )
-    return len(current_rows), len(new)
-
-
 def _write_stale_failure_hits(
     selectors: list[SelectorFailure],
     output_path: Path,
@@ -619,10 +570,7 @@ def _pytest_command(
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run the CUDA proof packet for "
-            "docs/jax_gpu_failed_stale_tests_impl_plan_2026-06-05.md."
-        )
+        description="Run the fail-closed CUDA integration proof packet."
     )
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument(
@@ -640,11 +588,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--batch-paths-dir",
         type=Path,
         default=_DEFAULT_BATCH_PATHS_DIR,
-    )
-    parser.add_argument(
-        "--baseline-selectors",
-        type=Path,
-        default=_DEFAULT_BASELINE_SELECTORS,
     )
     parser.add_argument("--chunk-count", type=int, default=_DEFAULT_CHUNK_COUNT)
     parser.add_argument("--timeout-seconds", type=int, default=_DEFAULT_TIMEOUT_SECONDS)
@@ -673,10 +616,6 @@ def main(argv: list[str]) -> int:
     batch_paths_dir = args.batch_paths_dir
     if not batch_paths_dir.is_absolute():
         batch_paths_dir = repo / batch_paths_dir
-    baseline_selectors = args.baseline_selectors
-    if not baseline_selectors.is_absolute():
-        baseline_selectors = repo / baseline_selectors
-
     results_dir.mkdir(parents=True, exist_ok=True)
     if not args.skip_clean_check and not args.dry_run:
         _require_clean_worktree(repo)
@@ -799,7 +738,10 @@ def main(argv: list[str]) -> int:
         results_dir / "focused_lane_selectors_with_missing_paths.txt",
         focused_lane_selectors_with_missing_paths,
     )
-    if focused_repro_selectors_with_missing_paths and args.missing_path_policy == "fail":
+    if (
+        focused_repro_selectors_with_missing_paths
+        and args.missing_path_policy == "fail"
+    ):
         failures.append(
             f"{len(focused_repro_selectors_with_missing_paths)} focused abort "
             "repro selector paths are missing; rerun on the integration branch or use "
@@ -891,12 +833,7 @@ def main(argv: list[str]) -> int:
         str(batch_dir / "batch_*.xml"),
         current_selectors,
     )
-    current_count, new_count = _write_selector_comparison(
-        baseline_path=baseline_selectors,
-        current_path=current_selector_path,
-        json_path=results_dir / "failed_selector_comparison.json",
-        markdown_path=results_dir / "failed_selector_comparison.md",
-    )
+    current_count = len(current_selectors)
     stale_hit_count = _write_stale_failure_hits(
         current_selectors,
         results_dir / "stale_failure_hits.tsv",
@@ -912,8 +849,6 @@ def main(argv: list[str]) -> int:
             )
     if current_count:
         failures.append(f"{current_count} integration failed/error selectors remain")
-    if new_count:
-        failures.append(f"{new_count} new selectors are not in the June 5 baseline")
     if stale_hit_count:
         failures.append(f"{stale_hit_count} selectors still match stale-owner patterns")
 
@@ -944,7 +879,6 @@ def main(argv: list[str]) -> int:
         "integration_focused_lane_deselect_count": focused_lane_deselected_count,
         "batch_paths_dir": str(batch_paths_dir),
         "current_failed_selector_count": current_count,
-        "new_failed_selector_count": new_count,
         "stale_failure_hit_count": stale_hit_count,
         "records": [
             {

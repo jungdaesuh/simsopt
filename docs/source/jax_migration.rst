@@ -1,111 +1,141 @@
 JAX Backend Migration Guide
 ===========================
 
-This page documents the mapping between CPU (simsoptpp) APIs and their
-JAX equivalents for callers migrating to the JAX code path.
+The JAX backend coexists with SIMSOPT's native CPU implementation.  Existing
+CPU APIs remain the default and the correctness reference.  Applications can
+adopt JAX one boundary at a time instead of converting an entire optimization
+workflow at once.
 
-The JAX modules do **not** replace the CPU modules.  Both coexist.
-The CPU path remains the default and the correctness oracle.
+Adapter APIs
+------------
 
-The trusted least-squares backend remains the native CPU/reference lane
-with ``optimizer_backend="scipy"``.
-High-level JAX backend flows default to ``optimizer_backend="scipy-jax"``:
-SciPy keeps host control of L-BFGS-B while the objective and inner Boozer solve
-run through the JAX target-lane value/grad path. Explicit ``ondevice`` and
-``scipy-jax-fullgraph`` remain available for target-lane stress tests, but CPU
-``ondevice`` is memory-intensive and emits a warning.
-
-Stage 2 (Field + Flux Objective)
---------------------------------
+The compatibility adapters preserve SIMSOPT's host-side ``Optimizable``
+interfaces while delegating numerical work to JAX:
 
 .. list-table::
    :header-rows: 1
-   :widths: 40 40 20
+   :widths: 31 31 38
 
-   * - CPU API
-     - JAX Equivalent
-     - Module
-   * - ``BiotSavart(coils)``
-     - ``BiotSavartJAX(coils)``
-     - ``simsopt.field``
-   * - ``bs.B()``
-     - ``bs_jax.B()``
-     - same API
-   * - ``bs.dB_by_dX()``
-     - ``bs_jax.dB_by_dX()``
-     - same API
-   * - ``bs.B_vjp(v)``
-     - ``bs_jax.B_vjp(v)``
-     - same API
-   * - ``SquaredFlux(surf, bs)``
-     - ``SquaredFluxJAX(surf, bs_jax)``
-     - ``simsopt.objectives``
-   * - ``sopp.integral_BdotN(…)``
-     - ``integral_BdotN_jax(…)``
-     - ``simsopt.objectives.integral_bdotn_jax``
+   * - Native CPU API
+     - JAX adapter
+     - Import module
+   * - ``BiotSavart``
+     - ``BiotSavartJAX``
+     - ``simsopt_jax_adapters.field.biotsavart_backend``
+   * - ``SquaredFlux``
+     - ``SquaredFluxJAX``
+     - ``simsopt_jax_adapters.objectives.flux``
+   * - ``BoozerSurface``
+     - ``BoozerSurfaceJAX``
+     - ``simsopt_jax_adapters.geo.boozer_surface``
+   * - ``BoozerResidual``
+     - ``BoozerResidualJAX``
+     - ``simsopt_jax_adapters.geo.surface_objectives``
+   * - ``Iotas``
+     - ``IotasJAX``
+     - ``simsopt_jax_adapters.geo.surface_objectives``
+   * - ``NonQuasiSymmetricRatio``
+     - ``NonQuasiSymmetricRatioJAX``
+     - ``simsopt_jax_adapters.geo.surface_objectives``
 
-Single-Stage (Boozer Solver + Objectives)
------------------------------------------
+For example::
+
+    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+    from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+    bs_jax = BiotSavartJAX(coils)
+    objective = SquaredFluxJAX(surface, bs_jax)
+
+The adapter layer is the normal migration path for an application that already
+uses ``Optimizable`` objects.  The lower-level ``simsopt_jax.core`` package
+provides immutable PyTrees and pure numerical functions for code that can stay
+inside transformations such as ``jax.jit``, ``jax.grad``, and ``jax.vmap``.
+
+State boundaries
+----------------
+
+JAX transformations require explicit, traceable state.  Mutable host objects
+therefore cross a boundary before compiled work begins:
+
+* host ``Optimizable`` objects continue to own dependencies and degrees of
+  freedom;
+* adapters snapshot the required values into immutable arrays or frozen
+  PyTrees;
+* compiled functions consume that explicit state without reading or mutating
+  the live host graph;
+* a changed host object requires a new snapshot or adapter evaluation.
+
+The same rule applies to VMEC diagnostics.  Use ``vmec_freeze_splines`` from
+``simsopt_jax_adapters.mhd.vmec_diagnostics`` to create the frozen spline state
+passed to JAX diagnostic kernels.
+
+Optimizer lanes
+---------------
+
+The native ``optimizer_backend="scipy"`` lane remains the CPU reference.  JAX
+workflows can select among these control strategies where the objective
+supports them:
 
 .. list-table::
    :header-rows: 1
-   :widths: 40 40 20
+   :widths: 33 67
 
-   * - CPU API
-     - JAX Equivalent
-     - Module
-   * - ``BoozerSurface(bs, surf, label, target, cw)``
-     - ``BoozerSurfaceJAX(bs_jax, surf, label, target, cw)``
-     - ``simsopt.geo``
-   * - ``booz.run_code(iota, G)``
-     - ``booz_jax.run_code(iota, G)``
-     - same API
-   * - ``BoozerResidual(booz, bs)``
-     - ``BoozerResidualJAX(booz_jax, bs_jax)``
-     - ``simsopt.geo``
-   * - ``Iotas(booz)``
-     - ``IotasJAX(booz_jax)``
-     - ``simsopt.geo``
-   * - ``NonQuasiSymmetricRatio(booz, bs)``
-     - ``NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)``
-     - ``simsopt.geo``
+   * - Backend
+     - Control model
+   * - ``scipy-jax``
+     - SciPy controls L-BFGS-B on the host; JAX evaluates target-lane values
+       and gradients.
+   * - ``scipy-jax-fullgraph``
+     - SciPy retains host control while JAX evaluates the full traceable
+       objective graph.
+   * - ``ondevice``
+     - The supported optimization loop executes through JAX control flow on
+       the target device.
+   * - ``optax-lbfgs``
+     - Optional Optax L-BFGS target lane.
+   * - ``optimistix-lbfgs``
+     - Optional Optimistix L-BFGS target lane.
 
-Internal APIs (No Direct Replacement Needed)
----------------------------------------------
+Choose an optimizer lane explicitly and verify that the objective supports its
+traceability contract.  Host callbacks, Python mutation, and implicit NumPy
+conversion cannot occur inside a compiled on-device loop.
 
-These simsoptpp internals are replaced by JAX autodiff and do not need
-to be called directly:
+VJP callback convention
+-----------------------
 
-.. list-table::
-   :header-rows: 1
-   :widths: 50 50
+JAX Boozer-surface VJP callbacks stored in ``result["vjp"]`` accept
+``(lm, booz_surf, iota, G)``.  This differs from the native CPU callback
+``(lm, booz_surf)`` because the JAX callback constructs its decision state
+from explicit arguments instead of reading mutable solver state.
 
-   * - CPU Internal
-     - JAX Replacement
-   * - ``sopp.biot_savart_vjp_graph(…)``
-     - ``jax.vjp`` through ``biot_savart_B``
-   * - ``boozer_surface_residual_dB(…)``
-     - ``jax.grad`` through ``boozer_residual_scalar``
-   * - ``boozer_surface_dlsqgrad_dcoils_vjp(…)``
-     - ``_boozer_ls_coil_vjp()`` via ``jax.vjp``
-   * - ``boozer_surface_dexactresidual_dcoils_dcurrents_vjp(…)``
-     - ``_boozer_exact_coil_vjp()`` via ``jax.vjp``
+Tracing and MPI
+---------------
 
-VJP Calling Convention Change
------------------------------
+JAX-compatible field-line tracing adapters are available in
+``simsopt_jax_adapters.field.tracing``.  They do not imply that every native
+tracing option or callback is traceable; validate the specific operation used
+by an application.
 
-The JAX VJP hooks stored in ``res['vjp']`` have signature
-``(lm, booz_surf, iota, G)``, **not** the CPU signature ``(lm, booz_surf)``.
-This is because JAX VJPs construct the decision vector from explicit args
-rather than reading ``booz_surf`` internal state.
+``least_squares_mpi_solve_jax`` in ``simsopt_jax_adapters.solve.mpi`` supports
+``TraceableLeastSquaresProblem`` with MPI-distributed finite-difference
+Jacobian columns and a SciPy solve on rank zero.  It is a scoped MPI path, not
+a claim that every JAX adapter can execute under MPI.
 
-What Is NOT Changing
---------------------
+Migration checklist
+-------------------
 
-- The ``Optimizable`` dependency graph and ``need_to_run_code`` semantics
-  are preserved.
-- ``Coil``, ``Current``, ``CurveXYZFourier`` and all curve classes remain
-  CPU-only.  The JAX path reads coil geometry from these objects at the
-  ``run_code()`` boundary.
-- MPI support is not part of the JAX lane (v1 is single-process).
-- Field-line tracing (``simsopt.field.tracing``) is not ported.
+#. Keep a native CPU run as the numerical reference.
+#. Select a JAX runtime mode before importing JAX-heavy modules.
+#. Replace one native object with its adapter and compare values and
+   derivatives in FP64.
+#. Move immutable numerical state into ``simsopt_jax.core`` only when the
+   workflow benefits from a larger compiled region.
+#. Measure first-call compilation, steady-state time, device transfers, and
+   peak memory separately.
+#. Expand the migrated boundary only after the representative optimization
+   trajectory remains within the application's tolerances.
+
+Not every mutable SIMSOPT object or third-party callback has a traceable JAX
+equivalent.  Falling back to the native CPU path at a documented host boundary
+is supported; silently mixing host work into a supposedly compiled region is
+not.
