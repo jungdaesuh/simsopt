@@ -16,6 +16,8 @@
 set -euo pipefail
 
 module load python/3.13-26.1.0
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
 PROFILE="${PROFILE:-pilot}"
@@ -898,7 +900,6 @@ SOURCE_SHA="$(<"${MACHINE_ROOT}/git_commit.txt")"
 SOURCE_TREE="$(<"${MACHINE_ROOT}/git_tree.txt")"
 python -m venv "${VENV_DIR}"
 printf '%s\n' "${VENV_DIR}" > "${MACHINE_ROOT}/venv_path.txt"
-export PYTHONNOUSERSITE=1
 
 if [[ "${PROFILE}" == "pilot" ]]; then
     "${VENV_DIR}/bin/python" -m pip install --upgrade \
