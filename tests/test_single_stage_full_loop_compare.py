@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import math
 import os
@@ -11,6 +13,7 @@ import sys
 
 import pytest
 
+import benchmarks.single_stage_full_loop_compare as full_loop_compare
 from benchmarks.single_stage_full_loop_compare import (
     ComparisonTolerances,
     ContractError,
@@ -50,6 +53,76 @@ LAUNCHER_PATH = (
 INTERPRETER_PROBE_PATH = (
     Path(__file__).resolve().parent / "subprocess" / "full_loop_interpreter_probe.py"
 )
+FAKE_PYTHON_PATH = (
+    Path(__file__).resolve().parent / "subprocess" / "full_loop_fake_python.py"
+)
+COMPARATOR_PATH = LAUNCHER_PATH.parents[1] / "single_stage_full_loop_compare.py"
+THREE_LANES = ("native_cpu", "jax_cpu", "jax_gpu")
+THREE_NODES = {
+    "native_cpu": "nid000101",
+    "jax_cpu": "nid000202",
+    "jax_gpu": "nid000303",
+}
+
+
+def _install_fake_python(tmp_path: Path) -> Path:
+    fake_python = tmp_path / "shared" / "venv" / "bin" / "python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_bytes(FAKE_PYTHON_PATH.read_bytes())
+    fake_python.chmod(0o755)
+    return fake_python
+
+
+def _launcher_python_heredoc(containing: str) -> str:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    blocks = re.findall(r"(?ms)<<'PY'[^\n]*\n(.*?)^PY$", source)
+    matches = [block for block in blocks if containing in block.splitlines()]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _prepare_arguments(
+    *,
+    tmp_path: Path,
+    output_root: Path,
+    python: Path,
+    nodes: dict[str, str] | None = None,
+) -> list[str]:
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir(exist_ok=True)
+    input_paths = {
+        "surface": seed_root / "surface.json",
+        "biotsavart": seed_root / "biotsavart.json",
+        "boozer": seed_root / "boozer.json",
+    }
+    for input_path in input_paths.values():
+        input_path.write_text("{}\n", encoding="utf-8")
+    assigned_nodes = THREE_NODES if nodes is None else nodes
+    return [
+        "prepare",
+        "--python",
+        str(python),
+        "--surface-path",
+        str(input_paths["surface"]),
+        "--biotsavart-file",
+        str(input_paths["biotsavart"]),
+        "--boozer-state-path",
+        str(input_paths["boozer"]),
+        "--output-root",
+        str(output_root),
+        "--environment-lock-sha256",
+        "e" * 64,
+        "--iota-target",
+        "0.15",
+        "--maxiter",
+        "1",
+        "--native-cpu-node",
+        assigned_nodes["native_cpu"],
+        "--jax-cpu-node",
+        assigned_nodes["jax_cpu"],
+        "--jax-gpu-node",
+        assigned_nodes["jax_gpu"],
+    ]
 
 
 def _run_interpreter_probe(
@@ -181,7 +254,7 @@ def _lane_payload(
             "mixed_precision": False,
             "adjoint_acceptance_policy": (
                 "checked-residual-and-condition"
-                if backend == "jax-cuda"
+                if backend in {"jax-cpu", "jax-cuda"}
                 else "native-plu-finite-gradient"
             ),
             "inactive_term_requirements": {"coil_surface_distance": 0.0},
@@ -215,6 +288,151 @@ def _lane_payload(
             "nit": 9,
             "nfev": 12,
             "rejected_evaluations": rejected_evaluations,
+        },
+    }
+
+
+def _prepare_three_lane_probe(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nodes: dict[str, str] | None = None,
+) -> tuple[Path, Path]:
+    output_root = tmp_path / "pair"
+    fake_python = _install_fake_python(tmp_path)
+    clean_identity = full_loop_compare.SourceIdentity(
+        commit_sha="1" * 40,
+        tree_sha="2" * 40,
+        status_porcelain="",
+    )
+    monkeypatch.setattr(
+        full_loop_compare,
+        "source_identity",
+        lambda _repo_root: clean_identity,
+    )
+    returncode = full_loop_compare.main(
+        _prepare_arguments(
+            tmp_path=tmp_path,
+            output_root=output_root,
+            python=fake_python,
+            nodes=nodes,
+        )
+    )
+    assert returncode == 0
+    return output_root, fake_python
+
+
+def _write_three_lane_result_templates(output_root: Path, tmp_path: Path) -> Path:
+    manifest = json.loads(
+        (output_root / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    results_root = tmp_path / "probe-results"
+    results_root.mkdir()
+    backends = {
+        "native_cpu": "native-simsopt-cpu",
+        "jax_cpu": "jax-cpu",
+        "jax_gpu": "jax-cuda",
+    }
+    for lane, backend in backends.items():
+        payload = _lane_payload(
+            backend=backend,
+            input_sha256=manifest["input_sha256"],
+        )
+        payload["run_config_sha256"] = manifest["run_config_sha256"]
+        (results_root / f"{lane}.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return results_root
+
+
+def _run_three_lane_probe(
+    *,
+    output_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, int]:
+    results_root = _write_three_lane_result_templates(output_root, tmp_path)
+
+    def fake_step_identity(assigned_node: str) -> full_loop_compare.StepIdentity:
+        return full_loop_compare.StepIdentity(
+            assigned_node=assigned_node,
+            actual_node=assigned_node,
+            slurm_job_id="12345",
+            slurm_step_id=f"step-{assigned_node}",
+            slurm_step_nodelist=assigned_node,
+            slurm_step_num_nodes="1",
+            slurm_node_id="0",
+            slurm_process_id="0",
+        )
+
+    monkeypatch.setattr(full_loop_compare, "_raw_step_identity", fake_step_identity)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-7")
+    monkeypatch.setenv("FULL_LOOP_PROBE_RESULTS_ROOT", str(results_root))
+    monkeypatch.setenv("FULL_LOOP_PROBE_HOLD_SECONDS", "0.3")
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            lane: executor.submit(
+                full_loop_compare.main,
+                ["run-lane", "--output-root", str(output_root), "--lane", lane],
+            )
+            for lane in THREE_LANES
+        }
+        return {lane: future.result(timeout=15) for lane, future in futures.items()}
+
+
+def _adjudicate_three_lane_probe(output_root: Path) -> int:
+    return full_loop_compare.main(
+        [
+            "adjudicate",
+            "--output-root",
+            str(output_root),
+            "--native-cpu-returncode",
+            "0",
+            "--jax-cpu-returncode",
+            "0",
+            "--jax-gpu-returncode",
+            "0",
+        ]
+    )
+
+
+def _valid_gpu_memory_hook(output_root: Path) -> dict[str, object]:
+    execution = json.loads(
+        (output_root / "jax_gpu" / "execution.json").read_text(encoding="utf-8")
+    )
+    environment = execution["environment"]
+    assert isinstance(environment, dict)
+    cuda_visible_devices = environment["CUDA_VISIBLE_DEVICES"]
+    assert isinstance(cuda_visible_devices, str)
+    return {
+        "schema_version": 1,
+        "metric": "nvidia-smi compute-process used_memory",
+        "unit": "MiB",
+        "pair": output_root.name,
+        "node": THREE_NODES["jax_gpu"],
+        "slurm_step_id": execution["slurm_step_id"],
+        "cuda_visible_devices": cuda_visible_devices,
+        "gpu_inventory": [
+            {
+                "index": 0,
+                "name": "NVIDIA H100 80GB HBM3",
+                "uuid": "GPU-probe",
+                "memory_total_mib": 81920,
+                "driver_version": "575.57.08",
+            }
+        ],
+        "sample_count": 3,
+        "gpu_uuids": ["GPU-probe"],
+        "process_ids": [4242],
+        "first_sample_at_utc": execution["started_at_utc"],
+        "last_sample_at_utc": execution["ended_at_utc"],
+        "maximum_used_memory_mib": 512,
+        "sampler_queries": {
+            "query_count": 3,
+            "successful_query_count": 3,
+            "failure_count": 0,
+            "all_succeeded": True,
         },
     }
 
@@ -559,7 +777,9 @@ def test_parse_gnu_time_verbose_requires_one_positive_max_rss_record() -> None:
         parse_gnu_time_verbose("Exit status: 0")
 
 
-def test_lane_commands_share_profile_but_only_jax_gets_exclusion_flags() -> None:
+def test_three_lane_commands_share_interpreter_and_profile_with_exact_backends() -> (
+    None
+):
     args = Namespace(
         python=Path("/python"),
         surface_path=Path("/seed/surface.json"),
@@ -583,30 +803,44 @@ def test_lane_commands_share_profile_but_only_jax_gets_exclusion_flags() -> None
         boozer_newton_tol=1.0e-13,
         boozer_newton_maxiter=50,
     )
-    cpu = build_lane_command(
+    native_cpu = build_lane_command(
         args,
-        lane="cpu",
-        run_dir=Path("/output/cpu"),
+        lane="native_cpu",
+        run_dir=Path("/output/native_cpu"),
         run_config_sha256=RUN_CONFIG_SHA256,
     )
-    jax = build_lane_command(
+    jax_cpu = build_lane_command(
         args,
-        lane="jax",
-        run_dir=Path("/output/jax"),
+        lane="jax_cpu",
+        run_dir=Path("/output/jax_cpu"),
+        run_config_sha256=RUN_CONFIG_SHA256,
+    )
+    jax_gpu = build_lane_command(
+        args,
+        lane="jax_gpu",
+        run_dir=Path("/output/jax_gpu"),
         run_config_sha256=RUN_CONFIG_SHA256,
     )
 
-    assert cpu[cpu.index("--objective-profile") + 1] == "common-seven-term"
-    assert jax[jax.index("--objective-profile") + 1] == "common-seven-term"
-    assert "--output-root" in cpu
-    assert "--run-dir" not in cpu
-    assert "--run-dir" in jax
-    assert "--weight-poloidal-extent" not in cpu
-    assert "--weight-poloidal-extent" in jax
-    assert "--no-current-penalties" in jax
-    assert "--no-width" in jax
-    assert "--sign-g" not in cpu
-    assert "--sign-g" not in jax
+    commands = (native_cpu, jax_cpu, jax_gpu)
+    assert {command[0] for command in commands} == {"/python"}
+    assert {
+        command[command.index("--objective-profile") + 1] for command in commands
+    } == {"common-seven-term"}
+    assert "--output-root" in native_cpu
+    assert "--run-dir" not in native_cpu
+    assert "--backend" not in native_cpu
+    assert jax_cpu[jax_cpu.index("--backend") + 1] == "cpu"
+    assert jax_cpu[jax_cpu.index("--platform") + 1] == "cpu"
+    assert jax_gpu[jax_gpu.index("--backend") + 1] == "jax"
+    assert jax_gpu[jax_gpu.index("--platform") + 1] == "cuda"
+    for jax_command in (jax_cpu, jax_gpu):
+        assert "--run-dir" in jax_command
+        assert "--weight-poloidal-extent" in jax_command
+        assert "--no-current-penalties" in jax_command
+        assert "--no-width" in jax_command
+    assert "--weight-poloidal-extent" not in native_cpu
+    assert all("--sign-g" not in command for command in commands)
 
 
 @pytest.mark.parametrize("interpreter_path_kind", ("absolute", "relative"))
@@ -703,15 +937,410 @@ def test_normalization_preserves_parent_symlink_dotdot_traversal(
     "visible_devices",
     ("", "0,1", "GPU-first,GPU-second", "0 1", " 0"),
 )
-def test_jax_lane_requires_exactly_one_cuda_selector(
+def test_jax_gpu_lane_requires_exactly_one_cuda_selector(
     visible_devices: str,
 ) -> None:
     with pytest.raises(RuntimeError, match="exactly one Slurm-assigned"):
-        lane_environment("jax", {"CUDA_VISIBLE_DEVICES": visible_devices})
+        lane_environment("jax_gpu", {"CUDA_VISIBLE_DEVICES": visible_devices})
 
-    environment = lane_environment("jax", {"CUDA_VISIBLE_DEVICES": "0"})
+    environment = lane_environment("jax_gpu", {"CUDA_VISIBLE_DEVICES": "0"})
     assert environment["CUDA_VISIBLE_DEVICES"] == "0"
     assert environment["JAX_PLATFORMS"] == "cuda"
+
+
+@pytest.mark.parametrize("lane", ("native_cpu", "jax_cpu"))
+def test_cpu_lane_hides_parent_gpu_visibility(lane: str) -> None:
+    environment = lane_environment(
+        lane,
+        {
+            "CUDA_VISIBLE_DEVICES": "GPU-parent-0,GPU-parent-1",
+            "JAX_PLATFORMS": "cuda",
+            "SIMSOPT_JAX_PLATFORM": "cuda",
+            "SIMSOPT_JAX_BACKEND": "cuda",
+        },
+    )
+
+    assert environment["CUDA_VISIBLE_DEVICES"] == ""
+    assert environment["JAX_PLATFORMS"] == "cpu"
+    assert environment["SIMSOPT_JAX_PLATFORM"] == "cpu"
+    assert environment["SIMSOPT_JAX_BACKEND"] == "cpu"
+
+
+def test_comparator_cli_exposes_only_three_canonical_operational_lanes() -> None:
+    parser = full_loop_compare._cli_parser()
+    for lane in THREE_LANES:
+        arguments = parser.parse_args(
+            ["run-lane", "--output-root", "/pair", "--lane", lane]
+        )
+        assert arguments.command == "run-lane"
+        assert arguments.lane == lane
+
+    for legacy_lane in ("cpu", "jax"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["run-lane", "--output-root", "/pair", "--lane", legacy_lane]
+            )
+
+    adjudicate = parser.parse_args(
+        [
+            "adjudicate",
+            "--output-root",
+            "/pair",
+            "--native-cpu-returncode",
+            "3",
+            "--jax-cpu-returncode",
+            "5",
+            "--jax-gpu-returncode",
+            "7",
+        ]
+    )
+    assert (
+        adjudicate.native_cpu_returncode,
+        adjudicate.jax_cpu_returncode,
+        adjudicate.jax_gpu_returncode,
+    ) == (3, 5, 7)
+
+
+def test_prepare_manifest_freezes_exact_three_node_barrier_topology(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, _fake_python = _prepare_three_lane_probe(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+
+    manifest = json.loads(
+        (output_root / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["execution_topology"] == {
+        "policy": "concurrent-different-nodes",
+        "assigned_nodes": THREE_NODES,
+        "barrier": {
+            "protocol": "shared-ready-files-v1",
+            "participants": list(THREE_LANES),
+        },
+    }
+    assert (output_root / "run_manifest.sha256").is_file()
+    assert (output_root / "barrier").is_dir()
+
+
+def test_prepare_rejects_colocated_nodes_before_writing_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    colocated = dict(THREE_NODES)
+    colocated["jax_cpu"] = colocated["native_cpu"]
+
+    with pytest.raises(ContractError, match="distinct"):
+        _prepare_three_lane_probe(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            nodes=colocated,
+        )
+
+    assert not (tmp_path / "pair" / "run_manifest.json").exists()
+
+
+def test_run_lane_preflight_failure_writes_terminal_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, _fake_python = _prepare_three_lane_probe(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    manifest = json.loads(
+        (output_root / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    Path(manifest["input_paths"]["surface"]).unlink()
+
+    with pytest.raises(ContractError, match="Prepared surface input is missing"):
+        full_loop_compare.main(
+            [
+                "run-lane",
+                "--output-root",
+                str(output_root),
+                "--lane",
+                "native_cpu",
+            ]
+        )
+
+    invocation = json.loads(
+        (output_root / "native_cpu" / "invocation.json").read_text(encoding="utf-8")
+    )
+    execution = json.loads(
+        (output_root / "native_cpu" / "execution.json").read_text(encoding="utf-8")
+    )
+    assert invocation["failure"]["type"] == "ContractError"
+    assert execution["status"] == "failed"
+    assert execution["failure"] == invocation["failure"]
+    assert execution["runner_ended_at_utc"] == invocation["runner_ended_at_utc"]
+
+
+def test_adjudicate_missing_prepared_root_writes_failed_comparison(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "missing-pair"
+
+    returncode = full_loop_compare.main(
+        [
+            "adjudicate",
+            "--output-root",
+            str(output_root),
+            "--native-cpu-returncode",
+            "125",
+            "--jax-cpu-returncode",
+            "125",
+            "--jax-gpu-returncode",
+            "125",
+        ]
+    )
+
+    assert returncode == 1
+    comparison = json.loads(
+        (output_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert comparison["status"] == "failed"
+    assert comparison["claim_ready"] is False
+    assert comparison["performance"] is None
+    assert "Prepared run manifest or digest is missing" in comparison["failures"][0]
+
+
+def test_run_lane_cli_uses_real_three_party_barrier_and_isolates_environments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, _fake_python = _prepare_three_lane_probe(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    returncodes = _run_three_lane_probe(
+        output_root=output_root,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+
+    assert returncodes == {lane: 0 for lane in THREE_LANES}
+    for lane, assigned_node in THREE_NODES.items():
+        invocation = json.loads(
+            (output_root / lane / "invocation.json").read_text(encoding="utf-8")
+        )
+        execution = json.loads(
+            (output_root / lane / "execution.json").read_text(encoding="utf-8")
+        )
+        expected_peers = set(THREE_LANES) - {lane}
+        assert invocation["assigned_node"] == assigned_node
+        assert invocation["actual_node"] == assigned_node
+        assert invocation["slurm_job_id"] == "12345"
+        assert execution["slurm_job_id"] == "12345"
+        assert set(invocation["barrier_peer_observed_at_utc"]) == expected_peers
+        assert set(execution["barrier_peer_observed_at_utc"]) == expected_peers
+        assert invocation["barrier_peer_slurm_job_ids"] == {
+            peer_lane: "12345" for peer_lane in expected_peers
+        }
+        assert execution["barrier_peer_slurm_job_ids"] == {
+            peer_lane: "12345" for peer_lane in expected_peers
+        }
+        driver_probe = json.loads(
+            (output_root / lane / "driver_probe.json").read_text(encoding="utf-8")
+        )
+        environment = driver_probe["environment"]
+        if lane == "jax_gpu":
+            assert environment["CUDA_VISIBLE_DEVICES"] == "GPU-7"
+            assert environment["JAX_PLATFORMS"] == "cuda"
+        else:
+            assert environment["CUDA_VISIBLE_DEVICES"] == ""
+            assert environment["JAX_PLATFORMS"] == "cpu"
+
+    gpu_memory_hook = _valid_gpu_memory_hook(output_root)
+    (output_root / "jax_gpu" / "gpu_process_memory.json").write_text(
+        json.dumps(gpu_memory_hook, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    adjudicate_returncode = _adjudicate_three_lane_probe(output_root)
+    assert adjudicate_returncode == 0
+    comparison = json.loads(
+        (output_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert comparison["claim_ready"] is True
+    assert comparison["performance"]["gpu_process_memory"] == gpu_memory_hook
+    for lane in THREE_LANES:
+        lane_evidence = comparison["lanes"][lane]
+        assert lane_evidence["slurm_job_id"] == "12345"
+        assert lane_evidence["barrier_peer_slurm_job_ids"] == {
+            peer_lane: "12345" for peer_lane in set(THREE_LANES) - {lane}
+        }
+    assert comparison["execution_topology"] == {
+        "policy": "concurrent-different-nodes",
+        "assigned_nodes": THREE_NODES,
+        "barrier": {
+            "protocol": "shared-ready-files-v1",
+            "participants": list(THREE_LANES),
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure_case", "expected_failure"),
+    (
+        ("missing", "JAX-GPU process-memory evidence is missing"),
+        ("zero-sample", "sample_count must be positive"),
+        ("failed-query", "sampler queries did not all succeed"),
+        ("wrong-node", "node differs from execution"),
+    ),
+)
+def test_adjudication_requires_claim_grade_gpu_memory_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_case: str,
+    expected_failure: str,
+) -> None:
+    output_root, _fake_python = _prepare_three_lane_probe(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    assert _run_three_lane_probe(
+        output_root=output_root,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    ) == {lane: 0 for lane in THREE_LANES}
+    hook_path = output_root / "jax_gpu" / "gpu_process_memory.json"
+    if failure_case != "missing":
+        hook = _valid_gpu_memory_hook(output_root)
+        if failure_case == "zero-sample":
+            hook["sample_count"] = 0
+        elif failure_case == "failed-query":
+            sampler_queries = hook["sampler_queries"]
+            assert isinstance(sampler_queries, dict)
+            sampler_queries.update(
+                {
+                    "successful_query_count": 2,
+                    "failure_count": 1,
+                    "all_succeeded": False,
+                }
+            )
+        else:
+            hook["node"] = "nid999999"
+        hook_path.write_text(
+            json.dumps(hook, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    returncode = _adjudicate_three_lane_probe(output_root)
+
+    assert returncode == 1
+    comparison = json.loads(
+        (output_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert comparison["status"] == "failed"
+    assert comparison["claim_ready"] is False
+    assert comparison["performance"] is None
+    assert expected_failure in comparison["failures"][0]
+
+
+def test_adjudication_rejects_lanes_from_different_slurm_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, _fake_python = _prepare_three_lane_probe(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    assert _run_three_lane_probe(
+        output_root=output_root,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    ) == {lane: 0 for lane in THREE_LANES}
+    for artifact_name in ("invocation.json", "execution.json"):
+        artifact_path = output_root / "jax_cpu" / artifact_name
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        artifact["slurm_job_id"] = "54321"
+        artifact["barrier_peer_slurm_job_ids"] = {
+            peer_lane: "54321" for peer_lane in set(THREE_LANES) - {"jax_cpu"}
+        }
+        artifact_path.write_text(
+            json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    (output_root / "jax_gpu" / "gpu_process_memory.json").write_text(
+        json.dumps(_valid_gpu_memory_hook(output_root), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    returncode = _adjudicate_three_lane_probe(output_root)
+
+    assert returncode == 1
+    comparison = json.loads(
+        (output_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert "execution_topology.slurm_job_ids_not_equal" in comparison["failures"]
+
+
+@pytest.mark.parametrize(
+    ("failure_case", "expected_failure"),
+    (
+        ("missing", "lane_evidence.jax_cpu"),
+        ("mismatched", "lane_evidence.jax_cpu"),
+        ("colocated", "lane_evidence.jax_cpu"),
+        ("nonzero", "step_returncode.jax_gpu"),
+    ),
+)
+def test_adjudication_fails_closed_on_incomplete_or_invalid_lane_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_case: str,
+    expected_failure: str,
+) -> None:
+    output_root, _fake_python = _prepare_three_lane_probe(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    assert _run_three_lane_probe(
+        output_root=output_root,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    ) == {lane: 0 for lane in THREE_LANES}
+
+    jax_cpu_execution_path = output_root / "jax_cpu" / "execution.json"
+    if failure_case == "missing":
+        jax_cpu_execution_path.unlink()
+    elif failure_case in {"mismatched", "colocated"}:
+        execution = json.loads(jax_cpu_execution_path.read_text(encoding="utf-8"))
+        if failure_case == "mismatched":
+            execution["actual_node"] = "nid999999"
+        else:
+            execution["assigned_node"] = THREE_NODES["native_cpu"]
+            execution["actual_node"] = THREE_NODES["native_cpu"]
+            execution["slurm_step_nodelist"] = THREE_NODES["native_cpu"]
+        jax_cpu_execution_path.write_text(
+            json.dumps(execution, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    jax_gpu_returncode = "9" if failure_case == "nonzero" else "0"
+    adjudicate_returncode = full_loop_compare.main(
+        [
+            "adjudicate",
+            "--output-root",
+            str(output_root),
+            "--native-cpu-returncode",
+            "0",
+            "--jax-cpu-returncode",
+            "0",
+            "--jax-gpu-returncode",
+            jax_gpu_returncode,
+        ]
+    )
+
+    assert adjudicate_returncode == 1
+    comparison = json.loads(
+        (output_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert comparison["status"] == "failed"
+    assert comparison["claim_ready"] is False
+    assert any(expected_failure in failure for failure in comparison["failures"])
 
 
 def test_source_status_ignores_only_top_level_slurm_scheduler_logs() -> None:
@@ -729,7 +1358,7 @@ def test_source_status_ignores_only_top_level_slurm_scheduler_logs() -> None:
     )
 
 
-def test_launcher_venv_root_respects_tmpdir_and_uid_scope(
+def test_launcher_venv_root_uses_shared_scratch_and_uid_scope(
     tmp_path: Path,
 ) -> None:
     source = LAUNCHER_PATH.read_text(encoding="utf-8")
@@ -749,14 +1378,10 @@ def test_launcher_venv_root_respects_tmpdir_and_uid_scope(
 
     environment = os.environ.copy()
     environment.pop("VENV_ROOT", None)
+    environment["SCRATCH"] = str(tmp_path / "shared-scratch")
     environment["TMPDIR"] = str(tmp_path / "node-local")
     assert resolve_venv_root(environment) == str(
-        tmp_path / "node-local" / f"simsopt-full-loop-envs-{os.getuid()}"
-    )
-
-    environment.pop("TMPDIR")
-    assert resolve_venv_root(environment) == (
-        f"/tmp/simsopt-full-loop-envs-{os.getuid()}"
+        tmp_path / "shared-scratch" / f"simsopt-full-loop-envs-{os.getuid()}"
     )
 
     environment["VENV_ROOT"] = str(tmp_path / "explicit-override")
@@ -822,17 +1447,10 @@ def test_launcher_isolates_python_environment_before_python_use(
         "unset PYTHONPATH",
         "export PYTHONNOUSERSITE=1",
     ]
-    executable_prefix = [
-        line
-        for line in lines[: module_index + 3]
-        if line.strip() and not line.startswith("#")
-    ]
-    assert executable_prefix == [
-        "set -euo pipefail",
-        module_load,
-        "unset PYTHONPATH",
-        "export PYTHONNOUSERSITE=1",
-    ]
+    isolation_index = source.index(isolation)
+    assert source.index('if [[ "${1:-}" == "__run-lane-step" ]]') < isolation_index
+    assert isolation_index < source.index('REPO_ROOT="${REPO_ROOT:-')
+    assert isolation_index < source.index('python -m venv "${VENV_DIR}"')
 
     fake_site = tmp_path / "pymon"
     fake_metadata = fake_site / "nersc_pymon-0.5.0.dist-info"
@@ -935,30 +1553,19 @@ def test_launcher_requires_a_private_venv_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("profile", "execution_mode", "expected_returncode"),
     (
-        "profile",
-        "execution_mode",
-        "slurm_step_id",
-        "visible_devices",
-        "expected_returncode",
-    ),
-    (
-        ("pilot", "slurm-step", None, None, 0),
-        ("full", "slurm-step", None, None, 0),
-        ("pilot", "direct", "12", "0", 0),
-        ("pilot", "direct", None, "0", 2),
-        ("full", "direct", "12", "0", 2),
-        ("pilot", "direct", "12", None, 2),
-        ("pilot", "direct", "12", "0,1", 2),
-        ("pilot", "direct", "12", "0 1", 2),
-        ("pilot", "unknown", "12", "0", 2),
+        ("pilot", "slurm-step", 0),
+        ("full", "slurm-step", 0),
+        ("pilot", "direct", 2),
+        ("full", "direct", 2),
+        ("full", "sequential", 2),
+        ("pilot", "unknown", 2),
     ),
 )
-def test_launcher_pair_execution_mode_contract(
+def test_launcher_has_no_direct_or_sequential_fallback(
     profile: str,
     execution_mode: str,
-    slurm_step_id: str | None,
-    visible_devices: str | None,
     expected_returncode: int,
 ) -> None:
     source = LAUNCHER_PATH.read_text(encoding="utf-8")
@@ -967,13 +1574,6 @@ def test_launcher_pair_execution_mode_contract(
         source,
     )
     assert function is not None
-    environment = os.environ.copy()
-    environment.pop("SLURM_STEP_ID", None)
-    environment.pop("CUDA_VISIBLE_DEVICES", None)
-    if slurm_step_id is not None:
-        environment["SLURM_STEP_ID"] = slurm_step_id
-    if visible_devices is not None:
-        environment["CUDA_VISIBLE_DEVICES"] = visible_devices
     completed = subprocess.run(
         [
             "bash",
@@ -986,35 +1586,15 @@ def test_launcher_pair_execution_mode_contract(
         check=False,
         text=True,
         capture_output=True,
-        env=environment,
     )
 
     assert completed.returncode == expected_returncode
 
 
-@pytest.mark.parametrize(
-    ("execution_mode", "expected_command"),
-    (
-        (
-            "slurm-step",
-            (
-                "srun",
-                "--ntasks=1",
-                "--cpus-per-task=32",
-                "--gpus-per-task=1",
-                "--cpu-bind=cores",
-            ),
-        ),
-        ("direct", ()),
-    ),
-)
-def test_launcher_pair_execution_mode_selects_expected_command(
-    execution_mode: str,
-    expected_command: tuple[str, ...],
-) -> None:
+def test_launcher_execution_mode_guidance_names_only_supported_mode() -> None:
     source = LAUNCHER_PATH.read_text(encoding="utf-8")
     function = re.search(
-        r"(?ms)^configure_pair_launcher\(\) \{.*?^\}\n",
+        r"(?ms)^validate_pair_execution_mode\(\) \{.*?^\}\n",
         source,
     )
     assert function is not None
@@ -1022,31 +1602,561 @@ def test_launcher_pair_execution_mode_selects_expected_command(
         [
             "bash",
             "-c",
+            f'{function.group(0)}\nvalidate_pair_execution_mode "$1" "$2"',
+            "validate-pair-execution-mode-guidance-test",
+            "full",
+            "unknown",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 2
+    assert "PAIR_EXECUTION_MODE must be slurm-step; got unknown" in completed.stderr
+    assert "or direct" not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("allocated_nodes", "expected_returncode"),
+    (
+        (("nid001", "nid002", "nid003"), 0),
+        (("nid001", "nid002"), 2),
+        (("nid001", "nid002", "nid002"), 2),
+        (("nid001", "nid002", "nid003", "nid004"), 2),
+    ),
+)
+def test_launcher_requires_exactly_three_distinct_allocated_nodes(
+    allocated_nodes: tuple[str, ...],
+    expected_returncode: int,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^validate_allocated_nodes\(\) \{.*?^\}\n",
+        source,
+    )
+    assert function is not None
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (f'{function.group(0)}\nALLOCATED_NODES=("$@")\nvalidate_allocated_nodes'),
+            "validate-allocated-nodes-test",
+            *allocated_nodes,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == expected_returncode
+    assert "#SBATCH -N 3" in source
+    assert "#SBATCH --ntasks=3" in source
+
+
+def test_launcher_rotates_all_three_node_roles_between_pairs() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^assign_pair_nodes\(\) \{.*?^\}\n", source)
+    assert function is not None
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
             (
                 f"{function.group(0)}\n"
-                'configure_pair_launcher "$1"\n'
-                "if ((${#PAIR_LAUNCHER[@]})); then\n"
-                '    printf "%s\\n" "${PAIR_LAUNCHER[@]}"\n'
-                "fi"
+                "ALLOCATED_NODES=(nid001 nid002 nid003)\n"
+                "for pair_index in 1 2 3 4; do\n"
+                '    assign_pair_nodes "${pair_index}"\n'
+                "    printf '%s,%s,%s\\n' \"${native_cpu_node}\" "
+                '"${jax_cpu_node}" "${jax_gpu_node}"\n'
+                "done"
             ),
-            "configure-pair-launcher-test",
-            execution_mode,
+            "assign-pair-nodes-test",
         ],
         check=True,
         text=True,
         capture_output=True,
-        env={**os.environ, "SLURM_CPUS_PER_TASK": "32"},
     )
 
-    assert tuple(completed.stdout.splitlines()) == expected_command
-    comparator_invocation = (
-        'if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \\\n'
-        '        "${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py" \\\n'
-        '        --python "${VENV_DIR}/bin/python" \\'
+    assert completed.stdout.splitlines() == [
+        "nid001,nid002,nid003",
+        "nid002,nid003,nid001",
+        "nid003,nid001,nid002",
+        "nid001,nid002,nid003",
+    ]
+
+
+def test_launcher_starts_three_exactly_pinned_steps_before_waiting(
+    tmp_path: Path,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^launch_pair_lanes\(\) \{.*?^\}\n", source)
+    assert function is not None
+    pair_dir = tmp_path / "pair"
+    barrier_root = tmp_path / "fake-srun-barrier"
+    pair_dir.mkdir()
+    barrier_root.mkdir()
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "set -euo pipefail\n"
+                "shopt -s nullglob\n"
+                f"{function.group(0)}\n"
+                "srun() {\n"
+                "    local lane=''\n"
+                "    local argument\n"
+                '    for argument in "$@"; do\n'
+                '        case "${argument}" in\n'
+                '            native_cpu|jax_cpu|jax_gpu) lane="${argument}" ;;\n'
+                "        esac\n"
+                "    done\n"
+                '    [[ -n "${lane}" ]]\n'
+                '    printf \'%s\\n\' "$@" > "${BARRIER_ROOT}/${lane}.argv"\n'
+                '    touch "${BARRIER_ROOT}/${lane}.ready"\n'
+                "    while true; do\n"
+                '        local -a ready=("${BARRIER_ROOT}"/*.ready)\n'
+                "        ((${#ready[@]} == 3)) && break\n"
+                "        sleep 0.01\n"
+                "    done\n"
+                "}\n"
+                f'launch_pair_lanes "$PAIR_DIR" {THREE_NODES["native_cpu"]} '
+                f"{THREE_NODES['jax_cpu']} {THREE_NODES['jax_gpu']}\n"
+                'wait "${NATIVE_CPU_STEP_PID}"\n'
+                'wait "${JAX_CPU_STEP_PID}"\n'
+                'wait "${JAX_GPU_STEP_PID}"\n'
+            ),
+            "launch-three-lanes-test",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        env={
+            **os.environ,
+            "PAIR_DIR": str(pair_dir),
+            "BARRIER_ROOT": str(barrier_root),
+            "SLURM_CPUS_PER_TASK": "32",
+            "LAUNCHER_PATH": "/shared/launcher.slurm",
+            "VENV_DIR": "/shared/venv",
+            "COMPARATOR_PATH": "/shared/comparator.py",
+            "GPU_PROCESS_MEMORY_CSV": "/shared/process.csv",
+            "GPU_SAMPLER_QUERY_CSV": "/shared/queries.csv",
+            "GPU_SAMPLER_ERROR_LOG": "/shared/errors.log",
+        },
     )
-    assert source.count(comparator_invocation) == 1
-    assert source.count("single_stage_full_loop_compare.py") == 1
-    assert source.count("--python") == 1
+    assert completed.returncode == 0
+
+    lane_arguments = {
+        lane: (barrier_root / f"{lane}.argv").read_text(encoding="utf-8").splitlines()
+        for lane in THREE_LANES
+    }
+    for lane, node in THREE_NODES.items():
+        arguments = lane_arguments[lane]
+        assert arguments.count("--nodes=1") == 1
+        assert arguments.count("--ntasks=1") == 1
+        assert arguments.count(f"--nodelist={node}") == 1
+        assert lane in arguments
+    for lane in ("native_cpu", "jax_cpu"):
+        assert "--gres=none" in lane_arguments[lane]
+        assert "CUDA_VISIBLE_DEVICES=" in lane_arguments[lane]
+        assert "--gpus-per-task=1" not in lane_arguments[lane]
+    assert "--gpus-per-task=1" in lane_arguments["jax_gpu"]
+    assert "--gres=none" not in lane_arguments["jax_gpu"]
+
+
+def test_launcher_collects_all_three_lane_returncodes_independently() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^wait_for_pair_lanes\(\) \{.*?^\}\n", source)
+    assert function is not None
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"{function.group(0)}\n"
+                "(exit 3) & NATIVE_CPU_STEP_PID=$!\n"
+                "(exit 5) & JAX_CPU_STEP_PID=$!\n"
+                "(exit 7) & JAX_GPU_STEP_PID=$!\n"
+                "wait_for_pair_lanes\n"
+                "printf '%s,%s,%s\\n' \"${native_cpu_returncode}\" "
+                '"${jax_cpu_returncode}" "${jax_gpu_returncode}"'
+            ),
+            "wait-three-lanes-test",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.stdout.strip() == "3,5,7"
+    adjudication = source[source.index('"${COMPARATOR_PATH}" adjudicate') :]
+    assert '--native-cpu-returncode "${native_cpu_returncode}"' in adjudication
+    assert '--jax-cpu-returncode "${jax_cpu_returncode}"' in adjudication
+    assert '--jax-gpu-returncode "${jax_gpu_returncode}"' in adjudication
+
+
+def test_launcher_finishes_lane_local_gpu_hook_before_adjudication() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    wrapper = re.search(r"(?ms)^run_lane_step\(\) \{.*?^\}\n", source)
+    assert wrapper is not None
+    wrapper_source = wrapper.group(0)
+    assert wrapper_source.index('wait "${gpu_monitor_pid}"') < wrapper_source.index(
+        "if write_gpu_memory_hook"
+    )
+    assert 'pair_dir / "jax_gpu" / "gpu_process_memory.json"' in source
+
+    pair_loop = source[source.index("FAILED_PAIRS=0") :]
+    assert pair_loop.index("wait_for_pair_lanes") < pair_loop.index(
+        '"${COMPARATOR_PATH}" adjudicate'
+    )
+
+
+def test_launcher_gpu_summary_null_timestamps_fail_evidence_without_crashing(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    pair_root = artifact_root / "pairs"
+    execution_root = pair_root / "pair-01" / "jax_gpu"
+    execution_root.mkdir(parents=True)
+    (execution_root / "execution.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "started_at_utc": None,
+                "ended_at_utc": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    machine_root = artifact_root / "machine"
+    machine_root.mkdir()
+    process_csv = machine_root / "gpu_process_memory.csv"
+    process_csv.write_text(
+        "timestamp_utc,pair,node,gpu_uuid,pid,used_memory_mib\n"
+        "2026-07-16T00:00:00+00:00,pair-01,nid1,GPU-1,123,512\n",
+        encoding="utf-8",
+    )
+    query_csv = machine_root / "gpu_sampler_queries.csv"
+    query_csv.write_text(
+        "timestamp_utc,pair,node,status,exit_code\n"
+        "2026-07-16T00:00:00+00:00,pair-01,nid1,ok,0\n",
+        encoding="utf-8",
+    )
+    error_log = machine_root / "gpu_sampler_errors.log"
+    error_log.write_text("", encoding="utf-8")
+    summary_path = machine_root / "gpu_process_memory_summary.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _launcher_python_heredoc(
+                'process_csv_path = Path(os.environ["GPU_PROCESS_MEMORY_CSV"])'
+            ),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GPU_PROCESS_MEMORY_CSV": str(process_csv),
+            "GPU_SAMPLER_QUERY_CSV": str(query_csv),
+            "GPU_SAMPLER_ERROR_LOG": str(error_log),
+            "GPU_PROCESS_MEMORY_SUMMARY": str(summary_path),
+            "PAIR_ROOT": str(pair_root),
+            "PROFILE": "full",
+            "PAIR_COUNT": "1",
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    pair_summary = summary["by_pair"]["pair-01"]
+    assert summary["schema_version"] == 2
+    assert summary["overall"]["sample_count"] == 1
+    assert pair_summary["jax_gpu_execution_window_recorded"] is False
+    assert pair_summary["jax_gpu_process_sample_count"] == 0
+    assert summary["evidence_gate"] == {
+        "profile": "full",
+        "expected_pair_count": 1,
+        "all_queries_succeeded": True,
+        "every_pair_has_jax_gpu_process_sample": False,
+        "passed": False,
+        "required_for_claim": True,
+    }
+
+
+def test_launcher_overlap_probe_treats_null_timestamps_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    pair_dir = tmp_path / "pair-01"
+    for lane in THREE_LANES:
+        lane_dir = pair_dir / lane
+        lane_dir.mkdir(parents=True)
+        (lane_dir / "execution.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "started_at_utc": None,
+                    "ended_at_utc": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _launcher_python_heredoc('    print("false false 0.0")'),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PAIR_DIR": str(pair_dir)},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "false false 0.0"
+
+
+def test_launcher_aggregate_persists_failed_null_performance_comparison(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    pair_dir = artifact_root / "pairs" / "pair-01"
+    pair_dir.mkdir(parents=True)
+    (pair_dir / "pair_status.tsv").write_text(
+        "\n".join(
+            (
+                "pair_execution_mode\tconcurrent-srun-steps",
+                "adjudicated_status\tfailed",
+                "native_cpu_node\tnid1",
+                "jax_cpu_node\tnid2",
+                "jax_gpu_node\tnid3",
+                "all_lanes_overlapped\tfalse",
+                "comparison_status\tfailed",
+                "comparison_claim_ready\tfalse",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    failure = "lane_evidence.jax_gpu: execution status is failed"
+    (pair_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "claim_ready": False,
+                "performance": None,
+                "parity": {
+                    "required_failures": [failure],
+                    "advisory_failures": [],
+                },
+                "failures": [failure],
+            }
+        ),
+        encoding="utf-8",
+    )
+    machine_root = artifact_root / "machine"
+    machine_root.mkdir()
+    gpu_summary_path = machine_root / "gpu_process_memory_summary.json"
+    gpu_summary_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "by_pair": {},
+                "evidence_gate": {
+                    "profile": "full",
+                    "expected_pair_count": 1,
+                    "all_queries_succeeded": False,
+                    "every_pair_has_jax_gpu_process_sample": False,
+                    "passed": False,
+                    "required_for_claim": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _launcher_python_heredoc(
+                "successful_native_cpu_over_jax_cpu_speedups: list[float] = []"
+            ),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "ARTIFACT_ROOT": str(artifact_root),
+            "PROFILE": "full",
+            "EVIDENCE_CLASS": "production",
+            "PAIR_EXECUTION_MODE": "concurrent-srun-steps",
+            "PAIR_COUNT": "1",
+            "GPU_PROCESS_MEMORY_SUMMARY": str(gpu_summary_path),
+            "ENVIRONMENT_LOCK_MANIFEST": str(
+                artifact_root / "environment" / "manifest.json"
+            ),
+        },
+    )
+
+    assert completed.returncode == 1
+    aggregate = json.loads(
+        (artifact_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    pair = aggregate["pairs"][0]
+    assert aggregate["schema_version"] == 2
+    assert aggregate["status"] == "failed"
+    assert aggregate["claim_ready"] is False
+    assert aggregate["measurement_design_valid"] is True
+    assert aggregate["repeat_design_valid"] is False
+    assert pair["performance"] is None
+    assert pair["host_rss_kib"] is None
+    assert pair["failures"] == [failure]
+    assert pair["required_failures"] == [failure]
+
+
+def test_launcher_single_triplet_is_claim_ready_without_claiming_repeats(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    pair_dir = artifact_root / "pairs" / "pair-01"
+    pair_dir.mkdir(parents=True)
+    (pair_dir / "pair_status.tsv").write_text(
+        "\n".join(
+            (
+                "pair_execution_mode\tconcurrent-srun-steps",
+                "adjudicated_status\tpassed",
+                "native_cpu_node\tnid1",
+                "jax_cpu_node\tnid2",
+                "jax_gpu_node\tnid3",
+                "all_lanes_overlapped\ttrue",
+                "comparison_status\tpassed",
+                "comparison_claim_ready\ttrue",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (pair_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "claim_ready": True,
+                "performance": {
+                    "speedups": {
+                        "native_cpu_over_jax_cpu": 2.0,
+                        "native_cpu_over_jax_gpu": 4.0,
+                        "jax_cpu_over_jax_gpu": 2.0,
+                    },
+                    "wall_seconds": {
+                        "native_cpu": 40.0,
+                        "jax_cpu": 20.0,
+                        "jax_gpu": 10.0,
+                    },
+                    "host_max_rss_kib": {
+                        "native_cpu": 100,
+                        "jax_cpu": 200,
+                        "jax_gpu": 300,
+                    },
+                },
+                "parity": {
+                    "required_failures": [],
+                    "advisory_failures": [],
+                },
+                "failures": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    machine_root = artifact_root / "machine"
+    machine_root.mkdir()
+    gpu_summary_path = machine_root / "gpu_process_memory_summary.json"
+    gpu_summary_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "by_pair": {},
+                "evidence_gate": {
+                    "profile": "full",
+                    "expected_pair_count": 1,
+                    "all_queries_succeeded": True,
+                    "every_pair_has_jax_gpu_process_sample": True,
+                    "passed": True,
+                    "required_for_claim": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    environment_root = artifact_root / "environment"
+    environment_root.mkdir()
+    lock_path = environment_root / "requirements.lock"
+    lock_path.write_text("locked-dependency\n", encoding="utf-8")
+    lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    environment_manifest_path = environment_root / "manifest.json"
+    environment_manifest_path.write_text(
+        json.dumps(
+            {
+                "lock_sha256": lock_sha256,
+                "secure_install_verified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _launcher_python_heredoc(
+                "successful_native_cpu_over_jax_cpu_speedups: list[float] = []"
+            ),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "ARTIFACT_ROOT": str(artifact_root),
+            "PROFILE": "full",
+            "EVIDENCE_CLASS": "production",
+            "PAIR_EXECUTION_MODE": "concurrent-srun-steps",
+            "PAIR_COUNT": "1",
+            "GPU_PROCESS_MEMORY_SUMMARY": str(gpu_summary_path),
+            "ENVIRONMENT_LOCK_MANIFEST": str(environment_manifest_path),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    aggregate = json.loads(
+        (artifact_root / "comparison.json").read_text(encoding="utf-8")
+    )
+    assert aggregate["status"] == "passed"
+    assert aggregate["claim_ready"] is True
+    assert aggregate["measurement_design_valid"] is True
+    assert aggregate["repeat_design_valid"] is False
+    assert aggregate["measurement_class"] == "single_matched_triplet"
+    assert (
+        aggregate["measurement_interpretation"]
+        == "one matched measurement; no statistical inference"
+    )
+
+
+def test_launcher_creates_pair_directory_before_adjudication() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    pair_loop = source[source.index("FAILED_PAIRS=0") :]
+    prepare_index = pair_loop.index('"${COMPARATOR_PATH}" prepare')
+    mkdir_index = pair_loop.index('mkdir -p "${pair_dir}"')
+    adjudicate_index = pair_loop.index('"${COMPARATOR_PATH}" adjudicate')
+
+    assert prepare_index < mkdir_index < adjudicate_index
 
 
 def test_comparator_output_root_must_be_outside_source_checkout(
@@ -1312,11 +2422,12 @@ def test_launcher_venv_creation_is_non_destructive_and_follows_reservation() -> 
         ("pilot", "2", 0),
         ("pilot", "0", 2),
         ("pilot", "invalid", 2),
+        ("full", "1", 0),
         ("full", "2", 0),
+        ("full", "3", 0),
         ("full", "4", 0),
         ("full", "0", 2),
-        ("full", "1", 2),
-        ("full", "3", 2),
+        ("full", "invalid", 2),
     ),
 )
 def test_launcher_pair_count_validation(
@@ -1345,3 +2456,14 @@ def test_launcher_pair_count_validation(
     )
 
     assert completed.returncode == expected_returncode
+
+
+def test_launcher_full_profile_uses_requested_solver_budgets() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    full_profile = re.search(r"(?ms)^    full\)\n(?P<body>.*?)^        ;;", source)
+
+    assert full_profile is not None
+    body = full_profile.group("body")
+    assert 'PAIR_COUNT="${PAIR_COUNT:-1}"' in body
+    assert 'OUTER_MAXITER="${OUTER_MAXITER:-1500}"' in body
+    assert 'BOOZER_NEWTON_MAXITER="${BOOZER_NEWTON_MAXITER:-50}"' in body

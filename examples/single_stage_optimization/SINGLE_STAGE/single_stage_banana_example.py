@@ -59,6 +59,7 @@ from banana_opt.jax_banana_drivers import (
     build_single_stage_common_objective,
     build_single_stage_objective,
     build_surface,
+    comparison_backend_label,
     diagnostics_from_terms,
     ensure_writable_outputs,
     load_or_build_biotsavart,
@@ -538,8 +539,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     if common_profile and not bool(jax.config.jax_enable_x64):
         raise RuntimeError("common-seven-term comparison requires JAX FP64")
-    if common_profile and jax.devices()[0].platform != "gpu":
-        raise RuntimeError("common-seven-term comparison requires a JAX CUDA device")
+    comparison_backend = (
+        comparison_backend_label(jax.devices()[0].platform) if common_profile else None
+    )
 
     setup_started = perf_counter()
     paths = output_paths(_run_dir(args), prefix="single_stage")
@@ -661,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
     if common_profile:
         payload.update(
             {
-                "backend": "jax-cuda",
+                "backend": comparison_backend,
                 "precision": "float64",
                 "constraint_method": "soft-penalty",
                 "mixed_precision": False,

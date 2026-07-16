@@ -1479,6 +1479,18 @@ def boozer_solver_grid_shape(
     return int(nphi), int(ntheta)
 
 
+def comparison_backend_label(device_platform: str) -> str:
+    """Return the full-loop artifact label for one JAX execution platform."""
+    if device_platform == "cpu":
+        return "jax-cpu"
+    if device_platform == "gpu":
+        return "jax-cuda"
+    raise ValueError(
+        "The matched full-loop comparison supports only JAX CPU or CUDA devices; "
+        f"got {device_platform!r}"
+    )
+
+
 def save_chainable_boozer_surface(
     path: Path,
     *,
