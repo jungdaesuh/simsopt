@@ -50,7 +50,9 @@ STAGE2_SCRIPT = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT = EXAMPLE_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py"
 
 
-def _run_driver(script: Path, args: list[str], *, timeout: int) -> subprocess.CompletedProcess:
+def _run_driver(
+    script: Path, args: list[str], *, timeout: int
+) -> subprocess.CompletedProcess:
     env = {
         **os.environ,
         "PYTHONNOUSERSITE": "1",
@@ -173,8 +175,167 @@ def test_single_stage_minimizer_penalizes_rejected_boozer_candidates(monkeypatch
     )
 
     assert tracker.evaluations == 3
+    assert tracker.rejected_evaluations == 2
     assert any("rejected_boozer_solve=true" in message for message in messages)
     assert any("rejected_boozer_adjoint=true" in message for message in messages)
+
+
+def test_single_stage_minimizer_does_not_promote_unaccepted_trial_state(monkeypatch):
+    class FakeObjective:
+        def __init__(self):
+            self.x = np.asarray([1.0, -2.0])
+
+        def J(self) -> float:
+            return float(np.dot(self.x, self.x))
+
+        def dJ(self) -> np.ndarray:
+            return 2.0 * self.x
+
+    class FakeSurface:
+        def __init__(self):
+            self.dofs = np.asarray([0.5, 0.25])
+
+        def get_dofs(self) -> np.ndarray:
+            return self.dofs.copy()
+
+        def set_dofs(self, dofs: np.ndarray) -> None:
+            self.dofs = np.asarray(dofs, dtype=float).copy()
+
+    class FakeBoozerSurface:
+        def __init__(self):
+            self.calls = 0
+            self.inputs: list[tuple[float, float]] = []
+            self.need_to_run_code = True
+            self.res = None
+            self.surface = FakeSurface()
+
+        def run_code(self, iota: float, G: float):
+            self.calls += 1
+            self.inputs.append((iota, G))
+            success = self.calls != 3
+            self.surface.set_dofs(np.asarray([self.calls, -self.calls], dtype=float))
+            self.res = {
+                "success": success,
+                "iota": iota + 0.1 * self.calls,
+                "G": G,
+            }
+            return self.res
+
+    objective = FakeObjective()
+    boozersurface = FakeBoozerSurface()
+
+    def fake_minimize(fun, x0, **kwargs):
+        del kwargs
+        baseline_value, baseline_gradient = fun(x0)
+        trial_value, _ = fun(x0 + 0.25)
+        rejected_value, rejected_gradient = fun(x0 + 0.5)
+        assert trial_value != baseline_value
+        assert rejected_value > baseline_value
+        np.testing.assert_array_equal(rejected_gradient, baseline_gradient)
+        return SimpleNamespace(x=np.asarray(x0, dtype=float))
+
+    monkeypatch.setattr(banana_drivers, "minimize", fake_minimize)
+    minimize_single_stage_soft_penalty(
+        objective=objective,
+        boozersurface=boozersurface,
+        initial_state=BoozerSolveState(iota=0.15, G=-2.0),
+        maxiter=1,
+        log=lambda _message: None,
+    )
+
+    assert boozersurface.inputs == [
+        (0.15, -2.0),
+        (0.25, -2.0),
+        (0.25, -2.0),
+        (0.25, -2.0),
+    ]
+
+
+def test_single_stage_minimizer_promotes_callback_accepted_trial_state(monkeypatch):
+    class FakeObjective:
+        def __init__(self):
+            self.x = np.asarray([1.0, -2.0])
+
+        def J(self) -> float:
+            return float(np.dot(self.x, self.x))
+
+        def dJ(self) -> np.ndarray:
+            return 2.0 * self.x
+
+    class FakeSurface:
+        def __init__(self):
+            self.dofs = np.asarray([0.5, 0.25])
+
+        def get_dofs(self) -> np.ndarray:
+            return self.dofs.copy()
+
+        def set_dofs(self, dofs: np.ndarray) -> None:
+            self.dofs = np.asarray(dofs, dtype=float).copy()
+
+    class FakeBoozerSurface:
+        def __init__(self):
+            self.calls = 0
+            self.inputs: list[tuple[float, float]] = []
+            self.starting_surface_dofs: list[np.ndarray] = []
+            self.need_to_run_code = True
+            self.res = None
+            self.surface = FakeSurface()
+
+        def run_code(self, iota: float, G: float):
+            self.calls += 1
+            self.inputs.append((iota, G))
+            self.starting_surface_dofs.append(self.surface.get_dofs())
+            self.surface.set_dofs(np.asarray([self.calls, -self.calls], dtype=float))
+            self.res = {
+                "success": True,
+                "iota": iota + 0.1 * self.calls,
+                "G": G,
+            }
+            return self.res
+
+    objective = FakeObjective()
+    boozersurface = FakeBoozerSurface()
+    accepted_dofs = objective.x + 0.25
+    later_trial_dofs = objective.x + 0.5
+
+    def fake_minimize(fun, x0, *, callback, **kwargs):
+        del kwargs
+        fun(x0)
+        fun(accepted_dofs)
+        callback(accepted_dofs)
+        fun(later_trial_dofs)
+        return SimpleNamespace(x=accepted_dofs.copy())
+
+    monkeypatch.setattr(banana_drivers, "minimize", fake_minimize)
+    _, tracker = minimize_single_stage_soft_penalty(
+        objective=objective,
+        boozersurface=boozersurface,
+        initial_state=BoozerSolveState(iota=0.15, G=-2.0),
+        maxiter=1,
+        log=lambda _message: None,
+    )
+
+    assert tracker.iterations == 1
+    assert tracker.rejected_evaluations == 0
+    np.testing.assert_allclose(
+        boozersurface.inputs,
+        [
+            (0.15, -2.0),
+            (0.25, -2.0),
+            (0.45, -2.0),
+            (0.45, -2.0),
+        ],
+    )
+    np.testing.assert_allclose(
+        boozersurface.starting_surface_dofs,
+        [
+            (0.5, 0.25),
+            (1.0, -1.0),
+            (2.0, -2.0),
+            (2.0, -2.0),
+        ],
+    )
+    np.testing.assert_array_equal(objective.x, accepted_dofs)
 
 
 def test_banana_geometry_jax_objectives_have_finite_gradients():

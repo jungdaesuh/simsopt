@@ -160,7 +160,12 @@ class BananaDriverPaths:
 class EvaluationTracker:
     iterations: int = 0
     evaluations: int = 0
+    rejected_evaluations: int = 0
     started_at: float = 0.0
+    optimizer_s: float = 0.0
+    final_inner_solve_s: float = 0.0
+    final_objective_s: float = 0.0
+    elapsed_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -195,6 +200,16 @@ N_COILS = VF_IDX + N_VF
 DEFAULT_BANANA_ORDER = 4
 DEFAULT_BOOZER_CONSTRAINT_WEIGHT = 1.0
 DEFAULT_PROXY_RZ = (HBT_BANANA_WS.major_radius, 0.0)
+COMMON_OBJECTIVE_CONTRACT_ID = "banana-single-stage-common-v1"
+COMMON_OBJECTIVE_TERM_NAMES = (
+    "non_quasisymmetric_ratio",
+    "boozer_residual",
+    "iota",
+    "length_max",
+    "coil_coil_distance",
+    "coil_surface_distance",
+    "curvature",
+)
 DEFAULT_BANANA_DOFS = {
     "phic(0)": 0.0600,
     "phic(1)": 0.0300,
