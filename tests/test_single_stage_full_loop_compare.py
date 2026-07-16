@@ -643,6 +643,35 @@ def test_launcher_pins_expected_bootstrap_tool_versions() -> None:
     assert bootstrap.groups() == ("26.1.2", "83.0.0", "0.47.0")
 
 
+def test_launcher_installs_only_benchmark_runtime_extras() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    editable_specs = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('-e "${REPO_ROOT}'):
+            editable_specs.append(stripped.removeprefix('-e "').split('"', 1)[0])
+
+    assert editable_specs == ["${REPO_ROOT}[JAX_GPU]", "${REPO_ROOT}"]
+    assert (
+        re.search(
+            r"\[[^]]*\btest\b[^]]*\]",
+            source,
+            re.IGNORECASE,
+        )
+        is None
+    )
+    assert (
+        re.search(
+            r"\b(?:algs|pytest|ground|bentley[-_.]ottmann|qsc)\b",
+            source,
+            re.IGNORECASE,
+        )
+        is None
+    )
+    assert source.count("'shapely==2.1.2'") == 1
+    assert source.count("'numba==0.65.1'") == 1
+
+
 def test_launcher_isolates_python_environment_before_python_use(
     tmp_path: Path,
 ) -> None:
