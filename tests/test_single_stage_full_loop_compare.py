@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+import json
 import math
 import os
 from pathlib import Path
@@ -46,6 +47,47 @@ LAUNCHER_PATH = (
     / "perlmutter"
     / "single_stage_full_loop_cpu_gpu.slurm"
 )
+INTERPRETER_PROBE_PATH = (
+    Path(__file__).resolve().parent / "subprocess" / "full_loop_interpreter_probe.py"
+)
+
+
+def _run_interpreter_probe(
+    *,
+    runner: Path,
+    requested_python: Path,
+    tmp_path: Path,
+    case_name: str,
+) -> subprocess.CompletedProcess[str]:
+    input_paths = [
+        tmp_path / f"{case_name}-{name}" for name in ("surface", "biotsavart", "boozer")
+    ]
+    for input_path in input_paths:
+        input_path.write_text("{}\n", encoding="utf-8")
+    return subprocess.run(
+        [
+            str(runner),
+            str(INTERPRETER_PROBE_PATH),
+            "--python",
+            str(requested_python),
+            "--surface-path",
+            str(input_paths[0]),
+            "--biotsavart-file",
+            str(input_paths[1]),
+            "--boozer-state-path",
+            str(input_paths[2]),
+            "--output-root",
+            str(tmp_path / f"{case_name}-artifacts"),
+            "--environment-lock-sha256",
+            "a" * 64,
+            "--iota-target",
+            "0.11",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        cwd=LAUNCHER_PATH.parents[2],
+    )
 
 
 def _term_payload(
@@ -567,6 +609,96 @@ def test_lane_commands_share_profile_but_only_jax_gets_exclusion_flags() -> None
     assert "--sign-g" not in jax
 
 
+@pytest.mark.parametrize("interpreter_path_kind", ("absolute", "relative"))
+def test_normalization_preserves_virtual_environment_interpreter(
+    tmp_path: Path,
+    interpreter_path_kind: str,
+) -> None:
+    venv_root = tmp_path / "venv"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "venv",
+            "--without-pip",
+            "--symlinks",
+            str(venv_root),
+        ],
+        check=True,
+    )
+    venv_python = venv_root / "bin" / "python"
+    assert venv_python.is_symlink()
+    assert venv_python.resolve() == Path(sys.executable).resolve()
+    repo_root = LAUNCHER_PATH.parents[2]
+    if interpreter_path_kind == "absolute":
+        requested_python = venv_python
+    else:
+        requested_python = Path(os.path.relpath(venv_python, repo_root))
+    expected_python = (repo_root / requested_python).absolute()
+    probe = _run_interpreter_probe(
+        runner=venv_python,
+        requested_python=requested_python,
+        tmp_path=tmp_path,
+        case_name=f"venv-entry-{interpreter_path_kind}",
+    )
+    payload = json.loads(probe.stdout)
+
+    assert payload["normalized_python"] == str(expected_python)
+    assert payload["commands"] == {
+        "cpu": str(expected_python),
+        "jax": str(expected_python),
+    }
+    assert Path(payload["sys_prefix"]) == venv_root
+    command_probe = subprocess.run(
+        [
+            payload["commands"]["cpu"],
+            str(INTERPRETER_PROBE_PATH),
+            "--print-prefix",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert Path(command_probe.stdout.strip()) == venv_root
+
+
+def test_normalization_preserves_parent_symlink_dotdot_traversal(
+    tmp_path: Path,
+) -> None:
+    correct_root = tmp_path / "correct"
+    nested_dir = correct_root / "nested"
+    correct_bin = correct_root / "bin"
+    nested_dir.mkdir(parents=True)
+    correct_bin.mkdir()
+    (correct_bin / "python").symlink_to("/usr/bin/true")
+    parent_alias = tmp_path / "parent-alias"
+    parent_alias.symlink_to(nested_dir, target_is_directory=True)
+    requested_python = parent_alias / ".." / "bin" / "python"
+
+    wrong_bin = tmp_path / "bin"
+    wrong_bin.mkdir()
+    (wrong_bin / "python").symlink_to("/usr/bin/false")
+    assert requested_python.is_file()
+    expected_python = requested_python.absolute()
+
+    probe = _run_interpreter_probe(
+        runner=Path(sys.executable),
+        requested_python=requested_python,
+        tmp_path=tmp_path,
+        case_name="parent-dotdot",
+    )
+    payload = json.loads(probe.stdout)
+
+    assert payload["normalized_python"] == str(expected_python)
+    assert payload["commands"] == {
+        "cpu": str(expected_python),
+        "jax": str(expected_python),
+    }
+    for command in payload["commands"].values():
+        completed = subprocess.run([command], check=False)
+        assert completed.returncode == 0
+
+
 @pytest.mark.parametrize(
     "visible_devices",
     ("", "0,1", "GPU-first,GPU-second", "0 1", " 0"),
@@ -907,7 +1039,14 @@ def test_launcher_pair_execution_mode_selects_expected_command(
     )
 
     assert tuple(completed.stdout.splitlines()) == expected_command
-    assert 'if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \\' in source
+    comparator_invocation = (
+        'if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \\\n'
+        '        "${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py" \\\n'
+        '        --python "${VENV_DIR}/bin/python" \\'
+    )
+    assert source.count(comparator_invocation) == 1
+    assert source.count("single_stage_full_loop_compare.py") == 1
+    assert source.count("--python") == 1
 
 
 def test_comparator_output_root_must_be_outside_source_checkout(

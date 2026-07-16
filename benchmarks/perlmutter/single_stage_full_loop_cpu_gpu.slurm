@@ -1334,6 +1334,7 @@ do
 
     if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \
         "${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py" \
+        --python "${VENV_DIR}/bin/python" \
         --surface-path "${SURFACE_SNAPSHOT}" \
         --biotsavart-file "${BIOTSAVART_SNAPSHOT}" \
         --boozer-state-path "${BOOZER_STATE_SNAPSHOT}" \

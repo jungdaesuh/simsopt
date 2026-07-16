@@ -1434,6 +1434,14 @@ def _resolved_existing_file(path: Path, *, label: str) -> Path:
     return resolved
 
 
+def _absolute_existing_file(path: Path, *, label: str) -> Path:
+    """Make a file path absolute without collapsing ``..`` or resolving symlinks."""
+    absolute = path.expanduser().absolute()
+    if not absolute.is_file():
+        raise FileNotFoundError(f"{label} does not exist: {absolute}")
+    return absolute
+
+
 def resolve_external_output_root(repo_root: Path, output_root: Path) -> Path:
     """Resolve an output root and reject writes into the source checkout."""
     resolved_repo_root = repo_root.expanduser().resolve(strict=True)
@@ -1457,7 +1465,7 @@ def _normalize_args(args: argparse.Namespace) -> None:
     args.boozer_state_path = _resolved_existing_file(
         args.boozer_state_path, label="Boozer state seed"
     )
-    args.python = _resolved_existing_file(args.python, label="Python interpreter")
+    args.python = _absolute_existing_file(args.python, label="Python interpreter")
     args.output_root = resolve_external_output_root(REPO_ROOT, args.output_root)
     if args.output_root.exists():
         raise FileExistsError(f"Refusing to reuse output root: {args.output_root}")
