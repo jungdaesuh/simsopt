@@ -910,7 +910,7 @@ if [[ "${PROFILE}" == "pilot" ]]; then
     CMAKE_BUILD_TYPE=Release CXXFLAGS='-O3' \
         "${VENV_DIR}/bin/python" -m pip install \
         --no-build-isolation \
-        -e "${REPO_ROOT}[JAX_GPU,test,ALGS]" \
+        -e "${REPO_ROOT}[JAX_GPU]" \
         'shapely==2.1.2' \
         'numba==0.65.1'
     "${VENV_DIR}/bin/python" -m pip check
