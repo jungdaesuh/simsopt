@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 import json
 import time
@@ -46,6 +46,7 @@ from simsopt.objectives import QuadraticPenalty
 from .jax_banana_types import (
     BANANA_IDX,
     BANANA_TARGETS,
+    COMMON_OBJECTIVE_TERM_NAMES,
     DEFAULT_BANANA_DOFS,
     HBT_BANANA_WS,
     HBT_TF,
@@ -90,16 +91,18 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 class DriverLog:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, persist: bool = True):
         self.path = path
+        self.persist = persist
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("", encoding="utf-8")
 
     def __call__(self, message: object) -> None:
         text = str(message)
         print(text, flush=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(text + "\n")
+        if self.persist:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(text + "\n")
 
 
 def output_paths(output_dir: str | Path, *, prefix: str) -> BananaDriverPaths:
@@ -163,7 +166,9 @@ def build_surface(
         if scale is not None:
             surface.set_dofs(surface.get_dofs() * float(scale) / surface.major_radius())
     else:
-        raise ValueError(f"Unsupported surface extension {suffix!r}; expected .json or .nc")
+        raise ValueError(
+            f"Unsupported surface extension {suffix!r}; expected .json or .nc"
+        )
     return resize_surface(surface, nphi=nphi, ntheta=ntheta)
 
 
@@ -317,7 +322,9 @@ def _boozer_quadpoints(
         ntheta=ntheta,
         nfp=nfp,
     )
-    return np.asarray(quadpoints_phi, dtype=float), np.asarray(quadpoints_theta, dtype=float)
+    return np.asarray(quadpoints_phi, dtype=float), np.asarray(
+        quadpoints_theta, dtype=float
+    )
 
 
 def soft_constraint_weight(weight: float) -> float | None:
@@ -386,7 +393,9 @@ def generate_banana_coils(
     )
 
 
-def generate_proxy_coils(proxy_current_ka: float, proxy_rz: tuple[float, float]) -> list[Coil]:
+def generate_proxy_coils(
+    proxy_current_ka: float, proxy_rz: tuple[float, float]
+) -> list[Coil]:
     radius, z_position = proxy_rz
     curve = _fixed_circular_curve(radius, z_position)
     current = _scaled_current(proxy_current_ka, fix_current=True)
@@ -481,7 +490,10 @@ def banana_base_curve(biotsavart: BiotSavart | BiotSavartJAX) -> object:
 
 def tf_current_total_abs_A(biotsavart: BiotSavart | BiotSavartJAX) -> float:
     return float(
-        sum(abs(coil.current.get_value()) for coil in biotsavart.coils[TF_IDX:BANANA_IDX])
+        sum(
+            abs(coil.current.get_value())
+            for coil in biotsavart.coils[TF_IDX:BANANA_IDX]
+        )
     )
 
 
@@ -595,7 +607,9 @@ class PoloidalExtentJAX(Optimizable):
     def poloidal_half_width(self) -> float:
         gamma = np.asarray(self.curve.gamma(), dtype=float)
         radius = np.linalg.norm(gamma[:, :2], axis=-1)
-        theta_in = np.arctan2(gamma[:, 2] - self.z_position, -(radius - self.major_radius))
+        theta_in = np.arctan2(
+            gamma[:, 2] - self.z_position, -(radius - self.major_radius)
+        )
         return float(np.max(np.abs(theta_in)))
 
     def J(self) -> float:
@@ -651,9 +665,7 @@ class EllipseWidthJAX(Optimizable):
         self.scale = scale
         self.epsilon = epsilon
         self._grad_gamma = jax.jit(jax.grad(ellipse_width_pure, argnums=0))
-        self._grad_gammadash = jax.jit(
-            jax.grad(ellipse_width_pure, argnums=1)
-        )
+        self._grad_gammadash = jax.jit(jax.grad(ellipse_width_pure, argnums=1))
         super().__init__(depends_on=[curve])
 
     def J(self) -> float:
@@ -775,6 +787,34 @@ def weighted_sum_objective(terms: list[WeightedTerm]) -> Optimizable:
     for term in active_terms[1:]:
         objective = objective + term.weight * term.objective
     return objective
+
+
+class _RecordedObjective(Optimizable):
+    """Record one term value without evaluating the term a second time."""
+
+    def __init__(self, objective: Optimizable) -> None:
+        self.objective = objective
+        self.last_value: float | None = None
+        super().__init__(depends_on=[objective])
+
+    def J(self) -> float:
+        self.last_value = float(self.objective.J())
+        return self.last_value
+
+    @derivative_dec
+    def dJ(self):
+        return self.objective.dJ(partials=True)
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+def _require_inactive_coil_surface_distance(objective: _RecordedObjective) -> None:
+    if objective.last_value is None or objective.last_value > 0.0:
+        raise RuntimeError(
+            "The matched seven-term benchmark requires the coil-surface-distance "
+            "hinge to remain inactive because its implicit Boozer-surface derivative "
+            "is not implemented"
+        )
 
 
 def add_current_penalties(
@@ -1004,7 +1044,79 @@ def build_single_stage_objective(
     return weighted_sum_objective(terms), terms
 
 
-def diagnostics_from_terms(objective: Optimizable, terms: list[WeightedTerm]) -> dict[str, float]:
+def build_single_stage_common_objective(
+    *,
+    boozersurface: BoozerSurfaceJAX,
+    biotsavart_jax: BiotSavartJAX,
+    iota_target: float,
+    weights: SingleStageWeights,
+) -> tuple[Optimizable, list[WeightedTerm], _RecordedObjective]:
+    """Build the ordered seven-term objective shared with native SIMSOPT."""
+    if weights.csdist <= 0.0:
+        raise ValueError(
+            "The common seven-term contract requires a positive "
+            "coil-surface-distance weight"
+        )
+    curves = banana_curves(biotsavart_jax)
+    base_curve = banana_base_curve(biotsavart_jax)
+    coil_surface_distance = _RecordedObjective(
+        CurveSurfaceDistanceJAX(
+            curves,
+            boozersurface.surface,
+            HARDWARE_LIMITS.min_csdist,
+        )
+    )
+    terms = [
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[0],
+            weights.nonqs,
+            NonQuasiSymmetricRatioJAX(boozersurface, biotsavart_jax),
+        ),
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[1],
+            weights.bres,
+            BoozerResidualJAX(boozersurface, biotsavart_jax),
+        ),
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[2],
+            weights.iota,
+            QuadraticPenalty(IotasJAX(boozersurface), iota_target),
+        ),
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[3],
+            weights.length,
+            QuadraticPenalty(
+                CurveLengthJAX(base_curve),
+                HARDWARE_LIMITS.max_length,
+                "max",
+            ),
+        ),
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[4],
+            weights.ccdist,
+            CurveCurveDistanceJAX(curves, HARDWARE_LIMITS.min_ccdist),
+        ),
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[5],
+            weights.csdist,
+            coil_surface_distance,
+        ),
+        WeightedTerm(
+            COMMON_OBJECTIVE_TERM_NAMES[6],
+            weights.curvature,
+            LpCurveCurvatureJAX(
+                base_curve,
+                HARDWARE_LIMITS.banana_curv_p,
+                HARDWARE_LIMITS.max_curvature,
+            ),
+        ),
+    ]
+    return weighted_sum_objective(terms), terms, coil_surface_distance
+
+
+def diagnostics_from_terms(
+    objective: Optimizable, terms: list[WeightedTerm]
+) -> dict[str, float]:
     diagnostics = {
         "J": float(objective.J()),
         "grad_norm": float(np.linalg.norm(np.asarray(objective.dJ(), dtype=float))),
@@ -1016,7 +1128,9 @@ def diagnostics_from_terms(objective: Optimizable, terms: list[WeightedTerm]) ->
     return diagnostics
 
 
-def banana_geometry_diagnostics(biotsavart: BiotSavart | BiotSavartJAX) -> dict[str, float]:
+def banana_geometry_diagnostics(
+    biotsavart: BiotSavart | BiotSavartJAX,
+) -> dict[str, float]:
     base_curve = banana_base_curve(biotsavart)
     poloidal = PoloidalExtentJAX(
         base_curve,
@@ -1033,7 +1147,9 @@ def banana_geometry_diagnostics(biotsavart: BiotSavart | BiotSavartJAX) -> dict[
     )
     return {
         "coil_length_m": float(CurveLengthJAX(base_curve).J()),
-        "max_curvature_inv_m": float(np.max(np.asarray(base_curve.kappa(), dtype=float))),
+        "max_curvature_inv_m": float(
+            np.max(np.asarray(base_curve.kappa(), dtype=float))
+        ),
         "poloidal_half_width_rad": poloidal.poloidal_half_width(),
         "ellipse_width_m": float(width.J()),
         "global_curvature_radius_m": global_radius.shortest_radius(),
@@ -1081,10 +1197,13 @@ def minimize_soft_penalty(
         options={"maxiter": int(maxiter), "maxcor": 300},
     )
     objective.x = np.asarray(result.x, dtype=float)
+    elapsed_s = time.monotonic() - started_at
     return result, EvaluationTracker(
         iterations=iterations,
         evaluations=evaluations,
         started_at=started_at,
+        optimizer_s=elapsed_s,
+        elapsed_s=elapsed_s,
     )
 
 
@@ -1115,6 +1234,15 @@ def _boozer_solve_state_or_none(
     )
 
 
+@dataclass(frozen=True)
+class _SingleStageTrialState:
+    optimizer_dofs: np.ndarray
+    surface_dofs: np.ndarray
+    solve_state: BoozerSolveState
+    objective: float
+    gradient: np.ndarray
+
+
 def minimize_single_stage_soft_penalty(
     *,
     objective: Optimizable,
@@ -1122,40 +1250,47 @@ def minimize_single_stage_soft_penalty(
     initial_state: BoozerSolveState,
     maxiter: int,
     log: DriverLog,
+    maxcor: int = 300,
+    maxls: int = 20,
+    ftol: float = 1.0e-15,
+    gtol: float = 1.0e-15,
+    coil_surface_distance: _RecordedObjective | None = None,
 ) -> tuple[object, EvaluationTracker]:
     started_at = time.monotonic()
     evaluations = 0
     iterations = 0
-    solve_state = initial_state
-    last_successful_value: float | None = None
-    last_successful_gradient: np.ndarray | None = None
-    last_successful_surface_dofs: np.ndarray | None = None
+    rejected_evaluations = 0
+    accepted_solve_state = initial_state
+    accepted_surface_dofs = np.asarray(
+        boozersurface.surface.get_dofs(), dtype=np.float64
+    ).copy()
+    accepted_value: float | None = None
+    accepted_gradient: np.ndarray | None = None
+    last_trial: _SingleStageTrialState | None = None
+
+    def restore_accepted_surface(candidate_dofs: np.ndarray) -> None:
+        objective.x = np.asarray(candidate_dofs, dtype=np.float64)
+        boozersurface.surface.set_dofs(accepted_surface_dofs)
+        boozersurface.need_to_run_code = True
 
     def reject_candidate(
         *,
         reason: str,
-        candidate_value: float | None = None,
     ) -> tuple[float, np.ndarray]:
-        nonlocal evaluations
-        if (
-            last_successful_value is None
-            or last_successful_gradient is None
-            or last_successful_surface_dofs is None
-        ):
+        nonlocal evaluations, last_trial, rejected_evaluations
+        if accepted_value is None or accepted_gradient is None:
             raise RuntimeError(
                 "Initial Boozer value/gradient evaluation failed during JAX banana "
                 "single-stage optimization"
             )
-        boozersurface.surface.set_dofs(last_successful_surface_dofs)
-        penalty = max(abs(last_successful_value), 1.0)
-        finite_candidate = (
-            last_successful_value
-            if candidate_value is None or not np.isfinite(candidate_value)
-            else candidate_value
-        )
-        value = max(finite_candidate, last_successful_value + penalty) + penalty
-        gradient = last_successful_gradient.copy()
+        last_trial = None
+        boozersurface.surface.set_dofs(accepted_surface_dofs)
+        boozersurface.need_to_run_code = True
+        penalty = max(abs(accepted_value), 1.0)
+        value = accepted_value + 2.0 * penalty
+        gradient = accepted_gradient.copy()
         evaluations += 1
+        rejected_evaluations += 1
         log(
             "eval="
             f"{evaluations}, iter={iterations}, rejected_{reason}=true, "
@@ -1164,59 +1299,115 @@ def minimize_single_stage_soft_penalty(
         return value, gradient
 
     def value_and_gradient(dofs: np.ndarray) -> tuple[float, np.ndarray]:
-        nonlocal evaluations, solve_state
-        nonlocal last_successful_value, last_successful_gradient
-        nonlocal last_successful_surface_dofs
-        objective.x = dofs
-        candidate_state = _boozer_solve_state_or_none(boozersurface, solve_state)
+        nonlocal accepted_gradient, accepted_solve_state, accepted_surface_dofs
+        nonlocal accepted_value, evaluations, last_trial
+        candidate_dofs = np.asarray(dofs, dtype=np.float64)
+        restore_accepted_surface(candidate_dofs)
+        candidate_state = _boozer_solve_state_or_none(
+            boozersurface,
+            accepted_solve_state,
+        )
         if candidate_state is None:
             return reject_candidate(reason="boozer_solve")
 
         value = float(objective.J())
+        if coil_surface_distance is not None:
+            _require_inactive_coil_surface_distance(coil_surface_distance)
         try:
             gradient = np.asarray(objective.dJ(), dtype=float)
         except BoozerAdjointLinearSolveError:
-            return reject_candidate(
-                reason="boozer_adjoint",
-                candidate_value=value,
-            )
-        solve_state = candidate_state
-        last_successful_value = value
-        last_successful_gradient = gradient.copy()
-        last_successful_surface_dofs = np.asarray(
-            boozersurface.surface.get_dofs(),
-            dtype=float,
-        ).copy()
+            return reject_candidate(reason="boozer_adjoint")
+        if not np.isfinite(value) or not np.all(np.isfinite(gradient)):
+            return reject_candidate(reason="nonfinite_objective")
+        last_trial = _SingleStageTrialState(
+            optimizer_dofs=candidate_dofs.copy(),
+            surface_dofs=np.asarray(
+                boozersurface.surface.get_dofs(), dtype=np.float64
+            ).copy(),
+            solve_state=candidate_state,
+            objective=value,
+            gradient=gradient.copy(),
+        )
+        if accepted_value is None:
+            accepted_solve_state = last_trial.solve_state
+            accepted_surface_dofs = last_trial.surface_dofs.copy()
+            accepted_value = last_trial.objective
+            accepted_gradient = last_trial.gradient.copy()
         evaluations += 1
         log(
             "eval="
             f"{evaluations}, iter={iterations}, "
-            f"iota={solve_state.iota:.16e}, J={value:.16e}, "
+            f"iota={candidate_state.iota:.16e}, J={value:.16e}, "
             f"|grad|={np.linalg.norm(gradient):.16e}"
         )
         return value, gradient
 
     def callback(dofs: np.ndarray) -> None:
-        nonlocal iterations
-        objective.x = dofs
+        nonlocal accepted_gradient, accepted_solve_state, accepted_surface_dofs
+        nonlocal accepted_value, iterations, last_trial
+        accepted_dofs = np.asarray(dofs, dtype=np.float64)
+        if last_trial is None or not np.array_equal(
+            accepted_dofs,
+            last_trial.optimizer_dofs,
+        ):
+            value_and_gradient(accepted_dofs)
+        if last_trial is None:
+            raise RuntimeError(
+                "SciPy accepted a candidate without a successful JAX Boozer solve"
+            )
+        accepted_solve_state = last_trial.solve_state
+        accepted_surface_dofs = last_trial.surface_dofs.copy()
+        accepted_value = last_trial.objective
+        accepted_gradient = last_trial.gradient.copy()
+        objective.x = accepted_dofs
+        boozersurface.surface.set_dofs(accepted_surface_dofs)
+        boozersurface.need_to_run_code = False
         iterations += 1
-        log(f"accepted_iter={iterations}, J={float(objective.J()):.16e}")
+        log(f"accepted_iter={iterations}, J={accepted_value:.16e}")
 
+    optimizer_started_at = time.monotonic()
     result = minimize(
         value_and_gradient,
         np.asarray(objective.x, dtype=float),
         jac=True,
         method="L-BFGS-B",
         callback=callback,
-        tol=1.0e-15,
-        options={"maxiter": int(maxiter), "maxcor": 300},
+        options={
+            "maxiter": int(maxiter),
+            "maxcor": int(maxcor),
+            "maxls": int(maxls),
+            "ftol": float(ftol),
+            "gtol": float(gtol),
+        },
     )
-    objective.x = np.asarray(result.x, dtype=float)
-    require_successful_boozer_solve(boozersurface, solve_state)
+    optimizer_s = time.monotonic() - optimizer_started_at
+    final_dofs = np.asarray(result.x, dtype=np.float64)
+    restore_accepted_surface(final_dofs)
+    final_solve_started_at = time.monotonic()
+    require_successful_boozer_solve(boozersurface, accepted_solve_state)
+    final_inner_solve_s = time.monotonic() - final_solve_started_at
+    final_objective_started_at = time.monotonic()
+    final_value = float(objective.J())
+    if coil_surface_distance is not None:
+        _require_inactive_coil_surface_distance(coil_surface_distance)
+    final_gradient = np.asarray(objective.dJ(), dtype=np.float64)
+    if not np.isfinite(final_value) or not np.all(np.isfinite(final_gradient)):
+        raise RuntimeError(
+            "Final JAX Boozer endpoint produced a non-finite objective or gradient"
+        )
+    result.fun = final_value
+    result.jac = final_gradient
+    final_objective_s = time.monotonic() - final_objective_started_at
+    elapsed_s = time.monotonic() - started_at
     return result, EvaluationTracker(
         iterations=iterations,
         evaluations=evaluations,
+        rejected_evaluations=rejected_evaluations,
         started_at=started_at,
+        optimizer_s=optimizer_s,
+        final_inner_solve_s=final_inner_solve_s,
+        final_objective_s=final_objective_s,
+        elapsed_s=elapsed_s,
     )
 
 
@@ -1229,6 +1420,11 @@ def build_jax_boozer_surface(
     nphi: int,
     ntheta: int,
     constraint_weight: float | None,
+    bfgs_tol: float = 1.0e-10,
+    bfgs_maxiter: int = 1500,
+    newton_tol: float | None = None,
+    newton_maxiter: int = 40,
+    limited_memory: bool = False,
 ) -> BoozerSurfaceJAX:
     boozer_surface = build_boozer_surface_copy(
         surface,
@@ -1238,13 +1434,31 @@ def build_jax_boozer_surface(
         ntheta=ntheta,
     )
     label = Volume(boozer_surface)
+    resolved_newton_tol = (
+        (1.0e-11 if constraint_weight is not None else 1.0e-13)
+        if newton_tol is None
+        else float(newton_tol)
+    )
+    options: dict[str, object] = {
+        "verbose": False,
+        "newton_tol": resolved_newton_tol,
+        "newton_maxiter": int(newton_maxiter),
+    }
+    if constraint_weight is not None:
+        options.update(
+            {
+                "bfgs_tol": float(bfgs_tol),
+                "bfgs_maxiter": int(bfgs_maxiter),
+                "limited_memory": bool(limited_memory),
+            }
+        )
     return BoozerSurfaceJAX(
         biotsavart_jax,
         boozer_surface,
         label,
         boozer_surface.volume(),
         constraint_weight=constraint_weight,
-        options={"verbose": False},
+        options=options,
     )
 
 
