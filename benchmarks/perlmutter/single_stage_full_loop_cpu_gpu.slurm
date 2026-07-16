@@ -23,7 +23,8 @@ SEED_DIR="${SEED_DIR:?Set SEED_DIR to the immutable banana seed directory}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${SCRATCH}/simsopt-full-loop/${SLURM_JOB_ID}}"
 IOTA_TARGET="${IOTA_TARGET:?Set IOTA_TARGET explicitly from the seed provenance}"
 HASH_LOCK_PATH="${HASH_LOCK_PATH:-}"
-VENV_ROOT="${VENV_ROOT:-${SCRATCH}/simsopt-full-loop-envs}"
+VENV_ROOT="${VENV_ROOT:-${TMPDIR:-/tmp}/simsopt-full-loop-envs-${UID}}"
+PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE:-slurm-step}"
 
 validate_external_write_root() {
     local root_label="$1"
@@ -76,12 +77,40 @@ reserve_fresh_directory() {
     fi
 }
 
+prepare_private_venv_root() {
+    local root_path="$1"
+    local owner_uid
+    local permissions
+    if [[ -L "${root_path}" ]]; then
+        echo "VENV_ROOT must not be a symbolic link: ${root_path}" >&2
+        return 2
+    fi
+    if [[ ! -e "${root_path}" ]]; then
+        if ! mkdir --mode=700 -- "${root_path}"; then
+            echo "VENV_ROOT could not be reserved privately: ${root_path}" >&2
+            return 2
+        fi
+    fi
+    if [[ ! -d "${root_path}" ]]; then
+        echo "VENV_ROOT must be a directory: ${root_path}" >&2
+        return 2
+    fi
+    owner_uid="$(stat -c %u -- "${root_path}")"
+    permissions="$(stat -c %a -- "${root_path}")"
+    if [[ "${owner_uid}" != "${UID}" || "${permissions}" != "700" ]]; then
+        echo "VENV_ROOT must be owned by the current user with mode 700" >&2
+        echo "VENV_ROOT=${root_path}" >&2
+        echo "owner_uid=${owner_uid} permissions=${permissions}" >&2
+        return 2
+    fi
+}
+
 validate_external_write_root "ARTIFACT_ROOT" "${REPO_ROOT}" "${ARTIFACT_ROOT}"
 validate_external_write_root "VENV_ROOT" "${REPO_ROOT}" "${VENV_ROOT}"
 REPO_ROOT="$(realpath -- "${REPO_ROOT}")"
 ARTIFACT_ROOT="$(realpath -m -- "${ARTIFACT_ROOT}")"
-VENV_ROOT="$(realpath -m -- "${VENV_ROOT}")"
-VENV_DIR="${VENV_ROOT}/job-${SLURM_JOB_ID}-py313"
+VENV_ROOT_REAL="$(realpath -m -- "${VENV_ROOT}")"
+VENV_DIR="${VENV_ROOT_REAL}/job-${SLURM_JOB_ID}-py313"
 validate_disjoint_write_roots \
     "ARTIFACT_ROOT" "${ARTIFACT_ROOT}" "VENV_DIR" "${VENV_DIR}"
 
@@ -142,7 +171,56 @@ validate_pair_count() {
     fi
 }
 
+validate_pair_execution_mode() {
+    local profile="$1"
+    local execution_mode="$2"
+    local visible_devices
+    case "${execution_mode}" in
+        slurm-step)
+            ;;
+        direct)
+            if [[ "${profile}" != "pilot" ]]; then
+                echo "Direct pair execution is diagnostic-only and requires PROFILE=pilot" >&2
+                return 2
+            fi
+            if [[ -z "${SLURM_STEP_ID:-}" ]]; then
+                echo "Direct pair execution requires the launcher to run inside a Slurm step" >&2
+                return 2
+            fi
+            visible_devices="${CUDA_VISIBLE_DEVICES:-}"
+            if [[ -z "${visible_devices}" || "${visible_devices}" == *,* \
+                || "${visible_devices}" =~ [[:space:]] ]]; then
+                echo \
+                    "Direct pair execution requires exactly one CUDA_VISIBLE_DEVICES selector" \
+                    >&2
+                return 2
+            fi
+            ;;
+        *)
+            echo \
+                "PAIR_EXECUTION_MODE must be slurm-step or direct; got ${execution_mode}" \
+                >&2
+            return 2
+            ;;
+    esac
+}
+
+configure_pair_launcher() {
+    local execution_mode="$1"
+    PAIR_LAUNCHER=()
+    if [[ "${execution_mode}" == "slurm-step" ]]; then
+        PAIR_LAUNCHER=(
+            srun
+            --ntasks=1
+            --cpus-per-task="${SLURM_CPUS_PER_TASK}"
+            --gpus-per-task=1
+            --cpu-bind=cores
+        )
+    fi
+}
+
 validate_pair_count "${PROFILE}" "${PAIR_COUNT}"
+validate_pair_execution_mode "${PROFILE}" "${PAIR_EXECUTION_MODE}"
 
 CONSTRAINT_WEIGHT="${CONSTRAINT_WEIGHT:-1.0}"
 OUTER_MAXCOR="${OUTER_MAXCOR:-300}"
@@ -150,6 +228,13 @@ OUTER_MAXLS="${OUTER_MAXLS:-20}"
 BOOZER_BFGS_TOL="${BOOZER_BFGS_TOL:-1e-10}"
 BOOZER_NEWTON_TOL="${BOOZER_NEWTON_TOL:-1e-11}"
 
+prepare_private_venv_root "${VENV_ROOT}"
+VENV_ROOT="$(realpath -- "${VENV_ROOT}")"
+if [[ "${VENV_ROOT}" != "${VENV_ROOT_REAL}" ]]; then
+    echo "VENV_ROOT changed while it was being reserved" >&2
+    exit 2
+fi
+VENV_DIR="${VENV_ROOT}/job-${SLURM_JOB_ID}-py313"
 reserve_fresh_directory "ARTIFACT_ROOT" "${ARTIFACT_ROOT}"
 reserve_fresh_directory "VENV_DIR" "${VENV_DIR}"
 
@@ -303,7 +388,12 @@ payload = {
     "metric": "nvidia-smi compute-process used_memory",
     "unit": "MiB",
     "sampling_interval_seconds": 1,
-    "scope": "all compute processes on the exclusive Slurm node",
+    "scope": (
+        "all compute processes on the exclusive Slurm node"
+        if profile == "full"
+        else "diagnostic samples from all compute processes visible on the "
+        "allocated node"
+    ),
     "note": (
         "JAX samples are compute-process rows whose timestamps fall inside "
         "the recorded JAX lane execution window. GPU process memory is "
@@ -350,6 +440,7 @@ aggregate_pairs() {
     ARTIFACT_ROOT="${ARTIFACT_ROOT}" \
         PROFILE="${PROFILE}" \
         EVIDENCE_CLASS="${EVIDENCE_CLASS}" \
+        PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE}" \
         PAIR_COUNT="${PAIR_COUNT}" \
         GPU_PROCESS_MEMORY_SUMMARY="${GPU_PROCESS_MEMORY_SUMMARY}" \
         ENVIRONMENT_LOCK_MANIFEST="${ENVIRONMENT_LOCK_MANIFEST}" \
@@ -367,6 +458,7 @@ artifact_root = Path(os.environ["ARTIFACT_ROOT"])
 pair_root = artifact_root / "pairs"
 profile = os.environ["PROFILE"]
 evidence_class = os.environ["EVIDENCE_CLASS"]
+pair_execution_mode = os.environ["PAIR_EXECUTION_MODE"]
 expected_pair_count = int(os.environ["PAIR_COUNT"])
 gpu_memory_summary_path = Path(os.environ["GPU_PROCESS_MEMORY_SUMMARY"])
 environment_lock_manifest_path = Path(os.environ["ENVIRONMENT_LOCK_MANIFEST"])
@@ -457,6 +549,7 @@ for pair_index in range(1, expected_pair_count + 1):
         "pair_index": pair_index,
         "pair_name": pair_name,
         "order": order,
+        "pair_execution_mode": status_values.get("pair_execution_mode"),
         "status": status,
         "comparator_exit_code": (
             int(status_values["comparator_exit_code"])
@@ -534,8 +627,13 @@ repeat_design_valid = (
     if profile == "full"
     else expected_pair_count >= 1
 )
+pair_execution_modes_match = all(
+    pair["pair_execution_mode"] == pair_execution_mode for pair in pairs
+)
 all_pairs_passed = (
-    repeat_design_valid and successful_pair_count == expected_pair_count
+    repeat_design_valid
+    and pair_execution_modes_match
+    and successful_pair_count == expected_pair_count
 )
 production_evidence_gates_passed = bool(
     gpu_memory_gate["passed"] and dependency_lock_gate_passed
@@ -573,11 +671,13 @@ payload = {
     ),
     "profile": profile,
     "evidence_class": evidence_class,
+    "pair_execution_mode": pair_execution_mode,
     "claim_ready": aggregate_claim_ready,
     "expected_pair_count": expected_pair_count,
     "successful_pair_count": successful_pair_count,
     "failed_pair_count": expected_pair_count - successful_pair_count,
     "repeat_design_valid": repeat_design_valid,
+    "pair_execution_modes_match": pair_execution_modes_match,
     "lane_order_policy": "alternating cpu-jax / jax-cpu",
     "speedup": speedup_summary,
     "wall_seconds": {
@@ -651,6 +751,7 @@ finalize_job() {
     FINAL_EXIT_CODE="${exit_code}" \
         FINAL_PROFILE="${PROFILE}" \
         FINAL_EVIDENCE_CLASS="${EVIDENCE_CLASS}" \
+        FINAL_PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE}" \
         FINAL_CURRENT_PAIR="${last_pair}" \
         FINAL_STATUS_PATH="${MACHINE_ROOT}/job_status.json" \
         python - <<'PY'
@@ -669,6 +770,7 @@ payload = {
     "exit_code": exit_code,
     "profile": os.environ["FINAL_PROFILE"],
     "evidence_class": os.environ["FINAL_EVIDENCE_CLASS"],
+    "pair_execution_mode": os.environ["FINAL_PAIR_EXECUTION_MODE"],
     "last_pair": os.environ["FINAL_CURRENT_PAIR"] or None,
     "finished_at_utc": datetime.now(timezone.utc).isoformat(),
 }
@@ -800,7 +902,7 @@ export PYTHONNOUSERSITE=1
 
 if [[ "${PROFILE}" == "pilot" ]]; then
     "${VENV_DIR}/bin/python" -m pip install --upgrade \
-        'pip==26.1.2' 'setuptools==83.1.0' 'wheel==0.47.0'
+        'pip==26.1.2' 'setuptools==83.0.0' 'wheel==0.47.0'
     "${VENV_DIR}/bin/python" -m pip install \
         'scikit-build-core' 'pybind11<3.0.0' 'setuptools_scm>=8.0' \
         'numpy>=2.0,<2.5'
@@ -1066,6 +1168,7 @@ PY
 
 PROFILE="${PROFILE}" \
     EVIDENCE_CLASS="${EVIDENCE_CLASS}" \
+    PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE}" \
     LOCK_ORIGIN="${LOCK_ORIGIN}" \
     ENVIRONMENT_LOCK_SNAPSHOT="${ENVIRONMENT_LOCK_SNAPSHOT}" \
     ENVIRONMENT_LOCK_SHA256="${ENVIRONMENT_LOCK_SHA256}" \
@@ -1100,6 +1203,7 @@ payload = {
     "created_at_utc": datetime.now(timezone.utc).isoformat(),
     "profile": os.environ["PROFILE"],
     "evidence_class": os.environ["EVIDENCE_CLASS"],
+    "pair_execution_mode": os.environ["PAIR_EXECUTION_MODE"],
     "lock_origin": os.environ["LOCK_ORIGIN"],
     "lock_snapshot": str(lock_path),
     "lock_sha256": lock_sha256,
@@ -1131,6 +1235,8 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
+printf '%s\n' "${PAIR_EXECUTION_MODE}" \
+    > "${MACHINE_ROOT}/pair_execution_mode.txt"
 module list > "${MACHINE_ROOT}/modules.txt" 2>&1
 lscpu > "${MACHINE_ROOT}/lscpu.txt"
 nvidia-smi -q > "${MACHINE_ROOT}/nvidia_smi_before.txt"
@@ -1208,6 +1314,8 @@ touch "${GPU_MONITOR_SENTINEL}"
 ) &
 GPU_MONITOR_PID=$!
 
+configure_pair_launcher "${PAIR_EXECUTION_MODE}"
+
 FAILED_PAIRS=0
 for ((pair_index = 1; pair_index <= PAIR_COUNT; pair_index++))
 do
@@ -1223,12 +1331,7 @@ do
     pair_started_at="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
     echo "Starting ${pair_name}/${PAIR_COUNT} with order ${pair_order}" >&2
 
-    if srun \
-        --ntasks=1 \
-        --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
-        --gpus-per-task=1 \
-        --cpu-bind=cores \
-        "${VENV_DIR}/bin/python" \
+    if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \
         "${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py" \
         --surface-path "${SURFACE_SNAPSHOT}" \
         --biotsavart-file "${BIOTSAVART_SNAPSHOT}" \
@@ -1314,6 +1417,7 @@ PY
         printf 'order\t%s\n' "${pair_order}"
         printf 'profile\t%s\n' "${PROFILE}"
         printf 'evidence_class\t%s\n' "${EVIDENCE_CLASS}"
+        printf 'pair_execution_mode\t%s\n' "${PAIR_EXECUTION_MODE}"
         printf 'started_at_utc\t%s\n' "${pair_started_at}"
         printf 'finished_at_utc\t%s\n' "${pair_finished_at}"
         printf 'comparator_exit_code\t%s\n' "${comparator_exit_code}"

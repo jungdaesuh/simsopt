@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -19,6 +20,7 @@ from benchmarks.single_stage_full_loop_compare import (
     _tolerances,
     build_lane_command,
     compare_lane_results,
+    lane_environment,
     parse_gnu_time_verbose,
     parse_lane_result,
     resolve_external_output_root,
@@ -564,6 +566,21 @@ def test_lane_commands_share_profile_but_only_jax_gets_exclusion_flags() -> None
     assert "--sign-g" not in jax
 
 
+@pytest.mark.parametrize(
+    "visible_devices",
+    ("", "0,1", "GPU-first,GPU-second", "0 1", " 0"),
+)
+def test_jax_lane_requires_exactly_one_cuda_selector(
+    visible_devices: str,
+) -> None:
+    with pytest.raises(RuntimeError, match="exactly one Slurm-assigned"):
+        lane_environment("jax", {"CUDA_VISIBLE_DEVICES": visible_devices})
+
+    environment = lane_environment("jax", {"CUDA_VISIBLE_DEVICES": "0"})
+    assert environment["CUDA_VISIBLE_DEVICES"] == "0"
+    assert environment["JAX_PLATFORMS"] == "cuda"
+
+
 def test_source_status_ignores_only_top_level_slurm_scheduler_logs() -> None:
     status = "\n".join(
         (
@@ -577,6 +594,213 @@ def test_source_status_ignores_only_top_level_slurm_scheduler_logs() -> None:
     assert source_relevant_git_status(status) == "\n".join(
         ("?? nested/slurm-123.out", " M benchmarks/runner.py")
     )
+
+
+def test_launcher_venv_root_respects_tmpdir_and_uid_scope(
+    tmp_path: Path,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    assignment = next(
+        line for line in source.splitlines() if line.startswith('VENV_ROOT="')
+    )
+
+    def resolve_venv_root(environment: dict[str, str]) -> str:
+        completed = subprocess.run(
+            ["bash", "-c", f'{assignment}\nprintf "%s" "$VENV_ROOT"'],
+            check=True,
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+        return completed.stdout
+
+    environment = os.environ.copy()
+    environment.pop("VENV_ROOT", None)
+    environment["TMPDIR"] = str(tmp_path / "node-local")
+    assert resolve_venv_root(environment) == str(
+        tmp_path / "node-local" / f"simsopt-full-loop-envs-{os.getuid()}"
+    )
+
+    environment.pop("TMPDIR")
+    assert resolve_venv_root(environment) == (
+        f"/tmp/simsopt-full-loop-envs-{os.getuid()}"
+    )
+
+    environment["VENV_ROOT"] = str(tmp_path / "explicit-override")
+    assert resolve_venv_root(environment) == environment["VENV_ROOT"]
+
+
+def test_launcher_pins_expected_bootstrap_tool_versions() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    bootstrap = re.search(
+        r"pip install --upgrade \\\n"
+        r"\s+'pip==([^']+)' 'setuptools==([^']+)' 'wheel==([^']+)'",
+        source,
+    )
+
+    assert bootstrap is not None
+    assert bootstrap.groups() == ("26.1.2", "83.0.0", "0.47.0")
+
+
+def test_launcher_requires_a_private_venv_root(tmp_path: Path) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^prepare_private_venv_root\(\) \{.*?^\}\n",
+        source,
+    )
+    assert function is not None
+    prepare_call = 'prepare_private_venv_root "${VENV_ROOT}"'
+    canonical_assignment = 'VENV_ROOT="$(realpath -- "${VENV_ROOT}")"'
+    assert source.count(prepare_call) == 1
+    assert source.count(canonical_assignment) == 1
+    assert source.index(prepare_call) < source.index(canonical_assignment)
+
+    def prepare(root_path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'{function.group(0)}\nprepare_private_venv_root "$1"',
+                "prepare-private-venv-root-test",
+                str(root_path),
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    private_root = tmp_path / "private"
+    assert prepare(private_root).returncode == 0
+    assert private_root.stat().st_mode & 0o777 == 0o700
+    assert prepare(private_root).returncode == 0
+
+    permissive_root = tmp_path / "permissive"
+    permissive_root.mkdir(mode=0o755)
+    permissive_root.chmod(0o755)
+    completed = prepare(permissive_root)
+    assert completed.returncode == 2
+    assert "owned by the current user with mode 700" in completed.stderr
+    assert permissive_root.stat().st_mode & 0o777 == 0o755
+
+    symlink_target = tmp_path / "symlink-target"
+    symlink_target.mkdir(mode=0o700)
+    symlink_target.chmod(0o700)
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.symlink_to(symlink_target, target_is_directory=True)
+    completed = prepare(symlink_root)
+    assert completed.returncode == 2
+    assert "must not be a symbolic link" in completed.stderr
+    assert symlink_root.is_symlink()
+    assert symlink_target.stat().st_mode & 0o777 == 0o700
+    assert tuple(symlink_target.iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    (
+        "profile",
+        "execution_mode",
+        "slurm_step_id",
+        "visible_devices",
+        "expected_returncode",
+    ),
+    (
+        ("pilot", "slurm-step", None, None, 0),
+        ("full", "slurm-step", None, None, 0),
+        ("pilot", "direct", "12", "0", 0),
+        ("pilot", "direct", None, "0", 2),
+        ("full", "direct", "12", "0", 2),
+        ("pilot", "direct", "12", None, 2),
+        ("pilot", "direct", "12", "0,1", 2),
+        ("pilot", "direct", "12", "0 1", 2),
+        ("pilot", "unknown", "12", "0", 2),
+    ),
+)
+def test_launcher_pair_execution_mode_contract(
+    profile: str,
+    execution_mode: str,
+    slurm_step_id: str | None,
+    visible_devices: str | None,
+    expected_returncode: int,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^validate_pair_execution_mode\(\) \{.*?^\}\n",
+        source,
+    )
+    assert function is not None
+    environment = os.environ.copy()
+    environment.pop("SLURM_STEP_ID", None)
+    environment.pop("CUDA_VISIBLE_DEVICES", None)
+    if slurm_step_id is not None:
+        environment["SLURM_STEP_ID"] = slurm_step_id
+    if visible_devices is not None:
+        environment["CUDA_VISIBLE_DEVICES"] = visible_devices
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'{function.group(0)}\nvalidate_pair_execution_mode "$1" "$2"',
+            "validate-pair-execution-mode-test",
+            profile,
+            execution_mode,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
+
+    assert completed.returncode == expected_returncode
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "expected_command"),
+    (
+        (
+            "slurm-step",
+            (
+                "srun",
+                "--ntasks=1",
+                "--cpus-per-task=32",
+                "--gpus-per-task=1",
+                "--cpu-bind=cores",
+            ),
+        ),
+        ("direct", ()),
+    ),
+)
+def test_launcher_pair_execution_mode_selects_expected_command(
+    execution_mode: str,
+    expected_command: tuple[str, ...],
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^configure_pair_launcher\(\) \{.*?^\}\n",
+        source,
+    )
+    assert function is not None
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"{function.group(0)}\n"
+                'configure_pair_launcher "$1"\n'
+                "if ((${#PAIR_LAUNCHER[@]})); then\n"
+                '    printf "%s\\n" "${PAIR_LAUNCHER[@]}"\n'
+                "fi"
+            ),
+            "configure-pair-launcher-test",
+            execution_mode,
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "SLURM_CPUS_PER_TASK": "32"},
+    )
+
+    assert tuple(completed.stdout.splitlines()) == expected_command
+    assert 'if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \\' in source
 
 
 def test_comparator_output_root_must_be_outside_source_checkout(
