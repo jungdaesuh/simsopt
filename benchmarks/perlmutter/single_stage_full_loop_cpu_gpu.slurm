@@ -150,6 +150,7 @@ run_lane_step() {
     local pair_name
     local actual_node
     local assigned_gpu_id=""
+    local nvidia_smi_selector=""
     local visible_devices="${CUDA_VISIBLE_DEVICES:-}"
     local -a step_nodes=()
 
@@ -191,6 +192,7 @@ run_lane_step() {
             echo "jax_gpu requires exactly one Slurm GPU assigned to its step" >&2
             return 2
         fi
+        nvidia_smi_selector="${visible_devices}"
     else
         if [[ -n "${visible_devices}" || -n "${SLURM_STEP_GPUS:-}" ]]; then
             echo "${lane} must not receive a GPU or CUDA visibility" >&2
@@ -208,6 +210,7 @@ run_lane_step() {
         printf 'slurm_cpus_per_task\t%s\n' "${SLURM_CPUS_PER_TASK}"
         printf 'omp_num_threads\t%s\n' "${OMP_NUM_THREADS}"
         printf 'cuda_visible_devices\t%s\n' "${visible_devices}"
+        printf 'nvidia_smi_selector\t%s\n' "${nvidia_smi_selector}"
     } > "${pair_dir}/${lane}_slurm_step.tsv"
     lscpu > "${pair_dir}/${lane}_lscpu.txt"
 
@@ -218,9 +221,9 @@ run_lane_step() {
         local gpu_memory_hook_returncode
         local gpu_monitor_pid
 
-        nvidia-smi --id="${assigned_gpu_id}" -q \
+        nvidia-smi --id="${nvidia_smi_selector}" -q \
             > "${pair_dir}/jax_gpu_nvidia_smi_before.txt"
-        nvidia-smi --id="${assigned_gpu_id}" \
+        nvidia-smi --id="${nvidia_smi_selector}" \
             --query-gpu=index,name,uuid,memory.total,driver_version \
             --format=csv,noheader > "${pair_dir}/jax_gpu_inventory.csv"
         touch "${gpu_monitor_sentinel}"
@@ -231,7 +234,7 @@ run_lane_step() {
             while [[ -e "${gpu_monitor_sentinel}" ]]
             do
                 local_timestamp="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
-                if sample="$(nvidia-smi --id="${assigned_gpu_id}" \
+                if sample="$(nvidia-smi --id="${nvidia_smi_selector}" \
                     --query-compute-apps=gpu_uuid,pid,used_memory \
                     --format=csv,noheader,nounits 2> "${sampler_last_error}")"
                 then
@@ -282,9 +285,9 @@ run_lane_step() {
                 lane_exit_code="${gpu_memory_hook_returncode}"
             fi
         fi
-        nvidia-smi --id="${assigned_gpu_id}" -q \
+        nvidia-smi --id="${nvidia_smi_selector}" -q \
             > "${pair_dir}/jax_gpu_nvidia_smi_after.txt"
-        nvidia-smi --id="${assigned_gpu_id}" \
+        nvidia-smi --id="${nvidia_smi_selector}" \
             --query-gpu=index,name,uuid,memory.used,memory.total \
             --format=csv,noheader > "${pair_dir}/jax_gpu_inventory_after.csv"
     elif "${python_executable}" "${comparator_path}" run-lane \
@@ -1062,8 +1065,9 @@ payload = {
     "note": (
         "JAX-GPU samples are compute-process rows whose timestamps fall inside "
         "the recorded JAX-GPU lane execution window. Every nvidia-smi query is "
-        "restricted to the lane's Slurm-assigned global GPU ID. GPU process "
-        "memory is separate from GNU-time host RSS."
+        "restricted to the lane's cgroup-visible CUDA selector; the matching "
+        "Slurm-assigned global GPU ID is recorded separately. GPU process memory "
+        "is separate from GNU-time host RSS."
     ),
     "sampler_queries": {
         "query_count": query_count,

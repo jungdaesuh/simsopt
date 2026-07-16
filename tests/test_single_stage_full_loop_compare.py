@@ -2245,8 +2245,30 @@ def test_launcher_restricts_gpu_sampling_to_the_assigned_gpu() -> None:
 
     assert 'assigned_gpu_id="${SLURM_STEP_GPUS:-}"' in wrapper_source
     assert '"${assigned_gpu_id}" == *,*' in wrapper_source
-    assert wrapper_source.count('--id="${assigned_gpu_id}"') == 5
+    assert 'nvidia_smi_selector="${visible_devices}"' in wrapper_source
+    assert wrapper_source.count('--id="${nvidia_smi_selector}"') == 5
+    assert '--id="${assigned_gpu_id}"' not in wrapper_source
+    assert "nvidia_smi_selector" in wrapper_source
     assert "exactly one Slurm GPU assigned to its step" in wrapper_source
+
+
+def test_launcher_uses_cgroup_visible_gpu_selector_for_nvidia_smi() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    wrapper = re.search(r"(?ms)^run_lane_step\(\) \{.*?^\}\n", source)
+    assert wrapper is not None
+    wrapper_source = wrapper.group(0)
+
+    assert 'local assigned_gpu_id=""' in wrapper_source
+    assert 'local nvidia_smi_selector=""' in wrapper_source
+    assert 'local visible_devices="${CUDA_VISIBLE_DEVICES:-}"' in wrapper_source
+    assert 'nvidia_smi_selector="${visible_devices}"' in wrapper_source
+    assert "slurm_step_gpus" in wrapper_source
+    assert "cuda_visible_devices" in wrapper_source
+    assert "nvidia_smi_selector" in wrapper_source
+
+    summary_source = source[source.index('"note": (') :]
+    assert "cgroup-visible CUDA selector" in summary_source
+    assert "Slurm-assigned global GPU ID is recorded separately" in summary_source
 
 
 def test_launcher_gpu_summary_null_timestamps_fail_evidence_without_crashing(
