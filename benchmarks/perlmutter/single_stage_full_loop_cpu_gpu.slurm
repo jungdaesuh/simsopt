@@ -315,6 +315,7 @@ ARTIFACT_ROOT="${ARTIFACT_ROOT:-${SCRATCH}/simsopt-full-loop/${SLURM_JOB_ID}}"
 IOTA_TARGET="${IOTA_TARGET:?Set IOTA_TARGET explicitly from the seed provenance}"
 HASH_LOCK_PATH="${HASH_LOCK_PATH:-}"
 VENV_ROOT="${VENV_ROOT:-${SCRATCH:?SCRATCH must be set}/simsopt-full-loop-envs-${UID}}"
+PREPARED_VENV_DIR="${PREPARED_VENV_DIR:-}"
 PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE:-slurm-step}"
 
 validate_external_write_root() {
@@ -358,14 +359,79 @@ validate_disjoint_write_roots() {
     esac
 }
 
+resolve_source_scm_provenance() {
+    local repo_root="$1"
+    local source_sha="$2"
+    local description
+    description="$(
+        git -C "${repo_root}" describe \
+            --tags --long --abbrev=40 --match 'v[0-9]*' "${source_sha}"
+    )"
+    if [[ ! "${description}" =~ ^(v[0-9][0-9A-Za-z.+]*)(-([0-9]+))-g([0-9a-f]{40})$ ]]; then
+        echo \
+            "Unsupported SIMSOPT release description for package version: ${description}" \
+            >&2
+        return 2
+    fi
+    SOURCE_SCM_DESCRIPTION="${description}"
+    SOURCE_SCM_TAG="${BASH_REMATCH[1]}"
+    SOURCE_SCM_DISTANCE="${BASH_REMATCH[3]}"
+    SOURCE_SCM_NODE="g${BASH_REMATCH[4]}"
+    if [[ "${SOURCE_SCM_NODE}" != "g${source_sha}" ]]; then
+        echo "Source SCM node does not match the recorded source commit" >&2
+        echo "source_commit=${source_sha}" >&2
+        echo "source_scm_node=${SOURCE_SCM_NODE}" >&2
+        return 2
+    fi
+    printf -v SOURCE_SCM_METADATA \
+        '{node="%s", distance=%s, dirty=false}' \
+        "${SOURCE_SCM_NODE}" "${SOURCE_SCM_DISTANCE}"
+}
+
+format_source_package_version() {
+    local python_executable="$1"
+    SOURCE_SCM_TAG="${SOURCE_SCM_TAG}" \
+        SOURCE_SCM_DISTANCE="${SOURCE_SCM_DISTANCE}" \
+        SOURCE_SCM_NODE="${SOURCE_SCM_NODE}" \
+        "${python_executable}" - <<'PY'
+from __future__ import annotations
+
+import os
+
+from setuptools_scm import Configuration
+from setuptools_scm.version import format_version, meta
+
+
+configuration = Configuration(root=".", dist_name="simsopt")
+scm_version = meta(
+    tag=os.environ["SOURCE_SCM_TAG"],
+    distance=int(os.environ["SOURCE_SCM_DISTANCE"]),
+    node=os.environ["SOURCE_SCM_NODE"],
+    dirty=False,
+    config=configuration,
+)
+print(format_version(scm_version))
+PY
+}
+
 reserve_fresh_directory() {
     local root_label="$1"
     local root_path="$2"
+    local directory_mode="${3:-}"
     mkdir -p -- "$(dirname -- "${root_path}")"
-    if ! mkdir -- "${root_path}"; then
-        echo "${root_label} must not exist before launch: ${root_path}" >&2
-        return 2
+    if [[ -n "${directory_mode}" ]]; then
+        if mkdir --mode="${directory_mode}" -- "${root_path}"; then
+            return
+        fi
+    elif mkdir -- "${root_path}"; then
+        return
     fi
+    if [[ -e "${root_path}" ]]; then
+        echo "${root_label} must not exist before launch: ${root_path}" >&2
+    else
+        echo "${root_label} could not be created: ${root_path}" >&2
+    fi
+    return 2
 }
 
 prepare_private_venv_root() {
@@ -396,12 +462,112 @@ prepare_private_venv_root() {
     fi
 }
 
+validate_prepared_venv() {
+    local prepared_venv="$1"
+    local owner_uid
+    local parent_owner_uid
+    local parent_permissions
+    local permissions
+    local python_abi
+    if [[ -L "${prepared_venv}" ]]; then
+        echo "PREPARED_VENV_DIR must not be a symbolic link: ${prepared_venv}" >&2
+        return 2
+    fi
+    if [[ ! -d "${prepared_venv}" ]]; then
+        echo "PREPARED_VENV_DIR must be an existing directory: ${prepared_venv}" >&2
+        return 2
+    fi
+    owner_uid="$(stat -c %u -- "${prepared_venv}")"
+    permissions="$(stat -c %a -- "${prepared_venv}")"
+    if [[ "${owner_uid}" != "${UID}" ]]; then
+        echo "PREPARED_VENV_DIR must be owned by the current user" >&2
+        echo "PREPARED_VENV_DIR=${prepared_venv}" >&2
+        echo "owner_uid=${owner_uid}" >&2
+        return 2
+    fi
+    if [[ "${permissions}" == "770" ]]; then
+        parent_owner_uid="$(stat -c %u -- "$(dirname -- "${prepared_venv}")")"
+        parent_permissions="$(stat -c %a -- "$(dirname -- "${prepared_venv}")")"
+        if [[
+            "${parent_owner_uid}" != "${UID}"
+            || "${parent_permissions}" != "700"
+        ]]; then
+            echo \
+                "Mode-770 PREPARED_VENV_DIR requires an owner-only mode-700 parent" \
+                >&2
+            echo "PREPARED_VENV_DIR=${prepared_venv}" >&2
+            echo \
+                "parent_owner_uid=${parent_owner_uid} parent_permissions=${parent_permissions}" \
+                >&2
+            return 2
+        fi
+    elif [[ "${permissions}" != "700" ]]; then
+        echo \
+            "PREPARED_VENV_DIR must use mode 700, or mode 770 under an owner-only parent" \
+            >&2
+        echo "PREPARED_VENV_DIR=${prepared_venv}" >&2
+        echo "permissions=${permissions}" >&2
+        return 2
+    fi
+    if [[ ! -x "${prepared_venv}/bin/python" ]]; then
+        echo "PREPARED_VENV_DIR has no executable bin/python" >&2
+        return 2
+    fi
+    python_abi="$(
+        "${prepared_venv}/bin/python" -c \
+            'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+    )"
+    if [[ "${python_abi}" != "3.13" ]]; then
+        echo "PREPARED_VENV_DIR must use Python 3.13; found ${python_abi}" >&2
+        return 2
+    fi
+    if ! (
+        cd /
+        "${prepared_venv}/bin/python" - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+from importlib.util import find_spec
+
+
+try:
+    installed_simsopt = version("simsopt")
+except PackageNotFoundError:
+    installed_simsopt = None
+if installed_simsopt is not None:
+    raise RuntimeError(
+        "PREPARED_VENV_DIR must not contain SIMSOPT before source installation: "
+        f"found {installed_simsopt}"
+    )
+if find_spec("simsoptpp") is not None:
+    raise RuntimeError(
+        "PREPARED_VENV_DIR must not contain simsoptpp before source installation"
+    )
+PY
+    ); then
+        return 2
+    fi
+}
+
 validate_external_write_root "ARTIFACT_ROOT" "${REPO_ROOT}" "${ARTIFACT_ROOT}"
-validate_external_write_root "VENV_ROOT" "${REPO_ROOT}" "${VENV_ROOT}"
 REPO_ROOT="$(realpath -- "${REPO_ROOT}")"
 ARTIFACT_ROOT="$(realpath -m -- "${ARTIFACT_ROOT}")"
-VENV_ROOT_REAL="$(realpath -m -- "${VENV_ROOT}")"
-VENV_DIR="${VENV_ROOT_REAL}/job-${SLURM_JOB_ID}-py313"
+if [[ -n "${PREPARED_VENV_DIR}" ]]; then
+    if [[ -L "${PREPARED_VENV_DIR}" || ! -d "${PREPARED_VENV_DIR}" ]]; then
+        echo \
+            "PREPARED_VENV_DIR must be an existing non-symbolic-link directory" \
+            >&2
+        echo "PREPARED_VENV_DIR=${PREPARED_VENV_DIR}" >&2
+        exit 2
+    fi
+    validate_external_write_root \
+        "PREPARED_VENV_DIR" "${REPO_ROOT}" "${PREPARED_VENV_DIR}"
+    VENV_DIR="$(realpath -- "${PREPARED_VENV_DIR}")"
+    PREPARED_VENV_DIR="${VENV_DIR}"
+    VENV_ROOT_REAL=""
+else
+    validate_external_write_root "VENV_ROOT" "${REPO_ROOT}" "${VENV_ROOT}"
+    VENV_ROOT_REAL="$(realpath -m -- "${VENV_ROOT}")"
+    VENV_DIR="${VENV_ROOT_REAL}/job-${SLURM_JOB_ID}-py313"
+fi
 validate_disjoint_write_roots \
     "ARTIFACT_ROOT" "${ARTIFACT_ROOT}" "VENV_DIR" "${VENV_DIR}"
 
@@ -447,6 +613,10 @@ case "${PROFILE}" in
         exit 2
         ;;
 esac
+if [[ -n "${PREPARED_VENV_DIR}" && "${PROFILE}" != "full" ]]; then
+    echo "PREPARED_VENV_DIR is supported only for PROFILE=full" >&2
+    exit 2
+fi
 
 validate_pair_count() {
     local profile="$1"
@@ -666,15 +836,26 @@ OUTER_MAXLS="${OUTER_MAXLS:-20}"
 BOOZER_BFGS_TOL="${BOOZER_BFGS_TOL:-1e-10}"
 BOOZER_NEWTON_TOL="${BOOZER_NEWTON_TOL:-1e-11}"
 
-prepare_private_venv_root "${VENV_ROOT}"
-VENV_ROOT="$(realpath -- "${VENV_ROOT}")"
-if [[ "${VENV_ROOT}" != "${VENV_ROOT_REAL}" ]]; then
-    echo "VENV_ROOT changed while it was being reserved" >&2
-    exit 2
+if [[ -n "${PREPARED_VENV_DIR}" ]]; then
+    validate_prepared_venv "${VENV_DIR}"
+    exec {PREPARED_VENV_LOCK_FD}>"${VENV_DIR}.lock"
+    if ! flock -n "${PREPARED_VENV_LOCK_FD}"; then
+        echo "PREPARED_VENV_DIR is already in use: ${VENV_DIR}" >&2
+        exit 2
+    fi
+else
+    prepare_private_venv_root "${VENV_ROOT}"
+    VENV_ROOT="$(realpath -- "${VENV_ROOT}")"
+    if [[ "${VENV_ROOT}" != "${VENV_ROOT_REAL}" ]]; then
+        echo "VENV_ROOT changed while it was being reserved" >&2
+        exit 2
+    fi
+    VENV_DIR="${VENV_ROOT}/job-${SLURM_JOB_ID}-py313"
 fi
-VENV_DIR="${VENV_ROOT}/job-${SLURM_JOB_ID}-py313"
 reserve_fresh_directory "ARTIFACT_ROOT" "${ARTIFACT_ROOT}"
-reserve_fresh_directory "VENV_DIR" "${VENV_DIR}"
+if [[ -z "${PREPARED_VENV_DIR}" ]]; then
+    reserve_fresh_directory "VENV_DIR" "${VENV_DIR}" 700
+fi
 
 MACHINE_ROOT="${ARTIFACT_ROOT}/machine"
 INPUT_ROOT="${ARTIFACT_ROOT}/inputs"
@@ -1390,8 +1571,10 @@ do
     fi
 done
 
-git -C "${REPO_ROOT}" rev-parse HEAD > "${MACHINE_ROOT}/git_commit.txt"
-git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}' > "${MACHINE_ROOT}/git_tree.txt"
+SOURCE_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+SOURCE_TREE="$(git -C "${REPO_ROOT}" rev-parse 'HEAD^{tree}')"
+printf '%s\n' "${SOURCE_SHA}" > "${MACHINE_ROOT}/git_commit.txt"
+printf '%s\n' "${SOURCE_TREE}" > "${MACHINE_ROOT}/git_tree.txt"
 git -C "${REPO_ROOT}" status --porcelain=v1 --untracked-files=normal \
     > "${MACHINE_ROOT}/git_status.txt"
 sed -E '/^\?\? slurm-[0-9]+\.(out|err)$/d' \
@@ -1401,6 +1584,9 @@ if [[ -s "${MACHINE_ROOT}/git_source_status.txt" ]]; then
     cat "${MACHINE_ROOT}/git_source_status.txt" >&2
     exit 2
 fi
+resolve_source_scm_provenance "${REPO_ROOT}" "${SOURCE_SHA}"
+printf '%s\n' "${SOURCE_SCM_DESCRIPTION}" \
+    > "${MACHINE_ROOT}/source_scm_description.txt"
 
 SURFACE_ORIGINAL="$(realpath -- "${SURFACE_PATH}")"
 BIOTSAVART_ORIGINAL="$(realpath -- "${BIOTSAVART_FILE}")"
@@ -1482,9 +1668,76 @@ temporary_path.write_text(
 temporary_path.replace(output_path)
 PY
 
-SOURCE_SHA="$(<"${MACHINE_ROOT}/git_commit.txt")"
-SOURCE_TREE="$(<"${MACHINE_ROOT}/git_tree.txt")"
-python -m venv "${VENV_DIR}"
+verify_installed_requirements_match_lock() {
+    local installed_requirements="$1"
+    "${VENV_DIR}/bin/python" -m pip freeze --all --exclude-editable \
+        > "${installed_requirements}"
+    ENVIRONMENT_LOCK_SNAPSHOT="${ENVIRONMENT_LOCK_SNAPSHOT}" \
+        INSTALLED_REQUIREMENTS="${installed_requirements}" \
+        "${VENV_DIR}/bin/python" - <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+
+
+def canonicalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def exact_versions(path: Path, *, lock: bool) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    pattern = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("--hash="):
+            continue
+        match = pattern.match(line)
+        if match is None:
+            kind = "lock" if lock else "installed requirement"
+            raise RuntimeError(
+                f"Non-exact {kind} at {path}:{line_number}: {line!r}"
+            )
+        name = canonicalize_name(match.group(1))
+        if name in versions:
+            raise RuntimeError(f"Duplicate requirement for {name} in {path}")
+        versions[name] = match.group(2)
+    return versions
+
+
+lock_versions = exact_versions(
+    Path(os.environ["ENVIRONMENT_LOCK_SNAPSHOT"]),
+    lock=True,
+)
+installed_versions = exact_versions(
+    Path(os.environ["INSTALLED_REQUIREMENTS"]),
+    lock=False,
+)
+if lock_versions != installed_versions:
+    missing = sorted(lock_versions.keys() - installed_versions.keys())
+    unexpected = sorted(installed_versions.keys() - lock_versions.keys())
+    changed = {
+        name: {
+            "lock": lock_versions[name],
+            "installed": installed_versions[name],
+        }
+        for name in sorted(lock_versions.keys() & installed_versions.keys())
+        if lock_versions[name] != installed_versions[name]
+    }
+    raise RuntimeError(
+        "Installed environment does not match dependency lock: "
+        f"missing={missing}, unexpected={unexpected}, changed={changed}"
+    )
+PY
+}
+
+if [[ -z "${PREPARED_VENV_DIR}" ]]; then
+    python -m venv "${VENV_DIR}"
+fi
 printf '%s\n' "${VENV_DIR}" > "${MACHINE_ROOT}/venv_path.txt"
 
 if [[ "${PROFILE}" == "pilot" ]]; then
@@ -1493,7 +1746,12 @@ if [[ "${PROFILE}" == "pilot" ]]; then
     "${VENV_DIR}/bin/python" -m pip install \
         'scikit-build-core' 'pybind11<3.0.0' 'setuptools_scm>=8.0' \
         'numpy>=2.0,<2.5'
-    CMAKE_BUILD_TYPE=Release CXXFLAGS='-O3' \
+    SOURCE_PACKAGE_VERSION="$(
+        format_source_package_version "${VENV_DIR}/bin/python"
+    )"
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SOURCE_PACKAGE_VERSION}" \
+        SETUPTOOLS_SCM_PRETEND_METADATA_FOR_SIMSOPT="${SOURCE_SCM_METADATA}" \
+        CMAKE_BUILD_TYPE=Release CXXFLAGS='-O3' \
         "${VENV_DIR}/bin/python" -m pip install \
         --no-build-isolation \
         -e "${REPO_ROOT}[JAX_GPU]" \
@@ -1659,6 +1917,7 @@ PY
         "${ENVIRONMENT_LOCK_SNAPSHOT}"
     ENVIRONMENT_LOCK_SHA256="$(sha256sum "${ENVIRONMENT_LOCK_SNAPSHOT}" | cut -d' ' -f1)"
     LOCK_ORIGIN="pilot-generated"
+    DEPENDENCY_INSTALL_CONTRACT="pilot-resolved environment"
     SECURE_INSTALL_VERIFIED="false"
     echo "Pilot generated production lock: ${ENVIRONMENT_LOCK_SNAPSHOT}" >&2
     echo \
@@ -1676,92 +1935,86 @@ else
     ENVIRONMENT_LOCK_SHA256="$(sha256sum "${ENVIRONMENT_LOCK_SNAPSHOT}" | cut -d' ' -f1)"
     LOCK_ORIGIN="${HASH_LOCK_ORIGINAL}"
 
-    "${VENV_DIR}/bin/python" -m pip install \
-        --require-hashes \
-        --only-binary=:all: \
-        --requirement "${ENVIRONMENT_LOCK_SNAPSHOT}"
-    CMAKE_BUILD_TYPE=Release CXXFLAGS='-O3' \
+    if [[ -z "${PREPARED_VENV_DIR}" ]]; then
+        "${VENV_DIR}/bin/python" -m pip install \
+            --require-hashes \
+            --only-binary=:all: \
+            --requirement "${ENVIRONMENT_LOCK_SNAPSHOT}"
+        DEPENDENCY_INSTALL_CONTRACT="pip --require-hashes --only-binary=:all:"
+        SECURE_INSTALL_VERIFIED="true"
+    else
+        DEPENDENCY_INSTALL_CONTRACT=\
+"prepared dependency-only venv; exact lock revalidated before source install"
+        SECURE_INSTALL_VERIFIED="false"
+        verify_installed_requirements_match_lock \
+            "${ENVIRONMENT_ROOT}/prepared_venv_requirements.txt"
+    fi
+    SOURCE_PACKAGE_VERSION="$(
+        format_source_package_version "${VENV_DIR}/bin/python"
+    )"
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SOURCE_PACKAGE_VERSION}" \
+        SETUPTOOLS_SCM_PRETEND_METADATA_FOR_SIMSOPT="${SOURCE_SCM_METADATA}" \
+        CMAKE_BUILD_TYPE=Release CXXFLAGS='-O3' \
         "${VENV_DIR}/bin/python" -m pip install \
         --no-deps \
         --no-build-isolation \
         -e "${REPO_ROOT}"
     "${VENV_DIR}/bin/python" -m pip check
-    SECURE_INSTALL_VERIFIED="true"
 fi
 
-"${VENV_DIR}/bin/python" -m pip freeze --all --exclude-editable \
-    > "${ENVIRONMENT_ROOT}/installed_requirements.txt"
-ENVIRONMENT_LOCK_SNAPSHOT="${ENVIRONMENT_LOCK_SNAPSHOT}" \
-    INSTALLED_REQUIREMENTS="${ENVIRONMENT_ROOT}/installed_requirements.txt" \
+printf '%s\n' "${SOURCE_PACKAGE_VERSION}" \
+    > "${MACHINE_ROOT}/source_package_version.txt"
+EXPECTED_SOURCE_PACKAGE_VERSION="${SOURCE_PACKAGE_VERSION}" \
+    EXPECTED_SOURCE_COMMIT_ID="g${SOURCE_SHA:0:9}" \
     "${VENV_DIR}/bin/python" - <<'PY'
 from __future__ import annotations
 
+from importlib.metadata import version
 import os
-from pathlib import Path
-import re
+
+import simsopt
+from simsopt import _version
 
 
-def canonicalize_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def exact_versions(path: Path, *, lock: bool) -> dict[str, str]:
-    versions: dict[str, str] = {}
-    pattern = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
-    for line_number, raw_line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(),
-        start=1,
-    ):
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("--hash="):
-            continue
-        match = pattern.match(line)
-        if match is None:
-            kind = "lock" if lock else "installed requirement"
-            raise RuntimeError(
-                f"Non-exact {kind} at {path}:{line_number}: {line!r}"
-            )
-        name = canonicalize_name(match.group(1))
-        if name in versions:
-            raise RuntimeError(f"Duplicate requirement for {name} in {path}")
-        versions[name] = match.group(2)
-    return versions
-
-
-lock_versions = exact_versions(
-    Path(os.environ["ENVIRONMENT_LOCK_SNAPSHOT"]),
-    lock=True,
-)
-installed_versions = exact_versions(
-    Path(os.environ["INSTALLED_REQUIREMENTS"]),
-    lock=False,
-)
-if lock_versions != installed_versions:
-    missing = sorted(lock_versions.keys() - installed_versions.keys())
-    unexpected = sorted(installed_versions.keys() - lock_versions.keys())
-    changed = {
-        name: {
-            "lock": lock_versions[name],
-            "installed": installed_versions[name],
-        }
-        for name in sorted(lock_versions.keys() & installed_versions.keys())
-        if lock_versions[name] != installed_versions[name]
-    }
+expected_version = os.environ["EXPECTED_SOURCE_PACKAGE_VERSION"]
+installed_version = version("simsopt")
+if installed_version != expected_version:
     raise RuntimeError(
-        "Installed environment does not match dependency lock: "
-        f"missing={missing}, unexpected={unexpected}, changed={changed}"
+        "Installed SIMSOPT distribution version does not match source provenance: "
+        f"expected={expected_version}, installed={installed_version}"
+    )
+if simsopt.__version__ != expected_version:
+    raise RuntimeError(
+        "Imported SIMSOPT version does not match source provenance: "
+        f"expected={expected_version}, imported={simsopt.__version__}"
+    )
+expected_commit_id = os.environ["EXPECTED_SOURCE_COMMIT_ID"]
+if _version.commit_id != expected_commit_id:
+    raise RuntimeError(
+        "Generated SIMSOPT commit ID does not match source provenance: "
+        f"expected={expected_commit_id}, generated={_version.commit_id}"
     )
 PY
+
+verify_installed_requirements_match_lock \
+    "${ENVIRONMENT_ROOT}/installed_requirements.txt"
 
 PROFILE="${PROFILE}" \
     EVIDENCE_CLASS="${EVIDENCE_CLASS}" \
     PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE}" \
     LOCK_ORIGIN="${LOCK_ORIGIN}" \
+    DEPENDENCY_INSTALL_CONTRACT="${DEPENDENCY_INSTALL_CONTRACT}" \
+    PREPARED_VENV_DIR="${PREPARED_VENV_DIR}" \
     ENVIRONMENT_LOCK_SNAPSHOT="${ENVIRONMENT_LOCK_SNAPSHOT}" \
     ENVIRONMENT_LOCK_SHA256="${ENVIRONMENT_LOCK_SHA256}" \
     SECURE_INSTALL_VERIFIED="${SECURE_INSTALL_VERIFIED}" \
     SOURCE_SHA="${SOURCE_SHA}" \
     SOURCE_TREE="${SOURCE_TREE}" \
+    SOURCE_SCM_DESCRIPTION="${SOURCE_SCM_DESCRIPTION}" \
+    SOURCE_SCM_TAG="${SOURCE_SCM_TAG}" \
+    SOURCE_SCM_DISTANCE="${SOURCE_SCM_DISTANCE}" \
+    SOURCE_SCM_NODE="${SOURCE_SCM_NODE}" \
+    SOURCE_PACKAGE_VERSION="${SOURCE_PACKAGE_VERSION}" \
     ENVIRONMENT_LOCK_MANIFEST="${ENVIRONMENT_LOCK_MANIFEST}" \
     "${VENV_DIR}/bin/python" - <<'PY'
 from __future__ import annotations
@@ -1796,11 +2049,23 @@ payload = {
     "lock_sha256": lock_sha256,
     "secure_install_verified": os.environ["SECURE_INSTALL_VERIFIED"] == "true",
     "install_contract": {
-        "dependencies": "pip --require-hashes --only-binary=:all:",
+        "dependencies": os.environ["DEPENDENCY_INSTALL_CONTRACT"],
         "repository": "pip --no-deps --no-build-isolation -e",
+        "repository_version_source": (
+            "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT"
+        ),
+        "repository_metadata_source": (
+            "SETUPTOOLS_SCM_PRETEND_METADATA_FOR_SIMSOPT"
+        ),
     },
     "source_commit": os.environ["SOURCE_SHA"],
     "source_tree": os.environ["SOURCE_TREE"],
+    "source_scm_description": os.environ["SOURCE_SCM_DESCRIPTION"],
+    "source_scm_tag": os.environ["SOURCE_SCM_TAG"],
+    "source_scm_distance": int(os.environ["SOURCE_SCM_DISTANCE"]),
+    "source_scm_node": os.environ["SOURCE_SCM_NODE"],
+    "source_package_version": os.environ["SOURCE_PACKAGE_VERSION"],
+    "prepared_venv_dir": os.environ["PREPARED_VENV_DIR"] or None,
 }
 manifest_path = Path(os.environ["ENVIRONMENT_LOCK_MANIFEST"])
 manifest_path.write_text(

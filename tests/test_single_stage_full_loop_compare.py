@@ -1396,6 +1396,51 @@ def test_launcher_venv_root_uses_shared_scratch_and_uid_scope(
     assert resolve_venv_root(environment) == environment["VENV_ROOT"]
 
 
+def test_launcher_prepared_venv_resume_is_explicit_and_fail_closed() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+
+    assert 'PREPARED_VENV_DIR="${PREPARED_VENV_DIR:-}"' in source
+    assert "validate_prepared_venv()" in source
+    assert 'if [[ -L "${prepared_venv}" ]]' in source
+    assert 'if [[ "${permissions}" == "770" ]]' in source
+    assert '"${parent_permissions}" != "700"' in source
+    assert 'elif [[ "${permissions}" != "700" ]]' in source
+    assert 'if [[ "${python_abi}" != "3.13" ]]' in source
+    assert 'installed_simsopt = version("simsopt")' in source
+    assert 'find_spec("simsoptpp")' in source
+    assert 'if [[ -n "${PREPARED_VENV_DIR}" && "${PROFILE}" != "full" ]]' in source
+    assert 'flock -n "${PREPARED_VENV_LOCK_FD}"' in source
+    assert (
+        'if [[ -z "${PREPARED_VENV_DIR}" ]]; then\n'
+        '    reserve_fresh_directory "VENV_DIR" "${VENV_DIR}" 700\n'
+        "fi"
+    ) in source
+    assert (
+        "prepared dependency-only venv; exact lock revalidated before source install"
+        in source
+    )
+    prepared_lock_check = source.index(
+        'verify_installed_requirements_match_lock \\\n'
+        '            "${ENVIRONMENT_ROOT}/prepared_venv_requirements.txt"'
+    )
+    full_editable_install = source.rindex(
+        'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SOURCE_PACKAGE_VERSION}"'
+    )
+    assert prepared_lock_check < full_editable_install
+    prepared_contract = source.index(
+        "prepared dependency-only venv; exact lock revalidated before source install"
+    )
+    prepared_insecure = source.index(
+        'SECURE_INSTALL_VERIFIED="false"',
+        prepared_contract,
+    )
+    assert prepared_contract < prepared_insecure < full_editable_install
+    assert (
+        '"prepared_venv_dir": os.environ["PREPARED_VENV_DIR"] or None'
+        in source
+    )
+
+
 def test_launcher_pins_expected_bootstrap_tool_versions() -> None:
     source = LAUNCHER_PATH.read_text(encoding="utf-8")
     bootstrap = re.search(
@@ -1435,6 +1480,139 @@ def test_launcher_installs_only_benchmark_runtime_extras() -> None:
     )
     assert source.count("'shapely==2.1.2'") == 1
     assert source.count("'numba==0.65.1'") == 1
+
+
+def test_launcher_resolves_exact_source_scm_provenance_without_worktree_scan(
+    tmp_path: Path,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^resolve_source_scm_provenance\(\) \{.*?^\}\n",
+        source,
+    )
+    assert function is not None
+    assert "git status" not in function.group(0)
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Benchmark Test"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "benchmark@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    tracked_file = repository / "tracked.txt"
+    tracked_file.write_text("tagged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "tagged"], cwd=repository, check=True)
+    subprocess.run(["git", "tag", "v1.2.3"], cwd=repository, check=True)
+
+    def resolve_provenance() -> list[str]:
+        source_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    f"{function.group(0)}\n"
+                    'resolve_source_scm_provenance "$1" "$2"\n'
+                    'printf "%s\\n%s\\n%s\\n%s\\n" '
+                    '"$SOURCE_SCM_DESCRIPTION" "$SOURCE_SCM_TAG" '
+                    '"$SOURCE_SCM_DISTANCE" "$SOURCE_SCM_NODE"'
+                ),
+                "resolve-source-scm-provenance-test",
+                str(repository),
+                source_sha,
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return completed.stdout.splitlines()
+
+    tagged_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    assert resolve_provenance() == [
+        f"v1.2.3-0-g{tagged_sha}",
+        "v1.2.3",
+        "0",
+        f"g{tagged_sha}",
+    ]
+
+    for index in range(2):
+        tracked_file.write_text(f"commit-{index}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", f"commit-{index}"],
+            cwd=repository,
+            check=True,
+        )
+
+    current_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    assert resolve_provenance() == [
+        f"v1.2.3-2-g{current_sha}",
+        "v1.2.3",
+        "2",
+        f"g{current_sha}",
+    ]
+
+
+def test_launcher_overrides_and_verifies_editable_package_version() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+
+    assert (
+        source.count(
+            'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="${SOURCE_PACKAGE_VERSION}"'
+        )
+        == 2
+    )
+    assert (
+        source.count(
+            'SETUPTOOLS_SCM_PRETEND_METADATA_FOR_SIMSOPT="${SOURCE_SCM_METADATA}"'
+        )
+        == 2
+    )
+    assert (
+        'EXPECTED_SOURCE_COMMIT_ID="g${SOURCE_SHA:0:9}"' in source
+    )
+    assert 'if installed_version != expected_version:' in source
+    assert 'if simsopt.__version__ != expected_version:' in source
+    assert 'if _version.commit_id != expected_commit_id:' in source
+    assert '"source_package_version": os.environ["SOURCE_PACKAGE_VERSION"]' in source
+    assert (
+        '"repository_version_source": (\n'
+        '            "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT"\n'
+        "        )"
+    ) in source
+    assert (
+        '"repository_metadata_source": (\n'
+        '            "SETUPTOOLS_SCM_PRETEND_METADATA_FOR_SIMSOPT"\n'
+        "        )"
+    ) in source
+    assert '"source_scm_description": os.environ["SOURCE_SCM_DESCRIPTION"]' in source
+    assert '"source_scm_node": os.environ["SOURCE_SCM_NODE"]' in source
 
 
 def test_launcher_isolates_python_environment_before_python_use(
