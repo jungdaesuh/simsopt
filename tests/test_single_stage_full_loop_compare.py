@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -640,6 +641,83 @@ def test_launcher_pins_expected_bootstrap_tool_versions() -> None:
 
     assert bootstrap is not None
     assert bootstrap.groups() == ("26.1.2", "83.0.0", "0.47.0")
+
+
+def test_launcher_isolates_python_environment_before_python_use(
+    tmp_path: Path,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    isolation = "unset PYTHONPATH\nexport PYTHONNOUSERSITE=1"
+    module_load = "module load python/3.13-26.1.0"
+    module_index = lines.index(module_load)
+
+    assert source.count(module_load) == 1
+    assert source.count("PYTHONPATH") == 1
+    assert source.count("unset PYTHONPATH") == 1
+    assert source.count("export PYTHONNOUSERSITE=1") == 1
+    assert lines[module_index : module_index + 3] == [
+        module_load,
+        "unset PYTHONPATH",
+        "export PYTHONNOUSERSITE=1",
+    ]
+    executable_prefix = [
+        line
+        for line in lines[: module_index + 3]
+        if line.strip() and not line.startswith("#")
+    ]
+    assert executable_prefix == [
+        "set -euo pipefail",
+        module_load,
+        "unset PYTHONPATH",
+        "export PYTHONNOUSERSITE=1",
+    ]
+
+    fake_site = tmp_path / "pymon"
+    fake_metadata = fake_site / "nersc_pymon-0.5.0.dist-info"
+    fake_metadata.mkdir(parents=True)
+    (fake_metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: nersc-pymon\nVersion: 0.5.0\n",
+        encoding="utf-8",
+    )
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(fake_site),
+        "PYTHONNOUSERSITE": "0",
+    }
+    probe = (
+        "from importlib.metadata import PackageNotFoundError, version\n"
+        "try:\n"
+        "    print(version('nersc-pymon'))\n"
+        "except PackageNotFoundError:\n"
+        "    print('ABSENT')\n"
+    )
+    leaked = subprocess.run(
+        [sys.executable, "-c", probe],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
+    assert leaked.returncode == 0, leaked.stderr
+    assert leaked.stdout.strip() == "0.5.0"
+
+    isolated = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'{isolation}\nexec "$1" -c "$2"',
+            "isolate-python-environment-test",
+            sys.executable,
+            probe,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
+    assert isolated.returncode == 0, isolated.stderr
+    assert isolated.stdout.strip() == "ABSENT"
 
 
 def test_launcher_requires_a_private_venv_root(tmp_path: Path) -> None:
