@@ -1,18 +1,27 @@
 #!/bin/bash -l
-#SBATCH -A m4680_g
-#SBATCH -C gpu
+#SBATCH -A m4680
+#SBATCH -C cpu
 #SBATCH -q regular
 #SBATCH -t 36:00:00
-#SBATCH -N 3
-#SBATCH --exclusive
-#SBATCH --gpus-per-node=4
-#SBATCH --ntasks=3
+#SBATCH -N 2
+#SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=128
 #SBATCH --hint=nomultithread
 #SBATCH --job-name=banana-full-loop
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
+#SBATCH hetjob
+#SBATCH -A m4680_g
+#SBATCH -C gpu
+#SBATCH -q shared
+#SBATCH -t 36:00:00
+#SBATCH -N 1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+# Keep SMT enabled on the shared GPU slice: 32 logical CPUs are 16 physical cores.
+#SBATCH --cpus-per-task=32
+#SBATCH --gpus-per-task=1
 
 set -euo pipefail
 
@@ -136,8 +145,11 @@ run_lane_step() {
     local process_memory_csv="$6"
     local sampler_query_csv="$7"
     local sampler_error_log="$8"
+    local expected_cpu_count="$9"
+    local expected_omp_thread_count="${10}"
     local pair_name
     local actual_node
+    local assigned_gpu_id=""
     local visible_devices="${CUDA_VISIBLE_DEVICES:-}"
     local -a step_nodes=()
 
@@ -154,14 +166,29 @@ run_lane_step() {
         return 2
     fi
 
+    if [[ "${SLURM_CPUS_PER_TASK:?}" != "${expected_cpu_count}" ]]; then
+        echo \
+            "${lane} step CPU mismatch: expected=${expected_cpu_count} actual=${SLURM_CPUS_PER_TASK}" \
+            >&2
+        return 2
+    fi
+    if [[ "${OMP_NUM_THREADS:?}" != "${expected_omp_thread_count}" ]]; then
+        echo \
+            "${lane} OMP thread mismatch: expected=${expected_omp_thread_count} actual=${OMP_NUM_THREADS}" \
+            >&2
+        return 2
+    fi
+
     if [[ "${lane}" == "jax_gpu" ]]; then
         if [[ -z "${visible_devices}" || "${visible_devices}" == *,* \
             || "${visible_devices}" =~ [[:space:]] ]]; then
             echo "jax_gpu requires exactly one CUDA_VISIBLE_DEVICES selector" >&2
             return 2
         fi
-        if [[ -z "${SLURM_STEP_GPUS:-}" ]]; then
-            echo "jax_gpu requires a Slurm GPU assigned to its step" >&2
+        assigned_gpu_id="${SLURM_STEP_GPUS:-}"
+        if [[ -z "${assigned_gpu_id}" || "${assigned_gpu_id}" == *,* \
+            || "${assigned_gpu_id}" =~ [[:space:]] ]]; then
+            echo "jax_gpu requires exactly one Slurm GPU assigned to its step" >&2
             return 2
         fi
     else
@@ -178,6 +205,8 @@ run_lane_step() {
         printf 'slurm_step_id\t%s\n' "${SLURM_STEP_ID:?}"
         printf 'slurm_step_nodelist\t%s\n' "${SLURM_STEP_NODELIST}"
         printf 'slurm_step_gpus\t%s\n' "${SLURM_STEP_GPUS:-}"
+        printf 'slurm_cpus_per_task\t%s\n' "${SLURM_CPUS_PER_TASK}"
+        printf 'omp_num_threads\t%s\n' "${OMP_NUM_THREADS}"
         printf 'cuda_visible_devices\t%s\n' "${visible_devices}"
     } > "${pair_dir}/${lane}_slurm_step.tsv"
     lscpu > "${pair_dir}/${lane}_lscpu.txt"
@@ -189,8 +218,10 @@ run_lane_step() {
         local gpu_memory_hook_returncode
         local gpu_monitor_pid
 
-        nvidia-smi -q > "${pair_dir}/jax_gpu_nvidia_smi_before.txt"
-        nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
+        nvidia-smi --id="${assigned_gpu_id}" -q \
+            > "${pair_dir}/jax_gpu_nvidia_smi_before.txt"
+        nvidia-smi --id="${assigned_gpu_id}" \
+            --query-gpu=index,name,uuid,memory.total,driver_version \
             --format=csv,noheader > "${pair_dir}/jax_gpu_inventory.csv"
         touch "${gpu_monitor_sentinel}"
         (
@@ -200,7 +231,7 @@ run_lane_step() {
             while [[ -e "${gpu_monitor_sentinel}" ]]
             do
                 local_timestamp="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
-                if sample="$(nvidia-smi \
+                if sample="$(nvidia-smi --id="${assigned_gpu_id}" \
                     --query-compute-apps=gpu_uuid,pid,used_memory \
                     --format=csv,noheader,nounits 2> "${sampler_last_error}")"
                 then
@@ -251,8 +282,10 @@ run_lane_step() {
                 lane_exit_code="${gpu_memory_hook_returncode}"
             fi
         fi
-        nvidia-smi -q > "${pair_dir}/jax_gpu_nvidia_smi_after.txt"
-        nvidia-smi --query-gpu=index,name,uuid,memory.used,memory.total \
+        nvidia-smi --id="${assigned_gpu_id}" -q \
+            > "${pair_dir}/jax_gpu_nvidia_smi_after.txt"
+        nvidia-smi --id="${assigned_gpu_id}" \
+            --query-gpu=index,name,uuid,memory.used,memory.total \
             --format=csv,noheader > "${pair_dir}/jax_gpu_inventory_after.csv"
     elif "${python_executable}" "${comparator_path}" run-lane \
         --output-root "${pair_dir}" --lane "${lane}"
@@ -445,27 +478,99 @@ validate_pair_execution_mode() {
 }
 
 validate_allocated_nodes() {
-    if ((${#ALLOCATED_NODES[@]} != 3)); then
+    if ((${#CPU_ALLOCATION_NODES[@]} != 2)); then
         echo \
-            "Three-node benchmark requires exactly 3 allocated nodes; got ${#ALLOCATED_NODES[@]}" \
+            "Heterogeneous benchmark requires exactly 2 CPU nodes; got ${#CPU_ALLOCATION_NODES[@]}" \
             >&2
         return 2
     fi
-    if [[ "${ALLOCATED_NODES[0]}" == "${ALLOCATED_NODES[1]}" \
-        || "${ALLOCATED_NODES[0]}" == "${ALLOCATED_NODES[2]}" \
-        || "${ALLOCATED_NODES[1]}" == "${ALLOCATED_NODES[2]}" ]]; then
+    if ((${#GPU_ALLOCATION_NODES[@]} != 1)); then
+        echo \
+            "Heterogeneous benchmark requires exactly 1 GPU node; got ${#GPU_ALLOCATION_NODES[@]}" \
+            >&2
+        return 2
+    fi
+    if [[ "${CPU_ALLOCATION_NODES[0]}" == "${CPU_ALLOCATION_NODES[1]}" \
+        || "${CPU_ALLOCATION_NODES[0]}" == "${GPU_ALLOCATION_NODES[0]}" \
+        || "${CPU_ALLOCATION_NODES[1]}" == "${GPU_ALLOCATION_NODES[0]}" ]]; then
         echo "Three-node benchmark requires 3 distinct allocated nodes" >&2
-        printf 'allocated_node=%s\n' "${ALLOCATED_NODES[@]}" >&2
+        printf 'allocated_node=%s\n' \
+            "${CPU_ALLOCATION_NODES[@]}" "${GPU_ALLOCATION_NODES[@]}" >&2
         return 2
     fi
 }
 
+discover_allocation_topology() {
+    if [[ "${SLURM_HET_SIZE:-}" != "2" ]]; then
+        echo \
+            "Benchmark requires a 2-component heterogeneous allocation; got SLURM_HET_SIZE=${SLURM_HET_SIZE:-unset}" \
+            >&2
+        return 2
+    fi
+    if [[ -z "${SLURM_JOB_NODELIST_HET_GROUP_0:-}" \
+        || -z "${SLURM_JOB_NODELIST_HET_GROUP_1:-}" ]]; then
+        echo "Heterogeneous component node lists are required" >&2
+        return 2
+    fi
+    if [[ -z "${SLURM_JOB_ID_HET_GROUP_0:-}" \
+        || -z "${SLURM_JOB_ID_HET_GROUP_1:-}" \
+        || "${SLURM_JOB_ID:?}" != "${SLURM_JOB_ID_HET_GROUP_0}" ]]; then
+        echo "SLURM_JOB_ID must be the heterogeneous group-0 leader ID" >&2
+        return 2
+    fi
+
+    CPU_ALLOCATION_NODES=()
+    GPU_ALLOCATION_NODES=()
+    mapfile -t CPU_ALLOCATION_NODES \
+        < <(scontrol show hostnames "${SLURM_JOB_NODELIST_HET_GROUP_0}")
+    mapfile -t GPU_ALLOCATION_NODES \
+        < <(scontrol show hostnames "${SLURM_JOB_NODELIST_HET_GROUP_1}")
+    if ! validate_allocated_nodes; then
+        return 2
+    fi
+
+    CPU_COMPONENT_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK_HET_GROUP_0:-}"
+    GPU_COMPONENT_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK_HET_GROUP_1:-}"
+    CPU_LANE_CPUS_PER_TASK="${CPU_LANE_CPUS_PER_TASK:-64}"
+    JAX_GPU_CPUS_PER_TASK="${JAX_GPU_CPUS_PER_TASK:-${GPU_COMPONENT_CPUS_PER_TASK}}"
+    if [[ ! "${CPU_COMPONENT_CPUS_PER_TASK}" =~ ^[1-9][0-9]*$ \
+        || ! "${GPU_COMPONENT_CPUS_PER_TASK}" =~ ^[1-9][0-9]*$ \
+        || ! "${CPU_LANE_CPUS_PER_TASK}" =~ ^[1-9][0-9]*$ \
+        || ! "${JAX_GPU_CPUS_PER_TASK}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Heterogeneous component CPU counts must be positive integers" >&2
+        return 2
+    fi
+    if [[ "${CPU_LANE_CPUS_PER_TASK}" -gt "${CPU_COMPONENT_CPUS_PER_TASK}" \
+        || "${JAX_GPU_CPUS_PER_TASK}" -gt "${GPU_COMPONENT_CPUS_PER_TASK}" ]]; then
+        echo "Lane CPU counts must not exceed their component allocations" >&2
+        return 2
+    fi
+    # The shared GPU component exposes two hardware threads per physical core.
+    JAX_GPU_OMP_NUM_THREADS="${JAX_GPU_OMP_NUM_THREADS:-16}"
+    if [[ ! "${JAX_GPU_OMP_NUM_THREADS}" =~ ^[1-9][0-9]*$ \
+        || "${JAX_GPU_OMP_NUM_THREADS}" -gt "${JAX_GPU_CPUS_PER_TASK}" ]]; then
+        echo \
+            "JAX_GPU_OMP_NUM_THREADS must be a positive integer no greater than the GPU step CPU count" \
+            >&2
+        return 2
+    fi
+
+    ALLOCATION_LAYOUT="perlmutter-het-cpu2-gpu1"
+    LANE_ASSIGNMENT_POLICY="concurrent typed nodes; CPU roles swap by pair index and JAX GPU remains on the GPU node"
+    ALLOCATED_NODES=(
+        "${CPU_ALLOCATION_NODES[@]}"
+        "${GPU_ALLOCATION_NODES[@]}"
+    )
+    CPU_HET_ARGS=(--het-group=0)
+    GPU_HET_ARGS=(--het-group=1)
+}
+
 assign_pair_nodes() {
     local pair_index="$1"
-    local rotation_index=$(((pair_index - 1) % 3))
-    native_cpu_node="${ALLOCATED_NODES[rotation_index]}"
-    jax_cpu_node="${ALLOCATED_NODES[(rotation_index + 1) % 3]}"
-    jax_gpu_node="${ALLOCATED_NODES[(rotation_index + 2) % 3]}"
+    local rotation_index=$(((pair_index - 1) % 2))
+    native_cpu_node="${CPU_ALLOCATION_NODES[rotation_index]}"
+    jax_cpu_node="${CPU_ALLOCATION_NODES[(rotation_index + 1) % 2]}"
+    jax_gpu_node="${GPU_ALLOCATION_NODES[0]}"
 }
 
 launch_pair_lanes() {
@@ -473,15 +578,25 @@ launch_pair_lanes() {
     local native_cpu_node="$2"
     local jax_cpu_node="$3"
     local jax_gpu_node="$4"
-    local -a common_step=(
-        srun
+    local -a common_step_arguments=(
         --nodes=1
         --ntasks=1
-        --cpus-per-task="${SLURM_CPUS_PER_TASK}"
-        --hint=nomultithread
         --cpu-bind=cores
         --exact
         --mpi=none
+    )
+    local -a cpu_step=(
+        srun
+        "${CPU_HET_ARGS[@]}"
+        "${common_step_arguments[@]}"
+        --cpus-per-task="${CPU_LANE_CPUS_PER_TASK}"
+        --hint=nomultithread
+    )
+    local -a gpu_step=(
+        srun
+        "${GPU_HET_ARGS[@]}"
+        "${common_step_arguments[@]}"
+        --cpus-per-task="${JAX_GPU_CPUS_PER_TASK}"
     )
     local -a lane_wrapper=(
         bash
@@ -489,34 +604,38 @@ launch_pair_lanes() {
         __run-lane-step
     )
 
-    "${common_step[@]}" --nodelist="${native_cpu_node}" --gres=none \
+    "${cpu_step[@]}" --nodelist="${native_cpu_node}" --gres=none \
         --output="${pair_dir}/native_cpu_slurm_stdout.log" \
         --error="${pair_dir}/native_cpu_slurm_stderr.log" \
-        env CUDA_VISIBLE_DEVICES= \
+        env CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS="${CPU_LANE_CPUS_PER_TASK}" \
         "${lane_wrapper[@]}" native_cpu "${native_cpu_node}" "${pair_dir}" \
         "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" \
         "${GPU_PROCESS_MEMORY_CSV}" "${GPU_SAMPLER_QUERY_CSV}" \
-        "${GPU_SAMPLER_ERROR_LOG}" &
+        "${GPU_SAMPLER_ERROR_LOG}" "${CPU_LANE_CPUS_PER_TASK}" \
+        "${CPU_LANE_CPUS_PER_TASK}" &
     NATIVE_CPU_STEP_PID=$!
 
-    "${common_step[@]}" --nodelist="${jax_cpu_node}" --gres=none \
+    "${cpu_step[@]}" --nodelist="${jax_cpu_node}" --gres=none \
         --output="${pair_dir}/jax_cpu_slurm_stdout.log" \
         --error="${pair_dir}/jax_cpu_slurm_stderr.log" \
-        env CUDA_VISIBLE_DEVICES= \
+        env CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS="${CPU_LANE_CPUS_PER_TASK}" \
         "${lane_wrapper[@]}" jax_cpu "${jax_cpu_node}" "${pair_dir}" \
         "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" \
         "${GPU_PROCESS_MEMORY_CSV}" "${GPU_SAMPLER_QUERY_CSV}" \
-        "${GPU_SAMPLER_ERROR_LOG}" &
+        "${GPU_SAMPLER_ERROR_LOG}" "${CPU_LANE_CPUS_PER_TASK}" \
+        "${CPU_LANE_CPUS_PER_TASK}" &
     JAX_CPU_STEP_PID=$!
 
-    "${common_step[@]}" --nodelist="${jax_gpu_node}" --gpus-per-task=1 \
+    "${gpu_step[@]}" --nodelist="${jax_gpu_node}" --gpus-per-task=1 \
         --gpu-bind=single:1 \
         --output="${pair_dir}/jax_gpu_slurm_stdout.log" \
         --error="${pair_dir}/jax_gpu_slurm_stderr.log" \
+        env OMP_NUM_THREADS="${JAX_GPU_OMP_NUM_THREADS}" \
         "${lane_wrapper[@]}" jax_gpu "${jax_gpu_node}" "${pair_dir}" \
         "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" \
         "${GPU_PROCESS_MEMORY_CSV}" "${GPU_SAMPLER_QUERY_CSV}" \
-        "${GPU_SAMPLER_ERROR_LOG}" &
+        "${GPU_SAMPLER_ERROR_LOG}" "${JAX_GPU_CPUS_PER_TASK}" \
+        "${JAX_GPU_OMP_NUM_THREADS}" &
     JAX_GPU_STEP_PID=$!
 }
 
@@ -573,9 +692,40 @@ ENVIRONMENT_LOCK_SNAPSHOT="${ENVIRONMENT_ROOT}/requirements.lock"
 COMPARATOR_PATH="${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py"
 
 ALLOCATED_NODES=()
-mapfile -t ALLOCATED_NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST:?}")
-validate_allocated_nodes
+CPU_ALLOCATION_NODES=()
+GPU_ALLOCATION_NODES=()
+CPU_HET_ARGS=()
+GPU_HET_ARGS=()
+discover_allocation_topology
 printf '%s\n' "${ALLOCATED_NODES[@]}" > "${MACHINE_ROOT}/allocated_nodes.txt"
+printf '%s\n' "${CPU_ALLOCATION_NODES[@]}" \
+    > "${MACHINE_ROOT}/cpu_allocated_nodes.txt"
+printf '%s\n' "${GPU_ALLOCATION_NODES[@]}" \
+    > "${MACHINE_ROOT}/gpu_allocated_nodes.txt"
+{
+    printf 'allocation_layout\t%s\n' "${ALLOCATION_LAYOUT}"
+    printf 'leader_job_id\t%s\n' "${SLURM_JOB_ID}"
+    printf 'cpu_component_job_id\t%s\n' "${SLURM_JOB_ID_HET_GROUP_0}"
+    printf 'gpu_component_job_id\t%s\n' "${SLURM_JOB_ID_HET_GROUP_1}"
+    printf 'cpu_component_account\t%s\n' "${SLURM_JOB_ACCOUNT_HET_GROUP_0:-}"
+    printf 'gpu_component_account\t%s\n' "${SLURM_JOB_ACCOUNT_HET_GROUP_1:-}"
+    printf 'cpu_component_qos\t%s\n' "${SLURM_JOB_QOS_HET_GROUP_0:-}"
+    printf 'gpu_component_qos\t%s\n' "${SLURM_JOB_QOS_HET_GROUP_1:-}"
+    printf 'cpu_component_nodelist\t%s\n' \
+        "${SLURM_JOB_NODELIST_HET_GROUP_0}"
+    printf 'gpu_component_nodelist\t%s\n' \
+        "${SLURM_JOB_NODELIST_HET_GROUP_1}"
+    printf 'cpu_component_cpus_per_task\t%s\n' \
+        "${CPU_COMPONENT_CPUS_PER_TASK}"
+    printf 'gpu_component_cpus_per_task\t%s\n' \
+        "${GPU_COMPONENT_CPUS_PER_TASK}"
+    printf 'cpu_lane_cpus_per_task\t%s\n' "${CPU_LANE_CPUS_PER_TASK}"
+    printf 'jax_gpu_cpus_per_task\t%s\n' "${JAX_GPU_CPUS_PER_TASK}"
+    printf 'jax_gpu_omp_num_threads\t%s\n' "${JAX_GPU_OMP_NUM_THREADS}"
+    printf 'gpu_component_allocation\t%s\n' \
+        "${SLURM_JOB_GPUS_HET_GROUP_1:-}"
+    printf 'lane_assignment_policy\t%s\n' "${LANE_ASSIGNMENT_POLICY}"
+} > "${MACHINE_ROOT}/slurm_allocation.tsv"
 
 summarize_gpu_process_memory() {
     local python_executable="python"
@@ -723,15 +873,16 @@ payload = {
     "unit": "MiB",
     "sampling_interval_seconds": 1,
     "scope": (
-        "all compute processes visible inside each exclusive JAX-GPU lane step"
+        "all compute processes on the GPU assigned to each JAX-GPU lane step"
         if profile == "full"
-        else "diagnostic samples from compute processes visible inside each "
-        "JAX-GPU lane step"
+        else "diagnostic samples from compute processes on the GPU assigned "
+        "to each JAX-GPU lane step"
     ),
     "note": (
         "JAX-GPU samples are compute-process rows whose timestamps fall inside "
-        "the recorded JAX-GPU lane execution window. GPU process memory is "
-        "separate from GNU-time host RSS."
+        "the recorded JAX-GPU lane execution window. Every nvidia-smi query is "
+        "restricted to the lane's Slurm-assigned global GPU ID. GPU process "
+        "memory is separate from GNU-time host RSS."
     ),
     "sampler_queries": {
         "query_count": query_count,
@@ -775,6 +926,13 @@ aggregate_pairs() {
         PROFILE="${PROFILE}" \
         EVIDENCE_CLASS="${EVIDENCE_CLASS}" \
         PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE}" \
+        ALLOCATION_LAYOUT="${ALLOCATION_LAYOUT}" \
+        LANE_ASSIGNMENT_POLICY="${LANE_ASSIGNMENT_POLICY}" \
+        CPU_COMPONENT_CPUS_PER_TASK="${CPU_COMPONENT_CPUS_PER_TASK}" \
+        GPU_COMPONENT_CPUS_PER_TASK="${GPU_COMPONENT_CPUS_PER_TASK}" \
+        CPU_LANE_CPUS_PER_TASK="${CPU_LANE_CPUS_PER_TASK}" \
+        JAX_GPU_CPUS_PER_TASK="${JAX_GPU_CPUS_PER_TASK}" \
+        JAX_GPU_OMP_NUM_THREADS="${JAX_GPU_OMP_NUM_THREADS}" \
         PAIR_COUNT="${PAIR_COUNT}" \
         GPU_PROCESS_MEMORY_SUMMARY="${GPU_PROCESS_MEMORY_SUMMARY}" \
         ENVIRONMENT_LOCK_MANIFEST="${ENVIRONMENT_LOCK_MANIFEST}" \
@@ -793,6 +951,13 @@ pair_root = artifact_root / "pairs"
 profile = os.environ["PROFILE"]
 evidence_class = os.environ["EVIDENCE_CLASS"]
 pair_execution_mode = os.environ["PAIR_EXECUTION_MODE"]
+allocation_layout = os.environ["ALLOCATION_LAYOUT"]
+lane_assignment_policy = os.environ["LANE_ASSIGNMENT_POLICY"]
+cpu_component_cpus_per_task = int(os.environ["CPU_COMPONENT_CPUS_PER_TASK"])
+gpu_component_cpus_per_task = int(os.environ["GPU_COMPONENT_CPUS_PER_TASK"])
+cpu_lane_cpus_per_task = int(os.environ["CPU_LANE_CPUS_PER_TASK"])
+jax_gpu_cpus_per_task = int(os.environ["JAX_GPU_CPUS_PER_TASK"])
+jax_gpu_omp_num_threads = int(os.environ["JAX_GPU_OMP_NUM_THREADS"])
 expected_pair_count = int(os.environ["PAIR_COUNT"])
 gpu_memory_summary_path = Path(os.environ["GPU_PROCESS_MEMORY_SUMMARY"])
 environment_lock_manifest_path = Path(os.environ["ENVIRONMENT_LOCK_MANIFEST"])
@@ -884,6 +1049,8 @@ for pair_index in range(1, expected_pair_count + 1):
         "pair_name": pair_name,
         "order": status_values.get("order", "concurrent"),
         "pair_execution_mode": status_values.get("pair_execution_mode"),
+        "allocation_layout": status_values.get("allocation_layout"),
+        "lane_assignment_policy": status_values.get("lane_assignment_policy"),
         "status": status,
         "nodes": {
             lane: status_values.get(f"{lane}_node")
@@ -1008,6 +1175,12 @@ repeat_design_valid = expected_pair_count >= 2
 pair_execution_modes_match = all(
     pair["pair_execution_mode"] == pair_execution_mode for pair in pairs
 )
+pair_allocation_layouts_match = all(
+    pair["allocation_layout"] == allocation_layout for pair in pairs
+)
+pair_lane_assignment_policies_match = all(
+    pair["lane_assignment_policy"] == lane_assignment_policy for pair in pairs
+)
 pair_topologies_valid = all(
     pair["all_lanes_overlapped"] is True
     and len(set(pair["nodes"].values())) == 3
@@ -1017,6 +1190,8 @@ pair_topologies_valid = all(
 all_pairs_passed = (
     measurement_design_valid
     and pair_execution_modes_match
+    and pair_allocation_layouts_match
+    and pair_lane_assignment_policies_match
     and pair_topologies_valid
     and successful_pair_count == expected_pair_count
 )
@@ -1058,6 +1233,7 @@ payload = {
     "profile": profile,
     "evidence_class": evidence_class,
     "pair_execution_mode": pair_execution_mode,
+    "allocation_layout": allocation_layout,
     "claim_ready": aggregate_claim_ready,
     "expected_pair_count": expected_pair_count,
     "successful_pair_count": successful_pair_count,
@@ -1065,18 +1241,38 @@ payload = {
     "measurement_design_valid": measurement_design_valid,
     "repeat_design_valid": repeat_design_valid,
     "pair_execution_modes_match": pair_execution_modes_match,
+    "pair_allocation_layouts_match": pair_allocation_layouts_match,
+    "pair_lane_assignment_policies_match": pair_lane_assignment_policies_match,
     "pair_topologies_valid": pair_topologies_valid,
     "measurement_class": (
         "single_matched_triplet"
         if expected_pair_count == 1
-        else "repeated_rotating_triplets"
+        else "repeated_cpu-swapped_triplets"
     ),
     "measurement_interpretation": (
         "one matched measurement; no statistical inference"
         if expected_pair_count == 1
-        else "repeated matched measurements with deterministic role rotation"
+        else "repeated matched measurements with deterministic CPU-role swap "
+        "and a fixed GPU node"
     ),
-    "lane_assignment_policy": "concurrent three-node roles rotated by pair index",
+    "lane_assignment_policy": lane_assignment_policy,
+    "resources": {
+        "cpu_component_cpus_per_task": cpu_component_cpus_per_task,
+        "gpu_component_cpus_per_task": gpu_component_cpus_per_task,
+        "native_cpu": {
+            "cpus_per_task": cpu_lane_cpus_per_task,
+            "omp_num_threads": cpu_lane_cpus_per_task,
+        },
+        "jax_cpu": {
+            "cpus_per_task": cpu_lane_cpus_per_task,
+            "omp_num_threads": cpu_lane_cpus_per_task,
+        },
+        "jax_gpu": {
+            "cpus_per_task": jax_gpu_cpus_per_task,
+            "omp_num_threads": jax_gpu_omp_num_threads,
+            "gpus_per_task": 1,
+        },
+    },
     "speedup": speedup_summary,
     "wall_seconds": {
         "native_cpu": distribution(successful_native_cpu_wall_seconds),
@@ -1619,7 +1815,7 @@ export JAX_ENABLE_COMPILATION_CACHE=0
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled
 export SIMSOPT_MIXED_PRECISION=0
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
+export OMP_NUM_THREADS="${CPU_LANE_CPUS_PER_TASK}"
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OPENBLAS_NUM_THREADS=1
@@ -1628,6 +1824,8 @@ export NUMEXPR_NUM_THREADS=1
 
 printf '%s\n' "${PAIR_EXECUTION_MODE}" \
     > "${MACHINE_ROOT}/pair_execution_mode.txt"
+printf '%s\n' "${ALLOCATION_LAYOUT}" \
+    > "${MACHINE_ROOT}/allocation_layout.txt"
 module list > "${MACHINE_ROOT}/modules.txt" 2>&1
 hostname -s > "${MACHINE_ROOT}/batch_host.txt"
 lscpu > "${MACHINE_ROOT}/batch_host_lscpu.txt"
@@ -1858,6 +2056,8 @@ PY
         printf 'profile\t%s\n' "${PROFILE}"
         printf 'evidence_class\t%s\n' "${EVIDENCE_CLASS}"
         printf 'pair_execution_mode\t%s\n' "${PAIR_EXECUTION_MODE}"
+        printf 'allocation_layout\t%s\n' "${ALLOCATION_LAYOUT}"
+        printf 'lane_assignment_policy\t%s\n' "${LANE_ASSIGNMENT_POLICY}"
         printf 'native_cpu_node\t%s\n' "${native_cpu_node}"
         printf 'jax_cpu_node\t%s\n' "${jax_cpu_node}"
         printf 'jax_gpu_node\t%s\n' "${jax_gpu_node}"
