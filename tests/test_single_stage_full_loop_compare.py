@@ -50,6 +50,9 @@ LAUNCHER_PATH = (
     / "perlmutter"
     / "single_stage_full_loop_cpu_gpu.slurm"
 )
+INTERACTIVE_LAUNCHER_PATH = (
+    LAUNCHER_PATH.parent / "single_stage_full_loop_shared_interactive.sh"
+)
 INTERPRETER_PROBE_PATH = (
     Path(__file__).resolve().parent / "subprocess" / "full_loop_interpreter_probe.py"
 )
@@ -63,6 +66,11 @@ THREE_NODES = {
     "jax_cpu": "nid000202",
     "jax_gpu": "nid000303",
 }
+ALLOCATION_LAYOUT = "perlmutter-het-cpu2-gpu1"
+LANE_ASSIGNMENT_POLICY = (
+    "concurrent typed nodes; CPU roles swap by pair index and JAX GPU remains "
+    "on the GPU node"
+)
 
 
 def _install_fake_python(tmp_path: Path) -> Path:
@@ -1617,17 +1625,100 @@ def test_launcher_execution_mode_guidance_names_only_supported_mode() -> None:
     assert "or direct" not in completed.stderr
 
 
+def test_launcher_requests_two_cpu_nodes_and_exactly_one_shared_gpu() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    cpu_component, gpu_component = source.split("#SBATCH hetjob\n", maxsplit=1)
+
+    assert "#SBATCH -A m4680\n" in cpu_component
+    assert "#SBATCH -C cpu\n" in cpu_component
+    assert "#SBATCH -q regular\n" in cpu_component
+    assert "#SBATCH -N 2\n" in cpu_component
+    assert "#SBATCH --ntasks=2\n" in cpu_component
+    assert "#SBATCH --cpus-per-task=128\n" in cpu_component
+    assert "#SBATCH --hint=nomultithread\n" in cpu_component
+    assert "--gpus" not in cpu_component
+
+    assert "#SBATCH -A m4680_g\n" in gpu_component
+    assert "#SBATCH -C gpu\n" in gpu_component
+    assert "#SBATCH -q shared\n" in gpu_component
+    assert "#SBATCH -N 1\n" in gpu_component
+    assert "#SBATCH --ntasks=1\n" in gpu_component
+    assert "#SBATCH --cpus-per-task=32\n" in gpu_component
+    assert "#SBATCH --hint=nomultithread\n" not in gpu_component
+    assert gpu_component.count("#SBATCH --gpus-per-task=1\n") == 1
+    assert "--gpus-per-node=4" not in source
+    assert "#SBATCH --exclusive" not in source
+
+
+def test_shared_interactive_launcher_uses_non_consuming_controller_step(
+    tmp_path: Path,
+) -> None:
+    source = INTERACTIVE_LAUNCHER_PATH.read_text(encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_salloc = fake_bin / "salloc"
+    fake_salloc.write_text(
+        "#!/bin/bash\n"
+        "printf '%s\\n' \"$@\" > \"${SALLOC_ARGUMENTS_PATH}\"\n"
+        "sed -n 'p' > \"${SALLOC_STDIN_PATH}\"\n",
+        encoding="utf-8",
+    )
+    fake_salloc.chmod(0o755)
+    arguments_path = tmp_path / "salloc.args"
+    stdin_path = tmp_path / "salloc.stdin"
+    completed = subprocess.run(
+        ["bash", str(INTERACTIVE_LAUNCHER_PATH)],
+        check=False,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "REPO_ROOT": str(LAUNCHER_PATH.parents[2]),
+            "SALLOC_ARGUMENTS_PATH": str(arguments_path),
+            "SALLOC_STDIN_PATH": str(stdin_path),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--qos=interactive" in source
+    assert "--qos=shared_interactive" in source
+    assert source.count("--nodes=2") == 1
+    assert source.count("--nodes=1") == 1
+    assert source.count("--cpus-per-task=128") == 1
+    assert source.count("--cpus-per-task=32") == 1
+    assert source.count("--hint=nomultithread") == 1
+    assert source.count("--gpus-per-task=1") == 1
+    assert "--gpus-per-node" not in source
+    assert "--no-shell" not in source
+    assert "srun" not in source
+    assert "<<'SALLOC_COMMANDS'" in source
+    assert 'exec bash -l -- "${BENCHMARK_LAUNCHER}"' in source
+    arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+    assert arguments.count("--nodes=2") == 1
+    assert arguments.count("--nodes=1") == 1
+    assert arguments.count("--gpus-per-task=1") == 1
+    assert arguments[-1] == "--gpus-per-task=1"
+    assert stdin_path.read_text(encoding="utf-8") == (
+        'exec bash -l -- "${BENCHMARK_LAUNCHER}"\n'
+    )
+
+
 @pytest.mark.parametrize(
-    ("allocated_nodes", "expected_returncode"),
+    ("cpu_nodes", "gpu_nodes", "expected_returncode"),
     (
-        (("nid001", "nid002", "nid003"), 0),
-        (("nid001", "nid002"), 2),
-        (("nid001", "nid002", "nid002"), 2),
-        (("nid001", "nid002", "nid003", "nid004"), 2),
+        (("nid001", "nid002"), ("nid003",), 0),
+        (("nid001",), ("nid003",), 2),
+        (("nid001", "nid002", "nid004"), ("nid003",), 2),
+        (("nid001", "nid002"), (), 2),
+        (("nid001", "nid002"), ("nid003", "nid004"), 2),
+        (("nid001", "nid001"), ("nid003",), 2),
+        (("nid001", "nid002"), ("nid002",), 2),
     ),
 )
-def test_launcher_requires_exactly_three_distinct_allocated_nodes(
-    allocated_nodes: tuple[str, ...],
+def test_launcher_requires_two_cpu_nodes_and_one_distinct_gpu_node(
+    cpu_nodes: tuple[str, ...],
+    gpu_nodes: tuple[str, ...],
     expected_returncode: int,
 ) -> None:
     source = LAUNCHER_PATH.read_text(encoding="utf-8")
@@ -1640,21 +1731,165 @@ def test_launcher_requires_exactly_three_distinct_allocated_nodes(
         [
             "bash",
             "-c",
-            (f'{function.group(0)}\nALLOCATED_NODES=("$@")\nvalidate_allocated_nodes'),
+            (
+                f"{function.group(0)}\n"
+                'CPU_ALLOCATION_NODES=(${CPU_NODES})\n'
+                'GPU_ALLOCATION_NODES=(${GPU_NODES})\n'
+                "validate_allocated_nodes"
+            ),
             "validate-allocated-nodes-test",
-            *allocated_nodes,
         ],
         check=False,
         text=True,
         capture_output=True,
+        env={
+            **os.environ,
+            "CPU_NODES": " ".join(cpu_nodes),
+            "GPU_NODES": " ".join(gpu_nodes),
+        },
     )
 
     assert completed.returncode == expected_returncode
-    assert "#SBATCH -N 3" in source
-    assert "#SBATCH --ntasks=3" in source
 
 
-def test_launcher_rotates_all_three_node_roles_between_pairs() -> None:
+def test_launcher_discovers_typed_heterogeneous_components() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    validation = re.search(
+        r"(?ms)^validate_allocated_nodes\(\) \{.*?^\}\n",
+        source,
+    )
+    discovery = re.search(
+        r"(?ms)^discover_allocation_topology\(\) \{.*?^\}\n",
+        source,
+    )
+    assert validation is not None
+    assert discovery is not None
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"{validation.group(0)}\n{discovery.group(0)}\n"
+                "scontrol() {\n"
+                '    case "$3" in\n'
+                "        cpu-nodes) printf 'nid001\\nnid002\\n' ;;\n"
+                "        gpu-node) printf 'nid003\\n' ;;\n"
+                "    esac\n"
+                "}\n"
+                "discover_allocation_topology\n"
+                "printf '%s\\n' \"${CPU_ALLOCATION_NODES[*]}\" "
+                '"${GPU_ALLOCATION_NODES[*]}" "${ALLOCATED_NODES[*]}" '
+                '"${CPU_COMPONENT_CPUS_PER_TASK},"'
+                '"${GPU_COMPONENT_CPUS_PER_TASK},"'
+                '"${CPU_LANE_CPUS_PER_TASK},${JAX_GPU_CPUS_PER_TASK},"'
+                '"${JAX_GPU_OMP_NUM_THREADS}" "${ALLOCATION_LAYOUT}"'
+            ),
+            "discover-allocation-topology-test",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "SLURM_HET_SIZE": "2",
+            "SLURM_JOB_ID": "100",
+            "SLURM_JOB_ID_HET_GROUP_0": "100",
+            "SLURM_JOB_ID_HET_GROUP_1": "101",
+            "SLURM_JOB_NODELIST": "wrong-flat-list",
+            "SLURM_JOB_NODELIST_HET_GROUP_0": "cpu-nodes",
+            "SLURM_JOB_NODELIST_HET_GROUP_1": "gpu-node",
+            "SLURM_CPUS_PER_TASK_HET_GROUP_0": "128",
+            "SLURM_CPUS_PER_TASK_HET_GROUP_1": "32",
+            "CPU_LANE_CPUS_PER_TASK": "64",
+            "JAX_GPU_CPUS_PER_TASK": "32",
+            "JAX_GPU_OMP_NUM_THREADS": "16",
+        },
+    )
+
+    assert completed.stdout.splitlines() == [
+        "nid001 nid002",
+        "nid003",
+        "nid001 nid002 nid003",
+        "128,32,64,32,16",
+        ALLOCATION_LAYOUT,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("environment_override", "expected_error"),
+    (
+        ({"SLURM_HET_SIZE": "1"}, "2-component heterogeneous allocation"),
+        ({"SLURM_JOB_NODELIST_HET_GROUP_1": ""}, "node lists are required"),
+        ({"SLURM_JOB_ID_HET_GROUP_0": "99"}, "group-0 leader ID"),
+        (
+            {"SLURM_CPUS_PER_TASK_HET_GROUP_1": "invalid"},
+            "CPU counts must be positive integers",
+        ),
+        (
+            {"CPU_LANE_CPUS_PER_TASK": "129"},
+            "Lane CPU counts must not exceed",
+        ),
+        (
+            {"JAX_GPU_OMP_NUM_THREADS": "33"},
+            "no greater than the GPU step CPU count",
+        ),
+    ),
+)
+def test_launcher_rejects_invalid_heterogeneous_metadata(
+    environment_override: dict[str, str],
+    expected_error: str,
+) -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    validation = re.search(
+        r"(?ms)^validate_allocated_nodes\(\) \{.*?^\}\n",
+        source,
+    )
+    discovery = re.search(
+        r"(?ms)^discover_allocation_topology\(\) \{.*?^\}\n",
+        source,
+    )
+    assert validation is not None
+    assert discovery is not None
+    environment = {
+        **os.environ,
+        "SLURM_HET_SIZE": "2",
+        "SLURM_JOB_ID": "100",
+        "SLURM_JOB_ID_HET_GROUP_0": "100",
+        "SLURM_JOB_ID_HET_GROUP_1": "101",
+        "SLURM_JOB_NODELIST_HET_GROUP_0": "cpu-nodes",
+        "SLURM_JOB_NODELIST_HET_GROUP_1": "gpu-node",
+        "SLURM_CPUS_PER_TASK_HET_GROUP_0": "128",
+        "SLURM_CPUS_PER_TASK_HET_GROUP_1": "32",
+        "CPU_LANE_CPUS_PER_TASK": "64",
+        "JAX_GPU_CPUS_PER_TASK": "32",
+        "JAX_GPU_OMP_NUM_THREADS": "16",
+    }
+    environment.update(environment_override)
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f"{validation.group(0)}\n{discovery.group(0)}\n"
+                "scontrol() {\n"
+                '    [[ "$3" == cpu-nodes ]] && printf \'nid001\\nnid002\\n\' '
+                "|| printf 'nid003\\n'\n"
+                "}\n"
+                "discover_allocation_topology"
+            ),
+            "reject-allocation-topology-test",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 2
+    assert expected_error in completed.stderr
+
+
+def test_launcher_swaps_only_cpu_roles_between_pairs() -> None:
     source = LAUNCHER_PATH.read_text(encoding="utf-8")
     function = re.search(r"(?ms)^assign_pair_nodes\(\) \{.*?^\}\n", source)
     assert function is not None
@@ -1664,7 +1899,8 @@ def test_launcher_rotates_all_three_node_roles_between_pairs() -> None:
             "-c",
             (
                 f"{function.group(0)}\n"
-                "ALLOCATED_NODES=(nid001 nid002 nid003)\n"
+                "CPU_ALLOCATION_NODES=(nid001 nid002)\n"
+                "GPU_ALLOCATION_NODES=(nid003)\n"
                 "for pair_index in 1 2 3 4; do\n"
                 '    assign_pair_nodes "${pair_index}"\n'
                 "    printf '%s,%s,%s\\n' \"${native_cpu_node}\" "
@@ -1680,9 +1916,9 @@ def test_launcher_rotates_all_three_node_roles_between_pairs() -> None:
 
     assert completed.stdout.splitlines() == [
         "nid001,nid002,nid003",
-        "nid002,nid003,nid001",
-        "nid003,nid001,nid002",
+        "nid002,nid001,nid003",
         "nid001,nid002,nid003",
+        "nid002,nid001,nid003",
     ]
 
 
@@ -1737,7 +1973,11 @@ def test_launcher_starts_three_exactly_pinned_steps_before_waiting(
             **os.environ,
             "PAIR_DIR": str(pair_dir),
             "BARRIER_ROOT": str(barrier_root),
-            "SLURM_CPUS_PER_TASK": "32",
+            "CPU_HET_ARGS": "--het-group=0",
+            "GPU_HET_ARGS": "--het-group=1",
+            "CPU_LANE_CPUS_PER_TASK": "64",
+            "JAX_GPU_CPUS_PER_TASK": "32",
+            "JAX_GPU_OMP_NUM_THREADS": "16",
             "LAUNCHER_PATH": "/shared/launcher.slurm",
             "VENV_DIR": "/shared/venv",
             "COMPARATOR_PATH": "/shared/comparator.py",
@@ -1759,9 +1999,15 @@ def test_launcher_starts_three_exactly_pinned_steps_before_waiting(
         assert arguments.count(f"--nodelist={node}") == 1
         assert lane in arguments
     for lane in ("native_cpu", "jax_cpu"):
+        assert "--het-group=0" in lane_arguments[lane]
+        assert "--cpus-per-task=64" in lane_arguments[lane]
         assert "--gres=none" in lane_arguments[lane]
         assert "CUDA_VISIBLE_DEVICES=" in lane_arguments[lane]
+        assert "OMP_NUM_THREADS=64" in lane_arguments[lane]
         assert "--gpus-per-task=1" not in lane_arguments[lane]
+    assert "--het-group=1" in lane_arguments["jax_gpu"]
+    assert "--cpus-per-task=32" in lane_arguments["jax_gpu"]
+    assert "OMP_NUM_THREADS=16" in lane_arguments["jax_gpu"]
     assert "--gpus-per-task=1" in lane_arguments["jax_gpu"]
     assert "--gres=none" not in lane_arguments["jax_gpu"]
 
@@ -1811,6 +2057,18 @@ def test_launcher_finishes_lane_local_gpu_hook_before_adjudication() -> None:
     assert pair_loop.index("wait_for_pair_lanes") < pair_loop.index(
         '"${COMPARATOR_PATH}" adjudicate'
     )
+
+
+def test_launcher_restricts_gpu_sampling_to_the_assigned_gpu() -> None:
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    wrapper = re.search(r"(?ms)^run_lane_step\(\) \{.*?^\}\n", source)
+    assert wrapper is not None
+    wrapper_source = wrapper.group(0)
+
+    assert 'assigned_gpu_id="${SLURM_STEP_GPUS:-}"' in wrapper_source
+    assert '"${assigned_gpu_id}" == *,*' in wrapper_source
+    assert wrapper_source.count('--id="${assigned_gpu_id}"') == 5
+    assert "exactly one Slurm GPU assigned to its step" in wrapper_source
 
 
 def test_launcher_gpu_summary_null_timestamps_fail_evidence_without_crashing(
@@ -1932,6 +2190,8 @@ def test_launcher_aggregate_persists_failed_null_performance_comparison(
         "\n".join(
             (
                 "pair_execution_mode\tconcurrent-srun-steps",
+                f"allocation_layout\t{ALLOCATION_LAYOUT}",
+                f"lane_assignment_policy\t{LANE_ASSIGNMENT_POLICY}",
                 "adjudicated_status\tfailed",
                 "native_cpu_node\tnid1",
                 "jax_cpu_node\tnid2",
@@ -1998,6 +2258,13 @@ def test_launcher_aggregate_persists_failed_null_performance_comparison(
             "PROFILE": "full",
             "EVIDENCE_CLASS": "production",
             "PAIR_EXECUTION_MODE": "concurrent-srun-steps",
+            "ALLOCATION_LAYOUT": ALLOCATION_LAYOUT,
+            "LANE_ASSIGNMENT_POLICY": LANE_ASSIGNMENT_POLICY,
+            "CPU_COMPONENT_CPUS_PER_TASK": "128",
+            "GPU_COMPONENT_CPUS_PER_TASK": "32",
+            "CPU_LANE_CPUS_PER_TASK": "64",
+            "JAX_GPU_CPUS_PER_TASK": "32",
+            "JAX_GPU_OMP_NUM_THREADS": "16",
             "PAIR_COUNT": "1",
             "GPU_PROCESS_MEMORY_SUMMARY": str(gpu_summary_path),
             "ENVIRONMENT_LOCK_MANIFEST": str(
@@ -2032,6 +2299,8 @@ def test_launcher_single_triplet_is_claim_ready_without_claiming_repeats(
         "\n".join(
             (
                 "pair_execution_mode\tconcurrent-srun-steps",
+                f"allocation_layout\t{ALLOCATION_LAYOUT}",
+                f"lane_assignment_policy\t{LANE_ASSIGNMENT_POLICY}",
                 "adjudicated_status\tpassed",
                 "native_cpu_node\tnid1",
                 "jax_cpu_node\tnid2",
@@ -2128,6 +2397,13 @@ def test_launcher_single_triplet_is_claim_ready_without_claiming_repeats(
             "PROFILE": "full",
             "EVIDENCE_CLASS": "production",
             "PAIR_EXECUTION_MODE": "concurrent-srun-steps",
+            "ALLOCATION_LAYOUT": ALLOCATION_LAYOUT,
+            "LANE_ASSIGNMENT_POLICY": LANE_ASSIGNMENT_POLICY,
+            "CPU_COMPONENT_CPUS_PER_TASK": "128",
+            "GPU_COMPONENT_CPUS_PER_TASK": "32",
+            "CPU_LANE_CPUS_PER_TASK": "64",
+            "JAX_GPU_CPUS_PER_TASK": "32",
+            "JAX_GPU_OMP_NUM_THREADS": "16",
             "PAIR_COUNT": "1",
             "GPU_PROCESS_MEMORY_SUMMARY": str(gpu_summary_path),
             "ENVIRONMENT_LOCK_MANIFEST": str(environment_manifest_path),
@@ -2142,6 +2418,19 @@ def test_launcher_single_triplet_is_claim_ready_without_claiming_repeats(
     assert aggregate["claim_ready"] is True
     assert aggregate["measurement_design_valid"] is True
     assert aggregate["repeat_design_valid"] is False
+    assert aggregate["allocation_layout"] == ALLOCATION_LAYOUT
+    assert aggregate["lane_assignment_policy"] == LANE_ASSIGNMENT_POLICY
+    assert aggregate["resources"] == {
+        "cpu_component_cpus_per_task": 128,
+        "gpu_component_cpus_per_task": 32,
+        "native_cpu": {"cpus_per_task": 64, "omp_num_threads": 64},
+        "jax_cpu": {"cpus_per_task": 64, "omp_num_threads": 64},
+        "jax_gpu": {
+            "cpus_per_task": 32,
+            "gpus_per_task": 1,
+            "omp_num_threads": 16,
+        },
+    }
     assert aggregate["measurement_class"] == "single_matched_triplet"
     assert (
         aggregate["measurement_interpretation"]
