@@ -1034,9 +1034,14 @@ def lane_environment(
         return environment
     if lane != "jax":
         raise ValueError(f"Unsupported lane {lane!r}")
-    if not environment.get("CUDA_VISIBLE_DEVICES"):
+    visible_devices = environment.get("CUDA_VISIBLE_DEVICES", "")
+    if (
+        not visible_devices
+        or "," in visible_devices
+        or any(character.isspace() for character in visible_devices)
+    ):
         raise RuntimeError(
-            "JAX lane requires one Slurm-assigned CUDA_VISIBLE_DEVICES entry"
+            "JAX lane requires exactly one Slurm-assigned CUDA_VISIBLE_DEVICES selector"
         )
     environment.update(
         {
