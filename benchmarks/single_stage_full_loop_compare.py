@@ -1,6 +1,6 @@
-"""Run and adjudicate one native-SIMSOPT-CPU/JAX-CUDA optimization pair.
+"""Run and adjudicate one native-CPU/JAX-CPU/JAX-CUDA optimization triplet.
 
-The two lanes execute as isolated child processes from one immutable seed/config.
+The three lanes execute as isolated child processes from one immutable seed/config.
 This module owns provenance, resource accounting, and fail-closed parity policy;
 the child drivers own only their backend-specific optimization implementation.
 """
@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import socket
 import struct
 import subprocess
 import sys
@@ -79,6 +80,14 @@ RECORDED_ENV_NAMES = (
     "PYTHONHASHSEED",
     "PYTHONNOUSERSITE",
 )
+LANES = ("native_cpu", "jax_cpu", "jax_gpu")
+EXECUTION_POLICY = "concurrent-different-nodes"
+BARRIER_PROTOCOL = "shared-ready-files-v1"
+BARRIER_TIMEOUT_SECONDS = 300.0
+BARRIER_POLL_SECONDS = 0.1
+RUN_MANIFEST_NAME = "run_manifest.json"
+RUN_MANIFEST_DIGEST_NAME = "run_manifest.sha256"
+LEGACY_LANE_ALIASES = {"cpu": "native_cpu", "jax": "jax_gpu"}
 
 
 class ContractError(ValueError):
@@ -195,6 +204,36 @@ class LaneExecution:
     stdout_log: str
     stderr_log: str
     resource_log: str
+    run_manifest_sha256: str
+    assigned_node: str
+    actual_node: str
+    slurm_job_id: str
+    slurm_step_id: str
+    slurm_step_nodelist: str
+    barrier_peer_observed_at_utc: dict[str, str]
+    barrier_peer_slurm_job_ids: dict[str, str]
+
+
+@dataclass(frozen=True)
+class StepIdentity:
+    assigned_node: str
+    actual_node: str
+    slurm_job_id: str
+    slurm_step_id: str
+    slurm_step_nodelist: str
+    slurm_step_num_nodes: str
+    slurm_node_id: str
+    slurm_process_id: str
+
+
+@dataclass(frozen=True)
+class PreparedLaneExecution:
+    """Validated immutable inputs required to execute one prepared lane."""
+
+    command: tuple[str, ...]
+    run_manifest_sha256: str
+    assigned_node: str
+    allocation_slurm_job_id: str | None
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -271,6 +310,13 @@ def _require_int(parent: Mapping[str, object], key: str) -> int:
         raise ContractError(f"{key} must be an integer")
     if value < 0:
         raise ContractError(f"{key} must be non-negative")
+    return value
+
+
+def _require_positive_int(parent: Mapping[str, object], key: str) -> int:
+    value = _require_int(parent, key)
+    if value <= 0:
+        raise ContractError(f"{key} must be positive")
     return value
 
 
@@ -642,6 +688,12 @@ def compare_lane_results(
     expected_run_config_sha256: str,
     tolerances: ComparisonTolerances,
     mode: str = "production",
+    cpu_lane_name: str = "cpu",
+    jax_lane_name: str = "jax",
+    expected_cpu_backend: str = "native-simsopt-cpu",
+    expected_jax_backend: str = "jax-cuda",
+    expected_cpu_adjoint_policy: str = "native-plu-finite-gradient",
+    expected_jax_adjoint_policy: str = "checked-residual-and-condition",
 ) -> dict[str, object]:
     """Apply invariant gates and mode-dependent optimization-outcome policy."""
     if mode not in {"production", "diagnostic"}:
@@ -650,8 +702,8 @@ def compare_lane_results(
     required_checks = [
         _exact_check("comparison_schema_version.cpu", cpu.comparison_schema_version, 1),
         _exact_check("comparison_schema_version.jax", jax.comparison_schema_version, 1),
-        _exact_check("backend.cpu", cpu.backend, "native-simsopt-cpu"),
-        _exact_check("backend.jax", jax.backend, "jax-cuda"),
+        _exact_check("backend.cpu", cpu.backend, expected_cpu_backend),
+        _exact_check("backend.jax", jax.backend, expected_jax_backend),
         _exact_check("precision.cpu", cpu.precision, "float64"),
         _exact_check("precision.jax", jax.precision, "float64"),
         _exact_check("constraint_method.cpu", cpu.constraint_method, "soft-penalty"),
@@ -722,12 +774,12 @@ def compare_lane_results(
         _exact_check(
             "contract.adjoint_acceptance_policy.cpu",
             cpu.contract.adjoint_acceptance_policy,
-            "native-plu-finite-gradient",
+            expected_cpu_adjoint_policy,
         ),
         _exact_check(
             "contract.adjoint_acceptance_policy.jax",
             jax.contract.adjoint_acceptance_policy,
-            "checked-residual-and-condition",
+            expected_jax_adjoint_policy,
         ),
         _exact_check("inputs.cpu", cpu.input_sha256, dict(expected_input_sha256)),
         _exact_check("inputs.jax", jax.input_sha256, dict(expected_input_sha256)),
@@ -914,6 +966,12 @@ def compare_lane_results(
                 )
             )
 
+    for check in required_checks + outcome_checks:
+        name = str(check["name"])
+        if name.endswith(".cpu"):
+            check["name"] = f"{name[:-4]}.{cpu_lane_name}"
+        elif name.endswith(".jax"):
+            check["name"] = f"{name[:-4]}.{jax_lane_name}"
     for check in required_checks:
         check["category"] = "integrity"
     for check in outcome_checks:
@@ -1010,9 +1068,17 @@ def _selected_environment(environment: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _canonical_lane(lane: str) -> str:
+    canonical = LEGACY_LANE_ALIASES.get(lane, lane)
+    if canonical not in LANES:
+        raise ValueError(f"Unsupported lane {lane!r}")
+    return canonical
+
+
 def lane_environment(
     lane: str, parent_environment: Mapping[str, str]
 ) -> dict[str, str]:
+    canonical_lane = _canonical_lane(lane)
     environment = dict(parent_environment)
     environment.update(
         {
@@ -1022,7 +1088,7 @@ def lane_environment(
             "SIMSOPT_MIXED_PRECISION": "0",
         }
     )
-    if lane == "cpu":
+    if canonical_lane in {"native_cpu", "jax_cpu"}:
         environment.update(
             {
                 "CUDA_VISIBLE_DEVICES": "",
@@ -1032,8 +1098,6 @@ def lane_environment(
             }
         )
         return environment
-    if lane != "jax":
-        raise ValueError(f"Unsupported lane {lane!r}")
     visible_devices = environment.get("CUDA_VISIBLE_DEVICES", "")
     if (
         not visible_devices
@@ -1109,6 +1173,7 @@ def build_lane_command(
     run_dir: Path,
     run_config_sha256: str,
 ) -> tuple[str, ...]:
+    canonical_lane = _canonical_lane(lane)
     surface_normalization_arguments: tuple[str, ...] = (
         "--vmec-s",
         str(args.vmec_s),
@@ -1118,7 +1183,7 @@ def build_lane_command(
             "--surface-scale",
             str(args.surface_scale),
         )
-    if lane == "cpu":
+    if canonical_lane == "native_cpu":
         driver = NATIVE_DRIVER
         lane_arguments: Sequence[str] = ()
         output_arguments: Sequence[str] = (
@@ -1127,9 +1192,13 @@ def build_lane_command(
             "--overwrite",
         )
         exclusion_arguments: Sequence[str] = ()
-    elif lane == "jax":
+    elif canonical_lane in {"jax_cpu", "jax_gpu"}:
         driver = JAX_DRIVER
-        lane_arguments = ("--backend", "jax", "--platform", "cuda")
+        lane_arguments = (
+            ("--backend", "cpu", "--platform", "cpu")
+            if canonical_lane == "jax_cpu"
+            else ("--backend", "jax", "--platform", "cuda")
+        )
         output_arguments = (
             "--run-dir",
             str(run_dir),
@@ -1149,9 +1218,6 @@ def build_lane_command(
             "--no-current-penalties",
             "--no-width",
         )
-    else:
-        raise ValueError(f"Unsupported lane {lane!r}")
-
     command = (
         str(args.python),
         str(driver),
@@ -1217,99 +1283,393 @@ def build_lane_command(
     return command
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _short_hostname(value: str, *, label: str) -> str:
+    stripped = value.strip()
+    if not stripped or any(character.isspace() for character in stripped):
+        raise ContractError(f"{label} must be one non-empty hostname")
+    short = stripped.split(".", 1)[0]
+    if not short or any(character in short for character in ",[]"):
+        raise ContractError(f"{label} must identify exactly one host: {value!r}")
+    return short
+
+
+def _raw_step_identity(assigned_node: str) -> StepIdentity:
+    return StepIdentity(
+        assigned_node=assigned_node,
+        actual_node=socket.gethostname().split(".", 1)[0],
+        slurm_job_id=os.environ.get("SLURM_JOB_ID", ""),
+        slurm_step_id=os.environ.get("SLURM_STEP_ID", ""),
+        slurm_step_nodelist=os.environ.get("SLURM_STEP_NODELIST", ""),
+        slurm_step_num_nodes=os.environ.get("SLURM_STEP_NUM_NODES", ""),
+        slurm_node_id=os.environ.get("SLURM_NODEID", ""),
+        slurm_process_id=os.environ.get("SLURM_PROCID", ""),
+    )
+
+
+def _validate_step_identity(identity: StepIdentity) -> None:
+    actual_node = _short_hostname(identity.actual_node, label="actual hostname")
+    assigned_node = _short_hostname(identity.assigned_node, label="assigned node")
+    if actual_node != assigned_node:
+        raise ContractError(
+            "Lane step ran on the wrong node: "
+            f"assigned={assigned_node}, actual={actual_node}"
+        )
+    if not identity.slurm_job_id:
+        raise ContractError("run-lane requires SLURM_JOB_ID from an active allocation")
+    if identity.slurm_step_id in {"", "batch", "extern"}:
+        raise ContractError("run-lane requires a dedicated Slurm srun step")
+    if identity.slurm_step_num_nodes != "1":
+        raise ContractError(
+            "run-lane requires a one-node Slurm step; "
+            f"SLURM_STEP_NUM_NODES={identity.slurm_step_num_nodes!r}"
+        )
+    step_node = _short_hostname(
+        identity.slurm_step_nodelist,
+        label="SLURM_STEP_NODELIST",
+    )
+    if step_node != assigned_node:
+        raise ContractError(
+            "Slurm step node does not match the manifest assignment: "
+            f"assigned={assigned_node}, step_node={step_node}"
+        )
+
+
+def _step_identity_payload(identity: StepIdentity) -> dict[str, object]:
+    return {
+        "assigned_node": identity.assigned_node,
+        "actual_node": identity.actual_node,
+        "slurm_job_id": identity.slurm_job_id,
+        "slurm_step_id": identity.slurm_step_id,
+        "slurm_step_nodelist": identity.slurm_step_nodelist,
+        "slurm_step_num_nodes": identity.slurm_step_num_nodes,
+        "slurm_node_id": identity.slurm_node_id,
+        "slurm_process_id": identity.slurm_process_id,
+    }
+
+
+def _unbound_step_identity_payload(
+    parent_environment: Mapping[str, str],
+) -> dict[str, object]:
+    """Capture scheduler identity before the immutable lane assignment is loaded."""
+    return {
+        "assigned_node": None,
+        "actual_node": socket.gethostname().split(".", 1)[0],
+        "slurm_job_id": parent_environment.get("SLURM_JOB_ID", ""),
+        "slurm_step_id": parent_environment.get("SLURM_STEP_ID", ""),
+        "slurm_step_nodelist": parent_environment.get("SLURM_STEP_NODELIST", ""),
+        "slurm_step_num_nodes": parent_environment.get("SLURM_STEP_NUM_NODES", ""),
+        "slurm_node_id": parent_environment.get("SLURM_NODEID", ""),
+        "slurm_process_id": parent_environment.get("SLURM_PROCID", ""),
+    }
+
+
+def _write_json_exclusive(path: Path, payload: object) -> None:
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("x", encoding="utf-8") as handle:
+        handle.write(serialized)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _enter_lane_barrier(
+    *,
+    output_root: Path,
+    lane: str,
+    identity: StepIdentity,
+    run_manifest_sha256: str,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Publish this lane once and wait until both peer steps are live."""
+    barrier_root = output_root / "barrier"
+    if not barrier_root.is_dir():
+        raise ContractError(f"Prepared barrier directory is missing: {barrier_root}")
+    ready_at_utc = _utc_now()
+    _write_json_exclusive(
+        barrier_root / f"{lane}.ready.json",
+        {
+            "protocol": BARRIER_PROTOCOL,
+            "lane": lane,
+            "run_manifest_sha256": run_manifest_sha256,
+            "ready_at_utc": ready_at_utc,
+            **_step_identity_payload(identity),
+        },
+    )
+
+    peer_observed_at_utc: dict[str, str] = {}
+    peer_slurm_job_ids: dict[str, str] = {}
+    deadline = time.monotonic() + BARRIER_TIMEOUT_SECONDS
+    while len(peer_observed_at_utc) != len(LANES) - 1:
+        for peer_lane in LANES:
+            if peer_lane == lane or peer_lane in peer_observed_at_utc:
+                continue
+            peer_path = barrier_root / f"{peer_lane}.ready.json"
+            if not peer_path.is_file():
+                continue
+            peer = _load_json_object(peer_path)
+            if _require_string(peer, "protocol") != BARRIER_PROTOCOL:
+                raise ContractError(f"Barrier protocol mismatch in {peer_path}")
+            if _require_string(peer, "lane") != peer_lane:
+                raise ContractError(f"Barrier lane mismatch in {peer_path}")
+            if _require_sha256(peer, "run_manifest_sha256") != run_manifest_sha256:
+                raise ContractError(f"Barrier manifest mismatch in {peer_path}")
+            assigned = _short_hostname(
+                _require_string(peer, "assigned_node"),
+                label=f"{peer_lane} assigned node",
+            )
+            actual = _short_hostname(
+                _require_string(peer, "actual_node"),
+                label=f"{peer_lane} actual node",
+            )
+            if assigned != actual:
+                raise ContractError(f"Barrier peer {peer_lane} attested the wrong node")
+            peer_slurm_job_id = _require_string(peer, "slurm_job_id")
+            if peer_slurm_job_id != identity.slurm_job_id:
+                raise ContractError(
+                    f"Barrier peer {peer_lane} belongs to a different Slurm job: "
+                    f"expected={identity.slurm_job_id}, actual={peer_slurm_job_id}"
+                )
+            _require_string(peer, "slurm_step_id")
+            peer_observed_at_utc[peer_lane] = _utc_now()
+            peer_slurm_job_ids[peer_lane] = peer_slurm_job_id
+        if len(peer_observed_at_utc) == len(LANES) - 1:
+            break
+        if time.monotonic() >= deadline:
+            missing = sorted(set(LANES) - {lane} - set(peer_observed_at_utc))
+            raise TimeoutError(f"Timed out waiting for barrier peers: {missing}")
+        time.sleep(BARRIER_POLL_SECONDS)
+    return ready_at_utc, peer_observed_at_utc, peer_slurm_job_ids
+
+
 def _run_lane(
     *,
     lane: str,
-    command: tuple[str, ...],
-    environment: Mapping[str, str],
-    run_dir: Path,
+    parent_environment: Mapping[str, str],
+    output_root: Path,
 ) -> LaneExecution:
+    """Validate and execute one manifest lane inside a terminal evidence envelope."""
+    canonical_lane = _canonical_lane(lane)
+    if canonical_lane != lane:
+        raise ValueError("Operational run-lane requires a canonical lane name")
+    run_dir = output_root / canonical_lane
     run_dir.mkdir(parents=True, exist_ok=False)
     stdout_path = run_dir / "stdout.log"
     stderr_path = run_dir / "stderr.log"
     resource_path = run_dir / "gnu_time.txt"
     invocation_path = run_dir / "invocation.json"
-    time_executable = Path("/usr/bin/time")
-    if not time_executable.is_file():
-        raise RuntimeError("Full-loop comparator requires GNU /usr/bin/time")
-
-    recorded_environment = _selected_environment(environment)
-    _write_json(
-        invocation_path,
-        {
-            "lane": lane,
-            "command": list(command),
-            "environment": recorded_environment,
-        },
-    )
-    timed_command = (
-        str(time_executable),
-        "--verbose",
-        "--output",
-        str(resource_path),
-        *command,
-    )
-    started_at_utc = datetime.now(timezone.utc).isoformat()
-    started_at = time.monotonic()
-    with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
-        "w", encoding="utf-8"
-    ) as stderr_handle:
-        completed = subprocess.run(
-            timed_command,
-            cwd=REPO_ROOT,
-            env=dict(environment),
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            check=False,
-            text=True,
-        )
-    wall_seconds = time.monotonic() - started_at
-    ended_at_utc = datetime.now(timezone.utc).isoformat()
-    host_max_rss_kib = parse_gnu_time_verbose(resource_path.read_text(encoding="utf-8"))
     execution_path = run_dir / "execution.json"
-    execution_payload = {
-        "lane": lane,
-        "returncode": completed.returncode,
-        "started_at_utc": started_at_utc,
-        "ended_at_utc": ended_at_utc,
-        "wall_seconds": wall_seconds,
-        "host_max_rss_kib": host_max_rss_kib,
+    results_path = run_dir / "results.json"
+    recorded_environment = _selected_environment(parent_environment)
+    runner_started_at_utc = _utc_now()
+    invocation: dict[str, object] = {
+        "schema_version": 2,
+        "lane": canonical_lane,
+        "command": [],
+        "environment": recorded_environment,
+        "run_manifest_sha256": None,
+        "runner_started_at_utc": runner_started_at_utc,
+        "barrier_protocol": BARRIER_PROTOCOL,
+        "barrier_peer_observed_at_utc": {},
+        "barrier_peer_slurm_job_ids": {},
+        **_unbound_step_identity_payload(parent_environment),
+    }
+    execution: dict[str, object] = {
+        **invocation,
+        "status": "starting",
+        "returncode": None,
+        "started_at_utc": None,
+        "ended_at_utc": None,
+        "runner_ended_at_utc": None,
+        "wall_seconds": None,
+        "host_max_rss_kib": None,
+        "run_dir": str(run_dir),
+        "results_json": str(results_path),
+        "results_sha256": None,
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
         "resource_log": str(resource_path),
     }
-    _write_json(execution_path, execution_payload)
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"{lane} child exited with status {completed.returncode}; see {stderr_path}"
-        )
+    _write_json(invocation_path, invocation)
+    _write_json(execution_path, execution)
 
-    results_path = run_dir / "results.json"
-    if not results_path.is_file():
-        raise ContractError(f"{lane} child did not produce {results_path}")
-    results_sha256 = sha256_file(results_path)
-    return LaneExecution(
-        lane=lane,
-        command=command,
-        environment=recorded_environment,
-        returncode=completed.returncode,
-        started_at_utc=started_at_utc,
-        ended_at_utc=ended_at_utc,
-        wall_seconds=wall_seconds,
-        host_max_rss_kib=host_max_rss_kib,
-        run_dir=str(run_dir),
-        results_json=str(results_path),
-        results_sha256=results_sha256,
-        stdout_log=str(stdout_path),
-        stderr_log=str(stderr_path),
-        resource_log=str(resource_path),
-    )
+    terminal_evidence_written = False
+    try:
+        prepared = _prepare_lane_execution(output_root, canonical_lane)
+        command = prepared.command
+        run_manifest_sha256 = prepared.run_manifest_sha256
+        identity = _raw_step_identity(prepared.assigned_node)
+        invocation.update(
+            {
+                "command": list(command),
+                "run_manifest_sha256": run_manifest_sha256,
+                **_step_identity_payload(identity),
+            }
+        )
+        execution.update(
+            {
+                "command": list(command),
+                "run_manifest_sha256": run_manifest_sha256,
+                **_step_identity_payload(identity),
+            }
+        )
+        _write_json(invocation_path, invocation)
+        _write_json(execution_path, execution)
+        _validate_step_identity(identity)
+        if (
+            prepared.allocation_slurm_job_id is not None
+            and identity.slurm_job_id != prepared.allocation_slurm_job_id
+        ):
+            raise ContractError(
+                "Lane step belongs to a different Slurm allocation: "
+                f"expected={prepared.allocation_slurm_job_id}, "
+                f"actual={identity.slurm_job_id}"
+            )
+        environment = lane_environment(canonical_lane, parent_environment)
+        recorded_environment = _selected_environment(environment)
+        invocation["environment"] = recorded_environment
+        execution["environment"] = recorded_environment
+        _write_json(invocation_path, invocation)
+        _write_json(execution_path, execution)
+        time_executable = Path("/usr/bin/time")
+        if not time_executable.is_file():
+            raise RuntimeError("Full-loop comparator requires GNU /usr/bin/time")
+        (
+            barrier_ready_at_utc,
+            peer_observed_at_utc,
+            peer_slurm_job_ids,
+        ) = _enter_lane_barrier(
+            output_root=output_root,
+            lane=canonical_lane,
+            identity=identity,
+            run_manifest_sha256=run_manifest_sha256,
+        )
+        invocation.update(
+            {
+                "barrier_ready_at_utc": barrier_ready_at_utc,
+                "barrier_peer_observed_at_utc": peer_observed_at_utc,
+                "barrier_peer_slurm_job_ids": peer_slurm_job_ids,
+            }
+        )
+        _write_json(invocation_path, invocation)
+
+        timed_command = (
+            str(time_executable),
+            "--verbose",
+            "--output",
+            str(resource_path),
+            *command,
+        )
+        started_at_utc = _utc_now()
+        started_at = time.monotonic()
+        with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
+            "w", encoding="utf-8"
+        ) as stderr_handle:
+            completed = subprocess.run(
+                timed_command,
+                cwd=REPO_ROOT,
+                env=dict(environment),
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                check=False,
+                text=True,
+            )
+        wall_seconds = time.monotonic() - started_at
+        ended_at_utc = _utc_now()
+        host_max_rss_kib = parse_gnu_time_verbose(
+            resource_path.read_text(encoding="utf-8")
+        )
+        results_sha256 = sha256_file(results_path) if results_path.is_file() else None
+        execution.update(
+            {
+                "status": "passed"
+                if completed.returncode == 0 and results_sha256
+                else "failed",
+                "returncode": completed.returncode,
+                "started_at_utc": started_at_utc,
+                "ended_at_utc": ended_at_utc,
+                "runner_ended_at_utc": _utc_now(),
+                "wall_seconds": wall_seconds,
+                "host_max_rss_kib": host_max_rss_kib,
+                "results_sha256": results_sha256,
+                "barrier_ready_at_utc": barrier_ready_at_utc,
+                "barrier_peer_observed_at_utc": peer_observed_at_utc,
+                "barrier_peer_slurm_job_ids": peer_slurm_job_ids,
+            }
+        )
+        invocation["runner_ended_at_utc"] = execution["runner_ended_at_utc"]
+        _write_json(invocation_path, invocation)
+        _write_json(execution_path, execution)
+        terminal_evidence_written = True
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"{canonical_lane} child exited with status {completed.returncode}; "
+                f"see {stderr_path}"
+            )
+        if results_sha256 is None:
+            raise ContractError(
+                f"{canonical_lane} child did not produce {results_path}"
+            )
+        return LaneExecution(
+            lane=canonical_lane,
+            command=command,
+            environment=recorded_environment,
+            returncode=completed.returncode,
+            started_at_utc=started_at_utc,
+            ended_at_utc=ended_at_utc,
+            wall_seconds=wall_seconds,
+            host_max_rss_kib=host_max_rss_kib,
+            run_dir=str(run_dir),
+            results_json=str(results_path),
+            results_sha256=results_sha256,
+            stdout_log=str(stdout_path),
+            stderr_log=str(stderr_path),
+            resource_log=str(resource_path),
+            run_manifest_sha256=run_manifest_sha256,
+            assigned_node=identity.assigned_node,
+            actual_node=identity.actual_node,
+            slurm_job_id=identity.slurm_job_id,
+            slurm_step_id=identity.slurm_step_id,
+            slurm_step_nodelist=identity.slurm_step_nodelist,
+            barrier_peer_observed_at_utc=peer_observed_at_utc,
+            barrier_peer_slurm_job_ids=peer_slurm_job_ids,
+        )
+    except Exception as error:
+        if not terminal_evidence_written:
+            execution.update(
+                {
+                    "status": "failed",
+                    "runner_ended_at_utc": _utc_now(),
+                    "failure": {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    },
+                }
+            )
+            invocation["runner_ended_at_utc"] = execution["runner_ended_at_utc"]
+            invocation["failure"] = execution["failure"]
+            _write_json(invocation_path, invocation)
+            _write_json(execution_path, execution)
+        raise
 
 
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
     return parsed
 
 
@@ -1333,12 +1693,13 @@ def _lowercase_sha256(value: str) -> str:
     return value
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        add_help=add_help,
         description=(
-            "Compare full-loop native CPU and FP64 JAX CUDA banana optimization "
-            "on one seed using host SciPy L-BFGS-B and no ALM."
-        )
+            "Prepare one full-loop native CPU, JAX CPU, and FP64 JAX CUDA "
+            "banana comparison using host SciPy L-BFGS-B and no ALM."
+        ),
     )
     parser.add_argument("--surface-path", type=Path, required=True)
     parser.add_argument("--biotsavart-file", type=Path, required=True)
@@ -1349,9 +1710,8 @@ def _parser() -> argparse.ArgumentParser:
         "--environment-lock-sha256",
         type=_lowercase_sha256,
         required=True,
-        help="SHA-256 of the immutable dependency lock used by both lanes.",
+        help="SHA-256 of the immutable dependency lock used by all three lanes.",
     )
-    parser.add_argument("--order", choices=("cpu-jax", "jax-cpu"), default="cpu-jax")
     parser.add_argument(
         "--mode",
         choices=("production", "diagnostic"),
@@ -1427,6 +1787,46 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cli_parser() -> argparse.ArgumentParser:
+    """Return the operational prepare/run-lane/adjudicate command surface."""
+    parser = argparse.ArgumentParser(
+        description="Run a three-node full-loop comparison in explicit phases."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare = subparsers.add_parser(
+        "prepare",
+        parents=[_parser(add_help=False)],
+        help="Freeze the shared comparison contract before Slurm lane steps start.",
+    )
+    prepare.add_argument("--native-cpu-node", required=True)
+    prepare.add_argument("--jax-cpu-node", required=True)
+    prepare.add_argument("--jax-gpu-node", required=True)
+
+    run_lane = subparsers.add_parser(
+        "run-lane",
+        help="Execute one manifest-defined lane inside its pinned Slurm step.",
+    )
+    run_lane.add_argument("--output-root", type=Path, required=True)
+    run_lane.add_argument("--lane", choices=LANES, required=True)
+
+    adjudicate = subparsers.add_parser(
+        "adjudicate",
+        help="Validate all lane evidence and write the final comparison artifact.",
+    )
+    adjudicate.add_argument("--output-root", type=Path, required=True)
+    adjudicate.add_argument(
+        "--native-cpu-returncode", type=_nonnegative_int, required=True
+    )
+    adjudicate.add_argument(
+        "--jax-cpu-returncode", type=_nonnegative_int, required=True
+    )
+    adjudicate.add_argument(
+        "--jax-gpu-returncode", type=_nonnegative_int, required=True
+    )
+    return parser
+
+
 def _resolved_existing_file(path: Path, *, label: str) -> Path:
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
@@ -1493,9 +1893,44 @@ def _tolerances(args: argparse.Namespace) -> ComparisonTolerances:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+def _assigned_nodes(args: argparse.Namespace) -> dict[str, str]:
+    nodes = {
+        "native_cpu": _short_hostname(
+            args.native_cpu_node,
+            label="native CPU assigned node",
+        ),
+        "jax_cpu": _short_hostname(
+            args.jax_cpu_node,
+            label="JAX CPU assigned node",
+        ),
+        "jax_gpu": _short_hostname(
+            args.jax_gpu_node,
+            label="JAX GPU assigned node",
+        ),
+    }
+    if len(set(nodes.values())) != len(LANES):
+        raise ContractError(f"All three lane nodes must be distinct: {nodes}")
+    return nodes
+
+
+def _write_immutable_run_manifest(output_root: Path, payload: object) -> str:
+    manifest_path = output_root / RUN_MANIFEST_NAME
+    digest_path = output_root / RUN_MANIFEST_DIGEST_NAME
+    _write_json(manifest_path, payload)
+    run_manifest_sha256 = sha256_file(manifest_path)
+    with digest_path.open("x", encoding="utf-8") as handle:
+        handle.write(f"{run_manifest_sha256}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    manifest_path.chmod(0o444)
+    digest_path.chmod(0o444)
+    return run_manifest_sha256
+
+
+def _prepare_pair(args: argparse.Namespace) -> int:
+    """Freeze one immutable three-lane contract before scheduler steps start."""
     _normalize_args(args)
+    assigned_nodes = _assigned_nodes(args)
     source = source_identity(REPO_ROOT)
     input_paths = {
         "surface": args.surface_path,
@@ -1505,8 +1940,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     input_sha256 = {name: sha256_file(path) for name, path in input_paths.items()}
     shared_configuration = _shared_configuration(args, input_sha256)
     run_config_sha256 = sha256_json(shared_configuration)
-    lanes = tuple(args.order.split("-"))
-    environments = {lane: lane_environment(lane, os.environ) for lane in lanes}
     commands = {
         lane: build_lane_command(
             args,
@@ -1514,99 +1947,799 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_dir=args.output_root / lane,
             run_config_sha256=run_config_sha256,
         )
-        for lane in lanes
+        for lane in LANES
     }
-
-    args.output_root.mkdir(parents=True, exist_ok=False)
-    _write_json(
-        args.output_root / "run_manifest.json",
-        {
-            "schema_version": 1,
-            "source": asdict(source),
-            "input_paths": {name: str(path) for name, path in input_paths.items()},
-            "input_sha256": input_sha256,
-            "environment_lock_sha256": args.environment_lock_sha256,
-            "shared_configuration": shared_configuration,
-            "run_config_sha256": run_config_sha256,
-            "comparison_mode": args.mode,
-            "lane_order": list(lanes),
-            "commands": {lane: list(command) for lane, command in commands.items()},
-            "environments": {
-                lane: _selected_environment(environment)
-                for lane, environment in environments.items()
-            },
+    execution_topology: dict[str, object] = {
+        "policy": EXECUTION_POLICY,
+        "assigned_nodes": assigned_nodes,
+        "barrier": {
+            "protocol": BARRIER_PROTOCOL,
+            "participants": list(LANES),
         },
-    )
-
-    executions: dict[str, LaneExecution] = {}
-    for lane in lanes:
-        print(f"Starting {lane} full-loop lane", flush=True)
-        executions[lane] = _run_lane(
-            lane=lane,
-            command=commands[lane],
-            environment=environments[lane],
-            run_dir=args.output_root / lane,
-        )
-
-    parsed = {
-        lane: parse_lane_result(_load_json_object(Path(execution.results_json)))
-        for lane, execution in executions.items()
     }
-    parity = compare_lane_results(
-        parsed["cpu"],
-        parsed["jax"],
-        expected_input_sha256=input_sha256,
-        expected_run_config_sha256=run_config_sha256,
-        tolerances=_tolerances(args),
-        mode=args.mode,
-    )
-    cpu_execution = executions["cpu"]
-    jax_execution = executions["jax"]
-    performance = {
-        "cpu_wall_seconds": cpu_execution.wall_seconds,
-        "jax_wall_seconds": jax_execution.wall_seconds,
-        "cpu_over_jax_speedup": cpu_execution.wall_seconds / jax_execution.wall_seconds,
-        "cpu_host_max_rss_kib": cpu_execution.host_max_rss_kib,
-        "jax_host_max_rss_kib": jax_execution.host_max_rss_kib,
-        "jax_over_cpu_host_max_rss_ratio": jax_execution.host_max_rss_kib
-        / cpu_execution.host_max_rss_kib,
-    }
-    status = (
-        "passed"
-        if parity["claim_ready"]
-        else "diagnostic"
-        if parity["passed"]
-        else "failed"
-    )
-    comparison = {
-        "schema_version": 1,
-        "status": status,
-        "comparison_mode": args.mode,
-        "claim_ready": parity["claim_ready"],
+    allocation_slurm_job_id = os.environ.get("SLURM_JOB_ID", "")
+    if allocation_slurm_job_id:
+        execution_topology["slurm_job_id"] = allocation_slurm_job_id
+    manifest = {
+        "schema_version": 2,
+        "prepared_at_utc": _utc_now(),
         "source": asdict(source),
+        "input_paths": {name: str(path) for name, path in input_paths.items()},
         "input_sha256": input_sha256,
         "environment_lock_sha256": args.environment_lock_sha256,
+        "shared_configuration": shared_configuration,
         "run_config_sha256": run_config_sha256,
-        "lane_order": list(lanes),
-        "lanes": {lane: asdict(execution) for lane, execution in executions.items()},
+        "comparison_mode": args.mode,
+        "commands": {lane: list(command) for lane, command in commands.items()},
+        "tolerances": asdict(_tolerances(args)),
+        "execution_topology": execution_topology,
+    }
+    args.output_root.mkdir(parents=True, exist_ok=False)
+    (args.output_root / "barrier").mkdir()
+    run_manifest_sha256 = _write_immutable_run_manifest(args.output_root, manifest)
+    print(
+        json.dumps(
+            {
+                "run_manifest": str(args.output_root / RUN_MANIFEST_NAME),
+                "run_manifest_sha256": run_manifest_sha256,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return 0
+
+
+def _existing_output_root(output_root: Path) -> Path:
+    resolved = resolve_external_output_root(REPO_ROOT, output_root)
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"Prepared output root does not exist: {resolved}")
+    return resolved
+
+
+def _manifest_tolerances(manifest: Mapping[str, object]) -> ComparisonTolerances:
+    values = _require_mapping(manifest, "tolerances")
+
+    def tolerance(name: str) -> float:
+        value = _require_finite_float(values, name)
+        if value < 0.0:
+            raise ContractError(f"tolerances.{name} must be non-negative")
+        return value
+
+    return ComparisonTolerances(
+        initial_objective_rtol=tolerance("initial_objective_rtol"),
+        initial_objective_atol=tolerance("initial_objective_atol"),
+        initial_gradient_rtol=tolerance("initial_gradient_rtol"),
+        initial_gradient_atol=tolerance("initial_gradient_atol"),
+        initial_iota_atol=tolerance("initial_iota_atol"),
+        initial_G_rtol=tolerance("initial_G_rtol"),
+        initial_G_atol=tolerance("initial_G_atol"),
+        initial_volume_rtol=tolerance("initial_volume_rtol"),
+        initial_volume_atol=tolerance("initial_volume_atol"),
+        initial_term_rtol=tolerance("initial_term_rtol"),
+        initial_term_atol=tolerance("initial_term_atol"),
+        final_objective_rtol=tolerance("final_objective_rtol"),
+        final_objective_atol=tolerance("final_objective_atol"),
+        final_dofs_rtol=tolerance("final_dofs_rtol"),
+        final_dofs_atol=tolerance("final_dofs_atol"),
+        final_gradient_rtol=tolerance("final_gradient_rtol"),
+        final_gradient_atol=tolerance("final_gradient_atol"),
+        final_iota_atol=tolerance("final_iota_atol"),
+        final_G_rtol=tolerance("final_G_rtol"),
+        final_G_atol=tolerance("final_G_atol"),
+        final_volume_rtol=tolerance("final_volume_rtol"),
+        final_volume_atol=tolerance("final_volume_atol"),
+        final_term_rtol=tolerance("final_term_rtol"),
+        final_term_atol=tolerance("final_term_atol"),
+    )
+
+
+def _manifest_assigned_nodes(manifest: Mapping[str, object]) -> dict[str, str]:
+    topology = _require_mapping(manifest, "execution_topology")
+    if _require_string(topology, "policy") != EXECUTION_POLICY:
+        raise ContractError("Run manifest execution policy is not concurrent")
+    barrier = _require_mapping(topology, "barrier")
+    if _require_string(barrier, "protocol") != BARRIER_PROTOCOL:
+        raise ContractError("Run manifest barrier protocol is unsupported")
+    if _require_string_tuple(barrier, "participants") != LANES:
+        raise ContractError("Run manifest barrier participants must be all three lanes")
+    raw_nodes = _require_mapping(topology, "assigned_nodes")
+    if set(raw_nodes) != set(LANES):
+        raise ContractError(
+            "Run manifest must assign exactly the three canonical lanes"
+        )
+    nodes = {
+        lane: _short_hostname(
+            _require_string(raw_nodes, lane),
+            label=f"{lane} assigned node",
+        )
+        for lane in LANES
+    }
+    if len(set(nodes.values())) != len(LANES):
+        raise ContractError("Run manifest lane nodes must be pairwise distinct")
+    return nodes
+
+
+def _manifest_slurm_job_id(manifest: Mapping[str, object]) -> str | None:
+    topology = _require_mapping(manifest, "execution_topology")
+    value = topology.get("slurm_job_id")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ContractError("Run manifest Slurm job ID must be a non-empty string")
+    return value
+
+
+def _load_run_manifest(output_root: Path) -> tuple[dict[str, object], str]:
+    manifest_path = output_root / RUN_MANIFEST_NAME
+    digest_path = output_root / RUN_MANIFEST_DIGEST_NAME
+    if not manifest_path.is_file() or not digest_path.is_file():
+        raise ContractError("Prepared run manifest or digest is missing")
+    if manifest_path.stat().st_mode & 0o222 or digest_path.stat().st_mode & 0o222:
+        raise ContractError("Prepared run manifest and digest must be read-only")
+    expected_digest = digest_path.read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+        raise ContractError("Run manifest digest sidecar is invalid")
+    actual_digest = sha256_file(manifest_path)
+    if actual_digest != expected_digest:
+        raise ContractError("Run manifest changed after prepare")
+    manifest = _load_json_object(manifest_path)
+    if _require_int(manifest, "schema_version") != 2:
+        raise ContractError("Run manifest schema_version must be 2")
+    _require_string(manifest, "prepared_at_utc")
+    _require_mapping(manifest, "source")
+    input_paths = _require_mapping(manifest, "input_paths")
+    input_sha256 = _require_mapping(manifest, "input_sha256")
+    if set(input_paths) != set(INPUT_NAMES) or set(input_sha256) != set(INPUT_NAMES):
+        raise ContractError("Run manifest input identities are incomplete")
+    for name in INPUT_NAMES:
+        _require_string(input_paths, name)
+        _require_sha256(input_sha256, name)
+    _require_sha256(manifest, "environment_lock_sha256")
+    shared_configuration = _require_mapping(manifest, "shared_configuration")
+    run_config_sha256 = _require_sha256(manifest, "run_config_sha256")
+    if sha256_json(shared_configuration) != run_config_sha256:
+        raise ContractError("Run manifest shared configuration digest is invalid")
+    if _require_string(manifest, "comparison_mode") not in {
+        "production",
+        "diagnostic",
+    }:
+        raise ContractError("Run manifest comparison mode is unsupported")
+    commands = _require_mapping(manifest, "commands")
+    if set(commands) != set(LANES):
+        raise ContractError("Run manifest commands must cover exactly three lanes")
+    for lane in LANES:
+        _require_string_tuple(commands, lane)
+    _manifest_tolerances(manifest)
+    _manifest_assigned_nodes(manifest)
+    _manifest_slurm_job_id(manifest)
+    return manifest, actual_digest
+
+
+def _validate_manifest_inputs_and_source(manifest: Mapping[str, object]) -> None:
+    recorded_source = _require_mapping(manifest, "source")
+    current_source = source_identity(REPO_ROOT)
+    expected_source = {
+        "commit_sha": _require_string(recorded_source, "commit_sha"),
+        "tree_sha": _require_string(recorded_source, "tree_sha"),
+        "status_porcelain": recorded_source.get("status_porcelain"),
+    }
+    if asdict(current_source) != expected_source:
+        raise ContractError("Source identity changed after prepare")
+    input_paths = _require_mapping(manifest, "input_paths")
+    input_sha256 = _require_mapping(manifest, "input_sha256")
+    for name in INPUT_NAMES:
+        path = Path(_require_string(input_paths, name))
+        if not path.is_file():
+            raise ContractError(f"Prepared {name} input is missing: {path}")
+        if sha256_file(path) != _require_sha256(input_sha256, name):
+            raise ContractError(f"Prepared {name} input changed after prepare")
+
+
+def _prepare_lane_execution(output_root: Path, lane: str) -> PreparedLaneExecution:
+    manifest, run_manifest_sha256 = _load_run_manifest(output_root)
+    _validate_manifest_inputs_and_source(manifest)
+    assigned_nodes = _manifest_assigned_nodes(manifest)
+    commands = _require_mapping(manifest, "commands")
+    return PreparedLaneExecution(
+        command=_require_string_tuple(commands, lane),
+        run_manifest_sha256=run_manifest_sha256,
+        assigned_node=assigned_nodes[lane],
+        allocation_slurm_job_id=_manifest_slurm_job_id(manifest),
+    )
+
+
+def _run_lane_phase(args: argparse.Namespace) -> int:
+    output_root = _existing_output_root(args.output_root)
+    _run_lane(
+        lane=args.lane,
+        parent_environment=os.environ,
+        output_root=output_root,
+    )
+    return 0
+
+
+def _parse_utc_timestamp(value: str, *, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ContractError(f"{label} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise ContractError(f"{label} must include a timezone")
+    return parsed
+
+
+def _string_mapping(
+    parent: Mapping[str, object],
+    key: str,
+    *,
+    allow_empty_values: bool = False,
+) -> dict[str, str]:
+    raw = _require_mapping(parent, key)
+    result: dict[str, str] = {}
+    for name, value in raw.items():
+        if not isinstance(value, str) or (not value and not allow_empty_values):
+            expected = "a string" if allow_empty_values else "a non-empty string"
+            raise ContractError(f"{key}.{name} must be {expected}")
+        result[name] = value
+    return result
+
+
+def _load_successful_lane_execution(
+    *,
+    output_root: Path,
+    lane: str,
+    assigned_node: str,
+    run_manifest_sha256: str,
+    expected_command: tuple[str, ...],
+) -> LaneExecution:
+    run_dir = output_root / lane
+    invocation = _load_json_object(run_dir / "invocation.json")
+    execution = _load_json_object(run_dir / "execution.json")
+    for payload_name, payload in (("invocation", invocation), ("execution", execution)):
+        if _require_string(payload, "lane") != lane:
+            raise ContractError(f"{payload_name} lane mismatch for {lane}")
+        if _require_sha256(payload, "run_manifest_sha256") != run_manifest_sha256:
+            raise ContractError(f"{payload_name} manifest mismatch for {lane}")
+        if (
+            _short_hostname(
+                _require_string(payload, "assigned_node"),
+                label=f"{lane} assigned node",
+            )
+            != assigned_node
+        ):
+            raise ContractError(f"{payload_name} assigned-node mismatch for {lane}")
+        if (
+            _short_hostname(
+                _require_string(payload, "actual_node"),
+                label=f"{lane} actual node",
+            )
+            != assigned_node
+        ):
+            raise ContractError(f"{payload_name} actual-node mismatch for {lane}")
+        if (
+            _short_hostname(
+                _require_string(payload, "slurm_step_nodelist"),
+                label=f"{lane} step nodelist",
+            )
+            != assigned_node
+        ):
+            raise ContractError(f"{payload_name} step-node mismatch for {lane}")
+        _require_string(payload, "slurm_job_id")
+        _require_string(payload, "slurm_step_id")
+    slurm_job_id = _require_string(execution, "slurm_job_id")
+    if _require_string(invocation, "slurm_job_id") != slurm_job_id:
+        raise ContractError(f"{lane} invocation/execution Slurm job IDs differ")
+    if _require_string(execution, "status") != "passed":
+        raise ContractError(f"{lane} execution did not pass")
+    if _require_int(execution, "returncode") != 0:
+        raise ContractError(f"{lane} child return code was nonzero")
+    command = _require_string_tuple(execution, "command")
+    if (
+        command != expected_command
+        or _require_string_tuple(
+            invocation,
+            "command",
+        )
+        != expected_command
+    ):
+        raise ContractError(f"{lane} command differs from the run manifest")
+    environment = _string_mapping(
+        execution,
+        "environment",
+        allow_empty_values=True,
+    )
+    if (
+        _string_mapping(
+            invocation,
+            "environment",
+            allow_empty_values=True,
+        )
+        != environment
+    ):
+        raise ContractError(f"{lane} invocation/execution environments differ")
+    started_at_utc = _require_string(execution, "started_at_utc")
+    ended_at_utc = _require_string(execution, "ended_at_utc")
+    started = _parse_utc_timestamp(started_at_utc, label=f"{lane} start")
+    ended = _parse_utc_timestamp(ended_at_utc, label=f"{lane} end")
+    if ended <= started:
+        raise ContractError(f"{lane} execution interval is not positive")
+    wall_seconds = _require_finite_float(execution, "wall_seconds")
+    if wall_seconds <= 0.0:
+        raise ContractError(f"{lane} wall_seconds must be positive")
+    host_max_rss_kib = _require_int(execution, "host_max_rss_kib")
+    if host_max_rss_kib <= 0:
+        raise ContractError(f"{lane} host_max_rss_kib must be positive")
+    results_path = Path(_require_string(execution, "results_json"))
+    expected_results_path = run_dir / "results.json"
+    if results_path != expected_results_path or not results_path.is_file():
+        raise ContractError(f"{lane} results path is missing or non-canonical")
+    results_sha256 = _require_sha256(execution, "results_sha256")
+    if sha256_file(results_path) != results_sha256:
+        raise ContractError(f"{lane} results changed after execution")
+    for artifact_key in ("stdout_log", "stderr_log", "resource_log"):
+        if not Path(_require_string(execution, artifact_key)).is_file():
+            raise ContractError(f"{lane} {artifact_key} artifact is missing")
+    peer_observed_at_utc = _string_mapping(
+        execution,
+        "barrier_peer_observed_at_utc",
+    )
+    expected_peers = set(LANES) - {lane}
+    if set(peer_observed_at_utc) != expected_peers:
+        raise ContractError(f"{lane} did not observe both barrier peers")
+    invocation_peers = _string_mapping(
+        invocation,
+        "barrier_peer_observed_at_utc",
+    )
+    if invocation_peers != peer_observed_at_utc:
+        raise ContractError(f"{lane} invocation/execution barrier evidence differs")
+    for peer_lane, observed_at_utc in peer_observed_at_utc.items():
+        _parse_utc_timestamp(
+            observed_at_utc,
+            label=f"{lane} observation of {peer_lane}",
+        )
+    peer_slurm_job_ids = _string_mapping(
+        execution,
+        "barrier_peer_slurm_job_ids",
+    )
+    if set(peer_slurm_job_ids) != expected_peers:
+        raise ContractError(f"{lane} did not bind both barrier peers to a Slurm job")
+    if set(peer_slurm_job_ids.values()) != {slurm_job_id}:
+        raise ContractError(f"{lane} observed a barrier peer from another Slurm job")
+    if _string_mapping(invocation, "barrier_peer_slurm_job_ids") != peer_slurm_job_ids:
+        raise ContractError(f"{lane} invocation/execution barrier Slurm job IDs differ")
+    return LaneExecution(
+        lane=lane,
+        command=command,
+        environment=environment,
+        returncode=0,
+        started_at_utc=started_at_utc,
+        ended_at_utc=ended_at_utc,
+        wall_seconds=wall_seconds,
+        host_max_rss_kib=host_max_rss_kib,
+        run_dir=str(run_dir),
+        results_json=str(results_path),
+        results_sha256=results_sha256,
+        stdout_log=_require_string(execution, "stdout_log"),
+        stderr_log=_require_string(execution, "stderr_log"),
+        resource_log=_require_string(execution, "resource_log"),
+        run_manifest_sha256=run_manifest_sha256,
+        assigned_node=assigned_node,
+        actual_node=_require_string(execution, "actual_node"),
+        slurm_job_id=slurm_job_id,
+        slurm_step_id=_require_string(execution, "slurm_step_id"),
+        slurm_step_nodelist=_require_string(execution, "slurm_step_nodelist"),
+        barrier_peer_observed_at_utc=peer_observed_at_utc,
+        barrier_peer_slurm_job_ids=peer_slurm_job_ids,
+    )
+
+
+def _aggregate_parity(
+    comparisons: Mapping[str, Mapping[str, object]],
+    *,
+    mode: str,
+) -> dict[str, object]:
+    required_failures: list[str] = []
+    outcome_failures: list[str] = []
+    advisory_failures: list[str] = []
+    for comparison_name, comparison in comparisons.items():
+        required_failures.extend(
+            f"{comparison_name}.{failure}"
+            for failure in _require_string_tuple_allow_empty(
+                comparison,
+                "required_failures",
+            )
+        )
+        outcome_failures.extend(
+            f"{comparison_name}.{failure}"
+            for failure in _require_string_tuple_allow_empty(
+                comparison,
+                "outcome_failures",
+            )
+        )
+        advisory_failures.extend(
+            f"{comparison_name}.{failure}"
+            for failure in _require_string_tuple_allow_empty(
+                comparison,
+                "advisory_failures",
+            )
+        )
+    passed = all(
+        _require_bool(comparison, "passed") for comparison in comparisons.values()
+    )
+    claim_ready = all(
+        _require_bool(comparison, "claim_ready") for comparison in comparisons.values()
+    )
+    failures = required_failures + (outcome_failures if mode == "production" else [])
+    return {
+        "mode": mode,
+        "passed": passed,
+        "claim_ready": claim_ready,
+        "failures": failures,
+        "required_failures": required_failures,
+        "outcome_failures": outcome_failures,
+        "advisory_failures": advisory_failures,
+    }
+
+
+def _require_string_tuple_allow_empty(
+    parent: Mapping[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    value = parent.get(key)
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise ContractError(f"{key} must be a JSON string array")
+    return tuple(value)
+
+
+def _validated_gpu_memory_hook(
+    output_root: Path,
+    execution: LaneExecution,
+) -> dict[str, object]:
+    """Load claim-grade JAX-GPU process-memory evidence for one pair."""
+    hook_path = output_root / "jax_gpu" / "gpu_process_memory.json"
+    if not hook_path.is_file():
+        raise ContractError(f"JAX-GPU process-memory evidence is missing: {hook_path}")
+    hook = _load_json_object(hook_path)
+    if _require_int(hook, "schema_version") != 1:
+        raise ContractError("JAX-GPU process-memory schema_version must be 1")
+    if _require_string(hook, "metric") != "nvidia-smi compute-process used_memory":
+        raise ContractError("JAX-GPU process-memory metric is unsupported")
+    if _require_string(hook, "unit") != "MiB":
+        raise ContractError("JAX-GPU process-memory unit must be MiB")
+    if _require_string(hook, "pair") != output_root.name:
+        raise ContractError("JAX-GPU process-memory pair identity differs")
+    if _short_hostname(
+        _require_string(hook, "node"),
+        label="JAX-GPU process-memory node",
+    ) != _short_hostname(execution.actual_node, label="JAX-GPU execution node"):
+        raise ContractError("JAX-GPU process-memory node differs from execution")
+    if _require_string(hook, "slurm_step_id") != execution.slurm_step_id:
+        raise ContractError("JAX-GPU process-memory Slurm step differs from execution")
+    expected_selector = execution.environment.get("CUDA_VISIBLE_DEVICES")
+    if (
+        not expected_selector
+        or _require_string(hook, "cuda_visible_devices") != expected_selector
+    ):
+        raise ContractError(
+            "JAX-GPU process-memory CUDA selector differs from execution"
+        )
+
+    inventory = hook.get("gpu_inventory")
+    if not isinstance(inventory, list) or not inventory:
+        raise ContractError("JAX-GPU process-memory inventory must be non-empty")
+    inventory_uuids: set[str] = set()
+    for index, item in enumerate(inventory):
+        if not isinstance(item, dict) or not all(isinstance(key, str) for key in item):
+            raise ContractError(f"gpu_inventory[{index}] must be a JSON object")
+        _require_int(item, "index")
+        _require_string(item, "name")
+        inventory_uuids.add(_require_string(item, "uuid"))
+        _require_positive_int(item, "memory_total_mib")
+        _require_string(item, "driver_version")
+
+    sample_count = _require_positive_int(hook, "sample_count")
+    gpu_uuids = set(_require_string_tuple(hook, "gpu_uuids"))
+    if not gpu_uuids.issubset(inventory_uuids):
+        raise ContractError("JAX-GPU process-memory samples reference unknown GPUs")
+    process_ids = hook.get("process_ids")
+    if not isinstance(process_ids, list) or not process_ids:
+        raise ContractError("JAX-GPU process-memory process_ids must be non-empty")
+    if any(
+        isinstance(process_id, bool)
+        or not isinstance(process_id, int)
+        or process_id <= 0
+        for process_id in process_ids
+    ):
+        raise ContractError(
+            "JAX-GPU process-memory process_ids must be positive integers"
+        )
+    first_sample = _parse_utc_timestamp(
+        _require_string(hook, "first_sample_at_utc"),
+        label="JAX-GPU first memory sample",
+    )
+    last_sample = _parse_utc_timestamp(
+        _require_string(hook, "last_sample_at_utc"),
+        label="JAX-GPU last memory sample",
+    )
+    if last_sample < first_sample:
+        raise ContractError("JAX-GPU process-memory sample interval is reversed")
+    _require_positive_int(hook, "maximum_used_memory_mib")
+
+    sampler_queries = _require_mapping(hook, "sampler_queries")
+    query_count = _require_positive_int(sampler_queries, "query_count")
+    successful_query_count = _require_int(
+        sampler_queries,
+        "successful_query_count",
+    )
+    if (
+        _require_int(sampler_queries, "failure_count") != 0
+        or successful_query_count != query_count
+        or _require_bool(sampler_queries, "all_succeeded") is not True
+    ):
+        raise ContractError(
+            "JAX-GPU process-memory sampler queries did not all succeed"
+        )
+    if sample_count < len(process_ids):
+        raise ContractError(
+            "JAX-GPU process-memory sample count is internally inconsistent"
+        )
+    return hook
+
+
+def _failed_comparison_payload(
+    *,
+    failures: Sequence[str],
+    step_returncodes: Mapping[str, int],
+    manifest: Mapping[str, object] | None,
+    run_manifest_sha256: str | None,
+    lanes: Mapping[str, object],
+) -> dict[str, object]:
+    mode = (
+        _require_string(manifest, "comparison_mode")
+        if manifest is not None
+        else "unknown"
+    )
+    return {
+        "schema_version": 2,
+        "status": "failed",
+        "comparison_mode": mode,
+        "claim_ready": False,
+        "run_manifest_sha256": run_manifest_sha256,
+        "step_returncodes": dict(step_returncodes),
+        "execution_topology": (
+            manifest.get("execution_topology") if manifest is not None else None
+        ),
+        "lanes": dict(lanes),
+        "comparisons": {},
+        "parity": {
+            "mode": mode,
+            "passed": False,
+            "claim_ready": False,
+            "failures": list(failures),
+            "required_failures": list(failures),
+            "outcome_failures": [],
+            "advisory_failures": [],
+        },
+        "performance": None,
+        "failures": list(failures),
+    }
+
+
+def _adjudicate_prepared_pair(
+    *,
+    output_root: Path,
+    manifest: Mapping[str, object],
+    run_manifest_sha256: str,
+    step_returncodes: Mapping[str, int],
+) -> tuple[dict[str, object], int]:
+    _validate_manifest_inputs_and_source(manifest)
+    allocation_slurm_job_id = _manifest_slurm_job_id(manifest)
+    if (
+        allocation_slurm_job_id is not None
+        and os.environ.get("SLURM_JOB_ID", "") != allocation_slurm_job_id
+    ):
+        raise ContractError(
+            "Adjudication belongs to a different Slurm allocation: "
+            f"expected={allocation_slurm_job_id}, "
+            f"actual={os.environ.get('SLURM_JOB_ID', '')}"
+        )
+    assigned_nodes = _manifest_assigned_nodes(manifest)
+    commands = _require_mapping(manifest, "commands")
+    failures = [
+        f"step_returncode.{lane}" for lane in LANES if step_returncodes[lane] != 0
+    ]
+    lane_evidence: dict[str, object] = {}
+    executions: dict[str, LaneExecution] = {}
+    for lane in LANES:
+        execution_path = output_root / lane / "execution.json"
+        if execution_path.is_file():
+            lane_evidence[lane] = _load_json_object(execution_path)
+        try:
+            executions[lane] = _load_successful_lane_execution(
+                output_root=output_root,
+                lane=lane,
+                assigned_node=assigned_nodes[lane],
+                run_manifest_sha256=run_manifest_sha256,
+                expected_command=_require_string_tuple(commands, lane),
+            )
+        except (ContractError, FileNotFoundError) as error:
+            failures.append(f"lane_evidence.{lane}: {error}")
+    if len(executions) == len(LANES):
+        slurm_job_ids = {execution.slurm_job_id for execution in executions.values()}
+        if len(slurm_job_ids) != 1:
+            failures.append("execution_topology.slurm_job_ids_not_equal")
+        allocation_slurm_job_id = _manifest_slurm_job_id(manifest)
+        if allocation_slurm_job_id is not None and slurm_job_ids != {
+            allocation_slurm_job_id
+        }:
+            failures.append("execution_topology.slurm_job_id_not_manifest_allocation")
+        step_ids = {execution.slurm_step_id for execution in executions.values()}
+        if len(step_ids) != len(LANES):
+            failures.append("execution_topology.slurm_step_ids_not_distinct")
+        starts = [
+            _parse_utc_timestamp(execution.started_at_utc, label=f"{lane} start")
+            for lane, execution in executions.items()
+        ]
+        ends = [
+            _parse_utc_timestamp(execution.ended_at_utc, label=f"{lane} end")
+            for lane, execution in executions.items()
+        ]
+        if max(starts) >= min(ends):
+            failures.append("execution_topology.lane_intervals_do_not_overlap")
+    if failures:
+        return (
+            _failed_comparison_payload(
+                failures=failures,
+                step_returncodes=step_returncodes,
+                manifest=manifest,
+                run_manifest_sha256=run_manifest_sha256,
+                lanes=lane_evidence,
+            ),
+            1,
+        )
+
+    gpu_memory_hook = _validated_gpu_memory_hook(
+        output_root,
+        executions["jax_gpu"],
+    )
+    parsed = {
+        lane: parse_lane_result(_load_json_object(Path(executions[lane].results_json)))
+        for lane in LANES
+    }
+    input_sha256_mapping = _require_mapping(manifest, "input_sha256")
+    input_sha256 = {
+        name: _require_sha256(input_sha256_mapping, name) for name in INPUT_NAMES
+    }
+    run_config_sha256 = _require_sha256(manifest, "run_config_sha256")
+    tolerances = _manifest_tolerances(manifest)
+    mode = _require_string(manifest, "comparison_mode")
+    comparisons = {
+        "native_cpu_vs_jax_cpu": compare_lane_results(
+            parsed["native_cpu"],
+            parsed["jax_cpu"],
+            expected_input_sha256=input_sha256,
+            expected_run_config_sha256=run_config_sha256,
+            tolerances=tolerances,
+            mode=mode,
+            cpu_lane_name="native_cpu",
+            jax_lane_name="jax_cpu",
+            expected_jax_backend="jax-cpu",
+        ),
+        "native_cpu_vs_jax_gpu": compare_lane_results(
+            parsed["native_cpu"],
+            parsed["jax_gpu"],
+            expected_input_sha256=input_sha256,
+            expected_run_config_sha256=run_config_sha256,
+            tolerances=tolerances,
+            mode=mode,
+            cpu_lane_name="native_cpu",
+            jax_lane_name="jax_gpu",
+        ),
+        "jax_cpu_vs_jax_gpu": compare_lane_results(
+            parsed["jax_cpu"],
+            parsed["jax_gpu"],
+            expected_input_sha256=input_sha256,
+            expected_run_config_sha256=run_config_sha256,
+            tolerances=tolerances,
+            mode=mode,
+            cpu_lane_name="jax_cpu",
+            jax_lane_name="jax_gpu",
+            expected_cpu_backend="jax-cpu",
+            expected_jax_backend="jax-cuda",
+            expected_cpu_adjoint_policy="checked-residual-and-condition",
+        ),
+    }
+    parity = _aggregate_parity(comparisons, mode=mode)
+    claim_ready = _require_bool(parity, "claim_ready")
+    parity_passed = _require_bool(parity, "passed")
+    status = "passed" if claim_ready else "diagnostic" if parity_passed else "failed"
+    performance = {
+        "wall_seconds": {lane: executions[lane].wall_seconds for lane in LANES},
+        "host_max_rss_kib": {lane: executions[lane].host_max_rss_kib for lane in LANES},
+        "speedups": {
+            "native_cpu_over_jax_cpu": executions["native_cpu"].wall_seconds
+            / executions["jax_cpu"].wall_seconds,
+            "native_cpu_over_jax_gpu": executions["native_cpu"].wall_seconds
+            / executions["jax_gpu"].wall_seconds,
+            "jax_cpu_over_jax_gpu": executions["jax_cpu"].wall_seconds
+            / executions["jax_gpu"].wall_seconds,
+        },
+        "gpu_process_memory": gpu_memory_hook,
+    }
+    comparison = {
+        "schema_version": 2,
+        "status": status,
+        "comparison_mode": mode,
+        "claim_ready": claim_ready,
+        "source": manifest["source"],
+        "input_sha256": input_sha256,
+        "environment_lock_sha256": _require_sha256(
+            manifest,
+            "environment_lock_sha256",
+        ),
+        "run_config_sha256": run_config_sha256,
+        "run_manifest_sha256": run_manifest_sha256,
+        "step_returncodes": dict(step_returncodes),
+        "execution_topology": manifest["execution_topology"],
+        "lanes": {lane: asdict(executions[lane]) for lane in LANES},
+        "comparisons": comparisons,
         "parity": parity,
         "performance": performance,
+        "failures": parity["failures"],
     }
-    comparison_path = args.output_root / "comparison.json"
-    _write_json(comparison_path, comparison)
-    print(json.dumps(performance, indent=2, sort_keys=True), flush=True)
-    if not parity["passed"]:
-        print(f"Full-loop parity failed: {parity['failures']}", file=sys.stderr)
-        return 1
-    if not parity["claim_ready"]:
-        print(
-            "Diagnostic comparison completed with advisory outcome failures: "
-            f"{parity['advisory_failures']}",
-            flush=True,
+    return comparison, 0 if parity_passed else 1
+
+
+def _adjudicate_phase(args: argparse.Namespace) -> int:
+    output_root = resolve_external_output_root(REPO_ROOT, args.output_root)
+    step_returncodes = {
+        "native_cpu": args.native_cpu_returncode,
+        "jax_cpu": args.jax_cpu_returncode,
+        "jax_gpu": args.jax_gpu_returncode,
+    }
+    manifest: dict[str, object] | None = None
+    run_manifest_sha256: str | None = None
+    try:
+        manifest, run_manifest_sha256 = _load_run_manifest(output_root)
+        comparison, exit_code = _adjudicate_prepared_pair(
+            output_root=output_root,
+            manifest=manifest,
+            run_manifest_sha256=run_manifest_sha256,
+            step_returncodes=step_returncodes,
         )
-        return 0
-    print(f"Full-loop comparison passed: {comparison_path}", flush=True)
-    return 0
+    except Exception as error:
+        comparison = _failed_comparison_payload(
+            failures=(f"adjudication: {type(error).__name__}: {error}",),
+            step_returncodes=step_returncodes,
+            manifest=manifest,
+            run_manifest_sha256=run_manifest_sha256,
+            lanes={},
+        )
+        exit_code = 1
+    comparison_path = output_root / "comparison.json"
+    _write_json(comparison_path, comparison)
+    print(json.dumps(comparison["performance"], indent=2, sort_keys=True), flush=True)
+    if exit_code != 0:
+        print(
+            f"Full-loop adjudication failed: {comparison['failures']}", file=sys.stderr
+        )
+    else:
+        print(f"Full-loop adjudication complete: {comparison_path}", flush=True)
+    return exit_code
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _cli_parser().parse_args(argv)
+    if args.command == "prepare":
+        return _prepare_pair(args)
+    if args.command == "run-lane":
+        return _run_lane_phase(args)
+    if args.command == "adjudicate":
+        return _adjudicate_phase(args)
+    raise AssertionError(f"Unsupported command {args.command!r}")
 
 
 if __name__ == "__main__":

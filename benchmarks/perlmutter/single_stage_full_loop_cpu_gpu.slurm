@@ -3,10 +3,11 @@
 #SBATCH -C gpu
 #SBATCH -q regular
 #SBATCH -t 36:00:00
-#SBATCH -N 1
+#SBATCH -N 3
 #SBATCH --exclusive
 #SBATCH --gpus-per-node=4
-#SBATCH --ntasks=1
+#SBATCH --ntasks=3
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --hint=nomultithread
 #SBATCH --job-name=banana-full-loop
@@ -15,17 +16,272 @@
 
 set -euo pipefail
 
+write_gpu_memory_hook() {
+    local pair_dir="$1"
+    local pair_name="$2"
+    local actual_node="$3"
+    local python_executable="$4"
+    local process_memory_csv="$5"
+    local sampler_query_csv="$6"
+    local inventory_csv="$7"
+
+    GPU_HOOK_PAIR_DIR="${pair_dir}" \
+        GPU_HOOK_PAIR_NAME="${pair_name}" \
+        GPU_HOOK_NODE="${actual_node}" \
+        GPU_HOOK_PROCESS_MEMORY_CSV="${process_memory_csv}" \
+        GPU_HOOK_SAMPLER_QUERY_CSV="${sampler_query_csv}" \
+        GPU_HOOK_INVENTORY_CSV="${inventory_csv}" \
+        "${python_executable}" - <<'PY'
+from __future__ import annotations
+
+import csv
+import json
+import os
+from pathlib import Path
+
+
+pair_dir = Path(os.environ["GPU_HOOK_PAIR_DIR"])
+pair_name = os.environ["GPU_HOOK_PAIR_NAME"]
+node = os.environ["GPU_HOOK_NODE"]
+process_memory_csv = Path(os.environ["GPU_HOOK_PROCESS_MEMORY_CSV"])
+sampler_query_csv = Path(os.environ["GPU_HOOK_SAMPLER_QUERY_CSV"])
+inventory_csv = Path(os.environ["GPU_HOOK_INVENTORY_CSV"])
+
+sample_count = 0
+gpu_uuids: set[str] = set()
+process_ids: set[int] = set()
+first_sample_at_utc: str | None = None
+last_sample_at_utc: str | None = None
+maximum_used_memory_mib: int | None = None
+with process_memory_csv.open(encoding="utf-8", newline="") as handle:
+    for row in csv.DictReader(handle):
+        if row["pair"].strip() != pair_name or row["node"].strip() != node:
+            continue
+        timestamp_utc = row["timestamp_utc"].strip()
+        gpu_uuid = row["gpu_uuid"].strip()
+        pid = int(row["pid"])
+        used_memory_mib = int(row["used_memory_mib"])
+        sample_count += 1
+        gpu_uuids.add(gpu_uuid)
+        process_ids.add(pid)
+        if first_sample_at_utc is None:
+            first_sample_at_utc = timestamp_utc
+        last_sample_at_utc = timestamp_utc
+        maximum_used_memory_mib = (
+            used_memory_mib
+            if maximum_used_memory_mib is None
+            else max(maximum_used_memory_mib, used_memory_mib)
+        )
+
+query_count = 0
+query_failure_count = 0
+with sampler_query_csv.open(encoding="utf-8", newline="") as handle:
+    for row in csv.DictReader(handle):
+        if row["pair"].strip() != pair_name or row["node"].strip() != node:
+            continue
+        query_count += 1
+        query_failure_count += int(row["status"].strip() != "ok")
+
+gpu_inventory: list[dict[str, str | int]] = []
+with inventory_csv.open(encoding="utf-8", newline="") as handle:
+    for row in csv.reader(handle, skipinitialspace=True):
+        gpu_inventory.append(
+            {
+                "index": int(row[0]),
+                "name": row[1].strip(),
+                "uuid": row[2].strip(),
+                "memory_total_mib": int(row[3].strip().removesuffix(" MiB")),
+                "driver_version": row[4].strip(),
+            }
+        )
+
+payload = {
+    "schema_version": 1,
+    "metric": "nvidia-smi compute-process used_memory",
+    "unit": "MiB",
+    "pair": pair_name,
+    "node": node,
+    "slurm_step_id": os.environ["SLURM_STEP_ID"],
+    "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
+    "gpu_inventory": gpu_inventory,
+    "sample_count": sample_count,
+    "gpu_uuids": sorted(gpu_uuids),
+    "process_ids": sorted(process_ids),
+    "first_sample_at_utc": first_sample_at_utc,
+    "last_sample_at_utc": last_sample_at_utc,
+    "maximum_used_memory_mib": maximum_used_memory_mib,
+    "sampler_queries": {
+        "query_count": query_count,
+        "successful_query_count": query_count - query_failure_count,
+        "failure_count": query_failure_count,
+        "all_succeeded": query_count > 0 and query_failure_count == 0,
+    },
+}
+output_path = pair_dir / "jax_gpu" / "gpu_process_memory.json"
+temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+temporary_path.write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+temporary_path.replace(output_path)
+PY
+}
+
+run_lane_step() {
+    local lane="$1"
+    local expected_node="$2"
+    local pair_dir="$3"
+    local python_executable="$4"
+    local comparator_path="$5"
+    local process_memory_csv="$6"
+    local sampler_query_csv="$7"
+    local sampler_error_log="$8"
+    local pair_name
+    local actual_node
+    local visible_devices="${CUDA_VISIBLE_DEVICES:-}"
+    local -a step_nodes=()
+
+    pair_name="$(basename -- "${pair_dir}")"
+    actual_node="$(hostname -s)"
+    mapfile -t step_nodes < <(scontrol show hostnames "${SLURM_STEP_NODELIST:?}")
+    if ((${#step_nodes[@]} != 1)) \
+        || [[ "${SLURM_STEP_NUM_NODES:?}" != "1" ]] \
+        || [[ "${step_nodes[0]}" != "${expected_node}" ]] \
+        || [[ "${actual_node}" != "${expected_node}" ]]; then
+        echo \
+            "${lane} step node mismatch: expected=${expected_node} actual=${actual_node} step_nodes=${step_nodes[*]}" \
+            >&2
+        return 2
+    fi
+
+    if [[ "${lane}" == "jax_gpu" ]]; then
+        if [[ -z "${visible_devices}" || "${visible_devices}" == *,* \
+            || "${visible_devices}" =~ [[:space:]] ]]; then
+            echo "jax_gpu requires exactly one CUDA_VISIBLE_DEVICES selector" >&2
+            return 2
+        fi
+        if [[ -z "${SLURM_STEP_GPUS:-}" ]]; then
+            echo "jax_gpu requires a Slurm GPU assigned to its step" >&2
+            return 2
+        fi
+    else
+        if [[ -n "${visible_devices}" || -n "${SLURM_STEP_GPUS:-}" ]]; then
+            echo "${lane} must not receive a GPU or CUDA visibility" >&2
+            return 2
+        fi
+    fi
+
+    {
+        printf 'lane\t%s\n' "${lane}"
+        printf 'expected_node\t%s\n' "${expected_node}"
+        printf 'actual_node\t%s\n' "${actual_node}"
+        printf 'slurm_step_id\t%s\n' "${SLURM_STEP_ID:?}"
+        printf 'slurm_step_nodelist\t%s\n' "${SLURM_STEP_NODELIST}"
+        printf 'slurm_step_gpus\t%s\n' "${SLURM_STEP_GPUS:-}"
+        printf 'cuda_visible_devices\t%s\n' "${visible_devices}"
+    } > "${pair_dir}/${lane}_slurm_step.tsv"
+    lscpu > "${pair_dir}/${lane}_lscpu.txt"
+
+    local lane_exit_code=0
+    if [[ "${lane}" == "jax_gpu" ]]; then
+        local gpu_monitor_sentinel="${pair_dir}/jax_gpu_monitor.running"
+        local sampler_last_error="${pair_dir}/jax_gpu_sampler_last_error.txt"
+        local gpu_memory_hook_returncode
+        local gpu_monitor_pid
+
+        nvidia-smi -q > "${pair_dir}/jax_gpu_nvidia_smi_before.txt"
+        nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
+            --format=csv,noheader > "${pair_dir}/jax_gpu_inventory.csv"
+        touch "${gpu_monitor_sentinel}"
+        (
+            exec 3>> "${process_memory_csv}"
+            exec 4>> "${sampler_query_csv}"
+            exec 5>> "${sampler_error_log}"
+            while [[ -e "${gpu_monitor_sentinel}" ]]
+            do
+                local_timestamp="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
+                if sample="$(nvidia-smi \
+                    --query-compute-apps=gpu_uuid,pid,used_memory \
+                    --format=csv,noheader,nounits 2> "${sampler_last_error}")"
+                then
+                    printf '%s,%s,%s,ok,0\n' \
+                        "${local_timestamp}" "${pair_name}" "${actual_node}" >&4
+                    if [[ -n "${sample}" ]]; then
+                        while IFS= read -r process_record
+                        do
+                            printf '%s,%s,%s,%s\n' \
+                                "${local_timestamp}" "${pair_name}" \
+                                "${actual_node}" "${process_record}" >&3
+                        done <<< "${sample}"
+                    fi
+                else
+                    sampler_exit_code=$?
+                    printf '%s,%s,%s,failed,%s\n' \
+                        "${local_timestamp}" "${pair_name}" "${actual_node}" \
+                        "${sampler_exit_code}" >&4
+                    printf '[%s] pair=%s node=%s exit_code=%s\n' \
+                        "${local_timestamp}" "${pair_name}" "${actual_node}" \
+                        "${sampler_exit_code}" >&5
+                    sed 's/^/  /' "${sampler_last_error}" >&5
+                fi
+                sleep 1
+            done
+            rm -f "${sampler_last_error}"
+        ) &
+        gpu_monitor_pid=$!
+
+        if "${python_executable}" "${comparator_path}" run-lane \
+            --output-root "${pair_dir}" --lane "${lane}"
+        then
+            lane_exit_code=0
+        else
+            lane_exit_code=$?
+        fi
+        rm -f "${gpu_monitor_sentinel}"
+        wait "${gpu_monitor_pid}"
+        if write_gpu_memory_hook \
+            "${pair_dir}" "${pair_name}" "${actual_node}" \
+            "${python_executable}" "${process_memory_csv}" \
+            "${sampler_query_csv}" "${pair_dir}/jax_gpu_inventory.csv"
+        then
+            gpu_memory_hook_returncode=0
+        else
+            gpu_memory_hook_returncode=$?
+            if [[ "${lane_exit_code}" -eq 0 ]]; then
+                lane_exit_code="${gpu_memory_hook_returncode}"
+            fi
+        fi
+        nvidia-smi -q > "${pair_dir}/jax_gpu_nvidia_smi_after.txt"
+        nvidia-smi --query-gpu=index,name,uuid,memory.used,memory.total \
+            --format=csv,noheader > "${pair_dir}/jax_gpu_inventory_after.csv"
+    elif "${python_executable}" "${comparator_path}" run-lane \
+        --output-root "${pair_dir}" --lane "${lane}"
+    then
+        lane_exit_code=0
+    else
+        lane_exit_code=$?
+    fi
+    return "${lane_exit_code}"
+}
+
+if [[ "${1:-}" == "__run-lane-step" ]]; then
+    shift
+    run_lane_step "$@"
+    exit $?
+fi
+
 module load python/3.13-26.1.0
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
 
 REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
+LAUNCHER_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
 PROFILE="${PROFILE:-pilot}"
 SEED_DIR="${SEED_DIR:?Set SEED_DIR to the immutable banana seed directory}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-${SCRATCH}/simsopt-full-loop/${SLURM_JOB_ID}}"
 IOTA_TARGET="${IOTA_TARGET:?Set IOTA_TARGET explicitly from the seed provenance}"
 HASH_LOCK_PATH="${HASH_LOCK_PATH:-}"
-VENV_ROOT="${VENV_ROOT:-${TMPDIR:-/tmp}/simsopt-full-loop-envs-${UID}}"
+VENV_ROOT="${VENV_ROOT:-${SCRATCH:?SCRATCH must be set}/simsopt-full-loop-envs-${UID}}"
 PAIR_EXECUTION_MODE="${PAIR_EXECUTION_MODE:-slurm-step}"
 
 validate_external_write_root() {
@@ -142,16 +398,16 @@ case "${PROFILE}" in
                 >&2
             exit 2
         fi
-        PAIR_COUNT="${PAIR_COUNT:-4}"
+        PAIR_COUNT="${PAIR_COUNT:-1}"
         MPOL="${MPOL:-10}"
         NTOR="${NTOR:-10}"
         NPHI="${NPHI:-255}"
         NTHETA="${NTHETA:-64}"
-        OUTER_MAXITER="${OUTER_MAXITER:-150}"
+        OUTER_MAXITER="${OUTER_MAXITER:-1500}"
         OUTER_FTOL="${OUTER_FTOL:-1e-12}"
         OUTER_GTOL="${OUTER_GTOL:-1e-12}"
         BOOZER_BFGS_MAXITER="${BOOZER_BFGS_MAXITER:-1500}"
-        BOOZER_NEWTON_MAXITER="${BOOZER_NEWTON_MAXITER:-40}"
+        BOOZER_NEWTON_MAXITER="${BOOZER_NEWTON_MAXITER:-50}"
         ;;
     *)
         echo "PROFILE must be pilot or full; got ${PROFILE}" >&2
@@ -166,58 +422,119 @@ validate_pair_count() {
         echo "PAIR_COUNT must be a positive integer; got ${pair_count}" >&2
         return 2
     fi
-    if [[ "${profile}" == "full" ]] \
-        && ((pair_count < 2 || pair_count % 2 != 0)); then
-        echo "Full production evidence requires an even PAIR_COUNT >= 2; got ${pair_count}" >&2
-        return 2
-    fi
 }
 
 validate_pair_execution_mode() {
-    local profile="$1"
     local execution_mode="$2"
-    local visible_devices
     case "${execution_mode}" in
         slurm-step)
             ;;
         direct)
-            if [[ "${profile}" != "pilot" ]]; then
-                echo "Direct pair execution is diagnostic-only and requires PROFILE=pilot" >&2
-                return 2
-            fi
-            if [[ -z "${SLURM_STEP_ID:-}" ]]; then
-                echo "Direct pair execution requires the launcher to run inside a Slurm step" >&2
-                return 2
-            fi
-            visible_devices="${CUDA_VISIBLE_DEVICES:-}"
-            if [[ -z "${visible_devices}" || "${visible_devices}" == *,* \
-                || "${visible_devices}" =~ [[:space:]] ]]; then
-                echo \
-                    "Direct pair execution requires exactly one CUDA_VISIBLE_DEVICES selector" \
-                    >&2
-                return 2
-            fi
+            echo \
+                "Direct pair execution cannot satisfy the three-node benchmark topology" \
+                >&2
+            return 2
             ;;
         *)
             echo \
-                "PAIR_EXECUTION_MODE must be slurm-step or direct; got ${execution_mode}" \
+                "PAIR_EXECUTION_MODE must be slurm-step; got ${execution_mode}" \
                 >&2
             return 2
             ;;
     esac
 }
 
-configure_pair_launcher() {
-    local execution_mode="$1"
-    PAIR_LAUNCHER=()
-    if [[ "${execution_mode}" == "slurm-step" ]]; then
-        PAIR_LAUNCHER=(
-            srun
-            --ntasks=1
-            --cpus-per-task="${SLURM_CPUS_PER_TASK}"
-            --gpus-per-task=1
-            --cpu-bind=cores
-        )
+validate_allocated_nodes() {
+    if ((${#ALLOCATED_NODES[@]} != 3)); then
+        echo \
+            "Three-node benchmark requires exactly 3 allocated nodes; got ${#ALLOCATED_NODES[@]}" \
+            >&2
+        return 2
+    fi
+    if [[ "${ALLOCATED_NODES[0]}" == "${ALLOCATED_NODES[1]}" \
+        || "${ALLOCATED_NODES[0]}" == "${ALLOCATED_NODES[2]}" \
+        || "${ALLOCATED_NODES[1]}" == "${ALLOCATED_NODES[2]}" ]]; then
+        echo "Three-node benchmark requires 3 distinct allocated nodes" >&2
+        printf 'allocated_node=%s\n' "${ALLOCATED_NODES[@]}" >&2
+        return 2
+    fi
+}
+
+assign_pair_nodes() {
+    local pair_index="$1"
+    local rotation_index=$(((pair_index - 1) % 3))
+    native_cpu_node="${ALLOCATED_NODES[rotation_index]}"
+    jax_cpu_node="${ALLOCATED_NODES[(rotation_index + 1) % 3]}"
+    jax_gpu_node="${ALLOCATED_NODES[(rotation_index + 2) % 3]}"
+}
+
+launch_pair_lanes() {
+    local pair_dir="$1"
+    local native_cpu_node="$2"
+    local jax_cpu_node="$3"
+    local jax_gpu_node="$4"
+    local -a common_step=(
+        srun
+        --nodes=1
+        --ntasks=1
+        --cpus-per-task="${SLURM_CPUS_PER_TASK}"
+        --hint=nomultithread
+        --cpu-bind=cores
+        --exact
+        --mpi=none
+    )
+    local -a lane_wrapper=(
+        bash
+        "${LAUNCHER_PATH}"
+        __run-lane-step
+    )
+
+    "${common_step[@]}" --nodelist="${native_cpu_node}" --gres=none \
+        --output="${pair_dir}/native_cpu_slurm_stdout.log" \
+        --error="${pair_dir}/native_cpu_slurm_stderr.log" \
+        env CUDA_VISIBLE_DEVICES= \
+        "${lane_wrapper[@]}" native_cpu "${native_cpu_node}" "${pair_dir}" \
+        "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" \
+        "${GPU_PROCESS_MEMORY_CSV}" "${GPU_SAMPLER_QUERY_CSV}" \
+        "${GPU_SAMPLER_ERROR_LOG}" &
+    NATIVE_CPU_STEP_PID=$!
+
+    "${common_step[@]}" --nodelist="${jax_cpu_node}" --gres=none \
+        --output="${pair_dir}/jax_cpu_slurm_stdout.log" \
+        --error="${pair_dir}/jax_cpu_slurm_stderr.log" \
+        env CUDA_VISIBLE_DEVICES= \
+        "${lane_wrapper[@]}" jax_cpu "${jax_cpu_node}" "${pair_dir}" \
+        "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" \
+        "${GPU_PROCESS_MEMORY_CSV}" "${GPU_SAMPLER_QUERY_CSV}" \
+        "${GPU_SAMPLER_ERROR_LOG}" &
+    JAX_CPU_STEP_PID=$!
+
+    "${common_step[@]}" --nodelist="${jax_gpu_node}" --gpus-per-task=1 \
+        --gpu-bind=single:1 \
+        --output="${pair_dir}/jax_gpu_slurm_stdout.log" \
+        --error="${pair_dir}/jax_gpu_slurm_stderr.log" \
+        "${lane_wrapper[@]}" jax_gpu "${jax_gpu_node}" "${pair_dir}" \
+        "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" \
+        "${GPU_PROCESS_MEMORY_CSV}" "${GPU_SAMPLER_QUERY_CSV}" \
+        "${GPU_SAMPLER_ERROR_LOG}" &
+    JAX_GPU_STEP_PID=$!
+}
+
+wait_for_pair_lanes() {
+    if wait "${NATIVE_CPU_STEP_PID}"; then
+        native_cpu_returncode=0
+    else
+        native_cpu_returncode=$?
+    fi
+    if wait "${JAX_CPU_STEP_PID}"; then
+        jax_cpu_returncode=0
+    else
+        jax_cpu_returncode=$?
+    fi
+    if wait "${JAX_GPU_STEP_PID}"; then
+        jax_gpu_returncode=0
+    else
+        jax_gpu_returncode=$?
     fi
 }
 
@@ -247,15 +564,18 @@ ENVIRONMENT_ROOT="${ARTIFACT_ROOT}/environment"
 mkdir -p "${MACHINE_ROOT}" "${INPUT_ROOT}" "${PAIR_ROOT}" \
     "${ENVIRONMENT_ROOT}"
 
-GPU_MONITOR_PID=""
-GPU_MONITOR_SENTINEL="${MACHINE_ROOT}/gpu_monitor.running"
 GPU_PROCESS_MEMORY_CSV="${MACHINE_ROOT}/gpu_process_memory.csv"
 GPU_SAMPLER_QUERY_CSV="${MACHINE_ROOT}/gpu_sampler_queries.csv"
 GPU_SAMPLER_ERROR_LOG="${MACHINE_ROOT}/gpu_sampler_errors.log"
 GPU_PROCESS_MEMORY_SUMMARY="${MACHINE_ROOT}/gpu_process_memory_summary.json"
-CURRENT_PAIR_PATH="${MACHINE_ROOT}/current_pair.txt"
 ENVIRONMENT_LOCK_MANIFEST="${ENVIRONMENT_ROOT}/manifest.json"
 ENVIRONMENT_LOCK_SNAPSHOT="${ENVIRONMENT_ROOT}/requirements.lock"
+COMPARATOR_PATH="${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py"
+
+ALLOCATED_NODES=()
+mapfile -t ALLOCATED_NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST:?}")
+validate_allocated_nodes
+printf '%s\n' "${ALLOCATED_NODES[@]}" > "${MACHINE_ROOT}/allocated_nodes.txt"
 
 summarize_gpu_process_memory() {
     local python_executable="python"
@@ -300,12 +620,13 @@ by_pair: dict[str, dict[str, object]] = {
     pair_name: {
         "query_count": 0,
         "query_failure_count": 0,
+        "sampled_nodes": set(),
         "process_sample_count": 0,
         "process_ids": set(),
         "values": [],
-        "jax_process_sample_count": 0,
-        "jax_process_ids": set(),
-        "jax_values": [],
+        "jax_gpu_process_sample_count": 0,
+        "jax_gpu_process_ids": set(),
+        "jax_gpu_values": [],
     }
     for pair_name in expected_pair_names
 }
@@ -322,16 +643,25 @@ if query_csv_path.is_file():
                 pair_summary = by_pair[pair]
                 pair_summary["query_count"] += 1
                 pair_summary["query_failure_count"] += int(failed)
+                pair_summary["sampled_nodes"].add(row["node"])
 
-jax_windows: dict[str, tuple[datetime, datetime]] = {}
+jax_gpu_windows: dict[str, tuple[datetime, datetime]] = {}
 for pair_name in expected_pair_names:
-    execution_path = pair_root / pair_name / "jax" / "execution.json"
+    execution_path = pair_root / pair_name / "jax_gpu" / "execution.json"
     if not execution_path.is_file():
         continue
     execution = json.loads(execution_path.read_text(encoding="utf-8"))
-    jax_windows[pair_name] = (
-        parse_timestamp(str(execution["started_at_utc"])),
-        parse_timestamp(str(execution["ended_at_utc"])),
+    started_at_utc = execution.get("started_at_utc")
+    ended_at_utc = execution.get("ended_at_utc")
+    if (
+        execution.get("status") != "passed"
+        or not isinstance(started_at_utc, str)
+        or not isinstance(ended_at_utc, str)
+    ):
+        continue
+    jax_gpu_windows[pair_name] = (
+        parse_timestamp(started_at_utc),
+        parse_timestamp(ended_at_utc),
     )
 
 overall_values: list[int] = []
@@ -347,15 +677,16 @@ if process_csv_path.is_file():
             used_memory_mib = int(row["used_memory_mib"])
             sampled_at = parse_timestamp(row["timestamp_utc"])
             pair_summary = by_pair[pair]
+            pair_summary["sampled_nodes"].add(row["node"])
             pair_summary["process_sample_count"] += 1
             pair_summary["process_ids"].add(pid)
             pair_summary["values"].append(used_memory_mib)
-            if pair in jax_windows:
-                started_at, ended_at = jax_windows[pair]
+            if pair in jax_gpu_windows:
+                started_at, ended_at = jax_gpu_windows[pair]
                 if started_at <= sampled_at <= ended_at:
-                    pair_summary["jax_process_sample_count"] += 1
-                    pair_summary["jax_process_ids"].add(pid)
-                    pair_summary["jax_values"].append(used_memory_mib)
+                    pair_summary["jax_gpu_process_sample_count"] += 1
+                    pair_summary["jax_gpu_process_ids"].add(pid)
+                    pair_summary["jax_gpu_values"].append(used_memory_mib)
             overall_pids.add(pid)
             overall_values.append(used_memory_mib)
 
@@ -363,42 +694,43 @@ serialized_by_pair = {
     pair: {
         "query_count": values["query_count"],
         "query_failure_count": values["query_failure_count"],
+        "sampled_nodes": sorted(values["sampled_nodes"]),
         "process_sample_count": values["process_sample_count"],
         "process_ids": sorted(values["process_ids"]),
         "maximum_used_memory_mib": (
             max(values["values"]) if values["values"] else None
         ),
-        "jax_execution_window_recorded": pair in jax_windows,
-        "jax_process_sample_count": values["jax_process_sample_count"],
-        "jax_process_ids": sorted(values["jax_process_ids"]),
-        "maximum_jax_used_memory_mib": (
-            max(values["jax_values"]) if values["jax_values"] else None
+        "jax_gpu_execution_window_recorded": pair in jax_gpu_windows,
+        "jax_gpu_process_sample_count": values["jax_gpu_process_sample_count"],
+        "jax_gpu_process_ids": sorted(values["jax_gpu_process_ids"]),
+        "maximum_jax_gpu_used_memory_mib": (
+            max(values["jax_gpu_values"]) if values["jax_gpu_values"] else None
         ),
     }
     for pair, values in sorted(by_pair.items())
 }
 all_queries_succeeded = query_count > 0 and query_failure_count == 0
-every_pair_has_jax_process_sample = all(
-    int(serialized_by_pair[pair_name]["jax_process_sample_count"]) > 0
+every_pair_has_jax_gpu_process_sample = all(
+    int(serialized_by_pair[pair_name]["jax_gpu_process_sample_count"]) > 0
     for pair_name in expected_pair_names
 )
 production_gate_passed = (
-    all_queries_succeeded and every_pair_has_jax_process_sample
+    all_queries_succeeded and every_pair_has_jax_gpu_process_sample
 )
 payload = {
-    "schema_version": 1,
+    "schema_version": 2,
     "metric": "nvidia-smi compute-process used_memory",
     "unit": "MiB",
     "sampling_interval_seconds": 1,
     "scope": (
-        "all compute processes on the exclusive Slurm node"
+        "all compute processes visible inside each exclusive JAX-GPU lane step"
         if profile == "full"
-        else "diagnostic samples from all compute processes visible on the "
-        "allocated node"
+        else "diagnostic samples from compute processes visible inside each "
+        "JAX-GPU lane step"
     ),
     "note": (
-        "JAX samples are compute-process rows whose timestamps fall inside "
-        "the recorded JAX lane execution window. GPU process memory is "
+        "JAX-GPU samples are compute-process rows whose timestamps fall inside "
+        "the recorded JAX-GPU lane execution window. GPU process memory is "
         "separate from GNU-time host RSS."
     ),
     "sampler_queries": {
@@ -420,7 +752,7 @@ payload = {
         "profile": profile,
         "expected_pair_count": expected_pair_count,
         "all_queries_succeeded": all_queries_succeeded,
-        "every_pair_has_jax_process_sample": every_pair_has_jax_process_sample,
+        "every_pair_has_jax_gpu_process_sample": every_pair_has_jax_gpu_process_sample,
         "passed": production_gate_passed,
         "required_for_claim": profile == "full",
     },
@@ -507,7 +839,7 @@ gpu_memory_gate = (
         "profile": profile,
         "expected_pair_count": expected_pair_count,
         "all_queries_succeeded": False,
-        "every_pair_has_jax_process_sample": False,
+        "every_pair_has_jax_gpu_process_sample": False,
         "passed": False,
         "required_for_claim": profile == "full",
     }
@@ -521,11 +853,15 @@ dependency_lock_gate_passed = bool(
     )
 )
 pairs: list[dict[str, object]] = []
-successful_speedups: list[float] = []
-successful_cpu_wall_seconds: list[float] = []
-successful_jax_wall_seconds: list[float] = []
-successful_cpu_host_rss_kib: list[int] = []
-successful_jax_host_rss_kib: list[int] = []
+successful_native_cpu_over_jax_cpu_speedups: list[float] = []
+successful_native_cpu_over_jax_gpu_speedups: list[float] = []
+successful_jax_cpu_over_jax_gpu_speedups: list[float] = []
+successful_native_cpu_wall_seconds: list[float] = []
+successful_jax_cpu_wall_seconds: list[float] = []
+successful_jax_gpu_wall_seconds: list[float] = []
+successful_native_cpu_host_rss_kib: list[int] = []
+successful_jax_cpu_host_rss_kib: list[int] = []
+successful_jax_gpu_host_rss_kib: list[int] = []
 
 for pair_index in range(1, expected_pair_count + 1):
     pair_name = f"pair-{pair_index:02d}"
@@ -543,19 +879,50 @@ for pair_index in range(1, expected_pair_count + 1):
         comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
 
     status = status_values.get("adjudicated_status", "not-run")
-    order = status_values.get(
-        "order",
-        "cpu-jax" if pair_index % 2 == 1 else "jax-cpu",
-    )
     pair_payload: dict[str, object] = {
         "pair_index": pair_index,
         "pair_name": pair_name,
-        "order": order,
+        "order": status_values.get("order", "concurrent"),
         "pair_execution_mode": status_values.get("pair_execution_mode"),
         "status": status,
+        "nodes": {
+            lane: status_values.get(f"{lane}_node")
+            for lane in ("native_cpu", "jax_cpu", "jax_gpu")
+        },
+        "lane_returncodes": {
+            lane: (
+                int(status_values[f"{lane}_returncode"])
+                if f"{lane}_returncode" in status_values
+                else None
+            )
+            for lane in ("native_cpu", "jax_cpu", "jax_gpu")
+        },
+        "lane_statuses": {
+            lane: status_values.get(f"{lane}_status")
+            for lane in ("native_cpu", "jax_cpu", "jax_gpu")
+        },
+        "prepare_returncode": (
+            int(status_values["prepare_returncode"])
+            if "prepare_returncode" in status_values
+            else None
+        ),
+        "adjudicate_returncode": (
+            int(status_values["adjudicate_returncode"])
+            if "adjudicate_returncode" in status_values
+            else None
+        ),
         "comparator_exit_code": (
             int(status_values["comparator_exit_code"])
             if "comparator_exit_code" in status_values
+            else None
+        ),
+        "execution_timestamps_complete": (
+            status_values.get("execution_timestamps_complete") == "true"
+        ),
+        "all_lanes_overlapped": status_values.get("all_lanes_overlapped") == "true",
+        "overlap_seconds": (
+            float(status_values["overlap_seconds"])
+            if "overlap_seconds" in status_values
             else None
         ),
         "comparison_status": status_values.get("comparison_status"),
@@ -564,16 +931,14 @@ for pair_index in range(1, expected_pair_count + 1):
             if "comparison_claim_ready" in status_values
             else None
         ),
-        "cpu_optimizer_success": (
-            status_values.get("cpu_optimizer_success") == "true"
-            if "cpu_optimizer_success" in status_values
-            else None
-        ),
-        "jax_optimizer_success": (
-            status_values.get("jax_optimizer_success") == "true"
-            if "jax_optimizer_success" in status_values
-            else None
-        ),
+        "optimizer_success": {
+            lane: (
+                status_values.get(f"{lane}_optimizer_success") == "true"
+                if f"{lane}_optimizer_success" in status_values
+                else None
+            )
+            for lane in ("native_cpu", "jax_cpu", "jax_gpu")
+        },
         "started_at_utc": status_values.get("started_at_utc"),
         "finished_at_utc": status_values.get("finished_at_utc"),
         "comparison_path": (
@@ -588,53 +953,71 @@ for pair_index in range(1, expected_pair_count + 1):
             {
                 "query_count": 0,
                 "query_failure_count": 0,
+                "sampled_nodes": [],
                 "process_sample_count": 0,
                 "process_ids": [],
                 "maximum_used_memory_mib": None,
-                "jax_execution_window_recorded": False,
-                "jax_process_sample_count": 0,
-                "jax_process_ids": [],
-                "maximum_jax_used_memory_mib": None,
+                "jax_gpu_execution_window_recorded": False,
+                "jax_gpu_process_sample_count": 0,
+                "jax_gpu_process_ids": [],
+                "maximum_jax_gpu_used_memory_mib": None,
             },
         )
     if comparison is not None:
         performance = comparison["performance"]
         parity = comparison["parity"]
         pair_payload["performance"] = performance
+        pair_payload["failures"] = comparison["failures"]
         pair_payload["required_failures"] = parity["required_failures"]
         pair_payload["advisory_failures"] = parity["advisory_failures"]
-        pair_payload["host_rss_kib"] = {
-            "cpu": performance["cpu_host_max_rss_kib"],
-            "jax": performance["jax_host_max_rss_kib"],
-        }
-        if status == "passed":
-            successful_speedups.append(float(performance["cpu_over_jax_speedup"]))
-            successful_cpu_wall_seconds.append(
-                float(performance["cpu_wall_seconds"])
+        pair_payload["host_rss_kib"] = (
+            performance["host_max_rss_kib"] if performance is not None else None
+        )
+        if status == "passed" and performance is not None:
+            speedups = performance["speedups"]
+            wall_seconds = performance["wall_seconds"]
+            host_max_rss_kib = performance["host_max_rss_kib"]
+            successful_native_cpu_over_jax_cpu_speedups.append(
+                float(speedups["native_cpu_over_jax_cpu"])
             )
-            successful_jax_wall_seconds.append(
-                float(performance["jax_wall_seconds"])
+            successful_native_cpu_over_jax_gpu_speedups.append(
+                float(speedups["native_cpu_over_jax_gpu"])
             )
-            successful_cpu_host_rss_kib.append(
-                int(performance["cpu_host_max_rss_kib"])
+            successful_jax_cpu_over_jax_gpu_speedups.append(
+                float(speedups["jax_cpu_over_jax_gpu"])
             )
-            successful_jax_host_rss_kib.append(
-                int(performance["jax_host_max_rss_kib"])
+            successful_native_cpu_wall_seconds.append(
+                float(wall_seconds["native_cpu"])
+            )
+            successful_jax_cpu_wall_seconds.append(float(wall_seconds["jax_cpu"]))
+            successful_jax_gpu_wall_seconds.append(float(wall_seconds["jax_gpu"]))
+            successful_native_cpu_host_rss_kib.append(
+                int(host_max_rss_kib["native_cpu"])
+            )
+            successful_jax_cpu_host_rss_kib.append(
+                int(host_max_rss_kib["jax_cpu"])
+            )
+            successful_jax_gpu_host_rss_kib.append(
+                int(host_max_rss_kib["jax_gpu"])
             )
     pairs.append(pair_payload)
 
-successful_pair_count = len(successful_speedups)
-repeat_design_valid = (
-    expected_pair_count >= 2 and expected_pair_count % 2 == 0
-    if profile == "full"
-    else expected_pair_count >= 1
-)
+successful_pair_count = len(successful_native_cpu_over_jax_gpu_speedups)
+measurement_design_valid = expected_pair_count >= 1
+repeat_design_valid = expected_pair_count >= 2
 pair_execution_modes_match = all(
     pair["pair_execution_mode"] == pair_execution_mode for pair in pairs
 )
+pair_topologies_valid = all(
+    pair["all_lanes_overlapped"] is True
+    and len(set(pair["nodes"].values())) == 3
+    and None not in pair["nodes"].values()
+    for pair in pairs
+)
 all_pairs_passed = (
-    repeat_design_valid
+    measurement_design_valid
     and pair_execution_modes_match
+    and pair_topologies_valid
     and successful_pair_count == expected_pair_count
 )
 production_evidence_gates_passed = bool(
@@ -643,17 +1026,6 @@ production_evidence_gates_passed = bool(
 aggregate_claim_ready = bool(
     profile == "full" and all_pairs_passed and production_evidence_gates_passed
 )
-speedup_summary = {
-    "metric": "native_simsopt_cpu_wall_seconds / jax_cuda_wall_seconds",
-    "successful_pair_count": successful_pair_count,
-    "median": (
-        statistics.median(successful_speedups) if successful_speedups else None
-    ),
-    "minimum": min(successful_speedups) if successful_speedups else None,
-    "maximum": max(successful_speedups) if successful_speedups else None,
-}
-
-
 def distribution(values: list[float] | list[int]) -> dict[str, float | int | None]:
     return {
         "median": statistics.median(values) if values else None,
@@ -662,8 +1034,20 @@ def distribution(values: list[float] | list[int]) -> dict[str, float | int | Non
     }
 
 
+speedup_summary = {
+    "successful_pair_count": successful_pair_count,
+    "native_cpu_over_jax_cpu": distribution(
+        successful_native_cpu_over_jax_cpu_speedups
+    ),
+    "native_cpu_over_jax_gpu": distribution(
+        successful_native_cpu_over_jax_gpu_speedups
+    ),
+    "jax_cpu_over_jax_gpu": distribution(successful_jax_cpu_over_jax_gpu_speedups),
+}
+
+
 payload = {
-    "schema_version": 1,
+    "schema_version": 2,
     "status": (
         "passed"
         if aggregate_claim_ready
@@ -678,17 +1062,31 @@ payload = {
     "expected_pair_count": expected_pair_count,
     "successful_pair_count": successful_pair_count,
     "failed_pair_count": expected_pair_count - successful_pair_count,
+    "measurement_design_valid": measurement_design_valid,
     "repeat_design_valid": repeat_design_valid,
     "pair_execution_modes_match": pair_execution_modes_match,
-    "lane_order_policy": "alternating cpu-jax / jax-cpu",
+    "pair_topologies_valid": pair_topologies_valid,
+    "measurement_class": (
+        "single_matched_triplet"
+        if expected_pair_count == 1
+        else "repeated_rotating_triplets"
+    ),
+    "measurement_interpretation": (
+        "one matched measurement; no statistical inference"
+        if expected_pair_count == 1
+        else "repeated matched measurements with deterministic role rotation"
+    ),
+    "lane_assignment_policy": "concurrent three-node roles rotated by pair index",
     "speedup": speedup_summary,
     "wall_seconds": {
-        "cpu": distribution(successful_cpu_wall_seconds),
-        "jax": distribution(successful_jax_wall_seconds),
+        "native_cpu": distribution(successful_native_cpu_wall_seconds),
+        "jax_cpu": distribution(successful_jax_cpu_wall_seconds),
+        "jax_gpu": distribution(successful_jax_gpu_wall_seconds),
     },
     "host_max_rss_kib": {
-        "cpu": distribution(successful_cpu_host_rss_kib),
-        "jax": distribution(successful_jax_host_rss_kib),
+        "native_cpu": distribution(successful_native_cpu_host_rss_kib),
+        "jax_cpu": distribution(successful_jax_cpu_host_rss_kib),
+        "jax_gpu": distribution(successful_jax_gpu_host_rss_kib),
     },
     "pairs": pairs,
     "input_manifest": "inputs/manifest.json",
@@ -730,16 +1128,8 @@ finalize_job() {
     local exit_code=$?
     local last_pair=""
     set +e
-    rm -f "${GPU_MONITOR_SENTINEL}"
-    if [[ -n "${GPU_MONITOR_PID}" ]]; then
-        wait "${GPU_MONITOR_PID}"
-    fi
-    rm -f "${CURRENT_PAIR_PATH}"
-    nvidia-smi -q > "${MACHINE_ROOT}/nvidia_smi_after.txt" 2>&1
-    nvidia-smi --query-gpu=index,name,uuid,memory.used,memory.total \
-        --format=csv,noheader > "${MACHINE_ROOT}/gpu_inventory_after.csv" 2>&1
     sacct -j "${SLURM_JOB_ID}" \
-        --format=JobIDRaw,State,ExitCode,Elapsed,MaxRSS,AllocTRES%80 -P \
+        --format=JobIDRaw,State,ExitCode,Elapsed,NodeList,NNodes,NTasks,MaxRSS,AllocTRES%80 -P \
         > "${MACHINE_ROOT}/sacct_final.txt" 2>&1
     if [[ -f "${MACHINE_ROOT}/last_pair.txt" ]]; then
         last_pair="$(<"${MACHINE_ROOT}/last_pair.txt")"
@@ -1239,10 +1629,8 @@ export NUMEXPR_NUM_THREADS=1
 printf '%s\n' "${PAIR_EXECUTION_MODE}" \
     > "${MACHINE_ROOT}/pair_execution_mode.txt"
 module list > "${MACHINE_ROOT}/modules.txt" 2>&1
-lscpu > "${MACHINE_ROOT}/lscpu.txt"
-nvidia-smi -q > "${MACHINE_ROOT}/nvidia_smi_before.txt"
-nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
-    --format=csv,noheader > "${MACHINE_ROOT}/gpu_inventory.csv"
+hostname -s > "${MACHINE_ROOT}/batch_host.txt"
+lscpu > "${MACHINE_ROOT}/batch_host_lscpu.txt"
 scontrol show job "${SLURM_JOB_ID}" > "${MACHINE_ROOT}/slurm_job.txt"
 "${VENV_DIR}/bin/python" -m pip freeze --all > "${MACHINE_ROOT}/pip_freeze.txt"
 sha256sum "${SURFACE_ORIGINAL}" "${BIOTSAVART_ORIGINAL}" \
@@ -1272,106 +1660,90 @@ print(f"simsoptpp={extension}")
 print(f"simsoptpp_sha256={digest_builder.hexdigest()}")
 PY
 
-printf 'timestamp_utc,pair,gpu_uuid,pid,used_memory_mib\n' \
+printf 'timestamp_utc,pair,node,gpu_uuid,pid,used_memory_mib\n' \
     > "${GPU_PROCESS_MEMORY_CSV}"
-printf 'timestamp_utc,pair,status,exit_code\n' > "${GPU_SAMPLER_QUERY_CSV}"
+printf 'timestamp_utc,pair,node,status,exit_code\n' > "${GPU_SAMPLER_QUERY_CSV}"
 : > "${GPU_SAMPLER_ERROR_LOG}"
-touch "${GPU_MONITOR_SENTINEL}"
-(
-    sampler_last_error="${MACHINE_ROOT}/gpu_sampler_last_error.txt"
-    exec 3>> "${GPU_PROCESS_MEMORY_CSV}"
-    exec 4>> "${GPU_SAMPLER_QUERY_CSV}"
-    exec 5>> "${GPU_SAMPLER_ERROR_LOG}"
-    while [[ -e "${GPU_MONITOR_SENTINEL}" ]]
-    do
-        timestamp="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
-        pair_name="unassigned"
-        if [[ -s "${CURRENT_PAIR_PATH}" ]]; then
-            pair_name="$(<"${CURRENT_PAIR_PATH}")"
-        fi
-        if sample="$(nvidia-smi \
-            --query-compute-apps=gpu_uuid,pid,used_memory \
-            --format=csv,noheader,nounits 2> "${sampler_last_error}")"
-        then
-            printf '%s,%s,ok,0\n' "${timestamp}" "${pair_name}" >&4
-            if [[ -n "${sample}" ]]; then
-                while IFS= read -r process_record
-                do
-                    printf '%s,%s,%s\n' \
-                        "${timestamp}" "${pair_name}" "${process_record}" >&3
-                done <<< "${sample}"
-            fi
-        else
-            sampler_exit_code=$?
-            printf '%s,%s,failed,%s\n' \
-                "${timestamp}" "${pair_name}" "${sampler_exit_code}" >&4
-            printf '[%s] pair=%s exit_code=%s\n' \
-                "${timestamp}" "${pair_name}" "${sampler_exit_code}" >&5
-            sed 's/^/  /' "${sampler_last_error}" >&5
-        fi
-        sleep 1
-    done
-    rm -f "${sampler_last_error}"
-) &
-GPU_MONITOR_PID=$!
 
-configure_pair_launcher "${PAIR_EXECUTION_MODE}"
+COMPARATOR_PREPARE_ARGS=(
+    --python "${VENV_DIR}/bin/python"
+    --surface-path "${SURFACE_SNAPSHOT}"
+    --biotsavart-file "${BIOTSAVART_SNAPSHOT}"
+    --boozer-state-path "${BOOZER_STATE_SNAPSHOT}"
+    --mode "${EVIDENCE_CLASS}"
+    --mpol "${MPOL}"
+    --ntor "${NTOR}"
+    --nphi "${NPHI}"
+    --ntheta "${NTHETA}"
+    --constraint-weight "${CONSTRAINT_WEIGHT}"
+    --iota-target "${IOTA_TARGET}"
+    --environment-lock-sha256 "${ENVIRONMENT_LOCK_SHA256}"
+    --maxiter "${OUTER_MAXITER}"
+    --outer-maxcor "${OUTER_MAXCOR}"
+    --outer-maxls "${OUTER_MAXLS}"
+    --outer-ftol "${OUTER_FTOL}"
+    --outer-gtol "${OUTER_GTOL}"
+    --boozer-bfgs-tol "${BOOZER_BFGS_TOL}"
+    --boozer-bfgs-maxiter "${BOOZER_BFGS_MAXITER}"
+    --boozer-newton-tol "${BOOZER_NEWTON_TOL}"
+    --boozer-newton-maxiter "${BOOZER_NEWTON_MAXITER}"
+)
 
 FAILED_PAIRS=0
 for ((pair_index = 1; pair_index <= PAIR_COUNT; pair_index++))
 do
     pair_name="pair-$(printf '%02d' "${pair_index}")"
     pair_dir="${PAIR_ROOT}/${pair_name}"
-    if ((pair_index % 2 == 1)); then
-        pair_order="cpu-jax"
-    else
-        pair_order="jax-cpu"
-    fi
-    printf '%s\n' "${pair_name}" > "${CURRENT_PAIR_PATH}"
+    assign_pair_nodes "${pair_index}"
     printf '%s\n' "${pair_name}" > "${MACHINE_ROOT}/last_pair.txt"
     pair_started_at="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
-    echo "Starting ${pair_name}/${PAIR_COUNT} with order ${pair_order}" >&2
+    echo \
+        "Starting ${pair_name}/${PAIR_COUNT}: native_cpu=${native_cpu_node} jax_cpu=${jax_cpu_node} jax_gpu=${jax_gpu_node}" \
+        >&2
 
-    if "${PAIR_LAUNCHER[@]}" "${VENV_DIR}/bin/python" \
-        "${REPO_ROOT}/benchmarks/single_stage_full_loop_compare.py" \
-        --python "${VENV_DIR}/bin/python" \
-        --surface-path "${SURFACE_SNAPSHOT}" \
-        --biotsavart-file "${BIOTSAVART_SNAPSHOT}" \
-        --boozer-state-path "${BOOZER_STATE_SNAPSHOT}" \
+    if "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" prepare \
+        "${COMPARATOR_PREPARE_ARGS[@]}" \
         --output-root "${pair_dir}" \
-        --order "${pair_order}" \
-        --mode "${EVIDENCE_CLASS}" \
-        --mpol "${MPOL}" \
-        --ntor "${NTOR}" \
-        --nphi "${NPHI}" \
-        --ntheta "${NTHETA}" \
-        --constraint-weight "${CONSTRAINT_WEIGHT}" \
-        --iota-target "${IOTA_TARGET}" \
-        --environment-lock-sha256 "${ENVIRONMENT_LOCK_SHA256}" \
-        --maxiter "${OUTER_MAXITER}" \
-        --outer-maxcor "${OUTER_MAXCOR}" \
-        --outer-maxls "${OUTER_MAXLS}" \
-        --outer-ftol "${OUTER_FTOL}" \
-        --outer-gtol "${OUTER_GTOL}" \
-        --boozer-bfgs-tol "${BOOZER_BFGS_TOL}" \
-        --boozer-bfgs-maxiter "${BOOZER_BFGS_MAXITER}" \
-        --boozer-newton-tol "${BOOZER_NEWTON_TOL}" \
-        --boozer-newton-maxiter "${BOOZER_NEWTON_MAXITER}"
+        --native-cpu-node "${native_cpu_node}" \
+        --jax-cpu-node "${jax_cpu_node}" \
+        --jax-gpu-node "${jax_gpu_node}"
     then
-        comparator_exit_code=0
+        prepare_returncode=0
     else
-        comparator_exit_code=$?
+        prepare_returncode=$?
+    fi
+
+    native_cpu_returncode=125
+    jax_cpu_returncode=125
+    jax_gpu_returncode=125
+    if [[ "${prepare_returncode}" -eq 0 ]]; then
+        launch_pair_lanes \
+            "${pair_dir}" "${native_cpu_node}" "${jax_cpu_node}" "${jax_gpu_node}"
+        wait_for_pair_lanes
+    fi
+
+    mkdir -p "${pair_dir}"
+    if "${VENV_DIR}/bin/python" "${COMPARATOR_PATH}" adjudicate \
+        --output-root "${pair_dir}" \
+        --native-cpu-returncode "${native_cpu_returncode}" \
+        --jax-cpu-returncode "${jax_cpu_returncode}" \
+        --jax-gpu-returncode "${jax_gpu_returncode}"
+    then
+        adjudicate_returncode=0
+    else
+        adjudicate_returncode=$?
     fi
     pair_finished_at="$(date --utc +%Y-%m-%dT%H:%M:%S.%NZ)"
-    mkdir -p "${pair_dir}"
 
     comparison_status="missing"
     comparison_claim_ready="false"
-    cpu_optimizer_success="false"
-    jax_optimizer_success="false"
+    native_cpu_optimizer_success="false"
+    jax_cpu_optimizer_success="false"
+    jax_gpu_optimizer_success="false"
     if [[ -f "${pair_dir}/comparison.json" ]]; then
-        read -r comparison_status comparison_claim_ready cpu_optimizer_success \
-            jax_optimizer_success < <(
+        read -r comparison_status comparison_claim_ready \
+            native_cpu_optimizer_success jax_cpu_optimizer_success \
+            jax_gpu_optimizer_success < <(
             PAIR_DIR="${pair_dir}" "${VENV_DIR}/bin/python" - <<'PY'
 from __future__ import annotations
 
@@ -1384,24 +1756,77 @@ pair_dir = Path(os.environ["PAIR_DIR"])
 comparison = json.loads(
     (pair_dir / "comparison.json").read_text(encoding="utf-8")
 )
-cpu_results = json.loads(
-    (pair_dir / "cpu" / "results.json").read_text(encoding="utf-8")
-)
-jax_results = json.loads(
-    (pair_dir / "jax" / "results.json").read_text(encoding="utf-8")
-)
+
+
+def optimizer_success(lane: str) -> bool:
+    results_path = pair_dir / lane / "results.json"
+    if not results_path.is_file():
+        return False
+    results = json.loads(results_path.read_text(encoding="utf-8"))
+    return bool(results["optimizer"]["success"])
+
+
 print(
     comparison["status"],
     str(bool(comparison["claim_ready"])).lower(),
-    str(bool(cpu_results["optimizer"]["success"])).lower(),
-    str(bool(jax_results["optimizer"]["success"])).lower(),
+    *(str(optimizer_success(lane)).lower() for lane in (
+        "native_cpu",
+        "jax_cpu",
+        "jax_gpu",
+    )),
 )
 PY
         )
     fi
 
+    read -r execution_timestamps_complete all_lanes_overlapped overlap_seconds < <(
+        PAIR_DIR="${pair_dir}" "${VENV_DIR}/bin/python" - <<'PY'
+from __future__ import annotations
+
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+
+
+pair_dir = Path(os.environ["PAIR_DIR"])
+executions = []
+for lane in ("native_cpu", "jax_cpu", "jax_gpu"):
+    execution_path = pair_dir / lane / "execution.json"
+    if not execution_path.is_file():
+        break
+    executions.append(json.loads(execution_path.read_text(encoding="utf-8")))
+
+timestamps = [
+    (item.get("started_at_utc"), item.get("ended_at_utc"))
+    for item in executions
+]
+if len(executions) != 3 or not all(
+    isinstance(started_at_utc, str) and isinstance(ended_at_utc, str)
+    for started_at_utc, ended_at_utc in timestamps
+):
+    print("false false 0.0")
+else:
+    starts = [
+        datetime.fromisoformat(started_at_utc)
+        for started_at_utc, _ended_at_utc in timestamps
+    ]
+    ends = [
+        datetime.fromisoformat(ended_at_utc)
+        for _started_at_utc, ended_at_utc in timestamps
+    ]
+    overlap_seconds = (min(ends) - max(starts)).total_seconds()
+    print("true", str(overlap_seconds > 0.0).lower(), max(0.0, overlap_seconds))
+PY
+    )
+
     adjudicated_status="failed"
-    if [[ "${comparator_exit_code}" -eq 0 ]]; then
+    if [[ "${prepare_returncode}" -eq 0 \
+        && "${native_cpu_returncode}" -eq 0 \
+        && "${jax_cpu_returncode}" -eq 0 \
+        && "${jax_gpu_returncode}" -eq 0 \
+        && "${adjudicate_returncode}" -eq 0 \
+        && "${all_lanes_overlapped}" == "true" ]]; then
         if [[ "${PROFILE}" == "pilot" && "${comparison_status}" == "diagnostic" ]]; then
             adjudicated_status="passed"
         elif [[ "${PROFILE}" == "full" && "${comparison_status}" == "passed" \
@@ -1413,26 +1838,53 @@ PY
         FAILED_PAIRS=$((FAILED_PAIRS + 1))
     fi
 
+    native_cpu_status="failed"
+    jax_cpu_status="failed"
+    jax_gpu_status="failed"
+    if [[ "${native_cpu_returncode}" -eq 0 ]]; then
+        native_cpu_status="passed"
+    fi
+    if [[ "${jax_cpu_returncode}" -eq 0 ]]; then
+        jax_cpu_status="passed"
+    fi
+    if [[ "${jax_gpu_returncode}" -eq 0 ]]; then
+        jax_gpu_status="passed"
+    fi
+
     {
         printf 'pair_index\t%s\n' "${pair_index}"
         printf 'pair_name\t%s\n' "${pair_name}"
-        printf 'order\t%s\n' "${pair_order}"
+        printf 'order\tconcurrent\n'
         printf 'profile\t%s\n' "${PROFILE}"
         printf 'evidence_class\t%s\n' "${EVIDENCE_CLASS}"
         printf 'pair_execution_mode\t%s\n' "${PAIR_EXECUTION_MODE}"
+        printf 'native_cpu_node\t%s\n' "${native_cpu_node}"
+        printf 'jax_cpu_node\t%s\n' "${jax_cpu_node}"
+        printf 'jax_gpu_node\t%s\n' "${jax_gpu_node}"
         printf 'started_at_utc\t%s\n' "${pair_started_at}"
         printf 'finished_at_utc\t%s\n' "${pair_finished_at}"
-        printf 'comparator_exit_code\t%s\n' "${comparator_exit_code}"
+        printf 'prepare_returncode\t%s\n' "${prepare_returncode}"
+        printf 'native_cpu_returncode\t%s\n' "${native_cpu_returncode}"
+        printf 'jax_cpu_returncode\t%s\n' "${jax_cpu_returncode}"
+        printf 'jax_gpu_returncode\t%s\n' "${jax_gpu_returncode}"
+        printf 'adjudicate_returncode\t%s\n' "${adjudicate_returncode}"
+        printf 'comparator_exit_code\t%s\n' "${adjudicate_returncode}"
+        printf 'native_cpu_status\t%s\n' "${native_cpu_status}"
+        printf 'jax_cpu_status\t%s\n' "${jax_cpu_status}"
+        printf 'jax_gpu_status\t%s\n' "${jax_gpu_status}"
+        printf 'execution_timestamps_complete\t%s\n' "${execution_timestamps_complete}"
+        printf 'all_lanes_overlapped\t%s\n' "${all_lanes_overlapped}"
+        printf 'overlap_seconds\t%s\n' "${overlap_seconds}"
         printf 'comparison_status\t%s\n' "${comparison_status}"
         printf 'comparison_claim_ready\t%s\n' "${comparison_claim_ready}"
-        printf 'cpu_optimizer_success\t%s\n' "${cpu_optimizer_success}"
-        printf 'jax_optimizer_success\t%s\n' "${jax_optimizer_success}"
+        printf 'native_cpu_optimizer_success\t%s\n' "${native_cpu_optimizer_success}"
+        printf 'jax_cpu_optimizer_success\t%s\n' "${jax_cpu_optimizer_success}"
+        printf 'jax_gpu_optimizer_success\t%s\n' "${jax_gpu_optimizer_success}"
         printf 'adjudicated_status\t%s\n' "${adjudicated_status}"
     } > "${pair_dir}/pair_status.tsv"
     echo "Finished ${pair_name}: ${adjudicated_status}" >&2
 done
 
-rm -f "${CURRENT_PAIR_PATH}"
 echo "Full-loop artifact root: ${ARTIFACT_ROOT}"
 if ((FAILED_PAIRS > 0)); then
     echo "${FAILED_PAIRS}/${PAIR_COUNT} pairs failed adjudication" >&2

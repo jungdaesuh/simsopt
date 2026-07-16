@@ -27,6 +27,7 @@ from examples.single_stage_optimization.banana_opt.jax_banana_drivers import (  
     boozer_solver_grid_shape,
     build_biotsavart,
     build_boozer_surface_copy,
+    comparison_backend_label,
     minimize_single_stage_soft_penalty,
     read_banana_dofs,
 )
@@ -105,6 +106,22 @@ def test_boozer_solver_grid_distinguishes_penalty_and_exact_modes():
         **common,
         constraint_weight=None,
     ) == (7, 5)
+
+
+@pytest.mark.parametrize(
+    ("device_platform", "backend_label"),
+    (("cpu", "jax-cpu"), ("gpu", "jax-cuda")),
+)
+def test_comparison_backend_label_matches_execution_platform(
+    device_platform: str,
+    backend_label: str,
+) -> None:
+    assert comparison_backend_label(device_platform) == backend_label
+
+
+def test_comparison_backend_label_rejects_unsupported_platform() -> None:
+    with pytest.raises(ValueError, match="only JAX CPU or CUDA"):
+        comparison_backend_label("tpu")
 
 
 def test_single_stage_minimizer_penalizes_rejected_boozer_candidates(monkeypatch):
