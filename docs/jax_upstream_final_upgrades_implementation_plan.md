@@ -51,9 +51,11 @@ commit.
 
 ### Confirmed repository facts
 
-- The target branch is `pr/jax-port-squashed` at `d2cdd7a8f`. At review time it
-  had no tracked worktree changes; this plan was the only untracked path.
-- The locally inspected upstream snapshot is `631cbe736`. On 2026-07-22,
+- The implementation code baseline beneath the planning-only commits is
+  `d2cdd7a8f`. Do not assume the branch tip still equals that commit: Phase 1
+  must capture the actual clean `pr/jax-port-squashed` tip as `upgrade_base`
+  immediately before implementation.
+- The locally inspected upstream snapshot is `631cbe736`. On 2026-07-23,
   `git ls-remote upstream_check refs/heads/master` reported remote HEAD
   `51b22454f5a0faffbfc712b4a9a8d45738f12781`, so the local
   `upstream_check/master` reference is stale and must be refreshed before
@@ -65,14 +67,13 @@ commit.
   `a79ddd4eaf6e46b2a7562b1c5379afd57221b7e1` is a retention merge whose
   integration ancestry includes a tree with 1,378 changed paths and 947,229
   deletions relative to the stable anchor; it is not a port source.
-- A 2026-07-23 post-anchor audit found no additional trustworthy production
+- A 2026-07-23 immutable-ref audit found no additional trustworthy production
   source. Of the 314 commits in `5fb968188..a79ddd4e`, 301 are synthetic
-  reconstruction commits; the remaining implementation commits are
-  campaign/attestation-only or already represented by the stable-anchor
-  semantics selected below. Of 845 relevant untracked source/test/build paths
-  in the dirty source worktree, 821 are byte-identical to anchor files displaced
-  by the retention tree; the residue is deferred QFM/Diffrax work or excluded
-  campaign/history infrastructure.
+  reconstruction commits; the remainder are campaign/attestation changes,
+  planning/merge records, or behavior already represented by the stable-anchor
+  semantics selected below. The dirty source worktree is deliberately not
+  completeness evidence: it is mutable, uncommitted, and excluded as a port
+  source regardless of its current path counts.
 - The target already contains the base JAX port and FP64 hardening, including
   patch-equivalent dense-solve, rejected-gradient, residual-J LSMR, and Boozer
   warm-start fixes.
@@ -103,7 +104,7 @@ commit.
 | SciPy evaluation ownership and factor routing | earlier routing invariant from `950fb5ca7`, reconciled with production portions of `e6746f04a`, `9183695f0`, `dbfb3238c`, then `f35f83515` | Port provider/lifecycle abstractions and explicit adjoint/forward factor authority without phase/campaign analyzers. |
 | Native derivative, transfer, and replay correctness | `e4c008e80`, `df4b5b711`, the native curve host-ownership, derivative, and curve-surface ownership portions of `5df801e1b`, and selected portions of `5e3208281` | Port the explicit public-method allowlist, native curve strict-transfer boundary, and physical partials only; exclude broad batching, reduced-objective/certificate, and genuine-675 owners. |
 | Deterministic paired statistics | `benchmarks/paired_bca.py` from `1f71046a7` plus example-independent contract assertions | Reuse the dependency-light BCa utility and deterministic balanced schedule; do not port the campaign comparator. |
-| Test/bootstrap and public documentation companions | selected `1f71046a7`, `5df801e1b`, `ad73aa0f1`, conditional `9e4b7c23f`, and the documentation-only `82e9b88d3` hunk | Package integration tests for collision-free mixed collection; port only fixtures required by selected final signatures; add the eager surface/native-curve strict-transfer regressions and public CurveSurfaceDistance/controller documentation. |
+| Test/bootstrap and public documentation companions | selected `1f71046a7`, `5df801e1b`, `ad73aa0f1`, `9e4b7c23f`, and the documentation-only `82e9b88d3` hunk | Package integration tests for collision-free mixed collection; port only fixtures required by selected final signatures; add the eager surface/native-curve strict-transfer regressions and public CurveSurfaceDistance/controller documentation. |
 | QFM reuse and diagnostics | `0d4f82ddc` | Candidate follow-up after the core precision stack is stable. |
 
 ## Rationale
@@ -357,7 +358,10 @@ the compatibility default and mixed precision is selected explicitly.
      final Hessians. Damping may change the Newton step, but the returned
      accepted-state Hessian must be undamped for dense and CG adjoint authority;
      preserve stabilization only for explicitly augmented residual-J LSMR
-     formulations.
+     formulations. Adapt the helper to the target's existing adjoint selector:
+     support the selected `"lsmr_j"` path, and do not import the source-only
+     `HessianLinearSolver.LSMR_IR` enum member or its environment-selected
+     comparator.
    - [ ] Add the exact typed `linear_solver` keyword and
      `BoozerSurfaceJAX.options["newton_linear_solver"]` contract from the
      resolved decisions. Keep `operator_gmres` as the target default; require
@@ -376,7 +380,9 @@ the compatibility default and mixed precision is selected explicitly.
      damping with an undamped returned Hessian, solver-specific stabilization
      ownership, bounded-mixed final-Hessian behavior, undamped dense adjoint
      runtime state, and cache/bundle identity independence from dense Newton
-     step damping.
+     step damping. Adapt the solver-specific parameterization to the selected
+     dense, CG, and existing `"lsmr_j"` routes; do not copy the deferred
+     `LSMR_IR` case.
 
 4. Thread mixed compute dtype through pure kernels and private optimizers.
    - [ ] Port compute-dtype propagation through
@@ -533,6 +539,16 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Port mixed compute/certificate routing into
      `src/simsopt_jax_adapters/geo/boozer_surface.py` while preserving current
      FP64 result keys and public behavior.
+   - [ ] Reconcile every Boozer adapter consumer of Newton stabilization with
+     the Phase 3 final/adjoint owner. In `get_adjoint_runtime_state()`, pass
+     `adjoint_hessian_stabilization(newton_stab)` into the Hessian solve and
+     retain the residual closure for the existing `"lsmr_j"` route. In the
+     penalty-kernel signature/bundle path, key on that resolved final/adjoint
+     stabilization so changing dense/CG step damping does not split an
+     equivalent undamped adjoint bundle, and thread the same resolved value
+     through traceable objective state/signatures rather than storing raw Newton
+     step damping as adjoint identity. Do not add the deferred `"lsmr_ir"`
+     selector or source environment dispatch.
    - [ ] Port large-constant staging, runtime-dtype predictor solves, seeded/K2
      FP64 certificate rules, and accepted-state ownership into
      `surface_objectives_traceable.py`.
@@ -590,10 +606,18 @@ the compatibility default and mixed precision is selected explicitly.
      certificate-key helpers and the final `newton_trace_capacity` mock/state
      contract. Do not copy validation-ladder, banana, campaign, or evidence
      imports from the source test wholesale.
-   - [ ] If the selected final `run_code_traceable` state contract consumes
-     `converged`, `failed`, and `k`, port the `9e4b7c23f` least-squares mock
-     update in `tests/geo/test_boozersurface_jax.py`; do not leave an
-     `x_k`-only fake minimizer that can pass against a stale signature.
+   - [ ] Port the production `newton_trace_capacity` owner and propagation
+     finalized by `add41e95c`: `BoozerSurfaceJAX` must return the full configured
+     `newton_maxiter` capacity for every production lane, and
+     `surface_objectives_traceable.py` must carry that static capacity through
+     cache identity, traceable state, pack/pad helpers, compiled bundles, and
+     every forward path. Do not port the earlier policy-dependent bounded-mixed
+     capacity from `5df801e1b`; all JAX branches must share one static trace
+     shape.
+   - [ ] Port the unconditional `9e4b7c23f` private minimizer fixture update in
+     `tests/geo/test_boozersurface_jax.py`: the selected on-device
+     quasi-Newton branch already consumes `converged`, `failed`, and `k`, so its
+     fake result must provide those fields in addition to `x_k`.
 
 7. Port standalone reusable performance upgrades.
    - [ ] Add `src/simsopt_jax/core/biotsavart_online.py` from the final
@@ -690,6 +714,10 @@ the compatibility default and mixed precision is selected explicitly.
      `CurveSurfaceDistance` depend on the surface, and return the surface VJP
      from `dJ(partials=True)`. Port the matching public
      `CurveSurfaceDistanceJAX` owner and four-input derivative behavior.
+   - [ ] Update the native `CurveSurfaceDistance.dJ` and adapter
+     `CurveSurfaceDistanceJAX.dJ` docstrings to state that derivatives cover
+     both curve and surface DOFs. Port the focused introspection assertions so
+     callable-owned documentation and `docs/source/geo.rst` cannot drift apart.
    - [ ] Preserve the physical derivative basis for fixed surfaces, including
      the selected `5df801e1b` Boozer label-gradient fix after
      `surface.fix_all()`.
