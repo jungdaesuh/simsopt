@@ -81,7 +81,7 @@ commit.
 | Online Biot-Savart | production portions of `2afc66397`, then `12f7eb254` | Port implementation and focused field tests only. |
 | Dense HVP and surface placement | `b9732104b`, `7f6bf6192`, `5742d81b8` | Port as independent performance/correctness slices. |
 | SciPy evaluation ownership and factor routing | earlier routing invariant from `950fb5ca7`, reconciled with production portions of `e6746f04a`, `9183695f0`, `dbfb3238c`, then `f35f83515` | Port provider/lifecycle abstractions and explicit adjoint/forward factor authority without phase/campaign analyzers. |
-| Native derivative and replay correctness | `e4c008e80`, selected portions of `5e3208281` | Port only public derivative/replay behavior and focused tests. |
+| Native derivative and replay correctness | `e4c008e80`, the derivative-only portion of `5df801e1b`, and selected portions of `5e3208281` | Port only public derivative/replay behavior and focused tests. |
 | QFM reuse and diagnostics | `0d4f82ddc` | Candidate follow-up after the core precision stack is stable. |
 
 ## Rationale
@@ -241,6 +241,10 @@ the compatibility default and mixed precision is selected explicitly.
      `SIMSOPT_PRECISION=mode_default` rather than serializing `fp32_smoke`.
      Invoke those named cases through the existing subprocess harness; do not
      generate Python source or use `exec`, `compile`, or `python -c`.
+   - [ ] Add `SIMSOPT_PRECISION` to the root `tests/conftest.py` runtime
+     environment snapshot/restore owner so precision selection cannot leak
+     between tests. Do not add the source branch's obsolete
+     `SIMSOPT_MIXED_PRECISION` spelling.
    - [ ] Reject every value outside `{"mode_default", "fp64", "mixed"}` with an actionable
      `ValueError` from the runtime resolver before JAX runtime initialization;
      test invalid explicit and environment inputs through the public entrypoint
@@ -273,15 +277,25 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Port compute-dtype propagation through
      `src/simsopt_jax/core/_device_scalars.py`, `_math_utils.py`,
      `biotsavart.py`, `curve_geometry.py`, `curve_kernels.py`, `field.py`,
-     `specs.py`, `surface_fourier_kernels.py`, and `surface_rzfourier.py`.
+     `specs.py`, `surface_fourier_kernels.py`, and `surface_rzfourier.py`, plus
+     `src/simsopt_jax/geo/label_constraints.py`. In
+     `toroidal_flux_jax()`, construct the quadrature divisor in the active
+     vector-potential dtype instead of forcing FP64 so the residual graph
+     preserves the resolved compute dtype.
+   - [ ] Extend `tests/geo/test_label_constraints_jax.py` with a direct
+     `toroidal_flux_jax()` dtype regression: pass matching FP32 vector-potential
+     and tangent inputs and require an FP32 scalar result, while retaining the
+     corresponding FP64 result contract. Numerical value and derivative parity
+     alone do not prove this dtype boundary.
    - [ ] Add or reconcile the shared
      `src/simsopt_jax/core/_pairwise_reductions.py` owner without duplicating
      policy in `src/simsopt_jax/geo/_pairwise_reductions.py`.
    - [ ] Port mixed-dtype support through private BFGS, LBFGS, common optimizer,
      line-search, and result-conversion modules.
-   - [ ] Ensure proposal arrays may use FP32 while decision state, externally
-     visible results, and certificate computations retain their declared FP64
-     contract.
+   - [ ] Ensure proposal arrays and explicitly compute-dtype intermediates may
+     use FP32 while kernel-declared FP64 reductions/results, decision state,
+     host-materialized public results, and certificate computations retain their
+     declared FP64 contract.
    - [ ] Preserve transfer-guard-safe scalar and constant staging; do not add
      host callbacks to traced hot paths.
    - [ ] Resolve and validate the immutable numerical policy once at the public
@@ -363,6 +377,11 @@ the compatibility default and mixed precision is selected explicitly.
      stationarity/Armijo threshold owner, speculative callback isolation, full key
      round-trip/fresh-versus-replay authority, and the forward/adjoint
      factor-routing invariant.
+   - [ ] Create or port `tests/test_runtime_host_boundary.py` for the exact
+     two-word `uint32` contraction-probe key, strict transfer-guard behavior,
+     post-freeze fresh entropy, explicit replay authority, and x64-disabled
+     round-trip. Keep the test independent of examples and historical
+     artifacts.
    - [ ] Do not add `src/simsopt_jax/newton_telemetry.py` unless a production
      API—not a benchmark consumer—requires its schema.
 
@@ -374,7 +393,15 @@ the compatibility default and mixed precision is selected explicitly.
      FP64 certificate rules, and accepted-state ownership into
      `surface_objectives_traceable.py`.
    - [ ] Port only the required production changes in
-     `surface_objectives.py` and the field Biot-Savart adapter.
+     `surface_objectives.py` and
+     `src/simsopt_jax_adapters/field/biotsavart_backend.py`. In the adapter's
+     per-coil unit-field path, stage points, coil geometry, and unit current in
+     the resolved compute dtype before `vmap` or `lax.map`, then return each
+     kernel result unchanged. The real Biot-Savart kernels retain their declared
+     FP64 quadrature accumulation and output dtype even when their elementwise
+     inputs are FP32; do not add a helper-local cast in either direction. Port
+     the per-coil boundary regression to the typed precision API and assert FP32
+     staged operands together with preservation of the kernel's FP64 result.
    - [ ] Introduce `_evaluation_lifecycle.py` and `_evaluation_provider.py` as
      optimizer-owned abstractions, then route `_shared.py`, `optimizer.py`, and
      `reference.py` through them.
@@ -435,6 +462,11 @@ the compatibility default and mixed precision is selected explicitly.
 8. Port native derivative and replay correctness fixes.
    - [ ] Add full-gradient projection behavior for fully fixed Optimizable
      lineages in `src/simsopt/_core/derivative.py`.
+   - [ ] Reconcile the source-anchor companion behavior in the same module:
+     `Derivative.__call__()` returns `np.empty((0,), dtype=np.float64)` when no
+     free lineage contributes instead of calling `np.concatenate([])`, and
+     `derivative_dec` preserves the wrapped callable's metadata with
+     `functools.wraps`.
    - [ ] Implement that projection without copying the source commit's new
      function-local import. Reuse the existing validated derivative path or
      move the runtime type dependency to a static module boundary without
@@ -540,13 +572,23 @@ the compatibility default and mixed precision is selected explicitly.
 
 ### Focused CPU tests
 
-- [ ] Run `python -m pytest -q tests/test_backend_dtypes_reference_sharding.py tests/test_backend_strict_jax_device_detection.py`.
+- [ ] Run `python -m pytest -q tests/test_backend_dtypes_reference_sharding.py tests/test_backend_strict_jax_device_detection.py tests/test_runtime_host_boundary.py`.
 - [ ] Run `python -m pytest -q tests/geo/test_adjoint_cg_solver.py tests/geo/test_boozersurface_jax_private.py`.
 - [ ] Run `python -m pytest -q tests/geo/test_boozersurface_jax.py tests/geo/test_surface_objectives_jax.py`.
 - [ ] Run `python -m pytest -q tests/geo/test_optimizer_jax_reference.py tests/geo/test_traceable_bundle_mixed_lowering.py tests/geo/test_traceable_predictor_dtype_guard.py`.
 - [ ] Run `python -m pytest -q tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_online.py tests/geo/test_surface_fourier_device_placement.py`.
-- [ ] Run `python -m pytest -q tests/core/test_derivative.py tests/geo/test_surface_objectives.py`.
+- [ ] Run `python -m pytest -q tests/geo/test_label_constraints_jax.py tests/geo/test_boozer_residual_jax.py tests/geo/test_curvexyzfouriersymmetries_spec_jax.py tests/geo/test_surface_fourier_jax.py` and require the label-constraint, residual, curve-spec, and surface-from-DOFs paths to preserve the selected compute dtype.
+- [ ] Run `python -m pytest -q tests/core/test_derivative.py tests/geo/test_surface_objectives.py tests/integration/test_factor_once_adjoint_phase2.py`.
 - [ ] Run `python -m pytest -q tests/integration/test_jax_precision_upgrade_gate.py`.
+- [ ] Implement native synthetic snapshot, seed-gate, state-isolation, and
+  whole-pipeline fallback regressions from the source-anchor design contract in
+  `docs/mixed_online_biotsavart_matrix_free_single_stage_implementation_plan_2026-07-20.md`.
+  Add the separate target-side speculative callback-isolation regression
+  required by Phase 5; do not attribute it to that source document.
+  Reuse only the example-independent bounded-Newton fallback fixtures that
+  actually exist in the source anchor's
+  `tests/integration/test_mixed_precision_bfgs_newton_ab_gate.py`; do not copy
+  its campaign schemas or artifact consumers.
 - [ ] Run the existing target FP64 regression tests before enabling any mixed
   mode so target-only hardening cannot regress unnoticed.
 
