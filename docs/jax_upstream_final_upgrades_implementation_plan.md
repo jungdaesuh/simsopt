@@ -1,6 +1,6 @@
 # JAX Upstream Final Upgrades Implementation Plan
 
-**Status:** Reviewed and ready for implementation
+**Status:** Completeness-audited and ready for implementation
 **Last updated:** 2026-07-22
 
 ## Purpose
@@ -41,6 +41,10 @@ commit.
 - Adding Diffrax or its tracing/Poincare integrations in this change. Those
   require a separate dependency and import-boundary review.
 - Making dense-IR or mixed precision the implicit default for existing users.
+- Porting persistent Boozer factor snapshots, HVP rematerialization environment
+  controls, persistent compilation-cache threshold tuning, coil-spec
+  memoization, surface-tangent finite-build support, general native/JAX curve
+  cleanup, or broad objective batching in this series.
 
 ## Current Context
 
@@ -56,12 +60,16 @@ commit.
 - The stable source provenance anchor is
   `5fb96818885fe0f839f088f624914e411f2f25f8`.
 - The current source branch tip and dirty source worktree are not safe merge or
-  file-copy sources.
+  file-copy sources. In particular,
+  `a79ddd4eaf6e46b2a7562b1c5379afd57221b7e1` is a retention merge whose
+  integration ancestry includes a tree with 1,378 changed paths and 947,229
+  deletions relative to the stable anchor; it is not a port source.
 - The target already contains the base JAX port and FP64 hardening, including
   patch-equivalent dense-solve, rejected-gradient, residual-J LSMR, and Boozer
   warm-start fixes.
 - The target does not contain `src/simsopt_jax/numerical_policy.py`,
   `src/simsopt_jax/core/biotsavart_online.py`,
+  `src/simsopt_jax/runtime/exact_numeric_identity.py`,
   `src/simsopt_jax/geo/optimizers/_evaluation_lifecycle.py`, or
   `src/simsopt_jax/geo/optimizers/_evaluation_provider.py`.
 - The target does not expose the source branch's mixed-precision or
@@ -74,14 +82,18 @@ commit.
 
 | Capability | Source provenance | Port rule |
 | --- | --- | --- |
-| FP64 dense-IR/factor-once Newton | `37b65c7af`, `ad3cc28b7`, `01baba0d5`, `4abc6982e`, `3a64837b2` | Port behavior and focused tests, including the state-dependent Hessian and ill-conditioned equivalence guards; retain the target default solver. |
-| Mixed dtype and solver foundation | `35eda35e3`, `e726e161f`, `37fc6be86`, `303ca6ed1` | Reconcile hunks with target FP64 hardening. |
-| Mixed correctness fixes | `93a3e0271`, `9c3b6523e`, `d5ea716e3`, `c9299557b`, `111d22758`, `18b39f0c3`, `5604c4263`, `c2450d7bb`, `dd6d7fcc7` | Port final semantics, not intermediate states. |
+| FP64 dense-IR/factor-once Newton | selected portions of `1d055547e`, `139c05880`, `9bd9661b9`, `8d4a1103b`, `db6906fc9`, then `37b65c7af`, `ad3cc28b7`, `01baba0d5`, `4abc6982e`, `3a64837b2` | Port the complete non-default typed-mode and retry lineage, not the source's changed default. Include all four declared solver values or remove unsupported values from the public type. |
+| Host/dense operator correctness | selected portions of `9ca8929f5`, `7d488caacc`, `ecdba5011`, and `aa7612a05` | Keep host dense-Hessian materialization independent, short-circuit exact-zero RHS solves, and use bounded static CUDA chunk sizing without weakening target fail-closed gates. |
+| Mixed dtype and solver foundation | `35eda35e3`, `e726e161f`, `37fc6be86`, `303ca6ed1`, selected `1f71046a7`, and `8120b0ede` | Reconcile hunks with target FP64 hardening; retain target defaults, preserve explicit FP32 placement, and port replicated-scalar sharding. |
+| Mixed correctness fixes | `93a3e0271`, `9c3b6523e`, `d5ea716e3`, `c9299557b`, `111d22758`, `18b39f0c3`, `5604c4263`, `c2450d7bb`, `dd6d7fcc7`, and selected `7d488caacc` | Port final semantics, including the transfer-safe fixed reduction tree, not intermediate states. |
+| Pairwise and curve-objective SSOT | production portions of `8e3d2a784` | Port the core owner, geo compatibility re-export, core curve kernels, adapter routing, and focused parity tests as one slice; exclude banana owners and tests. |
 | Typed policy and certificate/fallback closure | selected portions of `1f71046a7`, `5df801e1b`, `84bfcfc6b`, `0412de980`, `add41e95c`, `b35d9a9cc`, `c338f48ca`, `9e13791ca`, `e7b74254a`, `0391dd82d`, `aa47aa741` | Exclude campaign, attestation, and evidence-publication files; retain the strict-transfer host-boundary fix. |
 | Online Biot-Savart | production portions of `2afc66397`, then `12f7eb254` | Port implementation and focused field tests only. |
 | Dense HVP and surface placement | `b9732104b`, `7f6bf6192`, `5742d81b8` | Port as independent performance/correctness slices. |
+| Adapter transfer/compile correctness | selected production portions of `2a134a677`, `7c934adc2`, `0412de980`, and `8120b0ede` | Port explicit quadrature boundaries, the exact lowerable production gradient, cached-report staging, and spec-backed ownership; exclude compile-evidence and campaign bundles. |
 | SciPy evaluation ownership and factor routing | earlier routing invariant from `950fb5ca7`, reconciled with production portions of `e6746f04a`, `9183695f0`, `dbfb3238c`, then `f35f83515` | Port provider/lifecycle abstractions and explicit adjoint/forward factor authority without phase/campaign analyzers. |
-| Native derivative and replay correctness | `e4c008e80`, the derivative-only portion of `5df801e1b`, and selected portions of `5e3208281` | Port only public derivative/replay behavior and focused tests. |
+| Native derivative and replay correctness | `e4c008e80`, `df4b5b711`, the derivative and curve-surface ownership portions of `5df801e1b`, and selected portions of `5e3208281` | Port the explicit public-method allowlist and physical partials only; exclude reduced-objective/certificate and genuine-675 owners. |
+| Deterministic paired statistics | `benchmarks/paired_bca.py` from `1f71046a7` plus example-independent contract assertions | Reuse the dependency-light BCa utility and deterministic balanced schedule; do not port the campaign comparator. |
 | QFM reuse and diagnostics | `0d4f82ddc` | Candidate follow-up after the core precision stack is stable. |
 
 ## Rationale
@@ -151,8 +163,16 @@ the compatibility default and mixed precision is selected explicitly.
   not read environment variables. Changing the public spelling therefore
   changes the runtime owner, its exports, compatibility tests, and docs—not
   every numerical caller.
+- Mixed FP32 execution uses `matmul_precision="highest"` to prohibit TF32.
+  `mode_default` and explicit FP64 retain the target mode's existing matmul
+  setting, including `"default"` for smoke/fast modes where that is the current
+  compatibility behavior.
 - Dense-IR remains opt-in for this series. Any proposal to make it the default
   is a separate API change after upstream performance and compatibility review.
+- The source's tiny-solution exception for unsafe condition estimates is not
+  part of this series. Exact-zero RHS receives its own successful zero-solution
+  path, while every nonzero solve retains the target's fail-closed condition
+  policy.
 - The source anchor's production adapter still runs the outer BFGS stage in the
   FP64 runtime dtype. Phase 4 deliberately extends proposal compute into FP32;
   that new exposure adopts the proposal-isolation contract recorded in
@@ -172,10 +192,12 @@ the compatibility default and mixed precision is selected explicitly.
   source-to-target migration to the typed keyword/option and test that the old
   environment spelling cannot change the target default.
 - QFM commit `0d4f82ddc` is deferred to a follow-up PR.
-- The only new benchmark owner in this series is
+- The only new benchmark entrypoint in this series is
   `benchmarks/jax_precision_upgrade_gate.py`, with contract tests in
-  `tests/integration/test_jax_precision_upgrade_gate.py`. It must use native,
-  synthetic fixtures and must not read campaign artifacts or import examples.
+  `tests/integration/test_jax_precision_upgrade_gate.py`.
+  `benchmarks/paired_bca.py` is its reusable, dependency-light statistical
+  utility, not a second benchmark owner. Both must use native, synthetic
+  fixtures and must not read campaign artifacts or import examples.
 - Authoritative GPU signoff runs on one Perlmutter GPU allocation. FP64 and
   mixed lanes run sequentially on the same recorded GPU UUID, environment, and
   source commit. If that allocation is unavailable, GPU signoff is blocked;
@@ -197,6 +219,11 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] For every source commit in the provenance table, inspect both its
      complete file list and the final state at `5fb968188`; do not infer scope
      from the subject line alone.
+   - [ ] Preserve target commit `ef4c8681588a31291a14111d355b82032dcef430`,
+     especially the explicit `jax.device_get()` host boundary in
+     `src/simsopt_jax/solve/minimize_runtime.py` and target-only sharding
+     helpers. Do not copy source-anchor hunks that broadly allow transfers or
+     remove those target safeguards.
    - [ ] Reject any candidate patch that adds or modifies `examples/`, generated
      artifacts, `.Codex/`, or campaign-only runtime modules.
    - [ ] Maintain a per-phase staged-file manifest and verify it with
@@ -206,8 +233,16 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Add `src/simsopt_jax/numerical_policy.py` with only the policy,
      certificate, fallback, and typed evidence structures required by
      production backend, optimizer, host-boundary, and adapter code.
+     The production allowlist is the mixed dense-IR accuracy policy and
+     singleton; optimizer history capacities/source, correction limits, Armijo
+     coefficient, and backend code; host-boundary two-word key and PRNG
+     implementation types; and adapter refinement, solve, fallback,
+     fresh-versus-replay challenge, probability/sampling, and K-seed evidence
+     consumed by selected production callers.
    - [ ] Do not include benchmark report schemas or historical campaign payload
-     migration unless a production caller demonstrably requires them.
+     migration, comparator schemas, cross-lane limits, final-gradient campaign
+     policy, or producer-lineage schemas unless a selected production caller
+     demonstrably requires them.
    - [ ] Add the defaulted `precision="mode_default"` stored selection to
      `BackendConfig`, add the omission-sentinel signature
      `precision: PrecisionSelection | None = None` to `set_backend()` and
@@ -216,6 +251,11 @@ the compatibility default and mixed precision is selected explicitly.
      dtype, and `CertificateDType | None`. Keep runtime and host result dtype
      FP64 in mixed mode; keep `jax_cpu_float32_smoke` fully FP32.
    - [ ] Preserve every existing mode's current default dtype and behavior.
+   - [ ] Set JAX matmul precision to `"highest"` only for resolved mixed FP32
+     execution so TF32 cannot weaken the numerical contract. Preserve the
+     target's current matmul setting for `mode_default`, explicit FP64, and
+     `jax_cpu_float32_smoke`; add tests for both TF32 blocking and compatibility
+     defaults.
    - [ ] Export `PrecisionSelection`, `ResolvedPrecision`, and the resolved
      precision helpers through the
      existing backend/config public surface. Do not add a parallel
@@ -224,6 +264,11 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Port the required helpers and exports in
      `src/simsopt_jax/backend/dtypes.py`, `src/simsopt_jax/config.py`, and
      `src/simsopt_jax/runtime/host_boundary.py`.
+   - [ ] Port the selected `1f71046a7` placement semantics so
+     `_device_put_preserving_dtype()` and `explicit_device_array()` preserve an
+     explicitly requested FP32 dtype rather than reapplying the runtime FP64
+     dtype. Add the direct regression to
+     `tests/test_backend_dtypes_reference_sharding.py`.
    - [ ] Add a backend/precision compatibility matrix and tests proving that
      omitted precision preserves every existing mode, including
      `jax_cpu_float32_smoke`, and that unsupported native/smoke combinations
@@ -254,11 +299,24 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Reconcile the factor-once dense-IR materialization and solve path into
      `src/simsopt_jax/geo/optimizers/optimizer.py`.
    - [ ] Port strict-cap retry routing through dense LU and the lazy-chord factor
-     reuse behavior.
+     reuse behavior. Reconstruct the selected non-default lineage from
+     `1d055547e`, `139c05880`, `9bd9661b9`, `8d4a1103b`, and `db6906fc9`
+     before applying `37b65c7af`; do not copy the `9bd9661b9` change to the
+     default `operator_gmres` route.
    - [ ] Preserve existing fail-closed condition, backward-error, and
      ill-conditioning gates already present on the target.
    - [ ] Generate dense operator columns without materializing a quadratic
      identity constant, using the final behavior from `b9732104b`.
+   - [ ] Port `_materialize_dense_hessian_host()` as an independent host
+     implementation from selected `9ca8929f5`; it must not call the device
+     `lax.map` materializer. Preserve the existing monkeypatch regression and
+     add `tests/geo/test_optimizer_jax_item19.py` to focused validation.
+   - [ ] Port the exact-zero-RHS operator-solve short circuit from selected
+     `7d488caacc`: return a successful zero solution without invoking GMRES.
+     Do not port the separate tiny-nonzero-solution condition exception.
+   - [ ] Port the static CUDA dense-operator chunk auto-sizing finalized by
+     `ecdba5011` and `aa7612a05`, retaining explicit override and the
+     conservative non-CUDA default. Keep the helper private.
    - [ ] Add the exact typed `linear_solver` keyword and
      `BoozerSurfaceJAX.options["newton_linear_solver"]` contract from the
      resolved decisions. Keep `operator_gmres` as the target default; require
@@ -278,18 +336,35 @@ the compatibility default and mixed precision is selected explicitly.
      `src/simsopt_jax/core/_device_scalars.py`, `_math_utils.py`,
      `biotsavart.py`, `curve_geometry.py`, `curve_kernels.py`, `field.py`,
      `specs.py`, `surface_fourier_kernels.py`, and `surface_rzfourier.py`, plus
-     `src/simsopt_jax/geo/label_constraints.py`. In
+     `src/simsopt_jax/geo/label_constraints.py` and
+     `src/simsopt_jax/geo/boozer_residual.py`. In
      `toroidal_flux_jax()`, construct the quadrature divisor in the active
      vector-potential dtype instead of forcing FP64 so the residual graph
      preserves the resolved compute dtype.
+   - [ ] In `boozer_residual.py`, port the final `303ca6ed1` behavior reconciled
+     with `9c3b6523e`: preserve caller dtype in decision splits and residual
+     inputs, use explicit scalar/vector compute dtype, stage literals relative
+     to live arrays, keep CPU-ordered values/gradients in `B.dtype`, request
+     compute dtype from surface geometry, and thread `dtype=B.dtype` through
+     composed residual and coil-VJP paths.
    - [ ] Extend `tests/geo/test_label_constraints_jax.py` with a direct
      `toroidal_flux_jax()` dtype regression: pass matching FP32 vector-potential
      and tangent inputs and require an FP32 scalar result, while retaining the
      corresponding FP64 result contract. Numerical value and derivative parity
      alone do not prove this dtype boundary.
-   - [ ] Add or reconcile the shared
-     `src/simsopt_jax/core/_pairwise_reductions.py` owner without duplicating
-     policy in `src/simsopt_jax/geo/_pairwise_reductions.py`.
+   - [ ] Port the selected `8e3d2a784` pairwise/curve-objective slice as one
+     coherent owner migration: add
+     `src/simsopt_jax/core/_pairwise_reductions.py`, convert
+     `src/simsopt_jax/geo/_pairwise_reductions.py` to a compatibility
+     re-export, move the reusable length/curvature/curve-distance kernels into
+     `core/curve_kernels.py`, and route
+     `src/simsopt_jax_adapters/geo/curve_objectives.py` through those kernels.
+     Exclude `banana.py`, banana specs/exports, and banana tests.
+   - [ ] Port the `7d488caacc` fixed reduction tree in
+     `src/simsopt_jax/core/reductions.py`; remove the short-axis
+     `lax.slice_in_dim` path so VJP on three-component axes remains valid under
+     `jax.transfer_guard("disallow")`. Reconcile the same commit's selected
+     static selector/update portion of `curve_geometry.py`.
    - [ ] Port mixed-dtype support through private BFGS, LBFGS, common optimizer,
      line-search, and result-conversion modules.
    - [ ] Ensure proposal arrays and explicitly compute-dtype intermediates may
@@ -297,7 +372,10 @@ the compatibility default and mixed precision is selected explicitly.
      host-materialized public results, and certificate computations retain their
      declared FP64 contract.
    - [ ] Preserve transfer-guard-safe scalar and constant staging; do not add
-     host callbacks to traced hot paths.
+     host callbacks to traced hot paths. Port the selected `8120b0ede`
+     behavior that maps a rank-zero scalar derived from a nonreplicated
+     `NamedSharding` reference to replicated `PartitionSpec()` and stages
+     `curve_kernels.py` literals through the shared helper.
    - [ ] Resolve and validate the immutable numerical policy once at the public
      boundary before tracing. Thread its retained dtype, tolerance,
      certificate, and fallback fields explicitly through kernels and cached
@@ -308,7 +386,9 @@ the compatibility default and mixed precision is selected explicitly.
      production path consumes the numerical-policy owner rather than duplicated
      constants.
    - [ ] Add focused dtype and strict-transfer tests without importing example
-     modules.
+     modules. Include a replicated-scalar `NamedSharding` regression,
+     `tests/core/test_reductions.py` short-axis VJP coverage, and dense/chunked
+     value-and-gradient parity in `tests/geo/test_curve_objectives_jax.py`.
    - [ ] Create or port
      `tests/geo/test_traceable_bundle_mixed_lowering.py` and
      `tests/geo/test_traceable_predictor_dtype_guard.py`; these files do not
@@ -365,6 +445,12 @@ the compatibility default and mixed precision is selected explicitly.
      the common public result contract.
    - [ ] Port only production-required portions of
      `src/simsopt_jax_adapters/geo/factor_handoff_identity.py`.
+   - [ ] Add its direct production dependency
+     `src/simsopt_jax/runtime/exact_numeric_identity.py` from selected
+     `5df801e1b`. Test that tree identity binds structure, dtype, shape, and
+     bytes, and rejects object/nonfinite leaves in a new dependency-light
+     `tests/test_exact_numeric_identity.py`; do not import the source campaign
+     probe.
    - [ ] Port the `950fb5ca7` routing invariant: an explicit adjoint selector
      overrides supplied factor metadata, and selecting LSMR for the adjoint
      path never changes the K1 forward predictor, with or without supplied
@@ -377,6 +463,10 @@ the compatibility default and mixed precision is selected explicitly.
      stationarity/Armijo threshold owner, speculative callback isolation, full key
      round-trip/fresh-versus-replay authority, and the forward/adjoint
      factor-routing invariant.
+   - [ ] Add an explicit regression proving the bounded mixed primitive is
+     independent of the default Newton runner and its iteration shape; adapt
+     only the example-independent assertion from the source test to the typed
+     precision API.
    - [ ] Create or port `tests/test_runtime_host_boundary.py` for the exact
      two-word `uint32` contraction-probe key, strict transfer-guard behavior,
      post-freeze fresh entropy, explicit replay authority, and x64-disabled
@@ -392,6 +482,15 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Port large-constant staging, runtime-dtype predictor solves, seeded/K2
      FP64 certificate rules, and accepted-state ownership into
      `surface_objectives_traceable.py`.
+   - [ ] Port the selected `2a134a677` device-quadrature boundary: use the
+     explicit host boundary in `surface_objectives.py` only when host data is
+     required, and stage already-device-resident quadrature directly in
+     `surface_objectives_traceable.py`. Add the source strict-transfer
+     regression without example imports.
+   - [ ] Port only the production lowerable-gradient seam from `7c934adc2`:
+     construct one `lowerable_total_gradient_for`, reuse it in lazy and eager
+     production routes, and expose that exact callable to prewarm/lowering.
+     Exclude the commit's compile-evidence and campaign bundle.
    - [ ] Port only the required production changes in
      `surface_objectives.py` and
      `src/simsopt_jax_adapters/field/biotsavart_backend.py`. In the adapter's
@@ -402,6 +501,11 @@ the compatibility default and mixed precision is selected explicitly.
      inputs are FP32; do not add a helper-local cast in either direction. Port
      the per-coil boundary regression to the typed precision API and assert FP32
      staged operands together with preservation of the kernel's FP64 result.
+   - [ ] Preserve spec-backed Biot-Savart graph identity through rotated/scaled
+     curve and current wrappers, give spec-backed fields the required
+     `clear_points()` behavior, and include symmetry-current owner segments in
+     cache identity using selected `7d488caacc`, `8120b0ede`, and
+     `5df801e1b` production hunks. Do not port campaign consumers.
    - [ ] Introduce `_evaluation_lifecycle.py` and `_evaluation_provider.py` as
      optimizer-owned abstractions, then route `_shared.py`, `optimizer.py`, and
      `reference.py` through them.
@@ -415,14 +519,28 @@ the compatibility default and mixed precision is selected explicitly.
      `BoozerSurfaceJAX` entrypoint. Include both in cache identities and result
      labels; test the public entrypoint, not only private helpers, with values
      that distinguish each route.
+   - [ ] In `boozer_residual.py::_surface_geometry_from_dofs`, construct one
+     immutable `SurfaceXYZTensorFourierSpec` carrying compact `int32` indices
+     and `clamped_dims`, then call the spec-owned geometry kernels. Port the
+     `7f6bf6192` companion fixture changes in
+     `tests/geo/boozersurface_jax_test_helpers.py` so clones and mocks preserve
+     `clamped_dims`.
    - [ ] Add the `aa47aa741` strict-transfer regression at the lazy reporting
      boundary, proving host booleans are staged outside traced/device code and
      do not cause an implicit host-to-device transfer.
+   - [ ] Complete the selected `0412de980` reporting boundary by staging both
+     the cached `outer_raw_terms` presence flag and every cached raw-term leaf
+     relative to `solved_x`; add a strict-transfer regression.
 
 7. Port standalone reusable performance upgrades.
    - [ ] Add `src/simsopt_jax/core/biotsavart_online.py` from the final
      production state and connect it through `core/field.py` without campaign
      selectors.
+   - [ ] Port the matching backend half of the dispatch from `2afc66397`: the
+     mixed online source-tile constant,
+     `FieldKernelTuning.mixed_biot_savart_source_tile_size`, and its policy
+     population. Test tuning and strict-transfer dispatch so `core/field.py`
+     cannot dereference a missing field.
    - [ ] Preserve bitwise agreement between the direct primal entry point and
      the custom-JVP primal while fusing primal and tangent source traversal.
    - [ ] Port the stellarator-symmetry index-scatter representation across
@@ -437,8 +555,10 @@ the compatibility default and mixed precision is selected explicitly.
      the target baseline.
    - [ ] Add `benchmarks/jax_precision_upgrade_gate.py` and its contract test.
      Pre-register a count `N >= 20` with `N % 4 == 0` fresh independent paired
-     process blocks on the same GPU UUID, with equal predeclared AB and BA lane
-     orders. In each process, use at least one warmup followed
+     process blocks on the same GPU UUID, using the temporally balanced
+     predeclared schedule `(AB, BA, BA, AB) * (N / 4)`. Tamper-test the complete
+     schedule, not only equal aggregate AB/BA counts. In each process, use at
+     least one warmup followed
      by at least three synchronized repetitions and reduce those repetitions to
      one lane median. Admit a timing pair only after both lanes pass their
      scientific correctness and FP64-certificate gates. Require the median
@@ -451,6 +571,13 @@ the compatibility default and mixed precision is selected explicitly.
      “times lower.” Report peak device memory and
      fallback frequency without substituting static compiled-buffer estimates
      for observed peak memory.
+   - [ ] Add the dependency-light `benchmarks/paired_bca.py` utility from
+     `1f71046a7`, or reproduce its final algorithm exactly in the new gate:
+     tie-aware bias correction, jackknife acceleration, deterministic
+     bootstrap, one-sided bounds, and fail-loud degenerate-sample handling.
+     Adapt its pure deterministic/distinctness/degenerate assertions into
+     `tests/integration/test_jax_precision_upgrade_gate.py`; do not import the
+     source campaign comparator.
    - [ ] Make the parent wrapper preserve a nonzero child exit code and attach
      the child's status and stderr before any success-only RSS/GPU telemetry is
      interpreted. Add a contract test for child failure precedence.
@@ -471,14 +598,30 @@ the compatibility default and mixed precision is selected explicitly.
      function-local import. Reuse the existing validated derivative path or
      move the runtime type dependency to a static module boundary without
      creating an import cycle.
-   - [ ] Port only the general public-objective portions of the FP64 primitive
-     replay work in `src/simsopt/geo/surfaceobjectives.py` and the two JAX
-     surface-objective adapters.
-   - [ ] Preserve the physical derivative basis for fixed surfaces.
+   - [ ] Port the explicit public replay allowlist from `df4b5b711`:
+     `NonQuasiSymmetricRatio._fixed_surface_value()`,
+     `NonQuasiSymmetricRatio.fixed_surface_value_and_derivative()`, and
+     `BoozerResidual.fixed_surface_value_derivative_and_y_partial()`. Reconcile
+     only the later `G: float | None` annotation from `5e3208281`.
+   - [ ] Exclude `BoozerSurfaceReducedAdjointCertificate`,
+     `BoozerSurfaceReducedObjective`, and
+     `boozer_surface_y_stationarity_outer_vjp()` from this series; they require
+     the broader genuine-675/remediation dependency chain.
+   - [ ] Port the native curve-surface physical-partial slice from selected
+     `5df801e1b`: add
+     `src/simsopt/geo/_curve_surface_distance_owners.py`, make
+     `CurveSurfaceDistance` depend on the surface, and return the surface VJP
+     from `dJ(partials=True)`. Port the matching public
+     `CurveSurfaceDistanceJAX` owner and four-input derivative behavior.
+   - [ ] Preserve the physical derivative basis for fixed surfaces, including
+     the selected `5df801e1b` Boozer label-gradient fix after
+     `surface.fix_all()`.
    - [ ] Ensure replay values and primitive partials come from the same FP64
      source of truth.
    - [ ] Add focused tests that construct native Optimizable fixtures directly;
-     do not import the single-stage example package.
+     do not import the single-stage example package. Include owner and
+     directional finite-difference coverage for native and JAX curve-surface
+     objectives and the fixed-surface Boozer label-gradient regression.
    - [ ] Add an independent finite-difference directional-derivative spot check
      for one fixed-surface objective so value replay, primitive partials, and
      the physical derivative basis are not validated only against each other.
@@ -489,12 +632,23 @@ the compatibility default and mixed precision is selected explicitly.
    - [ ] Update `docs/source/jax_gpu_setup.rst` with explicit FP64 and mixed
      selection, certificate/fallback behavior, synchronized timing, and
      compatibility defaults.
+   - [ ] Update the migration SSOT `docs/source/jax_migration.rst` with
+     `precision=`, `SIMSOPT_PRECISION`, compatibility defaults, removal of the
+     source-only environment spellings, and typed opt-in dense-IR selection.
    - [ ] Document that mixed precision changes proposal computation but not the
      FP64 acceptance authority.
    - [ ] Confirm that no new dependency is required for this plan. Keep Diffrax
      and Poincare work in a separate follow-up plan and PR.
    - [ ] Run a source-boundary audit proving production modules, selected tests,
      and selected benchmarks do not import from `examples/`.
+   - [ ] Port the example-independent AST boundary from
+     `tests/jax/solve/test_import_boundaries.py` so both `src/` and `examples/`
+     are forbidden from importing `benchmarks`.
+   - [ ] Add the CPU-safe focused tests to `.github/workflows/jax_smoke.yml`,
+     install the repository-supported JAX/JAXLIB pins there, and add the
+     strict-GPU correctness subset to `.github/workflows/jax_gpu_parity.yml`.
+     Keep the authoritative paired performance signoff on Perlmutter; do not
+     port source campaign workflows wholesale.
    - [ ] Keep the deferred QFM change `0d4f82ddc` out of this series.
 
 10. Prepare the upstream review series.
@@ -560,6 +714,9 @@ the compatibility default and mixed precision is selected explicitly.
   `rg -n '(from|import) examples|examples\.single_stage_optimization' src/simsopt src/simsopt_jax src/simsopt_jax_adapters`
   and require no production imports. Repeat the same scan over the changed test
   and benchmark manifest and require no matches there.
+- [ ] Run the AST boundary in
+  `tests/jax/solve/test_import_boundaries.py` and require that neither `src/`
+  nor `examples/` imports `benchmarks`.
 - [ ] Run `git diff --name-only "$upgrade_base"..HEAD -- examples` and require
   no output. Comparing against the upstream merge base is invalid here because
   it includes pre-existing files from the base JAX port.
@@ -568,17 +725,20 @@ the compatibility default and mixed precision is selected explicitly.
   function-local imports; require no newly introduced dynamic, generated-code,
   or local imports.
 - [ ] Run `sphinx-build -W -b html docs/source /tmp/simsopt-jax-docs-build` after
-  updating `docs/source/jax_gpu_setup.rst`.
+  updating `docs/source/jax_gpu_setup.rst` and
+  `docs/source/jax_migration.rst`.
 
 ### Focused CPU tests
 
 - [ ] Run `python -m pytest -q tests/test_backend_dtypes_reference_sharding.py tests/test_backend_strict_jax_device_detection.py tests/test_runtime_host_boundary.py`.
-- [ ] Run `python -m pytest -q tests/geo/test_adjoint_cg_solver.py tests/geo/test_boozersurface_jax_private.py`.
+- [ ] Run `python -m pytest -q tests/test_exact_numeric_identity.py tests/jax/solve/test_import_boundaries.py`.
+- [ ] Run `python -m pytest -q tests/geo/test_adjoint_cg_solver.py tests/geo/test_boozersurface_jax_private.py tests/geo/test_optimizer_jax_item19.py`.
 - [ ] Run `python -m pytest -q tests/geo/test_boozersurface_jax.py tests/geo/test_surface_objectives_jax.py`.
+- [ ] Run `python -m pytest -q tests/geo/test_curve_objectives_jax.py`.
 - [ ] Run `python -m pytest -q tests/geo/test_optimizer_jax_reference.py tests/geo/test_traceable_bundle_mixed_lowering.py tests/geo/test_traceable_predictor_dtype_guard.py`.
 - [ ] Run `python -m pytest -q tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_online.py tests/geo/test_surface_fourier_device_placement.py`.
 - [ ] Run `python -m pytest -q tests/geo/test_label_constraints_jax.py tests/geo/test_boozer_residual_jax.py tests/geo/test_curvexyzfouriersymmetries_spec_jax.py tests/geo/test_surface_fourier_jax.py` and require the label-constraint, residual, curve-spec, and surface-from-DOFs paths to preserve the selected compute dtype.
-- [ ] Run `python -m pytest -q tests/core/test_derivative.py tests/geo/test_surface_objectives.py tests/integration/test_factor_once_adjoint_phase2.py`.
+- [ ] Run `python -m pytest -q tests/core/test_derivative.py tests/core/test_reductions.py tests/geo/test_surface_objectives.py tests/geo/test_boozersurface.py tests/integration/test_factor_once_adjoint_phase2.py`.
 - [ ] Run `python -m pytest -q tests/integration/test_jax_precision_upgrade_gate.py`.
 - [ ] Implement native synthetic snapshot, seed-gate, state-isolation, and
   whole-pipeline fallback regressions from the source-anchor design contract in
@@ -621,6 +781,9 @@ the compatibility default and mixed precision is selected explicitly.
   certificate authority match the current state.
 - [ ] Verify SciPy callbacks accept the latest exact duplicate and leave unknown
   callback states unresolved rather than fabricating evidence.
+- [ ] Verify the exact-zero RHS path returns a successful zero solution without
+  entering GMRES, while a nonzero ill-conditioned solve remains fail-closed and
+  does not receive the excluded tiny-solution exception.
 
 ### GPU validation
 
@@ -687,8 +850,23 @@ the compatibility default and mixed precision is selected explicitly.
   `rg` checks in validation.
 
 - Risk: Mixed dtype staging introduces host-device transfers or recompilation.
-  Mitigation: retain device-relative scalar construction, stage large constants
-  once, use strict transfer tests, and measure compile count and warm execution.
+  Mitigation: retain device-relative scalar construction, replicate rank-zero
+  scalar sharding explicitly, use the transfer-safe fixed reduction tree, stage
+  large constants once, test public solver/adapter entrypoints under strict
+  transfer guards, and measure compile count and warm execution.
+
+- Risk: A selected adapter or kernel is ported without its direct runtime,
+  policy, tuning, compatibility-re-export, or fixture dependency.
+  Mitigation: treat the exact-identity helper, online-field tuning, pairwise
+  owner migration, curve-objective routing, clamped-surface fixture, and
+  deterministic BCa utility as atomic dependency slices with focused tests.
+
+- Risk: Copying a broad source commit changes target defaults or imports
+  campaign/remediation code while fixing one reachable production seam.
+  Mitigation: use the symbol/file allowlists in each phase, preserve
+  `operator_gmres` and target transfer hardening, and exclude the source's
+  tiny-solution exception, compile-evidence bundle, reduced-objective chain,
+  and campaign schemas.
 
 - Risk: The source contains an implementation followed by a later revert.
   Mitigation: compare with the final tree at `5fb968188`; do not replay
@@ -714,12 +892,19 @@ the compatibility default and mixed precision is selected explicitly.
 - [ ] Existing backend modes retain their prior default behavior and pass their
   prior regression tests, including the full-FP32 `jax_cpu_float32_smoke` mode.
 - [ ] Dense-IR is available through an explicit solver selection and passes
-  factor-reuse, condition, retry, and fallback tests.
+  factor-reuse, independent host-materialization, exact-zero RHS, condition,
+  retry, and fallback tests for every declared typed solver value.
 - [ ] Mixed precision is explicitly selectable and cannot return an endpoint
   without FP64 acceptance authority.
 - [ ] Online Biot-Savart, dense-HVP, and surface-scatter upgrades pass their
-  focused parity and placement tests.
-- [ ] SciPy evaluation lifecycle and derivative/replay correctness tests pass.
+  focused parity, dispatch-tuning, graph-identity, and placement tests.
+- [ ] Core reductions, pairwise/curve-objective routing, scalar sharding, and
+  adapter quadrature/reporting boundaries pass strict-transfer and dtype tests.
+- [ ] SciPy evaluation lifecycle and derivative/replay correctness tests pass,
+  including fixed-surface replay and native/JAX curve-surface physical partials.
+- [ ] The deterministic paired benchmark uses the predeclared balanced schedule,
+  validated BCa implementation, synchronized timing, and fail-closed scientific
+  gate.
 - [ ] Production code and selected validation code have no imports from
   `examples/`.
 - [ ] No campaign artifact, remediation, genuine-675, canonical11, or generated
@@ -740,3 +925,8 @@ the compatibility default and mixed precision is selected explicitly.
   separate environments.
 - Any additional benchmark, QFM change, Diffrax integration, campaign schema, or
   example import is scope expansion and requires a separate plan/PR.
+- Persistent factor snapshots, HVP rematerialization controls, surface-tangent
+  finite-build support, coil-spec memoization commit `ca0c420d75`, general
+  batching commit `b24bad015`, and other post-anchor product features remain
+  separate follow-ups unless this plan and its dependency/validation inventory
+  are explicitly reopened.
