@@ -3554,18 +3554,24 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
-    obj._direct_objective_value_and_grad = object()
-    dJ_ds_sdofs = []
+    observed_inner_states = []
     obj._inner_objective_state = lambda _iota, _G, *, sdofs=None: (
         jnp.asarray([0.1, 0.2], dtype=jnp.float64),
         True,
     )
 
-    def _compute_dJ_ds(_coil_set_spec, _iota, _G, _weight_inv_modB, *, sdofs):
-        dJ_ds_sdofs.append(sdofs)
-        return jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+    def _value_and_gradients(coil_dofs, x_inner, optimize_G, weight_inv_modB):
+        np.testing.assert_allclose(np.asarray(coil_dofs), np.asarray([0.5, -0.25]))
+        observed_inner_states.append(np.asarray(x_inner))
+        assert optimize_G is True
+        assert weight_inv_modB is True
+        return (
+            2.5,
+            jnp.asarray([4.0, -1.0], dtype=jnp.float64),
+            jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+        )
 
-    obj._compute_dJ_ds = _compute_dJ_ds
+    obj._direct_objective_value_and_gradients = _value_and_gradients
 
     solved_state = types.SimpleNamespace(
         sdofs=jnp.asarray([0.4], dtype=jnp.float64),
@@ -3591,19 +3597,8 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_current_coil_dofs_and_spec",
-        lambda _biotsavart: (
-            jnp.asarray([0.5, -0.25], dtype=jnp.float64),
-            "coil-spec",
-        ),
-    )
-    monkeypatch.setattr(
-        surfaceobjectives_jax_module,
-        "_value_and_direct_coil_gradient",
-        lambda *_args: (
-            2.5,
-            jnp.asarray([4.0, -1.0], dtype=jnp.float64),
-        ),
+        "_current_coil_dofs",
+        lambda _biotsavart: jnp.asarray([0.5, -0.25], dtype=jnp.float64),
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -3629,9 +3624,9 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     np.testing.assert_allclose(np.asarray(gradient), np.asarray([3.0, -3.0]))
     assert obj._J == 2.5
     assert obj._dJ is None
-    assert len(dJ_ds_sdofs) == 1
+    assert len(observed_inner_states) == 1
     np.testing.assert_allclose(
-        np.asarray(dJ_ds_sdofs[0]), np.asarray(solved_state.sdofs)
+        observed_inner_states[0], np.asarray([0.1, 0.2])
     )
 
 
@@ -3696,12 +3691,10 @@ def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypat
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
-    obj._compute_value = lambda _sdofs, _coil_set_spec: 1.75
-    obj._direct_coil_gradient = lambda _coil_dofs, _sdofs: jnp.asarray(
-        [4.0, -1.0], dtype=jnp.float64
-    )
-    obj._compute_dJ_ds = lambda _coil_set_spec, _sdofs, _decision_size: jnp.asarray(
-        [0.0, 1.0], dtype=jnp.float64
+    obj._direct_objective_value_and_gradients = lambda _coil_dofs, _sdofs: (
+        1.75,
+        jnp.asarray([4.0, -1.0], dtype=jnp.float64),
+        jnp.asarray([0.0], dtype=jnp.float64),
     )
 
     solved_state = types.SimpleNamespace(
@@ -3728,11 +3721,8 @@ def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypat
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_current_coil_dofs_and_spec",
-        lambda _biotsavart: (
-            jnp.asarray([0.5, -0.25], dtype=jnp.float64),
-            "coil-spec",
-        ),
+        "_current_coil_dofs",
+        lambda _biotsavart: jnp.asarray([0.5, -0.25], dtype=jnp.float64),
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,

@@ -29,7 +29,10 @@ from simsopt_jax.geo._pairwise_reductions import (
     _resolve_pairwise_penalty_chunk_size,
     _use_dense_pairwise_path,
 )
-from simsopt_jax.runtime.host_boundary import host_float64 as _as_numpy_float64
+from simsopt_jax.runtime.host_boundary import (
+    host_float as _host_float,
+    host_float64 as _as_numpy_float64,
+)
 
 jit = jax.jit
 
@@ -429,11 +432,13 @@ class LpCurveCurvatureJAX(Optimizable):
         super().__init__(depends_on=[curve])
 
     def J(self):
-        return Lp_curvature_pure(
-            _as_jax_float64(self.curve.kappa()),
-            _as_jax_float64(self.curve.gammadash()),
-            _as_jax_float64(self.p),
-            _as_jax_float64(self.threshold),
+        return _host_float(
+            Lp_curvature_pure(
+                _as_jax_float64(self.curve.kappa()),
+                _as_jax_float64(self.curve.gammadash()),
+                _as_jax_float64(self.p),
+                _as_jax_float64(self.threshold),
+            )
         )
 
     @derivative_dec

@@ -490,6 +490,18 @@ def test_public_curve_objective_jax_wrappers_match_cpu_values_and_gradients():
     )
 
 
+def test_lp_curve_curvature_jax_value_composes_at_the_host_boundary():
+    curve = _build_nonplanar_curve()
+    objective = LpCurveCurvatureJAX(curve, p=2, threshold=0.0)
+    scaled_objective = 3.0 * objective
+
+    value = objective.J()
+    scaled_value = scaled_objective.J()
+
+    assert isinstance(value, float)
+    np.testing.assert_allclose(scaled_value, 3.0 * value, rtol=0.0, atol=0.0)
+
+
 def test_public_curve_distance_jax_wrappers_match_cpu_values_and_gradients():
     curve1 = _build_offset_nonplanar_curve(0.0)
     curve2 = _build_offset_nonplanar_curve(0.3)
