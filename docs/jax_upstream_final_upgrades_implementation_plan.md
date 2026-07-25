@@ -1,8 +1,9 @@
 # JAX Upstream Final Upgrades Implementation Plan
 
-**Status:** Master roadmap re-audited against the stable source anchor, clean
-candidate lineage, and detached FP64 lineage. The bounded Phase 0 below is the
-next implementation unit; the full master checklist is not one PR.
+**Status:** The bounded Phase 0 implementation is present on the clean
+candidate lineage and has a dedicated local acceptance gate below. The full
+master roadmap and authoritative Perlmutter signoff remain open and are not one
+PR.
 **Last updated:** 2026-07-24
 
 ## Purpose
@@ -265,22 +266,22 @@ the compatibility default and mixed precision is selected explicitly.
 Phase 0 is one independently reviewable core PR. It does not close the full
 roadmap and must not be described as complete strict-placement closure.
 
-- [ ] Freeze `upgrade_base` at `85cde8d83` (or record and review any newer
+- [x] Freeze `upgrade_base` at `85cde8d83` (or record and review any newer
   clean target tip before applying the slice).
-- [ ] Cherry-pick `752ed0193` whole as the target-native functional fusion
+- [x] Cherry-pick `752ed0193` whole as the target-native functional fusion
   slice. Preserve its five-file boundary.
-- [ ] Select only
+- [x] Select only
   `src/simsopt_jax_adapters/field/biotsavart_backend.py` and
   `src/simsopt_jax_adapters/geo/boozer_surface.py` from `4d52c19b2`.
   Explicitly exclude `src/simsopt_jax/geo/optimizers/private/_bfgs.py` until a
   dedicated public reproducer justifies that change.
-- [ ] Reconstruct, rather than cherry-pick, the narrow production behavior
+- [x] Reconstruct, rather than cherry-pick, the narrow production behavior
   from `0bfcf79b7`: return host scalars from the public curve-curve and
   curve-surface objective boundaries, and stage both surface-surface geometry
   inputs through the shared placement-aware conversion. Add target-owned public
   regressions instead of copying donor tests that depend on absent wrapper
   architecture.
-- [ ] Add at least one CUDA regression that exercises the fused derivative
+- [x] Add at least one CUDA regression that exercises the fused derivative
   through a public BoozerResidual or NonQuasiSymmetricRatio objective under
   `jax.transfer_guard("disallow")`. The private
   `_make_cached_strict_scalar_value_and_two_gradients` regression is necessary
@@ -288,14 +289,14 @@ roadmap and must not be described as complete strict-placement closure.
   host-staged geometry semantics and complete without a CUDA skip; this is an
   acceptance requirement, not a claim that `752ed0193` has a proven runtime
   defect.
-- [ ] Explicitly defer rotated-curve VJP placement. Its `a473ec6a6` production
+- [x] Explicitly defer rotated-curve VJP placement. Its `a473ec6a6` production
   hunk and regression depend on the spec-backed rotated-curve wrapper/graph-
   identity architecture absent from `85cde8d83`, `752ed0193`, and
   `4d52c19b2`.
-- [ ] Explicitly defer the `ef8626e5` custom JVP for `dofs_to_xyzc` until the
+- [x] Explicitly defer the `ef8626e5` custom JVP for `dofs_to_xyzc` until the
   one-dimensional index-scatter contract is ported. Phase 0 proves neither
   symbolic-zero tangent placement nor scatter transpose/VJP placement.
-- [ ] Require zero CUDA skips for the Phase 0 strict-placement gates, preserve
+- [x] Require zero CUDA skips for the Phase 0 strict-placement gates, preserve
   FP64 defaults, and record exact interpreter/import origins with the test
   receipt.
 
@@ -1083,10 +1084,45 @@ implementation.
   Require both root and integration conftest owners to load without module-name
   collision.
 
-### Focused CPU tests
+### Phase 0 bounded CPU/static acceptance
 
-Phase 0 has this bounded CPU/static acceptance subset; the longer checklist
-below belongs to the full roadmap:
+Phase 0 owns this deliberately bounded gate over the production and regression
+contracts changed by the slice:
+
+```bash
+git diff --check 752ed0193..HEAD
+python -m compileall -q \
+  src/simsopt/geo/curve.py \
+  src/simsopt_jax_adapters/field/biotsavart_backend.py \
+  src/simsopt_jax_adapters/geo/boozer_surface.py \
+  src/simsopt_jax_adapters/geo/curve_objectives.py \
+  src/simsopt_jax_adapters/geo/surface_objectives.py \
+  src/simsopt_jax_adapters/objectives/flux.py
+JAX_PLATFORMS=cpu SIMSOPT_JAX_PLATFORM=cpu python -m pytest -q -rs \
+  tests/geo/test_curve_objectives_jax.py \
+  tests/field/test_biotsavart_jax.py::TestBiotSavartJAXCoilStateToken::test_biotsavart_extraction_spec_changes_only_for_captured_dof_contract \
+  tests/field/test_biotsavart_jax.py::TestBiotSavartJAXCoilStateToken::test_spec_backed_biotsavart_jax_advances_layout_version_on_fix \
+  tests/geo/test_surface_objectives_jax.py::test_iotas_jax_gradient_path_reads_adjoint_runtime_state \
+  tests/geo/test_surface_objectives_jax.py::test_iotas_jax_native_gradient_stays_flat_until_public_boundary \
+  tests/geo/test_surface_objectives_jax.py::test_public_dJ_projects_cached_native_gradient_without_recomputing \
+  tests/geo/test_surface_objectives_jax.py::test_major_radius_jax_re_solve_directional_finite_difference \
+  tests/geo/test_surface_objectives_jax.py::test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit \
+  tests/objectives/test_fluxobjective_jax_parity.py::test_squaredfluxjax_rejects_fixed_field_dof_value_mutation \
+  tests/objectives/test_fluxobjective_jax_parity.py::test_squaredfluxjax_rejects_field_dof_layout_mutation_after_construction
+```
+
+Require no failures. CPU skips are permitted only for explicitly GPU-only
+parameterizations and must be enumerated. This node list is the Phase 0 owner;
+it does not redefine the full-roadmap regression suite below.
+
+Local receipt on 2026-07-24: `31 passed, 2 skipped` in 20.62 s. Both skips
+were the CUDA-only parameterizations of the two `SquaredFluxJAX` contract
+tests; every CPU-owned node executed.
+
+### Full four-file CPU roadmap diagnostic
+
+The original four-complete-file command remains a broader roadmap diagnostic,
+not the bounded Phase 0 acceptance gate:
 
 ```bash
 git diff --check "$upgrade_base"..HEAD
@@ -1102,9 +1138,15 @@ python -m pytest -q -rs \
   tests/geo/test_surface_objectives_jax.py
 ```
 
-Require no failures, enumerate every skip, and reject any import origin that
-violates the environment rule above. GPU-marked skips in this CPU subset do not
-close their corresponding CUDA gates.
+Its 2026-07-24 isolated-checkout run completed with `486 passed, 36 skipped,
+17 failed` in 770.94 s. All 17 failures were in
+`tests/geo/test_surface_objectives_jax.py` and predated the strict-test
+ownership repair: stale native-versus-adapter module references, absent legacy
+runtime contracts, traceable failure-sentinel placement, one non-finite solved
+pair, and stale native `MajorRadius.compute` call signatures. They are retained
+as explicit full-roadmap debt; they are neither hidden by exclusions nor used
+to qualify the bounded Phase 0 result. GPU-marked skips in this diagnostic do
+not close their corresponding CUDA gates.
 
 Current diagnostic receipt, not acceptance evidence: the following unified
 command reproducibly completed with `110 passed, 4 skipped, 330 deselected`
@@ -1221,11 +1263,19 @@ with no strict-placement skips.
 - [ ] In one Perlmutter allocation, record `jax.__version__`, `jaxlib` version,
   device model, GPU UUID, driver, backend, x64 state, Python/import origins,
   dependency check, and source commit before GPU execution.
-- [ ] Run
-  `python -m pytest -q -rs tests/jax/core/test_surface_objective_fused_gradients.py tests/geo/test_surface_objectives_jax.py`
-  with the public fused-objective strict-GPU regression selected. Require the
-  private-helper and public-objective tests to execute on CUDA with zero skips;
-  a collection success or CUDA-unavailable skip is not placement evidence.
+- [x] Run the canonical strict-mode local gate before authoritative allocation
+  signoff:
+  `SIMSOPT_BACKEND_MODE=jax_gpu_parity JAX_PLATFORMS=cuda SIMSOPT_JAX_PLATFORM=cuda python -m pytest -q -rs tests/jax/core/test_surface_objective_fused_gradients.py tests/geo/test_curve_objectives_strict_gpu_jax.py tests/geo/test_surface_objectives_strict_gpu_jax.py`.
+  Require private-helper and public objective value/derivative tests to execute
+  on CUDA with zero skips; collection success or a CUDA-unavailable skip is not
+  placement evidence.
+  Local receipt on 2026-07-24: `6 passed` with zero skips in 73.46 s on
+  `NVIDIA GeForce RTX 5090`, UUID
+  `GPU-7951f78e-c05d-e01c-303f-d644f4341fe1`, driver `595.84`, Python
+  3.11.15, JAX/JAXLIB 0.10.0, and x64 enabled by the test fixture. `simsopt`
+  resolved from this checkout; `simsoptpp`, JAX, and JAXLIB resolved from the
+  isolated environment's installed dependency paths. This closes local strict
+  collection but does not substitute for the authoritative Perlmutter receipt.
 - [ ] Run the focused FP64 and mixed kernel/optimizer tests sequentially on that
   same GPU UUID with `jax.transfer_guard("disallow")` active around the public
   solver entry points, not only around pure kernels.
@@ -1376,17 +1426,17 @@ with no strict-placement skips.
 
 ### Phase 0 completion
 
-- [ ] `752ed0193` is integrated as the bounded functional fusion slice; only
+- [x] `752ed0193` is integrated as the bounded functional fusion slice; only
   the two selected adapter files from `4d52c19b2` are present, and `_bfgs.py`
   is unchanged from `upgrade_base`.
-- [ ] The narrow `0bfcf79b7` public host/input-placement behavior is
+- [x] The narrow `0bfcf79b7` public host/input-placement behavior is
   reconstructed with target-owned tests and without donor-only wrapper,
   example, campaign, or `.Codex/` dependencies.
-- [ ] Private-helper and public-objective fused-gradient tests execute on CUDA
+- [x] Private-helper and public-objective fused-gradient tests execute on CUDA
   under strict transfer guard with zero skips, all imports resolve to the
   candidate environment, FP64 defaults are unchanged, and the bounded Phase 0
   CPU/static subset passes.
-- [ ] Phase 0 release notes state that rotated-VJP placement and scatter custom
+- [x] Phase 0 release notes state that rotated-VJP placement and scatter custom
   JVP/VJP placement remain deferred; no complete strict-placement claim is
   made.
 
