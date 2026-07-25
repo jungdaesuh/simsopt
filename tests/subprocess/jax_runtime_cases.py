@@ -141,8 +141,35 @@ from simsopt_jax.geo.surface_fourier import (  # type: ignore[import-untyped]
     stellsym_scatter_indices,
     surface_gamma_from_dofs,
 )
+from simsopt_jax.numerical_policy import (  # type: ignore[import-untyped]
+    MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_MAX,
+    CertificateProbeAuthority,
+    CertificateProbeKeyData,
+)
+from simsopt_jax.runtime.host_boundary import (  # type: ignore[import-untyped]
+    runtime_certificate_probe_key,
+)
 
 OptimizerMethod = Literal["lbfgs-ondevice", "bfgs-ondevice"]
+
+
+def _run_certificate_probe_key_x64_disabled_case() -> None:
+    assert jax.config.jax_enable_x64 is False
+    authority = CertificateProbeAuthority(
+        source="supplied_replay",
+        key_data=CertificateProbeKeyData(
+            MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_MAX,
+            MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_MAX - 1,
+        ),
+    )
+    restored = CertificateProbeAuthority.from_json(authority.as_json())
+    key = runtime_certificate_probe_key(restored.key_data)
+    key_data = jax.random.key_data(key)
+    assert key_data.dtype == jnp.dtype(jnp.uint32)
+    np.testing.assert_array_equal(
+        np.asarray(jax.device_get(key_data)),
+        np.asarray(restored.key_data.words, dtype=np.uint32),
+    )
 
 
 def _solve_jax_driver_for_optimizer_method(method: OptimizerMethod) -> Driver:
@@ -163,7 +190,6 @@ def _solve_jax_options_for_optimizer_method(
     if method == "bfgs-ondevice":
         return SimsoptBFGSOptions(maxiter=maxiter)
     raise ValueError(f"Unknown optimizer method {method!r}.")
-
 
 
 def _configure_strict_cpu_parity_backend() -> bool:
@@ -1287,15 +1313,15 @@ def _run_pairwise_penalty_explicit_row_sharding_case() -> None:
 def _run_surface_quadrature_sharding_case() -> None:
     nphi = 8
     ntheta = 5
-    Bcoil_host = np.linspace(
-        0.2, 1.4, nphi * ntheta * 3, dtype=np.float64
-    ).reshape(nphi, ntheta, 3)
-    target_host = np.linspace(
-        -0.01, 0.02, nphi * ntheta, dtype=np.float64
-    ).reshape(nphi, ntheta)
-    normal_host = np.linspace(
-        0.3, 1.7, nphi * ntheta * 3, dtype=np.float64
-    ).reshape(nphi, ntheta, 3)
+    Bcoil_host = np.linspace(0.2, 1.4, nphi * ntheta * 3, dtype=np.float64).reshape(
+        nphi, ntheta, 3
+    )
+    target_host = np.linspace(-0.01, 0.02, nphi * ntheta, dtype=np.float64).reshape(
+        nphi, ntheta
+    )
+    normal_host = np.linspace(0.3, 1.7, nphi * ntheta * 3, dtype=np.float64).reshape(
+        nphi, ntheta, 3
+    )
 
     config = surface_quadrature_sharding_config(Bcoil_host)
     with jax.transfer_guard_host_to_device("allow"):
@@ -1360,9 +1386,7 @@ def _run_seed_batch_value_grad_sharding_case() -> None:
     batched_value_and_grad = surfaceobjectives_traceable_jax_module._make_traceable_batched_value_and_grad_pipeline(
         compiled_value_and_grad_for
     )
-    coil_dofs_batch_host = np.linspace(-1.0, 1.0, 8 * 3, dtype=np.float64).reshape(
-        8, 3
-    )
+    coil_dofs_batch_host = np.linspace(-1.0, 1.0, 8 * 3, dtype=np.float64).reshape(8, 3)
     config = seed_batch_sharding_config(coil_dofs_batch_host)
     with jax.transfer_guard_host_to_device("allow"):
         with jax.transfer_guard_device_to_device("allow"):
@@ -1707,7 +1731,9 @@ def _run_surface_rzfourier_gamma_from_spec_case() -> None:
 
 
 def _run_surface_rzfourier_normal_from_spec_case() -> None:
-    normal = surface_rz_fourier_normal_from_spec(_surface_rzfourier_transfer_guard_spec())
+    normal = surface_rz_fourier_normal_from_spec(
+        _surface_rzfourier_transfer_guard_spec()
+    )
 
     _assert_finite_array(normal, expected_shape=(16, 16, 3))
 
@@ -2002,6 +2028,9 @@ def _dispatch_case(args: argparse.Namespace) -> None:
     if args.case == "dense-condition-threshold-nondefault-device":
         _run_dense_condition_threshold_nondefault_device_case()
         return
+    if args.case == "certificate-probe-key-x64-disabled":
+        _run_certificate_probe_key_x64_disabled_case()
+        return
     raise ValueError(f"unsupported subprocess case {args.case!r}")
 
 
@@ -2044,6 +2073,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("grouped-host-spec-vjp")
     subparsers.add_parser("dense-condition-estimate-cross-device-factors")
     subparsers.add_parser("dense-condition-threshold-nondefault-device")
+    subparsers.add_parser("certificate-probe-key-x64-disabled")
 
     args = parser.parse_args(argv)
 

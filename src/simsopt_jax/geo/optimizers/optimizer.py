@@ -6779,6 +6779,8 @@ def _solve_hessian_least_squares_system_with_status(
     stab,
     tol,
     residual_fn=None,
+    proposal_objective_fn=None,
+    certificate_probe_key=None,
     solver: _AdjointHessianLinearSolver | None = None,
 ):
     """Solve a Hessian adjoint system without forming normal equations."""
@@ -6806,6 +6808,36 @@ def _solve_hessian_least_squares_system_with_status(
             tol=tol,
         )
     if _dense_square_operator_materialization_allowed(rhs):
+        if proposal_objective_fn is not None:
+            if certificate_probe_key is None:
+                raise ValueError(
+                    "Mixed dense IR requires a fresh or replay-authorized "
+                    "runtime certificate key."
+                )
+            policy = get_backend_policy()
+            proposal_dtype = np.dtype(policy.compute_dtype)
+            certificate_dtype = np.dtype(policy.runtime_dtype)
+            if proposal_dtype != np.dtype(np.float32) or certificate_dtype != np.dtype(
+                np.float64
+            ):
+                raise ValueError(
+                    "A proposal objective requires the FP32-factor/FP64-certificate "
+                    "mixed-precision policy."
+                )
+            proposal_operator = _hessian_linear_operator(
+                proposal_objective_fn,
+                jnp.asarray(x, dtype=proposal_dtype),
+                stab=stab,
+            )
+            return _solve_mixed_dense_ir_operator_with_status(
+                proposal_operator["matvec"],
+                operator["matvec"],
+                rhs,
+                tol=tol,
+                proposal_dtype=proposal_dtype,
+                certificate_sweep_dtype=operator["dtype"],
+                certificate_probe_key=certificate_probe_key,
+            )
         return _solve_dense_square_operator_least_squares_system_with_status(
             operator["matvec"],
             rhs,

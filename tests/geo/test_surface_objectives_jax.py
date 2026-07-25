@@ -34,6 +34,10 @@ if _REPO_SRC_ROOT not in sys.path:
 
 from simsopt_jax.field.biotsavart import biot_savart_A
 from simsopt_jax.runtime.host_boundary import scalar_pullback_seed
+from simsopt_jax.numerical_policy import (
+    CertificateProbeAuthority,
+    CertificateProbeKeyData,
+)
 from simsopt.field.biotsavart import BiotSavart
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
@@ -182,12 +186,23 @@ def _donating_sum_value_and_grad():
 
 def test_traceable_runtime_old_import_path_reexports_public_and_private_helpers():
     assert (
+        surfaceobjectives_jax_module.TraceableObjectiveCertifiedSeededValueAndGrad
+        is surfaceobjectives_traceable_jax_module.TraceableObjectiveCertifiedSeededValueAndGrad
+    )
+    assert "TraceableObjectiveCertifiedSeededValueAndGrad" in (
+        surfaceobjectives_jax_module.__all__
+    )
+    assert (
         surfaceobjectives_jax_module.make_traceable_objective
         is surfaceobjectives_traceable_jax_module.make_traceable_objective
     )
     assert (
         surfaceobjectives_jax_module.make_traceable_solved_state_value_and_grad
         is surfaceobjectives_traceable_jax_module.make_traceable_solved_state_value_and_grad
+    )
+    assert (
+        surfaceobjectives_jax_module.make_traceable_objective_certified_seeded_value_and_grad
+        is surfaceobjectives_traceable_jax_module.make_traceable_objective_certified_seeded_value_and_grad
     )
     assert (
         surfaceobjectives_jax_module._get_cached_traceable_runtime_entry
@@ -2070,6 +2085,114 @@ def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch)
     np.testing.assert_allclose(np.asarray(solution), np.asarray(2.0 * rhs))
 
 
+def test_traceable_hessian_no_factor_uses_mixed_proposal_and_fp64_certificate(
+    monkeypatch,
+):
+    solved_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    rhs = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+    stabilization = 1.0e-4
+    certificate_matrix = jnp.asarray(
+        ((3.125000119, 0.375000077), (0.375000077, 2.250000131)),
+        dtype=jnp.float64,
+    )
+    certificate_probe_key = jax.random.wrap_key_data(
+        jnp.asarray((17, 23), dtype=jnp.uint32),
+        impl="threefry2x32",
+    )
+    policy = types.SimpleNamespace(
+        compute_dtype=np.dtype(np.float32),
+        runtime_dtype=np.dtype(np.float64),
+        max_dense_jacobian_bytes=1 << 20,
+        linear_solve_tolerance_floor=1.0e-14,
+        linear_solve_tolerance_cap=1.0e-10,
+    )
+    constructed_objective_dtypes = []
+
+    def make_quadratic_objective(
+        *,
+        coil_set_spec,
+        decision_split_mode,
+        infer_optimizer_state_dtype=False,
+    ):
+        del decision_split_mode, infer_optimizer_state_dtype
+        matrix = jnp.asarray(coil_set_spec["matrix"])
+        constructed_objective_dtypes.append(np.dtype(matrix.dtype))
+
+        def objective(state):
+            working_state = jnp.asarray(state, dtype=matrix.dtype)
+            return (
+                jnp.asarray(0.5, dtype=matrix.dtype)
+                * jnp.vdot(
+                    working_state,
+                    matrix @ working_state,
+                ).real
+            )
+
+        return objective
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: policy,
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "get_backend_policy",
+        lambda: policy,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        make_quadratic_objective,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda objective_kwargs: objective_kwargs,
+    )
+
+    compiled_solve = jax.jit(
+        lambda current_rhs, current_certificate_probe_key: (
+            surfaceobjectives_traceable_jax_module._traceable_solve_linearization(
+                _make_test_hessian_booz(),
+                solved_x,
+                current_rhs,
+                coil_set_spec={"matrix": certificate_matrix},
+                objective_kwargs={},
+                linear_solve_factors=None,
+                linearization_kind="hessian",
+                linear_solve_tol=1.0e-10,
+                linear_solve_stab=stabilization,
+                transpose=True,
+                certificate_probe_key=current_certificate_probe_key,
+            )
+        )
+    )
+    solution, status = compiled_solve(rhs, certificate_probe_key)
+
+    expected_solution = np.linalg.solve(
+        np.asarray(certificate_matrix) + stabilization * np.eye(2),
+        np.asarray(rhs),
+    )
+    assert isinstance(status, optimizer_jax_module._MixedDenseIrSolveStatus)
+    assert bool(status.success)
+    assert bool(status.trust.active)
+    assert constructed_objective_dtypes == [
+        np.dtype(np.float64),
+        np.dtype(np.float32),
+    ]
+    np.testing.assert_array_equal(
+        np.asarray(status.trust.certificate_probe_key_data),
+        np.asarray((17, 23), dtype=np.uint32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        expected_solution,
+        rtol=1.0e-10,
+        atol=1.0e-12,
+    )
+
+
 def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
     monkeypatch,
 ):
@@ -2679,6 +2802,10 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         G=None,
         weight_inv_modB=False,
     )
+    policy = types.SimpleNamespace(
+        compute_dtype=np.dtype(np.float64),
+        runtime_dtype=np.dtype(np.float64),
+    )
 
     def pack_decision_vector(iota, G, *, sdofs):
         pack_calls.append((iota, G, sdofs))
@@ -2732,6 +2859,11 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
 
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: policy,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
         "_resolved_boozer_solved_runtime_state",
         lambda _booz: solved_state,
     )
@@ -2774,10 +2906,24 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         bs,
         0.23,
     )
+    policy.compute_dtype = np.dtype(np.float32)
+    entry3 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
+    policy.compute_dtype = np.dtype(np.float64)
+    entry4 = surfaceobjectives_traceable_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
 
     assert entry1 is entry2
-    assert len(pack_calls) == 1
-    assert len(evaluate_calls) == 1
+    assert entry3 is not entry2
+    assert entry4 is not entry3
+    assert len(pack_calls) == 3
+    assert len(evaluate_calls) == 3
 
 
 def test_cached_strict_scalar_value_and_grad_builds_stable_jit(monkeypatch):
@@ -3036,6 +3182,46 @@ def test_traceable_runtime_cache_key_uses_runtime_state_tokens_not_object_identi
         )
         != base_key
     )
+
+
+def test_traceable_runtime_cache_key_includes_precision_policy(monkeypatch):
+    booz = types.SimpleNamespace(
+        options={},
+        _collect_optimizer_options=lambda *, method: {},
+    )
+    state = _traceable_cache_key_state(
+        {
+            "objective_kwargs": {"outer_objective_config": None},
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
+        }
+    )
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float64),
+            runtime_dtype=np.dtype(np.float64),
+        ),
+    )
+    fp64_key = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
+        booz, state, success_filter=None
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+        ),
+    )
+    mixed_key = surfaceobjectives_traceable_jax_module._traceable_runtime_cache_key(
+        booz, state, success_filter=None
+    )
+
+    assert fp64_key != mixed_key
 
 
 def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
@@ -5283,7 +5469,7 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
         object(),
     )
 
-    value, grad = seeded.optimizer_initial_value_and_grad
+    value, grad = seeded.seeded_value_and_grad.optimizer_initial_value_and_grad
     _assert_primal_value_with_nonfinite_gradient(value, grad, 1.25)
 
 
@@ -5342,6 +5528,235 @@ def test_traceable_seeded_value_and_grad_builds_general_only_bundle(monkeypatch)
             },
         )
     ]
+
+
+def test_traceable_legacy_seed_remains_deterministic_under_mixed_policy(monkeypatch):
+    state = {
+        "baseline_coil_dofs": np.asarray([0.5, -0.25], dtype=np.float64),
+        "baseline_value": np.asarray(1.25, dtype=np.float64),
+        "baseline_x": np.asarray([0.0, 1.0], dtype=np.float64),
+        "baseline_linear_solve_factors": None,
+    }
+    baseline_gradient = jnp.asarray([0.125, -0.5], dtype=jnp.float64)
+
+    def randomized_gradient_must_not_run(*_args):
+        raise AssertionError("legacy seed must not invoke randomized certification")
+
+    seeded_compiled_bundle = {
+        "compiled_total_gradient_for": lambda *_args: (
+            baseline_gradient,
+            jnp.asarray(True),
+        ),
+        "compiled_total_gradient_for_with_certificate_key": randomized_gradient_must_not_run,
+        "compiled_value_and_grad_for": lambda coil_dofs: (
+            jnp.asarray(1.25, dtype=jnp.float64),
+            jnp.zeros_like(coil_dofs),
+        ),
+    }
+    runtime_entry = {"compiled_bundle": {"state": state}, "success_filter": None}
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        lambda *_args, **_kwargs: seeded_compiled_bundle,
+    )
+
+    seeded = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
+        runtime_entry, object()
+    )
+
+    assert seeded.certificate_probe_authority is None
+    np.testing.assert_array_equal(
+        np.asarray(seeded.seeded_value_and_grad.optimizer_initial_value_and_grad[1]),
+        np.asarray(baseline_gradient),
+    )
+
+
+def test_traceable_seeded_public_contract_remains_two_fields():
+    seeded = (
+        surfaceobjectives_traceable_jax_module.TraceableObjectiveSeededValueAndGrad(
+            value_and_grad=lambda value: value,
+            optimizer_initial_value_and_grad=(
+                jnp.asarray(1.0),
+                jnp.asarray([2.0]),
+            ),
+        )
+    )
+
+    assert len(seeded) == 2
+
+
+def test_traceable_seeded_mixed_key_is_post_freeze_and_replayable(monkeypatch):
+    baseline_x = np.asarray([0.0, 1.0], dtype=np.float64)
+    state = {
+        "baseline_coil_dofs": np.asarray([0.5, -0.25], dtype=np.float64),
+        "baseline_value": np.asarray(1.25, dtype=np.float64),
+        "baseline_x": baseline_x,
+        "baseline_linear_solve_factors": None,
+    }
+    access_order = []
+
+    class FrozenCompiledBundle(dict):
+        def __getitem__(self, key):
+            if key == "state":
+                access_order.append("state")
+            return super().__getitem__(key)
+
+    observed_key_words = []
+
+    def compiled_total_gradient_for_with_certificate_key(
+        _coil_dofs,
+        solved_x,
+        _linear_solve_factors,
+        certificate_probe_key,
+    ):
+        key_words = jax.random.key_data(certificate_probe_key)
+        observed_key_words.append(tuple(int(word) for word in np.asarray(key_words)))
+        trust = optimizer_jax_module._inactive_mixed_dense_ir_trust_telemetry(
+            solved_x
+        )._replace(
+            active=jnp.asarray(True),
+            certificate_probe_key_data=key_words,
+            proposal_trusted=jnp.asarray(True),
+        )
+        return jnp.asarray([0.125, -0.5]), jnp.asarray(True), trust
+
+    seeded_compiled_bundle = {
+        "compiled_total_gradient_for_with_certificate_key": (
+            compiled_total_gradient_for_with_certificate_key
+        ),
+        "compiled_value_and_grad_for": lambda coil_dofs: (
+            jnp.asarray(1.25, dtype=jnp.float64),
+            jnp.zeros_like(coil_dofs),
+        ),
+    }
+    runtime_entry = {
+        "compiled_bundle": FrozenCompiledBundle(state=state),
+        "success_filter": None,
+    }
+    fresh_authority = CertificateProbeAuthority(
+        source="fresh_runtime",
+        key_data=CertificateProbeKeyData(11, 23),
+    )
+
+    def resolve_authority(replay_key_data):
+        assert access_order == ["state"]
+        if replay_key_data is None:
+            return fresh_authority
+        return CertificateProbeAuthority(
+            source="supplied_replay",
+            key_data=replay_key_data,
+        )
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "resolve_certificate_probe_authority",
+        resolve_authority,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        lambda *_args, **_kwargs: seeded_compiled_bundle,
+    )
+
+    fresh = surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
+        runtime_entry,
+        object(),
+    )
+    access_order.clear()
+    replay_key_data = CertificateProbeKeyData(29, 31)
+    replay = surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
+        runtime_entry,
+        object(),
+        certificate_probe_key_data=replay_key_data,
+    )
+    access_order.clear()
+    replay_again = surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
+        runtime_entry,
+        object(),
+        certificate_probe_key_data=replay_key_data,
+    )
+
+    assert fresh.certificate_probe_authority == fresh_authority
+    assert replay.certificate_probe_authority == CertificateProbeAuthority(
+        source="supplied_replay",
+        key_data=replay_key_data,
+    )
+    assert fresh.certificate_probe_evidence is not None
+    assert (
+        fresh.certificate_probe_evidence.observed_key_data == fresh_authority.key_data
+    )
+    assert replay.certificate_probe_evidence is not None
+    assert replay.certificate_probe_evidence.observed_key_data == replay_key_data
+    assert replay_again is not replay
+    assert observed_key_words == [(11, 23), (29, 31), (29, 31)]
+
+
+def test_traceable_certified_seed_rejects_mismatched_observed_key(monkeypatch):
+    state = {
+        "baseline_coil_dofs": np.asarray([0.5], dtype=np.float64),
+        "baseline_value": np.asarray(1.25, dtype=np.float64),
+        "baseline_x": np.asarray([0.0], dtype=np.float64),
+        "baseline_linear_solve_factors": None,
+    }
+
+    def compiled_total_gradient_for_with_certificate_key(
+        _coil_dofs, solved_x, _linear_solve_factors, _certificate_probe_key
+    ):
+        trust = optimizer_jax_module._inactive_mixed_dense_ir_trust_telemetry(
+            solved_x
+        )._replace(
+            active=jnp.asarray(True),
+            certificate_probe_key_data=jnp.asarray([41, 43], dtype=jnp.uint32),
+            proposal_trusted=jnp.asarray(True),
+        )
+        return jnp.asarray([0.125]), jnp.asarray(True), trust
+
+    seeded_compiled_bundle = {
+        "compiled_total_gradient_for_with_certificate_key": (
+            compiled_total_gradient_for_with_certificate_key
+        ),
+        "compiled_value_and_grad_for": lambda coil_dofs: (
+            jnp.asarray(1.25, dtype=jnp.float64),
+            jnp.zeros_like(coil_dofs),
+        ),
+    }
+    runtime_entry = {"compiled_bundle": {"state": state}, "success_filter": None}
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "get_backend_policy",
+        lambda: types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        lambda *_args, **_kwargs: seeded_compiled_bundle,
+    )
+
+    with pytest.raises(ValueError, match="observed key differs"):
+        surfaceobjectives_traceable_jax_module._make_traceable_runtime_certified_seeded_value_and_grad(
+            runtime_entry,
+            object(),
+            certificate_probe_key_data=CertificateProbeKeyData(11, 23),
+        )
 
 
 def test_traceable_optimizer_value_and_grad_builds_general_only_bundle_without_seed(

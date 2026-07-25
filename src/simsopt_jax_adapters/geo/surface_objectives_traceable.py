@@ -20,10 +20,19 @@ from jax.sharding import PartitionSpec as P
 
 from simsopt_jax.runtime.host_boundary import (
     host_array as _host_array,
+    host_bool as _host_bool,
     host_inf_norm as _host_inf_norm,
+    host_int as _host_int,
     host_scalar as _host_scalar,
+    runtime_certificate_probe_key as _runtime_certificate_probe_key,
 )
-from simsopt_jax.numerical_policy import MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS
+from simsopt_jax.numerical_policy import (
+    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    CertificateProbeAuthority,
+    CertificateProbeEvidence,
+    CertificateProbeKeyData,
+    resolve_certificate_probe_authority,
+)
 from simsopt_jax.backend import get_backend_policy
 from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
@@ -66,12 +75,14 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
 
 
 __all__ = [
+    "TraceableObjectiveCertifiedSeededValueAndGrad",
     "TraceableObjectiveSeededValueAndGrad",
     "TraceableObjectiveSolvedPair",
     "diagnose_traceable_objective_runtime",
     "make_traceable_objective",
     "make_traceable_objective_profile_suite",
     "make_traceable_objective_runtime_bundle",
+    "make_traceable_objective_certified_seeded_value_and_grad",
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_solved_pair",
     "make_traceable_objective_value_and_grad",
@@ -416,6 +427,7 @@ def _traceable_solve_hessian_linearization(
     linear_solve_tol,
     linear_solve_stab,
     transpose,
+    certificate_probe_key=None,
 ):
     explicit_adjoint = transpose and _traceable_non_dense_adjoint_selected()
     residual_jacobian_adjoint = (
@@ -464,6 +476,32 @@ def _traceable_solve_hessian_linearization(
             **_traceable_inner_objective_kwargs(objective_kwargs),
         )
     linear_solver = _optimizer_jax._ADJOINT_LINEAR_SOLVER if transpose else "dense"
+    policy = get_backend_policy()
+    mixed_dense_ir = (
+        certificate_probe_key is not None
+        and linear_solver == "dense"
+        and np.dtype(policy.compute_dtype) == np.dtype(np.float32)
+        and np.dtype(policy.runtime_dtype) == np.dtype(np.float64)
+    )
+    if mixed_dense_ir:
+        proposal_dtype = np.dtype(policy.compute_dtype)
+        proposal_coil_set_spec = _optimizer_jax._cast_floating_tree(
+            coil_set_spec,
+            proposal_dtype,
+        )
+        proposal_objective_kwargs = _optimizer_jax._cast_floating_tree(
+            _traceable_inner_objective_kwargs(objective_kwargs),
+            proposal_dtype,
+        )
+        residual_kwargs["proposal_objective_fn"] = (
+            _make_boozer_penalty_objective_closure(
+                coil_set_spec=proposal_coil_set_spec,
+                decision_split_mode="jvp",
+                infer_optimizer_state_dtype=True,
+                **proposal_objective_kwargs,
+            )
+        )
+        residual_kwargs["certificate_probe_key"] = certificate_probe_key
     return _optimizer_jax._solve_hessian_least_squares_system_with_status(
         objective_fn,
         solved_x,
@@ -874,6 +912,7 @@ def _traceable_solve_linearization(
     linear_solve_tol,
     linear_solve_stab,
     transpose,
+    certificate_probe_key=None,
 ):
     if linearization_kind == "hessian":
         return _traceable_solve_hessian_linearization(
@@ -886,6 +925,7 @@ def _traceable_solve_linearization(
             linear_solve_tol=linear_solve_tol,
             linear_solve_stab=linear_solve_stab,
             transpose=transpose,
+            certificate_probe_key=certificate_probe_key,
         )
     if linearization_kind == "exact_jacobian":
         return _traceable_solve_exact_linearization(
@@ -1324,8 +1364,9 @@ def _traceable_total_gradient_with_status(
     linear_solve_stab,
     objective_kwargs,
     scalar_objective_fn=None,
+    certificate_probe_key=None,
 ):
-    _, _, total_grad, linear_solve_success = _traceable_objective_gradient_parts(
+    _, _, total_grad, linear_solve_success, _ = _traceable_objective_gradient_parts(
         booz_jax,
         coil_set_spec_from_dofs,
         coil_dofs=coil_dofs,
@@ -1336,8 +1377,38 @@ def _traceable_total_gradient_with_status(
         linear_solve_stab=linear_solve_stab,
         objective_kwargs=objective_kwargs,
         scalar_objective_fn=scalar_objective_fn,
+        certificate_probe_key=certificate_probe_key,
     )
     return total_grad, linear_solve_success
+
+
+def _traceable_total_gradient_with_trust(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    solved_x,
+    solved_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    objective_kwargs,
+    certificate_probe_key,
+):
+    """Return the total gradient and its mixed dense-IR certificate evidence."""
+    _, _, total_grad, linear_solve_success, trust = _traceable_objective_gradient_parts(
+        booz_jax,
+        coil_set_spec_from_dofs,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        solved_linear_solve_factors=solved_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        objective_kwargs=objective_kwargs,
+        certificate_probe_key=certificate_probe_key,
+    )
+    return total_grad, linear_solve_success, trust
 
 
 def _traceable_adjoint_rhs_exactly_zero(rhs):
@@ -1359,6 +1430,7 @@ def _traceable_objective_gradient_parts(
     objective_kwargs,
     term_name=None,
     scalar_objective_fn=None,
+    certificate_probe_key=None,
 ):
     """Return direct, implicit, and total gradients for one traceable objective."""
     if scalar_objective_fn is not None and term_name is not None:
@@ -1366,6 +1438,10 @@ def _traceable_objective_gradient_parts(
             "scalar_objective_fn and term_name are mutually exclusive traceable "
             "gradient selectors."
         )
+
+    inactive_mixed_dense_ir_trust = (
+        _optimizer_jax._inactive_mixed_dense_ir_trust_telemetry(solved_x)
+    )
 
     def _evaluate_objective(x_inner, current_coil_dofs, coil_set_spec):
         if scalar_objective_fn is not None:
@@ -1419,7 +1495,11 @@ def _traceable_objective_gradient_parts(
         )
 
         def zero_adjoint(_):
-            return _runtime_zeros_like(solved_x), _runtime_bool(True)
+            return (
+                _runtime_zeros_like(solved_x),
+                _runtime_bool(True),
+                inactive_mixed_dense_ir_trust,
+            )
 
         def solve_adjoint(_):
             adjoint_value, linear_solve_status = _traceable_solve_linearization(
@@ -1433,18 +1513,31 @@ def _traceable_objective_gradient_parts(
                 linear_solve_tol=linear_solve_tol,
                 linear_solve_stab=linear_solve_stab,
                 transpose=True,
+                certificate_probe_key=certificate_probe_key,
+            )
+            trust = (
+                linear_solve_status.trust
+                if isinstance(
+                    linear_solve_status,
+                    _optimizer_jax._MixedDenseIrSolveStatus,
+                )
+                else inactive_mixed_dense_ir_trust
             )
             return (
                 adjoint_value,
                 _optimizer_jax._linear_solve_status_success(linear_solve_status),
+                trust,
             )
 
-        adjoint, linear_solve_success = lax.cond(
+        adjoint, linear_solve_success, mixed_dense_ir_trust = lax.cond(
             _traceable_adjoint_rhs_exactly_zero(dJ_dx),
             zero_adjoint,
             solve_adjoint,
             operand=None,
         )
+
+    if not depends_on_x_inner:
+        mixed_dense_ir_trust = inactive_mixed_dense_ir_trust
 
     if not depends_on_coil_dofs:
         # Some diagnostic terms depend only on the solved inner state, so
@@ -1457,7 +1550,13 @@ def _traceable_objective_gradient_parts(
 
     if not depends_on_x_inner:
         implicit_grad = _runtime_zeros_like(coil_dofs)
-        return direct_grad, implicit_grad, direct_grad, linear_solve_success
+        return (
+            direct_grad,
+            implicit_grad,
+            direct_grad,
+            linear_solve_success,
+            mixed_dense_ir_trust,
+        )
 
     inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
@@ -1477,7 +1576,13 @@ def _traceable_objective_gradient_parts(
         direct_grad - implicit_grad,
         linear_solve_success,
     )
-    return direct_grad, implicit_grad, total_grad, linear_solve_success
+    return (
+        direct_grad,
+        implicit_grad,
+        total_grad,
+        linear_solve_success,
+        mixed_dense_ir_trust,
+    )
 
 
 def _traceable_predict_warmstart_result_from_anchor(
@@ -1944,6 +2049,31 @@ def _build_traceable_objective_compiled_bundle_from_state(
 
     compiled_total_gradient_for = jax.jit(_total_gradient_for)
 
+    def _total_gradient_for_with_certificate_key(
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+        certificate_probe_key,
+    ):
+        return _traceable_total_gradient_with_trust(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=_traceable_runtime_deviceify_tree(
+                solved_linear_solve_factors
+            ),
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            objective_kwargs=objective_kwargs,
+            certificate_probe_key=certificate_probe_key,
+        )
+
+    compiled_total_gradient_for_with_certificate_key = jax.jit(
+        _total_gradient_for_with_certificate_key
+    )
+
     def _value_and_grad_for(coil_dofs):
         result = jitted_forward_result_for(coil_dofs)
 
@@ -2007,6 +2137,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
         "state": state,
         "compiled_forward_result_for": compiled_forward_result_for,
         "compiled_total_gradient_for": compiled_total_gradient_for,
+        "compiled_total_gradient_for_with_certificate_key": (
+            compiled_total_gradient_for_with_certificate_key
+        ),
         "compiled_value_and_grad_for": compiled_value_and_grad_for,
     }
 
@@ -2103,6 +2236,7 @@ class _TraceableRuntimeCacheKey:
     objective_contract_signature: object
     option_signature: object
     success_filter_signature: object
+    precision_signature: tuple[str, str]
 
 
 def _traceable_runtime_cache_key(booz_jax, state, *, success_filter=None):
@@ -2116,6 +2250,7 @@ def _traceable_runtime_cache_key(booz_jax, state, *, success_filter=None):
     layout.
     """
     objective_kwargs = state["objective_kwargs"]
+    policy = get_backend_policy()
     return _TraceableRuntimeCacheKey(
         solve_state_token=state["solve_state_token"],
         coil_dof_state_token=state["coil_dof_state_token"],
@@ -2127,6 +2262,10 @@ def _traceable_runtime_cache_key(booz_jax, state, *, success_filter=None):
         ),
         option_signature=_traceable_runtime_option_signature(booz_jax, state),
         success_filter_signature=_traceable_success_filter_signature(success_filter),
+        precision_signature=(
+            np.dtype(policy.compute_dtype).str,
+            np.dtype(policy.runtime_dtype).str,
+        ),
     )
 
 
@@ -2414,13 +2553,16 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
     return optimizer_solved_pair
 
 
-def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
-    """Materialize the seeded optimizer-only value/grad path on demand."""
+def _ensure_traceable_runtime_seeded_value_and_grad(
+    runtime_entry,
+    booz_jax,
+):
+    """Materialize the deterministic compatibility seed and cache its result."""
+    state = runtime_entry["compiled_bundle"]["state"]
     seeded_value_and_grad = runtime_entry.get("seeded_value_and_grad")
     if seeded_value_and_grad is not None:
         return seeded_value_and_grad
 
-    state = runtime_entry["compiled_bundle"]["state"]
     seeded_compiled_bundle = _ensure_traceable_runtime_optimizer_compiled_bundle(
         runtime_entry,
         booz_jax,
@@ -2438,23 +2580,112 @@ def _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax):
         baseline_x,
         baseline_linear_solve_factors,
     )
+    mixed_dense_ir_trust = _optimizer_jax._inactive_mixed_dense_ir_trust_telemetry(
+        baseline_x
+    )
     baseline_gradient = _traceable_adjoint_gradient_or_nan(
         baseline_gradient,
         baseline_linear_solve_success,
     )
-    seeded_value_and_grad = TraceableObjectiveSeededValueAndGrad(
-        value_and_grad=_ensure_traceable_runtime_optimizer_value_and_grad(
-            runtime_entry,
-            booz_jax,
+    seeded_value_and_grad = TraceableObjectiveCertifiedSeededValueAndGrad(
+        seeded_value_and_grad=TraceableObjectiveSeededValueAndGrad(
+            value_and_grad=_ensure_traceable_runtime_optimizer_value_and_grad(
+                runtime_entry,
+                booz_jax,
+            ),
+            optimizer_initial_value_and_grad=(
+                baseline_value,
+                baseline_gradient,
+            ),
         ),
-        optimizer_initial_value_and_grad=(
-            baseline_value,
-            baseline_gradient,
-        ),
+        certificate_probe_authority=None,
+        certificate_probe_evidence=None,
+        mixed_dense_ir_trust=mixed_dense_ir_trust,
     )
     runtime_entry["seeded_compiled_bundle"] = seeded_compiled_bundle
     runtime_entry["seeded_value_and_grad"] = seeded_value_and_grad
     return seeded_value_and_grad
+
+
+def _mixed_certificate_probe_evidence(
+    authority: CertificateProbeAuthority,
+    trust: _optimizer_jax._MixedDenseIrTrustTelemetry,
+) -> CertificateProbeEvidence | None:
+    """Bind active device trust to its exact host challenge and fallback decision."""
+    if not _host_bool(trust.active):
+        return None
+    observed_words = _host_array(
+        trust.certificate_probe_key_data,
+        dtype=np.uint32,
+    )
+    evidence = CertificateProbeEvidence(
+        authority=authority,
+        observed_key_data=CertificateProbeKeyData(
+            int(observed_words[0]),
+            int(observed_words[1]),
+        ),
+        active=True,
+        proposal_trusted=_host_bool(trust.proposal_trusted),
+        fp64_rebuild_count=_host_int(trust.fp64_rebuild_count),
+        fallback_attempted=_host_bool(trust.fallback.attempted),
+        fallback_success=_host_bool(trust.fallback.success),
+    )
+    evidence.require_valid_for_mixed()
+    return evidence
+
+
+def _make_traceable_runtime_certified_seeded_value_and_grad(
+    runtime_entry,
+    booz_jax,
+    *,
+    certificate_probe_key_data: CertificateProbeKeyData | None = None,
+):
+    """Evaluate one uncached mixed certificate from fresh or replay authority."""
+    state = runtime_entry["compiled_bundle"]["state"]
+    policy = get_backend_policy()
+    mixed_dense_ir_enabled = np.dtype(policy.compute_dtype) == np.dtype(
+        np.float32
+    ) and np.dtype(policy.runtime_dtype) == np.dtype(np.float64)
+    if not mixed_dense_ir_enabled or state["baseline_linear_solve_factors"] is not None:
+        return _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax)
+
+    authority = resolve_certificate_probe_authority(certificate_probe_key_data)
+    seeded_compiled_bundle = _ensure_traceable_runtime_optimizer_compiled_bundle(
+        runtime_entry,
+        booz_jax,
+    )
+    baseline_coil_dofs = _traceable_runtime_deviceify_tree(state["baseline_coil_dofs"])
+    baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
+    baseline_value = _traceable_runtime_deviceify_tree(state["baseline_value"])
+    certificate_probe_key = _runtime_certificate_probe_key(authority.key_data)
+    (
+        baseline_gradient,
+        baseline_linear_solve_success,
+        mixed_dense_ir_trust,
+    ) = seeded_compiled_bundle["compiled_total_gradient_for_with_certificate_key"](
+        baseline_coil_dofs,
+        baseline_x,
+        None,
+        certificate_probe_key,
+    )
+    baseline_gradient = _traceable_adjoint_gradient_or_nan(
+        baseline_gradient,
+        baseline_linear_solve_success,
+    )
+    evidence = _mixed_certificate_probe_evidence(authority, mixed_dense_ir_trust)
+    observed_authority = authority if evidence is not None else None
+    return TraceableObjectiveCertifiedSeededValueAndGrad(
+        seeded_value_and_grad=TraceableObjectiveSeededValueAndGrad(
+            value_and_grad=_ensure_traceable_runtime_optimizer_value_and_grad(
+                runtime_entry,
+                booz_jax,
+            ),
+            optimizer_initial_value_and_grad=(baseline_value, baseline_gradient),
+        ),
+        certificate_probe_authority=observed_authority,
+        certificate_probe_evidence=evidence,
+        mixed_dense_ir_trust=mixed_dense_ir_trust,
+    )
 
 
 def _make_traceable_lazy_host_reporting_metrics(runtime_entry):
@@ -3513,19 +3744,23 @@ def diagnose_traceable_objective_runtime(
     nonfinite_terms = []
     for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         _traceable_diag_progress(f"term_gradient:{term_name}")
-        direct_grad, implicit_grad, term_total_grad, linear_solve_success = (
-            _traceable_objective_gradient_parts(
-                booz_jax,
-                coil_set_spec_from_dofs,
-                coil_dofs=baseline_coil_dofs,
-                solved_x=baseline_x,
-                solved_linear_solve_factors=baseline_linear_solve_factors,
-                linearization_kind=state["linearization_kind"],
-                linear_solve_tol=state["linear_solve_tol"],
-                linear_solve_stab=state["linear_solve_stab"],
-                objective_kwargs=objective_kwargs,
-                term_name=term_name,
-            )
+        (
+            direct_grad,
+            implicit_grad,
+            term_total_grad,
+            linear_solve_success,
+            _mixed_dense_ir_trust,
+        ) = _traceable_objective_gradient_parts(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=baseline_coil_dofs,
+            solved_x=baseline_x,
+            solved_linear_solve_factors=baseline_linear_solve_factors,
+            linearization_kind=state["linearization_kind"],
+            linear_solve_tol=state["linear_solve_tol"],
+            linear_solve_stab=state["linear_solve_stab"],
+            objective_kwargs=objective_kwargs,
+            term_name=term_name,
         )
         term_report = {
             "weight": float(
@@ -3640,6 +3875,15 @@ class TraceableObjectiveSeededValueAndGrad(NamedTuple):
     optimizer_initial_value_and_grad: tuple[jax.Array, jax.Array]
 
 
+class TraceableObjectiveCertifiedSeededValueAndGrad(NamedTuple):
+    """Seeded value/gradient plus replayable mixed certificate authority."""
+
+    seeded_value_and_grad: TraceableObjectiveSeededValueAndGrad
+    certificate_probe_authority: CertificateProbeAuthority | None
+    certificate_probe_evidence: CertificateProbeEvidence | None
+    mixed_dense_ir_trust: _optimizer_jax._MixedDenseIrTrustTelemetry
+
+
 def make_traceable_objective_seeded_value_and_grad(
     booz_jax,
     bs_jax,
@@ -3662,7 +3906,35 @@ def make_traceable_objective_seeded_value_and_grad(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
-    return _ensure_traceable_runtime_seeded_value_and_grad(runtime_entry, booz_jax)
+    certified_seed = _ensure_traceable_runtime_seeded_value_and_grad(
+        runtime_entry,
+        booz_jax,
+    )
+    return certified_seed.seeded_value_and_grad
+
+
+def make_traceable_objective_certified_seeded_value_and_grad(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+    certificate_probe_key_data: CertificateProbeKeyData | None = None,
+):
+    """Build a seeded value/gradient with explicit fresh-or-replay authority."""
+    runtime_entry = _get_cached_traceable_runtime_entry(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    return _make_traceable_runtime_certified_seeded_value_and_grad(
+        runtime_entry,
+        booz_jax,
+        certificate_probe_key_data=certificate_probe_key_data,
+    )
 
 
 def make_traceable_objective_value_and_grad(
