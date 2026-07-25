@@ -72,7 +72,7 @@ def test_public_curve_geometry_values_and_derivatives_obey_strict_gpu_guard(
                 surface,
                 minimum_distance=0.8,
             ),
-            (curve1,),
+            (curve1, surface),
         ),
     )
 

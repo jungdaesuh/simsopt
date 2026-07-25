@@ -51,13 +51,6 @@ def incremental_arclength_pure(d1gamma):
     return jnp.linalg.norm(d1gamma, axis=1)
 
 
-incremental_arclength_vjp = jit(
-    lambda d1gamma, v: vjp(lambda d1g: incremental_arclength_pure(d1g), d1gamma)[1](v)[
-        0
-    ]
-)
-
-
 @jit
 def kappa_pure(d1gamma, d2gamma):
     r"""
@@ -306,17 +299,25 @@ class Curve(Optimizable):
         to the curve and :math:`\mathbf{c}` are the curve dofs.
         """
 
-        return self.dgammadash_by_dcoeff_vjp(
-            incremental_arclength_vjp(self.gammadash(), v)
+        gammadash = np.asarray(self.gammadash())
+        speed = np.linalg.norm(gammadash, axis=1)
+        incremental_arclength_cotangent = (
+            np.asarray(v)[:, None] * gammadash / speed[:, None]
         )
+        return self.dgammadash_by_dcoeff_vjp(incremental_arclength_cotangent)
 
     def kappa_impl(self, kappa):
         r"""
         This function implements the curvature, :math:`\kappa(\varphi)`.
         """
-        d1gamma = device_put(self.gammadash())
-        d2gamma = device_put(self.gammadashdash())
-        kappa[:] = np.asarray(device_get(kappa_pure(d1gamma, d2gamma)))
+        gammadash = self.gammadash()
+        gammadashdash = self.gammadashdash()
+        cross_norm = np.linalg.norm(
+            np.cross(gammadash, gammadashdash),
+            axis=1,
+        )
+        speed = np.linalg.norm(gammadash, axis=1)
+        kappa[:] = cross_norm / (speed * speed * speed)
 
     def dkappa_by_dcoeff_impl(self, dkappa_by_dcoeff):
         r"""
@@ -752,6 +753,15 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the incremental arclength of the curve.
         """
         return self.incremental_arclength_jax(self.get_dofs())
+
+    def kappa_impl(self, kappa):
+        """Evaluate JAX-backed curve curvature with the JAX kernel."""
+        kappa[:] = np.asarray(
+            kappa_pure(
+                self.gammadash(),
+                self.gammadashdash(),
+            )
+        )
 
     def dgamma_by_dcoeff_impl(self, dgamma_by_dcoeff):
         r"""
