@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt_jax.backend.dtypes import (
     _shape_tuple,
+    as_compute_array,
     as_jax_array,
     as_jax_float64,
     as_jax_int32,
@@ -30,6 +31,7 @@ from simsopt_jax.backend.dtypes import (
 
 __all__ = (
     "_explicit_device_array",
+    "as_compute_array",
     "as_jax_array",
     "as_jax_float64",
     "as_jax_int32",
