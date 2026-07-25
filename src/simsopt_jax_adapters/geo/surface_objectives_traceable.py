@@ -913,6 +913,8 @@ def _pack_traceable_forward_result(
     primal_success,
     adjoint_linear_solve_available,
     newton_linear_solve_backend_code=None,
+    dense_hessian_bytes=None,
+    max_dense_hessian_bytes=None,
     outer_raw_terms=None,
 ):
     """Return the normalized traceable forward-result contract."""
@@ -935,6 +937,27 @@ def _pack_traceable_forward_result(
         "newton_linear_solve_backend_code_present": _runtime_bool(backend_code_present),
     }
     packed["outer_raw_terms_present"] = _runtime_bool(outer_raw_terms is not None)
+    missing_int64 = _staged_like(
+        value,
+        np.iinfo(np.int64).min,
+        dtype=jnp.int64,
+    )
+    packed["dense_hessian_bytes"] = (
+        missing_int64
+        if dense_hessian_bytes is None
+        else _staged_like(value, dense_hessian_bytes, dtype=jnp.int64)
+    )
+    packed["dense_hessian_bytes_present"] = _runtime_bool(
+        dense_hessian_bytes is not None
+    )
+    packed["max_dense_hessian_bytes"] = (
+        missing_int64
+        if max_dense_hessian_bytes is None
+        else _staged_like(value, max_dense_hessian_bytes, dtype=jnp.int64)
+    )
+    packed["max_dense_hessian_bytes_present"] = _runtime_bool(
+        max_dense_hessian_bytes is not None
+    )
     for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         packed[f"outer_raw_term_{term_name}"] = (
             _runtime_float64_scalar(np.nan, reference=value)
@@ -1123,6 +1146,8 @@ def _traceable_general_forward_result(
             newton_linear_solve_backend_code=solve_result.get(
                 "newton_linear_solve_backend_code"
             ),
+            dense_hessian_bytes=solve_result.get("dense_hessian_bytes"),
+            max_dense_hessian_bytes=solve_result.get("max_dense_hessian_bytes"),
             outer_raw_terms=outer_raw_terms,
         )
 
