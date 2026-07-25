@@ -497,7 +497,15 @@ def _clamped_dims_or_default(spec: SurfaceXYZTensorFourierSpec):
 def _surface_xyz_tensor_fourier_from_spec(
     spec: SurfaceXYZTensorFourierSpec,
     kernel: Callable[..., jax.Array],
+    *,
+    use_compute_dtype: bool = False,
 ) -> jax.Array:
+    """Evaluate one tensor-surface quantity from its immutable runtime spec.
+
+    The spec is the sole owner of compact scatter indices and clamping flags.
+    ``use_compute_dtype`` changes arithmetic dtype only; representation and
+    boundary-condition metadata remain identical across proposal/certificate lanes.
+    """
     return kernel(
         spec.dofs,
         spec.quadpoints_phi,
@@ -508,15 +516,24 @@ def _surface_xyz_tensor_fourier_from_spec(
         spec.stellsym,
         _scatter_indices_or_none(spec),
         clamped_dims=_clamped_dims_or_default(spec),
+        use_compute_dtype=use_compute_dtype,
     )
 
 
 def _make_surface_xyz_tensor_fourier_from_spec(
     name: str,
     kernel: Callable[..., jax.Array],
-) -> Callable[[SurfaceXYZTensorFourierSpec], jax.Array]:
-    def _from_spec(spec: SurfaceXYZTensorFourierSpec) -> jax.Array:
-        return _surface_xyz_tensor_fourier_from_spec(spec, kernel)
+) -> Callable[..., jax.Array]:
+    def _from_spec(
+        spec: SurfaceXYZTensorFourierSpec,
+        *,
+        use_compute_dtype: bool = False,
+    ) -> jax.Array:
+        return _surface_xyz_tensor_fourier_from_spec(
+            spec,
+            kernel,
+            use_compute_dtype=use_compute_dtype,
+        )
 
     return _named_wrapper(name, _from_spec)
 

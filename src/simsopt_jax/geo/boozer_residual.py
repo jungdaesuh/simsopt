@@ -65,6 +65,12 @@ from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_geometry_from_spec,
     surface_rz_fourier_spec_from_dofs,
 )
+from simsopt_jax.core.specs import SurfaceXYZTensorFourierSpec
+from simsopt_jax.core.surface_fourier import (
+    surface_xyz_tensor_fourier_gamma_from_spec,
+    surface_xyz_tensor_fourier_gammadash1_from_spec,
+    surface_xyz_tensor_fourier_gammadash2_from_spec,
+)
 from simsopt_jax.core.reductions import (
     pairwise_sum_axis,
     scalar_square_sum,
@@ -628,6 +634,7 @@ def _surface_geometry_from_dofs(
     stellsym,
     scatter_indices,
     surface_kind="generic",
+    clamped_dims=(False, False, False),
     use_compute_dtype=False,
 ):
     """Evaluate gamma, gammadash1, gammadash2 from surface DOFs.
@@ -669,7 +676,41 @@ def _surface_geometry_from_dofs(
             )
         return sgf(*args), sg1f(*args), sg2f(*args)
 
-    if surface_kind not in {"generic", "xyztensorfourier"}:
+    if surface_kind == "xyztensorfourier":
+        # The immutable spec jointly owns the compact coefficient mapping and
+        # Cartesian boundary clamps. Keeping both in this one payload prevents
+        # Boozer callers from reconstructing either representation independently.
+        surface_spec = SurfaceXYZTensorFourierSpec(
+            dofs=jnp.asarray(sdofs),
+            quadpoints_phi=jnp.asarray(quadpoints_phi),
+            quadpoints_theta=jnp.asarray(quadpoints_theta),
+            scatter_indices=(
+                jnp.asarray(scatter_indices, dtype=jnp.int32)
+                if stellsym
+                else jnp.zeros((0,), dtype=jnp.int32)
+            ),
+            nfp=int(nfp),
+            stellsym=bool(stellsym),
+            mpol=int(mpol),
+            ntor=int(ntor),
+            clamped_dims=tuple(bool(flag) for flag in clamped_dims),
+        )
+        return (
+            surface_xyz_tensor_fourier_gamma_from_spec(
+                surface_spec,
+                use_compute_dtype=use_compute_dtype,
+            ),
+            surface_xyz_tensor_fourier_gammadash1_from_spec(
+                surface_spec,
+                use_compute_dtype=use_compute_dtype,
+            ),
+            surface_xyz_tensor_fourier_gammadash2_from_spec(
+                surface_spec,
+                use_compute_dtype=use_compute_dtype,
+            ),
+        )
+
+    if surface_kind != "generic":
         raise ValueError(f"Unsupported Boozer JAX surface_kind {surface_kind!r}.")
 
     sgf, sg1f, sg2f = _get_surface_fns()

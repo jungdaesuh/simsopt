@@ -888,17 +888,20 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      tuple values.
      Host finalizers and lifecycle observers execute with implicit transfers
      disallowed in both directions.
-   - [ ] Propagate clamped dimension and static-basis metadata as immutable
+   - [x] Propagate clamped dimension and static-basis metadata as immutable
      runtime state through the geometry dispatcher and the public
      `BoozerSurfaceJAX` entrypoint. Include both in cache identities and result
      labels; test the public entrypoint, not only private helpers, with values
-     that distinguish each route.
-   - [ ] In `boozer_residual.py::_surface_geometry_from_dofs`, construct one
+     that distinguish each route. **Result:** the focused public runtime,
+     signature, compact-lowering, and AD slice passes `6/6` on CPU and its
+     three device-executing contracts pass `3/3` on the local RTX 5090.
+   - [x] In `boozer_residual.py::_surface_geometry_from_dofs`, construct one
      immutable `SurfaceXYZTensorFourierSpec` carrying compact `int32` indices
      and `clamped_dims`, then call the spec-owned geometry kernels. Port the
      `7f6bf6192` companion fixture changes in
      `tests/geo/boozersurface_jax_test_helpers.py` so clones and mocks preserve
-     `clamped_dims`.
+     `clamped_dims`. The generic compatibility surface retains its explicit
+     dense fallback; the production XYZ-tensor route owns the compact spec.
    - [x] Add the `aa47aa741` strict-transfer regression at the lazy reporting
      boundary, proving host booleans are staged outside traced/device code and
      do not cause an implicit host-to-device transfer.

@@ -880,6 +880,13 @@ jax.tree_util.register_dataclass(
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class _BoozerSurfaceRuntimeState:
+    """Immutable geometry representation shared by every Boozer solver lane.
+
+    Compact stellsym indices and XYZ-tensor clamping flags are captured together;
+    callers never rebuild either representation from mutable surface objects.
+    Array signatures bind dtype, shape, and contents into compilation cache keys.
+    """
+
     quadpoints_phi: jax.Array
     quadpoints_theta: jax.Array
     scatter_indices: jax.Array | None
@@ -891,6 +898,7 @@ class _BoozerSurfaceRuntimeState:
     nfp: int = field(metadata={"static": True})
     stellsym: bool = field(metadata={"static": True})
     surface_kind: str = field(metadata={"static": True})
+    clamped_dims: tuple[bool, bool, bool] = field(metadata={"static": True})
 
 
 @jax.tree_util.register_dataclass
@@ -1023,11 +1031,13 @@ class _BoozerLSGroupedVJPSnapshot:
     label_type: str = field(metadata={"static": True})
     phi_idx: int = field(metadata={"static": True})
     surface_kind: str = field(metadata={"static": True})
+    clamped_dims: tuple[bool, bool, bool] = field(metadata={"static": True})
     label_mpol: int = field(metadata={"static": True})
     label_ntor: int = field(metadata={"static": True})
     label_nfp: int = field(metadata={"static": True})
     label_stellsym: bool = field(metadata={"static": True})
     label_surface_kind: str = field(metadata={"static": True})
+    label_clamped_dims: tuple[bool, bool, bool] = field(metadata={"static": True})
     label_quadpoints_phi: jax.Array
     label_quadpoints_theta: jax.Array
     label_scatter_indices: jax.Array | None
@@ -1127,12 +1137,52 @@ def _host_array_signature(array) -> tuple[str, tuple[int, ...], str] | None:
     )
 
 
+def _surface_stellsym_scatter_indices_host(mpol: int, ntor: int) -> np.ndarray:
+    """Return the canonical compact stellsym mapping with sealed scatter promises."""
+    indices = np.ascontiguousarray(
+        stellsym_scatter_indices(mpol, ntor),
+        dtype=np.int32,
+    )
+    coefficient_count = int(3 * (2 * mpol + 1) * (2 * ntor + 1))
+    if indices.ndim != 1:
+        raise ValueError(
+            "stellsym_scatter_indices must return a one-dimensional vector; "
+            f"got shape {indices.shape}"
+        )
+    if indices.size and (
+        int(indices[0]) < 0
+        or int(indices[-1]) >= coefficient_count
+        or not bool(np.all(np.diff(indices) > 0))
+    ):
+        raise ValueError(
+            "stellsym scatter indices must be strictly increasing, unique, and "
+            f"within [0, {coefficient_count})"
+        )
+    return indices
+
+
 def _generic_surface_scatter_operator_host(mpol: int, ntor: int) -> np.ndarray:
-    positions = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
-    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
-    operator = np.zeros((3 * n_per_coord, positions.size), dtype=np.float64)
-    operator[positions, np.arange(positions.size)] = 1.0
+    indices = _surface_stellsym_scatter_indices_host(mpol, ntor)
+    coefficient_count = int(3 * (2 * mpol + 1) * (2 * ntor + 1))
+    operator = np.zeros((coefficient_count, indices.size), dtype=np.float64)
+    operator[indices, np.arange(indices.size)] = 1.0
     return operator
+
+
+def _surface_clamped_dims(
+    surface,
+    *,
+    surface_kind: str,
+) -> tuple[bool, bool, bool]:
+    if surface_kind != "xyztensorfourier":
+        return (False, False, False)
+    clamped_dims = tuple(bool(flag) for flag in surface.clamped_dims)
+    if len(clamped_dims) != 3:
+        raise ValueError(
+            "SurfaceXYZTensorFourier clamped_dims must contain exactly three "
+            f"boolean flags; got length {len(clamped_dims)}"
+        )
+    return clamped_dims
 
 
 def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
@@ -1140,6 +1190,7 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     quadpoints_phi = np.asarray(surface.quadpoints_phi, dtype=np.float64)
     quadpoints_theta = np.asarray(surface.quadpoints_theta, dtype=np.float64)
     surface_kind = _surface_geometry_kind(surface)
+    clamped_dims = _surface_clamped_dims(surface, surface_kind=surface_kind)
     scatter_indices = None
     scatter_indices_host = None
     if surface.stellsym:
@@ -1150,9 +1201,9 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
             )
             scatter_indices = _as_jax_float64(scatter_indices_host)
         else:
-            scatter_indices_host = np.asarray(
-                stellsym_scatter_indices(surface.mpol, surface.ntor),
-                dtype=np.int32,
+            scatter_indices_host = _surface_stellsym_scatter_indices_host(
+                surface.mpol,
+                surface.ntor,
             )
             scatter_indices = _as_jax_int32(scatter_indices_host)
     return _BoozerSurfaceRuntimeState(
@@ -1167,6 +1218,7 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
         nfp=int(surface.nfp),
         stellsym=bool(surface.stellsym),
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1177,6 +1229,7 @@ def _boozer_surface_runtime_signature(state: _BoozerSurfaceRuntimeState):
         int(state.nfp),
         bool(state.stellsym),
         str(state.surface_kind),
+        tuple(bool(flag) for flag in state.clamped_dims),
         state.quadpoints_phi_signature,
         state.quadpoints_theta_signature,
         state.scatter_indices_signature,
@@ -1609,6 +1662,7 @@ def _geometry_from_x(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     optimize_G,
     decision_split_mode="reverse",
     optimizer_state_dtype=None,
@@ -1629,6 +1683,7 @@ def _geometry_from_x(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
     )
     return geometry, optimizer_state
 
@@ -1644,6 +1699,7 @@ def _geometry_from_surface_dofs(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     parity_policy: str = "production",
 ):
     surface_dofs = jnp.asarray(surface_dofs)
@@ -1655,9 +1711,14 @@ def _geometry_from_surface_dofs(
     quadpoints_theta = _as_boozer_penalty_compute_array(
         quadpoints_theta, geometry_dtype
     )
-    if parity_policy == "cpu_ordered" and surface_kind in (
-        "generic",
-        "xyztensorfourier",
+    if (
+        parity_policy == "cpu_ordered"
+        and surface_kind
+        in (
+            "generic",
+            "xyztensorfourier",
+        )
+        and not any(clamped_dims)
     ):
         gamma = surface_gamma_from_dofs_cpu_ordered(
             surface_dofs,
@@ -1702,6 +1763,7 @@ def _geometry_from_surface_dofs(
         stellsym,
         scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
         use_compute_dtype=use_compute_dtype,
     )
     return _place_active_replicated_geometry(
@@ -1890,6 +1952,7 @@ def _surface_geometry_and_derivatives_from_dofs(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     parity_policy: str = "production",
 ):
     """Evaluate geometry and its DOF Jacobian.
@@ -1910,9 +1973,14 @@ def _surface_geometry_and_derivatives_from_dofs(
               surface kinds fall back to ``"production"`` and the census will
               keep flagging the residual drift.
     """
-    if parity_policy == "cpu_ordered" and surface_kind in (
-        "generic",
-        "xyztensorfourier",
+    if (
+        parity_policy == "cpu_ordered"
+        and surface_kind
+        in (
+            "generic",
+            "xyztensorfourier",
+        )
+        and not any(clamped_dims)
     ):
         return _surface_geometry_and_derivatives_cpu_ordered(
             surface_dofs,
@@ -1936,6 +2004,7 @@ def _surface_geometry_and_derivatives_from_dofs(
             stellsym,
             scatter_indices,
             surface_kind=surface_kind,
+            clamped_dims=clamped_dims,
         )
 
     gamma, xphi, xtheta = geometry_arrays(surface_dofs)
@@ -2077,6 +2146,7 @@ def _label_value_from_surface_dofs(
     label_stellsym,
     label_scatter_indices,
     label_surface_kind,
+    label_clamped_dims=(False, False, False),
     label_type,
     phi_idx,
     parity_policy: str = "production",
@@ -2091,6 +2161,7 @@ def _label_value_from_surface_dofs(
         stellsym=label_stellsym,
         scatter_indices=label_scatter_indices,
         surface_kind=label_surface_kind,
+        clamped_dims=label_clamped_dims,
         parity_policy=parity_policy,
     )
     return _compute_label(
@@ -2117,6 +2188,7 @@ def _boozer_penalty_value_and_grad_inputs_cpu_ordered(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     optimize_G,
     parity_policy: str = "production",
 ):
@@ -2158,6 +2230,7 @@ def _boozer_penalty_value_and_grad_inputs_cpu_ordered(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
         parity_policy=parity_policy,
     )
     G_value = (
@@ -2202,6 +2275,7 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     label_quadpoints_phi,
     label_quadpoints_theta,
     label_mpol,
@@ -2210,6 +2284,7 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
     label_stellsym,
     label_scatter_indices,
     label_surface_kind,
+    label_clamped_dims=(False, False, False),
     targetlabel,
     constraint_weight,
     label_type,
@@ -2231,6 +2306,7 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
             stellsym=stellsym,
             scatter_indices=scatter_indices,
             surface_kind=surface_kind,
+            clamped_dims=clamped_dims,
             optimize_G=optimize_G,
             parity_policy=parity_policy,
         )
@@ -2261,6 +2337,7 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
         label_stellsym=label_stellsym,
         label_scatter_indices=label_scatter_indices,
         label_surface_kind=label_surface_kind,
+        label_clamped_dims=label_clamped_dims,
         label_type=label_type,
         phi_idx=phi_idx,
         parity_policy=parity_policy,
@@ -2386,6 +2463,7 @@ def _boozer_penalty_objective(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     label_quadpoints_phi,
     label_quadpoints_theta,
     label_mpol,
@@ -2394,6 +2472,7 @@ def _boozer_penalty_objective(
     label_stellsym,
     label_scatter_indices,
     label_surface_kind,
+    label_clamped_dims=(False, False, False),
     targetlabel,
     constraint_weight,
     label_type,
@@ -2425,6 +2504,7 @@ def _boozer_penalty_objective(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
         optimize_G=optimize_G,
         decision_split_mode=decision_split_mode,
         optimizer_state_dtype=optimizer_state_dtype,
@@ -2439,6 +2519,7 @@ def _boozer_penalty_objective(
         stellsym=label_stellsym,
         scatter_indices=label_scatter_indices,
         surface_kind=label_surface_kind,
+        clamped_dims=label_clamped_dims,
     )
     if optimize_G:
         G = optimizer_state.G
@@ -2491,6 +2572,7 @@ def _boozer_penalty_residual_vector(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     label_quadpoints_phi,
     label_quadpoints_theta,
     label_mpol,
@@ -2499,6 +2581,7 @@ def _boozer_penalty_residual_vector(
     label_stellsym,
     label_scatter_indices,
     label_surface_kind,
+    label_clamped_dims=(False, False, False),
     targetlabel,
     constraint_weight,
     label_type,
@@ -2531,6 +2614,7 @@ def _boozer_penalty_residual_vector(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
     )
     gamma = geometry.gamma
     xphi = geometry.xphi
@@ -2545,6 +2629,7 @@ def _boozer_penalty_residual_vector(
         stellsym=label_stellsym,
         scatter_indices=label_scatter_indices,
         surface_kind=label_surface_kind,
+        clamped_dims=label_clamped_dims,
     )
     nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
     points = gamma.reshape(-1, 3)
@@ -2602,6 +2687,7 @@ def _boozer_exact_residual(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     label_quadpoints_phi,
     label_quadpoints_theta,
     label_mpol,
@@ -2610,6 +2696,7 @@ def _boozer_exact_residual(
     label_stellsym,
     label_scatter_indices,
     label_surface_kind,
+    label_clamped_dims=(False, False, False),
     targetlabel,
     label_type,
     phi_idx,
@@ -2637,6 +2724,7 @@ def _boozer_exact_residual(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
         label_quadpoints_phi=label_quadpoints_phi,
         label_quadpoints_theta=label_quadpoints_theta,
         label_mpol=label_mpol,
@@ -2645,6 +2733,7 @@ def _boozer_exact_residual(
         label_stellsym=label_stellsym,
         label_scatter_indices=label_scatter_indices,
         label_surface_kind=label_surface_kind,
+        label_clamped_dims=label_clamped_dims,
         targetlabel=targetlabel,
         label_type=label_type,
         phi_idx=phi_idx,
@@ -2679,6 +2768,7 @@ def _boozer_exact_residual_impl(
     stellsym,
     scatter_indices,
     surface_kind,
+    clamped_dims=(False, False, False),
     label_quadpoints_phi,
     label_quadpoints_theta,
     label_mpol,
@@ -2687,6 +2777,7 @@ def _boozer_exact_residual_impl(
     label_stellsym,
     label_scatter_indices,
     label_surface_kind,
+    label_clamped_dims=(False, False, False),
     targetlabel,
     label_type,
     phi_idx,
@@ -2719,6 +2810,7 @@ def _boozer_exact_residual_impl(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        clamped_dims=clamped_dims,
     )
     gamma = geometry.gamma
     xphi = geometry.xphi
@@ -2733,6 +2825,7 @@ def _boozer_exact_residual_impl(
         stellsym=label_stellsym,
         scatter_indices=label_scatter_indices,
         surface_kind=label_surface_kind,
+        clamped_dims=label_clamped_dims,
     )
     nphi, ntheta = gamma.shape[:2]
 
@@ -2813,6 +2906,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
             surface_kind=booz_surf._surface_geometry_kind,
+            clamped_dims=booz_surf.clamped_dims,
             label_quadpoints_phi=booz_surf.label_quadpoints_phi,
             label_quadpoints_theta=booz_surf.label_quadpoints_theta,
             label_mpol=booz_surf.label_mpol,
@@ -2821,6 +2915,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
             label_stellsym=booz_surf.label_stellsym,
             label_scatter_indices=booz_surf.label_scatter_indices,
             label_surface_kind=booz_surf._label_surface_geometry_kind,
+            label_clamped_dims=booz_surf.label_clamped_dims,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -2878,6 +2973,7 @@ def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_inde
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
             surface_kind=booz_surf._surface_geometry_kind,
+            clamped_dims=booz_surf.clamped_dims,
             label_quadpoints_phi=booz_surf.label_quadpoints_phi,
             label_quadpoints_theta=booz_surf.label_quadpoints_theta,
             label_mpol=booz_surf.label_mpol,
@@ -2886,6 +2982,7 @@ def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_inde
             label_stellsym=booz_surf.label_stellsym,
             label_scatter_indices=booz_surf.label_scatter_indices,
             label_surface_kind=booz_surf._label_surface_geometry_kind,
+            label_clamped_dims=booz_surf.label_clamped_dims,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -3039,6 +3136,7 @@ def _build_ls_grouped_vjp_snapshot(
         stellsym=booz_surf.stellsym,
         scatter_indices=booz_surf.scatter_indices,
         surface_kind=booz_surf._surface_geometry_kind,
+        clamped_dims=booz_surf.clamped_dims,
         optimize_G=optimize_G,
     )
     coil_currents = _grouped_coil_currents(coil_set_spec=coil_set_spec)
@@ -3055,6 +3153,7 @@ def _build_ls_grouped_vjp_snapshot(
         stellsym=booz_surf.label_stellsym,
         scatter_indices=booz_surf.label_scatter_indices,
         surface_kind=booz_surf._label_surface_geometry_kind,
+        clamped_dims=booz_surf.label_clamped_dims,
     )
     field_terms = _select_structured_field_terms_builder(booz_surf.label_type)(
         _field_points_from_geometry(geometry),
@@ -3082,11 +3181,13 @@ def _build_ls_grouped_vjp_snapshot(
         label_type=booz_surf.label_type,
         phi_idx=booz_surf.phi_idx,
         surface_kind=booz_surf._surface_geometry_kind,
+        clamped_dims=booz_surf.clamped_dims,
         label_mpol=booz_surf.label_mpol,
         label_ntor=booz_surf.label_ntor,
         label_nfp=booz_surf.label_nfp,
         label_stellsym=booz_surf.label_stellsym,
         label_surface_kind=booz_surf._label_surface_geometry_kind,
+        label_clamped_dims=booz_surf.label_clamped_dims,
         label_quadpoints_phi=booz_surf.label_quadpoints_phi,
         label_quadpoints_theta=booz_surf.label_quadpoints_theta,
         label_scatter_indices=booz_surf.label_scatter_indices,
@@ -3115,6 +3216,7 @@ def _geometry_tangent_from_decision_tangent(
             stellsym=snapshot.stellsym,
             scatter_indices=snapshot.scatter_indices,
             surface_kind=snapshot.surface_kind,
+            clamped_dims=snapshot.clamped_dims,
         )
 
     _, geometry_tangent = jax.jvp(
@@ -3140,6 +3242,7 @@ def _label_geometry_tangent_from_decision_tangent(
             stellsym=snapshot.label_stellsym,
             scatter_indices=snapshot.label_scatter_indices,
             surface_kind=snapshot.label_surface_kind,
+            clamped_dims=snapshot.label_clamped_dims,
         )
 
     _, geometry_tangent = jax.jvp(
@@ -3337,6 +3440,7 @@ def _make_ls_penalty_objective(
         stellsym=booz_surf.stellsym,
         scatter_indices=booz_surf.scatter_indices,
         surface_kind=booz_surf._surface_geometry_kind,
+        clamped_dims=booz_surf.clamped_dims,
         label_quadpoints_phi=booz_surf.label_quadpoints_phi,
         label_quadpoints_theta=booz_surf.label_quadpoints_theta,
         label_mpol=booz_surf.label_mpol,
@@ -3345,6 +3449,7 @@ def _make_ls_penalty_objective(
         label_stellsym=booz_surf.label_stellsym,
         label_scatter_indices=booz_surf.label_scatter_indices,
         label_surface_kind=booz_surf._label_surface_geometry_kind,
+        label_clamped_dims=booz_surf.label_clamped_dims,
         targetlabel=booz_surf.targetlabel,
         constraint_weight=booz_surf.constraint_weight,
         label_type=booz_surf.label_type,
@@ -4453,6 +4558,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         self._surface_geometry_kind = runtime_state.surface_kind
         self.scatter_indices = runtime_state.scatter_indices
+        self.clamped_dims = runtime_state.clamped_dims
         self.label_mpol = label_runtime_state.mpol
         self.label_ntor = label_runtime_state.ntor
         self.label_nfp = label_runtime_state.nfp
@@ -4464,6 +4570,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         self._label_surface_geometry_kind = label_runtime_state.surface_kind
         self.label_scatter_indices = label_runtime_state.scatter_indices
+        self.label_clamped_dims = label_runtime_state.clamped_dims
 
         # Toroidal flux phi index (first phi point by default)
         self.phi_idx = 0
@@ -5666,6 +5773,7 @@ class BoozerSurfaceJAX(Optimizable):
                 self.stellsym,
                 scatter_indices,
                 surface_kind=self._surface_geometry_kind,
+                clamped_dims=self.clamped_dims,
             )
             nphi, ntheta = gamma.shape[:2]
             B = _grouped_biot_savart_B_points(
@@ -5730,6 +5838,7 @@ class BoozerSurfaceJAX(Optimizable):
                 stellsym=self.stellsym,
                 scatter_indices=scatter_indices,
                 surface_kind=self._surface_geometry_kind,
+                clamped_dims=self.clamped_dims,
             )
             label_geometry = _geometry_from_surface_dofs(
                 sdofs,
@@ -5741,6 +5850,7 @@ class BoozerSurfaceJAX(Optimizable):
                 stellsym=self.label_stellsym,
                 scatter_indices=label_scatter_indices,
                 surface_kind=self._label_surface_geometry_kind,
+                clamped_dims=self.label_clamped_dims,
             )
             label_value, gamma_axis_z = _compute_label_and_axis_z(
                 geometry=geometry,
@@ -5951,6 +6061,7 @@ class BoozerSurfaceJAX(Optimizable):
             "stellsym": self.stellsym,
             "scatter_indices": host(self.scatter_indices),
             "surface_kind": self._surface_geometry_kind,
+            "clamped_dims": self.clamped_dims,
             "label_quadpoints_phi": host(self.label_quadpoints_phi),
             "label_quadpoints_theta": host(self.label_quadpoints_theta),
             "label_mpol": self.label_mpol,
@@ -5959,6 +6070,7 @@ class BoozerSurfaceJAX(Optimizable):
             "label_stellsym": self.label_stellsym,
             "label_scatter_indices": host(self.label_scatter_indices),
             "label_surface_kind": self._label_surface_geometry_kind,
+            "label_clamped_dims": self.label_clamped_dims,
             "targetlabel": self.targetlabel,
             "label_type": self.label_type,
             "phi_idx": self.phi_idx,
@@ -8026,6 +8138,7 @@ class BoozerSurfaceJAX(Optimizable):
             self.stellsym,
             self.scatter_indices,
             surface_kind=self._surface_geometry_kind,
+            clamped_dims=self.clamped_dims,
         )
         B_final = grouped_biot_savart_B_from_spec(
             gamma_final.reshape(-1, 3),
