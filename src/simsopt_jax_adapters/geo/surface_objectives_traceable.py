@@ -1448,6 +1448,101 @@ def _traceable_objective_gradient_parts(
     return direct_grad, implicit_grad, total_grad, linear_solve_success
 
 
+def _traceable_predict_warmstart_from_anchor(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    anchor_coil_dofs,
+    anchor_x,
+    anchor_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    predictor_kind,
+    objective_kwargs,
+):
+    """Predict a warm start from one caller-authorized solved anchor."""
+    delta = coil_dofs - anchor_coil_dofs
+
+    if predictor_kind == "exact":
+        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
+
+        def anchor_residual_of_coils(cd):
+            return _boozer_exact_residual(
+                anchor_x,
+                coil_set_spec=coil_set_spec_from_dofs(cd),
+                **exact_residual_kwargs,
+            )
+
+        forcing = jax.jvp(
+            anchor_residual_of_coils,
+            (anchor_coil_dofs,),
+            (delta,),
+        )[1]
+    else:
+        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+        forcing = _traceable_inner_stationarity_coil_jvp(
+            anchor_x,
+            anchor_coil_dofs,
+            delta,
+            coil_set_spec_from_dofs,
+            **inner_objective_kwargs,
+        )
+
+    dx, linear_solve_status = _traceable_solve_linearization(
+        booz_jax,
+        anchor_x,
+        -forcing,
+        coil_set_spec_from_dofs(anchor_coil_dofs),
+        objective_kwargs,
+        linear_solve_factors=anchor_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        transpose=False,
+    )
+    linear_solve_success = _optimizer_jax._linear_solve_status_success(
+        linear_solve_status
+    )
+    dx = jnp.asarray(dx, dtype=anchor_x.dtype)
+    predicted_x = anchor_x + dx
+    preserve_failed_predictor = (
+        predictor_kind == "exact" or linearization_kind == "exact_jacobian"
+    )
+    if preserve_failed_predictor:
+        return predicted_x, linear_solve_success
+    return (
+        lax.cond(
+            linear_solve_success,
+            lambda _: predicted_x,
+            lambda _: anchor_x,
+            operand=None,
+        ),
+        linear_solve_success,
+    )
+
+
+def _traceable_select_predictor_linear_solve_factors(
+    anchor_eligible,
+    *,
+    baseline_linear_solve_factors,
+    anchor_linear_solve_factors,
+):
+    """Select anchor factors only after the caller authorizes the anchor."""
+    if baseline_linear_solve_factors is None:
+        return None
+    return jax.tree.map(
+        lambda anchor_value, baseline_value: lax.select(
+            anchor_eligible,
+            anchor_value,
+            baseline_value,
+        ),
+        anchor_linear_solve_factors,
+        baseline_linear_solve_factors,
+    )
+
+
 def _traceable_predict_warmstart_x(
     booz_jax,
     coil_set_spec_from_dofs,
@@ -1462,63 +1557,19 @@ def _traceable_predict_warmstart_x(
     predictor_kind,
     objective_kwargs,
 ):
-    """Predict a coil-dependent warm start via a first-order implicit step."""
-    delta = coil_dofs - baseline_coil_dofs
-
-    if predictor_kind == "exact":
-        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
-
-        def baseline_residual_of_coils(cd):
-            return _boozer_exact_residual(
-                baseline_x,
-                coil_set_spec=coil_set_spec_from_dofs(cd),
-                **exact_residual_kwargs,
-            )
-
-        forcing = jax.jvp(
-            baseline_residual_of_coils,
-            (baseline_coil_dofs,),
-            (delta,),
-        )[1]
-    else:
-        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
-        forcing = _traceable_inner_stationarity_coil_jvp(
-            baseline_x,
-            baseline_coil_dofs,
-            delta,
-            coil_set_spec_from_dofs,
-            **inner_objective_kwargs,
-        )
-
-    dx, linear_solve_status = _traceable_solve_linearization(
+    """Predict a coil-dependent warm start from the immutable baseline."""
+    return _traceable_predict_warmstart_from_anchor(
         booz_jax,
-        baseline_x,
-        -forcing,
-        coil_set_spec_from_dofs(baseline_coil_dofs),
-        objective_kwargs,
-        linear_solve_factors=baseline_linear_solve_factors,
+        coil_set_spec_from_dofs,
+        coil_dofs=coil_dofs,
+        anchor_coil_dofs=baseline_coil_dofs,
+        anchor_x=baseline_x,
+        anchor_linear_solve_factors=baseline_linear_solve_factors,
         linearization_kind=linearization_kind,
         linear_solve_tol=linear_solve_tol,
         linear_solve_stab=linear_solve_stab,
-        transpose=False,
-    )
-    linear_solve_success = _optimizer_jax._linear_solve_status_success(
-        linear_solve_status
-    )
-    predicted_x = baseline_x + dx
-    preserve_failed_predictor = (
-        predictor_kind == "exact" or linearization_kind == "exact_jacobian"
-    )
-    if preserve_failed_predictor:
-        return predicted_x, linear_solve_success
-    return (
-        lax.cond(
-            linear_solve_success,
-            lambda _: predicted_x,
-            lambda _: baseline_x,
-            operand=None,
-        ),
-        linear_solve_success,
+        predictor_kind=predictor_kind,
+        objective_kwargs=objective_kwargs,
     )
 
 
@@ -3691,6 +3742,52 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             "success": warmstart_linear_solve_success,
         }
 
+    def _current_incumbent_warmstart_for(
+        coil_dofs,
+        anchor_coil_dofs,
+        anchor_x,
+        anchor_linear_solve_factors,
+        anchor_eligible,
+    ):
+        anchor_eligible = jnp.asarray(anchor_eligible, dtype=bool)
+        selected_anchor_coil_dofs = lax.select(
+            anchor_eligible,
+            _as_jax_float64(anchor_coil_dofs),
+            baseline_coil_dofs,
+        )
+        selected_anchor_x = lax.select(
+            anchor_eligible,
+            _as_jax_float64(anchor_x),
+            baseline_x,
+        )
+        selected_anchor_linear_solve_factors = (
+            _traceable_select_predictor_linear_solve_factors(
+                anchor_eligible,
+                baseline_linear_solve_factors=baseline_linear_solve_factors,
+                anchor_linear_solve_factors=anchor_linear_solve_factors,
+            )
+        )
+        warmstart_x, warmstart_linear_solve_success = (
+            _traceable_predict_warmstart_from_anchor(
+                booz_jax,
+                coil_set_spec_from_dofs,
+                coil_dofs=coil_dofs,
+                anchor_coil_dofs=selected_anchor_coil_dofs,
+                anchor_x=selected_anchor_x,
+                anchor_linear_solve_factors=selected_anchor_linear_solve_factors,
+                linearization_kind=linearization_kind,
+                linear_solve_tol=linear_solve_tol,
+                linear_solve_stab=linear_solve_stab,
+                predictor_kind=predictor_kind,
+                objective_kwargs=objective_kwargs,
+            )
+        )
+        return {
+            "x": warmstart_x,
+            "success": warmstart_linear_solve_success,
+            "anchor_used": anchor_eligible,
+        }
+
     def _solve_for(coil_dofs):
         coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
         warmstart = _warmstart_for(coil_dofs)
@@ -3815,6 +3912,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         compiled_forward_result_for
     )
     compiled_warmstart_for = jax.jit(_warmstart_for)
+    compiled_current_incumbent_warmstart_for = jax.jit(_current_incumbent_warmstart_for)
     compiled_inner_solve_for = jax.jit(_solve_for)
     compiled_surface_geometry_for = jax.jit(_surface_geometry_for)
     compiled_field_for = jax.jit(_field_for)
@@ -3828,6 +3926,9 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         "forward_result": compiled_forward_result_for,
         "forward_value": compiled_forward_value_for,
         "warmstart_predict": compiled_warmstart_for,
+        "current_incumbent_warmstart_predict": (
+            compiled_current_incumbent_warmstart_for
+        ),
         "inner_solve": compiled_inner_solve_for,
         "surface_geometry": compiled_surface_geometry_for,
         "field_eval": compiled_field_for,
