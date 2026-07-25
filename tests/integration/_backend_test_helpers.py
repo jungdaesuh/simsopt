@@ -10,7 +10,11 @@ import sys
 import numpy as np
 import pytest
 
-from simsopt_jax.backend import get_backend_config, invalidate_backend_cache, set_backend
+from simsopt_jax.backend import (
+    get_backend_config,
+    invalidate_backend_cache,
+    set_backend,
+)
 
 try:
     import jax
