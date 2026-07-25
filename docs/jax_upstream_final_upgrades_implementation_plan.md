@@ -762,9 +762,12 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      retains a dense matrix fallback. Full mixed value-and-gradient lowering
      contains no floating scatter matrix at either dtype (`1/1` CPU and `1/1`
      local RTX 5090).
-   - [ ] Audit seeded/K2 FP64 certificate rules and accepted-state ownership in
-     `surface_objectives_traceable.py`; do not infer closure from the predictor
-     contract.
+   - [x] Enforce the seeded/K2 FP64 certificate boundary in
+     `surface_objectives_traceable.py`: promote proposal coil/state arrays
+     before objective differentiation and adjoint branching, and return the
+     adjoint in the certificate dtype. Focused CPU and local RTX 5090 tests
+     cover FP32 proposal inputs. Accepted-state ownership remains a separate
+     Phase 4 lifecycle gate; do not infer its closure from this dtype contract.
    - [x] Port the dependency-complete reporting and warm-start state from
      selected `3c7a9d787` before applying later reporting/predictor commits:
      packed `outer_raw_terms_present`, the raw-term leaves and

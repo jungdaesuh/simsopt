@@ -5585,6 +5585,91 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
     _assert_primal_value_with_nonfinite_gradient(value, grad, 1.25)
 
 
+def test_traceable_k2_promotes_compute_state_to_fp64_certificate(monkeypatch):
+    observed: dict[str, list[np.dtype]] = {
+        "objective_state": [],
+        "objective_coils": [],
+        "coil_spec": [],
+        "solve_state": [],
+        "solve_rhs": [],
+    }
+
+    def coil_set_spec_from_dofs(current_coil_dofs):
+        observed["coil_spec"].append(np.dtype(current_coil_dofs.dtype))
+        return current_coil_dofs
+
+    def scalar_objective(
+        x_inner,
+        current_coil_dofs,
+        _coil_set_spec,
+        *,
+        objective_kwargs,
+    ):
+        del objective_kwargs
+        observed["objective_state"].append(np.dtype(x_inner.dtype))
+        observed["objective_coils"].append(np.dtype(current_coil_dofs.dtype))
+        return jnp.sum(x_inner * x_inner) + jnp.sum(
+            current_coil_dofs * current_coil_dofs
+        )
+
+    def solve_linearization(
+        _booz_jax,
+        solved_x,
+        rhs,
+        _coil_set_spec,
+        _objective_kwargs,
+        **_kwargs,
+    ):
+        observed["solve_state"].append(np.dtype(solved_x.dtype))
+        observed["solve_rhs"].append(np.dtype(rhs.dtype))
+        return jnp.zeros_like(solved_x), _mock_linear_solve_status(True)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_linearization",
+        solve_linearization,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_directional_inner_stationarity",
+        lambda x_inner, tangent, coil_set_spec, **_kwargs: (
+            jnp.sum(x_inner) * jnp.sum(tangent) * jnp.sum(coil_set_spec)
+        ),
+    )
+
+    objective_kwargs = {
+        key: None
+        for key in surfaceobjectives_traceable_jax_module._TRACEABLE_INNER_OBJECTIVE_KEYS
+    }
+    gradient, success = (
+        surfaceobjectives_traceable_jax_module._traceable_total_gradient_with_status(
+            object(),
+            coil_set_spec_from_dofs,
+            coil_dofs=jnp.asarray([0.5, -0.25], dtype=jnp.float32),
+            solved_x=jnp.asarray([0.75, -1.25], dtype=jnp.float32),
+            solved_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-11,
+            linear_solve_stab=0.0,
+            objective_kwargs=objective_kwargs,
+            scalar_objective_fn=scalar_objective,
+        )
+    )
+
+    expected_dtype = np.dtype(np.float64)
+    assert bool(np.asarray(success))
+    assert gradient.dtype == jnp.float64
+    assert observed["objective_state"] and set(observed["objective_state"]) == {
+        expected_dtype
+    }
+    assert observed["objective_coils"] and set(observed["objective_coils"]) == {
+        expected_dtype
+    }
+    assert observed["coil_spec"] and set(observed["coil_spec"]) == {expected_dtype}
+    assert observed["solve_state"] == [expected_dtype]
+    assert observed["solve_rhs"] == [expected_dtype]
+
+
 def test_traceable_seeded_value_and_grad_builds_general_only_bundle(monkeypatch):
     baseline_coil_dofs = np.asarray([0.5, -0.25], dtype=np.float64)
     baseline_gradient = jnp.asarray([0.125, -0.5], dtype=jnp.float64)

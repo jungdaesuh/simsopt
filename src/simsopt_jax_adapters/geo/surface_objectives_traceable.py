@@ -1647,13 +1647,15 @@ def _traceable_objective_gradient_parts(
     scalar_objective_fn=None,
     certificate_probe_key=None,
 ):
-    """Return direct, implicit, and total gradients for one traceable objective."""
+    """Return FP64-certificate gradients for one traceable objective."""
     if scalar_objective_fn is not None and term_name is not None:
         raise ValueError(
             "scalar_objective_fn and term_name are mutually exclusive traceable "
             "gradient selectors."
         )
 
+    coil_dofs = _as_jax_float64(coil_dofs)
+    solved_x = _as_jax_float64(solved_x)
     inactive_mixed_dense_ir_trust = (
         _optimizer_jax._inactive_mixed_dense_ir_trust_telemetry(solved_x)
     )
@@ -1730,6 +1732,7 @@ def _traceable_objective_gradient_parts(
                 transpose=True,
                 certificate_probe_key=certificate_probe_key,
             )
+            adjoint_value = jnp.asarray(adjoint_value, dtype=solved_x.dtype)
             trust = (
                 linear_solve_status.trust
                 if isinstance(
