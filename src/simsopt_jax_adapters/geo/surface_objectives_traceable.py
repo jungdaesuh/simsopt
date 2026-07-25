@@ -1492,18 +1492,10 @@ def _build_traceable_objective_cache_state(
     )
     optimize_G = warmstart_G is not None
     predictor_kind = booz_jax.boozer_type
-    solve_quadpoints_phi = _as_jax_float64(
-        np.asarray(booz_jax.quadpoints_phi, dtype=float)
-    )
-    solve_quadpoints_theta = _as_jax_float64(
-        np.asarray(booz_jax.quadpoints_theta, dtype=float)
-    )
-    label_quadpoints_phi = _as_jax_float64(
-        np.asarray(booz_jax.label_quadpoints_phi, dtype=float)
-    )
-    label_quadpoints_theta = _as_jax_float64(
-        np.asarray(booz_jax.label_quadpoints_theta, dtype=float)
-    )
+    solve_quadpoints_phi = _as_jax_float64(booz_jax.quadpoints_phi)
+    solve_quadpoints_theta = _as_jax_float64(booz_jax.quadpoints_theta)
+    label_quadpoints_phi = _as_jax_float64(booz_jax.label_quadpoints_phi)
+    label_quadpoints_theta = _as_jax_float64(booz_jax.label_quadpoints_theta)
     exact_quadpoints_phi, exact_quadpoints_theta, mask_indices = (
         _canonicalize_traceable_exact_quadrature(booz_jax)
     )
@@ -1533,12 +1525,8 @@ def _build_traceable_objective_cache_state(
         "iota_target": _as_jax_float64(iota_target),
         "exact_quadpoints_phi": exact_quadpoints_phi,
         "exact_quadpoints_theta": exact_quadpoints_theta,
-        "surface_quadpoints_phi": _as_jax_float64(
-            np.asarray(booz_jax.surface.quadpoints_phi, dtype=float)
-        ),
-        "surface_quadpoints_theta": _as_jax_float64(
-            np.asarray(booz_jax.surface.quadpoints_theta, dtype=float)
-        ),
+        "surface_quadpoints_phi": _as_jax_float64(booz_jax.surface.quadpoints_phi),
+        "surface_quadpoints_theta": _as_jax_float64(booz_jax.surface.quadpoints_theta),
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
         "outer_objective_config": outer_objective_config,
         "mask_indices": mask_indices,
