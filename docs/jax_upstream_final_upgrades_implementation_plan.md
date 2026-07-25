@@ -843,15 +843,15 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      fake result must provide those fields in addition to `x_k`.
 
 7. Port standalone reusable performance upgrades.
-   - [ ] Add `src/simsopt_jax/core/biotsavart_online.py` from the final
+   - [x] Add `src/simsopt_jax/core/biotsavart_online.py` from the final
      production state and connect it through `core/field.py` without campaign
      selectors.
-   - [ ] Port the matching backend half of the dispatch from `2afc66397`: the
+   - [x] Port the matching backend half of the dispatch from `2afc66397`: the
      mixed online source-tile constant,
      `FieldKernelTuning.mixed_biot_savart_source_tile_size`, and its policy
      population. Test tuning and strict-transfer dispatch so `core/field.py`
      cannot dereference a missing field.
-   - [ ] Preserve bitwise agreement between the direct primal entry point and
+   - [x] Preserve bitwise agreement between the direct primal entry point and
      the custom-JVP primal while fusing primal and tangent source traversal.
    - [ ] Port the stellarator-symmetry index-scatter representation across
      `surface_fourier.py`, `surface_fourier_kernels.py`, `boozer_residual.py`,
@@ -866,11 +866,15 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      sufficient. **Result:** primal, JVP, and JIT-transposed VJP placement pass
      `3/3` on both CPU and the local RTX 5090; the existing surface-Fourier CPU
      suite remains `158/158`.
-   - [ ] Add focused online Biot-Savart, additive/homogeneous JVP, scatter
+   - [x] Add focused online Biot-Savart, additive/homogeneous JVP, scatter
      equivalence, and device-placement tests.
-   - [ ] Create or port `tests/field/test_biotsavart_online.py` and
+   - [x] Create or port `tests/field/test_biotsavart_online.py` and
      `tests/geo/test_surface_fourier_device_placement.py`; both are absent from
-     the target baseline.
+     the target baseline. **Result:** the online kernel, derivative, dispatch,
+     and fallback suite passes `32/32` on CPU and `32/32` on the local RTX 5090.
+     Immutable grouped coil specs remain FP64; only the mixed execution boundary
+     stages FP32 operands, while certificate calls retain the established FP64
+     grouped implementation.
 ### Follow-up B — benchmark lifecycle, RSS, statistics, and provenance
 
 This is a separate benchmark-infrastructure plan/PR, with a minimal
