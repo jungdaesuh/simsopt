@@ -6779,18 +6779,20 @@ def _solve_hessian_least_squares_system_with_status(
     stab,
     tol,
     residual_fn=None,
+    solver: _AdjointHessianLinearSolver | None = None,
 ):
     """Solve a Hessian adjoint system without forming normal equations."""
     rhs = jnp.asarray(rhs)
     x = _place_like_concrete_array(x, rhs)
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    if _ADJOINT_LINEAR_SOLVER == "cg":
+    selected_solver = _ADJOINT_LINEAR_SOLVER if solver is None else solver
+    if selected_solver == "cg":
         return _solve_symmetric_operator_cg_with_status(
             operator["matvec"],
             rhs,
             tol=tol,
         )
-    if _ADJOINT_LINEAR_SOLVER == "lsmr_j":
+    if selected_solver == "lsmr_j":
         if residual_fn is None:
             raise ValueError(
                 "SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j requires a residual_fn "

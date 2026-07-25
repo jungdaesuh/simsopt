@@ -83,6 +83,12 @@ def _pivoting_hessian() -> jnp.ndarray:
     )
 
 
+def _packed_factors(matrix):
+    lu_piv = jsp_linalg.lu_factor(matrix)
+    P, L, U = opt_jax._plu_from_lu_piv(lu_piv)
+    return P, L, U, lu_piv[0], lu_piv[1]
+
+
 def _run_factor_dense_hessian_byte_parity_on_cpu() -> subprocess.CompletedProcess[str]:
     """Re-run this test selector in an exact CPU-only child process."""
     env = dict(os.environ)
@@ -216,14 +222,16 @@ def test_traceable_solve_plu_linearization_forward_matches_lu_solve(n, seed):
     rng = np.random.default_rng(seed + 100)
     rhs = jnp.asarray(rng.normal(size=(n,)), dtype=jnp.float64)
 
-    solved, success = soj._traceable_solve_plu_linearization(
+    solved, status = soj._traceable_solve_plu_linearization(
         factors_5tuple,
         rhs,
+        live_matvec=lambda vector: H @ vector,
         linear_solve_tol=1e-12,
         transpose=False,
     )
     expected = jsp_linalg.lu_solve(lu_piv, rhs, trans=0)
-    assert bool(np.asarray(success))
+    assert bool(np.asarray(status.success))
+    assert int(np.asarray(status.fp64_rebuild_count)) == 0
     assert np.array_equal(np.asarray(solved), np.asarray(expected))
 
 
@@ -238,14 +246,16 @@ def test_traceable_solve_plu_linearization_transpose_matches_lu_solve_trans(n, s
     rng = np.random.default_rng(seed + 200)
     rhs = jnp.asarray(rng.normal(size=(n,)), dtype=jnp.float64)
 
-    solved, success = soj._traceable_solve_plu_linearization(
+    solved, status = soj._traceable_solve_plu_linearization(
         factors_5tuple,
         rhs,
+        live_matvec=lambda vector: H.T @ vector,
         linear_solve_tol=1e-12,
         transpose=True,
     )
     expected = jsp_linalg.lu_solve(lu_piv, rhs, trans=1)
-    assert bool(np.asarray(success))
+    assert bool(np.asarray(status.success))
+    assert int(np.asarray(status.fp64_rebuild_count)) == 0
     assert np.array_equal(np.asarray(solved), np.asarray(expected))
 
 
@@ -272,12 +282,14 @@ def test_forward_and_adjoint_hessian_action_share_factor_bytes(n, seed):
     forward_sol, _ = soj._traceable_solve_plu_linearization(
         factors_5tuple,
         rhs,
+        live_matvec=lambda vector: H @ vector,
         linear_solve_tol=1e-12,
         transpose=False,
     )
     adjoint_sol, _ = soj._traceable_solve_plu_linearization(
         factors_5tuple,
         rhs,
+        live_matvec=lambda vector: H.T @ vector,
         linear_solve_tol=1e-12,
         transpose=True,
     )
@@ -309,17 +321,110 @@ def test_traceable_solve_plu_linearization_5tuple_vs_3tuple_equivalent():
     sol_5, _ = soj._traceable_solve_plu_linearization(
         (P, L, U, lu_piv[0], lu_piv[1]),
         rhs,
+        live_matvec=lambda vector: H @ vector,
         linear_solve_tol=1e-12,
         transpose=False,
     )
     sol_3, _ = soj._traceable_solve_plu_linearization(
         (P, L, U),
         rhs,
+        live_matvec=lambda vector: H @ vector,
         linear_solve_tol=1e-12,
         transpose=False,
     )
     eps = np.finfo(np.float64).eps
     assert np.linalg.norm(np.asarray(sol_5 - sol_3)) <= 100.0 * eps * n
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_stale_supplied_factors_trigger_live_fp64_rebuild(transpose):
+    """A self-consistent stale PLU must not certify a different live operator."""
+    stale_matrix = jnp.eye(3, dtype=jnp.float64)
+    live_matrix = jnp.asarray(
+        [
+            [3.0, 0.5, -0.25],
+            [-0.1, 2.0, 0.4],
+            [0.2, -0.3, 1.5],
+        ],
+        dtype=jnp.float64,
+    )
+    oriented_live_matrix = live_matrix.T if transpose else live_matrix
+    rhs = jnp.asarray([0.75, -0.5, 1.25], dtype=jnp.float64)
+
+    solution, status = soj._traceable_solve_plu_linearization(
+        _packed_factors(stale_matrix),
+        rhs,
+        live_matvec=lambda vector: oriented_live_matrix @ vector,
+        linear_solve_tol=1.0e-12,
+        transpose=transpose,
+    )
+
+    assert bool(np.asarray(status.success))
+    assert int(np.asarray(status.fp64_rebuild_count)) == 1
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.linalg.solve(np.asarray(oriented_live_matrix), np.asarray(rhs)),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_fp32_supplied_factors_contract_against_live_fp64_operator(transpose):
+    """FP32 factors may pass only after measured live-FP64 contraction."""
+    live_matrix = jnp.asarray(
+        [
+            [2.0, 0.25, -0.1],
+            [0.25, 1.5, 0.2],
+            [-0.1, 0.2, 1.25],
+        ],
+        dtype=jnp.float64,
+    )
+    approximate_matrix = jnp.asarray(
+        live_matrix
+        + jnp.asarray(
+            [
+                [1.0e-4, -2.0e-5, 0.0],
+                [-2.0e-5, -7.5e-5, 1.0e-5],
+                [0.0, 1.0e-5, 5.0e-5],
+            ],
+            dtype=jnp.float64,
+        ),
+        dtype=jnp.float32,
+    )
+    oriented_live_matrix = live_matrix.T if transpose else live_matrix
+    rhs = jnp.asarray([0.25, -0.75, 1.0], dtype=jnp.float64)
+
+    solution, status = soj._traceable_solve_plu_linearization(
+        _packed_factors(approximate_matrix),
+        rhs,
+        live_matvec=lambda vector: oriented_live_matrix @ vector,
+        linear_solve_tol=1.0e-12,
+        transpose=transpose,
+    )
+
+    trace_length = int(
+        np.asarray(status.supplied_factor_residual_relative_trace_length)
+    )
+    residual_trace = np.asarray(status.supplied_factor_residual_relative_trace)[
+        :trace_length
+    ]
+    contraction_trace = np.asarray(status.supplied_factor_contraction_ratio_trace)[
+        : trace_length - 1
+    ]
+    assert bool(np.asarray(status.success))
+    assert int(np.asarray(status.fp64_rebuild_count)) == 0
+    assert trace_length >= 2
+    assert np.all(np.isfinite(residual_trace))
+    assert np.all(np.diff(residual_trace) < 0.0)
+    assert np.all(np.isfinite(contraction_trace))
+    assert np.all(contraction_trace < 1.0)
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.linalg.solve(np.asarray(oriented_live_matrix), np.asarray(rhs)),
+        rtol=1.0e-11,
+        atol=1.0e-12,
+    )
 
 
 # --- 3) Public API surface checks (no simsoptpp) ---------------------------
