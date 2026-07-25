@@ -521,7 +521,7 @@ class CurveSurfaceDistanceJAX(Optimizable):
 
     def shortest_distance(self):
         surface_points = np.asarray(
-            self.surface.gamma()[::self.downsample, ::self.downsample, :],
+            self.surface.gamma()[:: self.downsample, :: self.downsample, :],
             dtype=np.float64,
         ).reshape((-1, 3))
         return min(
@@ -529,7 +529,7 @@ class CurveSurfaceDistanceJAX(Optimizable):
                 np.min(
                     np.linalg.norm(
                         np.asarray(
-                            curve.gamma()[::self.downsample, :],
+                            curve.gamma()[:: self.downsample, :],
                             dtype=np.float64,
                         )[:, None, :]
                         - surface_points[None, :, :],

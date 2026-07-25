@@ -5,7 +5,7 @@ import collections
 from ._derivative_decorator import derivative_dec  # noqa: F401 - compatibility re-export
 from .optimizable import Optimizable
 
-__all__ = ['Derivative']
+__all__ = ["Derivative"]
 
 
 class OptimizableDefaultDict(collections.defaultdict):
@@ -19,7 +19,7 @@ class OptimizableDefaultDict(collections.defaultdict):
 
     def __missing__(self, key):
         assert isinstance(key, Optimizable)
-        self[key] = value = np.zeros((key.local_full_dof_size, ))
+        self[key] = value = np.zeros((key.local_full_dof_size,))
         return value
 
 
@@ -31,7 +31,6 @@ def copy_numpy_dict(d):
 
 
 class Derivative:
-
     """
     This class stores the derivative of a scalar output wrt to the individual
     ``Optimizable`` classes that are required to compute this output.
@@ -74,7 +73,7 @@ class Derivative:
             inB: dobj/dinter1 * dinter1/dinB
         }
 
-    and 
+    and
 
     .. code-block::
 
