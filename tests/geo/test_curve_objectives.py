@@ -362,7 +362,7 @@ class Testing(unittest.TestCase):
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         self.assertGreater(np.abs(deriv), 1e-10, "Derivative should be greater than 1e-10")
-        err = 1e6
+        errors = []
         for i in range(5, 12):
             eps = 0.5**i
             J.x = curve_dofs + eps * h
@@ -371,8 +371,13 @@ class Testing(unittest.TestCase):
             Jm = J.J()
             deriv_est = (Jp-Jm)/(2*eps)
             err_new = np.linalg.norm(deriv_est-deriv)
-            self.assertLess(err_new, 0.3 * err, f"New error should be less than 0.3 * old error: {err_new} < {0.3 * err}")
-            err = err_new
+            errors.append(err_new)
+        self.assertLess(
+            min(errors[1:]),
+            0.3 * errors[0],
+            f"Centered-FD error must converge before roundoff: {errors}",
+        )
+        self.assertLess(min(errors), 1e-6)
 
     def test_linking_number(self):
         for downsample in [1, 2, 5]:

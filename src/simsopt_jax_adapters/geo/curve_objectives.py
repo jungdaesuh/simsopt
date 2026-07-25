@@ -16,6 +16,9 @@ from scipy.spatial.distance import cdist
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
+from simsopt.geo._curve_surface_distance_owners import (
+    curve_surface_distance_owners,
+)
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
@@ -258,7 +261,7 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
 
 @jit
 def _cs_distance_grad(gammac, lc, gammas, ns, minimum_distance):
-    return grad(cs_distance_pure, argnums=(0, 1))(
+    return grad(cs_distance_pure, argnums=(0, 1, 2, 3))(
         gammac,
         lc,
         gammas,
@@ -498,11 +501,12 @@ class CurveCurveDistanceBarrierJAX(_CurveCurveDistanceJAXBase):
 class CurveSurfaceDistanceJAX(Optimizable):
     """JAX-backed curve-surface distance penalty without C++ candidate culling."""
 
-    def __init__(self, curves, surface, minimum_distance):
+    def __init__(self, curves, surface, minimum_distance, downsample=1):
         self.curves = curves
         self.surface = surface
         self.minimum_distance = minimum_distance
-        super().__init__(depends_on=curves)
+        self.downsample = downsample
+        super().__init__(depends_on=curve_surface_distance_owners(curves, surface))
 
     def _evaluation_geometry(self):
         curve_positions, curve_tangents, surface_gamma, surface_normals = (
@@ -516,14 +520,18 @@ class CurveSurfaceDistanceJAX(Optimizable):
         )
 
     def shortest_distance(self):
-        surface_points = np.asarray(self.surface.gamma(), dtype=np.float64).reshape(
-            (-1, 3)
-        )
+        surface_points = np.asarray(
+            self.surface.gamma()[::self.downsample, ::self.downsample, :],
+            dtype=np.float64,
+        ).reshape((-1, 3))
         return min(
             float(
                 np.min(
                     np.linalg.norm(
-                        np.asarray(curve.gamma(), dtype=np.float64)[:, None, :]
+                        np.asarray(
+                            curve.gamma()[::self.downsample, :],
+                            dtype=np.float64,
+                        )[:, None, :]
                         - surface_points[None, :, :],
                         axis=-1,
                     )
@@ -550,28 +558,48 @@ class CurveSurfaceDistanceJAX(Optimizable):
 
     @derivative_dec
     def dJ(self):
+        """Return the derivative with respect to curve and surface DOFs."""
         curve_positions, curve_tangents, surface_gamma, surface_normals = (
             self._evaluation_geometry()
         )
         dgamma_buffers, dgammadash_buffers = _curve_vjp_buffers(self.curves)
+        surface_gamma_vjp = np.zeros_like(self.surface.gamma())
+        surface_normal_vjp = np.zeros_like(self.surface.normal())
         minimum_distance = _as_jax_float64(self.minimum_distance)
         for index, (gamma, gammadash) in enumerate(
             zip(curve_positions, curve_tangents)
         ):
-            grad_gamma, grad_gammadash = _cs_distance_grad(
-                _as_jax_float64(gamma),
-                _as_jax_float64(gammadash),
-                surface_gamma,
-                surface_normals,
-                minimum_distance,
+            grad_gamma, grad_gammadash, grad_surface_gamma, grad_surface_normal = (
+                _cs_distance_grad(
+                    _as_jax_float64(gamma),
+                    _as_jax_float64(gammadash),
+                    surface_gamma,
+                    surface_normals,
+                    minimum_distance,
+                )
             )
             dgamma_buffers[index] += _as_numpy_float64(grad_gamma)
             dgammadash_buffers[index] += _as_numpy_float64(grad_gammadash)
-        return _sum_curve_vjp_contributions(
+            surface_gamma_vjp += _as_numpy_float64(grad_surface_gamma).reshape(
+                surface_gamma_vjp.shape
+            )
+            surface_normal_vjp += _as_numpy_float64(grad_surface_normal).reshape(
+                surface_normal_vjp.shape
+            )
+        curve_derivative = _sum_curve_vjp_contributions(
             self.curves,
             dgamma_buffers,
             dgammadash_buffers,
         )
+        surface_derivative = Derivative(
+            {
+                self.surface: (
+                    self.surface.dgamma_by_dcoeff_vjp(surface_gamma_vjp)
+                    + self.surface.dnormal_by_dcoeff_vjp(surface_normal_vjp)
+                )
+            }
+        )
+        return curve_derivative + surface_derivative
 
     return_fn_map = {"J": J, "dJ": dJ}
 

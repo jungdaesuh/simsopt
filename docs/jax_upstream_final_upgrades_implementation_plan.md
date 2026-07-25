@@ -1055,7 +1055,7 @@ implementation.
      `boozer_surface_y_stationarity_outer_vjp()` from the selected core PRs;
      they require
      the broader genuine-675/remediation dependency chain.
-   - [ ] Port the narrow native curve host-ownership slice from selected
+   - [x] Port the narrow native curve host-ownership slice from selected
      `5df801e1b`. In `src/simsopt/geo/curve.py`, implement native
      `dincremental_arclength_by_dcoeff_vjp()` and `kappa_impl()` with NumPy-owned
      operations; retain the JAX kernel in an explicit `JaxCurve.kappa_impl()`.
@@ -1064,21 +1064,26 @@ implementation.
      cotangent instead of sending NumPy arrays through a jitted JAX gradient.
      This is a required strict-transfer boundary, not authorization to port the
      commit's broad curve-objective batching.
-   - [ ] Port `tests/geo/test_curve_length_transfer_guard.py` and the focused
-     native/JAX curvature regression in `tests/geo/test_curve.py`. Require native
+   - [x] Port the focused transfer regressions in the dependency-isolated
+     `tests/geo/test_curve_host_ownership.py`. Require native
      `CurveLength.J()/dJ()` and native curvature to run under
      `jax.transfer_guard("disallow")`, while preserving JAX-curve numerical
      behavior.
-   - [ ] Port the native curve-surface physical-partial slice from selected
+   - [x] Port the native curve-surface physical-partial slice from selected
      `5df801e1b`: add
      `src/simsopt/geo/_curve_surface_distance_owners.py`, make
      `CurveSurfaceDistance` depend on the surface, and return the surface VJP
      from `dJ(partials=True)`. Port the matching public
      `CurveSurfaceDistanceJAX` owner and four-input derivative behavior.
-   - [ ] Update the native `CurveSurfaceDistance.dJ` and adapter
+   - [x] Update the native `CurveSurfaceDistance.dJ` and adapter
      `CurveSurfaceDistanceJAX.dJ` docstrings to state that derivatives cover
      both curve and surface DOFs. Port the focused introspection assertions so
      callable-owned documentation and `docs/source/geo.rst` cannot drift apart.
+     **Result:** native and JAX owner gradients match independent centered
+     finite differences, downsampled shortest-distance behavior agrees across
+     the two public classes, the combined host/owner/adapter gate passes
+     `27/27` on CPU, and the strict RTX 5090 boundary passes `6/6` with zero
+     skips.
    - [ ] Preserve the physical derivative basis for fixed surfaces, including
      the selected `5df801e1b` Boozer label-gradient fix after
      `surface.fix_all()`. The native replay owner and its fixed-surface
@@ -1112,7 +1117,7 @@ implementation.
    - [ ] Update the migration SSOT `docs/source/jax_migration.rst` with
      `precision=`, `SIMSOPT_PRECISION`, compatibility defaults, removal of the
      source-only environment spellings, and typed opt-in dense-IR selection.
-   - [ ] Update `docs/source/geo.rst` so the public
+   - [x] Update `docs/source/geo.rst` so the public
      `CurveSurfaceDistance` description states that derivatives cover both curve
      and surface DOFs.
    - [ ] Port the independent `82e9b88d3` documentation correction in
