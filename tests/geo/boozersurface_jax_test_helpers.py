@@ -188,6 +188,7 @@ def _clone_upstream_surface(surface):
             ntor=surface.ntor,
             nfp=surface.nfp,
             stellsym=surface.stellsym,
+            clamped_dims=list(surface.clamped_dims),
             quadpoints_phi=quadpoints_phi,
             quadpoints_theta=quadpoints_theta,
         )
@@ -866,6 +867,7 @@ class _MockSurface:
         self.stellsym = stellsym
         self.quadpoints_phi = qphi
         self.quadpoints_theta = qtheta
+        self.clamped_dims = (False, False, False)
 
     def get_dofs(self):
         return self._dofs.copy()

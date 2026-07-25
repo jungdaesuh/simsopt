@@ -71,6 +71,7 @@ from .boozersurface_jax_test_helpers import (
     _PlumbingVolumeLabel,
     _bsj,
     _build_penalty_problem,
+    _build_upstream_boozer_pair,
     _build_upstream_boozer_exact_constraints_case,
     _ensure_solved_jax,
     _build_upstream_boozer_immutable_inputs,
@@ -103,6 +104,9 @@ from .boozersurface_jax_test_helpers import (
     require_target_backend_x64,
     resolve_least_squares_optimizer_method,
     resolve_optimizer_backend_method,
+    surface_gamma,
+    surface_gammadash1,
+    surface_gammadash2,
     stellsym_scatter_indices,
     UPSTREAM_BOOZER_OPTIMIZE_G,
     UPSTREAM_BOOZER_STELLSYM,
@@ -1318,6 +1322,34 @@ class TestStellsymScatterIndices:
         n_yz = (mpol + 1) * ntor + mpol * (ntor + 1)
         expected = n_x + 2 * n_yz
         assert len(indices) == expected
+
+    def test_canonical_indices_seal_lax_scatter_promises(self):
+        """Every tested mode range satisfies sorted/unique/in-bounds promises."""
+        for mpol in range(11):
+            for ntor in range(11):
+                indices = stellsym_scatter_indices(mpol, ntor)
+                coefficient_count = 3 * (2 * mpol + 1) * (2 * ntor + 1)
+
+                assert indices.dtype == np.dtype(np.int32)
+                assert indices.ndim == 1
+                assert indices.size > 0
+                assert int(indices[0]) >= 0
+                assert int(indices[-1]) < coefficient_count
+                assert np.all(np.diff(indices) > 0)
+                assert np.unique(indices).size == indices.size
+
+    def test_dense_scatter_operator_is_not_a_supported_representation(self):
+        """The public kernel accepts only the canonical one-dimensional mapping."""
+        with pytest.raises(
+            ValueError,
+            match="one-dimensional integer index vector",
+        ):
+            dofs_to_xyzc(
+                jnp.ones((2,), dtype=jnp.float64),
+                jnp.eye(3, 2, dtype=jnp.float64),
+                0,
+                0,
+            )
 
     def test_round_trip(self):
         """Scatter then gather recovers original DOFs."""
@@ -12421,7 +12453,14 @@ class TestStellsymMaskCPUJAXParity:
 class TestBuildBoozerSurfaceRuntimeState:
     """End-to-end tests for build_boozer_surface_runtime_state → constructor."""
 
-    def _make_real_surface(self, mpol=3, ntor=3, nfp=2, stellsym=True):
+    def _make_real_surface(
+        self,
+        mpol=3,
+        ntor=3,
+        nfp=2,
+        stellsym=True,
+        clamped_dims=(False, False, False),
+    ):
         phis = np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
         thetas = np.linspace(0, 1.0, 2 * mpol + 1, endpoint=False)
         return SurfaceXYZTensorFourier(
@@ -12429,6 +12468,7 @@ class TestBuildBoozerSurfaceRuntimeState:
             ntor=ntor,
             stellsym=stellsym,
             nfp=nfp,
+            clamped_dims=list(clamped_dims),
             quadpoints_phi=phis,
             quadpoints_theta=thetas,
         )
@@ -12468,9 +12508,249 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert rs.ntor == s.ntor
         assert rs.nfp == s.nfp
         assert rs.stellsym == s.stellsym
+        assert rs.clamped_dims == tuple(s.clamped_dims)
         np.testing.assert_allclose(np.asarray(rs.quadpoints_phi), s.quadpoints_phi)
         np.testing.assert_allclose(np.asarray(rs.quadpoints_theta), s.quadpoints_theta)
         assert rs.scatter_indices is not None  # stellsym=True
+        assert rs.scatter_indices.dtype == jnp.dtype(jnp.int32)
+        assert rs.scatter_indices.ndim == 1
+
+    def test_target_mode_runtime_state_uses_compact_indices(self):
+        """mpol=ntor=10 carries 661 int32 indices, not a 1323x661 matrix."""
+        s = self._make_real_surface(mpol=10, ntor=10)
+        rs = _bsj.build_boozer_surface_runtime_state(s)
+
+        assert rs.scatter_indices is not None
+        assert rs.scatter_indices.shape == (661,)
+        assert rs.scatter_indices.dtype == jnp.dtype(jnp.int32)
+        assert (
+            np.asarray(rs.scatter_indices).nbytes == 661 * np.dtype(np.int32).itemsize
+        )
+
+    def test_target_mode_lowering_contains_no_dense_scatter_constant(self):
+        """Production XYZ-tensor lowering embeds indices, never 1323x661 f64."""
+        s = self._make_real_surface(mpol=10, ntor=10)
+        rs = _bsj.build_boozer_surface_runtime_state(s)
+
+        def runtime_gamma(dofs):
+            return _bsj._geometry_from_surface_dofs(
+                dofs,
+                quadpoints_phi=rs.quadpoints_phi,
+                quadpoints_theta=rs.quadpoints_theta,
+                mpol=rs.mpol,
+                ntor=rs.ntor,
+                nfp=rs.nfp,
+                stellsym=rs.stellsym,
+                scatter_indices=rs.scatter_indices,
+                surface_kind=rs.surface_kind,
+                clamped_dims=rs.clamped_dims,
+            ).gamma
+
+        stablehlo = str(
+            jax.jit(runtime_gamma)
+            .lower(jnp.asarray(s.get_dofs(), dtype=jnp.float64))
+            .compiler_ir(dialect="stablehlo")
+        )
+        assert "tensor<661xi32>" in stablehlo
+        assert "tensor<1323x661xf64>" not in stablehlo
+
+    def test_clamped_dims_change_runtime_cache_signature(self):
+        """XYZ-tensor boundary clamps are immutable compilation-cache metadata."""
+        unclamped = _bsj.build_boozer_surface_runtime_state(
+            self._make_real_surface(clamped_dims=(False, False, False))
+        )
+        clamped = _bsj.build_boozer_surface_runtime_state(
+            self._make_real_surface(clamped_dims=(True, False, True))
+        )
+
+        assert unclamped.clamped_dims == (False, False, False)
+        assert clamped.clamped_dims == (True, False, True)
+        assert _bsj._boozer_surface_runtime_signature(unclamped) != (
+            _bsj._boozer_surface_runtime_signature(clamped)
+        )
+
+    def test_tensor_runtime_requires_explicit_clamped_dims_ownership(self):
+        """Tensor surfaces cannot silently select the unclamped basis."""
+        with pytest.raises(AttributeError, match="clamped_dims"):
+            _bsj._surface_clamped_dims(
+                types.SimpleNamespace(),
+                surface_kind="xyztensorfourier",
+            )
+
+    def test_clamped_tensor_surface_matches_native_through_boozer_runtime(self):
+        """Boozer runtime preserves clamped geometry, objective, and gradient."""
+        from simsopt.configs.zoo import get_data
+        from simsopt.geo import SurfaceXYZTensorFourier, ToroidalFlux
+
+        _, _, magnetic_axis, nfp, bs = get_data("ncsx")
+        surface = SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            nfp=nfp,
+            stellsym=True,
+            clamped_dims=[True, False, True],
+            quadpoints_phi=np.linspace(0.0, 1.0 / nfp, 5, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        surface.fit_to_curve(magnetic_axis, 0.1)
+        label = ToroidalFlux(surface, bs, nphi=5, ntheta=5)
+        constraint_weight = 11.1232
+        cpu_boozer, jax_boozer = _build_upstream_boozer_pair(
+            bs,
+            surface,
+            label,
+            0.1,
+            constraint_weight=constraint_weight,
+        )
+
+        runtime_state = jax_boozer.surface_runtime_state
+        runtime_geometry = _bsj._geometry_from_surface_dofs(
+            jnp.asarray(jax_boozer.surface.get_dofs(), dtype=jnp.float64),
+            quadpoints_phi=runtime_state.quadpoints_phi,
+            quadpoints_theta=runtime_state.quadpoints_theta,
+            mpol=runtime_state.mpol,
+            ntor=runtime_state.ntor,
+            nfp=runtime_state.nfp,
+            stellsym=runtime_state.stellsym,
+            scatter_indices=runtime_state.scatter_indices,
+            surface_kind=runtime_state.surface_kind,
+            clamped_dims=runtime_state.clamped_dims,
+        )
+        np.testing.assert_allclose(
+            np.asarray(runtime_geometry.gamma),
+            jax_boozer.surface.gamma(),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            np.asarray(runtime_geometry.xphi),
+            jax_boozer.surface.gammadash1(),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            np.asarray(runtime_geometry.xtheta),
+            jax_boozer.surface.gammadash2(),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+        x = np.concatenate((surface.get_dofs(), [-0.3]))
+        cpu_value, cpu_gradient = cpu_boozer.boozer_penalty_constraints_vectorized(
+            x,
+            derivatives=1,
+            constraint_weight=constraint_weight,
+            optimize_G=False,
+        )
+        objective = jax_boozer._make_penalty_objective_with(
+            False,
+            jax_boozer.options["weight_inv_modB"],
+            constraint_weight,
+        )
+        jax_value, jax_gradient = jax.value_and_grad(objective)(jnp.asarray(x))
+        tolerances = parity_ladder_tolerances("ls-wrapper-gradient")
+        np.testing.assert_allclose(
+            np.asarray(jax_value),
+            cpu_value,
+            rtol=tolerances["rtol"],
+            atol=tolerances["atol"],
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_gradient),
+            cpu_gradient,
+            rtol=tolerances["rtol"],
+            atol=tolerances["atol"],
+        )
+
+    def test_compact_runtime_matches_frozen_dense_baseline_for_ad_and_transfer(self):
+        """Index scatter preserves dense-baseline value, JVP, VJP, and residency."""
+        clamped_dims = (True, False, True)
+        surface = self._make_real_surface(
+            mpol=2,
+            ntor=2,
+            clamped_dims=clamped_dims,
+        )
+        runtime_state = _bsj.build_boozer_surface_runtime_state(surface)
+        indices = np.asarray(runtime_state.scatter_indices, dtype=np.int32)
+        coefficient_count = 3 * (2 * surface.mpol + 1) * (2 * surface.ntor + 1)
+        dense_operator = np.zeros(
+            (coefficient_count, indices.size),
+            dtype=np.float64,
+        )
+        dense_operator[indices, np.arange(indices.size)] = 1.0
+
+        def compact_geometry(dofs):
+            geometry = _bsj._geometry_from_surface_dofs(
+                dofs,
+                quadpoints_phi=runtime_state.quadpoints_phi,
+                quadpoints_theta=runtime_state.quadpoints_theta,
+                mpol=runtime_state.mpol,
+                ntor=runtime_state.ntor,
+                nfp=runtime_state.nfp,
+                stellsym=runtime_state.stellsym,
+                scatter_indices=runtime_state.scatter_indices,
+                surface_kind=runtime_state.surface_kind,
+                clamped_dims=runtime_state.clamped_dims,
+            )
+            return geometry.gamma, geometry.xphi, geometry.xtheta
+
+        def dense_geometry(dofs):
+            flat_coefficients = jnp.asarray(dense_operator) @ dofs
+            coefficient_shape = (
+                2 * runtime_state.mpol + 1,
+                2 * runtime_state.ntor + 1,
+            )
+            xc, yc, zc = (
+                coefficient.reshape(coefficient_shape)
+                for coefficient in jnp.split(flat_coefficients, 3)
+            )
+            geometry_args = (
+                runtime_state.quadpoints_phi,
+                runtime_state.quadpoints_theta,
+                xc,
+                yc,
+                zc,
+                runtime_state.mpol,
+                runtime_state.ntor,
+                runtime_state.nfp,
+            )
+            return (
+                surface_gamma(*geometry_args, clamped_dims=clamped_dims),
+                surface_gammadash1(*geometry_args, clamped_dims=clamped_dims),
+                surface_gammadash2(*geometry_args, clamped_dims=clamped_dims),
+            )
+
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+        tangent = jnp.asarray(
+            np.random.default_rng(37).normal(size=dofs.shape),
+            dtype=jnp.float64,
+        )
+        compact_value, compact_jvp = jax.jvp(compact_geometry, (dofs,), (tangent,))
+        dense_value, dense_jvp = jax.jvp(dense_geometry, (dofs,), (tangent,))
+        for compact_array, dense_array in zip(compact_value, dense_value, strict=True):
+            np.testing.assert_allclose(
+                compact_array, dense_array, rtol=1e-12, atol=1e-14
+            )
+        for compact_array, dense_array in zip(compact_jvp, dense_jvp, strict=True):
+            np.testing.assert_allclose(
+                compact_array, dense_array, rtol=1e-12, atol=1e-14
+            )
+
+        cotangent = tuple(jnp.ones_like(array) for array in compact_value)
+        compact_vjp = jax.vjp(compact_geometry, dofs)[1](cotangent)[0]
+        dense_vjp = jax.vjp(dense_geometry, dofs)[1](cotangent)[0]
+        vjp_roundoff_atol = coefficient_count * np.finfo(np.float64).eps
+        np.testing.assert_allclose(
+            compact_vjp,
+            dense_vjp,
+            rtol=1e-12,
+            atol=vjp_roundoff_atol,
+        )
+
+        compiled = jax.jit(compact_geometry)
+        compiled(dofs)[0].block_until_ready()
+        with jax.transfer_guard("disallow"):
+            compiled(dofs)[0].block_until_ready()
 
     def test_runtime_state_non_stellsym_has_no_scatter(self):
         """Non-stellsym surface produces scatter_indices=None."""
@@ -12575,6 +12855,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert surface_round_trip.nfp == surface_state.nfp
         assert surface_round_trip.stellsym == surface_state.stellsym
         assert surface_round_trip.surface_kind == surface_state.surface_kind
+        assert surface_round_trip.clamped_dims == surface_state.clamped_dims
 
         np.testing.assert_allclose(
             np.asarray(solved_round_trip.sdofs),
