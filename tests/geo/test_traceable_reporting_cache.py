@@ -19,7 +19,12 @@ def _raw_terms(scale=1.0):
     }
 
 
-def _packed_result(*, outer_raw_terms=None):
+def _packed_result(
+    *,
+    outer_raw_terms=None,
+    dense_hessian_bytes=None,
+    max_dense_hessian_bytes=None,
+):
     scalar = jnp.asarray(1.0, dtype=jnp.float64)
     return _traceable._pack_traceable_forward_result(
         value=scalar,
@@ -31,6 +36,8 @@ def _packed_result(*, outer_raw_terms=None):
         success=jnp.asarray(True),
         primal_success=jnp.asarray(True),
         adjoint_linear_solve_available=jnp.asarray(True),
+        dense_hessian_bytes=dense_hessian_bytes,
+        max_dense_hessian_bytes=max_dense_hessian_bytes,
         outer_raw_terms=outer_raw_terms,
     )
 
@@ -55,6 +62,22 @@ def test_forward_result_marks_absent_raw_terms_without_changing_tree_shape():
     assert not bool(np.asarray(present))
     assert raw_terms.keys() == _raw_terms().keys()
     assert all(np.isnan(np.asarray(value)) for value in raw_terms.values())
+
+
+def test_forward_result_preserves_dense_byte_metadata_as_int64():
+    dense_bytes = 2**32 + 17
+    max_dense_bytes = 2**33 + 29
+    result = _packed_result(
+        dense_hessian_bytes=dense_bytes,
+        max_dense_hessian_bytes=max_dense_bytes,
+    )
+
+    assert result["dense_hessian_bytes"].dtype == jnp.int64
+    assert result["max_dense_hessian_bytes"].dtype == jnp.int64
+    assert int(np.asarray(result["dense_hessian_bytes"])) == dense_bytes
+    assert int(np.asarray(result["max_dense_hessian_bytes"])) == max_dense_bytes
+    assert bool(np.asarray(result["dense_hessian_bytes_present"]))
+    assert bool(np.asarray(result["max_dense_hessian_bytes_present"]))
 
 
 def test_total_objective_aux_reuses_the_canonical_weighted_terms(monkeypatch):
