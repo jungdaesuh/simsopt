@@ -8655,6 +8655,257 @@ class TestBoozerSurfaceJAXExactPath:
             "objective_args": (booz.coil_set_spec,),
         }
 
+    @pytest.mark.parametrize(
+        ("seed_accepted", "bounded_success", "expected_fallback"),
+        [
+            (True, True, False),
+            (False, True, True),
+            (True, False, True),
+        ],
+    )
+    def test_traceable_mixed_pipeline_restores_original_seed_on_fallback(
+        self,
+        monkeypatch,
+        seed_accepted,
+        bounded_success,
+        expected_fallback,
+    ):
+        booz = _make_mock_boozer_surface()
+        original_seed = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        proposal_seed = jnp.asarray([0.5, -1.0], dtype=jnp.float32)
+        canonical_seed = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+        captured = {}
+
+        monkeypatch.setattr(
+            _bsj,
+            "get_backend_policy",
+            lambda: types.SimpleNamespace(
+                compute_dtype=np.dtype(np.float32),
+                runtime_dtype=np.dtype(np.float64),
+                resolved_precision="mixed",
+            ),
+        )
+        monkeypatch.setattr(
+            booz,
+            "_get_traceable_penalty_objective",
+            lambda *_args: lambda x, _coil_spec: 0.5 * jnp.vdot(x, x),
+        )
+
+        def fake_pre_newton(
+            _coil_spec,
+            x,
+            _method,
+            *,
+            optimizer_state_dtype,
+            **_kwargs,
+        ):
+            dtype = np.dtype(optimizer_state_dtype)
+            if dtype == np.dtype(np.float32):
+                result_x = proposal_seed
+                bits = 32
+            else:
+                captured["canonical_input"] = x
+                result_x = canonical_seed
+                bits = 64
+            return {
+                "x": result_x,
+                "success": jnp.asarray(True),
+                "nit": jnp.asarray(3, dtype=jnp.int32),
+                "nfev": jnp.asarray(5, dtype=jnp.int32),
+                "ngev": jnp.asarray(4, dtype=jnp.int32),
+                "line_search_status": jnp.asarray(0, dtype=jnp.int32),
+                "compute_dtype_bits": jnp.asarray(bits, dtype=jnp.int32),
+            }
+
+        def newton_result(x, *, success):
+            result_x = jnp.zeros_like(x)
+            return {
+                "x": result_x,
+                "fun": jnp.asarray(0.0, dtype=x.dtype),
+                "grad": jnp.zeros_like(x),
+                "hessian": jnp.eye(x.shape[0], dtype=x.dtype),
+                "nit": jnp.asarray(1, dtype=jnp.int32),
+                "success": jnp.asarray(success),
+            }
+
+        monkeypatch.setattr(booz, "_run_traceable_pre_newton_stage", fake_pre_newton)
+        monkeypatch.setattr(
+            booz,
+            "_run_traceable_newton_polish_stage",
+            lambda _spec, x, _method, **_kwargs: newton_result(x, success=True),
+        )
+        monkeypatch.setattr(
+            booz,
+            "_run_traceable_bounded_mixed_newton_stage",
+            lambda _spec, x, _method, **_kwargs: newton_result(
+                x, success=bounded_success
+            ),
+        )
+
+        def fake_candidate_status(
+            _x_next,
+            _value_next,
+            gradient_next,
+            *,
+            dx,
+            **_kwargs,
+        ):
+            captured["seed_dx"] = dx
+            return jnp.asarray(seed_accepted), jnp.linalg.norm(gradient_next)
+
+        monkeypatch.setattr(
+            _opt,
+            "_newton_candidate_status",
+            fake_candidate_status,
+        )
+
+        result = booz._run_traceable_mixed_pipeline(
+            jnp.asarray([1.0], dtype=jnp.float32),
+            jnp.asarray([1.0], dtype=jnp.float64),
+            original_seed,
+            "bfgs-ondevice",
+            optimize_G=True,
+            weight_inv_modB=True,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(captured["seed_dx"]),
+            np.asarray(original_seed - proposal_seed.astype(jnp.float64)),
+        )
+        assert bool(result["canonical_fallback_used"]) is expected_fallback
+        assert np.dtype(result["x"].dtype) == np.dtype(np.float64)
+        assert np.dtype(result["hessian"].dtype) == np.dtype(np.float64)
+        if expected_fallback:
+            np.testing.assert_array_equal(
+                np.asarray(captured["canonical_input"]),
+                np.asarray(original_seed),
+            )
+
+    def test_run_code_traceable_routes_mixed_bfgs_through_certified_pipeline(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = False
+        booz.options["newton_polish_policy"] = "full"
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        captured = {}
+
+        monkeypatch.setattr(
+            _bsj,
+            "get_backend_policy",
+            lambda: types.SimpleNamespace(
+                compute_dtype=np.dtype(np.float32),
+                runtime_dtype=np.dtype(np.float64),
+                resolved_precision="mixed",
+            ),
+        )
+
+        def fake_mixed_pipeline(
+            proposal_spec,
+            certificate_spec,
+            x0,
+            method,
+            **_kwargs,
+        ):
+            captured.update(
+                proposal_spec=proposal_spec,
+                certificate_spec=certificate_spec,
+                method=method,
+            )
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0, dtype=jnp.float64),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(x0.shape[0], dtype=jnp.float64),
+                "nit": jnp.asarray(1, dtype=jnp.int32),
+                "success": jnp.asarray(True),
+                "hessian_materialized": jnp.asarray(True),
+                "newton_iter": jnp.asarray(1, dtype=jnp.int32),
+                "final_gradient_norm": jnp.asarray(0.0, dtype=jnp.float64),
+                "final_gradient_inf_norm": jnp.asarray(0.0, dtype=jnp.float64),
+                "pre_newton_iter": jnp.asarray(2, dtype=jnp.int32),
+                "pre_newton_nfev": jnp.asarray(3, dtype=jnp.int32),
+                "pre_newton_ngev": jnp.asarray(3, dtype=jnp.int32),
+                "pre_newton_line_search_status": jnp.asarray(0, dtype=jnp.int32),
+                "pre_newton_compute_dtype_bits": jnp.asarray(32, dtype=jnp.int32),
+                "mixed_seed_accepted": jnp.asarray(True),
+                "mixed_bounded_certificate_accepted": jnp.asarray(True),
+                "canonical_fallback_used": jnp.asarray(False),
+            }
+
+        monkeypatch.setattr(
+            booz,
+            "_run_traceable_mixed_pipeline",
+            fake_mixed_pipeline,
+        )
+        monkeypatch.setattr(
+            booz,
+            "_run_traceable_pre_newton_stage",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("mixed routing must own the speculative pre-Newton stage")
+            ),
+        )
+
+        result = booz.run_code_traceable(booz.coil_set_spec, sdofs, iota, G)
+
+        assert captured["method"] == "bfgs-ondevice"
+        assert captured["proposal_spec"] is captured["certificate_spec"]
+        assert bool(result["success"])
+        assert int(result["pre_newton_compute_dtype_bits"]) == 32
+        assert bool(result["mixed_seed_accepted"])
+        assert bool(result["mixed_bounded_certificate_accepted"])
+        assert not bool(result["canonical_fallback_used"])
+
+    def test_traceable_mixed_pipeline_compiles_real_bfgs_and_bounded_newton(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["bfgs_maxiter"] = 4
+        booz.options["bfgs_tol"] = 1e-6
+        booz.options["newton_maxiter"] = 2
+        booz.options["newton_tol"] = 1e-10
+        booz.options["newton_stab"] = 0.0
+        policy = types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+            resolved_precision="mixed",
+            max_dense_jacobian_bytes=1 << 20,
+            linear_solve_tolerance_floor=1e-13,
+            linear_solve_tolerance_cap=None,
+        )
+        objective = lambda x, *_args: 0.5 * jnp.vdot(x, x)
+
+        monkeypatch.setattr(_bsj, "get_backend_policy", lambda: policy)
+        monkeypatch.setattr(_opt, "get_backend_policy", lambda: policy)
+        monkeypatch.setattr(
+            booz,
+            "_make_penalty_objective_with",
+            lambda *_args, **_kwargs: lambda x: objective(x),
+        )
+        monkeypatch.setattr(
+            booz,
+            "_get_traceable_penalty_objective",
+            lambda *_args: objective,
+        )
+
+        result = booz._run_traceable_mixed_pipeline(
+            jnp.asarray([1.0], dtype=jnp.float32),
+            jnp.asarray([1.0], dtype=jnp.float64),
+            jnp.asarray([2.0, -1.0], dtype=jnp.float64),
+            "bfgs-ondevice",
+            optimize_G=True,
+            weight_inv_modB=True,
+        )
+
+        assert bool(result["success"])
+        assert np.dtype(result["x"].dtype) == np.dtype(np.float64)
+        assert np.dtype(result["grad"].dtype) == np.dtype(np.float64)
+        assert int(result["pre_newton_compute_dtype_bits"]) in (32, 64)
+        assert float(result["final_gradient_norm"]) <= booz.options["newton_tol"]
+
     def test_run_code_traceable_ls_skip_policy_does_not_call_newton(self, monkeypatch):
         """Traceable LS skip policy must return the LS state without Newton lowering."""
         booz = _make_mock_boozer_surface()

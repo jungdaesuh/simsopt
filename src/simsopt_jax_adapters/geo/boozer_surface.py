@@ -6217,6 +6217,7 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G,
         weight_inv_modB,
         materialize_dense_linearization=True,
+        optimizer_state_dtype=None,
     ):
         """Run the traceable pre-Newton Boozer optimizer stage."""
         if method not in _ONDEVICE_OPTIMIZER_METHODS:
@@ -6271,6 +6272,7 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 coil_set_spec=coil_set_spec,
                 hostify_inputs=False,
+                optimizer_state_dtype=optimizer_state_dtype,
             )
             optimizer_options = self._collect_optimizer_options(method=method)
             if method == "bfgs-ondevice":
@@ -6282,6 +6284,7 @@ class BoozerSurfaceJAX(Optimizable):
                     line_search_maxiter=int(
                         optimizer_options.get("line_search_maxiter", 10)
                     ),
+                    x_dtype=optimizer_state_dtype,
                 )
             else:
                 state = _optimizer_jax._minimize_lbfgs_private(
@@ -6303,6 +6306,7 @@ class BoozerSurfaceJAX(Optimizable):
                             "monolithic_debug",
                         )
                     ),
+                    x_dtype=optimizer_state_dtype,
                 )
             x = state.x_k
             success = state.converged & jnp.logical_not(state.failed)
@@ -6320,6 +6324,10 @@ class BoozerSurfaceJAX(Optimizable):
             ),
             "residual_jacobian_condition_estimate": (
                 residual_jacobian_condition_estimate
+            ),
+            "compute_dtype_bits": jnp.asarray(
+                np.dtype(jnp.asarray(x).dtype).itemsize * 8,
+                dtype=jnp.int32,
             ),
         }
 
@@ -6354,6 +6362,202 @@ class BoozerSurfaceJAX(Optimizable):
             objective_args=(coil_set_spec,),
         )
 
+    def _run_traceable_bounded_mixed_newton_stage(
+        self,
+        coil_set_spec,
+        x0,
+        method,
+        *,
+        optimize_G,
+        weight_inv_modB,
+        materialize_dense_linearization=True,
+    ):
+        """Run the bounded mixed proposal/certificate Newton composition."""
+        if method not in _ONDEVICE_OPTIMIZER_METHODS:
+            raise RuntimeError("bounded mixed Newton requires an on-device optimizer")
+        objective = self._get_traceable_penalty_objective(
+            optimize_G,
+            weight_inv_modB,
+        )
+        materialize_hessian = bool(
+            self.options["materialize_dense_linearization"]
+            and materialize_dense_linearization
+        )
+        return _optimizer_jax.bounded_mixed_newton_polish_traceable(
+            objective,
+            x0,
+            tol=self.options["newton_tol"],
+            stab=self.options["newton_stab"],
+            args=(coil_set_spec,),
+            materialize_hessian=materialize_hessian,
+            max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
+        )
+
+    def _run_traceable_mixed_pipeline(
+        self,
+        proposal_coil_set_spec,
+        certificate_coil_set_spec,
+        x0,
+        method,
+        *,
+        optimize_G,
+        weight_inv_modB,
+        materialize_dense_linearization=True,
+    ):
+        """Run speculative FP32 BFGS with live-FP64 gates and full fallback."""
+        policy = get_backend_policy()
+        compute_dtype = np.dtype(policy.compute_dtype)
+        runtime_dtype = np.dtype(policy.runtime_dtype)
+        proposal_pre_newton = self._run_traceable_pre_newton_stage(
+            proposal_coil_set_spec,
+            x0,
+            method,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            materialize_dense_linearization=materialize_dense_linearization,
+            optimizer_state_dtype=compute_dtype,
+        )
+        proposal_seed = jnp.asarray(proposal_pre_newton["x"], dtype=runtime_dtype)
+        original_seed = jnp.asarray(x0, dtype=runtime_dtype)
+        certificate_objective = self._get_traceable_penalty_objective(
+            optimize_G,
+            weight_inv_modB,
+        )
+
+        def certificate_value_and_grad(x):
+            return jax.value_and_grad(certificate_objective, argnums=0)(
+                x,
+                certificate_coil_set_spec,
+            )
+
+        original_value, original_gradient = certificate_value_and_grad(original_seed)
+        proposal_value, proposal_gradient = certificate_value_and_grad(proposal_seed)
+        original_gradient_norm = jnp.linalg.norm(original_gradient)
+        seed_gate_accepted, _proposal_gradient_norm = (
+            _optimizer_jax._newton_candidate_status(
+                proposal_seed,
+                proposal_value,
+                proposal_gradient,
+                alpha=jnp.asarray(1.0, dtype=runtime_dtype),
+                current_val=original_value,
+                current_grad=original_gradient,
+                current_norm=original_gradient_norm,
+                dx=original_seed - proposal_seed,
+            )
+        )
+        seed_gate_accepted = seed_gate_accepted & proposal_pre_newton["success"]
+
+        def normalize_result(
+            pre_newton,
+            result,
+            *,
+            canonical_fallback_used,
+            mixed_seed_accepted,
+            mixed_bounded_certificate_accepted,
+        ):
+            hessian = result["hessian"]
+            if hessian is not None:
+                hessian = jnp.asarray(hessian, dtype=runtime_dtype)
+            gradient = jnp.asarray(result["grad"], dtype=runtime_dtype)
+            return {
+                "x": jnp.asarray(result["x"], dtype=runtime_dtype),
+                "fun": jnp.asarray(result["fun"], dtype=runtime_dtype),
+                "grad": gradient,
+                "hessian": hessian,
+                "nit": jnp.asarray(result["nit"], dtype=jnp.int32),
+                "success": jnp.asarray(result["success"], dtype=jnp.bool_),
+                "hessian_materialized": jnp.asarray(
+                    hessian is not None,
+                    dtype=jnp.bool_,
+                ),
+                "newton_iter": jnp.asarray(
+                    result.get("newton_iter", result["nit"]),
+                    dtype=jnp.int32,
+                ),
+                "final_gradient_norm": jnp.linalg.norm(gradient),
+                "final_gradient_inf_norm": jnp.linalg.norm(gradient, ord=jnp.inf),
+                "pre_newton_iter": jnp.asarray(
+                    pre_newton["nit"], dtype=jnp.int32
+                ),
+                "pre_newton_nfev": jnp.asarray(
+                    pre_newton["nfev"], dtype=jnp.int32
+                ),
+                "pre_newton_ngev": jnp.asarray(
+                    pre_newton["ngev"], dtype=jnp.int32
+                ),
+                "pre_newton_line_search_status": jnp.asarray(
+                    pre_newton["line_search_status"], dtype=jnp.int32
+                ),
+                "pre_newton_compute_dtype_bits": jnp.asarray(
+                    pre_newton["compute_dtype_bits"], dtype=jnp.int32
+                ),
+                "mixed_seed_accepted": jnp.asarray(
+                    mixed_seed_accepted, dtype=jnp.bool_
+                ),
+                "mixed_bounded_certificate_accepted": jnp.asarray(
+                    mixed_bounded_certificate_accepted, dtype=jnp.bool_
+                ),
+                "canonical_fallback_used": jnp.asarray(
+                    canonical_fallback_used, dtype=jnp.bool_
+                ),
+            }
+
+        def run_canonical_pipeline(_):
+            canonical_pre_newton = self._run_traceable_pre_newton_stage(
+                certificate_coil_set_spec,
+                original_seed,
+                method,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                materialize_dense_linearization=materialize_dense_linearization,
+                optimizer_state_dtype=runtime_dtype,
+            )
+            canonical_newton = self._run_traceable_newton_polish_stage(
+                certificate_coil_set_spec,
+                canonical_pre_newton["x"],
+                method,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                materialize_dense_linearization=materialize_dense_linearization,
+            )
+            return normalize_result(
+                canonical_pre_newton,
+                canonical_newton,
+                canonical_fallback_used=True,
+                mixed_seed_accepted=seed_gate_accepted,
+                mixed_bounded_certificate_accepted=False,
+            )
+
+        def run_bounded_or_canonical(_):
+            bounded_newton = self._run_traceable_bounded_mixed_newton_stage(
+                certificate_coil_set_spec,
+                proposal_seed,
+                method,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                materialize_dense_linearization=materialize_dense_linearization,
+            )
+            bounded_result = normalize_result(
+                proposal_pre_newton,
+                bounded_newton,
+                canonical_fallback_used=False,
+                mixed_seed_accepted=True,
+                mixed_bounded_certificate_accepted=bounded_newton["success"],
+            )
+            return jax.lax.cond(
+                bounded_newton["success"],
+                lambda _: bounded_result,
+                run_canonical_pipeline,
+                operand=None,
+            )
+
+        return jax.lax.cond(
+            seed_gate_accepted,
+            run_bounded_or_canonical,
+            run_canonical_pipeline,
+            operand=None,
+        )
+
     def run_code_traceable(
         self,
         coil_source,
@@ -6361,6 +6565,7 @@ class BoozerSurfaceJAX(Optimizable):
         iota,
         G,
         *,
+        certificate_coil_source=None,
         materialize_dense_linearization=True,
     ):
         """Trace-safe pure-array inner solve for the ondevice target lane.
@@ -6376,13 +6581,18 @@ class BoozerSurfaceJAX(Optimizable):
         """
         weight_inv_modB = self.options["weight_inv_modB"]
         coil_set_spec = grouped_coil_set_spec_from_source(coil_source)
+        certificate_coil_set_spec = (
+            coil_set_spec
+            if certificate_coil_source is None
+            else grouped_coil_set_spec_from_source(certificate_coil_source)
+        )
 
         if self.boozer_type == "exact":
             G_exact = (
                 G
                 if G is not None
                 else compute_G_from_currents(
-                    grouped_coil_currents_from_spec(coil_set_spec)
+                    grouped_coil_currents_from_spec(certificate_coil_set_spec)
                 )
             )
             x0 = _concat_jax_float64(sdofs, [iota, G_exact])
@@ -6392,7 +6602,7 @@ class BoozerSurfaceJAX(Optimizable):
                 x0,
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
-                args=(coil_set_spec,),
+                args=(certificate_coil_set_spec,),
             )
             jacobian = result["jacobian"]
             jacobian_available = jacobian is not None
@@ -6441,18 +6651,29 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G = G is not None
         method = self._resolve_optimizer_method(optimize_G=optimize_G)
         x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
-        pre_newton = self._run_traceable_pre_newton_stage(
-            coil_set_spec,
-            x0,
-            method,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
-            materialize_dense_linearization=materialize_dense_linearization,
+        mixed_pipeline_enabled = (
+            get_backend_policy().resolved_precision == "mixed"
+            and method == "bfgs-ondevice"
+            and self.options["newton_polish_policy"] != "skip"
         )
-        x_ls = pre_newton["x"]
-        ls_residual_jacobian_condition_estimate = pre_newton[
-            "residual_jacobian_condition_estimate"
-        ]
+        if mixed_pipeline_enabled:
+            pre_newton = None
+            x_ls = None
+            ls_residual_jacobian_condition_estimate = None
+        else:
+            pre_newton = self._run_traceable_pre_newton_stage(
+                certificate_coil_set_spec,
+                x0,
+                method,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                materialize_dense_linearization=materialize_dense_linearization,
+                optimizer_state_dtype=np.dtype(get_backend_policy().runtime_dtype),
+            )
+            x_ls = pre_newton["x"]
+            ls_residual_jacobian_condition_estimate = pre_newton[
+                "residual_jacobian_condition_estimate"
+            ]
 
         obj_fn = self._get_traceable_penalty_objective(
             optimize_G,
@@ -6461,14 +6682,14 @@ class BoozerSurfaceJAX(Optimizable):
         if self.options["newton_polish_policy"] == "skip":
 
             def objective_eval(x):
-                return obj_fn(x, coil_set_spec)
+                return obj_fn(x, certificate_coil_set_spec)
 
             fun_skip, grad_skip = jax.value_and_grad(objective_eval)(x_ls)
             ls_success = pre_newton["success"]
             sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
                 x_ls,
                 optimize_G,
-                coil_set_spec=coil_set_spec,
+                coil_set_spec=certificate_coil_set_spec,
             )
             finite = (
                 jnp.all(jnp.isfinite(x_ls))
@@ -6515,18 +6736,29 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
             }
 
-        newton_result = self._run_traceable_newton_polish_stage(
-            coil_set_spec,
-            x_ls,
-            method,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
-            materialize_dense_linearization=materialize_dense_linearization,
-        )
+        if mixed_pipeline_enabled:
+            newton_result = self._run_traceable_mixed_pipeline(
+                coil_set_spec,
+                certificate_coil_set_spec,
+                x0,
+                method,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                materialize_dense_linearization=materialize_dense_linearization,
+            )
+        else:
+            newton_result = self._run_traceable_newton_polish_stage(
+                certificate_coil_set_spec,
+                x_ls,
+                method,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                materialize_dense_linearization=materialize_dense_linearization,
+            )
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
             optimize_G,
-            coil_set_spec=coil_set_spec,
+            coil_set_spec=certificate_coil_set_spec,
         )
         finite = jnp.all(jnp.isfinite(newton_result["x"])) & jnp.all(
             jnp.isfinite(newton_result["grad"])
@@ -6589,10 +6821,38 @@ class BoozerSurfaceJAX(Optimizable):
             "optimizer_method": method,
             **_ls_newton_reporting_fields(newton_result),
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
-            "pre_newton_iter": pre_newton["nit"],
-            "pre_newton_nfev": pre_newton["nfev"],
-            "pre_newton_ngev": pre_newton["ngev"],
-            "pre_newton_line_search_status": pre_newton["line_search_status"],
+            "pre_newton_iter": (
+                newton_result["pre_newton_iter"]
+                if mixed_pipeline_enabled
+                else pre_newton["nit"]
+            ),
+            "pre_newton_nfev": (
+                newton_result["pre_newton_nfev"]
+                if mixed_pipeline_enabled
+                else pre_newton["nfev"]
+            ),
+            "pre_newton_ngev": (
+                newton_result["pre_newton_ngev"]
+                if mixed_pipeline_enabled
+                else pre_newton["ngev"]
+            ),
+            "pre_newton_line_search_status": (
+                newton_result["pre_newton_line_search_status"]
+                if mixed_pipeline_enabled
+                else pre_newton["line_search_status"]
+            ),
+            "pre_newton_compute_dtype_bits": (
+                newton_result["pre_newton_compute_dtype_bits"]
+                if mixed_pipeline_enabled
+                else pre_newton["compute_dtype_bits"]
+            ),
+            "mixed_seed_accepted": newton_result.get("mixed_seed_accepted"),
+            "mixed_bounded_certificate_accepted": newton_result.get(
+                "mixed_bounded_certificate_accepted"
+            ),
+            "canonical_fallback_used": newton_result.get(
+                "canonical_fallback_used"
+            ),
             "ls_condition_estimate": ls_condition_estimate,
             "ls_residual_jacobian_condition_estimate": (
                 ls_residual_jacobian_condition_estimate
