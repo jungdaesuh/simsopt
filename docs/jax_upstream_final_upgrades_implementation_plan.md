@@ -545,7 +545,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      and tangent inputs and require an FP32 scalar result, while retaining the
      corresponding FP64 result contract. Numerical value and derivative parity
      alone do not prove this dtype boundary.
-   - [ ] Port the selected `8e3d2a784` pairwise/curve-objective slice as one
+   - [x] Port the selected `8e3d2a784` pairwise/curve-objective slice as one
      coherent owner migration: add
      `src/simsopt_jax/core/_pairwise_reductions.py`, convert
      `src/simsopt_jax/geo/_pairwise_reductions.py` to a compatibility
