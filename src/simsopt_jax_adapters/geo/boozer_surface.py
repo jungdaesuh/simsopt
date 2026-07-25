@@ -1143,7 +1143,7 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     scatter_indices = None
     scatter_indices_host = None
     if surface.stellsym:
-        if surface_kind in {"generic", "xyztensorfourier"}:
+        if surface_kind == "generic":
             scatter_indices_host = _generic_surface_scatter_operator_host(
                 surface.mpol,
                 surface.ntor,
@@ -2294,14 +2294,19 @@ def _penalty_from_geometry_and_field_terms(
         geometry.xtheta,
         weight_inv_modB=params.weight_inv_modB,
         reduction_mode=boozer_reduction_mode,
+        dtype=params.iota.dtype,
     )
     label_val = _label_from_geometry_and_field_terms(
         label_geometry,
         field_terms,
         params,
     )
-    gamma_axis_z = _surface_sample_z(geometry.gamma)
-    half = _as_jax_float64(0.5)
+    label_val = _as_boozer_penalty_compute_array(label_val, params.iota.dtype)
+    gamma_axis_z = _as_boozer_penalty_compute_array(
+        _surface_sample_z(geometry.gamma),
+        params.iota.dtype,
+    )
+    half = _as_boozer_penalty_compute_array(0.5, params.iota.dtype)
     label_delta = label_val - params.targetlabel
     J_label = half * params.constraint_weight * label_delta * label_delta
     J_z = half * params.constraint_weight * gamma_axis_z * gamma_axis_z
