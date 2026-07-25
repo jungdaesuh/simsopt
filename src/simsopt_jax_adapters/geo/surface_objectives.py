@@ -2585,7 +2585,27 @@ class _BoozerObjectiveBase(Optimizable):
         self.biotsavart = biotsavart
         self.in_surface = boozer_surface.surface
         self.surface = self.in_surface
+        self._coil_dof_layout_version = biotsavart.dof_layout_version
+        self._coil_dof_extraction_spec = biotsavart.coil_dof_extraction_spec()
         self.recompute_bell()
+
+    def _rebuild_coil_dof_contract_bound_programs(self):
+        """Rebuild programs that capture the immutable coil DOF contract."""
+
+    def _ensure_coil_dof_contract_current(self):
+        """Invalidate programs after coil layout or fixed-value changes."""
+        layout_version = self.biotsavart.dof_layout_version
+        extraction_spec = self.biotsavart.coil_dof_extraction_spec()
+        if (
+            layout_version == self._coil_dof_layout_version
+            and extraction_spec is self._coil_dof_extraction_spec
+        ):
+            return
+        self._rebuild_coil_dof_contract_bound_programs()
+        self._coil_dof_layout_version = layout_version
+        self._coil_dof_extraction_spec = extraction_spec
+        self._dJ = None
+        self._dJ_by_dcoil_dofs = None
 
     def recompute_bell(self, parent=None):
         self._J = None
@@ -2599,10 +2619,12 @@ class _BoozerObjectiveBase(Optimizable):
 
     @derivative_dec
     def dJ(self):
+        self._ensure_coil_dof_contract_current()
         return _public_dJ_from_native_cache(self)
 
     def dJ_by_dcoil_dofs(self):
         """Return the native flat free-coil-DOF gradient as a JAX array."""
+        self._ensure_coil_dof_contract_current()
         if self._dJ_by_dcoil_dofs is None:
             solved_state = _resolved_boozer_solved_runtime_state(self.boozer_surface)
             value, self._dJ_by_dcoil_dofs = (
@@ -2618,6 +2640,7 @@ class _BoozerObjectiveBase(Optimizable):
                 self._compute_value_from_solved_state(solved_state)
             )
             return
+        self._ensure_coil_dof_contract_current()
         value, self._dJ_by_dcoil_dofs = (
             self._value_and_dJ_by_dcoil_dofs_from_solved_state(solved_state)
         )
@@ -2654,6 +2677,9 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             else float(constraint_weight)
         )
         self._init_boozer_objective(boozer_surface, biotsavart)
+        self._rebuild_coil_dof_contract_bound_programs()
+
+    def _rebuild_coil_dof_contract_bound_programs(self):
         direct_objective = self._build_cached_direct_objective()
         self._direct_objective_value_and_grad = (
             _make_cached_strict_scalar_value_and_grad(direct_objective)
@@ -2964,6 +2990,9 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
         self._aux_phi_jax = _as_jax_float64(aux_phi)
         self._aux_theta_jax = _as_jax_float64(aux_theta)
         self._init_boozer_objective(boozer_surface, biotsavart)
+        self._rebuild_coil_dof_contract_bound_programs()
+
+    def _rebuild_coil_dof_contract_bound_programs(self):
         self._direct_objective_value_and_gradients = (
             self._build_cached_direct_objective_value_and_gradients()
         )
@@ -3091,6 +3120,9 @@ def compute_standard_surface_objective_gradients(
     ``_J`` and ``_dJ`` values and returns the three public gradients in wrapper
     order: ``(BoozerResidualJAX, IotasJAX, NonQuasiSymmetricRatioJAX)``.
     """
+    boozer_residual._ensure_coil_dof_contract_current()
+    iotas._ensure_coil_dof_contract_current()
+    non_qs_ratio._ensure_coil_dof_contract_current()
     booz_surf = boozer_residual.boozer_surface
     if (
         iotas.boozer_surface is not booz_surf

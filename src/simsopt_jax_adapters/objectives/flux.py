@@ -82,11 +82,11 @@ def _strict_field_coil_dof_extraction_spec(field):
 
 def _strict_field_dof_layout_version(field) -> int:
     """Return the field's DOF-layout drift counter; field must expose it."""
-    layout_version = getattr(field, "_dof_layout_version", None)
+    layout_version = getattr(field, "dof_layout_version", None)
     if not isinstance(layout_version, int):
         raise NotImplementedError(
             "SquaredFluxJAX requires a field exposing integer "
-            "_dof_layout_version for drift detection."
+            "dof_layout_version for drift detection."
         )
     return layout_version
 
@@ -312,6 +312,9 @@ class SquaredFluxJAX(Optimizable):
         field.set_points_from_spec(field_eval_spec)
         self._field_points_version = field._points_version
         self._field_dof_layout_version = _strict_field_dof_layout_version(field)
+        self._field_coil_dof_extraction_spec = (
+            _strict_field_coil_dof_extraction_spec(field)
+        )
         # Surface DOFs are baked into the JIT-captured ``_flux_spec``.
         # We capture a fingerprint here
         # so that any post-construction mutation of ``surface.x`` is detected
@@ -442,6 +445,16 @@ class SquaredFluxJAX(Optimizable):
             "new DOF layout."
         )
 
+    def _raise_if_field_coil_dof_extraction_drifted(self):
+        extraction_spec = _strict_field_coil_dof_extraction_spec(self.field)
+        if extraction_spec is self._field_coil_dof_extraction_spec:
+            return
+        raise RuntimeError(
+            "SquaredFluxJAX captures the immutable coil DOF extraction contract "
+            "at construction. Fixed coil/current DOF values have changed; "
+            "rebuild the objective for the new fixed state."
+        )
+
     def _raise_if_surface_dofs_drifted(self):
         if _surface_dofs_fingerprint(self.surface) == self._surface_dofs_fingerprint:
             return
@@ -455,6 +468,7 @@ class SquaredFluxJAX(Optimizable):
     def _raise_if_field_contract_drifted(self):
         self._raise_if_field_points_drifted()
         self._raise_if_field_dof_layout_drifted()
+        self._raise_if_field_coil_dof_extraction_drifted()
         self._raise_if_surface_dofs_drifted()
 
     def J(self):

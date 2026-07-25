@@ -85,7 +85,7 @@ class _NonNativeFakeField(Optimizable):
         self._uses_uniform_curve_xyz_fourier_fastpath = False
         self._points = None
         self._points_version = 0
-        self._dof_layout_version = 0
+        self.dof_layout_version = 0
         super().__init__(x0=np.zeros(1, dtype=np.float64))
 
     def recompute_bell(self, parent=None):
@@ -836,6 +836,26 @@ def test_squaredfluxjax_rejects_field_dof_layout_mutation_after_construction():
         with pytest.raises(RuntimeError, match="free/fixed DOF layout"):
             objective.J()
         with pytest.raises(RuntimeError, match="free/fixed DOF layout"):
+            objective.dJ()
+    finally:
+        lineage_opt.unfix(0)
+
+
+def test_squaredfluxjax_rejects_fixed_field_dof_value_mutation():
+    seed_objective = _make_large_grouped_flux_objective()
+    field = seed_objective.field
+    lineage_opt = next(
+        opt for opt in field.unique_dof_lineage if opt.local_dof_size > 1
+    )
+    lineage_opt.fix(0)
+    try:
+        objective = SquaredFluxJAX(seed_objective.surface, field)
+        fixed_value = float(lineage_opt.local_full_x[0])
+        lineage_opt.set(0, fixed_value + 1.0e-3)
+
+        with pytest.raises(RuntimeError, match="Fixed coil/current DOF values"):
+            objective.J()
+        with pytest.raises(RuntimeError, match="Fixed coil/current DOF values"):
             objective.dJ()
     finally:
         lineage_opt.unfix(0)
