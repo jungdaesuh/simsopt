@@ -650,7 +650,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      the common public result contract.
    - [ ] Port only production-required portions of
      `src/simsopt_jax_adapters/geo/factor_handoff_identity.py`.
-   - [ ] Add its direct production dependency
+   - [x] Add its direct production dependency
      `src/simsopt_jax/runtime/exact_numeric_identity.py` from selected
      `5df801e1b`. Test that tree identity binds structure, dtype, shape, and
      bytes, and rejects object/nonfinite leaves in a new dependency-light
