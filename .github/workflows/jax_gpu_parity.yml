@@ -100,6 +100,28 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
 
+      - name: Mixed precision and public derivative authority
+        id: precision_authority
+        continue-on-error: true
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest \
+              tests/jax/core/test_surface_objective_fused_gradients.py \
+              tests/geo/test_curve_objectives_strict_gpu_jax.py \
+              tests/geo/test_surface_objectives_strict_gpu_jax.py \
+              tests/geo/test_mixed_compute_strict_gpu_jax.py \
+              -v --tb=short
+
+      - name: Dense optimizer cross-device placement
+        id: optimizer_placement
+        continue-on-error: true
+        env:
+          JAX_PLATFORMS: cuda,cpu
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_optimizer_strict_gpu_jax.py \
+            -v --tb=short
+
       - name: GPU reproducibility contract
         id: ci_contract
         continue-on-error: true
@@ -126,6 +148,8 @@ jobs:
           echo "| Biot-Savart unit | ${{ steps.bs_unit.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Boozer residual | ${{ steps.boozer.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Precision and derivative authority | ${{ steps.precision_authority.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dense optimizer placement | ${{ steps.optimizer_placement.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| GPU reproducibility contract | ${{ steps.ci_contract.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -140,6 +164,8 @@ jobs:
              [ "${{ steps.bs_unit.outcome }}" != "success" ] || \
              [ "${{ steps.boozer.outcome }}" != "success" ] || \
              [ "${{ steps.surface.outcome }}" != "success" ] || \
+             [ "${{ steps.precision_authority.outcome }}" != "success" ] || \
+             [ "${{ steps.optimizer_placement.outcome }}" != "success" ] || \
              [ "${{ steps.ci_contract.outcome }}" != "success" ]; then
             echo "One or more GPU parity tests failed."
             exit 1
