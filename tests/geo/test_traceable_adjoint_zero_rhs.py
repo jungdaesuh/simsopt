@@ -80,7 +80,7 @@ def test_traceable_gradient_skips_only_exact_zero_adjoint_rhs(
         directional_inner_stationarity,
     )
 
-    direct_grad, implicit_grad, total_grad, linear_solve_success = (
+    direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
         _traceable._traceable_objective_gradient_parts(
             object(),
             lambda current_coil_dofs: current_coil_dofs,
