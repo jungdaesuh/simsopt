@@ -8,7 +8,6 @@ import jax.numpy as jnp
 from ._device_scalars import device_one, two_pi
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
-    as_runtime_float64 as _as_runtime_float64,
 )
 
 
@@ -17,10 +16,10 @@ def _mode_numbers(order, *, reference):
     return jnp.cumsum(jnp.broadcast_to(one, (int(order),)))
 
 
-def _constant_row(length, value, *, reference):
+def _constant_row(length: int, *, is_one: bool, reference):
     one = jax.lax.stop_gradient(device_one(reference))
     zero = one - one
-    scalar = jnp.where(_as_runtime_float64(value, reference=one) == one, one, zero)
+    scalar = one if is_one else zero
     return jnp.broadcast_to(scalar, (1, int(length)))
 
 
@@ -29,7 +28,7 @@ def _interleave_harmonics(first, second):
 
 
 def _fourier_basis_terms(quadpoints, order):
-    quadpoints = _as_runtime_float64(quadpoints, reference=quadpoints)
+    quadpoints = _as_jax_float64(quadpoints)
     angle_scale = jax.lax.stop_gradient(two_pi(quadpoints))
     points = angle_scale * quadpoints
     mode_numbers = _mode_numbers(order, reference=points)
@@ -39,11 +38,11 @@ def _fourier_basis_terms(quadpoints, order):
     mode_scale = angle_scale * mode_numbers
     mode_scale_sq = mode_scale * mode_scale
     mode_scale_cu = mode_scale_sq * mode_scale
-    zero_row = _constant_row(points.shape[0], 0.0, reference=points)
+    zero_row = _constant_row(points.shape[0], is_one=False, reference=points)
 
     basis = jnp.concatenate(
         (
-            _constant_row(points.shape[0], 1.0, reference=points),
+            _constant_row(points.shape[0], is_one=True, reference=points),
             _interleave_harmonics(sin_phase, cos_phase),
         ),
         axis=0,

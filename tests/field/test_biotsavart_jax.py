@@ -2267,6 +2267,69 @@ class TestBiotSavartJAXCoilStateToken:
         assert spec_backed_a._coil_dof_state_token != initial_token
         assert spec_backed_a._coil_dofs_generation == 1
 
+    def test_spec_backed_symmetry_coils_preserve_shared_graph_owners(self):
+        from simsopt.field import coils_via_symmetries
+        from simsopt_jax_adapters.field.biotsavart_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+            SpecBackedRotatedCurve,
+            SpecBackedScaledCurrent,
+        )
+        from simsopt_jax.core.specs import make_biot_savart_spec
+
+        seed_coil = self._make_two_basic_coils()[0]
+        symmetry_coils = coils_via_symmetries(
+            [seed_coil.curve],
+            [seed_coil.current],
+            2,
+            True,
+        )
+        bs_jax = BiotSavartJAX(symmetry_coils)
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        base_currents = [
+            coil.current.current_to_scale
+            if isinstance(coil.current, SpecBackedScaledCurrent)
+            else coil.current
+            for coil in spec_backed.coils
+        ]
+
+        assert any(
+            isinstance(coil.curve, SpecBackedRotatedCurve) for coil in spec_backed.coils
+        )
+        assert any(
+            isinstance(coil.current, SpecBackedScaledCurrent)
+            for coil in spec_backed.coils
+        )
+        assert all(current is base_currents[0] for current in base_currents[1:])
+
+    def test_spec_backed_clear_points_preserves_source_graph(self):
+        from simsopt_jax_adapters.field.biotsavart_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt_jax.core.specs import make_biot_savart_spec
+
+        bs_jax = BiotSavartJAX(list(self._make_two_basic_coils()))
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        coils = spec_backed.coils
+        version = spec_backed._points_version
+        spec_backed.set_points(np.zeros((2, 3), dtype=np.float64))
+
+        spec_backed.clear_points()
+
+        assert spec_backed.get_points_cart_ref() is None
+        assert spec_backed.coils is coils
+        assert spec_backed._points_version == version + 2
+
     def test_spec_backed_biotsavart_jax_advances_layout_version_on_fix(self):
         from simsopt_jax_adapters.field.biotsavart_backend import (
             BiotSavartJAX,
@@ -2362,6 +2425,7 @@ class TestBiotSavartJAXCoilStateToken:
         from simsopt_jax_adapters.field.biotsavart_backend import (
             BiotSavartJAX,
             SpecBackedBiotSavartJAX,
+            SpecBackedRotatedCurve,
         )
         from simsopt_jax.core.specs import make_biot_savart_spec
 
@@ -2381,7 +2445,7 @@ class TestBiotSavartJAXCoilStateToken:
         rotated_curve = next(
             coil.curve
             for coil in spec_backed.coils
-            if coil.curve._symmetry.has_rotation
+            if isinstance(coil.curve, SpecBackedRotatedCurve)
         )
         cotangent_values = np.arange(
             np.prod(rotated_curve.gamma().shape),
