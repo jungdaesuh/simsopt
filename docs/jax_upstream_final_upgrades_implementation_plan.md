@@ -1110,43 +1110,68 @@ implementation.
      Python 3.8 grammar.
 
 10. Close packaging, documentation, and source-boundary work.
-   - [ ] Export only intentional public precision and solver-policy symbols from
-     package `__init__.py` files.
-   - [ ] Update `docs/source/jax_gpu_setup.rst` with explicit FP64 and mixed
+   - [x] Export only intentional public precision and solver-policy symbols from
+     package `__init__.py` files. **Result:** the backend package continues to
+     expose `PrecisionSelection` and `ResolvedPrecision`; the optimizer package
+     now exposes only the import-light `TraceableNewtonLinearSolver` policy
+     type without importing JAX, Optax, Optimistix, or Lineax.
+   - [x] Update `docs/source/jax_gpu_setup.rst` with explicit FP64 and mixed
      selection, certificate/fallback behavior, synchronized timing, and
      compatibility defaults. State explicitly that base SIMSOPT remains
      installable on Python `>=3.8`, while the pinned `JAX` and `JAX_GPU` extras
-     require Python `>=3.11`.
-   - [ ] Update the migration SSOT `docs/source/jax_migration.rst` with
+     require Python `>=3.11`. **Result:** the setup page now documents the typed
+     selector, normalized environment transport, FP64 acceptance authority,
+     fail-closed fallback, and existing synchronized timing rule.
+   - [x] Update the migration SSOT `docs/source/jax_migration.rst` with
      `precision=`, `SIMSOPT_PRECISION`, compatibility defaults, removal of the
      source-only environment spellings, and typed opt-in dense-IR selection.
+     **Result:** migration examples preserve `mode_default`, reject the two
+     source-only environment selectors, and keep `hybrid_final_dense_ir`
+     explicitly opt-in behind `TraceableNewtonLinearSolver`.
    - [x] Update `docs/source/geo.rst` so the public
      `CurveSurfaceDistance` description states that derivatives cover both curve
      and surface DOFs.
-   - [ ] Port the independent `82e9b88d3` documentation correction in
+   - [x] Port the independent `82e9b88d3` documentation correction in
      `src/simsopt_jax/core/magnetic_axis_helpers.py`: describe the implemented
      local DOPRI5 exponent instead of the incorrect PI(0.7, 0.4) controller.
-   - [ ] Document that mixed precision changes proposal computation but not the
-     FP64 acceptance authority.
-   - [ ] Confirm that no new dependency is required for this plan. Keep Diffrax
-     and Poincare work in a separate follow-up plan and PR.
-   - [ ] Run a source-boundary audit proving production modules, selected tests,
-     and selected benchmarks do not import from `examples/`.
-   - [ ] Port the example-independent AST boundary from
+     **Result:** prose and section labels now match the implemented local
+     `1/5` update.
+   - [x] Document that mixed precision changes proposal computation but not the
+     FP64 acceptance authority. **Result:** both setup and migration SSOTs state
+     that live FP64 certification/fallback owns every accepted public result.
+   - [x] Confirm that no new dependency is required for this plan. Keep Diffrax
+     and Poincare work in a separate follow-up plan and PR. **Result:** the
+     production manifest is unchanged; the new policy module uses only
+     `typing.Literal`.
+   - [x] Run a source-boundary audit proving production modules, selected tests,
+     and selected benchmarks do not import from `examples/`. **Result:** the
+     selected Phase 10 source/tests contain no example imports and this core
+     slice selects no benchmark module.
+   - [x] Port the example-independent AST boundary from
      `tests/jax/solve/test_import_boundaries.py` so both `src/` and `examples/`
-     are forbidden from importing `benchmarks`.
-   - [ ] Add the CPU-safe focused tests to `.github/workflows/jax_smoke.yml`,
+     are forbidden from importing `benchmarks`. **Result:** the boundary test
+     passes across both trees and reports file, line, and imported module on a
+     violation.
+   - [x] Add the CPU-safe focused tests to `.github/workflows/jax_smoke.yml`,
      install the repository-supported JAX/JAXLIB pins there, and add the
      strict-GPU correctness subset to `.github/workflows/jax_gpu_parity.yml`.
      Keep the authoritative paired performance signoff on the designated local
-     RTX 5090; do not port source campaign workflows wholesale.
-   - [ ] Keep the deferred QFM change `0d4f82ddc` out of the selected core PRs.
-   - [ ] Audit three explicit exclusion seams before finalizing the manifest:
+     RTX 5090; do not port source campaign workflows wholesale. **Result:** CPU
+     CI now runs typed precision/import boundaries, fixed-surface authority,
+     and dense-IR contracts with JAX/JAXLIB `0.10.0`; GPU parity runs the public
+     derivative/mixed-compute and dual-backend optimizer-placement shards. The
+     exact local equivalents passed `46/46`, `9/9`, and `5/5`, respectively,
+     on the designated RTX 5090, and no campaign workflow was copied.
+   - [x] Keep the deferred QFM change `0d4f82ddc` out of the selected core PRs.
+     **Result:** no QFM source or test is part of the selected upgrade range.
+   - [x] Audit three explicit exclusion seams before finalizing the manifest:
      retain the target `backend/runtime.py` and `config.py` base without the
      source runtime-attestation imports/exports; keep
      `surface_objectives.py` on the existing numerical grouped-Biot-Savart path
      without dispatch-evidence plumbing; and adapt only selected assertions from
      source tests that otherwise import validation-ladder or banana owners.
+     **Result:** all three target seams remain intact; the Phase 10 test slice
+     imports neither validation-ladder nor banana/example owners.
 
 11. Prepare independently reviewable upstream PR slices.
     - [ ] Submit Phase 0 core objective fusion/partial placement independently
