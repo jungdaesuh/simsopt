@@ -135,6 +135,40 @@ def test_hessian_least_squares_dispatches_to_cg(monkeypatch):
     )
 
 
+def test_explicit_dense_solver_overrides_global_adjoint_selector(monkeypatch):
+    """A forward caller can select dense without mutating adjoint policy."""
+    matrix, _, rhs = _spd_problem(seed=17)
+
+    def objective_fn(x):
+        return 0.5 * jnp.dot(x, matrix @ x)
+
+    def fail_cg(*_args, **_kwargs):
+        raise AssertionError("explicit dense route must not dispatch to global CG")
+
+    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "cg")
+    monkeypatch.setattr(
+        _optimizer,
+        "_solve_symmetric_operator_cg_with_status",
+        fail_cg,
+    )
+    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
+        objective_fn,
+        jnp.zeros(matrix.shape[0]),
+        rhs,
+        stab=0.0,
+        tol=1e-12,
+        solver="dense",
+    )
+
+    assert bool(status.success)
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.asarray(jnp.linalg.solve(matrix, rhs)),
+        rtol=1e-8,
+        atol=1e-10,
+    )
+
+
 def test_default_selector_does_not_use_cg():
     """The default selector keeps the established (non-CG) path."""
     assert _optimizer._ADJOINT_LINEAR_SOLVER != "cg"

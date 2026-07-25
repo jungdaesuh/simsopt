@@ -23,6 +23,7 @@ from simsopt_jax.runtime.host_boundary import (
     host_inf_norm as _host_inf_norm,
     host_scalar as _host_scalar,
 )
+from simsopt_jax.numerical_policy import MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS
 from simsopt_jax.backend import get_backend_policy
 from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
@@ -61,6 +62,7 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
     gamma1 = _as_jax_float64(gamma1).reshape((-1, 3))
     gamma2 = _as_jax_float64(gamma2).reshape((-1, 3))
     return pairwise_min_distance_pure(gamma1, gamma2)
+
 
 __all__ = [
     "TraceableObjectiveSeededValueAndGrad",
@@ -351,6 +353,16 @@ def _traceable_directional_inner_objective(
     )
 
 
+def _traceable_non_dense_adjoint_selected() -> bool:
+    """Return whether the explicit adjoint route is matrix-free."""
+    return _optimizer_jax._ADJOINT_LINEAR_SOLVER in ("cg", "lsmr_j")
+
+
+def _traceable_residual_jacobian_adjoint_selected() -> bool:
+    """Return whether the adjoint route acts on the residual Jacobian."""
+    return _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j"
+
+
 def _traceable_solve_hessian_linearization(
     booz_jax,
     solved_x,
@@ -363,10 +375,32 @@ def _traceable_solve_hessian_linearization(
     linear_solve_stab,
     transpose,
 ):
-    if linear_solve_factors is not None:
+    explicit_adjoint = transpose and _traceable_non_dense_adjoint_selected()
+    residual_jacobian_adjoint = (
+        explicit_adjoint and _traceable_residual_jacobian_adjoint_selected()
+    )
+    objective_fn = _make_boozer_penalty_objective_closure(
+        coil_set_spec=coil_set_spec,
+        decision_split_mode="jvp",
+        **_traceable_inner_objective_kwargs(objective_kwargs),
+    )
+    if linear_solve_factors is not None and not explicit_adjoint:
+        live_x = _as_jax_float64(solved_x)
+        live_rhs = _as_jax_float64(rhs)
+        hessian_operator = _optimizer_jax._hessian_linear_operator(
+            objective_fn,
+            live_x,
+            stab=float(linear_solve_stab),
+        )
+        live_matvec = (
+            hessian_operator["transpose_matvec"]
+            if transpose
+            else hessian_operator["matvec"]
+        )
         return _traceable_solve_plu_linearization(
             linear_solve_factors,
-            rhs,
+            live_rhs,
+            live_matvec=live_matvec,
             linear_solve_tol=linear_solve_tol,
             transpose=transpose,
         )
@@ -380,24 +414,21 @@ def _traceable_solve_hessian_linearization(
     # ``success=False`` and emit NaN gradients (verified by
     # ``test_runtime_bundle_allows_strict_transfer_guard`` /
     # ``test_runtime_bundle_host_wrappers_allow_host_inputs_under_strict_transfer_guard``).
-    objective_fn = _make_boozer_penalty_objective_closure(
-        coil_set_spec=coil_set_spec,
-        decision_split_mode="jvp",
-        **_traceable_inner_objective_kwargs(objective_kwargs),
-    )
     residual_kwargs = {}
-    if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+    if residual_jacobian_adjoint:
         residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
             coil_set_spec=coil_set_spec,
             decision_split_mode="jvp",
             **_traceable_inner_objective_kwargs(objective_kwargs),
         )
+    linear_solver = _optimizer_jax._ADJOINT_LINEAR_SOLVER if transpose else "dense"
     return _optimizer_jax._solve_hessian_least_squares_system_with_status(
         objective_fn,
         solved_x,
         rhs,
         stab=float(linear_solve_stab),
         tol=linear_solve_tol,
+        solver=linear_solver,
         **residual_kwargs,
     )
 
@@ -438,67 +469,90 @@ def _traceable_plu_matrix(linear_solve_factors):
     return P @ (L @ U)
 
 
-def _traceable_solve_plu_linearization(
+_TRACEABLE_SUPPLIED_FACTOR_MAX_CORRECTIONS = MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS
+_TRACEABLE_SUPPLIED_FACTOR_FP64_REBUILD_BUDGET = 1
+
+
+class _TraceablePLURefinement(NamedTuple):
+    """One adaptive refinement attempt against an externally supplied operator."""
+
+    solution: jax.Array
+    residual: jax.Array
+    status: _optimizer_jax._LinearSolveStatus
+    residual_relative_trace: jax.Array
+    contraction_ratio_trace: jax.Array
+    residual_relative_trace_length: jax.Array
+    contraction_finite: jax.Array
+    contraction_monotone: jax.Array
+    stagnated: jax.Array
+
+
+class _TraceableSuppliedFactorSolveStatus(NamedTuple):
+    """Solve status plus live-operator supplied-factor certificate metrics."""
+
+    success: jax.Array
+    residual: jax.Array
+    residual_relative: jax.Array
+    iterations: jax.Array
+    residual_scale: jax.Array
+    requested_tolerance: jax.Array
+    effective_tolerance: jax.Array
+    supplied_factor_residual_relative_trace: jax.Array
+    supplied_factor_residual_relative_trace_length: jax.Array
+    supplied_factor_contraction_ratio_trace: jax.Array
+    supplied_factor_contraction_finite: jax.Array
+    supplied_factor_contraction_monotone: jax.Array
+    supplied_factor_stagnated: jax.Array
+    fp64_rebuild_count: jax.Array
+    fp64_rebuild_residual_relative_trace: jax.Array
+    fp64_rebuild_residual_relative_trace_length: jax.Array
+
+
+def _traceable_apply_plu_inverse(
     linear_solve_factors,
     rhs,
     *,
-    linear_solve_tol,
     transpose,
 ):
-    """Solve a dense PLU snapshot with a residual-quality success contract.
-
-    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
-    §5.3): when ``linear_solve_factors`` is a 5-tuple
-    ``(P, L, U, lu, piv)``, the forward and adjoint solves consume the
-    same packed ``(lu, piv)`` factor bytes via ``jsp_linalg.lu_solve``.
-    The legacy 3-tuple ``(P, L, U)`` form preserves the existing
-    triangular-solve fallback for callers that do not have packed
-    factors available.
-    """
+    """Apply supplied factors as an approximate inverse in their native dtype."""
     lu_piv = _traceable_plu_unpack_lu_piv(linear_solve_factors)
     if lu_piv is not None:
         lu, piv = lu_piv
+        factor_rhs = jnp.asarray(rhs, dtype=lu.dtype)
         solution = jsp_linalg.lu_solve(
             (lu, piv),
-            rhs,
+            factor_rhs,
             trans=1 if transpose else 0,
         )
     else:
         P, L, U = _traceable_plu_unpack_triple(linear_solve_factors)
+        factor_rhs = jnp.asarray(rhs, dtype=U.dtype)
         if transpose:
-            y = jsp_linalg.solve_triangular(U.T, rhs, lower=True)
+            y = jsp_linalg.solve_triangular(U.T, factor_rhs, lower=True)
             z = jsp_linalg.solve_triangular(L.T, y, lower=False)
             solution = P @ z
         else:
-            y = jsp_linalg.solve_triangular(L, P.T @ rhs, lower=True)
+            y = jsp_linalg.solve_triangular(L, P.T @ factor_rhs, lower=True)
             solution = jsp_linalg.solve_triangular(U, y, lower=False)
-    matrix = _traceable_plu_matrix(linear_solve_factors)
-    operator_matrix = matrix.T if transpose else matrix
-    residual = rhs - _traceable_plu_matvec(
+    return jnp.asarray(solution, dtype=rhs.dtype)
+
+
+def _traceable_refine_plu_linearization(
+    linear_solve_factors,
+    rhs,
+    *,
+    live_matvec,
+    linear_solve_tol,
+    transpose,
+):
+    """Adaptively refine a supplied inverse against the live FP64 operator."""
+    rhs = _as_jax_float64(rhs)
+    solution = _traceable_apply_plu_inverse(
         linear_solve_factors,
-        solution,
+        rhs,
         transpose=transpose,
     )
-    residual_norm = jnp.linalg.norm(residual)
-    residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
-    # The Boozer LS Hessian is symmetric by construction (J^T J is symmetric
-    # for any J). Therefore κ_1(matrix) == κ_1(matrix.T) and we can estimate
-    # the condition number using either orientation without distinguishing
-    # forward and adjoint paths. Both the LS lane and the forward warm-start
-    # solve reach this function with the same symmetric matrix. Handing the
-    # native ``matrix`` plus its ``(lu, piv)`` factors to the condition
-    # estimator lets Hager-Higham reuse the cached factors via
-    # ``jsp_linalg.lu_solve`` (10 × O(n²)) instead of refactorizing
-    # ``matrix`` 10 times (10 × O(n³)).
-    condition_estimate = _optimizer_jax._dense_matrix_condition_estimate(
-        matrix,
-        lu_piv=lu_piv,
-    )
-    forward_error_success = _optimizer_jax._forward_error_success(
-        residual_rel,
-        condition_estimate,
-        tol=linear_solve_tol,
-    )
+    residual = rhs - _as_jax_float64(live_matvec(solution))
     status = _optimizer_jax._linear_solve_status(
         solution,
         residual,
@@ -506,19 +560,236 @@ def _traceable_solve_plu_linearization(
         tol=linear_solve_tol,
         iterations=0,
     )
-    backward_error_success = _optimizer_jax._dense_matrix_backward_error_success(
-        operator_matrix,
+    trace_dtype = rhs.dtype
+    residual_relative_trace = (
+        jnp.full(
+            (_TRACEABLE_SUPPLIED_FACTOR_MAX_CORRECTIONS + 1,),
+            jnp.asarray(jnp.nan, dtype=trace_dtype),
+            dtype=trace_dtype,
+        )
+        .at[0]
+        .set(status.residual_relative)
+    )
+    contraction_ratio_trace = jnp.full(
+        (_TRACEABLE_SUPPLIED_FACTOR_MAX_CORRECTIONS,),
+        jnp.asarray(jnp.nan, dtype=trace_dtype),
+        dtype=trace_dtype,
+    )
+    initial_finite = _optimizer_jax._linear_solve_finite(
         solution,
+        residual,
+    ) & jnp.isfinite(status.residual_relative)
+    initial_state = _TraceablePLURefinement(
+        solution=solution,
+        residual=residual,
+        status=status,
+        residual_relative_trace=residual_relative_trace,
+        contraction_ratio_trace=contraction_ratio_trace,
+        residual_relative_trace_length=jnp.asarray(1, dtype=jnp.int32),
+        contraction_finite=initial_finite,
+        contraction_monotone=jnp.asarray(True, dtype=jnp.bool_),
+        stagnated=jnp.asarray(False, dtype=jnp.bool_),
+    )
+    unit_roundoff = jnp.asarray(
+        np.finfo(np.float64).eps / 2.0,
+        dtype=trace_dtype,
+    )
+
+    def refinement_active(state):
+        correction_count = state.residual_relative_trace_length - 1
+        return (
+            state.contraction_finite
+            & state.contraction_monotone
+            & ~state.stagnated
+            & ~state.status.success
+            & (correction_count < _TRACEABLE_SUPPLIED_FACTOR_MAX_CORRECTIONS)
+        )
+
+    def refine_once(state):
+        correction = _traceable_apply_plu_inverse(
+            linear_solve_factors,
+            state.residual,
+            transpose=transpose,
+        )
+        candidate_solution = state.solution + correction
+        candidate_residual = rhs - _as_jax_float64(live_matvec(candidate_solution))
+        candidate_status = _optimizer_jax._linear_solve_status(
+            candidate_solution,
+            candidate_residual,
+            rhs,
+            tol=linear_solve_tol,
+            iterations=state.residual_relative_trace_length,
+        )
+        previous_relative = state.status.residual_relative
+        candidate_relative = candidate_status.residual_relative
+        ratio = candidate_relative / jnp.maximum(previous_relative, unit_roundoff)
+        candidate_finite = (
+            _optimizer_jax._linear_solve_finite(
+                candidate_solution,
+                candidate_residual,
+            )
+            & jnp.isfinite(candidate_relative)
+            & jnp.isfinite(ratio)
+        )
+        monotone = candidate_relative < previous_relative
+        improvement = previous_relative - candidate_relative
+        stagnation_floor = unit_roundoff * jnp.maximum(
+            previous_relative,
+            jnp.asarray(1.0, dtype=trace_dtype),
+        )
+        stagnated = candidate_finite & monotone & (improvement <= stagnation_floor)
+        accept_candidate = candidate_finite & monotone
+        solution, residual, accepted_status = lax.cond(
+            accept_candidate,
+            lambda _: (candidate_solution, candidate_residual, candidate_status),
+            lambda _: (state.solution, state.residual, state.status),
+            operand=None,
+        )
+        trace_index = state.residual_relative_trace_length
+        ratio_index = trace_index - 1
+        return _TraceablePLURefinement(
+            solution=solution,
+            residual=residual,
+            status=accepted_status,
+            residual_relative_trace=state.residual_relative_trace.at[trace_index].set(
+                candidate_relative
+            ),
+            contraction_ratio_trace=state.contraction_ratio_trace.at[ratio_index].set(
+                ratio
+            ),
+            residual_relative_trace_length=trace_index + 1,
+            contraction_finite=state.contraction_finite & candidate_finite,
+            contraction_monotone=state.contraction_monotone & monotone,
+            stagnated=state.stagnated | stagnated,
+        )
+
+    refined = lax.while_loop(refinement_active, refine_once, initial_state)
+    correction_count = refined.residual_relative_trace_length - 1
+    return refined._replace(
+        status=refined.status._replace(iterations=correction_count),
+    )
+
+
+def _traceable_solve_plu_linearization(
+    linear_solve_factors,
+    rhs,
+    *,
+    live_matvec,
+    linear_solve_tol,
+    transpose,
+):
+    """Use supplied PLU provisionally and certify it on the live FP64 operator."""
+    rhs = _as_jax_float64(rhs)
+    supplied = _traceable_refine_plu_linearization(
+        linear_solve_factors,
         rhs,
-        tol=linear_solve_tol,
+        live_matvec=live_matvec,
+        linear_solve_tol=linear_solve_tol,
+        transpose=transpose,
     )
-    success = (
-        jnp.all(jnp.isfinite(solution))
-        & jnp.all(jnp.isfinite(residual))
-        & jnp.isfinite(residual_norm)
-        & ((status.success & forward_error_success) | backward_error_success)
+
+    def rebuild_live_fp64(_):
+        live_matrix = _optimizer_jax._dense_square_operator_matrix(
+            live_matvec,
+            rhs,
+            matrix_dtype=np.float64,
+            sweep_dtype=np.float64,
+        )
+        live_lu_piv = jsp_linalg.lu_factor(live_matrix)
+        live_plu = _optimizer_jax._plu_from_lu_piv(live_lu_piv)
+        rebuilt_factors = (
+            live_plu[0],
+            live_plu[1],
+            live_plu[2],
+            live_lu_piv[0],
+            live_lu_piv[1],
+        )
+        rebuilt = _traceable_refine_plu_linearization(
+            rebuilt_factors,
+            rhs,
+            live_matvec=live_matvec,
+            linear_solve_tol=linear_solve_tol,
+            transpose=False,
+        )
+        solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+            live_matrix,
+            rebuilt.solution,
+            rhs,
+            tol=linear_solve_tol,
+            lu_piv=live_lu_piv,
+            solve_dtype=rhs.dtype,
+        )
+        small_solution_success = (
+            _optimizer_jax._dense_matrix_solve_small_solution_success(
+                rebuilt.solution,
+                rhs,
+                tol=linear_solve_tol,
+            )
+        )
+        rebuilt_status = rebuilt.status._replace(
+            success=rebuilt.status.success & (solve_safe | small_solution_success),
+            iterations=supplied.status.iterations + rebuilt.status.iterations,
+        )
+        return rebuilt.solution, rebuilt_status, rebuilt
+
+    def keep_supplied(_):
+        empty_trace = jnp.full_like(
+            supplied.residual_relative_trace,
+            jnp.asarray(jnp.nan, dtype=rhs.dtype),
+        )
+        empty_ratio_trace = jnp.full_like(
+            supplied.contraction_ratio_trace,
+            jnp.asarray(jnp.nan, dtype=rhs.dtype),
+        )
+        unused_rebuild = _TraceablePLURefinement(
+            solution=supplied.solution,
+            residual=supplied.residual,
+            status=supplied.status,
+            residual_relative_trace=empty_trace,
+            contraction_ratio_trace=empty_ratio_trace,
+            residual_relative_trace_length=jnp.asarray(0, dtype=jnp.int32),
+            contraction_finite=jnp.asarray(True, dtype=jnp.bool_),
+            contraction_monotone=jnp.asarray(True, dtype=jnp.bool_),
+            stagnated=jnp.asarray(False, dtype=jnp.bool_),
+        )
+        return supplied.solution, supplied.status, unused_rebuild
+
+    solution, final_status, rebuilt = lax.cond(
+        supplied.status.success,
+        keep_supplied,
+        rebuild_live_fp64,
+        operand=None,
     )
-    return solution, status._replace(success=success)
+    rebuild_count = (
+        jnp.asarray(
+            _TRACEABLE_SUPPLIED_FACTOR_FP64_REBUILD_BUDGET,
+            dtype=jnp.int32,
+        )
+        * ~supplied.status.success
+    )
+    status = _TraceableSuppliedFactorSolveStatus(
+        success=final_status.success,
+        residual=final_status.residual,
+        residual_relative=final_status.residual_relative,
+        iterations=final_status.iterations,
+        residual_scale=final_status.residual_scale,
+        requested_tolerance=final_status.requested_tolerance,
+        effective_tolerance=final_status.effective_tolerance,
+        supplied_factor_residual_relative_trace=supplied.residual_relative_trace,
+        supplied_factor_residual_relative_trace_length=(
+            supplied.residual_relative_trace_length
+        ),
+        supplied_factor_contraction_ratio_trace=supplied.contraction_ratio_trace,
+        supplied_factor_contraction_finite=supplied.contraction_finite,
+        supplied_factor_contraction_monotone=supplied.contraction_monotone,
+        supplied_factor_stagnated=supplied.stagnated,
+        fp64_rebuild_count=rebuild_count,
+        fp64_rebuild_residual_relative_trace=rebuilt.residual_relative_trace,
+        fp64_rebuild_residual_relative_trace_length=(
+            rebuilt.residual_relative_trace_length
+        ),
+    )
+    return solution, status
 
 
 def _traceable_solve_exact_linearization(
@@ -618,9 +889,7 @@ def _pack_traceable_forward_result(
             if newton_linear_solve_backend_code is None
             else newton_linear_solve_backend_code
         ),
-        "newton_linear_solve_backend_code_present": _runtime_bool(
-            backend_code_present
-        ),
+        "newton_linear_solve_backend_code_present": _runtime_bool(backend_code_present),
     }
 
 

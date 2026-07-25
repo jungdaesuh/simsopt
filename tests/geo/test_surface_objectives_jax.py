@@ -5441,9 +5441,7 @@ def test_traceable_compiled_bundle_separates_proposal_and_certificate_coils(
     def fake_general_forward_result(_booz_jax, _coil_set_spec_from_dofs, **kwargs):
         captured["proposal_dtype"] = kwargs["coil_dofs"].dtype
         captured["objective_dtype"] = kwargs["objective_coil_dofs"].dtype
-        captured["certificate_dtype"] = kwargs[
-            "certificate_coil_set_spec"
-        ].dtype
+        captured["certificate_dtype"] = kwargs["certificate_coil_set_spec"].dtype
         captured["baseline_proposal_dtype"] = kwargs["baseline_coil_dofs"].dtype
         return {
             "value": jnp.sum(kwargs["objective_coil_dofs"]),
@@ -8621,6 +8619,225 @@ class TestToroidalFluxObjectParity:
             rtol=_TOROIDAL_FLUX_COIL_GRAD_RTOL,
             atol=_TOROIDAL_FLUX_COIL_GRAD_ATOL,
         )
+
+
+@pytest.mark.parametrize(
+    ("selector", "uses_residual_jacobian"),
+    [("cg", False), ("lsmr_j", True)],
+)
+def test_explicit_adjoint_selector_overrides_supplied_dense_factors(
+    monkeypatch,
+    selector,
+    uses_residual_jacobian,
+):
+    """An explicit matrix-free adjoint selector must override supplied PLU."""
+    objective_fn = object()
+    residual_fn = object()
+    observed = {}
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module._optimizer_jax,
+        "_ADJOINT_LINEAR_SOLVER",
+        selector,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        lambda **_kwargs: objective_fn,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_boozer_penalty_residual_closure",
+        lambda **_kwargs: residual_fn,
+    )
+
+    def fail_plu(*_args, **_kwargs):
+        raise AssertionError("explicit adjoint selection must not use dense factors")
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_plu_linearization",
+        fail_plu,
+    )
+    expected_solution = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+    expected_status = object()
+
+    def record_solve(
+        observed_objective_fn,
+        observed_x,
+        observed_rhs,
+        *,
+        stab,
+        tol,
+        residual_fn=None,
+        solver=None,
+    ):
+        observed.update(
+            objective_fn=observed_objective_fn,
+            x=observed_x,
+            rhs=observed_rhs,
+            stab=stab,
+            tol=tol,
+            residual_fn=residual_fn,
+            solver=solver,
+        )
+        return expected_solution, expected_status
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module._optimizer_jax,
+        "_solve_hessian_least_squares_system_with_status",
+        record_solve,
+    )
+    solved_x = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+    rhs = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
+    objective_kwargs = {
+        key: None
+        for key in surfaceobjectives_traceable_jax_module._TRACEABLE_INNER_OBJECTIVE_KEYS
+    }
+    solution, status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_hessian_linearization(
+            object(),
+            solved_x,
+            rhs,
+            object(),
+            objective_kwargs,
+            linear_solve_factors=(object(),),
+            linear_solve_tol=1.0e-11,
+            linear_solve_stab=1.0e-4,
+            transpose=True,
+        )
+    )
+
+    assert solution is expected_solution
+    assert status is expected_status
+    assert observed["objective_fn"] is objective_fn
+    assert observed["x"] is solved_x
+    assert observed["rhs"] is rhs
+    assert observed["residual_fn"] is (residual_fn if uses_residual_jacobian else None)
+    assert observed["solver"] == selector
+
+
+@pytest.mark.parametrize("selector", ["cg", "lsmr_j"])
+@pytest.mark.parametrize("with_factors", [False, True])
+def test_explicit_adjoint_selector_does_not_reroute_forward_predictor(
+    monkeypatch,
+    selector,
+    with_factors,
+):
+    """The adjoint-only selector must not alter the forward K1 solve route."""
+    objective_fn = object()
+    expected_solution = object()
+    expected_status = object()
+    observed = {}
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module._optimizer_jax,
+        "_ADJOINT_LINEAR_SOLVER",
+        selector,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        lambda **_kwargs: objective_fn,
+    )
+    solved_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    rhs = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+
+    if with_factors:
+        factors = (object(),)
+        live_matvec = object()
+
+        monkeypatch.setattr(
+            surfaceobjectives_traceable_jax_module._optimizer_jax,
+            "_hessian_linear_operator",
+            lambda observed_objective_fn, observed_x, *, stab: (
+                observed.update(
+                    objective_fn=observed_objective_fn,
+                    x=observed_x,
+                    stab=stab,
+                )
+                or {"matvec": live_matvec, "transpose_matvec": object()}
+            ),
+        )
+
+        def record_plu(
+            observed_factors,
+            observed_rhs,
+            *,
+            live_matvec: object,
+            linear_solve_tol,
+            transpose,
+        ):
+            observed.update(
+                factors=observed_factors,
+                rhs=observed_rhs,
+                live_matvec=live_matvec,
+                linear_solve_tol=linear_solve_tol,
+                transpose=transpose,
+            )
+            return expected_solution, expected_status
+
+        monkeypatch.setattr(
+            surfaceobjectives_traceable_jax_module,
+            "_traceable_solve_plu_linearization",
+            record_plu,
+        )
+    else:
+        factors = None
+
+        def record_dense(
+            observed_objective_fn,
+            observed_x,
+            observed_rhs,
+            *,
+            stab,
+            tol,
+            residual_fn=None,
+            solver=None,
+        ):
+            observed.update(
+                objective_fn=observed_objective_fn,
+                x=observed_x,
+                rhs=observed_rhs,
+                stab=stab,
+                tol=tol,
+                residual_fn=residual_fn,
+                solver=solver,
+            )
+            return expected_solution, expected_status
+
+        monkeypatch.setattr(
+            surfaceobjectives_traceable_jax_module._optimizer_jax,
+            "_solve_hessian_least_squares_system_with_status",
+            record_dense,
+        )
+
+    objective_kwargs = {
+        key: None
+        for key in surfaceobjectives_traceable_jax_module._TRACEABLE_INNER_OBJECTIVE_KEYS
+    }
+    solution, status = (
+        surfaceobjectives_traceable_jax_module._traceable_solve_hessian_linearization(
+            object(),
+            solved_x,
+            rhs,
+            object(),
+            objective_kwargs,
+            linear_solve_factors=factors,
+            linear_solve_tol=1.0e-11,
+            linear_solve_stab=1.0e-4,
+            transpose=False,
+        )
+    )
+
+    assert solution is expected_solution
+    assert status is expected_status
+    assert observed["objective_fn"] is objective_fn
+    if with_factors:
+        assert observed["factors"] is factors
+        assert observed["live_matvec"] is live_matvec
+        assert observed["transpose"] is False
+    else:
+        assert observed["solver"] == "dense"
+        assert observed["residual_fn"] is None
 
 
 if __name__ == "__main__":
