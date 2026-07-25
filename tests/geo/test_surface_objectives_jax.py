@@ -5001,6 +5001,16 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         "_as_jax_float64",
         lambda value: ("as_jax_float64", value),
     )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_staged_like",
+        lambda reference, value, *, dtype=None: (
+            "staged_like",
+            reference,
+            value,
+            dtype,
+        ),
+    )
 
     def ensure_reporting(entry):
         reporting_calls.append(entry)
@@ -5022,12 +5032,13 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
     def ensure_reporting_from_solution(entry):
         reporting_from_solution_calls.append(entry)
         entry["reporting_metrics_from_solution"] = (
-            lambda coil_dofs, solved_x, solver_success, *, include_distance_metrics=True: (
+            lambda coil_dofs, solved_x, solver_success, *, include_distance_metrics=True, outer_raw_terms=None: (
                 "reporting_metrics_from_solution",
                 coil_dofs,
                 solved_x,
-                bool(solver_success),
+                solver_success,
                 include_distance_metrics,
+                outer_raw_terms,
             )
         )
         return entry
@@ -5080,10 +5091,53 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         "reporting_metrics_from_solution",
         ("as_jax_float64", "coil_dofs"),
         ("as_jax_float64", "solved_x"),
+        (
+            "staged_like",
+            ("as_jax_float64", "solved_x"),
+            False,
+            np.bool_,
+        ),
         False,
-        False,
+        None,
     )
     assert reporting_from_solution_calls == [runtime_entry]
+
+    outer_raw_terms = (True, {"term": np.asarray(3.0, dtype=np.float64)})
+    cached_result = runtime_entry["public_reporting_metrics_from_solution"](
+        "coil_dofs",
+        "solved_x",
+        True,
+        outer_raw_terms=outer_raw_terms,
+    )
+    assert cached_result[:6] == (
+        "reporting_metrics_from_solution",
+        ("as_jax_float64", "coil_dofs"),
+        ("as_jax_float64", "solved_x"),
+        (
+            "staged_like",
+            ("as_jax_float64", "solved_x"),
+            True,
+            np.bool_,
+        ),
+        True,
+        (
+            (
+                "staged_like",
+                ("as_jax_float64", "solved_x"),
+                True,
+                np.bool_,
+            ),
+            {
+                "term": (
+                    "staged_like",
+                    ("as_jax_float64", "solved_x"),
+                    np.asarray(3.0, dtype=np.float64),
+                    None,
+                )
+            },
+        ),
+    )
+    assert reporting_from_solution_calls == [runtime_entry, runtime_entry]
 
 
 def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_used(

@@ -30,6 +30,7 @@ from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
 )
+from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core.curve_geometry import curve_geometry_from_spec
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
@@ -76,6 +77,7 @@ __all__ = [
     "make_traceable_objective_value_and_grad",
     "make_traceable_solved_state_value_and_grad",
     "make_traceable_single_stage_alm_runtime_bundle",
+    "traceable_forward_result_outer_raw_terms",
 ]
 
 
@@ -292,6 +294,46 @@ def _evaluate_traceable_total_objective(
         coil_set_spec,
         **_traceable_total_objective_kwargs(objective_kwargs),
     )
+
+
+def _traceable_weighted_terms_total(weighted_terms):
+    """Sum weighted outer terms in their canonical specification order."""
+    total = None
+    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        term_value = weighted_terms[term_name]
+        total = term_value if total is None else total + term_value
+    return total
+
+
+def _evaluate_traceable_total_objective_with_raw_terms(
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    objective_kwargs,
+):
+    """Return the total objective and reusable raw outer terms when available."""
+    outer_objective_config = objective_kwargs.get("outer_objective_config")
+    if outer_objective_config is None:
+        return (
+            _evaluate_traceable_total_objective(
+                x_inner,
+                coil_dofs,
+                coil_set_spec,
+                objective_kwargs,
+            ),
+            None,
+        )
+    raw_terms = _traceable_single_stage_outer_term_values(
+        x_inner,
+        coil_dofs,
+        coil_set_spec,
+        **_traceable_total_objective_kwargs(objective_kwargs),
+    )
+    weighted_terms = _traceable_weighted_single_stage_outer_term_values(
+        raw_terms,
+        outer_objective_config=outer_objective_config,
+    )
+    return _traceable_weighted_terms_total(weighted_terms), raw_terms
 
 
 def _traceable_directional_inner_stationarity(
@@ -871,10 +913,11 @@ def _pack_traceable_forward_result(
     primal_success,
     adjoint_linear_solve_available,
     newton_linear_solve_backend_code=None,
+    outer_raw_terms=None,
 ):
     """Return the normalized traceable forward-result contract."""
     backend_code_present = newton_linear_solve_backend_code is not None
-    return {
+    packed = {
         "value": value,
         "x": x,
         "sdofs": sdofs,
@@ -891,6 +934,27 @@ def _pack_traceable_forward_result(
         ),
         "newton_linear_solve_backend_code_present": _runtime_bool(backend_code_present),
     }
+    packed["outer_raw_terms_present"] = _runtime_bool(outer_raw_terms is not None)
+    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        packed[f"outer_raw_term_{term_name}"] = (
+            _runtime_float64_scalar(np.nan, reference=value)
+            if outer_raw_terms is None
+            else jnp.asarray(outer_raw_terms[term_name], dtype=jnp.float64)
+        )
+    return packed
+
+
+def traceable_forward_result_outer_raw_terms(forward_result):
+    """Return optional raw outer-term data carried by a forward result."""
+    if "outer_raw_terms_present" not in forward_result:
+        return None
+    return (
+        forward_result["outer_raw_terms_present"],
+        {
+            term_name: forward_result[f"outer_raw_term_{term_name}"]
+            for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        },
+    )
 
 
 def _traceable_result_linear_solve_factors(solve_result, linearization_kind):
@@ -1022,11 +1086,13 @@ def _traceable_general_forward_result(
                 lambda _: _runtime_bool(False),
                 operand=None,
             )
-        objective_value = _evaluate_traceable_total_objective(
-            solve_result["x"],
-            objective_coil_dofs,
-            certificate_coil_set_spec,
-            objective_kwargs,
+        objective_value, outer_raw_terms = (
+            _evaluate_traceable_total_objective_with_raw_terms(
+                solve_result["x"],
+                objective_coil_dofs,
+                certificate_coil_set_spec,
+                objective_kwargs,
+            )
         )
         filtered_objective_value = jax.lax.cond(
             success,
@@ -1053,6 +1119,7 @@ def _traceable_general_forward_result(
             newton_linear_solve_backend_code=solve_result.get(
                 "newton_linear_solve_backend_code"
             ),
+            outer_raw_terms=outer_raw_terms,
         )
 
     if linearization_kind != "exact_jacobian":
@@ -2057,17 +2124,40 @@ def _make_traceable_lazy_reporting_metrics_from_solution_boundary(runtime_entry)
         solver_success,
         *,
         include_distance_metrics=True,
+        outer_raw_terms=None,
     ):
         reporting_metrics_from_solution = (
             _ensure_traceable_runtime_reporting_metrics_from_solution(runtime_entry)[
                 "reporting_metrics_from_solution"
             ]
         )
+        staged_coil_dofs = _as_jax_float64(coil_dofs)
+        staged_solved_x = _as_jax_float64(solved_x)
+        staged_solver_success = _staged_like(
+            staged_solved_x,
+            solver_success,
+            dtype=np.bool_,
+        )
+        staged_outer_raw_terms = None
+        if outer_raw_terms is not None:
+            raw_terms_present, raw_terms = outer_raw_terms
+            staged_outer_raw_terms = (
+                _staged_like(
+                    staged_solved_x,
+                    raw_terms_present,
+                    dtype=np.bool_,
+                ),
+                jax.tree.map(
+                    lambda raw_term: _staged_like(staged_solved_x, raw_term),
+                    raw_terms,
+                ),
+            )
         return reporting_metrics_from_solution(
-            _as_jax_float64(coil_dofs),
-            _as_jax_float64(solved_x),
-            jnp.asarray(solver_success, dtype=bool),
+            staged_coil_dofs,
+            staged_solved_x,
+            staged_solver_success,
             include_distance_metrics=include_distance_metrics,
+            outer_raw_terms=staged_outer_raw_terms,
         )
 
     return reporting_metrics_from_solution_for
@@ -2567,6 +2657,8 @@ def _traceable_reporting_metrics_from_solution(
     solver_success,
     optimize_G,
     include_distance_metrics,
+    raw_terms=None,
+    raw_terms_present=None,
 ):
     """Compute reporting metrics for one explicit solved state."""
     outer_objective_config = objective_kwargs["outer_objective_config"]
@@ -2578,12 +2670,24 @@ def _traceable_reporting_metrics_from_solution(
     coil_dof_extraction_spec = objective_kwargs["coil_dof_extraction_spec"]
     banana_curve_index = int(outer_objective_config["banana_curve_index"])
     coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
-    raw_terms = _traceable_single_stage_outer_term_values(
-        solved_x,
-        coil_dofs,
-        coil_set_spec,
-        **_traceable_total_objective_kwargs(objective_kwargs),
-    )
+
+    def compute_raw_terms():
+        return _traceable_single_stage_outer_term_values(
+            solved_x,
+            coil_dofs,
+            coil_set_spec,
+            **_traceable_total_objective_kwargs(objective_kwargs),
+        )
+
+    if raw_terms is None:
+        raw_terms = compute_raw_terms()
+    elif raw_terms_present is not None:
+        raw_terms = lax.cond(
+            jnp.asarray(raw_terms_present, dtype=bool),
+            lambda _: raw_terms,
+            lambda _: compute_raw_terms(),
+            operand=None,
+        )
     sdofs, iota, G = _split_x_inner_runtime(solved_x, optimize_G)
     surface_gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -2739,6 +2843,40 @@ def _make_traceable_reporting_metrics_from_solution(
     return jax.jit(reporting_metrics_from_solution)
 
 
+def _make_traceable_reporting_metrics_from_solution_with_raw_terms(
+    compiled_bundle, *, include_distance_metrics
+):
+    """Build solved-state reporting metrics that can reuse raw outer terms."""
+    (
+        objective_kwargs,
+        optimize_G,
+        coil_set_spec_from_dofs,
+    ) = _traceable_reporting_metrics_context(compiled_bundle)
+
+    def reporting_metrics_from_solution(
+        coil_dofs,
+        solved_x,
+        solver_success,
+        raw_terms_present,
+        raw_terms,
+    ):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        solved_x = _as_jax_float64(solved_x)
+        return _traceable_reporting_metrics_from_solution(
+            objective_kwargs,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solver_success=jnp.asarray(solver_success, dtype=bool),
+            optimize_G=optimize_G,
+            include_distance_metrics=include_distance_metrics,
+            raw_terms=raw_terms,
+            raw_terms_present=raw_terms_present,
+        )
+
+    return jax.jit(reporting_metrics_from_solution)
+
+
 def _make_traceable_reporting_metrics_bundle(compiled_bundle):
     """Build the pure reporting-metrics selector for one compiled bundle."""
     reporting_metrics = _make_traceable_reporting_metrics(
@@ -2773,6 +2911,18 @@ def _make_traceable_reporting_metrics_from_solution_bundle(compiled_bundle):
             include_distance_metrics=False,
         )
     )
+    reporting_metrics_from_solution_with_raw_terms = (
+        _make_traceable_reporting_metrics_from_solution_with_raw_terms(
+            compiled_bundle,
+            include_distance_metrics=True,
+        )
+    )
+    reporting_metrics_from_solution_without_distances_with_raw_terms = (
+        _make_traceable_reporting_metrics_from_solution_with_raw_terms(
+            compiled_bundle,
+            include_distance_metrics=False,
+        )
+    )
 
     def reporting_metrics_from_solution_for(
         coil_dofs,
@@ -2780,13 +2930,28 @@ def _make_traceable_reporting_metrics_from_solution_bundle(compiled_bundle):
         solver_success,
         *,
         include_distance_metrics=True,
+        outer_raw_terms=None,
     ):
+        if outer_raw_terms is None:
+            selected_reporting_metrics = (
+                reporting_metrics_from_solution
+                if include_distance_metrics
+                else reporting_metrics_from_solution_without_distances
+            )
+            return selected_reporting_metrics(coil_dofs, solved_x, solver_success)
+        raw_terms_present, raw_terms = outer_raw_terms
         selected_reporting_metrics = (
-            reporting_metrics_from_solution
+            reporting_metrics_from_solution_with_raw_terms
             if include_distance_metrics
-            else reporting_metrics_from_solution_without_distances
+            else reporting_metrics_from_solution_without_distances_with_raw_terms
         )
-        return selected_reporting_metrics(coil_dofs, solved_x, solver_success)
+        return selected_reporting_metrics(
+            coil_dofs,
+            solved_x,
+            solver_success,
+            raw_terms_present,
+            raw_terms,
+        )
 
     return reporting_metrics_from_solution_for
 
