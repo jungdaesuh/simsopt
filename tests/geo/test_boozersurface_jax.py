@@ -8482,7 +8482,12 @@ class TestBoozerSurfaceJAXExactPath:
         )
 
         def fake_minimize(_fun, x0, **_kwargs):
-            return types.SimpleNamespace(x_k=x0)
+            return types.SimpleNamespace(
+                x_k=x0,
+                converged=jnp.asarray(True),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(1, dtype=jnp.int32),
+            )
 
         def fake_newton_polish(
             obj_fn,
@@ -8535,6 +8540,92 @@ class TestBoozerSurfaceJAXExactPath:
             np.asarray(result["grad"]),
             np.asarray(expected_grad),
         )
+
+    def test_traceable_pre_newton_stage_owns_lbfgs_result_schema(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        x0 = booz._pack_decision_vector(
+            jnp.asarray(0.3, dtype=jnp.float64),
+            jnp.asarray(0.05, dtype=jnp.float64),
+            sdofs=jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64),
+        )
+        expected_status = jnp.asarray(4, dtype=jnp.int32)
+
+        def fake_minimize(_objective, x, **_kwargs):
+            return types.SimpleNamespace(
+                x_k=x + 1.0,
+                converged=jnp.asarray(True),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(3, dtype=jnp.int32),
+                nfev=jnp.asarray(5, dtype=jnp.int32),
+                ngev=jnp.asarray(4, dtype=jnp.int32),
+                ls_status=expected_status,
+            )
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+
+        result = booz._run_traceable_pre_newton_stage(
+            booz.coil_set_spec,
+            x0,
+            "lbfgs-ondevice",
+            optimize_G=True,
+            weight_inv_modB=True,
+        )
+
+        np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0 + 1.0))
+        assert bool(result["success"])
+        assert int(result["nit"]) == 3
+        assert int(result["nfev"]) == 5
+        assert int(result["ngev"]) == 4
+        assert int(result["line_search_status"]) == int(expected_status)
+        assert result["residual_jacobian_condition_estimate"] is None
+
+    def test_traceable_newton_stage_delegates_full_configured_policy(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        x0 = booz._pack_decision_vector(
+            jnp.asarray(0.3, dtype=jnp.float64),
+            jnp.asarray(0.05, dtype=jnp.float64),
+            sdofs=jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64),
+        )
+        expected = {"x": x0}
+        captured = {}
+
+        def fake_polish(method, objective, x, **kwargs):
+            captured.update(
+                method=method,
+                objective=objective,
+                x=x,
+                kwargs=kwargs,
+            )
+            return expected
+
+        monkeypatch.setattr(booz, "_run_newton_polish_for_method", fake_polish)
+
+        result = booz._run_traceable_newton_polish_stage(
+            booz.coil_set_spec,
+            x0,
+            "lbfgs-ondevice",
+            optimize_G=True,
+            weight_inv_modB=True,
+            materialize_dense_linearization=False,
+        )
+
+        assert result is expected
+        assert captured["method"] == "lbfgs-ondevice"
+        assert captured["x"] is x0
+        assert captured["kwargs"] == {
+            "maxiter": booz.options["newton_maxiter"],
+            "tol": booz.options["newton_tol"],
+            "stab": booz.options["newton_stab"],
+            "materialize_hessian": False,
+            "max_dense_hessian_bytes": booz.options[
+                "max_dense_linearization_bytes"
+            ],
+            "objective_args": (booz.coil_set_spec,),
+        }
 
     def test_run_code_traceable_ls_skip_policy_does_not_call_newton(self, monkeypatch):
         """Traceable LS skip policy must return the LS state without Newton lowering."""
