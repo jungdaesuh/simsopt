@@ -558,7 +558,9 @@ def case_package_root_propagates_backend_import_error() -> None:
     except ImportError as exc:
         assert "blocked backend runtime import" in str(exc)
     else:
-        raise AssertionError("strict backend root must not hide backend import failures")
+        raise AssertionError(
+            "strict backend root must not hide backend import failures"
+        )
 
 
 def case_entrypoint_runtime_helper_configures_cpu_before_import() -> None:
@@ -1443,9 +1445,7 @@ def _make_spec_backed_biot_savart_jax(coil_definitions):
     owner_dofs = np.concatenate(owner_parts)
     return SpecBackedBiotSavartJAX(
         make_biot_savart_spec(
-            coil_dof_extraction=make_coil_set_dof_extraction_spec(
-                extraction_specs
-            ),
+            coil_dof_extraction=make_coil_set_dof_extraction_spec(extraction_specs),
             coil_dofs=owner_dofs,
         )
     )
@@ -1745,7 +1745,7 @@ fixed_surface_flux_integral fixed_surface_flux_integral_from_B VALID_REDUCTION_M
 pairwise_sum_axis pairwise_sum_flat scalar_square_sum validate_reduction_mode
 boozer_quasisymmetry_mode_indices boozer_quasisymmetry_residuals iota_target_metric_j iota_weighted_j
 well_weighted_j grouped_coil_set_spec_from_coil_specs grouped_biot_savart_A_from_inputs grouped_biot_savart_A_from_spec
-grouped_biot_savart_B_and_dB_from_spec grouped_biot_savart_B_from_inputs grouped_biot_savart_B_from_spec grouped_biot_savart_d2A_by_dXdX_from_inputs
+GroupedBiotSavartBDispatchEvidence GroupedBiotSavartBDispatchResult GroupedBiotSavartBDispatchRole grouped_biot_savart_B_and_dB_from_spec grouped_biot_savart_B_from_inputs grouped_biot_savart_B_from_spec grouped_biot_savart_B_from_spec_with_evidence grouped_biot_savart_d2A_by_dXdX_from_inputs
 grouped_biot_savart_d2A_by_dXdX_from_spec grouped_biot_savart_d2B_by_dXdX_from_inputs grouped_biot_savart_d2B_by_dXdX_from_spec grouped_biot_savart_dA_by_dX_from_inputs
 grouped_biot_savart_dA_by_dX_from_spec grouped_biot_savart_dB_by_dX_from_inputs grouped_biot_savart_dB_by_dX_from_spec grouped_coil_currents_from_inputs
 grouped_coil_currents_from_spec grouped_coil_index_lists_from_spec grouped_coil_set_spec_from_grouped_data grouped_coil_set_spec_from_inputs
