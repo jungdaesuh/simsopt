@@ -170,6 +170,34 @@ def _runtime_sdofs_for(booz):
     return jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_penalty_optimizer_state_respects_explicit_dtype(dtype):
+    x = jnp.arange(7, dtype=jnp.float64)
+
+    state = _bsj._as_boozer_penalty_optimizer_state(
+        x,
+        optimize_G=True,
+        optimizer_state_dtype=dtype,
+    )
+    params = _bsj._penalty_params(
+        iota=state.iota,
+        G_value=state.G,
+        targetlabel=1.0,
+        constraint_weight=2.0,
+        label_type="volume",
+        phi_idx=0,
+        weight_inv_modB=True,
+        dtype=dtype,
+    )
+
+    expected_dtype = np.dtype(dtype)
+    assert np.dtype(state.surface_dofs.dtype) == expected_dtype
+    assert np.dtype(state.iota.dtype) == expected_dtype
+    assert np.dtype(state.G.dtype) == expected_dtype
+    assert np.dtype(params.targetlabel.dtype) == expected_dtype
+    assert np.dtype(params.constraint_weight.dtype) == expected_dtype
+
+
 def test_public_solver_result_record_registry_is_mode_aware():
     entrypoint_cases = {
         "lbfgs": "minimize_boozer_penalty_constraints_LBFGS",
