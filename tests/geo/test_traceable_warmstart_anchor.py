@@ -147,6 +147,104 @@ def test_factor_selection_uses_only_an_eligible_anchor():
             np.testing.assert_allclose(actual, expected)
 
 
+def test_mixed_predictor_uses_fp32_forcing_but_fp64_linear_certificate(monkeypatch):
+    anchor_x = jnp.asarray([1.5, -2.5], dtype=jnp.float64)
+    anchor_coil_dofs = jnp.asarray([0.25, -0.75], dtype=jnp.float64)
+    certificate_anchor_coil_dofs = jnp.asarray(
+        [0.25000001, -0.75000001],
+        dtype=jnp.float64,
+    )
+    coil_dofs = jnp.asarray([0.75, -0.25], dtype=jnp.float64)
+    observed = {}
+
+    monkeypatch.setattr(
+        _traceable,
+        "_as_compute_array",
+        lambda value: jnp.asarray(value, dtype=jnp.float32),
+    )
+    monkeypatch.setattr(
+        _traceable,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {},
+    )
+
+    def stationarity_jvp(
+        x_inner,
+        current_coil_dofs,
+        coil_dofs_tangent,
+        _coil_set_spec_from_dofs,
+        **_objective_kwargs,
+    ):
+        observed["proposal_state_dtype"] = x_inner.dtype
+        observed["proposal_coil_dtype"] = current_coil_dofs.dtype
+        observed["proposal_delta_dtype"] = coil_dofs_tangent.dtype
+        return jnp.asarray([0.25, -0.5], dtype=jnp.float32)
+
+    def certificate_spec_from_dofs(current_coil_dofs):
+        observed["certificate_coil_dofs"] = current_coil_dofs
+        return current_coil_dofs
+
+    def solve_linearization(
+        _booz_jax,
+        solved_x,
+        rhs,
+        coil_set_spec,
+        _objective_kwargs,
+        **_solve_kwargs,
+    ):
+        observed["solve_state_dtype"] = solved_x.dtype
+        observed["solve_rhs_dtype"] = rhs.dtype
+        observed["solve_spec_dtype"] = coil_set_spec.dtype
+        np.testing.assert_array_equal(coil_set_spec, certificate_anchor_coil_dofs)
+        return jnp.asarray([0.125, -0.375], dtype=jnp.float64), _linear_solve_status(
+            True
+        )
+
+    monkeypatch.setattr(
+        _traceable,
+        "_traceable_inner_stationarity_coil_jvp",
+        stationarity_jvp,
+    )
+    monkeypatch.setattr(
+        _traceable,
+        "_traceable_solve_linearization",
+        solve_linearization,
+    )
+
+    forcing, predicted, _status, success = (
+        _traceable._traceable_predict_warmstart_result_from_anchor(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            certificate_coil_set_spec_from_dofs=certificate_spec_from_dofs,
+            anchor_certificate_coil_dofs=certificate_anchor_coil_dofs,
+            coil_dofs=coil_dofs,
+            anchor_coil_dofs=anchor_coil_dofs,
+            anchor_x=anchor_x,
+            anchor_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-7,
+            linear_solve_stab=0.0,
+            predictor_kind="ls",
+            objective_kwargs={},
+        )
+    )
+
+    assert forcing.dtype == jnp.float32
+    assert predicted.dtype == jnp.float64
+    assert bool(np.asarray(success))
+    assert observed.pop("proposal_state_dtype") == jnp.float64
+    assert observed.pop("proposal_coil_dtype") == jnp.float32
+    assert observed.pop("proposal_delta_dtype") == jnp.float32
+    np.testing.assert_array_equal(
+        observed.pop("certificate_coil_dofs"),
+        certificate_anchor_coil_dofs,
+    )
+    assert observed.pop("solve_state_dtype") == jnp.float64
+    assert observed.pop("solve_rhs_dtype") == jnp.float64
+    assert observed.pop("solve_spec_dtype") == jnp.float64
+    assert observed == {}
+
+
 def test_factor_selection_cannot_inject_factors_into_a_factorless_route():
     selected = _traceable._traceable_select_predictor_linear_solve_factors(
         jnp.asarray(True, dtype=bool),
