@@ -756,7 +756,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      required, and fuse explicit-objective VJPs. Preserve observable values and
      derivatives and add focused compile-count/graph-reuse regressions rather
      than campaign timing assertions.
-   - [ ] Port only the required production changes in
+   - [x] Port only the required production changes in
      `surface_objectives.py` and
      `src/simsopt_jax_adapters/field/biotsavart_backend.py`. In the adapter's
      per-coil unit-field path, stage points, coil geometry, and unit current in
@@ -766,6 +766,9 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      inputs are FP32; do not add a helper-local cast in either direction. Port
      the per-coil boundary regression to the typed precision API and assert FP32
      staged operands together with preservation of the kernel's FP64 result.
+     **Result:** the dedicated boundary regression passes `2/2` on CPU and
+     `2/2` on the local RTX 5090 for both unbounded `vmap` and bounded
+     `lax.map` dispatch.
    - [ ] Preserve spec-backed Biot-Savart graph identity through rotated/scaled
      curve and current wrappers, give spec-backed fields the required
      `clear_points()` behavior, and include symmetry-current owner segments in
