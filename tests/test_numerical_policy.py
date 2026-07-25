@@ -7,9 +7,25 @@ import sys
 
 import pytest
 from simsopt_jax.numerical_policy import (
+    DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY,
+    DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY,
     MIXED_DENSE_IR_ACCURACY_POLICY,
+    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    NEWTON_ARMIJO_C1,
+    DenseIrHistorySource,
     dense_ir_factorization_precision_evidence_is_complete,
 )
+
+
+def test_dense_ir_history_capacity_and_source_codes_share_one_policy() -> None:
+    assert DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY == (
+        MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS + 1
+    )
+    assert DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY == (
+        MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS
+    )
+    assert tuple(int(source) for source in DenseIrHistorySource) == (0, 1, 2, 3)
+    assert NEWTON_ARMIJO_C1 == 1.0e-4
 
 
 def test_mixed_dense_ir_forward_error_limit_uses_the_policy_floor():

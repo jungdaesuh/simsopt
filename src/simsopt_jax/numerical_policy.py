@@ -7,6 +7,7 @@ import secrets
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Final, Literal
 
 CertificateDType = Literal["float64"]
@@ -15,6 +16,22 @@ CertificateProbeSamplingModel = Literal["jax_threefry2x32_finite_pseudorandom_no
 CertificateProbabilityModel = Literal["independent_ideal_standard_gaussian"]
 PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE: Final[int] = 4
 MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS: Final[int] = sys.float_info.mant_dig
+DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY: Final[int] = (
+    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS + 1
+)
+DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY: Final[int] = (
+    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS
+)
+NEWTON_ARMIJO_C1: Final[float] = 1.0e-4
+
+
+class DenseIrHistorySource(IntEnum):
+    """Factor origin for one selected dense-IR correction history."""
+
+    NONE = 0
+    FP32_PROPOSAL_FACTORS = 1
+    FP64_CERTIFICATE_FACTORS = 2
+    FP64_REFACTOR_RETRY = 3
 
 
 MIXED_DENSE_IR_CERTIFICATE_KEY_WORD_BITS: Final[int] = 32
