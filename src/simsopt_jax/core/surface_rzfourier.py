@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from ._math_utils import as_compute_array as _as_compute_array
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from ._math_utils import runtime_device_put
 from ._device_scalars import device_one, float_scalar, two_pi
@@ -158,7 +159,10 @@ def _differentiated_fourier_modes(
     phi_order: int,
     theta_order: int,
 ) -> jax.Array:
-    scale = jnp.ones_like(cos_terms)
+    scale = jnp.broadcast_to(
+        device_one(phi_factor),
+        cos_terms.shape,
+    )
     if phi_order:
         scale = scale * phi_factor**phi_order
     if theta_order:
@@ -314,10 +318,12 @@ def _surface_rz_fourier_derivative_from_terms(
     sin_phi: jax.Array,
     angle_scale: jax.Array,
 ) -> jax.Array:
-    radial = jnp.zeros(cos_terms.shape[:2], dtype=cos_terms.dtype)
-    toroidal = jnp.zeros_like(radial)
-    radial_signs = (1.0, 0.0, -1.0, 0.0)
-    toroidal_signs = (0.0, 1.0, 0.0, -1.0)
+    one = device_one(angle_scale)
+    zero = one - one
+    radial = jnp.broadcast_to(zero, cos_terms.shape[:2])
+    toroidal = radial
+    radial_signs = (one, zero, -one, zero)
+    toroidal_signs = (zero, one, zero, -one)
 
     for basis_order in range(phi_order + 1):
         radius_derivative, _ = _radius_height_derivative_from_modes(
@@ -363,13 +369,15 @@ def _surface_rz_fourier_derivative_from_spec(
     theta_order: int,
 ) -> jax.Array:
     phi, _theta, _m, _n, angle_scale = _mode_axes(spec)
-    radial = jnp.zeros(
+    one = device_one(angle_scale)
+    zero = one - one
+    radial = jnp.broadcast_to(
+        zero,
         (spec.quadpoints_phi.shape[0], spec.quadpoints_theta.shape[0]),
-        dtype=spec.rc.dtype,
     )
-    toroidal = jnp.zeros_like(radial)
-    radial_signs = (1.0, 0.0, -1.0, 0.0)
-    toroidal_signs = (0.0, 1.0, 0.0, -1.0)
+    toroidal = radial
+    radial_signs = (one, zero, -one, zero)
+    toroidal_signs = (zero, one, zero, -one)
 
     for basis_order in range(phi_order + 1):
         radius_derivative, _ = _radius_height_derivative_from_spec(
@@ -550,6 +558,7 @@ def _coefficients_from_dofs(
     ntor: int,
     stellsym: bool,
     use_custom_vjp: bool = False,
+    use_compute_dtype: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     coeff_shape = (mpol + 1, 2 * ntor + 1)
     flat_size = coeff_shape[0] * coeff_shape[1]
@@ -566,7 +575,7 @@ def _coefficients_from_dofs(
 
     rc_count = int(include_positions.size)
     tail_count = int(exclude_positions.size)
-    dofs = _as_jax_float64(dofs)
+    dofs = _as_compute_array(dofs) if use_compute_dtype else _as_jax_float64(dofs)
     scatter_coefficients = (
         _scatter_coefficients if use_custom_vjp else _scatter_coefficients_raw
     )
@@ -616,14 +625,43 @@ def surface_rz_fourier_spec_from_dofs(
     nfp: int,
     stellsym: bool,
     use_custom_vjp: bool = False,
+    use_compute_dtype: bool = False,
 ) -> SurfaceRZFourierSpec:
+    if use_compute_dtype:
+        dofs_ref = _as_compute_array(dofs)
+        quadpoints_phi = _as_compute_array(
+            quadpoints_phi,
+            dtype=dofs_ref.dtype,
+            reference=dofs_ref,
+        )
+        quadpoints_theta = _as_compute_array(
+            quadpoints_theta,
+            dtype=dofs_ref.dtype,
+            reference=dofs_ref,
+        )
+    else:
+        dofs_ref = dofs
     rc, rs, zc, zs = _coefficients_from_dofs(
-        dofs,
+        dofs_ref,
         mpol=mpol,
         ntor=ntor,
         stellsym=stellsym,
         use_custom_vjp=use_custom_vjp,
+        use_compute_dtype=use_compute_dtype,
     )
+    if use_compute_dtype:
+        return SurfaceRZFourierSpec(
+            rc=rc,
+            rs=rs,
+            zc=zc,
+            zs=zs,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            nfp=int(nfp),
+            stellsym=bool(stellsym),
+            mpol=int(rc.shape[0] - 1),
+            ntor=int((rc.shape[1] - 1) // 2),
+        )
     return make_surface_rzfourier_spec(
         rc=rc,
         rs=rs,

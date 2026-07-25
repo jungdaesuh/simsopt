@@ -44,6 +44,7 @@ from conftest import (
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 import simsopt_jax.geo.boozer_residual as _brj
+from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.geo.boozer_residual import (
     _split_decision_vector,
     _split_decision_vector_jvp_safe,
@@ -54,6 +55,7 @@ from simsopt_jax.geo.boozer_residual import (
     boozer_residual_scalar,
     boozer_residual_grad,
     boozer_residual_hessian,
+    boozer_residual_scalar_and_grad_cpu_ordered,
     boozer_residual_vjp_composed,
     boozer_residual_vector,
 )
@@ -228,6 +230,15 @@ def test_split_decision_vector_static_slices_under_transfer_guard():
     assert host_scalar(default_jvp_tangent_with_G) == pytest.approx(2.1)
     np.testing.assert_allclose(host_array(hvp_with_G_result), [2.0, 2.0, 2.0, 1.0, 1.0])
     np.testing.assert_allclose(host_array(hvp_without_G_result), [2.0, 2.0, 0.0])
+
+
+def test_jvp_safe_decision_split_preserves_float32_primal_dtype():
+    x = jnp.asarray([0.2, -0.1, 0.3, 1.5], dtype=jnp.float32)
+    sdofs, iota, G = _split_decision_vector_jvp_safe(x, optimize_G=True)
+
+    assert sdofs.dtype == jnp.float32
+    assert iota.dtype == jnp.float32
+    assert G.dtype == jnp.float32
 
 
 def test_split_decision_vector_float32_vjp_under_transfer_guard():
@@ -990,6 +1001,89 @@ class TestBoozerResidualDevicePlacement:
         assert_arrays_on_device(expected_device, gradient)
         assert_arrays_on_device(expected_device, hessian)
         assert_arrays_on_device(expected_device, residual_vector)
+
+    def test_scalar_and_vector_accept_explicit_compute_dtype(self):
+        B, xphi, xtheta = _make_synthetic_data(6, 8)
+        B = jnp.asarray(B, dtype=jnp.float32)
+        xphi = jnp.asarray(xphi, dtype=jnp.float32)
+        xtheta = jnp.asarray(xtheta, dtype=jnp.float32)
+
+        scalar_value = boozer_residual_scalar(
+            1.5,
+            0.3,
+            B,
+            xphi,
+            xtheta,
+            dtype=jnp.float32,
+        )
+        residual_vector = boozer_residual_vector(
+            1.5,
+            0.3,
+            B,
+            xphi,
+            xtheta,
+            dtype=jnp.float32,
+        )
+
+        assert scalar_value.dtype == jnp.float32
+        assert residual_vector.dtype == jnp.float32
+
+    def test_cpu_ordered_scalar_and_grad_preserve_compute_dtype(self):
+        B, xphi, xtheta = _make_synthetic_data(4, 5)
+        B = jnp.asarray(B, dtype=jnp.float32)
+        xphi = jnp.asarray(xphi, dtype=jnp.float32)
+        xtheta = jnp.asarray(xtheta, dtype=jnp.float32)
+        nsurfdofs = 3
+        dx_ds = jnp.zeros((*B.shape, nsurfdofs), dtype=jnp.float32)
+        dxphi_ds = jnp.zeros_like(dx_ds)
+        dxtheta_ds = jnp.zeros_like(dx_ds)
+        dB_dX = jnp.zeros((*B.shape[:2], 3, 3), dtype=jnp.float32)
+
+        scalar_value, grad = boozer_residual_scalar_and_grad_cpu_ordered(
+            1.5,
+            0.3,
+            B,
+            dB_dX,
+            xphi,
+            xtheta,
+            dx_ds,
+            dxphi_ds,
+            dxtheta_ds,
+            optimize_G=True,
+            weight_inv_modB=True,
+        )
+
+        assert scalar_value.dtype == jnp.float32
+        assert grad.dtype == jnp.float32
+
+    def test_surface_geometry_from_dofs_uses_compute_dtype_in_mixed_mode(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
+        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+        invalidate_backend_cache()
+        try:
+            gamma, xphi, xtheta = _brj._surface_geometry_from_dofs(
+                jnp.asarray([1.0, 0.1, 0.2], dtype=jnp.float64),
+                jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+                jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+                1,
+                0,
+                1,
+                True,
+                None,
+                surface_kind="rzfourier",
+                use_compute_dtype=True,
+            )
+        finally:
+            monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
+            monkeypatch.delenv("SIMSOPT_BACKEND_MODE", raising=False)
+            invalidate_backend_cache()
+
+        assert gamma.dtype == jnp.float32
+        assert xphi.dtype == jnp.float32
+        assert xtheta.dtype == jnp.float32
 
 
 class TestBoozerResidualM1Limitations:

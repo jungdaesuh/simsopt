@@ -24,6 +24,7 @@ from simsopt_jax.backend import (
 )
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
+    as_compute_array as _as_compute_array,
     as_jax_float64 as _as_jax_float64,
     axis0_entries as _axis0_entries,
     explicit_inv as _explicit_inv,
@@ -169,7 +170,9 @@ def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
 
 
 def _tree_add(left, right):
-    return jax.tree.map(lambda left_leaf, right_leaf: left_leaf + right_leaf, left, right)
+    return jax.tree.map(
+        lambda left_leaf, right_leaf: left_leaf + right_leaf, left, right
+    )
 
 
 # ── Tiling primitives ────────────────────────────────────────────────
@@ -454,9 +457,7 @@ def _biot_savart_B_and_dB_integrand(x, gammas, gammadashs):
     temp0 = numerator0 - three_cross_inv * diff[..., 0, None]
     temp1 = numerator1 - three_cross_inv * diff[..., 1, None]
     temp2 = numerator2 - three_cross_inv * diff[..., 2, None]
-    dB_integrand = jnp.stack((temp0, temp1, temp2), axis=-2) * r_inv4[
-        ..., None, None
-    ]
+    dB_integrand = jnp.stack((temp0, temp1, temp2), axis=-2) * r_inv4[..., None, None]
     return B_integrand, dB_integrand
 
 
@@ -549,7 +550,9 @@ def _quadrature_block_B_and_dB_integral(x, gammas, gammadashs, *, block_size: in
     return average_sum(lax.fori_loop(0, block_count, body, zero))
 
 
-def _one_point_dense_B_and_dB(x, gammas, gammadashs, currents, *, quadrature_block_size):
+def _one_point_dense_B_and_dB(
+    x, gammas, gammadashs, currents, *, quadrature_block_size
+):
     B_integral, dB_integral = _quadrature_block_B_and_dB_integral(
         x,
         gammas,
@@ -981,7 +984,13 @@ def _coil_entry_sequence(values: object) -> tuple[object, ...]:
     return _axis0_entries(values)
 
 
-def group_coil_data(gammas_list, gammadashs_list, currents_list):
+def group_coil_data(
+    gammas_list,
+    gammadashs_list,
+    currents_list,
+    *,
+    use_compute_dtype: bool = True,
+):
     gamma_entries = _coil_entry_sequence(gammas_list)
     gammadash_entries = _coil_entry_sequence(gammadashs_list)
     current_entries = _coil_entry_sequence(currents_list)
@@ -989,13 +998,14 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
     for i, gamma in enumerate(gamma_entries):
         indices_by_nquad.setdefault(gamma.shape[0], []).append(i)
 
+    array_for_group = _as_compute_array if use_compute_dtype else _as_jax_float64
     groups = []
     for indices in sorted(indices_by_nquad.values(), key=lambda group: group[0]):
         groups.append(
             (
-                jnp.stack([_as_jax_float64(gamma_entries[i]) for i in indices]),
-                jnp.stack([_as_jax_float64(gammadash_entries[i]) for i in indices]),
-                jnp.stack([_as_jax_float64(current_entries[i]) for i in indices]),
+                jnp.stack([array_for_group(gamma_entries[i]) for i in indices]),
+                jnp.stack([array_for_group(gammadash_entries[i]) for i in indices]),
+                jnp.stack([array_for_group(current_entries[i]) for i in indices]),
                 indices,
             )
         )

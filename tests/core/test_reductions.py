@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
+from simsopt_jax.runtime.host_boundary import scalar_pullback_seed
 from simsopt_jax.core.reductions import (
     compensated_sum_flat,
     pairwise_sum_axis,
@@ -64,6 +65,20 @@ def test_pairwise_sum_axis_matches_numpy_fixed_tree():
     expected = _numpy_pairwise_sum_axis(values, axis=1)
 
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_pairwise_sum_axis_vjp_allows_strict_transfer_guard_for_axis3():
+    values = jnp.arange(2 * 5 * 3, dtype=jnp.float64).reshape(2, 5, 3) - 7.0
+
+    def objective(array):
+        return jnp.sum(pairwise_sum_axis(array * array, axis=-1))
+
+    with jax.transfer_guard("disallow"):
+        value, pullback = jax.vjp(objective, values)
+        (gradient,) = pullback(scalar_pullback_seed(value))
+
+    assert gradient.shape == values.shape
+    assert jnp.all(jnp.isfinite(gradient))
 
 
 def test_pairwise_sum_flat_matches_numpy_fixed_tree():

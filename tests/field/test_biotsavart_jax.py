@@ -1872,6 +1872,129 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         assert jnp.all(jnp.isfinite(result))
 
     @pytest.mark.parametrize(
+        ("mixed_precision", "point_dtype", "expected_dtype"),
+        (
+            (False, jnp.float64, jnp.float64),
+            (True, jnp.float64, jnp.float64),
+            (True, jnp.float32, jnp.float32),
+        ),
+    )
+    def test_grouped_biot_savart_kernel_boundary_uses_point_dtype(
+        self,
+        monkeypatch,
+        mixed_precision,
+        point_dtype,
+        expected_dtype,
+    ):
+        from simsopt_jax.core import field as core_field
+
+        if mixed_precision:
+            monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+        else:
+            monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
+        invalidate_backend_cache()
+
+        seen = []
+
+        def kernel(kernel_points, gammas, gammadashs, currents):
+            seen.append(
+                (
+                    kernel_points.dtype,
+                    gammas.dtype,
+                    gammadashs.dtype,
+                    currents.dtype,
+                )
+            )
+            return jnp.ones((kernel_points.shape[0], 3), dtype=jnp.float64)
+
+        monkeypatch.setattr(core_field, "biot_savart_B", kernel)
+
+        try:
+            points = jnp.asarray(
+                [[0.2, 0.1, -0.3], [0.1, -0.4, 0.0]],
+                dtype=point_dtype,
+            )
+            gammas, gammadashs, currents = _make_shifted_circular_coils(
+                2,
+                nquad=16,
+            )
+            coil_spec = core_field.grouped_coil_set_spec_from_lists(
+                [gammas[0], gammas[1]],
+                [gammadashs[0], gammadashs[1]],
+                [currents[0], currents[1]],
+            )
+
+            group = coil_spec.groups[0]
+            assert group.gammas.dtype == jnp.float64
+            assert group.gammadashs.dtype == jnp.float64
+            assert group.currents.dtype == jnp.float64
+
+            result = core_field.grouped_biot_savart_B_from_spec(points, coil_spec)
+        finally:
+            invalidate_backend_cache()
+
+        assert seen == [
+            (expected_dtype, expected_dtype, expected_dtype, expected_dtype)
+        ]
+        assert result.dtype == jnp.float64
+        assert result.shape == (2, 3)
+
+    def test_grouped_biot_savart_vjp_boundary_uses_point_dtype(self, monkeypatch):
+        from simsopt_jax.core import field as core_field
+
+        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+        invalidate_backend_cache()
+        seen = []
+
+        def vjp(kernel_points, v, gammas, gammadashs, currents):
+            seen.append(
+                (
+                    kernel_points.dtype,
+                    v.dtype,
+                    gammas.dtype,
+                    gammadashs.dtype,
+                    currents.dtype,
+                )
+            )
+            return (
+                jnp.zeros_like(gammas),
+                jnp.zeros_like(gammadashs),
+                jnp.zeros_like(currents),
+            )
+
+        monkeypatch.setattr(core_field, "biot_savart_B_vjp", vjp)
+
+        try:
+            points = jnp.asarray(
+                [[0.2, 0.1, -0.3], [0.1, -0.4, 0.0]],
+                dtype=jnp.float32,
+            )
+            v = jnp.ones((2, 3), dtype=jnp.float64)
+            gammas, gammadashs, currents = _make_shifted_circular_coils(
+                2,
+                nquad=16,
+            )
+            group = core_field.group_coil_data(
+                [gammas[0], gammas[1]],
+                [gammadashs[0], gammadashs[1]],
+                [currents[0], currents[1]],
+            )[0]
+            result = core_field.biot_savart_B_vjp_maybe_collective(
+                points, v, *group[:3]
+            )
+        finally:
+            invalidate_backend_cache()
+
+        assert seen == [
+            (jnp.float32, jnp.float32, jnp.float32, jnp.float32, jnp.float32)
+        ]
+        assert tuple(array.dtype for array in result) == (
+            jnp.float32,
+            jnp.float32,
+            jnp.float32,
+        )
+
+    @pytest.mark.parametrize(
         ("mode", "rtol", "atol"),
         [
             ("jax_cpu_parity", 1e-12, 1e-14),

@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt_jax.core import (
@@ -10,6 +11,9 @@ from simsopt_jax.core import (
     surface_rz_fourier_dminor_radius_from_dofs,
     surface_rz_fourier_dvolume_from_dofs,
     surface_rz_fourier_spec_from_dofs,
+)
+from simsopt_jax.core.surface_rzfourier import (
+    _surface_rz_fourier_derivative_lin_from_spec,
 )
 
 
@@ -67,3 +71,28 @@ def test_surface_rzfourier_scalar_gradients_allow_strict_transfer_guard():
     with jax.transfer_guard("disallow"):
         for compiled_fn in compiled_fns:
             compiled_fn(dofs).block_until_ready()
+
+
+def test_surface_rzfourier_eager_linear_derivatives_allow_strict_transfer_guard():
+    surface = _make_surface()
+    spec = _surface_spec_from_surface(surface)
+    quadpoints_phi = jax.device_put(np.asarray([0.0, 0.125], dtype=np.float64))
+    quadpoints_theta = jax.device_put(np.asarray([0.0, 0.25], dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        gammadash1 = _surface_rz_fourier_derivative_lin_from_spec(
+            spec,
+            quadpoints_phi,
+            quadpoints_theta,
+            1,
+            0,
+        )
+        gammadash2 = _surface_rz_fourier_derivative_lin_from_spec(
+            spec,
+            quadpoints_phi,
+            quadpoints_theta,
+            0,
+            1,
+        )
+        gammadash1.block_until_ready()
+        gammadash2.block_until_ready()
