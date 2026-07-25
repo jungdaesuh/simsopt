@@ -3290,6 +3290,8 @@ from .surface_objectives_traceable import (
     _traceable_plu_unpack_lu_piv as _traceable_plu_unpack_lu_piv,
     _traceable_plu_unpack_triple as _traceable_plu_unpack_triple,
     _traceable_predict_warmstart_x as _traceable_predict_warmstart_x,
+    _traceable_predict_warmstart_from_anchor as _traceable_predict_warmstart_from_anchor,
+    _traceable_select_predictor_linear_solve_factors as _traceable_select_predictor_linear_solve_factors,
     traceable_forward_result_outer_raw_terms,
     _traceable_reporting_metrics_from_solution as _traceable_reporting_metrics_from_solution,
     _traceable_result_linear_solve_factors as _traceable_result_linear_solve_factors,
