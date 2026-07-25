@@ -2464,6 +2464,81 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
     )
 
 
+def test_traceable_general_forward_passes_distinct_certificate_coil_source(
+    monkeypatch,
+):
+    baseline_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    proposal_coils = jnp.asarray([1.0, -2.0], dtype=jnp.float32)
+    objective_coils = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    certificate_spec = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
+    captured = {}
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_predict_warmstart_x",
+        lambda *_args, **_kwargs: (baseline_x, jnp.asarray(True)),
+    )
+
+    def evaluate_objective(x, coil_dofs, coil_set_spec, _objective_kwargs):
+        captured["objective_x"] = x
+        captured["objective_coils"] = coil_dofs
+        captured["objective_spec"] = coil_set_spec
+        return jnp.asarray(2.0, dtype=jnp.float64)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_evaluate_traceable_total_objective",
+        evaluate_objective,
+    )
+
+    def run_code_traceable(coil_source, sdofs, iota, G, **kwargs):
+        del sdofs, iota, G
+        captured["proposal_spec"] = coil_source
+        captured["certificate_spec"] = kwargs["certificate_coil_source"]
+        return {
+            "x": baseline_x,
+            "sdofs": baseline_x[:-1],
+            "iota": baseline_x[-1],
+            "G": None,
+            "primal_success": jnp.asarray(True),
+            "adjoint_linear_solve_available": jnp.asarray(True),
+        }
+
+    booz = types.SimpleNamespace(
+        _unpack_decision_vector_jax=lambda x, optimize_G, coil_set_spec: (
+            x[:-1],
+            x[-1],
+            None,
+        ),
+        run_code_traceable=run_code_traceable,
+    )
+
+    result = surfaceobjectives_traceable_jax_module._traceable_general_forward_result(
+        booz,
+        lambda coil_dofs: coil_dofs,
+        coil_dofs=proposal_coils,
+        objective_coil_dofs=objective_coils,
+        certificate_coil_set_spec=certificate_spec,
+        baseline_x=baseline_x,
+        baseline_value=jnp.asarray(1.0, dtype=jnp.float64),
+        baseline_linear_solve_factors=None,
+        linearization_kind="hessian",
+        linear_solve_tol=1.0e-10,
+        linear_solve_stab=0.0,
+        optimize_G=False,
+        baseline_coil_dofs=jnp.zeros_like(proposal_coils),
+        predictor_kind="ls",
+        objective_kwargs={},
+        success_filter=None,
+    )
+
+    assert np.dtype(captured["proposal_spec"].dtype) == np.dtype(np.float32)
+    assert captured["certificate_spec"] is certificate_spec
+    assert captured["objective_coils"] is objective_coils
+    assert captured["objective_spec"] is certificate_spec
+    assert bool(result["success"])
+
+
 def test_traceable_profile_suite_warmstart_predict_surfaces_exact_failure(
     monkeypatch,
 ):
@@ -5336,6 +5411,81 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
     assert calls["general_forward"] == 1
     np.testing.assert_allclose(np.asarray(value), 0.25)
     np.testing.assert_allclose(np.asarray(grad), np.ones(2, dtype=np.float64))
+
+
+def test_traceable_compiled_bundle_separates_proposal_and_certificate_coils(
+    monkeypatch,
+):
+    baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    state = {
+        "objective_kwargs": {},
+        "baseline_x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
+        "baseline_value": jnp.asarray(2.0, dtype=jnp.float64),
+        "baseline_linear_solve_factors": None,
+        "baseline_coil_dofs": baseline_coil_dofs,
+        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
+        "optimize_G": False,
+        "predictor_kind": "none",
+        "linearization_kind": "hessian",
+        "linear_solve_tol": 1.0e-10,
+        "linear_solve_stab": 0.0,
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_as_compute_array",
+        lambda value: jnp.asarray(value, dtype=jnp.float32),
+    )
+
+    def fake_general_forward_result(_booz_jax, _coil_set_spec_from_dofs, **kwargs):
+        captured["proposal_dtype"] = kwargs["coil_dofs"].dtype
+        captured["objective_dtype"] = kwargs["objective_coil_dofs"].dtype
+        captured["certificate_dtype"] = kwargs[
+            "certificate_coil_set_spec"
+        ].dtype
+        captured["baseline_proposal_dtype"] = kwargs["baseline_coil_dofs"].dtype
+        return {
+            "value": jnp.sum(kwargs["objective_coil_dofs"]),
+            "x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
+            "sdofs": jnp.asarray([1.0], dtype=jnp.float64),
+            "iota": jnp.asarray(-1.0, dtype=jnp.float64),
+            "G": None,
+            "linear_solve_factors": None,
+            "success": jnp.asarray(True),
+            "primal_success": jnp.asarray(True),
+            "adjoint_linear_solve_available": jnp.asarray(True),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_general_forward_result",
+        fake_general_forward_result,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_total_gradient_with_status",
+        lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
+            jnp.ones_like(kwargs["coil_dofs"]),
+            jnp.asarray(True),
+        ),
+    )
+
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        object(),
+        state,
+        general_only_forward=True,
+    )
+    value, gradient = bundle["compiled_value_and_grad_for"](
+        jnp.asarray([0.75, -0.125], dtype=jnp.float64)
+    )
+
+    assert np.dtype(captured["proposal_dtype"]) == np.dtype(np.float32)
+    assert np.dtype(captured["baseline_proposal_dtype"]) == np.dtype(np.float32)
+    assert np.dtype(captured["objective_dtype"]) == np.dtype(np.float64)
+    assert np.dtype(captured["certificate_dtype"]) == np.dtype(np.float64)
+    np.testing.assert_allclose(np.asarray(value), 0.625)
+    np.testing.assert_allclose(np.asarray(gradient), np.ones(2))
 
 
 @pytest.mark.parametrize(
