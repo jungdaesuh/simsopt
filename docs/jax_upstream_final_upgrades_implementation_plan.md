@@ -106,11 +106,10 @@ commit.
 - The target already contains the base JAX port and FP64 hardening, including
   patch-equivalent dense-solve, rejected-gradient, residual-J LSMR, and Boozer
   warm-start fixes.
-- The target now contains `src/simsopt_jax/numerical_policy.py` and
-  `src/simsopt_jax/runtime/exact_numeric_identity.py`. It still does not contain
-  `src/simsopt_jax/core/biotsavart_online.py`,
-  `src/simsopt_jax/geo/optimizers/_evaluation_lifecycle.py`, or
-  `src/simsopt_jax/geo/optimizers/_evaluation_provider.py`.
+- The target now contains `src/simsopt_jax/numerical_policy.py`,
+  `src/simsopt_jax/runtime/exact_numeric_identity.py`,
+  `src/simsopt_jax/core/biotsavart_online.py`, and the optimizer-owned
+  `_evaluation_lifecycle.py` and `_evaluation_provider.py` modules.
 - The target now exposes explicit mixed precision and
   `hybrid_final_dense_ir`; neither changes the existing FP64 defaults.
 - Source tests and benchmark harnesses contain direct imports from
@@ -876,20 +875,29 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
    - [x] Complete the selected `0412de980` reporting boundary by staging both
      the cached `outer_raw_terms` presence flag and every cached raw-term leaf
      relative to `solved_x`; add a strict-transfer regression.
-   - [ ] Reconcile only the dependency-complete fixture portions of
+   - [x] Reconcile only the dependency-complete fixture portions of
      `ad73aa0f1` in `tests/geo/test_surface_objectives_jax.py`: typed
      certificate-key helpers and the final `newton_trace_capacity` mock/state
      contract. Do not copy validation-ladder, banana, campaign, or evidence
      imports from the source test wholesale.
-   - [ ] Port the production `newton_trace_capacity` owner and propagation
+   - [x] Port the production `newton_trace_capacity` owner and propagation
      finalized by `add41e95c`: `BoozerSurfaceJAX` must return the full configured
      `newton_maxiter` capacity for every production lane, and
      `surface_objectives_traceable.py` must carry that static capacity through
      cache identity, traceable state, pack/pad helpers, compiled bundles, and
      every forward path. Do not port the earlier policy-dependent bounded-mixed
      capacity from `5df801e1b`; all JAX branches must share one static trace
-     shape.
-   - [ ] Port the unconditional `9e4b7c23f` private minimizer fixture update in
+     shape. **Result:** the focused capacity/fixture slice passes `16/16` on
+     CPU across the pack, cache-state, compiled-bundle, skip, and public
+     adapter contracts. The two direct capacity contracts pass `2/2` on the
+     local RTX 5090 with no skips; an additional strict-CUDA selection passed
+     `8` tests with one predeclared module-policy skip. A follow-up adversarial
+     review found and closed a mixed-controller evidence tear: bounded success
+     and canonical fallback now retain all fourteen selected Newton traces,
+     normalize them to the shared capacity, and publish an independent presence
+     bit for every trace. The focused controller-to-forward-contract closure
+     passes `7/7` on CPU and `7/7` on the local RTX 5090 with zero skips.
+   - [x] Port the unconditional `9e4b7c23f` private minimizer fixture update in
      `tests/geo/test_boozersurface_jax.py`: the selected on-device
      quasi-Newton branch already consumes `converged`, `failed`, and `k`, so its
      fake result must provide those fields in addition to `x_k`.
