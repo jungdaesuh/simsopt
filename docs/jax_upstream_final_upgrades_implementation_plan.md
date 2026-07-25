@@ -1084,20 +1084,23 @@ implementation.
      the two public classes, the combined host/owner/adapter gate passes
      `27/27` on CPU, and the strict RTX 5090 boundary passes `6/6` with zero
      skips.
-   - [ ] Preserve the physical derivative basis for fixed surfaces, including
+   - [x] Preserve the physical derivative basis for fixed surfaces, including
      the selected `5df801e1b` Boozer label-gradient fix after
-     `surface.fix_all()`. The native replay owner and its fixed-surface
-     directional finite-difference gate are complete; the matching JAX
-     `NonQuasiSymmetricRatioJAX` precision route remains open.
+     `surface.fix_all()`. The native intrinsic label-gradient owner now serves
+     every constrained Boozer path independently of the free-DOF projection,
+     and `NonQuasiSymmetricRatioJAX` seals its value, direct coil gradient, and
+     surface partial to `use_compute_dtype=False`.
    - [x] Ensure replay values and primitive partials come from the same FP64
      source of truth.
-   - [ ] Add focused tests that construct native Optimizable fixtures directly;
+   - [x] Add focused tests that construct native Optimizable fixtures directly;
      do not import the single-stage example package. Include owner and
      directional finite-difference coverage for native and JAX curve-surface
      objectives and the fixed-surface Boozer label-gradient regression. The
      replay portion now has native owner, value-parity, optional-y, and
-     fixed-surface physical-basis coverage; native/JAX curve-surface coverage
-     remains with its still-open owner slice.
+     fixed-surface physical-basis coverage. The completed curve-surface owner
+     slice and fixed-surface precision-authority slice use no example or
+     campaign imports. **Result:** the latter passes `7/7` focused CPU tests
+     plus `16` native gradient subtests, and `2/2` on the RTX 5090.
    - [x] Add an independent finite-difference directional-derivative spot check
      for one fixed-surface objective so value replay, primitive partials, and
      the physical derivative basis are not validated only against each other.
