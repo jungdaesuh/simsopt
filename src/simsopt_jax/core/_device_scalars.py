@@ -26,7 +26,7 @@ def staged_like(reference: jax.Array, host_value, *, dtype=None) -> jax.Array:
     """Explicitly stage a host literal with reference-compatible placement."""
     reference = jnp.asarray(reference)
     resolved_dtype = reference.dtype if dtype is None else np.dtype(dtype)
-    if isinstance(host_value, jax.Array):
+    if isinstance(reference, jax.core.Tracer) or isinstance(host_value, jax.Array):
         return jnp.asarray(host_value, dtype=resolved_dtype)
     return explicit_device_array(
         host_value,
