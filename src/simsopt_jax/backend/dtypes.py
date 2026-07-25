@@ -87,7 +87,7 @@ def _has_only_traced_jax_leaves(value) -> bool:
     return _has_jax_array_value(value) and not _contains_concrete_jax_leaves(value)
 
 
-def _reference_sharding(reference, *, ndim: int | None = None):
+def _reference_placement(reference, *, ndim: int | None = None):
     # A tracer is a ``jax.Array`` but carries no concrete sharding; probing
     # ``tracer.sharding`` raises ``AttributeError`` whose message eagerly walks
     # the entire jaxpr (jax's ``_origin_msg``/``find_progenitors``) only to be
@@ -100,14 +100,25 @@ def _reference_sharding(reference, *, ndim: int | None = None):
         return None
     if isinstance(reference, jax.Array):
         sharding = getattr(reference, "sharding", None)
-        return _compatible_reference_sharding(sharding, ndim=ndim)
+        if isinstance(sharding, NamedSharding):
+            return _compatible_reference_sharding(sharding, ndim=ndim)
+        return sharding
     if isinstance(reference, (list, tuple)):
         for leaf in jax.tree.leaves(reference):
             if isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf):
                 sharding = getattr(leaf, "sharding", None)
                 if sharding is not None:
-                    return _compatible_reference_sharding(sharding, ndim=ndim)
+                    if isinstance(sharding, NamedSharding):
+                        return _compatible_reference_sharding(sharding, ndim=ndim)
+                    return sharding
     return None
+
+
+def _reference_sharding(reference, *, ndim: int | None = None):
+    placement = _reference_placement(reference, ndim=ndim)
+    if placement is None or isinstance(placement, NamedSharding):
+        return placement
+    return _compatible_reference_sharding(placement, ndim=ndim)
 
 
 def _compatible_reference_sharding(sharding, *, ndim: int | None):
@@ -388,5 +399,11 @@ def runtime_eye(n: int) -> jax.Array:
     return runtime_device_put(np.eye(int(n), dtype=runtime_np_dtype()))
 
 
-def explicit_device_array(value, *, dtype) -> jax.Array:
-    return _device_put_preserving_dtype(value, dtype=dtype)
+def explicit_device_array(value, *, dtype, reference=None) -> jax.Array:
+    """Place an explicitly typed value, optionally matching reference sharding."""
+    reference_placement = _reference_placement(reference, ndim=_value_ndim(value))
+    return _device_put_preserving_dtype(
+        value,
+        dtype=dtype,
+        target=reference_placement,
+    )

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from simsopt_jax.backend.dtypes import explicit_device_array
 
 
 def device_one(reference: jax.Array) -> jax.Array:
@@ -17,3 +20,16 @@ def two_pi(reference: jax.Array) -> jax.Array:
 
 def float_scalar(value: int, reference: jax.Array) -> jax.Array:
     return jnp.sum(jnp.broadcast_to(device_one(reference), (value,)))
+
+
+def staged_like(reference: jax.Array, host_value, *, dtype=None) -> jax.Array:
+    """Explicitly stage a host literal with reference-compatible placement."""
+    reference = jnp.asarray(reference)
+    resolved_dtype = reference.dtype if dtype is None else np.dtype(dtype)
+    if isinstance(host_value, jax.Array):
+        return jnp.asarray(host_value, dtype=resolved_dtype)
+    return explicit_device_array(
+        host_value,
+        dtype=resolved_dtype,
+        reference=reference,
+    )

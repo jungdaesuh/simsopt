@@ -24,9 +24,9 @@ Three opt-in adjoint paths are covered here:
 """
 
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -35,7 +35,6 @@ jax = pytest.importorskip("jax")
 lineax = pytest.importorskip("lineax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
 
 _LINEAX_LSMR_AVAILABLE = hasattr(lineax, "LSMR")
@@ -46,9 +45,7 @@ def _run_jax_runtime_case(case):
     repo_root = Path(__file__).resolve().parents[2]
     script = repo_root / "tests" / "subprocess" / "jax_runtime_cases.py"
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get(
-        "PYTHONPATH", ""
-    )
+    env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
     env["JAX_ENABLE_X64"] = "True"
     env["JAX_PLATFORMS"] = "cpu"
     env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
@@ -149,11 +146,7 @@ def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():
     n = 32
     rng = np.random.default_rng(6)
     orthogonal, _ = np.linalg.qr(rng.normal(size=(n, n)))
-    matrix_np = (
-        orthogonal
-        @ np.diag(np.geomspace(1.0, 1.0e-12, n))
-        @ orthogonal.T
-    )
+    matrix_np = orthogonal @ np.diag(np.geomspace(1.0, 1.0e-12, n)) @ orthogonal.T
     true_solution = rng.normal(size=n)
     rhs_np = matrix_np @ true_solution
     matrix = jnp.asarray(matrix_np, dtype=jnp.float64)
@@ -174,6 +167,39 @@ def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():
     assert not bool(status.success) or float(
         np.asarray(status.residual_relative)
     ) <= float(np.asarray(effective_tolerance))
+
+
+def test_square_operator_zero_rhs_returns_successful_zero_solution():
+    rhs = jnp.zeros(2, dtype=jnp.float64)
+    matrix = jnp.asarray([[2.0, 0.25], [-0.5, 3.0]], dtype=jnp.float64)
+
+    solution, status = _optimizer._solve_square_vector_system_operator_only(
+        lambda vector: matrix @ vector,
+        rhs,
+        tol=1e-12,
+    )
+
+    np.testing.assert_array_equal(np.asarray(solution), np.zeros(2))
+    assert bool(np.asarray(status.success))
+    assert float(np.asarray(status.residual)) == pytest.approx(0.0)
+    assert float(np.asarray(status.residual_relative)) == pytest.approx(0.0)
+    assert int(np.asarray(status.iterations)) == 0
+
+
+def test_dense_operator_chunk_batch_size_tracks_byte_budget():
+    mib = 1024 * 1024
+
+    assert _optimizer._dense_operator_chunk_batch_size_from_budget(None) == 8
+    assert _optimizer._dense_operator_chunk_batch_size_from_budget(16 * mib) == 1
+    assert _optimizer._dense_operator_chunk_batch_size_from_budget(255 * mib) == 7
+    assert _optimizer._dense_operator_chunk_batch_size_from_budget(256 * mib) == 8
+    assert _optimizer._dense_operator_chunk_batch_size_from_budget(4096 * mib) == 8
+    assert (
+        _optimizer._dense_operator_chunk_batch_size_from_budget(48 * 1024 * mib) == 16
+    )
+    assert (
+        _optimizer._dense_operator_chunk_batch_size_from_budget(192 * 1024 * mib) == 64
+    )
 
 
 # --- Experimental LSMR-on-J comparator for regularized normal systems ---
@@ -376,10 +402,8 @@ def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
     """The committed LU+IR solver matches an independent dense oracle on a
     non-symmetric operator (the regime where the GMRES baseline stagnates)."""
     matrix, matvec, rhs = _nonsymmetric_problem(seed=0)
-    solution, status = (
-        _optimizer._solve_dense_square_operator_lu_system_with_status(
-            matvec, rhs, tol=1e-12
-        )
+    solution, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        matvec, rhs, tol=1e-12
     )
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
     assert bool(status.success)
@@ -397,10 +421,8 @@ def test_dense_lu_solver_batched_rhs_column_parity():
     n = matrix.shape[0]
     rng = np.random.default_rng(11)
     rhs_batched = jnp.asarray(rng.standard_normal((n, 3)))
-    batched, status = (
-        _optimizer._solve_dense_square_operator_lu_system_with_status(
-            matvec, rhs_batched, tol=1e-12
-        )
+    batched, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        matvec, rhs_batched, tol=1e-12
     )
     assert bool(status.success)
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs_batched))
@@ -408,10 +430,8 @@ def test_dense_lu_solver_batched_rhs_column_parity():
         np.asarray(batched), np.asarray(expected), rtol=1e-10, atol=1e-12
     )
     for j in range(3):
-        column, _ = (
-            _optimizer._solve_dense_square_operator_lu_system_with_status(
-                matvec, rhs_batched[:, j], tol=1e-12
-            )
+        column, _ = _optimizer._solve_dense_square_operator_lu_system_with_status(
+            matvec, rhs_batched[:, j], tol=1e-12
         )
         np.testing.assert_allclose(
             np.asarray(batched[:, j]), np.asarray(column), rtol=1e-10, atol=1e-12
@@ -520,9 +540,7 @@ def test_dense_lu_status_reports_machine_precision_residual():
 
 def test_dense_condition_estimate_preserves_float32_under_transfer_guard():
     """Float32 condition estimates stay dtype-stable and strict-transfer clean."""
-    matrix = jnp.diag(
-        jnp.asarray(np.geomspace(1.0, 1.0e-5, 32), dtype=jnp.float32)
-    )
+    matrix = jnp.diag(jnp.asarray(np.geomspace(1.0, 1.0e-5, 32), dtype=jnp.float32))
 
     with jax.transfer_guard("disallow"):
         estimate = _optimizer._dense_matrix_condition_estimate(matrix)
@@ -551,9 +569,7 @@ def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
     """A moderately conditioned float32 solve must not fail solely because
     the fp64 rank-tolerance rule was applied with fp32 epsilon."""
     n = 128
-    matrix = jnp.diag(
-        jnp.asarray(np.geomspace(1.0, 1.0e-5, n), dtype=jnp.float32)
-    )
+    matrix = jnp.diag(jnp.asarray(np.geomspace(1.0, 1.0e-5, n), dtype=jnp.float32))
     legacy_rank_threshold = 1.0 / (n * np.finfo(np.float32).eps)
     rhs = jnp.asarray(np.random.default_rng(21).standard_normal(n), dtype=jnp.float32)
 
@@ -562,10 +578,12 @@ def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
 
     with jax.transfer_guard("disallow"):
         estimate = _optimizer._dense_matrix_condition_estimate(matrix)
-        solution, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
-            matvec,
-            rhs,
-            tol=1.0e-4,
+        solution, status = (
+            _optimizer._solve_dense_square_operator_lu_system_with_status(
+                matvec,
+                rhs,
+                tol=1.0e-4,
+            )
         )
 
     assert float(np.asarray(estimate)) > legacy_rank_threshold
@@ -716,3 +734,122 @@ def test_dense_lstsq_status_fails_closed_on_singular_operator():
         )
     )
     assert not bool(status.success)
+
+
+def test_dense_lstsq_uses_operator_sweep_dtype_with_float64_rhs():
+    matrix32 = jnp.asarray([[2.0, 0.0], [0.0, 4.0]], dtype=jnp.float32)
+    rhs64 = jnp.asarray([2.0, 8.0], dtype=jnp.float64)
+    observed_sweep_dtypes = []
+
+    def matvec(vector):
+        observed_sweep_dtypes.append(np.dtype(vector.dtype))
+        return matrix32 @ vector
+
+    solution, status = (
+        _optimizer._solve_dense_square_operator_least_squares_system_with_status(
+            matvec,
+            rhs64,
+            tol=1.0e-10,
+            sweep_dtype=np.float32,
+        )
+    )
+
+    assert observed_sweep_dtypes == [np.dtype(np.float32)]
+    assert solution.dtype == jnp.float64
+    assert bool(status.success)
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.asarray([1.0, 2.0]),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize("dtype", (jnp.float32, jnp.float64))
+def test_dense_square_operator_matrix_preserves_nonsymmetric_columns(dtype):
+    matrix = jnp.asarray(
+        [[1.0, 2.0, 3.0], [5.0, 7.0, 11.0], [13.0, 17.0, 19.0]],
+        dtype=dtype,
+    )
+    rhs = jnp.ones(3, dtype=dtype)
+
+    materialized = _optimizer._dense_square_operator_matrix(
+        lambda vector: matrix @ vector,
+        rhs,
+        matrix_dtype=dtype,
+        sweep_dtype=dtype,
+    )
+
+    np.testing.assert_array_equal(np.asarray(materialized), np.asarray(matrix))
+
+
+def test_dense_square_operator_chunking_respects_strict_transfer_guard():
+    dimension = _optimizer.dense_operator_chunk_batch_size() + 1
+    rhs = jax.device_put(np.ones(dimension, dtype=np.float64))
+    diagonal = jax.device_put(np.arange(1.0, dimension + 1.0, dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        materialized = _optimizer._dense_square_operator_matrix(
+            lambda vector: diagonal * vector,
+            rhs,
+            matrix_dtype=jnp.float64,
+            sweep_dtype=jnp.float64,
+        )
+        jax.block_until_ready(materialized)
+
+    np.testing.assert_array_equal(
+        np.asarray(materialized),
+        np.diag(np.arange(1.0, dimension + 1.0, dtype=np.float64)),
+    )
+
+
+def test_dense_square_operator_hoists_hvp_device_closure():
+    dimension = _optimizer.dense_operator_chunk_batch_size() + 1
+    diagonal = jax.device_put(np.arange(1.0, dimension + 1.0, dtype=np.float64))
+    state = jax.device_put(np.ones(dimension, dtype=np.float64))
+    rhs = jax.device_put(np.ones(dimension, dtype=np.float64))
+
+    def objective(candidate):
+        return jnp.sum(diagonal * candidate * candidate)
+
+    hvp_fn = _optimizer._hessian_vector_product_fn(objective)
+
+    with jax.transfer_guard("disallow"):
+        materialized = _optimizer._dense_square_operator_matrix(
+            lambda vector: hvp_fn(state, vector),
+            rhs,
+            matrix_dtype=jnp.float64,
+            sweep_dtype=jnp.float64,
+        )
+        jax.block_until_ready(materialized)
+
+    np.testing.assert_array_equal(
+        np.asarray(materialized),
+        np.diag(2.0 * np.arange(1.0, dimension + 1.0, dtype=np.float64)),
+    )
+
+
+def test_dense_square_operator_lowering_has_no_quadratic_identity_constant():
+    dimension = _optimizer.dense_operator_chunk_batch_size() + 1
+
+    def materialize(diagonal):
+        return _optimizer._dense_square_operator_matrix(
+            lambda vector: diagonal * vector,
+            diagonal,
+            matrix_dtype=jnp.float64,
+            sweep_dtype=jnp.float64,
+        )
+
+    stablehlo = (
+        jax.jit(materialize)
+        .lower(jnp.arange(1.0, dimension + 1.0, dtype=jnp.float64))
+        .as_text()
+    )
+    quadratic_constant_type = f"tensor<{dimension}x{dimension}x"
+    quadratic_constants = [
+        line
+        for line in stablehlo.splitlines()
+        if "stablehlo.constant" in line and quadratic_constant_type in line
+    ]
+
+    assert quadratic_constants == []

@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 import simsopt_jax.geo.optimizers.optimizer as _opt
 
 
@@ -29,8 +28,29 @@ def test_item19_optimizer_jax_exposes_no_dynamic_private_loader():
     assert not hasattr(_opt, "_load_reference_optimizer_module")
 
 
-def test_item19_host_dense_hessian_reuses_chunked_device_materializer():
-    assert not hasattr(_opt, "_materialize_dense_linear_operator_host")
+def test_item19_host_dense_hessian_is_independent_from_device_materializer(
+    monkeypatch,
+):
+    def forbidden_device_materializer(*_args, **_kwargs):
+        raise AssertionError("host materialization called the device materializer")
+
+    monkeypatch.setattr(
+        _opt,
+        "_materialize_dense_hessian",
+        forbidden_device_materializer,
+    )
+
+    operator = jnp.asarray([[2.0, 0.5], [0.5, 3.0]], dtype=jnp.float64)
+
+    def hvp_fn(_x, vector):
+        return operator @ vector
+
+    actual = _opt._materialize_dense_hessian_host(
+        hvp_fn,
+        jnp.zeros(2, dtype=jnp.float64),
+    )
+
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(operator))
 
 
 def test_item19_host_dense_hessian_agrees_with_device_materializer():
@@ -166,7 +186,7 @@ def test_item19_host_jax_least_squares_uses_jacobian_blocks(monkeypatch):
 
     @jax.jit
     def jacobian_block_fn(_x, tangent_block, dynamic_state):
-        return (dynamic_state["matrix"] @ tangent_block.T)
+        return dynamic_state["matrix"] @ tangent_block.T
 
     dynamic_state = {
         "matrix": jnp.asarray([[3.0, 0.0], [0.0, 5.0]], dtype=jnp.float64),

@@ -156,6 +156,29 @@ def test_explicit_device_array_preserves_requested_float_dtype(monkeypatch):
     assert array.dtype == jnp.float32
 
 
+def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
+    """Concrete single-device placement must not fall back to the runtime device."""
+    reference = jnp.zeros(3)
+    placements: list[object | None] = []
+
+    def _device_put(array, placement=None):
+        placements.append(placement)
+        return array, placement
+
+    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
+    monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
+
+    array, placement = dtypes.explicit_device_array(
+        [1.0, 2.0],
+        dtype=jnp.float32,
+        reference=reference,
+    )
+
+    assert isinstance(array, np.ndarray)
+    assert placement == reference.sharding
+    assert placements == [reference.sharding]
+
+
 def test_mixed_compute_dtype_does_not_change_runtime_dtype(monkeypatch):
     monkeypatch.delenv("SIMSOPT_MIXED_PRECISION", raising=False)
     invalidate_backend_cache()
