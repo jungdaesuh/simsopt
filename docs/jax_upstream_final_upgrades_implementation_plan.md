@@ -804,13 +804,15 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `compiled_total_gradient_for`, reuse it in lazy and eager production
      routes, and expose that exact compiled callable to prewarm/lowering.
      Exclude the commit's compile-evidence and campaign bundle.
-   - [ ] Port the final stable-anchor traceable-adapter performance behavior as
+   - [x] Port the final stable-anchor traceable-adapter performance behavior as
      one dependency-ordered slice from `004684265`, `3b24fa5f5`, `e690422a2`,
      and `37970302a`: reuse the decomposed solved-pair adjoint kernel, defer
      general-only JIT construction, defer the host baseline peel until it is
      required, and fuse explicit-objective VJPs. Preserve observable values and
      derivatives and add focused compile-count/graph-reuse regressions rather
-     than campaign timing assertions.
+     than campaign timing assertions. **Result:** the focused ownership and
+     compile-count slice passes `6/6` on CPU; the public and private fused-VJP
+     strict-placement regressions pass `2/2` on the local RTX 5090.
    - [x] Port only the required production changes in
      `surface_objectives.py` and
      `src/simsopt_jax_adapters/field/biotsavart_backend.py`. In the adapter's
@@ -903,8 +905,9 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      contract. Do not copy validation-ladder, banana, campaign, or evidence
      imports from the source test wholesale.
    - [x] Port the production `newton_trace_capacity` owner and propagation
-     finalized by `add41e95c`: `BoozerSurfaceJAX` must return the full configured
-     `newton_maxiter` capacity for every production lane, and
+     finalized by `add41e95c`: `BoozerSurfaceJAX` must return one shared static
+     capacity equal to the greater of the configured `newton_maxiter` and the
+     bounded mixed attempt limit, and
      `surface_objectives_traceable.py` must carry that static capacity through
      cache identity, traceable state, pack/pad helpers, compiled bundles, and
      every forward path. Do not port the earlier policy-dependent bounded-mixed
