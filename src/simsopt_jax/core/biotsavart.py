@@ -113,6 +113,46 @@ def _float64_scalar(reference, value):
     return _device_one(reference) * np.float64(value)
 
 
+def _compute_scalar_like(reference, value):
+    return jnp.asarray(value, dtype=jnp.asarray(reference).dtype)
+
+
+def _compute_inv_impl(value):
+    return jnp.divide(_compute_scalar_like(value, 1.0), value)
+
+
+@jax.custom_jvp
+def _compute_inv(value):
+    return _compute_inv_impl(value)
+
+
+@_compute_inv.defjvp
+def _compute_inv_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    primal_out = _compute_inv_impl(value)
+    tangent_out = jnp.negative(value_dot * primal_out * primal_out)
+    return primal_out, tangent_out
+
+
+def _compute_rsqrt_impl(value):
+    return jnp.divide(_compute_scalar_like(value, 1.0), jnp.sqrt(value))
+
+
+@jax.custom_jvp
+def _compute_rsqrt(value):
+    return _compute_rsqrt_impl(value)
+
+
+@_compute_rsqrt.defjvp
+def _compute_rsqrt_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    primal_out = _compute_rsqrt_impl(value)
+    tangent_out = (
+        value_dot * _compute_scalar_like(value, -0.5) / (value * jnp.sqrt(value))
+    )
+    return primal_out, tangent_out
+
+
 def _as_int32_scalar(value):
     return jnp.asarray(value, dtype=jnp.int32)
 

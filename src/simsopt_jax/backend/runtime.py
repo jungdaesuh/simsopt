@@ -84,6 +84,7 @@ __all__ = [
     "is_backend_strict",
     "is_float32_smoke_policy",
     "is_jax_backend",
+    "is_mixed_precision_enabled",
     "is_parity_mode",
     "maybe_initialize_distributed_jax",
     "query_active_gpu_memory_mb",
@@ -391,6 +392,9 @@ _FIELD_KERNEL_DEFAULTS = {
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
 }
+# This is the bounded mixed reduction itself, not a dense-audit chunk override;
+# strict transfer-guard runs must retain the production-shape tile.
+_MIXED_BIOT_SAVART_SOURCE_TILE_SIZE = 128
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,
     "stable_default": 256,
@@ -672,6 +676,7 @@ class FieldKernelTuning:
     coil_chunk_size: int
     quadrature_block_size: int
     point_chunk_size: int
+    mixed_biot_savart_source_tile_size: int
 
 
 @dataclass(frozen=True)
@@ -1863,6 +1868,11 @@ def get_compute_dtype(mode: str | None = None) -> str:
     return get_backend_policy(mode).compute_dtype
 
 
+def is_mixed_precision_enabled(mode: str | None = None) -> bool:
+    """Return whether compute arrays intentionally differ from certificates."""
+    return get_backend_policy(mode).resolved_precision == "mixed"
+
+
 def get_certificate_dtype(mode: str | None = None) -> CertificateDType | None:
     """Return the optional FP64 certificate dtype for a backend mode."""
     return get_backend_policy(mode).certificate_dtype
@@ -2020,6 +2030,7 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
             coil_chunk_size=chunk_tuning.coil_chunk_size,
             quadrature_block_size=chunk_tuning.quadrature_block_size,
             point_chunk_size=chunk_tuning.point_chunk_size,
+            mixed_biot_savart_source_tile_size=(_MIXED_BIOT_SAVART_SOURCE_TILE_SIZE),
         )
         if mode is None:
             _cached_field_kernel_tuning = tuning
