@@ -598,8 +598,10 @@ def _pack_traceable_forward_result(
     success,
     primal_success,
     adjoint_linear_solve_available,
+    newton_linear_solve_backend_code=None,
 ):
     """Return the normalized traceable forward-result contract."""
+    backend_code_present = newton_linear_solve_backend_code is not None
     return {
         "value": value,
         "x": x,
@@ -610,6 +612,14 @@ def _pack_traceable_forward_result(
         "success": success,
         "primal_success": primal_success,
         "adjoint_linear_solve_available": adjoint_linear_solve_available,
+        "newton_linear_solve_backend_code": _runtime_int32_scalar(
+            0
+            if newton_linear_solve_backend_code is None
+            else newton_linear_solve_backend_code
+        ),
+        "newton_linear_solve_backend_code_present": _runtime_bool(
+            backend_code_present
+        ),
     }
 
 
@@ -759,6 +769,9 @@ def _traceable_general_forward_result(
             success=success,
             primal_success=primal_success,
             adjoint_linear_solve_available=adjoint_linear_solve_available,
+            newton_linear_solve_backend_code=solve_result.get(
+                "newton_linear_solve_backend_code"
+            ),
         )
 
     if linearization_kind != "exact_jacobian":

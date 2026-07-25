@@ -4273,6 +4273,16 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(ValueError, match="parity mode requires newton_stab=0.0"):
             _bsj._normalize_solver_options({"newton_stab": 1.0e-3}, "ls")
 
+    @pytest.mark.parametrize("linear_solver", ("operator", "dense-ir", None))
+    def test_newton_linear_solver_option_rejects_noncanonical_values(
+        self, linear_solver
+    ):
+        with pytest.raises(ValueError, match="linear_solver must be one of"):
+            _bsj._normalize_solver_options(
+                {"newton_linear_solver": linear_solver},
+                "ls",
+            )
+
     def test_private_options_rejected_with_scipy_backend(self):
         """Private optimizer options must be rejected when backend is scipy."""
         bs = _MockBiotSavart(_make_mock_coils())
@@ -7313,6 +7323,7 @@ class TestBoozerSurfaceJAXClass:
         """The ondevice Newton polish lane must stay callback-free inside the traced loop."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
+        booz.options["newton_linear_solver"] = "hybrid_final_dense_ir"
 
         observed = []
         captured = {}
@@ -7346,11 +7357,13 @@ class TestBoozerSurfaceJAXClass:
             stab,
             materialize_hessian=True,
             max_dense_hessian_bytes=None,
+            linear_solver="operator_gmres",
             progress_callback=None,
             args=(),
         ):
             del maxiter, tol, stab, materialize_hessian, max_dense_hessian_bytes, args
             captured["progress_callback"] = progress_callback
+            captured["linear_solver"] = linear_solver
             return _successful_newton_polish_result(x0, nit=2)
 
         monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
@@ -7372,6 +7385,7 @@ class TestBoozerSurfaceJAXClass:
         assert res is not None
         assert res["success"] is True
         assert captured["progress_callback"] is None
+        assert captured["linear_solver"] == "hybrid_final_dense_ir"
         assert "after_boozer_lbfgs" in labels
         assert "before_boozer_newton" in labels
         assert "after_boozer_newton" in labels

@@ -451,14 +451,14 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
   persisted data or source migration is involved.
 
 3. Port the FP64 dense-IR solver as an opt-in capability.
-   - [ ] Reconcile the factor-once dense-IR materialization and solve path into
+   - [x] Reconcile the factor-once dense-IR materialization and solve path into
      `src/simsopt_jax/geo/optimizers/optimizer.py`.
-   - [ ] Port strict-cap retry routing through dense LU and the lazy-chord factor
+   - [x] Port strict-cap retry routing through dense LU and the lazy-chord factor
      reuse behavior. Reconstruct the selected non-default lineage from
      `1d055547e`, `139c05880`, `9bd9661b9`, `8d4a1103b`, and `db6906fc9`
      before applying `37b65c7af`; do not copy the `9bd9661b9` change to the
      default `operator_gmres` route.
-   - [ ] Preserve existing fail-closed condition, backward-error, and
+   - [x] Preserve existing fail-closed condition, backward-error, and
      ill-conditioning gates already present on the target.
    - [x] Generate dense operator columns without materializing a quadratic
      identity constant, using the final behavior from `b9732104b`.
@@ -491,23 +491,23 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      support the selected `"lsmr_j"` path, and do not import the source-only
      `HessianLinearSolver.LSMR_IR` enum member or its environment-selected
      comparator.
-   - [ ] Add the exact typed `linear_solver` keyword and
+   - [x] Add the exact typed `linear_solver` keyword and
      `BoozerSurfaceJAX.options["newton_linear_solver"]` contract from the
      resolved decisions. Keep `operator_gmres` as the target default; require
      explicit `hybrid_final_dense_ir` selection during the dense-solver PR,
      validate the
      four canonical values, and do not accept the source environment aliases.
-   - [ ] Include the selector in every affected runner/cache identity and result
+   - [x] Include the selector in every affected runner/cache identity and result
      label so changing it cannot reuse a compilation or report the wrong lane.
    - [ ] Add observable tests to `tests/geo/test_adjoint_cg_solver.py` and
      `tests/geo/test_boozersurface_jax_private.py` for factor reuse, nonsymmetric
      column ordering, retry behavior, and FP64 certificate acceptance.
-   - [ ] Add CPU-safe `chunk_size + 1` and captured-HVP regressions plus
+   - [x] Add CPU-safe `chunk_size + 1` and captured-HVP regressions plus
      GPU-marked strict-transfer cases for CPU-committed state/closure arrays
      against a CUDA RHS. Require StableHLO inspection to show no quadratic
      identity constant. Never leave the detached tests' unconditional
      `jax.devices("cuda")[0]` lookup in the CPU shard.
-   - [ ] Add the `4abc6982e`/`3a64837b2` regressions: an x-dependent Hessian
+   - [x] Add the `4abc6982e`/`3a64837b2` regressions: an x-dependent Hessian
      near-target fixture that distinguishes factorization at the correct state,
      plus fail-loud equivalence tests for ill-conditioned and rejected solves.
    - [ ] Port the focused final-Hessian ownership regressions from

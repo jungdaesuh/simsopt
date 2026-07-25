@@ -309,6 +309,8 @@ _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
         "dense_newton_steps_materialized",
         "dense_newton_steps_message",
         "newton_iter",
+        "newton_linear_solve_backend_code",
+        "newton_trace_linear_solve_backend_code",
         "final_gradient_norm",
         "final_gradient_inf_norm",
         "iterative_refinement_ran",
@@ -3352,6 +3354,12 @@ def _ls_newton_reporting_fields(result):
         ),
         "dense_newton_steps_message": result.get("dense_newton_steps_message"),
         "newton_iter": result.get("newton_iter"),
+        "newton_linear_solve_backend_code": result.get(
+            "newton_linear_solve_backend_code"
+        ),
+        "newton_trace_linear_solve_backend_code": result.get(
+            "newton_trace_linear_solve_backend_code"
+        ),
         "final_gradient_norm": result.get("final_gradient_norm"),
         "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
         "iterative_refinement_ran": result.get("iterative_refinement_ran"),
@@ -3568,6 +3576,7 @@ _DEFAULT_OPTIONS_LS = {
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
     "newton_polish_policy": "run",
+    "newton_linear_solver": "operator_gmres",
     "newton_stab": 0.0,
     "weight_inv_modB": True,
     "materialize_dense_linearization": None,
@@ -4107,6 +4116,11 @@ def _normalize_solver_options(raw_options, boozer_type):
         if newton_polish_policy not in _NEWTON_POLISH_POLICIES:
             allowed = ", ".join(sorted(_NEWTON_POLISH_POLICIES))
             raise ValueError(f"newton_polish_policy must be one of: {allowed}.")
+        normalized_options["newton_linear_solver"] = (
+            _optimizer_jax._resolve_traceable_newton_linear_solver(
+                normalized_options.get("newton_linear_solver", "operator_gmres")
+            )
+        )
     if is_parity_mode() and float(normalized_options.get("newton_stab", 0.0)) != 0.0:
         raise ValueError(
             "BoozerSurfaceJAX parity mode requires newton_stab=0.0 so "
@@ -4173,6 +4187,9 @@ class BoozerSurfaceJAX(Optimizable):
             ``least_squares_algorithm="quasi-newton"``
             preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
             residual-vector Levenberg-Marquardt route on supported backends.
+            ``newton_linear_solver`` selects one of the four exact traceable
+            Newton solver names and defaults to ``"operator_gmres"``. Legacy
+            environment aliases are not interpreted.
         surface_runtime_state: optional immutable surface-metadata snapshot.
             When provided, traceable and exact JAX solver paths use this cached
             state instead of querying the live surface object for quadrature,
@@ -6546,6 +6563,7 @@ class BoozerSurfaceJAX(Optimizable):
                 stab=stab,
                 materialize_hessian=materialize_hessian,
                 max_dense_hessian_bytes=max_dense_hessian_bytes,
+                linear_solver=self.options["newton_linear_solver"],
                 progress_callback=progress_callback,
                 args=objective_args,
             )
