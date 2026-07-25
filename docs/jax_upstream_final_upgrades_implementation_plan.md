@@ -670,10 +670,25 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      the returned result. On a seed/certificate failure, discard mixed state,
      restore the snapshot, and run the complete canonical FP64
      pre-Newton/Newton pipeline once.
+     **Progress:** both seed-gate rejection and bounded-certificate failure now
+     select the canonical branch with the exact original FP64 decision vector;
+     focused runtime-dataflow tests use identity stage functions so the returned
+     value witnesses the branch-entry seed rather than relying on Python
+     trace-time side effects. The live FP64 seed gate evaluates both endpoints
+     and delegates its decision to `_newton_candidate_status` with the required
+     unit step and direction. Full closure remains open because the production
+     object reads mutable solver options and may populate its pure-callable
+     objective cache. A public stateful regression must still prove that a
+     rejected speculative route cannot alter warm-start ownership, accepted
+     state, or externally meaningful identity tokens.
    - [ ] Buffer or suppress callbacks from speculative mixed work until final
      certification. Publish only the accepted attempt's ordered lifecycle; on
      canonical fallback, discard speculative events so external observers never
      receive an abandoned trajectory that array/token restoration cannot undo.
+     The traceable mixed primitive correctly admits no host callback, but total
+     suppression does not satisfy accepted-lifecycle publication. Keep this
+     open for the outer host lifecycle/provider boundary; do not inject a host
+     callback into traced device work.
    - [x] Keep mixed and FP64 Newton producers distinct until they normalize into
      the common public result contract.
    - [x] Port only production-required portions of
@@ -690,17 +705,22 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      factors.
    - [ ] Add tests for FP32-BFGS-proposal-to-bounded-Newton handoff, exact
      snapshot restoration on every outer fallback trigger,
-     final-gradient/adjoint fail-closed
-     behavior inside the bounded primitive, outer canonical fallback after a
+     final-gradient fail-closed behavior inside the bounded primitive and
+     adjoint fail-closed behavior inside dense IR, outer canonical fallback after a
      failed final certificate, the exact seed-gate direction and shared
      stationarity/Armijo threshold owner, speculative callback isolation, full key
      round-trip/fresh-versus-replay authority, and the forward/adjoint
      factor-routing invariant. **Progress:** full key round-trip,
      fresh-versus-replay source, post-freeze ordering, challenge/observation
      binding, trust/fallback consistency, replay claim ineligibility, and
-     precision-sensitive cache identity are covered. Snapshot restoration and
-     speculative callback isolation keep this composite item open.
-   - [ ] Add an explicit regression proving the bounded mixed primitive is
+     precision-sensitive cache identity are covered. Target-native pure-array
+     decision-vector restoration now covers both outer fallback triggers, the
+     bounded primitive binds a final FP64 gradient miss to the exact canonical
+     attempt/factorization trace with no third attempt, dense IR fails closed on
+     catastrophic adjoint error, and the existing selector tests cover
+     forward/adjoint factor routing. The stateful warm-start/token/accepted-state
+     snapshot and accepted outer lifecycle publication remain open.
+   - [x] Add an explicit regression proving the bounded mixed primitive is
      independent of the default Newton runner and its iteration shape; adapt
      only the example-independent assertion from the source test to the typed
      precision API.
@@ -1307,7 +1327,13 @@ with no strict-placement skips.
   Reuse only the example-independent bounded-Newton fallback fixtures that
   actually exist in the source anchor's
   `tests/integration/test_mixed_precision_bfgs_newton_ab_gate.py`; do not copy
-  its campaign schemas or artifact consumers.
+  its campaign schemas or artifact consumers. **Target-native result:** the
+  pure-array mixed boundary has direct tests for proposal handoff, exact
+  original-decision-vector routing on both canonical fallback routes, shared
+  seed-gate direction/owner, real BFGS-to-bounded-Newton compilation, and
+  final-gradient fail-close. The public stateful ownership and accepted-event
+  lifecycle portions remain open. No source campaign schema or artifact
+  consumer was copied.
 - [ ] Run the existing target FP64 regression tests before enabling any mixed
   mode so target-only hardening cannot regress unnoticed.
 

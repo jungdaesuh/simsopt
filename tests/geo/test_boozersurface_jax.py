@@ -8657,7 +8657,6 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface()
         original_seed = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         proposal_seed = jnp.asarray([0.5, -1.0], dtype=jnp.float32)
-        canonical_seed = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
         captured = {}
 
         monkeypatch.setattr(
@@ -8688,8 +8687,7 @@ class TestBoozerSurfaceJAXExactPath:
                 result_x = proposal_seed
                 bits = 32
             else:
-                captured["canonical_input"] = x
-                result_x = canonical_seed
+                result_x = x
                 bits = 64
             return {
                 "x": result_x,
@@ -8702,9 +8700,8 @@ class TestBoozerSurfaceJAXExactPath:
             }
 
         def newton_result(x, *, success):
-            result_x = jnp.zeros_like(x)
             return {
-                "x": result_x,
+                "x": x,
                 "fun": jnp.asarray(0.0, dtype=x.dtype),
                 "grad": jnp.zeros_like(x),
                 "hessian": jnp.eye(x.shape[0], dtype=x.dtype),
@@ -8761,8 +8758,13 @@ class TestBoozerSurfaceJAXExactPath:
         assert np.dtype(result["hessian"].dtype) == np.dtype(np.float64)
         if expected_fallback:
             np.testing.assert_array_equal(
-                np.asarray(captured["canonical_input"]),
+                np.asarray(result["x"]),
                 np.asarray(original_seed),
+            )
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(result["x"]),
+                np.asarray(proposal_seed, dtype=np.float64),
             )
 
     def test_run_code_traceable_routes_mixed_bfgs_through_certified_pipeline(
