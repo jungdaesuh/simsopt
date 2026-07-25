@@ -41,6 +41,7 @@ from simsopt_jax.core import (
     curve_spec_from_curve,
     make_curve_xyzfouriersymmetries_spec,
 )
+from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core.curve_geometry import (
     _slice_1d_static,
     _update_1d_static,
@@ -510,6 +511,39 @@ def test_static_slice_and_update_grad_run_under_strict_transfer_guard() -> None:
         rtol=0.0,
         atol=0.0,
     )
+
+
+def test_static_slice_and_update_preserve_compute_dtype_in_mixed_mode(
+    monkeypatch,
+) -> None:
+    """Regression: every staged operand must follow ``use_compute_dtype``.
+
+    A runtime-dtype (fp64) scalar inside ``_update_1d_static`` promoted the
+    whole masked update — and via ``_mapped_full_dofs`` the mapped coil dofs
+    and the downstream Biot-Savart chain — back to fp64 in mixed mode.
+    """
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+    invalidate_backend_cache()
+    try:
+        array_host = np.linspace(-2.0, 3.0, num=6, dtype=np.float32)
+        replacement_host = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+        array = jax.device_put(jnp.asarray(array_host))
+        replacement = jax.device_put(jnp.asarray(replacement_host))
+
+        segment = _slice_1d_static(array, 2, 5, use_compute_dtype=True)
+        updated = _update_1d_static(array, 1, replacement, use_compute_dtype=True)
+
+        assert segment.dtype == jnp.float32
+        assert updated.dtype == jnp.float32
+        np.testing.assert_allclose(
+            np.asarray(updated),
+            np.concatenate([array_host[:1], replacement_host, array_host[4:]]),
+            rtol=0.0,
+            atol=0.0,
+        )
+    finally:
+        invalidate_backend_cache()
 
 
 def test_coprime_invariant_unchanged() -> None:

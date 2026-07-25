@@ -28,12 +28,14 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from simsopt_jax.core._device_scalars import two_pi as _device_two_pi
+from simsopt_jax.core._device_scalars import (
+    staged_like as _staged_like,
+    two_pi as _device_two_pi,
+)
 from simsopt_jax.core._math_utils import (
+    as_compute_array as _as_compute_array,
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
-    as_runtime_float64 as _as_runtime_float64,
-    zeros as _zeros,
 )
 from simsopt_jax.core._vector_norms import unit_vector3 as _unit_vector3
 from simsopt_jax.core.surface_integrals import surface_area, surface_volume
@@ -134,15 +136,18 @@ def _two_pi(reference):
 
 
 def _one(reference):
-    return _as_runtime_float64(_ONE_HOST, reference=reference)
+    # Guard-safe: an eager ``jnp.asarray`` host literal is an implicit H2D put
+    # that ``transfer_guard("disallow")`` rejects (see ``staged_like``).
+    return _staged_like(reference, _ONE_HOST)
 
 
 def _half(reference):
-    return _as_runtime_float64(_HALF_HOST, reference=reference)
+    return _staged_like(reference, _HALF_HOST)
 
 
-def _mode_range(start, stop):
-    return _as_jax_float64(np.arange(start, stop, dtype=np.float64))
+def _mode_range(start, stop, *, dtype=jnp.float64):
+    # Explicit unplaced put: guard-safe eagerly, constant-folded under jit.
+    return jax.device_put(np.arange(start, stop, dtype=np.float64).astype(dtype))
 
 
 def _selector_matrix(size, positions):
@@ -181,12 +186,12 @@ def build_theta_basis(quadpoints_theta, mpol):
         W:  (ntheta, 2*mpol+1) basis values.
         dW: (ntheta, 2*mpol+1) derivatives d/d(quadpoints_theta).
     """
-    quadpoints_theta = _as_jax_float64(quadpoints_theta)
+    quadpoints_theta = jnp.asarray(quadpoints_theta)
     two_pi = _two_pi(quadpoints_theta)
     theta = two_pi * quadpoints_theta  # (ntheta,)
 
-    m_cos = _mode_range(0, mpol + 1)  # [0 .. mpol]
-    m_sin = _mode_range(1, mpol + 1)  # [1 .. mpol]
+    m_cos = _mode_range(0, mpol + 1, dtype=quadpoints_theta.dtype)  # [0 .. mpol]
+    m_sin = _mode_range(1, mpol + 1, dtype=quadpoints_theta.dtype)  # [1 .. mpol]
 
     arg_cos = m_cos[None, :] * theta[:, None]  # (ntheta, mpol+1)
     arg_sin = m_sin[None, :] * theta[:, None]  # (ntheta, mpol)
@@ -206,12 +211,12 @@ def build_theta_basis(quadpoints_theta, mpol):
 
 
 def _build_theta_basis_with_second(quadpoints_theta, mpol):
-    quadpoints_theta = _as_jax_float64(quadpoints_theta)
+    quadpoints_theta = jnp.asarray(quadpoints_theta)
     two_pi = _two_pi(quadpoints_theta)
     theta = two_pi * quadpoints_theta
 
-    m_cos = _mode_range(0, mpol + 1)
-    m_sin = _mode_range(1, mpol + 1)
+    m_cos = _mode_range(0, mpol + 1, dtype=quadpoints_theta.dtype)
+    m_sin = _mode_range(1, mpol + 1, dtype=quadpoints_theta.dtype)
 
     arg_cos = m_cos[None, :] * theta[:, None]
     arg_sin = m_sin[None, :] * theta[:, None]
@@ -249,14 +254,14 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
         V:  (nphi, 2*ntor+1) basis values.
         dV: (nphi, 2*ntor+1) derivatives d/d(quadpoints_phi).
     """
-    quadpoints_phi = _as_jax_float64(quadpoints_phi)
+    quadpoints_phi = jnp.asarray(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi)
     phi = two_pi * quadpoints_phi  # (nphi,)
 
     # frequencies: [0, nfp, 2*nfp, …, ntor*nfp]
-    nfp_scale = _as_jax_float64(nfp)
-    n_cos = _mode_range(0, ntor + 1) * nfp_scale
-    n_sin = _mode_range(1, ntor + 1) * nfp_scale
+    nfp_scale = _staged_like(quadpoints_phi, nfp)
+    n_cos = _mode_range(0, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
+    n_sin = _mode_range(1, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
 
     arg_cos = n_cos[None, :] * phi[:, None]  # (nphi, ntor+1)
     arg_sin = n_sin[None, :] * phi[:, None]  # (nphi, ntor)
@@ -275,13 +280,13 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
 
 
 def _build_phi_basis_with_second(quadpoints_phi, ntor, nfp):
-    quadpoints_phi = _as_jax_float64(quadpoints_phi)
+    quadpoints_phi = jnp.asarray(quadpoints_phi)
     two_pi = _two_pi(quadpoints_phi)
     phi = two_pi * quadpoints_phi
 
-    nfp_scale = _as_jax_float64(nfp)
-    n_cos = _mode_range(0, ntor + 1) * nfp_scale
-    n_sin = _mode_range(1, ntor + 1) * nfp_scale
+    nfp_scale = jnp.asarray(nfp, dtype=quadpoints_phi.dtype)
+    n_cos = _mode_range(0, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
+    n_sin = _mode_range(1, ntor + 1, dtype=quadpoints_phi.dtype) * nfp_scale
 
     arg_cos = n_cos[None, :] * phi[:, None]
     arg_sin = n_sin[None, :] * phi[:, None]
@@ -341,11 +346,11 @@ def _eval_hat_paired(V, W, coeffs):
 
 
 def _bc_enforcer_angles(quadpoints_phi, quadpoints_theta, nfp):
-    qp = _as_jax_float64(quadpoints_phi)
-    qt = _as_jax_float64(quadpoints_theta)
+    qp = jnp.asarray(quadpoints_phi)
+    qt = jnp.asarray(quadpoints_theta, dtype=qp.dtype)
     two_pi_phi = _two_pi(qp)
     two_pi_theta = _two_pi(qt)
-    nfp_f = _as_jax_float64(nfp)
+    nfp_f = jnp.asarray(nfp, dtype=qp.dtype)
     phi_arg = nfp_f * (two_pi_phi * qp) * _half(qp)
     theta_arg = (two_pi_theta * qt) * _half(qt)
     return phi_arg, theta_arg, nfp_f, two_pi_phi, two_pi_theta
@@ -393,8 +398,10 @@ def _bc_enforcer_grid_with_derivatives(quadpoints_phi, quadpoints_theta, nfp):
 def _bc_enforcer_grid_lin(quadpoints_phi, quadpoints_theta, nfp):
     """Paired-point variant of :func:`_bc_enforcer_grid`. Shape: ``(npairs,)``."""
     phi_arg, theta_arg, _, _, _ = _bc_enforcer_angles(
-        _as_jax_float64(quadpoints_phi).reshape(-1),
-        _as_jax_float64(quadpoints_theta).reshape(-1),
+        jnp.asarray(quadpoints_phi).reshape(-1),
+        jnp.asarray(quadpoints_theta, dtype=jnp.asarray(quadpoints_phi).dtype).reshape(
+            -1
+        ),
         nfp,
     )
     sin_phi_half = jnp.sin(phi_arg)
@@ -405,7 +412,7 @@ def _bc_enforcer_grid_lin(quadpoints_phi, quadpoints_theta, nfp):
 def _cos_cos_block_mask(coeffs, mpol, ntor):
     mask = np.zeros(tuple(int(dim) for dim in coeffs.shape), dtype=np.float64)
     mask[: int(mpol) + 1, : int(ntor) + 1] = 1.0
-    return _as_runtime_float64(mask, reference=coeffs)
+    return jnp.asarray(mask, dtype=jnp.asarray(coeffs).dtype)
 
 
 def _eval_hat_block(V, W, coeffs, mpol, ntor):
@@ -501,7 +508,7 @@ def _hats_with_clamping_paired(
 
 
 def _rotate_hat_components(quadpoints_phi, radial, toroidal):
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=radial.dtype)
     phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
@@ -509,7 +516,7 @@ def _rotate_hat_components(quadpoints_phi, radial, toroidal):
 
 
 def _rotate_hat_components_lin(quadpoints_phi, radial, toroidal):
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=radial.dtype).reshape(-1)
     phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
     cphi = jnp.cos(phi_angle)
     sphi = jnp.sin(phi_angle)
@@ -744,7 +751,7 @@ def _gammadash1_clamped(
     yhat, dyhat_dphi = _hat_and_dphi(yc, cy)
     _, dz_dphi = _hat_and_dphi(zc, cz)
 
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=xhat.dtype)
     two_pi = _two_pi(quadpoints_phi_jax)
 
     radial = dxhat_dphi - two_pi * yhat
@@ -832,7 +839,7 @@ def surface_gammadash1(
     dyhat_dphi = _eval_hat(dV, W, yc)
     dz_dphi = _eval_hat(dV, W, zc)
 
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=xhat.dtype)
     two_pi = _two_pi(quadpoints_phi_jax)
 
     radial = dxhat_dphi - two_pi * yhat
@@ -910,7 +917,7 @@ def surface_gammadash1dash1(
                 clamped_dims=clamped_dims,
             )
 
-        qp = _as_jax_float64(quadpoints_phi)
+        qp = jnp.asarray(quadpoints_phi)
 
         def _diag(k1):
             phi_slice = jnp.atleast_1d(qp[k1])
@@ -930,7 +937,7 @@ def surface_gammadash1dash1(
     d2yhat_dphi2 = _eval_hat(ddV, W, yc)
     d2z_dphi2 = _eval_hat(ddV, W, zc)
 
-    two_pi = _two_pi(_as_jax_float64(quadpoints_phi))
+    two_pi = _two_pi(quadpoints_phi)
     radial = d2xhat_dphi2 - 2.0 * two_pi * dyhat_dphi - two_pi**2 * xhat
     toroidal = d2yhat_dphi2 + 2.0 * two_pi * dxhat_dphi - two_pi**2 * yhat
     dx, dy = _rotate_hat_components(quadpoints_phi, radial, toroidal)
@@ -965,7 +972,7 @@ def surface_gammadash1dash2(
                 clamped_dims=clamped_dims,
             )
 
-        qp = _as_jax_float64(quadpoints_phi)
+        qp = jnp.asarray(quadpoints_phi)
 
         def _diag(k1):
             phi_slice = jnp.atleast_1d(qp[k1])
@@ -983,7 +990,7 @@ def surface_gammadash1dash2(
     d2yhat_dphidtheta = _eval_hat(dV, dW, yc)
     d2z_dphidtheta = _eval_hat(dV, dW, zc)
 
-    two_pi = _two_pi(_as_jax_float64(quadpoints_phi))
+    two_pi = _two_pi(quadpoints_phi)
     radial = d2xhat_dphidtheta - two_pi * dyhat_dtheta
     toroidal = d2yhat_dphidtheta + two_pi * dxhat_dtheta
     dx, dy = _rotate_hat_components(quadpoints_phi, radial, toroidal)
@@ -1018,7 +1025,7 @@ def surface_gammadash2dash2(
                 clamped_dims=clamped_dims,
             )
 
-        qt = _as_jax_float64(quadpoints_theta)
+        qt = jnp.asarray(quadpoints_theta)
 
         def _diag(k2):
             theta_slice = jnp.atleast_1d(qt[k2])
@@ -1098,7 +1105,11 @@ def _unitnormal(normal):
 # ---------------------------------------------------------------------------
 
 
-def _split_flat_to_xyzc(flat, mpol, ntor):
+def _compute_array_like_reference(value, *, dtype, reference=None):
+    return _as_compute_array(value, dtype=dtype, reference=reference)
+
+
+def _split_flat_to_xyzc(flat, mpol, ntor, *, use_compute_dtype=False):
     """Split a flat super-vector into (xc, yc, zc) coefficient matrices.
 
     Args:
@@ -1109,7 +1120,7 @@ def _split_flat_to_xyzc(flat, mpol, ntor):
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
     shape = (int(2 * mpol + 1), int(2 * ntor + 1))
-    flat_jax = _as_jax_float64(flat)
+    flat_jax = _as_compute_array(flat) if use_compute_dtype else _as_jax_float64(flat)
     xc_flat, yc_flat, zc_flat = jnp.split(flat_jax, 3)
     return (
         jnp.reshape(xc_flat, shape),
@@ -1118,7 +1129,7 @@ def _split_flat_to_xyzc(flat, mpol, ntor):
     )
 
 
-def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
+def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor, *, use_compute_dtype=False):
     """Scatter surface DOFs into full ``(xc, yc, zc)`` coefficient matrices.
 
     JAX-traceable: supports autodiff through the scatter operation.
@@ -1131,17 +1142,30 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
     Returns:
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
-    sdofs_jax = _as_jax_float64(sdofs)
+    sdofs_jax = (
+        _as_compute_array(sdofs) if use_compute_dtype else _as_jax_float64(sdofs)
+    )
     scatter_operand = scatter_indices
     scatter_ndim = getattr(scatter_operand, "ndim", np.ndim(scatter_operand))
     if scatter_ndim == 2:
-        flat = _as_jax_float64(scatter_operand) @ sdofs_jax
-        return _split_flat_to_xyzc(flat, mpol, ntor)
+        scatter_matrix = (
+            _compute_array_like_reference(
+                scatter_operand,
+                dtype=sdofs_jax.dtype,
+                reference=sdofs_jax,
+            )
+            if use_compute_dtype
+            else _as_jax_float64(scatter_operand)
+        )
+        flat = scatter_matrix @ sdofs_jax
+        return _split_flat_to_xyzc(
+            flat, mpol, ntor, use_compute_dtype=use_compute_dtype
+        )
 
     n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
     scatter_indices_1d = _as_jax_int32(scatter_operand).reshape(-1, 1)
     flat = lax.scatter(
-        _zeros(3 * n_per_coord, sdofs_jax.dtype),
+        jnp.zeros((3 * n_per_coord,), dtype=sdofs_jax.dtype),
         scatter_indices_1d,
         sdofs_jax,
         _SCATTER_SET_DIMS_1D,
@@ -1149,10 +1173,18 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
         unique_indices=True,
         mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
     )
-    return _split_flat_to_xyzc(flat, mpol, ntor)
+    return _split_flat_to_xyzc(flat, mpol, ntor, use_compute_dtype=use_compute_dtype)
 
 
-def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
+def _dofs_to_xyzc_any(
+    dofs,
+    mpol,
+    ntor,
+    stellsym,
+    scatter_indices,
+    *,
+    use_compute_dtype=False,
+):
     """Internal helper: unpack DOFs to (xc, yc, zc) for both stellsym modes."""
     if stellsym:
         if scatter_indices is None:
@@ -1160,8 +1192,14 @@ def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
                 "scatter_indices required for stellsym=True. "
                 "Precompute with stellsym_scatter_indices(mpol, ntor)."
             )
-        return dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
-    return _split_flat_to_xyzc(dofs, mpol, ntor)
+        return dofs_to_xyzc(
+            dofs,
+            scatter_indices,
+            mpol,
+            ntor,
+            use_compute_dtype=use_compute_dtype,
+        )
+    return _split_flat_to_xyzc(dofs, mpol, ntor, use_compute_dtype=use_compute_dtype)
 
 
 def _scatter_surface_xyzfourier_dofs(
@@ -1171,6 +1209,8 @@ def _scatter_surface_xyzfourier_dofs(
     stellsym,
     scatter_indices=None,
     coeff_template=None,
+    *,
+    use_compute_dtype=False,
 ):
     """Unpack ``SurfaceXYZFourier`` DOFs into six coefficient matrices."""
     shape = (mpol + 1, 2 * ntor + 1)
@@ -1181,13 +1221,15 @@ def _scatter_surface_xyzfourier_dofs(
             shape,
             scatter_indices,
             coeff_template,
+            use_compute_dtype=use_compute_dtype,
         )
 
+    dofs = _as_compute_array(dofs) if use_compute_dtype else _as_jax_float64(dofs)
     cos_count = n_per - ntor
     sin_count = n_per - (ntor + 1)
 
     def _scatter_segment(source, start, count, fill_start):
-        flat = _zeros(n_per, source.dtype)
+        flat = jnp.zeros((n_per,), dtype=source.dtype)
         values = jnp.take(source, _slice_indices(start, count), axis=0)
         return flat.at[_slice_indices(fill_start, count)].set(values)
 
@@ -1200,7 +1242,7 @@ def _scatter_surface_xyzfourier_dofs(
             sin_count,
             ntor + 1,
         ).reshape(shape)
-        zeros = _zeros(shape, dofs.dtype)
+        zeros = jnp.zeros(shape, dtype=dofs.dtype)
         return xc, zeros, zeros, ys, zeros, zs
 
     offset = 0
@@ -1223,11 +1265,20 @@ def _scatter_surface_xyzfourier_dofs_from_template(
     shape,
     scatter_indices,
     coeff_template,
+    *,
+    use_compute_dtype=False,
 ):
+    updates = _as_compute_array(dofs) if use_compute_dtype else _as_jax_float64(dofs)
+    if use_compute_dtype:
+        coeff_template = _compute_array_like_reference(
+            coeff_template,
+            dtype=updates.dtype,
+            reference=updates,
+        )
     coeffs = lax.scatter(
         coeff_template,
         _as_jax_int32(scatter_indices).reshape(-1, 1),
-        _as_jax_float64(dofs),
+        updates,
         _SCATTER_SET_DIMS_1D,
         indices_are_sorted=True,
         unique_indices=True,
@@ -1236,9 +1287,34 @@ def _scatter_surface_xyzfourier_dofs_from_template(
     return tuple(jnp.reshape(coeffs, (6, *shape)))
 
 
+def _surface_dofs_and_quadpoints(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    *,
+    use_compute_dtype,
+):
+    if not use_compute_dtype:
+        return dofs, quadpoints_phi, quadpoints_theta
+    dofs = _as_compute_array(dofs)
+    return (
+        dofs,
+        _compute_array_like_reference(
+            quadpoints_phi,
+            dtype=dofs.dtype,
+            reference=dofs,
+        ),
+        _compute_array_like_reference(
+            quadpoints_theta,
+            dtype=dofs.dtype,
+            reference=dofs,
+        ),
+    )
+
+
 def _harmonic_derivative_basis(quadpoints, modes, order):
-    quadpoints_jax = _as_jax_float64(quadpoints)
-    modes_jax = _as_jax_float64(modes)
+    quadpoints_jax = jnp.asarray(quadpoints)
+    modes_jax = jnp.asarray(modes, dtype=quadpoints_jax.dtype)
     two_pi = _two_pi(quadpoints_jax)
     angle = (two_pi * quadpoints_jax)[:, None] * modes_jax[None, :]
     factor = (two_pi * modes_jax)[None, :] ** order
@@ -1263,8 +1339,12 @@ def _surface_xyzfourier_separable_basis(
     theta_order,
 ):
     """Return separable ``SurfaceXYZFourier`` phase bases."""
-    m = _mode_range(0, mpol + 1)
-    n = _mode_range(-ntor, ntor + 1) * _as_jax_float64(nfp)
+    basis_dtype = jnp.asarray(quadpoints_phi).dtype
+    m = _mode_range(0, mpol + 1, dtype=basis_dtype)
+    n = _mode_range(-ntor, ntor + 1, dtype=basis_dtype) * jnp.asarray(
+        nfp,
+        dtype=basis_dtype,
+    )
     phi_cos, phi_sin = _harmonic_derivative_basis(quadpoints_phi, n, phi_order)
     theta_cos, theta_sin = _harmonic_derivative_basis(
         quadpoints_theta,
@@ -1282,12 +1362,18 @@ def _surface_xyzfourier_basis_paired(
     nfp,
 ):
     """Return ``SurfaceXYZFourier`` phase terms at paired points."""
-    quadpoints_theta_jax = _as_jax_float64(quadpoints_theta).reshape(-1)
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi).reshape(-1)
+    quadpoints_theta_jax = jnp.asarray(
+        quadpoints_theta,
+        dtype=quadpoints_phi_jax.dtype,
+    ).reshape(-1)
     theta = _two_pi(quadpoints_theta_jax) * quadpoints_theta_jax
     phi = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
-    m = _mode_range(0, mpol + 1)
-    n = _mode_range(-ntor, ntor + 1) * _as_jax_float64(nfp)
+    m = _mode_range(0, mpol + 1, dtype=quadpoints_phi_jax.dtype)
+    n = _mode_range(-ntor, ntor + 1, dtype=quadpoints_phi_jax.dtype) * jnp.asarray(
+        nfp,
+        dtype=quadpoints_phi_jax.dtype,
+    )
 
     angle = theta[:, None, None] * m[None, :, None]
     angle -= phi[:, None, None] * n[None, None, :]
@@ -1403,10 +1489,24 @@ def surface_xyzfourier_gamma_from_dofs(
     stellsym,
     scatter_indices=None,
     coeff_template=None,
+    *,
+    use_compute_dtype=False,
 ):
     """Evaluate ``SurfaceXYZFourier.gamma()`` as a pure JAX function."""
+    dofs, quadpoints_phi, quadpoints_theta = _surface_dofs_and_quadpoints(
+        dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        use_compute_dtype=use_compute_dtype,
+    )
     coeffs = _scatter_surface_xyzfourier_dofs(
-        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+        scatter_indices,
+        coeff_template,
+        use_compute_dtype=use_compute_dtype,
     )
     ((xhat, yhat, z),) = _surface_xyzfourier_component_hat_derivatives(
         coeffs,
@@ -1463,10 +1563,24 @@ def surface_xyzfourier_gammadash1_from_dofs(
     stellsym,
     scatter_indices=None,
     coeff_template=None,
+    *,
+    use_compute_dtype=False,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash1()`` as a pure JAX function."""
+    dofs, quadpoints_phi, quadpoints_theta = _surface_dofs_and_quadpoints(
+        dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        use_compute_dtype=use_compute_dtype,
+    )
     coeffs = _scatter_surface_xyzfourier_dofs(
-        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+        scatter_indices,
+        coeff_template,
+        use_compute_dtype=use_compute_dtype,
     )
     (xhat, yhat, _z), (dxhat_dphi, dyhat_dphi, dz_dphi) = (
         _surface_xyzfourier_component_hat_derivatives(
@@ -1479,7 +1593,11 @@ def surface_xyzfourier_gammadash1_from_dofs(
             ((0, 0), (1, 0)),
         )
     )
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = (
+        jnp.asarray(quadpoints_phi)
+        if use_compute_dtype
+        else _as_jax_float64(quadpoints_phi)
+    )
     two_pi = _two_pi(quadpoints_phi_jax)
 
     radial = dxhat_dphi - two_pi * yhat
@@ -1542,10 +1660,24 @@ def surface_xyzfourier_gammadash2_from_dofs(
     stellsym,
     scatter_indices=None,
     coeff_template=None,
+    *,
+    use_compute_dtype=False,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash2()`` as a pure JAX function."""
+    dofs, quadpoints_phi, quadpoints_theta = _surface_dofs_and_quadpoints(
+        dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        use_compute_dtype=use_compute_dtype,
+    )
     coeffs = _scatter_surface_xyzfourier_dofs(
-        dofs, mpol, ntor, stellsym, scatter_indices, coeff_template
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+        scatter_indices,
+        coeff_template,
+        use_compute_dtype=use_compute_dtype,
     )
     ((dxhat_dtheta, dyhat_dtheta, dz_dtheta),) = (
         _surface_xyzfourier_component_hat_derivatives(
@@ -2063,8 +2195,28 @@ def _eval_surface_tensor_from_dofs(
     *,
     evaluator,
     clamped_dims,
+    use_compute_dtype=False,
 ):
-    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
+    if use_compute_dtype:
+        dofs = _as_compute_array(dofs)
+        quadpoints_phi = _compute_array_like_reference(
+            quadpoints_phi,
+            dtype=dofs.dtype,
+            reference=dofs,
+        )
+        quadpoints_theta = _compute_array_like_reference(
+            quadpoints_theta,
+            dtype=dofs.dtype,
+            reference=dofs,
+        )
+    xc, yc, zc = _dofs_to_xyzc_any(
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+        scatter_indices,
+        use_compute_dtype=use_compute_dtype,
+    )
     return evaluator(
         quadpoints_phi,
         quadpoints_theta,
@@ -2088,40 +2240,40 @@ def _surface_tensor_from_dofs_doc(quantity, returns):
 
 
 # fmt: off
-def surface_gamma_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
-    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gamma, clamped_dims=clamped_dims)
+def surface_gamma_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False), use_compute_dtype=False):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gamma, clamped_dims=clamped_dims, use_compute_dtype=use_compute_dtype)
 
 
 def surface_gamma_lin_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
     return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gamma_lin, clamped_dims=clamped_dims)
 
 
-def surface_gammadash1_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
-    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1, clamped_dims=clamped_dims)
+def surface_gammadash1_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False), use_compute_dtype=False):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1, clamped_dims=clamped_dims, use_compute_dtype=use_compute_dtype)
 
 
 def surface_gammadash1_lin_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
     return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1_lin, clamped_dims=clamped_dims)
 
 
-def surface_gammadash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
-    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2, clamped_dims=clamped_dims)
+def surface_gammadash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False), use_compute_dtype=False):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2, clamped_dims=clamped_dims, use_compute_dtype=use_compute_dtype)
 
 
 def surface_gammadash2_lin_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
     return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2_lin, clamped_dims=clamped_dims)
 
 
-def surface_gammadash1dash1_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
-    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1dash1, clamped_dims=clamped_dims)
+def surface_gammadash1dash1_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False), use_compute_dtype=False):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1dash1, clamped_dims=clamped_dims, use_compute_dtype=use_compute_dtype)
 
 
-def surface_gammadash1dash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
-    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1dash2, clamped_dims=clamped_dims)
+def surface_gammadash1dash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False), use_compute_dtype=False):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash1dash2, clamped_dims=clamped_dims, use_compute_dtype=use_compute_dtype)
 
 
-def surface_gammadash2dash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False)):
-    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2dash2, clamped_dims=clamped_dims)
+def surface_gammadash2dash2_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices=None, *, clamped_dims=(False, False, False), use_compute_dtype=False):
+    return _eval_surface_tensor_from_dofs(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym, scatter_indices, evaluator=surface_gammadash2dash2, clamped_dims=clamped_dims, use_compute_dtype=use_compute_dtype)
 # fmt: on
 
 

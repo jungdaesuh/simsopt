@@ -525,7 +525,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      bounded-mixed regression remains gated on the Phase 5 producer.
 
 4. Thread mixed compute dtype through pure kernels and private optimizers.
-   - [ ] Port compute-dtype propagation through
+   - [x] Port compute-dtype propagation through
      `src/simsopt_jax/core/_device_scalars.py`, `_math_utils.py`,
      `biotsavart.py`, `curve_geometry.py`, `curve_kernels.py`, `field.py`,
      `specs.py`, `surface_fourier_kernels.py`, and `surface_rzfourier.py`, plus
@@ -534,13 +534,13 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `toroidal_flux_jax()`, construct the quadrature divisor in the active
      vector-potential dtype instead of forcing FP64 so the residual graph
      preserves the resolved compute dtype.
-   - [ ] In `boozer_residual.py`, port the final `303ca6ed1` behavior reconciled
+   - [x] In `boozer_residual.py`, port the final `303ca6ed1` behavior reconciled
      with `9c3b6523e`: preserve caller dtype in decision splits and residual
      inputs, use explicit scalar/vector compute dtype, stage literals relative
      to live arrays, keep CPU-ordered values/gradients in `B.dtype`, request
      compute dtype from surface geometry, and thread `dtype=B.dtype` through
      composed residual and coil-VJP paths.
-   - [ ] Extend `tests/geo/test_label_constraints_jax.py` with a direct
+   - [x] Extend `tests/geo/test_label_constraints_jax.py` with a direct
      `toroidal_flux_jax()` dtype regression: pass matching FP32 vector-potential
      and tangent inputs and require an FP32 scalar result, while retaining the
      corresponding FP64 result contract. Numerical value and derivative parity
@@ -553,7 +553,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `core/curve_kernels.py`, and route
      `src/simsopt_jax_adapters/geo/curve_objectives.py` through those kernels.
      Exclude `banana.py`, banana specs/exports, and banana tests.
-   - [ ] Port the `7d488caacc` fixed reduction tree in
+   - [x] Port the `7d488caacc` fixed reduction tree in
      `src/simsopt_jax/core/reductions.py`; remove the short-axis
      `lax.slice_in_dim` path so VJP on three-component axes remains valid under
      `jax.transfer_guard("disallow")`. Reconcile the same commit's selected
@@ -564,7 +564,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      use FP32 while kernel-declared FP64 reductions/results, decision state,
      host-materialized public results, and certificate computations retain their
      declared FP64 contract.
-   - [ ] Preserve transfer-guard-safe scalar and constant staging; do not add
+   - [x] Preserve transfer-guard-safe scalar and constant staging; do not add
      host callbacks to traced hot paths. Port the selected `8120b0ede`
      behavior that maps a rank-zero scalar derived from a nonreplicated
      `NamedSharding` reference to replicated `PartitionSpec()` and stages
@@ -578,11 +578,11 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      a time and observe the intended kernel/certificate behavior, proving the
      production path consumes the numerical-policy owner rather than duplicated
      constants.
-   - [ ] Add focused dtype and strict-transfer tests without importing example
+   - [x] Add focused dtype and strict-transfer tests without importing example
      modules. Include a replicated-scalar `NamedSharding` regression,
      `tests/core/test_reductions.py` short-axis VJP coverage, and dense/chunked
      value-and-gradient parity in `tests/geo/test_curve_objectives_jax.py`.
-   - [ ] Port the selected `5df801e1b` eager
+   - [x] Port the selected `5df801e1b` eager
      `SurfaceRZFourier` linear-derivative regression in
      `tests/geo/test_surface_rzfourier_transfer_guard_jax.py`. Exercise
      `_surface_rz_fourier_derivative_lin_from_spec()` outside `jit` with
@@ -1243,7 +1243,7 @@ with no strict-placement skips.
   `python -m pytest -q tests/integration/test_process_lifecycle.py tests/integration/test_process_group_rss.py`;
   skip only the live `/proc` sampler cases on non-Linux workers, not the
   platform-independent lifecycle and synthetic-procfs contracts.
-- [ ] Run `python -m pytest -q tests/geo/test_label_constraints_jax.py tests/geo/test_boozer_residual_jax.py tests/geo/test_curvexyzfouriersymmetries_spec_jax.py tests/geo/test_surface_fourier_jax.py` and require the label-constraint, residual, curve-spec, and surface-from-DOFs paths to preserve the selected compute dtype.
+- [x] Run `python -m pytest -q tests/geo/test_label_constraints_jax.py tests/geo/test_boozer_residual_jax.py tests/geo/test_curvexyzfouriersymmetries_spec_jax.py tests/geo/test_surface_fourier_jax.py` and require the label-constraint, residual, curve-spec, and surface-from-DOFs paths to preserve the selected compute dtype. **Result:** `218 passed, 32 skipped` on the CPU gate; the canonical strict-CUDA companion `tests/geo/test_mixed_compute_strict_gpu_jax.py` passed `3/3` with zero skips on the RTX 5090.
 - [ ] Run `python -m pytest -q tests/core/test_derivative.py tests/core/test_reductions.py tests/geo/test_surface_objectives.py tests/geo/test_boozersurface.py tests/integration/test_factor_once_adjoint_phase2.py`.
 - [ ] Run `python -m pytest -q tests/integration/test_jax_precision_upgrade_gate.py`.
 - [ ] Implement native synthetic snapshot, seed-gate, state-isolation, and

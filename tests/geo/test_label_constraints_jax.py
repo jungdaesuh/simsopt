@@ -62,6 +62,16 @@ biot_savart_A = _biot_savart_A
 toroidal_flux_jax = _toroidal_flux_jax
 
 
+@pytest.mark.parametrize("dtype", (jnp.float32, jnp.float64))
+def test_toroidal_flux_preserves_input_dtype(dtype) -> None:
+    vector_potential = jnp.ones((4, 3), dtype=dtype)
+    poloidal_tangent = jnp.full((4, 3), 0.5, dtype=dtype)
+
+    flux = toroidal_flux_jax(vector_potential, poloidal_tangent, 4)
+
+    assert flux.dtype == dtype
+
+
 def _make_tf_coils(n_coils=16, R_center=1.0, r_coil=0.3, nquad=64, I=1e5):
     """Create toroidal-field coils evenly distributed in toroidal angle.
 

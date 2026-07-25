@@ -18,6 +18,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core import (
     make_surface_xyz_fourier_spec,
     make_surface_xyz_tensor_fourier_spec,
@@ -46,6 +47,9 @@ surface_gamma = _sf.surface_gamma
 surface_gammadash1 = _sf.surface_gammadash1
 surface_gammadash2 = _sf.surface_gammadash2
 surface_gamma_lin_from_dofs = _sf.surface_gamma_lin_from_dofs
+surface_gamma_from_dofs = _sf.surface_gamma_from_dofs
+surface_gammadash1_from_dofs = _sf.surface_gammadash1_from_dofs
+surface_gammadash2_from_dofs = _sf.surface_gammadash2_from_dofs
 surface_gammadash1_lin_from_dofs = _sf.surface_gammadash1_lin_from_dofs
 surface_gammadash2_lin_from_dofs = _sf.surface_gammadash2_lin_from_dofs
 surface_gammadash1dash1_from_dofs = _sf.surface_gammadash1dash1_from_dofs
@@ -120,6 +124,129 @@ surface_xyzfourier_dgammadash2dash2_by_dcoeff = (
 stellsym_scatter_indices = _sf.stellsym_scatter_indices
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+
+
+def test_surface_from_dofs_helpers_preserve_compute_dtype_in_mixed_mode(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+    invalidate_backend_cache()
+    quadpoints = jnp.asarray([0.0, 0.5], dtype=jnp.float64)
+    try:
+        tensor_dofs = jnp.asarray(
+            [1.0, 0.1, 0.2, 0.3, 0.4, 0.5, -0.2, 0.7, -0.4],
+            dtype=jnp.float64,
+        )
+        xyz_dofs = jnp.asarray([1.0, 0.1, 0.2, 0.3], dtype=jnp.float64)
+        outputs = (
+            surface_gamma_from_dofs(
+                tensor_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                False,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_gammadash1_from_dofs(
+                tensor_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                False,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_gammadash2_from_dofs(
+                tensor_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                False,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_gammadash1dash1_from_dofs(
+                tensor_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                False,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_gammadash1dash2_from_dofs(
+                tensor_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                False,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_gammadash2dash2_from_dofs(
+                tensor_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                False,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_xyzfourier_gamma_from_dofs(
+                xyz_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                True,
+                None,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_xyzfourier_gammadash1_from_dofs(
+                xyz_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                True,
+                None,
+                None,
+                use_compute_dtype=True,
+            ),
+            surface_xyzfourier_gammadash2_from_dofs(
+                xyz_dofs,
+                quadpoints,
+                quadpoints,
+                1,
+                0,
+                1,
+                True,
+                None,
+                None,
+                use_compute_dtype=True,
+            ),
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
+        monkeypatch.delenv("SIMSOPT_BACKEND_MODE", raising=False)
+        invalidate_backend_cache()
+
+    assert {output.dtype for output in outputs} == {jnp.dtype(jnp.float32)}
 
 
 def test_split_flat_to_xyzc_keeps_nan_blocks_isolated():
@@ -2185,7 +2312,9 @@ class TestSurfaceFourierObjectApiParity:
         np.testing.assert_allclose(rz_surface.gamma(), surface.gamma(), atol=1e-12)
         np.testing.assert_allclose(
             np.asarray(
-                jax.jit(surface_rz_fourier_gamma_from_spec)(_rz_surface_spec(rz_surface))
+                jax.jit(surface_rz_fourier_gamma_from_spec)(
+                    _rz_surface_spec(rz_surface)
+                )
             ),
             rz_surface.gamma(),
             rtol=1e-12,

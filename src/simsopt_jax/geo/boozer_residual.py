@@ -55,8 +55,8 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core._math_utils import (
-    as_runtime_float64 as _as_runtime_float64,
     as_runtime_value as _as_runtime_value,
     explicit_rsqrt as _explicit_rsqrt,
     require_runtime_dtype as _require_runtime_dtype,
@@ -100,13 +100,16 @@ __all__ = [
 
 
 def _split_decision_vector(x, *, optimize_G):
-    x_jax = _as_runtime_value(x, reference=x)
+    # Follow the caller's decision-vector dtype. Certificate enforcement lives
+    # at the adjoint interface pins (boozer_surface: the fp64 tangent pin and
+    # the fp64 decision-vector construction), not at this split.
+    x_jax = jnp.asarray(x)
     _validate_decision_vector_tail(x_jax, optimize_G=optimize_G)
     return _split_decision_vector_lax(x_jax, optimize_G=optimize_G)
 
 
 def _split_decision_vector_jvp_safe(x, *, optimize_G):
-    x_jax = _as_runtime_value(x, reference=x)
+    x_jax = jnp.asarray(x)
     _validate_decision_vector_tail(x_jax, optimize_G=optimize_G)
     return _split_decision_vector_lax(x_jax, optimize_G=optimize_G)
 
@@ -207,6 +210,30 @@ def _require_boozer_runtime_inputs(B, xphi, xtheta):
     return jnp.asarray(B), jnp.asarray(xphi), jnp.asarray(xtheta)
 
 
+def _boozer_inputs(B, xphi, xtheta, *, dtype=None):
+    if dtype is None:
+        return _require_boozer_runtime_inputs(B, xphi, xtheta)
+    resolved_dtype = np.dtype(dtype)
+    return (
+        jnp.asarray(B, dtype=resolved_dtype),
+        jnp.asarray(xphi, dtype=resolved_dtype),
+        jnp.asarray(xtheta, dtype=resolved_dtype),
+    )
+
+
+def _boozer_scalar(value, *, reference, dtype=None):
+    if dtype is None:
+        return _as_runtime_value(value, reference=reference)
+    # Guard-safe staging for the dtype-threaded lane: an eager ``jnp.asarray``
+    # host literal is an implicit H2D put that ``transfer_guard("disallow")``
+    # rejects (the fp64 branch above already stages explicitly).
+    return _staged_like(reference, value, dtype=np.dtype(dtype))
+
+
+def _dtype_scalar_like(reference, value):
+    return _staged_like(reference, value)
+
+
 def _cpu_ordered_boozer_square_sum(rtil):
     """Sum residual squares in the same point/component order as sopp."""
     nphi, ntheta = rtil.shape[:2]
@@ -232,6 +259,7 @@ def boozer_residual_scalar(
     xtheta,
     weight_inv_modB=False,
     reduction_mode="default",
+    dtype=None,
 ):
     """Boozer residual scalar objective (forward pass).
 
@@ -251,11 +279,11 @@ def boozer_residual_scalar(
     Returns:
         J: scalar objective value.
     """
-    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
-    G = _as_runtime_value(G, reference=B)
-    iota = _as_runtime_value(iota, reference=B)
+    B, xphi, xtheta = _boozer_inputs(B, xphi, xtheta, dtype=dtype)
+    G = _boozer_scalar(G, reference=B, dtype=dtype)
+    iota = _boozer_scalar(iota, reference=B, dtype=dtype)
     nphi, ntheta, _ = B.shape
-    num_res = _as_runtime_value(3 * nphi * ntheta, reference=B)
+    num_res = _boozer_scalar(3 * nphi * ntheta, reference=B, dtype=dtype)
     rtil = _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB)
     if reduction_mode == _BOOZER_CPU_ORDERED_REDUCTION_MODE:
         square_sum = _cpu_ordered_boozer_square_sum(rtil)
@@ -266,7 +294,7 @@ def boozer_residual_scalar(
             reduction_mode=reduction_mode,
             default="pairwise",
         )
-    return _as_runtime_value(0.5, reference=rtil) * square_sum / num_res
+    return _boozer_scalar(0.5, reference=rtil, dtype=dtype) * square_sum / num_res
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +342,7 @@ def _boozer_objective_from_packed(
         xtheta,
         weight_inv_modB=weight_inv_modB,
         reduction_mode=reduction_mode,
+        dtype=B.dtype,
     )
 
 
@@ -411,7 +440,7 @@ def boozer_residual_hessian(
 # ---------------------------------------------------------------------------
 
 
-def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False):
+def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False, dtype=None):
     """Boozer residual vector (not the scalar 0.5||r||²/N).
 
     Returns the residual at each grid point, flattened.
@@ -426,9 +455,9 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=False):
     Returns:
         (nphi*ntheta*3,) flattened residual vector.
     """
-    B, xphi, xtheta = _require_boozer_runtime_inputs(B, xphi, xtheta)
-    G = _as_runtime_value(G, reference=B)
-    iota = _as_runtime_value(iota, reference=B)
+    B, xphi, xtheta = _boozer_inputs(B, xphi, xtheta, dtype=dtype)
+    G = _boozer_scalar(G, reference=B, dtype=dtype)
+    iota = _boozer_scalar(iota, reference=B, dtype=dtype)
     return _boozer_weighted_residual(
         G,
         iota,
@@ -465,12 +494,13 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
     this is the same derivative-direction-first convention documented as
     ``dB_by_dX[p, j, l]`` in ``CLAUDE.md``.
     """
-    G = _as_runtime_float64(G, reference=B)
-    iota = _as_runtime_float64(iota, reference=B)
+    B = jnp.asarray(B)
+    G = _dtype_scalar_like(B, G)
+    iota = _dtype_scalar_like(B, iota)
     nphi, ntheta = B.shape[:2]
     nsurfdofs = dx_ds.shape[-1]
     grad_size = nsurfdofs + (2 if optimize_G else 1)
-    num_res = _as_runtime_float64(3 * nphi * ntheta, reference=B)
+    num_res = _dtype_scalar_like(B, 3 * nphi * ntheta)
     zero = jnp.sum(B, dtype=B.dtype) - jnp.sum(B, dtype=B.dtype)
     grad0 = jnp.zeros((grad_size,), dtype=B.dtype)
 
@@ -483,10 +513,9 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
         B1 = B[i, j, 1]
         B2_component = B[i, j, 2]
         B2 = B0 * B0 + B1 * B1 + B2_component * B2_component
-        rB2 = _as_runtime_float64(1.0, reference=B) / B2
-        wij = (
-            jnp.sqrt(rB2) if weight_inv_modB else _as_runtime_float64(1.0, reference=B)
-        )
+        one = _dtype_scalar_like(B, 1.0)
+        rB2 = one / B2
+        wij = jnp.sqrt(rB2) if weight_inv_modB else one
 
         tang0 = xphi[i, j, 0] + iota * xtheta[i, j, 0]
         tang1 = xphi[i, j, 1] + iota * xtheta[i, j, 1]
@@ -499,7 +528,7 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
         rtil0 = res0 * wij
         rtil1 = res1 * wij
         rtil2 = res2 * wij
-        value = value + _as_runtime_float64(0.5, reference=B) * (
+        value = value + _dtype_scalar_like(B, 0.5) * (
             rtil0 * rtil0 + rtil1 * rtil1 + rtil2 * rtil2
         )
 
@@ -515,13 +544,11 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
         dB2_component = (
             dB_dX[i, j, 0, 2] * dx0 + dB_dX[i, j, 1, 2] * dx1 + dB_dX[i, j, 2, 2] * dx2
         )
-        dB2 = _as_runtime_float64(2.0, reference=B) * (
+        dB2 = _dtype_scalar_like(B, 2.0) * (
             B0 * dB0 + B1 * dB1 + B2_component * dB2_component
         )
 
-        dtang_factors = jnp.asarray(
-            [iota, _as_runtime_float64(1.0, reference=B)], dtype=B.dtype
-        )
+        dtang_factors = jnp.asarray([iota, _dtype_scalar_like(B, 1.0)], dtype=B.dtype)
         dtang0 = jnp.tensordot(
             dtang_factors,
             jnp.stack((dxtheta_ds[i, j, 0, :], dxphi_ds[i, j, 0, :])),
@@ -543,7 +570,7 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
         dres2 = G * dB2_component - (dB2 * tang2 + B2 * dtang2)
 
         if weight_inv_modB:
-            dmodB = _as_runtime_float64(0.5, reference=B) * dB2 * wij
+            dmodB = _dtype_scalar_like(B, 0.5) * dB2 * wij
             dw = -dmodB * rB2
         else:
             dw = jnp.zeros_like(dB2)
@@ -601,6 +628,7 @@ def _surface_geometry_from_dofs(
     stellsym,
     scatter_indices,
     surface_kind="generic",
+    use_compute_dtype=False,
 ):
     """Evaluate gamma, gammadash1, gammadash2 from surface DOFs.
 
@@ -617,6 +645,7 @@ def _surface_geometry_from_dofs(
             ntor=ntor,
             nfp=nfp,
             stellsym=stellsym,
+            use_compute_dtype=use_compute_dtype,
         )
         return surface_rz_fourier_geometry_from_spec(surface_spec)
 
@@ -631,6 +660,13 @@ def _surface_geometry_from_dofs(
             nfp,
             stellsym,
         )
+        if use_compute_dtype:
+            args = (*args, None, None)
+            return (
+                sgf(*args, use_compute_dtype=True),
+                sg1f(*args, use_compute_dtype=True),
+                sg2f(*args, use_compute_dtype=True),
+            )
         return sgf(*args), sg1f(*args), sg2f(*args)
 
     if surface_kind not in {"generic", "xyztensorfourier"}:
@@ -647,7 +683,11 @@ def _surface_geometry_from_dofs(
         stellsym,
         scatter_indices,
     )
-    return sgf(*args), sg1f(*args), sg2f(*args)
+    return (
+        sgf(*args, use_compute_dtype=use_compute_dtype),
+        sg1f(*args, use_compute_dtype=use_compute_dtype),
+        sg2f(*args, use_compute_dtype=use_compute_dtype),
+    )
 
 
 def _unpack_decision_vector(
@@ -710,6 +750,7 @@ def _composed_pipeline(
         nfp,
         stellsym,
         scatter_indices,
+        use_compute_dtype=True,
     )
 
     B = grouped_biot_savart_B(gamma.reshape(-1, 3), coil_arrays)
@@ -784,6 +825,7 @@ def boozer_penalty_composed(
         xtheta,
         weight_inv_modB=weight_inv_modB,
         reduction_mode=reduction_mode,
+        dtype=B.dtype,
     )
 
 
@@ -877,6 +919,7 @@ def _boozer_residual_vector_composed(
         xphi,
         xtheta,
         weight_inv_modB=weight_inv_modB,
+        dtype=B.dtype,
     )
 
 
@@ -1051,6 +1094,7 @@ def boozer_residual_coil_vjp(
             xphi,
             xtheta,
             weight_inv_modB=weight_inv_modB,
+            dtype=B.dtype,
         )
 
     _, vjp_fn = jax.vjp(residual_of_coils, coil_arrays)

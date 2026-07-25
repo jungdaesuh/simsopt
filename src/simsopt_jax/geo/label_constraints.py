@@ -11,7 +11,6 @@ derivatives — no hand-coded ``dJ``, ``d2J`` needed.
 
 import jax.numpy as jnp
 
-from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from .surface_fourier import surface_area as area_jax
 from .surface_fourier import surface_volume as volume_jax
 
@@ -44,7 +43,10 @@ def toroidal_flux_jax(A, gammadash2_at_phi, ntheta):
     Returns:
         Scalar toroidal flux.
     """
-    return jnp.sum(A * gammadash2_at_phi) / _as_jax_float64(ntheta)
+    return jnp.sum(A * gammadash2_at_phi) / jnp.asarray(
+        ntheta,
+        dtype=jnp.asarray(A).dtype,
+    )
 
 
 def compute_G_from_currents(currents):

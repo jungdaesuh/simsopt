@@ -6,6 +6,7 @@ from dataclasses import replace
 from functools import partial
 
 import jax
+import jax.numpy as jnp
 from jax import lax
 import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec as P
@@ -28,6 +29,7 @@ from .sharding import (
     maybe_shard_grouped_field_inputs,
 )
 from ._math_utils import (
+    as_compute_array as _as_compute_array,
     as_runtime_float64 as _as_runtime_float64,
     pad_axis as _pad_axis,
     runtime_device_put,
@@ -108,11 +110,12 @@ def _tree_trim_axis0(tree, size: int):
     )
 
 
-def _runtime_group_inputs(reference, gammas, gammadashs, currents):
+def _compute_group_inputs(reference, gammas, gammadashs, currents):
+    field_dtype = jnp.asarray(reference).dtype
     return (
-        _as_runtime_float64(gammas, reference=reference),
-        _as_runtime_float64(gammadashs, reference=reference),
-        _as_runtime_float64(currents, reference=reference),
+        _as_compute_array(gammas, dtype=field_dtype, reference=reference),
+        _as_compute_array(gammadashs, dtype=field_dtype, reference=reference),
+        _as_compute_array(currents, dtype=field_dtype, reference=reference),
     )
 
 
@@ -257,18 +260,20 @@ def _collective_group_field(points, gammas, gammadashs, currents, kernel, config
 
 
 def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
-    gammas, gammadashs, currents = _runtime_group_inputs(
-        points,
+    point_dtype = jnp.asarray(points).dtype
+    compute_points = _as_compute_array(points, dtype=point_dtype)
+    gammas, gammadashs, currents = _compute_group_inputs(
+        compute_points,
         gammas,
         gammadashs,
         currents,
     )
     config = coil_group_collective_config(currents)
     if config is None:
-        return kernel(points, gammas, gammadashs, currents), config
+        return kernel(compute_points, gammas, gammadashs, currents), config
     return (
         _collective_group_field(
-            points,
+            compute_points,
             gammas,
             gammadashs,
             currents,
@@ -325,15 +330,20 @@ def grouped_field_sharding_summary(points: object, coil_spec: GroupedCoilSetSpec
 
 def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
     """Return B pullback, using the coil-axis collective path when active."""
-    gammas, gammadashs, currents = _runtime_group_inputs(
-        points,
+    point_dtype = jnp.asarray(points).dtype
+    compute_points = _as_compute_array(points, dtype=point_dtype)
+    compute_v = _as_compute_array(v, dtype=point_dtype, reference=compute_points)
+    gammas, gammadashs, currents = _compute_group_inputs(
+        compute_points,
         gammas,
         gammadashs,
         currents,
     )
     config = coil_group_collective_config(currents)
     if config is None:
-        return biot_savart_B_vjp(points, v, gammas, gammadashs, currents)
+        return biot_savart_B_vjp(
+            compute_points, compute_v, gammas, gammadashs, currents
+        )
 
     coil_count = int(currents.shape[0])
     padded_gammas, padded_gammadashs, padded_currents = _pad_coil_axis_to_device_count(
@@ -345,7 +355,7 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
 
     def _collective_forward(group_gammas, group_gammadashs, group_currents):
         return _collective_group_field(
-            points,
+            compute_points,
             group_gammas,
             group_gammadashs,
             group_currents,
@@ -360,7 +370,7 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
         padded_currents,
     )
     return _tree_trim_axis0(
-        pullback(_as_runtime_float64(v, reference=points)),
+        pullback(compute_v),
         coil_count,
     )
 
@@ -371,7 +381,12 @@ def grouped_coil_set_spec_from_lists(
     currents_list: object,
 ) -> GroupedCoilSetSpec:
     return make_grouped_coil_set_spec(
-        group_coil_data(gammas_list, gammadashs_list, currents_list)
+        group_coil_data(
+            gammas_list,
+            gammadashs_list,
+            currents_list,
+            use_compute_dtype=False,
+        )
     )
 
 
@@ -402,10 +417,13 @@ def grouped_coil_set_spec_from_coil_specs(
 def _coil_current_value_from_dofs(
     extraction_spec: CoilDofExtractionSpec,
     owner_dofs: object,
+    *,
+    use_compute_dtype: bool = False,
 ) -> CurrentValueSpec:
     current_dofs = optimizable_input_dofs_from_map_spec(
         extraction_spec.current_map,
         owner_dofs,
+        use_compute_dtype=use_compute_dtype,
     )
     if current_dofs.shape[0] != 1:
         raise RuntimeError(
@@ -418,13 +436,17 @@ def _coil_current_value_from_dofs(
 def _coil_curve_spec_from_dofs(
     extraction_spec: CoilDofExtractionSpec,
     owner_dofs: object,
+    *,
+    use_compute_dtype: bool = False,
 ) -> object:
     curve = curve_spec_with_dofs(
         extraction_spec.curve,
         optimizable_input_dofs_from_map_spec(
             extraction_spec.curve_map,
             owner_dofs,
+            use_compute_dtype=use_compute_dtype,
         ),
+        use_compute_dtype=use_compute_dtype,
     )
     if extraction_spec.surface_map is None:
         return curve
@@ -432,6 +454,7 @@ def _coil_curve_spec_from_dofs(
     surface_dofs = optimizable_input_dofs_from_map_spec(
         extraction_spec.surface_map,
         owner_dofs,
+        use_compute_dtype=use_compute_dtype,
     )
     surface = surface_rz_fourier_spec_from_dofs(
         surface_dofs,
@@ -441,6 +464,7 @@ def _coil_curve_spec_from_dofs(
         ntor=curve.surface.ntor,
         nfp=curve.surface.nfp,
         stellsym=curve.surface.stellsym,
+        use_compute_dtype=use_compute_dtype,
     )
     return replace(curve, surface=surface)
 
@@ -448,12 +472,25 @@ def _coil_curve_spec_from_dofs(
 def coil_specs_from_dof_extraction_spec(
     extraction_spec: CoilSetDofExtractionSpec,
     owner_dofs: object,
+    *,
+    use_compute_dtype: bool = False,
 ) -> tuple[CoilSpec, ...]:
-    owner_dofs = _as_runtime_float64(owner_dofs, reference=owner_dofs)
+    if use_compute_dtype:
+        owner_dofs = _as_compute_array(owner_dofs, reference=owner_dofs)
+    else:
+        owner_dofs = _as_runtime_float64(owner_dofs, reference=owner_dofs)
     return tuple(
         CoilSpec(
-            curve=_coil_curve_spec_from_dofs(coil_spec, owner_dofs),
-            current=_coil_current_value_from_dofs(coil_spec, owner_dofs),
+            curve=_coil_curve_spec_from_dofs(
+                coil_spec,
+                owner_dofs,
+                use_compute_dtype=use_compute_dtype,
+            ),
+            current=_coil_current_value_from_dofs(
+                coil_spec,
+                owner_dofs,
+                use_compute_dtype=use_compute_dtype,
+            ),
             symmetry=coil_spec.symmetry,
         )
         for coil_spec in extraction_spec.coils
@@ -463,9 +500,15 @@ def coil_specs_from_dof_extraction_spec(
 def coil_set_spec_from_dof_extraction_spec(
     extraction_spec: CoilSetDofExtractionSpec,
     owner_dofs: object,
+    *,
+    use_compute_dtype: bool = False,
 ) -> GroupedCoilSetSpec:
     return grouped_coil_set_spec_from_coil_specs(
-        coil_specs_from_dof_extraction_spec(extraction_spec, owner_dofs)
+        coil_specs_from_dof_extraction_spec(
+            extraction_spec,
+            owner_dofs,
+            use_compute_dtype=use_compute_dtype,
+        )
     )
 
 

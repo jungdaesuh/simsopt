@@ -18,8 +18,10 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from simsopt_jax.backend import dtypes
 from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
+from simsopt_jax.core._device_scalars import staged_like
 
 
 def test_reference_sharding_short_circuits_on_tracer():
@@ -56,6 +58,22 @@ def test_reference_sharding_still_probes_concrete_array():
     # a NamedSharding, so the compatible result is None -- but the path runs.
     assert compat.call_count == 1
     assert result is None
+
+
+def test_staged_scalar_uses_replicated_named_sharding() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:1], dtype=object), ("device",))
+    vector_sharding = NamedSharding(mesh, P("device"))
+    reference = jax.device_put(
+        np.ones(3, dtype=np.float64),
+        vector_sharding,
+    )
+
+    with jax.transfer_guard("disallow"):
+        scalar = staged_like(reference, 1.0)
+
+    assert scalar.ndim == 0
+    assert isinstance(scalar.sharding, NamedSharding)
+    assert scalar.sharding.spec == P()
 
 
 def test_reference_sharding_handles_tracer_leaf_in_sequence():

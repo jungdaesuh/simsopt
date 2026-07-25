@@ -25,6 +25,7 @@ from .curve_xyz_fourier import (
 )
 from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import (
+    as_compute_array as _as_compute_array,
     as_runtime_array as _as_runtime_array,
     as_runtime_float64 as _as_runtime_float64,
 )
@@ -108,6 +109,27 @@ def _as_explicit_runtime_array(value, *, reference=None) -> jax.Array:
     )
 
 
+def _as_explicit_compute_array(value, *, reference=None) -> jax.Array:
+    if reference is not None:
+        return _as_compute_array(value, reference=reference)
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return _as_compute_array(value)
+    if isinstance(value, (list, tuple)):
+        leaves = jax.tree.leaves(value)
+        if any(isinstance(leaf, jax.Array) or hasattr(leaf, "aval") for leaf in leaves):
+            return _as_compute_array(value)
+    raise TypeError(
+        "curve_geometry compute helpers require JAX/spec-backed arrays; "
+        "materialize an immutable spec or explicit device array first."
+    )
+
+
+def _as_explicit_array(value, *, reference=None, use_compute_dtype: bool = False):
+    if use_compute_dtype:
+        return _as_explicit_compute_array(value, reference=reference)
+    return _as_explicit_runtime_array(value, reference=reference)
+
+
 def _runtime_scalar(value: float, *, reference=None) -> jax.Array:
     return _as_explicit_runtime_array(value, reference=reference)
 
@@ -124,16 +146,50 @@ def _element_count_runtime(array: jax.Array) -> jax.Array:
     return _runtime_scalar(float(np.prod(array.shape)), reference=array)
 
 
-def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
-    return jax.lax.slice_in_dim(array, int(start), int(end), axis=0)
-
-
-def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
+def _slice_1d_static(
+    array: jax.Array,
+    start: int,
+    end: int,
+    *,
+    use_compute_dtype: bool = False,
+) -> jax.Array:
     start = int(start)
-    stop = start + values.shape[0]
-    head = jax.lax.slice_in_dim(array, 0, start, axis=0)
-    tail = jax.lax.slice_in_dim(array, stop, array.shape[0], axis=0)
-    return jnp.concatenate([head, values, tail], axis=0)
+    end = int(end)
+    selector = np.zeros((end - start, int(array.shape[0])), dtype=float)
+    selector[np.arange(end - start), np.arange(start, end)] = 1.0
+    return (
+        _as_explicit_array(
+            selector,
+            reference=array,
+            use_compute_dtype=use_compute_dtype,
+        )
+        @ array
+    )
+
+
+def _update_1d_static(
+    array: jax.Array,
+    start: int,
+    values: jax.Array,
+    *,
+    use_compute_dtype: bool = False,
+) -> jax.Array:
+    start = int(start)
+    stop = start + int(values.shape[0])
+    update_matrix = np.zeros((int(array.shape[0]), int(values.shape[0])), dtype=float)
+    update_matrix[np.arange(start, stop), np.arange(int(values.shape[0]))] = 1.0
+    keep_mask = 1.0 - np.sum(update_matrix, axis=1)
+    runtime_update_matrix = _as_explicit_array(
+        update_matrix,
+        reference=array,
+        use_compute_dtype=use_compute_dtype,
+    )
+    runtime_keep_mask = _as_explicit_array(
+        keep_mask,
+        reference=array,
+        use_compute_dtype=use_compute_dtype,
+    )
+    return array * runtime_keep_mask + runtime_update_matrix @ values
 
 
 def curve_spec_from_curve(curve):
@@ -191,11 +247,20 @@ def curve_spec_from_curve(curve):
     )
 
 
-def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
+def _curve_gamma_kernel(
+    spec: CurveSpec,
+    dofs=None,
+    *,
+    use_compute_dtype: bool = False,
+):
     curve_dofs = (
         spec.dofs
         if dofs is None
-        else _as_explicit_runtime_array(dofs, reference=spec.dofs)
+        else _as_explicit_array(
+            dofs,
+            reference=spec.dofs,
+            use_compute_dtype=use_compute_dtype,
+        )
     )
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "xyz_fourier":
@@ -263,6 +328,7 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.surface.ntor,
             spec.surface.nfp,
             spec.surface.stellsym,
+            use_compute_dtype=use_compute_dtype,
         )
     raise TypeError(
         "curve_gamma_kernel only supports direct curve specs, "
@@ -311,30 +377,71 @@ def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
     return geometry[: order + 1]
 
 
-def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
-    mapped = _as_explicit_runtime_array(
-        map_spec.template_full_dofs, reference=owner_dofs
+def _mapped_full_dofs(
+    map_spec: OptimizableDofMapSpec,
+    owner_dofs,
+    *,
+    use_compute_dtype: bool = False,
+):
+    mapped = _as_explicit_array(
+        map_spec.template_full_dofs,
+        reference=owner_dofs,
+        use_compute_dtype=use_compute_dtype,
     )
-    owner_dofs = _as_explicit_runtime_array(owner_dofs, reference=owner_dofs)
+    owner_dofs = _as_explicit_array(
+        owner_dofs,
+        reference=owner_dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
         del target_end
-        segment = _slice_1d_static(owner_dofs, owner_start, owner_end)
-        mapped = _update_1d_static(mapped, target_start, segment)
+        segment = _slice_1d_static(
+            owner_dofs,
+            owner_start,
+            owner_end,
+            use_compute_dtype=use_compute_dtype,
+        )
+        mapped = _update_1d_static(
+            mapped,
+            target_start,
+            segment,
+            use_compute_dtype=use_compute_dtype,
+        )
     return mapped
 
 
-def _mapped_input_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
-    mapped_full = _mapped_full_dofs(map_spec, owner_dofs)
+def _mapped_input_dofs(
+    map_spec: OptimizableDofMapSpec,
+    owner_dofs,
+    *,
+    use_compute_dtype: bool = False,
+):
+    mapped_full = _mapped_full_dofs(
+        map_spec,
+        owner_dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
     if map_spec.input_mode == "full":
         return mapped_full
-    return _slice_1d_static(mapped_full, map_spec.input_start, map_spec.input_end)
+    return _slice_1d_static(
+        mapped_full,
+        map_spec.input_start,
+        map_spec.input_end,
+        use_compute_dtype=use_compute_dtype,
+    )
 
 
 def optimizable_input_dofs_from_map_spec(
     map_spec: OptimizableDofMapSpec,
     owner_dofs,
+    *,
+    use_compute_dtype: bool = False,
 ):
-    return _mapped_input_dofs(map_spec, owner_dofs)
+    return _mapped_input_dofs(
+        map_spec,
+        owner_dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
 
 
 def _rotation_alpha_and_dash_from_dofs(
@@ -359,19 +466,29 @@ def _rotation_alpha_and_dash_from_dofs(
     )
 
 
-def _curve_geometry_with_third_derivative_from_dofs(spec: CurveSpec, dofs):
+def _curve_geometry_with_third_derivative_from_dofs(
+    spec: CurveSpec,
+    dofs,
+    *,
+    use_compute_dtype: bool = False,
+):
     """Return (gamma, gammadash, gammadashdash, gammadashdashdash) in one pass."""
     if isinstance(spec, CurvePerturbedSpec):
         base_geometry = _curve_geometry_with_third_derivative_from_dofs(
             spec.base_curve,
             _curve_perturbed_base_dofs(spec, dofs),
+            use_compute_dtype=use_compute_dtype,
         )
         return _add_curve_perturbation(spec, *base_geometry)
     quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=3)
     if direct_geometry is not None:
         return direct_geometry
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    gamma_kernel = _curve_gamma_kernel(
+        spec,
+        dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
     return _curve_geometry_terms_from_kernel(
         gamma_kernel,
         quadpoints,
@@ -522,7 +639,14 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
     )
 
 
-def curve_spec_with_dofs(spec: CurveSpec, dofs):
+def curve_spec_with_dofs(
+    spec: CurveSpec,
+    dofs,
+    *,
+    use_compute_dtype: bool = False,
+):
+    if use_compute_dtype:
+        return replace(spec, dofs=_as_compute_array(dofs, reference=spec.dofs))
     return replace(spec, dofs=_as_runtime_float64(dofs, reference=spec.dofs))
 
 
@@ -836,7 +960,12 @@ def curve_gamma_and_dash_from_spec(spec: CurveSpec):
     return curve_gamma_and_dash_from_dofs(spec, spec.dofs)
 
 
-def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
+def curve_gamma_and_dash_from_dofs(
+    spec: CurveSpec,
+    dofs,
+    *,
+    use_compute_dtype: bool = False,
+):
     """Return (gamma, gammadash) from a single kernel build and JVP call."""
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
@@ -849,7 +978,11 @@ def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
     direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=1)
     if direct_geometry is not None:
         return direct_geometry
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    gamma_kernel = _curve_gamma_kernel(
+        spec,
+        dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
     return _curve_geometry_terms_from_kernel(
         gamma_kernel,
         quadpoints,
@@ -858,11 +991,20 @@ def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
     )
 
 
-def curve_geometry_from_spec(spec: CurveSpec):
-    return curve_geometry_from_dofs(spec, spec.dofs)
+def curve_geometry_from_spec(spec: CurveSpec, *, use_compute_dtype: bool = False):
+    return curve_geometry_from_dofs(
+        spec,
+        spec.dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
 
 
-def curve_geometry_from_dofs(spec: CurveSpec, dofs):
+def curve_geometry_from_dofs(
+    spec: CurveSpec,
+    dofs,
+    *,
+    use_compute_dtype: bool = False,
+):
     """Return (gamma, gammadash, gammadashdash) from a single kernel build."""
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
@@ -875,7 +1017,11 @@ def curve_geometry_from_dofs(spec: CurveSpec, dofs):
     direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=2)
     if direct_geometry is not None:
         return direct_geometry
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    gamma_kernel = _curve_gamma_kernel(
+        spec,
+        dofs,
+        use_compute_dtype=use_compute_dtype,
+    )
     return _curve_geometry_terms_from_kernel(
         gamma_kernel,
         quadpoints,
