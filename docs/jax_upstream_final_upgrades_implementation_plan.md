@@ -1,9 +1,10 @@
 # JAX Upstream Final Upgrades Implementation Plan
 
-**Status:** The bounded Phase 0 implementation is present on the clean
-candidate lineage and has passed its authoritative local RTX 5090 acceptance
-gate below. The full master roadmap remains open and is not one PR.
-**Last updated:** 2026-07-24
+**Status:** The bounded Phase 0 implementation and the production mixed
+dense-IR primitive are present on the clean candidate lineage. Both have passed
+their authoritative local RTX 5090 gates below. Phase 5 producer/adapter
+integration and the rest of the master roadmap remain open and are not one PR.
+**Last updated:** 2026-07-25
 
 ## Purpose
 
@@ -601,13 +602,19 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `_run_traceable_newton_polish_stage()`, including pre-Newton result/status
      accounting and the Newton-polish handoff. Adapt applicable integration
      regressions without importing the source benchmark or example diagnostics.
-   - [ ] Port FP32 proposal-matrix construction into `optimizer.py`. Certify
+   - [x] Port FP32 proposal-matrix construction into `optimizer.py`. Certify
      against the live matrix-free FP64 operator through FP64 matvecs; do not
      materialize a separate FP64 certificate matrix. A single canonical FP64
      dense refactor/solve is allowed only as the bounded fallback attempt.
-   - [ ] Port bounded refinement history, contraction checks, effective linear
+     **Primitive result:** `tests/geo/test_mixed_dense_ir_optimizer.py` proves
+     FP32 factorization, widened FP64 factor application, and live FP64
+     residuals on CPU and the RTX 5090. Source inspection confines FP64 matrix
+     materialization to the single fallback function. Production stage
+     ownership remains with the open adapter items below.
+   - [x] Port bounded refinement history, contraction checks, effective linear
      tolerance normalization, factor authority, and fallback termination
-     semantics.
+     semantics. The correction histories have one typed fixed-capacity policy
+     owner and retain only the valid device-side prefix.
    - [ ] Preserve the randomized contraction-certificate contract: pass the
      complete two-word `uint32` Threefry key, mint fresh entropy only after the
      live operator inputs are frozen, distinguish fresh-run authority from an
@@ -615,19 +622,23 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      serialization even when x64 is disabled. Label the finite-PRNG sampling
      evidence separately from the ideal-Gaussian probability-model bound; do
      not present the latter as an unconditional PRNG failure probability.
-   - [ ] Require a live FP64 certificate before accepting a mixed proposal;
-     never return an uncertified FP32 endpoint.
-   - [ ] Reserve the single canonical FP64 fallback for proposal,
+   - [x] Require a live FP64 certificate before accepting a mixed proposal;
+     never return an uncertified FP32 endpoint. This is closed for the optimizer
+     primitive; outer producer publication remains open below.
+   - [x] Reserve the single canonical FP64 fallback for proposal,
      refinement/tolerance, contraction, or condition rejection. After that
      attempt, a nonfinite or out-of-tolerance final gradient or adjoint result
-     fails closed; it does not trigger a third attempt.
-   - [ ] Implement the bounded mixed Newton state machine exactly: take one FP32
+     fails closed; it does not trigger a third attempt. Focused tests cover a
+     successful fallback and a catastrophic forward-error fail-close.
+   - [x] Implement the bounded mixed Newton state machine exactly: take one FP32
      dense-IR proposal from the FP64 incumbent; after an accepted step that
      remains above tolerance, take the second logical attempt with fresh FP32
      factors against the live FP64 operator and permit one conditional FP64
      refactor only if that factor attempt is rejected. If the first proposal is
      rejected, go directly to the canonical FP64 attempt at the same incumbent.
      Do not add an unconditional FP64 rerun or a third bounded-Newton attempt.
+     The bounded primitive is independently tested without the general Newton
+     runner; its production pre-Newton handoff remains open.
    - [ ] Because Phase 4 newly moves the outer pre-Newton/BFGS proposal from its
      source-anchor FP64 runtime dtype to FP32 compute, capture an immutable
      snapshot of the FP64 decision vector, warm start, solver/cache identity

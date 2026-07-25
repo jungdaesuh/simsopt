@@ -119,7 +119,7 @@ from enum import Enum
 from functools import lru_cache, partial, wraps
 from itertools import count
 from threading import Lock
-from typing import Callable, Literal, NamedTuple, cast
+from typing import Callable, Final, Literal, NamedTuple, Protocol, cast
 from weakref import ref
 
 import jax
@@ -133,6 +133,7 @@ from jax import lax
 from jax.extend import core as jax_core
 from jax.flatten_util import ravel_pytree
 from jax.scipy.sparse.linalg import gmres
+from numpy.typing import DTypeLike
 from scipy.optimize import OptimizeResult
 
 from simsopt_jax.backend import (
@@ -183,6 +184,15 @@ from simsopt_jax.geo.optimizers.private import (
 )
 from simsopt_jax.geo.optimizers.private import (
     _private_lbfgs_result_to_optimize_result as _private_lbfgs_result_to_optimize_result_impl,
+)
+from simsopt_jax.numerical_policy import (
+    DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY,
+    DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY,
+    MIXED_DENSE_IR_ACCURACY_POLICY,
+    MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    NEWTON_ARMIJO_C1,
+    PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE,
+    DenseIrHistorySource,
 )
 from simsopt_jax.runtime.host_boundary import host_bool as _host_bool
 from simsopt_jax.runtime.host_boundary import host_scalar as _host_scalar
@@ -440,7 +450,9 @@ _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES = {
     _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: 1,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU: 2,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU: 3,
-    _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR: 4,
+    _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR: (
+        PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE
+    ),
 }
 
 
@@ -506,17 +518,238 @@ class _DeprecationCallSite:
     function: str
 
 
+class _ArrayObjectiveWithArgs(Protocol):
+    def __call__(self, x: jax.Array, *args: object) -> jax.Array: ...
+
+
 class _LinearSolveStatus(NamedTuple):
     success: jax.Array
     residual: jax.Array
     residual_relative: jax.Array
     iterations: jax.Array
+    residual_scale: jax.Array | None = None
+    requested_tolerance: jax.Array | None = None
+    effective_tolerance: jax.Array | None = None
 
     def __array__(self, dtype=None):
         return np.asarray(jax.device_get(self.success), dtype=dtype)
 
     def __bool__(self):
         return bool(np.asarray(self))
+
+
+class _TraceableNewtonLinearTelemetry(NamedTuple):
+    """Typed provenance for one traceable Newton linear solve."""
+
+    ir_correction_count: jax.Array
+    ir_residual_relative_trace: jax.Array
+    ir_contraction_ratio_trace: jax.Array
+    ir_trace_length: jax.Array
+    ir_history_source_code: jax.Array
+    live_operator_certificate: jax.Array
+    factorization_dtype_bits: jax.Array
+    factor_application_dtype_bits: jax.Array
+    residual_dtype_bits: jax.Array
+    factorization_event_increment: jax.Array
+    fp64_refactor_retry: jax.Array
+
+
+class _DenseIrContractionTelemetry(NamedTuple):
+    residual_relatives: jax.Array
+    contraction_ratios: jax.Array
+    residual_relative_trace_length: jax.Array
+    contraction_finite: jax.Array
+    contraction_monotone: jax.Array
+    stagnated: jax.Array
+
+
+class _DenseIrHistory(NamedTuple):
+    """Fixed-shape dense-IR correction history for one selected linear solve."""
+
+    residual_relative_trace: jax.Array
+    contraction_ratio_trace: jax.Array
+    trace_length: jax.Array
+    source_code: jax.Array
+
+
+class _DenseIrRefinementState(NamedTuple):
+    solution: jax.Array
+    residual: jax.Array
+    status: _LinearSolveStatus
+    telemetry: _DenseIrContractionTelemetry
+
+
+class _BoundedMixedCertificateAttempts(NamedTuple):
+    """Selected and physical attempts for one bounded second correction."""
+
+    selected: dict[str, jax.Array]
+    primary: dict[str, jax.Array]
+    retry: dict[str, jax.Array]
+    fp64_refactor_retry: jax.Array
+    factorization_dtype_bits: jax.Array
+    factorization_count: jax.Array
+
+
+class _BoundedNewtonAttemptTrace(NamedTuple):
+    """Fixed-shape device telemetry for ordered physical or logical attempts."""
+
+    active: jax.Array
+    accepted: jax.Array
+    linear_success: jax.Array
+    linear_iterations: jax.Array
+    linear_ir_correction_count: jax.Array
+    linear_ir_residual_relative: jax.Array
+    linear_ir_contraction_ratio: jax.Array
+    linear_ir_length: jax.Array
+    linear_ir_source_code: jax.Array
+    linear_residual: jax.Array
+    linear_residual_norm: jax.Array
+    linear_residual_scale: jax.Array
+    linear_requested_tolerance: jax.Array
+    linear_effective_tolerance: jax.Array
+    live_operator_certificate: jax.Array
+    factorization_dtype_bits: jax.Array
+    factor_application_dtype_bits: jax.Array
+    residual_dtype_bits: jax.Array
+    certificate_value_dtype_bits: jax.Array
+    certificate_gradient_dtype_bits: jax.Array
+    step_norm: jax.Array
+    step_finite: jax.Array
+    backtracking_attempted: jax.Array
+    backtracking_iterations: jax.Array
+    accepted_alpha: jax.Array
+    fp64_refactor_retry: jax.Array
+
+
+class _MixedDenseIrFallbackTelemetry(NamedTuple):
+    """Independent FP64 rebuild evidence kept separate from proposal trust."""
+
+    attempted: jax.Array
+    success: jax.Array
+    status: _LinearSolveStatus
+    factorization_dtype_bits: jax.Array
+    factor_application_dtype_bits: jax.Array
+    residual_dtype_bits: jax.Array
+    refinement: _DenseIrContractionTelemetry
+
+
+class _MixedDenseIrTrustTelemetry(NamedTuple):
+    """Probabilistic forward-accuracy evidence for FP32-origin dense factors."""
+
+    active: jax.Array
+    certificate_probe_key_data: jax.Array
+    contraction_probe_count: jax.Array
+    contraction_probe_alpha: jax.Array
+    contraction_operator_norm_upper: jax.Array
+    contraction_operator_norm_upper_limit: jax.Array
+    contraction_ideal_gaussian_failure_probability_bound: jax.Array
+    correction_tail_relative_bound: jax.Array
+    forward_error_tolerance: jax.Array
+    proposal_factorization_dtype_bits: jax.Array
+    factor_application_dtype_bits: jax.Array
+    residual_dtype_bits: jax.Array
+    certificate_sweep_dtype_bits: jax.Array
+    refinement: _DenseIrContractionTelemetry
+    proposal_trusted: jax.Array
+    fp64_rebuild_count: jax.Array
+    fallback: _MixedDenseIrFallbackTelemetry
+
+
+class _MixedDenseIrSolveStatus(NamedTuple):
+    success: jax.Array
+    residual: jax.Array
+    residual_relative: jax.Array
+    iterations: jax.Array
+    trust: _MixedDenseIrTrustTelemetry
+
+    def __array__(self, dtype=None):
+        return np.asarray(jax.device_get(self.success), dtype=dtype)
+
+    def __bool__(self):
+        return bool(np.asarray(self))
+
+
+def _inactive_mixed_dense_ir_fallback_telemetry(
+    reference: jax.Array,
+) -> _MixedDenseIrFallbackTelemetry:
+    reference = jnp.asarray(reference)
+    dtype = reference.dtype
+    nan = _device_scalar(np.nan, dtype=dtype)
+    false = _staged_like(reference, False, dtype=jnp.bool_)
+    residual_relatives = jnp.full(
+        (MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS + 1,),
+        nan,
+        dtype=dtype,
+    )
+    contraction_ratios = jnp.full(
+        (MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,),
+        nan,
+        dtype=dtype,
+    )
+    inactive_refinement = _DenseIrContractionTelemetry(
+        residual_relatives=residual_relatives,
+        contraction_ratios=contraction_ratios,
+        residual_relative_trace_length=_device_int32(0, like=reference),
+        contraction_finite=false,
+        contraction_monotone=false,
+        stagnated=false,
+    )
+    return _MixedDenseIrFallbackTelemetry(
+        attempted=false,
+        success=false,
+        status=_LinearSolveStatus(
+            success=false,
+            residual=jnp.full_like(reference, nan),
+            residual_relative=nan,
+            iterations=_device_int32(
+                _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+                like=reference,
+            ),
+            residual_scale=nan,
+            requested_tolerance=nan,
+            effective_tolerance=nan,
+        ),
+        factorization_dtype_bits=_device_int32(0, like=reference),
+        factor_application_dtype_bits=_device_int32(0, like=reference),
+        residual_dtype_bits=_device_int32(0, like=reference),
+        refinement=inactive_refinement,
+    )
+
+
+def _inactive_mixed_dense_ir_trust_telemetry(
+    reference: jax.Array,
+) -> _MixedDenseIrTrustTelemetry:
+    reference = jnp.asarray(reference)
+    dtype = reference.dtype
+    nan = _device_scalar(np.nan, dtype=dtype)
+    false = _staged_like(reference, False, dtype=jnp.bool_)
+    inactive_fallback = _inactive_mixed_dense_ir_fallback_telemetry(reference)
+    return _MixedDenseIrTrustTelemetry(
+        active=false,
+        certificate_probe_key_data=_staged_like(
+            reference,
+            np.zeros((2,), dtype=np.uint32),
+            dtype=jnp.uint32,
+        ),
+        contraction_probe_count=_device_int32(0, like=reference),
+        contraction_probe_alpha=nan,
+        contraction_operator_norm_upper=nan,
+        contraction_operator_norm_upper_limit=nan,
+        contraction_ideal_gaussian_failure_probability_bound=_device_scalar(
+            np.nan,
+            dtype=dtype,
+        ),
+        correction_tail_relative_bound=nan,
+        forward_error_tolerance=nan,
+        proposal_factorization_dtype_bits=_device_int32(0, like=reference),
+        factor_application_dtype_bits=_device_int32(0, like=reference),
+        residual_dtype_bits=_device_int32(0, like=reference),
+        certificate_sweep_dtype_bits=_device_int32(0, like=reference),
+        refinement=inactive_fallback.refinement,
+        proposal_trusted=false,
+        fp64_rebuild_count=_device_int32(0, like=reference),
+        fallback=inactive_fallback,
+    )
 
 
 def resolve_optimizer_backend(optimizer_backend: str | None) -> str:
@@ -1067,7 +1300,9 @@ def _device_scalar(value, *, dtype=jnp.float64):
     return jnp.asarray(np.asarray(value, dtype=np.dtype(dtype)))
 
 
-def _device_int32(value):
+def _device_int32(value, *, like=None):
+    if like is not None:
+        return _staged_like(like, value, dtype=jnp.int32)
     return runtime_device_put(value, dtype=jnp.int32)
 
 
@@ -1720,6 +1955,19 @@ def _normalize_solver_args(args):
     if isinstance(args, tuple):
         return args
     return (args,)
+
+
+def _cast_floating_tree(tree, dtype):
+    """Cast every floating array leaf while preserving discrete metadata."""
+    resolved_dtype = np.dtype(dtype)
+
+    def cast_leaf(leaf):
+        leaf_dtype = getattr(leaf, "dtype", None)
+        if leaf_dtype is not None and np.issubdtype(np.dtype(leaf_dtype), np.floating):
+            return jnp.asarray(leaf, dtype=resolved_dtype)
+        return leaf
+
+    return jax.tree.map(cast_leaf, tree)
 
 
 def _wrap_value_and_grad_fun(fun, x0, *, host_inputs):
@@ -3794,6 +4042,7 @@ def adjoint_hessian_stabilization(
         return newton_stabilization
     return 0.0
 
+
 # Operator-only square solves historically performed one residual-correction
 # solve. Keep that default for LS/Hessian fallback callers; exact-jacobian
 # adjoints opt into the smallest Track-A extension that clears one additional
@@ -3802,6 +4051,13 @@ _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
 _DENSE_IR_NEWTON_REFINEMENT_STEPS = 2
 _DENSE_IR_NEWTON_MATVEC_BUDGET = _DENSE_IR_NEWTON_REFINEMENT_STEPS + 1
 _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
+DENSE_IR_HISTORY_MAX_CORRECTIONS: Final[int] = MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS
+_MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT: Final[int] = 64
+_MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA: Final[float] = 2.0
+_MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT: Final[float] = 0.9
+_MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND: Final[float] = (
+    _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA**-_MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT
+)
 
 # Opt-in dense direct factorization for the EXACT-Jacobian adjoint transpose
 # solve ``J^T λ = g``.  At high mode counts (m18: ``J`` is 2055x2055) the
@@ -3880,6 +4136,11 @@ def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
     dense = _materialize_dense_linear_operator(hvp_fn, x)
     if not bool(symmetrize):
         return dense
+    upper = jnp.triu(dense)
+    return upper + jnp.triu(dense, 1).T
+
+
+def _symmetrize_dense_hessian(dense: jax.Array) -> jax.Array:
     upper = jnp.triu(dense)
     return upper + jnp.triu(dense, 1).T
 
@@ -4222,13 +4483,32 @@ def _newton_step_finite(x_next, grad_next):
     return jnp.all(jnp.isfinite(x_next)) & jnp.all(jnp.isfinite(grad_next))
 
 
-def _newton_candidate_status(x_next, val_next, grad_next):
+def _newton_candidate_status(
+    x_next,
+    val_next,
+    grad_next,
+    *,
+    alpha,
+    current_val,
+    current_grad,
+    current_norm,
+    dx,
+):
+    """Accept a finite Newton candidate by stationarity or Armijo merit."""
     candidate_norm = jnp.linalg.norm(grad_next)
-    accepted = (
+    finite = (
         _newton_step_finite(x_next, grad_next)
         & jnp.isfinite(val_next)
         & jnp.isfinite(candidate_norm)
     )
+    descent_measure = jnp.real(jnp.vdot(current_grad, dx))
+    armijo_bound = current_val - (
+        _device_scalar(NEWTON_ARMIJO_C1, dtype=jnp.asarray(x_next).dtype)
+        * alpha
+        * descent_measure
+    )
+    objective_decrease = (descent_measure > 0) & (val_next <= armijo_bound)
+    accepted = finite & ((candidate_norm <= current_norm) | objective_decrease)
     return accepted, candidate_norm
 
 
@@ -4237,6 +4517,17 @@ _NEWTON_STOP_MAXITER = 1
 _NEWTON_STOP_STALLED = 2
 _NEWTON_STOP_NONFINITE = 3
 _NEWTON_STOP_UNKNOWN = 4
+
+_BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT = 2
+_BOUNDED_MIXED_NEWTON_ACTUAL_CORRECTION_LIMIT = 3
+_BOUNDED_MIXED_NEWTON_FACTORIZATION_EVENT_LIMIT = 3
+_BOUNDED_NEWTON_ATTEMPT_NONE = 0
+_BOUNDED_NEWTON_ATTEMPT_FP32_PROPOSAL = 1
+_BOUNDED_NEWTON_ATTEMPT_FP64_CERTIFICATE = 2
+
+_DENSE_HESSIAN_MATERIALIZATION_NOT_REQUESTED = 0
+_DENSE_HESSIAN_MATERIALIZATION_COMPLETE = 1
+_DENSE_HESSIAN_MATERIALIZATION_BYTE_LIMIT = 2
 
 
 def _newton_backtracking_continue(state):
@@ -4271,8 +4562,12 @@ def _backtracking_value_grad_step(
             candidate_x,
             candidate_val,
             candidate_grad,
+            alpha=state["alpha"],
+            current_val=current_val,
+            current_grad=current_grad,
+            current_norm=current_norm,
+            dx=dx,
         )
-        candidate_accepted = candidate_accepted & (candidate_norm <= current_norm)
         return {
             "iteration": state["iteration"] + 1,
             "alpha": state["alpha"] * half,
@@ -4313,8 +4608,12 @@ def _host_backtracking_value_grad_step(
             candidate_x,
             candidate_val,
             candidate_grad,
+            alpha=alpha,
+            current_val=current_val,
+            current_grad=current_grad,
+            current_norm=current_norm,
+            dx=dx,
         )
-        candidate_accepted = candidate_accepted & (candidate_norm <= current_norm)
         next_alpha = alpha * half
         if _host_bool(candidate_accepted):
             return {
@@ -4445,6 +4744,7 @@ def _linear_solve_finite(solution, residual):
 # eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
 # solves of large, moderately ill-conditioned systems.
 _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
+_DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR = 100.0
 # Float64 dense solves still need a condition cap below the theoretical
 # ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
 # system can have machine-small residual but a 1e-4-scale wrong solution at
@@ -4507,6 +4807,26 @@ def _linear_solve_status_success(status):
     return status.success
 
 
+def _linear_solve_requested_tolerance_reached(status):
+    """Return whether the diagnostic caller target was reached."""
+    return (
+        status.success
+        & jnp.isfinite(status.residual_relative)
+        & jnp.isfinite(status.requested_tolerance)
+        & (status.residual_relative <= status.requested_tolerance)
+    )
+
+
+def _linear_solve_effective_tolerance_reached(status):
+    """Return whether a complete status meets the attainable policy gate."""
+    return (
+        status.success
+        & jnp.isfinite(status.residual_relative)
+        & jnp.isfinite(status.effective_tolerance)
+        & (status.residual_relative <= status.effective_tolerance)
+    )
+
+
 def _linear_solve_solution_or_nan(solution, status):
     return jax.lax.cond(
         jnp.asarray(_linear_solve_status_success(status), dtype=jnp.bool_),
@@ -4551,7 +4871,9 @@ def _linear_solve_iterations_host_value(iterations):
 
 def _linear_solve_status(solution, residual, rhs, *, tol, iterations):
     residual_norm = jnp.linalg.norm(residual)
-    residual_relative = residual_norm / _linear_solve_residual_scale(rhs)
+    residual_scale = _linear_solve_residual_scale(rhs)
+    residual_relative = residual_norm / residual_scale
+    requested_tolerance = _optimizer_scalar(tol, dtype=rhs.dtype)
     effective_tolerance = _effective_linear_solve_tolerance(rhs, tol)
     success = (
         _linear_solve_finite(solution, residual)
@@ -4562,8 +4884,44 @@ def _linear_solve_status(solution, residual, rhs, *, tol, iterations):
     return _LinearSolveStatus(
         success=success,
         residual=residual_norm,
+        residual_scale=residual_scale,
         residual_relative=residual_relative,
+        requested_tolerance=requested_tolerance,
+        effective_tolerance=effective_tolerance,
         iterations=_linear_solve_status_iterations(iterations),
+    )
+
+
+def _complete_linear_solve_status(status, rhs, *, tol):
+    """Complete legacy status metrics before entering a staged branch."""
+    rhs = jnp.asarray(rhs)
+    residual_scale = (
+        _linear_solve_residual_scale(rhs)
+        if status.residual_scale is None
+        else status.residual_scale
+    )
+    requested_tolerance = (
+        _optimizer_scalar(tol, dtype=rhs.dtype)
+        if status.requested_tolerance is None
+        else status.requested_tolerance
+    )
+    effective_tolerance = (
+        _effective_linear_solve_tolerance(rhs, tol)
+        if status.effective_tolerance is None
+        else status.effective_tolerance
+    )
+    return status._replace(
+        residual_scale=residual_scale,
+        requested_tolerance=requested_tolerance,
+        effective_tolerance=effective_tolerance,
+    )
+
+
+def _terminal_linear_solve_status(status, rhs, *, tol):
+    """Complete status and apply the attainable solver authority."""
+    completed = _complete_linear_solve_status(status, rhs, tol=tol)
+    return completed._replace(
+        success=_linear_solve_effective_tolerance_reached(completed)
     )
 
 
@@ -4576,7 +4934,8 @@ def _linear_solve_status_with_relative_tolerance(
     iterations,
 ):
     residual_norm = jnp.linalg.norm(residual)
-    residual_relative = residual_norm / _linear_solve_residual_scale(rhs)
+    residual_scale = _linear_solve_residual_scale(rhs)
+    residual_relative = residual_norm / residual_scale
     tolerance_value = _optimizer_scalar(tolerance, dtype=rhs.dtype)
     success = (
         _linear_solve_finite(solution, residual)
@@ -4587,7 +4946,10 @@ def _linear_solve_status_with_relative_tolerance(
     return _LinearSolveStatus(
         success=success,
         residual=residual_norm,
+        residual_scale=residual_scale,
         residual_relative=residual_relative,
+        requested_tolerance=tolerance_value,
+        effective_tolerance=tolerance_value,
         iterations=_linear_solve_status_iterations(iterations),
     )
 
@@ -4647,11 +5009,24 @@ def _forward_error_bound(residual_rel, condition_estimate):
     )
 
 
-def _forward_error_success(residual_rel, condition_estimate, *, tol):
-    dtype = residual_rel.dtype
+def _forward_error_tolerance(*, tol, dtype):
+    """Return the shared relative forward-accuracy acceptance threshold."""
+    dtype = np.dtype(dtype)
     tol_value = _optimizer_scalar(tol, dtype=dtype)
     floor = jnp.sqrt(_device_scalar(jnp.finfo(dtype).eps, dtype=dtype))
-    gate = jnp.maximum(floor, _device_scalar(10.0, dtype=dtype) * tol_value)
+    return jnp.maximum(
+        floor,
+        _device_scalar(
+            MIXED_DENSE_IR_ACCURACY_POLICY.forward_error_tolerance_multiplier,
+            dtype=dtype,
+        )
+        * tol_value,
+    )
+
+
+def _forward_error_success(residual_rel, condition_estimate, *, tol):
+    dtype = residual_rel.dtype
+    gate = _forward_error_tolerance(tol=tol, dtype=dtype)
     ferr = _forward_error_bound(residual_rel, condition_estimate)
     return jnp.isfinite(ferr) & (ferr <= gate)
 
@@ -4675,6 +5050,18 @@ def _eisenstat_walker_strict_cap_applies(norm, tol_value, *, dtype):
         )
         * tol_value
     )
+
+
+def _mixed_loose_fp32_handoff_applies(norm, tol_value, *, dtype):
+    handoff_floor = jnp.maximum(
+        _device_scalar(
+            _EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR,
+            dtype=dtype,
+        )
+        * tol_value,
+        _device_scalar(jnp.finfo(dtype).eps, dtype=dtype),
+    )
+    return norm <= handoff_floor
 
 
 def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
@@ -4839,6 +5226,17 @@ def _dense_matrix_solve_forward_error_success(
     return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
+def _dense_matrix_solve_small_solution_success(solution, rhs, *, tol):
+    solution = jnp.asarray(solution)
+    rhs = jnp.asarray(rhs)
+    solution_inf_norm = jnp.linalg.norm(solution, ord=np.inf)
+    threshold = _device_scalar(
+        _DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR,
+        dtype=rhs.dtype,
+    ) * _effective_linear_solve_tolerance(rhs, tol)
+    return jnp.all(jnp.isfinite(solution)) & (solution_inf_norm <= threshold)
+
+
 def _dense_matrix_nonsingular_threshold(size, dtype):
     dtype = np.dtype(dtype)
     eps = float(np.finfo(dtype).eps)
@@ -4859,6 +5257,20 @@ def _dense_matrix_condition_estimate_numerically_safe(
     condition_estimate = jnp.asarray(condition_estimate, dtype=dtype)
     threshold = _dense_matrix_nonsingular_threshold(size, dtype)
     return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
+
+
+def _dense_matrix_condition_numerically_safe(
+    condition_estimate,
+    *,
+    size,
+    solve_dtype,
+):
+    """Apply the shared dtype-specific numerical-singularity condition screen."""
+    return _dense_matrix_condition_estimate_numerically_safe(
+        condition_estimate,
+        size=int(size),
+        dtype=np.dtype(solve_dtype),
+    )
 
 
 def _dense_matrix_solve_numerically_safe(
@@ -5223,6 +5635,23 @@ def _dense_square_operator_matrix(
     return jnp.asarray(jnp.swapaxes(columns, 0, 1), dtype=matrix_dtype)
 
 
+def _materialize_dense_ir_proposal_matrix(hvp_fn, x, rhs, *, stab):
+    """Build the policy compute-dtype Newton-chord proposal operator."""
+    proposal_dtype = np.dtype(get_backend_policy().compute_dtype)
+    proposal_x = jnp.asarray(x, dtype=proposal_dtype)
+    proposal_stab = _staged_like(proposal_x, stab, dtype=proposal_dtype)
+
+    def proposal_matvec(vector):
+        return hvp_fn(proposal_x, vector) + proposal_stab * vector
+
+    return _dense_square_operator_matrix(
+        proposal_matvec,
+        rhs,
+        matrix_dtype=proposal_dtype,
+        sweep_dtype=proposal_x.dtype,
+    )
+
+
 def _solve_dense_square_operator_least_squares_system_with_status(
     matvec,
     rhs,
@@ -5240,7 +5669,7 @@ def _solve_dense_square_operator_least_squares_system_with_status(
         residual,
         rhs,
         tol=tol,
-        iterations=_device_int32(0),
+        iterations=_device_int32(0, like=rhs),
     )
     backward_error_success = _dense_matrix_backward_error_success(
         matrix,
@@ -5298,7 +5727,7 @@ def _solve_dense_square_operator_lu_system_with_status(
         residual,
         rhs,
         tol=tol,
-        iterations=_device_int32(0),
+        iterations=_device_int32(0, like=rhs),
     )
     backward_error_success = _dense_matrix_backward_error_success(
         matrix,
@@ -5329,20 +5758,721 @@ def _solve_dense_square_operator_lu_system_with_status(
     )
 
 
-def _solve_dense_ir_system_with_status(matvec, lu_piv, rhs, *, tol):
-    """Refine cached factors against the current live Newton operator."""
+def _run_dense_ir_refinement(
+    matvec: Callable[[jax.Array], jax.Array],
+    lu_piv: tuple[jax.Array, jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    max_refinement_corrections: int = _DENSE_IR_NEWTON_REFINEMENT_STEPS,
+) -> _DenseIrRefinementState:
+    """Adaptively refine cached factors against the live operator.
+
+    The correction budget remains static for JAX compilation, but execution
+    stops as soon as the live FP64 residual certifies, ceases to contract, or
+    reaches the unit-roundoff stagnation floor. A rejected correction is
+    recorded for diagnosis but never replaces the last contracting solution.
+    """
     rhs = jnp.asarray(rhs)
-    solution = jsp_linalg.lu_solve(lu_piv, rhs)
-    for _ in range(_DENSE_IR_NEWTON_REFINEMENT_STEPS):
-        residual = rhs - matvec(solution)
-        solution = solution + jsp_linalg.lu_solve(lu_piv, residual)
-    final_residual = rhs - matvec(solution)
-    return solution, _linear_solve_status_with_relative_tolerance(
+    factor_dtype = jnp.asarray(lu_piv[0]).dtype
+    solution = jnp.asarray(
+        jsp_linalg.lu_solve(lu_piv, jnp.asarray(rhs, dtype=factor_dtype)),
+        dtype=rhs.dtype,
+    )
+    residual = rhs - matvec(solution)
+    status = _linear_solve_status(
         solution,
-        final_residual,
+        residual,
         rhs,
-        tolerance=tol,
-        iterations=_device_int32(_DENSE_IR_NEWTON_REFINEMENT_STEPS),
+        tol=tol,
+        iterations=_device_int32(0, like=rhs),
+    )
+    trace_dtype = rhs.dtype
+    residual_relatives = (
+        jnp.full(
+            (max_refinement_corrections + 1,),
+            jnp.asarray(jnp.nan, dtype=trace_dtype),
+            dtype=trace_dtype,
+        )
+        .at[0]
+        .set(status.residual_relative)
+    )
+    contraction_ratios = jnp.full(
+        (max_refinement_corrections,),
+        jnp.asarray(jnp.nan, dtype=trace_dtype),
+        dtype=trace_dtype,
+    )
+    initial_finite = _linear_solve_finite(solution, residual) & jnp.isfinite(
+        status.residual_relative
+    )
+    initial_state = _DenseIrRefinementState(
+        solution=solution,
+        residual=residual,
+        status=status,
+        telemetry=_DenseIrContractionTelemetry(
+            residual_relatives=residual_relatives,
+            contraction_ratios=contraction_ratios,
+            residual_relative_trace_length=_device_int32(1, like=rhs),
+            contraction_finite=initial_finite,
+            contraction_monotone=jnp.asarray(True, dtype=jnp.bool_),
+            stagnated=jnp.asarray(False, dtype=jnp.bool_),
+        ),
+    )
+    unit_roundoff = jnp.asarray(
+        jnp.finfo(trace_dtype).eps / 2.0,
+        dtype=trace_dtype,
+    )
+
+    def refinement_active(state: _DenseIrRefinementState) -> jax.Array:
+        correction_count = state.telemetry.residual_relative_trace_length - 1
+        return (
+            state.telemetry.contraction_finite
+            & state.telemetry.contraction_monotone
+            & ~state.telemetry.stagnated
+            & ~_linear_solve_effective_tolerance_reached(state.status)
+            & (correction_count < max_refinement_corrections)
+        )
+
+    def refine_once(state: _DenseIrRefinementState) -> _DenseIrRefinementState:
+        correction = jsp_linalg.lu_solve(
+            lu_piv,
+            jnp.asarray(state.residual, dtype=factor_dtype),
+        )
+        candidate_solution = state.solution + jnp.asarray(
+            correction,
+            dtype=rhs.dtype,
+        )
+        candidate_residual = rhs - matvec(candidate_solution)
+        trace_index = state.telemetry.residual_relative_trace_length
+        candidate_status = _linear_solve_status(
+            candidate_solution,
+            candidate_residual,
+            rhs,
+            tol=tol,
+            iterations=trace_index,
+        )
+        previous_relative = state.status.residual_relative
+        candidate_relative = candidate_status.residual_relative
+        ratio = candidate_relative / jnp.maximum(previous_relative, unit_roundoff)
+        candidate_finite = (
+            _linear_solve_finite(candidate_solution, candidate_residual)
+            & jnp.isfinite(candidate_relative)
+            & jnp.isfinite(ratio)
+        )
+        monotone = candidate_relative < previous_relative
+        improvement = previous_relative - candidate_relative
+        stagnation_floor = unit_roundoff * jnp.maximum(
+            previous_relative,
+            jnp.asarray(1.0, dtype=trace_dtype),
+        )
+        stagnated = candidate_finite & monotone & (improvement <= stagnation_floor)
+        accept_candidate = candidate_finite & monotone
+        accepted_solution, accepted_residual, accepted_status = lax.cond(
+            accept_candidate,
+            lambda _: (candidate_solution, candidate_residual, candidate_status),
+            lambda _: (state.solution, state.residual, state.status),
+            operand=None,
+        )
+        ratio_index = trace_index - 1
+        return _DenseIrRefinementState(
+            solution=accepted_solution,
+            residual=accepted_residual,
+            status=accepted_status,
+            telemetry=_DenseIrContractionTelemetry(
+                residual_relatives=state.telemetry.residual_relatives.at[
+                    trace_index
+                ].set(candidate_relative),
+                contraction_ratios=state.telemetry.contraction_ratios.at[
+                    ratio_index
+                ].set(ratio),
+                residual_relative_trace_length=trace_index + 1,
+                contraction_finite=(
+                    state.telemetry.contraction_finite & candidate_finite
+                ),
+                contraction_monotone=(state.telemetry.contraction_monotone & monotone),
+                stagnated=state.telemetry.stagnated | stagnated,
+            ),
+        )
+
+    refined = (
+        initial_state
+        if max_refinement_corrections == 0
+        else lax.while_loop(refinement_active, refine_once, initial_state)
+    )
+    correction_count = refined.telemetry.residual_relative_trace_length - 1
+    return refined._replace(
+        status=refined.status._replace(iterations=correction_count),
+    )
+
+
+def _fixed_dense_ir_history(
+    telemetry: _DenseIrContractionTelemetry,
+    *,
+    source: DenseIrHistorySource,
+) -> _DenseIrHistory:
+    """Pad one dense-IR trace without changing its valid prefix or work budget."""
+    residual_count = int(telemetry.residual_relatives.shape[0])
+    contraction_count = int(telemetry.contraction_ratios.shape[0])
+    if residual_count > DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY:
+        raise ValueError("Dense-IR residual history exceeds its fixed capacity.")
+    if contraction_count > DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY:
+        raise ValueError("Dense-IR contraction history exceeds its fixed capacity.")
+    trace_dtype = telemetry.residual_relatives.dtype
+    residual_relative_trace = (
+        _staged_like(
+            telemetry.residual_relatives,
+            np.full(
+                (DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY,),
+                np.nan,
+                dtype=np.dtype(trace_dtype),
+            ),
+            dtype=trace_dtype,
+        )
+        .at[:residual_count]
+        .set(telemetry.residual_relatives)
+    )
+    contraction_ratio_trace = (
+        _staged_like(
+            telemetry.contraction_ratios,
+            np.full(
+                (DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY,),
+                np.nan,
+                dtype=np.dtype(trace_dtype),
+            ),
+            dtype=trace_dtype,
+        )
+        .at[:contraction_count]
+        .set(telemetry.contraction_ratios)
+    )
+    return _DenseIrHistory(
+        residual_relative_trace=residual_relative_trace,
+        contraction_ratio_trace=contraction_ratio_trace,
+        trace_length=telemetry.residual_relative_trace_length,
+        source_code=_device_int32(
+            source.value,
+            like=telemetry.residual_relatives,
+        ),
+    )
+
+
+def _inactive_dense_ir_history(reference: jax.Array) -> _DenseIrHistory:
+    """Return the fixed-shape marker for a solve that did not use dense IR."""
+    reference = jnp.asarray(reference)
+    trace_dtype = reference.dtype
+    return _DenseIrHistory(
+        residual_relative_trace=_staged_like(
+            reference,
+            np.full(
+                (DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY,),
+                np.nan,
+                dtype=np.dtype(trace_dtype),
+            ),
+            dtype=trace_dtype,
+        ),
+        contraction_ratio_trace=_staged_like(
+            reference,
+            np.full(
+                (DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY,),
+                np.nan,
+                dtype=np.dtype(trace_dtype),
+            ),
+            dtype=trace_dtype,
+        ),
+        trace_length=_device_int32(0, like=reference),
+        source_code=_device_int32(
+            DenseIrHistorySource.NONE.value,
+            like=reference,
+        ),
+    )
+
+
+def _solve_dense_ir_system_with_status(
+    matvec: Callable[[jax.Array], jax.Array],
+    lu_piv: tuple[jax.Array, jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    max_refinement_corrections: int = _DENSE_IR_NEWTON_REFINEMENT_STEPS,
+) -> tuple[jax.Array, _LinearSolveStatus]:
+    """Refine cached factors adaptively against the current live operator."""
+    rhs = jnp.asarray(rhs)
+    refined = _run_dense_ir_refinement(
+        matvec,
+        lu_piv,
+        rhs,
+        tol=tol,
+        max_refinement_corrections=max_refinement_corrections,
+    )
+    return (
+        refined.solution,
+        _terminal_linear_solve_status(refined.status, rhs, tol=tol),
+    )
+
+
+def _mixed_dense_ir_contraction_operator_norm_upper(
+    certificate_matvec: Callable[[jax.Array], jax.Array],
+    certificate_apply_factors: tuple[jax.Array, jax.Array],
+    rhs: jax.Array,
+    *,
+    certificate_probe_key: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Estimate an upper bound for ``||I - B A||_2`` from runtime probes.
+
+    ``A`` is the live FP64 operator and ``B`` applies the widened FP32-origin
+    factors. Under the independent ideal standard Gaussian theorem model,
+    Halko-Martinsson-Tropp Lemma 4.1 gives the separately returned exceptional-
+    probability bound. Execution uses finite Threefry2x32 pseudorandom normals,
+    so that number is not an unconditional PRNG failure probability. The caller
+    supplies a runtime key drawn after freezing ``A``; embedding a fixed seed
+    here would permit a dangerous direction orthogonal to the fixed probe span.
+    No certificate matrix is materialized.
+    """
+    rhs = jnp.asarray(rhs)
+    certificate_dtype = rhs.dtype
+    gaussian_probes = jax.random.normal(
+        certificate_probe_key,
+        shape=(_MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT, int(rhs.shape[0])),
+        dtype=certificate_dtype,
+    )
+
+    def contraction_image(probe: jax.Array) -> jax.Array:
+        live_image = certificate_matvec(probe)
+        preconditioned_live_image = jsp_linalg.lu_solve(
+            certificate_apply_factors,
+            jnp.asarray(live_image, dtype=certificate_dtype),
+        )
+        return probe - preconditioned_live_image
+
+    contraction_images = lax.map(
+        contraction_image,
+        gaussian_probes,
+        batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE,
+    )
+    sampled_norm_max = jnp.max(jnp.linalg.norm(contraction_images, axis=1))
+    alpha = _device_scalar(
+        _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA,
+        dtype=certificate_dtype,
+    )
+    gaussian_scale = jnp.sqrt(_device_scalar(2.0 / np.pi, dtype=certificate_dtype))
+    norm_upper = alpha * gaussian_scale * sampled_norm_max
+    ideal_gaussian_failure_probability_bound = _device_scalar(
+        _MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND,
+        dtype=certificate_dtype,
+    )
+    return norm_upper, ideal_gaussian_failure_probability_bound
+
+
+def _mixed_dense_ir_correction_tail_relative_bound(
+    refined: _DenseIrRefinementState,
+    lu_piv: tuple[jax.Array, jax.Array],
+    rhs: jax.Array,
+    *,
+    contraction_operator_norm_upper: jax.Array,
+) -> jax.Array:
+    """Bound unresolved error relative to the unknown exact solution."""
+    rhs = jnp.asarray(rhs)
+    certificate_dtype = rhs.dtype
+    next_correction = jsp_linalg.lu_solve(
+        lu_piv,
+        jnp.asarray(refined.residual, dtype=certificate_dtype),
+    )
+    next_correction_norm = jnp.linalg.norm(
+        jnp.asarray(next_correction, dtype=certificate_dtype)
+    )
+    tiny = _device_scalar(jnp.finfo(certificate_dtype).tiny, dtype=certificate_dtype)
+    solution_scale = jnp.maximum(jnp.linalg.norm(refined.solution), tiny)
+    contraction_denominator = (
+        _device_scalar(1.0, dtype=certificate_dtype) - contraction_operator_norm_upper
+    )
+    correction_relative_to_candidate = jnp.where(
+        contraction_denominator > _device_scalar(0.0, dtype=certificate_dtype),
+        next_correction_norm / (contraction_denominator * solution_scale),
+        _device_scalar(jnp.inf, dtype=certificate_dtype),
+    )
+    exact_solution_denominator = (
+        _device_scalar(1.0, dtype=certificate_dtype) - correction_relative_to_candidate
+    )
+    return jnp.where(
+        exact_solution_denominator > _device_scalar(0.0, dtype=certificate_dtype),
+        correction_relative_to_candidate / exact_solution_denominator,
+        _device_scalar(jnp.inf, dtype=certificate_dtype),
+    )
+
+
+def _solve_fp64_dense_ir_rebuild_with_telemetry(
+    certificate_matvec: Callable[[jax.Array], jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    certificate_sweep_dtype: DTypeLike,
+) -> tuple[jax.Array, _LinearSolveStatus, _MixedDenseIrFallbackTelemetry]:
+    """Factor one live FP64 operator and refine it to both tolerance gates."""
+    rhs = jnp.asarray(rhs)
+    certificate_dtype = np.dtype(rhs.dtype)
+    certificate_matrix = _dense_square_operator_matrix(
+        certificate_matvec,
+        rhs,
+        matrix_dtype=certificate_dtype,
+        sweep_dtype=certificate_sweep_dtype,
+    )
+    certificate_lu_piv = jsp_linalg.lu_factor(certificate_matrix)
+    refined = _run_dense_ir_refinement(
+        certificate_matvec,
+        certificate_lu_piv,
+        rhs,
+        tol=tol,
+        max_refinement_corrections=MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    )
+    backward_error_success = _dense_matrix_backward_error_success(
+        certificate_matrix,
+        refined.solution,
+        rhs,
+        tol=tol,
+    )
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        certificate_matrix,
+        refined.solution,
+        rhs,
+        tol=tol,
+        lu_piv=certificate_lu_piv,
+        solve_dtype=certificate_dtype,
+    )
+    small_solution_success = _dense_matrix_solve_small_solution_success(
+        refined.solution,
+        rhs,
+        tol=tol,
+    )
+    guarded_status = refined.status._replace(
+        success=(
+            ((refined.status.success | backward_error_success) & solve_safe)
+            | (refined.status.success & small_solution_success)
+        )
+    )
+    terminal_status = _terminal_linear_solve_status(guarded_status, rhs, tol=tol)
+    certificate_bits = _device_int32(
+        certificate_dtype.itemsize * 8,
+        like=rhs,
+    )
+    fallback = _MixedDenseIrFallbackTelemetry(
+        attempted=jnp.asarray(True, dtype=jnp.bool_),
+        success=terminal_status.success,
+        status=terminal_status._replace(residual=refined.residual),
+        factorization_dtype_bits=certificate_bits,
+        factor_application_dtype_bits=certificate_bits,
+        residual_dtype_bits=certificate_bits,
+        refinement=refined.telemetry,
+    )
+    return refined.solution, terminal_status, fallback
+
+
+def _solve_mixed_dense_ir_operator_with_telemetry(
+    proposal_matvec: Callable[[jax.Array], jax.Array],
+    certificate_matvec: Callable[[jax.Array], jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    proposal_dtype: DTypeLike,
+    certificate_sweep_dtype: DTypeLike,
+    certificate_probe_key: jax.Array,
+) -> tuple[jax.Array, _LinearSolveStatus, _MixedDenseIrTrustTelemetry]:
+    """Solve with FP32-origin factors and certify the live FP64 operator.
+
+    The proposal operator is materialized and factorized at ``proposal_dtype``.
+    Its packed LU values are then widened exactly to the RHS dtype so triangular
+    application, solution accumulation, and every residual calculation run at
+    certificate precision.  Adaptive refinement always evaluates residuals
+    through ``certificate_matvec``. Acceptance requires a probabilistic global
+    contraction certificate for ``I - B A`` and the resulting correction-tail
+    forward-error bound at the established FP64 tolerance. If either gate fails,
+    one unchanged certificate-dtype dense least-squares solve is the sole fallback.
+
+    This is the standard five-precision separation used by the no-factor dense
+    Hessian consumers: factor construction may be low precision, while factor
+    application, working updates, residuals, and the acceptance certificate stay
+    at runtime precision.  It deliberately does not cast a low-precision matrix
+    back to FP64 and call that a certificate operator.
+    """
+    rhs = jnp.asarray(rhs)
+    proposal_dtype = np.dtype(proposal_dtype)
+    certificate_dtype = np.dtype(rhs.dtype)
+    certificate_sweep_dtype = np.dtype(certificate_sweep_dtype)
+    if proposal_dtype != np.dtype(np.float32):
+        raise ValueError("Mixed dense IR requires FP32 proposal factorization.")
+    if certificate_dtype != np.dtype(np.float64):
+        raise ValueError("Mixed dense IR requires an FP64 certificate RHS.")
+    if certificate_sweep_dtype != certificate_dtype:
+        raise ValueError("Mixed dense IR requires FP64 certificate HVP sweeps.")
+
+    proposal_matrix = _dense_square_operator_matrix(
+        proposal_matvec,
+        rhs,
+        matrix_dtype=proposal_dtype,
+        sweep_dtype=proposal_dtype,
+    )
+    proposal_lu, proposal_piv = jsp_linalg.lu_factor(proposal_matrix)
+    certificate_apply_factors = (
+        jnp.asarray(proposal_lu, dtype=certificate_dtype),
+        proposal_piv,
+    )
+    return _certify_mixed_dense_ir_factors_with_telemetry(
+        certificate_matvec,
+        certificate_apply_factors,
+        rhs,
+        tol=tol,
+        proposal_factorization_dtype=proposal_dtype,
+        certificate_sweep_dtype=certificate_sweep_dtype,
+        certificate_probe_key=certificate_probe_key,
+    )
+
+
+def _certify_mixed_dense_ir_factors_with_telemetry(
+    certificate_matvec: Callable[[jax.Array], jax.Array],
+    certificate_apply_factors: tuple[jax.Array, jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    proposal_factorization_dtype: DTypeLike,
+    certificate_sweep_dtype: DTypeLike,
+    certificate_probe_key: jax.Array,
+) -> tuple[jax.Array, _LinearSolveStatus, _MixedDenseIrTrustTelemetry]:
+    """Certify one frozen FP32-origin factor tuple against a live FP64 operator.
+
+    Factor construction stays outside this seam. The same widened factors feed
+    refinement, HMT contraction probes, the correction-tail gate, and the
+    optional single FP64 rebuild, making this the production SSOT for both the
+    solver and same-factor certificate attribution.
+    """
+    rhs = jnp.asarray(rhs)
+    proposal_factorization_dtype = np.dtype(proposal_factorization_dtype)
+    certificate_dtype = np.dtype(rhs.dtype)
+    certificate_sweep_dtype = np.dtype(certificate_sweep_dtype)
+    factor_application_dtype = np.dtype(jnp.asarray(certificate_apply_factors[0]).dtype)
+    if proposal_factorization_dtype != np.dtype(np.float32):
+        raise ValueError("Mixed dense IR requires FP32 proposal factorization.")
+    if certificate_dtype != np.dtype(np.float64):
+        raise ValueError("Mixed dense IR requires an FP64 certificate RHS.")
+    if certificate_sweep_dtype != certificate_dtype:
+        raise ValueError("Mixed dense IR requires FP64 certificate HVP sweeps.")
+    if factor_application_dtype != certificate_dtype:
+        raise ValueError(
+            "Mixed dense IR requires widened factors at certificate precision."
+        )
+
+    refined = _run_dense_ir_refinement(
+        certificate_matvec,
+        certificate_apply_factors,
+        rhs,
+        tol=tol,
+        max_refinement_corrections=MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    )
+    certified_proposal_status = _terminal_linear_solve_status(
+        refined.status,
+        rhs,
+        tol=tol,
+    )
+    contraction_operator_norm_upper_limit = _device_scalar(
+        _MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT,
+        dtype=certificate_dtype,
+    )
+    forward_error_tolerance = _forward_error_tolerance(
+        tol=tol,
+        dtype=certificate_dtype,
+    )
+
+    def run_forward_error_certificate(_: None):
+        (
+            contraction_operator_norm_upper,
+            contraction_ideal_gaussian_failure_probability_bound,
+        ) = _mixed_dense_ir_contraction_operator_norm_upper(
+            certificate_matvec,
+            certificate_apply_factors,
+            rhs,
+            certificate_probe_key=certificate_probe_key,
+        )
+        correction_tail_relative_bound = _mixed_dense_ir_correction_tail_relative_bound(
+            refined,
+            certificate_apply_factors,
+            rhs,
+            contraction_operator_norm_upper=(contraction_operator_norm_upper),
+        )
+        contraction_certificate_safe = (
+            refined.telemetry.contraction_finite
+            & refined.telemetry.contraction_monotone
+            & ~refined.telemetry.stagnated
+            & jnp.isfinite(contraction_operator_norm_upper)
+            & (contraction_operator_norm_upper <= contraction_operator_norm_upper_limit)
+            & jnp.isfinite(correction_tail_relative_bound)
+            & (correction_tail_relative_bound <= forward_error_tolerance)
+        )
+        return (
+            contraction_operator_norm_upper,
+            contraction_ideal_gaussian_failure_probability_bound,
+            correction_tail_relative_bound,
+            contraction_certificate_safe,
+        )
+
+    def skip_forward_error_certificate(_: None):
+        nan = _device_scalar(np.nan, dtype=certificate_dtype)
+        return nan, nan, nan, jnp.asarray(False, dtype=jnp.bool_)
+
+    forward_error_certificate_active = certified_proposal_status.success
+    (
+        contraction_operator_norm_upper,
+        contraction_ideal_gaussian_failure_probability_bound,
+        correction_tail_relative_bound,
+        contraction_certificate_safe,
+    ) = lax.cond(
+        forward_error_certificate_active,
+        run_forward_error_certificate,
+        skip_forward_error_certificate,
+        operand=None,
+    )
+    proposal_trusted = contraction_certificate_safe & certified_proposal_status.success
+    certified_proposal_status = certified_proposal_status._replace(
+        success=proposal_trusted
+    )
+
+    def keep_certified_proposal(
+        _: None,
+    ) -> tuple[
+        jax.Array,
+        _LinearSolveStatus,
+        _MixedDenseIrFallbackTelemetry,
+    ]:
+        return (
+            refined.solution,
+            certified_proposal_status,
+            _inactive_mixed_dense_ir_fallback_telemetry(rhs),
+        )
+
+    def rebuild_certificate(
+        _: None,
+    ) -> tuple[
+        jax.Array,
+        _LinearSolveStatus,
+        _MixedDenseIrFallbackTelemetry,
+    ]:
+        return _solve_fp64_dense_ir_rebuild_with_telemetry(
+            certificate_matvec,
+            rhs,
+            tol=tol,
+            certificate_sweep_dtype=certificate_sweep_dtype,
+        )
+
+    solution, status, fallback = lax.cond(
+        proposal_trusted,
+        keep_certified_proposal,
+        rebuild_certificate,
+        operand=None,
+    )
+    telemetry = _MixedDenseIrTrustTelemetry(
+        active=jnp.asarray(True, dtype=jnp.bool_),
+        certificate_probe_key_data=jax.random.key_data(certificate_probe_key),
+        contraction_probe_count=lax.select(
+            forward_error_certificate_active,
+            _device_int32(
+                _MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT,
+                like=rhs,
+            ),
+            _device_int32(0, like=rhs),
+        ),
+        contraction_probe_alpha=lax.select(
+            forward_error_certificate_active,
+            _device_scalar(
+                _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA,
+                dtype=certificate_dtype,
+            ),
+            _device_scalar(np.nan, dtype=certificate_dtype),
+        ),
+        contraction_operator_norm_upper=contraction_operator_norm_upper,
+        contraction_operator_norm_upper_limit=lax.select(
+            forward_error_certificate_active,
+            contraction_operator_norm_upper_limit,
+            _device_scalar(np.nan, dtype=certificate_dtype),
+        ),
+        contraction_ideal_gaussian_failure_probability_bound=(
+            contraction_ideal_gaussian_failure_probability_bound
+        ),
+        correction_tail_relative_bound=correction_tail_relative_bound,
+        forward_error_tolerance=lax.select(
+            forward_error_certificate_active,
+            forward_error_tolerance,
+            _device_scalar(np.nan, dtype=certificate_dtype),
+        ),
+        proposal_factorization_dtype_bits=_device_int32(
+            proposal_factorization_dtype.itemsize * 8,
+            like=rhs,
+        ),
+        factor_application_dtype_bits=_device_int32(
+            factor_application_dtype.itemsize * 8,
+            like=rhs,
+        ),
+        residual_dtype_bits=_device_int32(
+            np.dtype(certificate_dtype).itemsize * 8,
+            like=rhs,
+        ),
+        certificate_sweep_dtype_bits=_device_int32(
+            np.dtype(certificate_sweep_dtype).itemsize * 8,
+            like=rhs,
+        ),
+        refinement=refined.telemetry,
+        proposal_trusted=proposal_trusted,
+        fp64_rebuild_count=fallback.attempted.astype(jnp.int32),
+        fallback=fallback,
+    )
+    return solution, status, telemetry
+
+
+def _solve_mixed_dense_ir_operator_with_status(
+    proposal_matvec: Callable[[jax.Array], jax.Array],
+    certificate_matvec: Callable[[jax.Array], jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    proposal_dtype: DTypeLike,
+    certificate_sweep_dtype: DTypeLike,
+    certificate_probe_key: jax.Array,
+) -> tuple[jax.Array, _MixedDenseIrSolveStatus]:
+    """Return the mixed dense-IR solution/status while retaining one SSOT."""
+    solution, status, telemetry = _solve_mixed_dense_ir_operator_with_telemetry(
+        proposal_matvec,
+        certificate_matvec,
+        rhs,
+        tol=tol,
+        proposal_dtype=proposal_dtype,
+        certificate_sweep_dtype=certificate_sweep_dtype,
+        certificate_probe_key=certificate_probe_key,
+    )
+    return solution, _MixedDenseIrSolveStatus(
+        success=status.success,
+        residual=status.residual,
+        residual_relative=status.residual_relative,
+        iterations=status.iterations,
+        trust=telemetry,
+    )
+
+
+def _solve_dense_ir_system_with_contraction_telemetry(
+    matvec: Callable[[jax.Array], jax.Array],
+    lu_piv: tuple[jax.Array, jax.Array],
+    rhs: jax.Array,
+    *,
+    tol: float | jax.Array,
+    max_refinement_corrections: int = _DENSE_IR_NEWTON_REFINEMENT_STEPS,
+) -> tuple[jax.Array, _LinearSolveStatus, _DenseIrContractionTelemetry]:
+    """Run adaptive dense IR and retain every attempted live residual ratio."""
+    rhs = jnp.asarray(rhs)
+    refined = _run_dense_ir_refinement(
+        matvec,
+        lu_piv,
+        rhs,
+        tol=tol,
+        max_refinement_corrections=max_refinement_corrections,
+    )
+    return (
+        refined.solution,
+        _terminal_linear_solve_status(refined.status, rhs, tol=tol),
+        refined.telemetry,
     )
 
 
@@ -5445,7 +6575,7 @@ def _hessian_linear_operator(objective_fn, x, *, stab=0.0):
     )
     dtype = first_leaf.dtype
     decision_size = int(np.asarray(jnp.asarray(x).size))
-    stab_value = _optimizer_scalar(stab, dtype=dtype)
+    stab_value = _staged_like(x, stab, dtype=dtype)
 
     def matvec_column(v):
         return hvp_fn(x, v) + stab_value * v
@@ -5958,6 +7088,1152 @@ def newton_polish(
         "final_step_dense_refinement_ran": bool(final_step_dense_refinement_ran),
         "hessian_materialized": materialize_hessian,
         **dense_report,
+    }
+
+
+def _bounded_dense_ir_newton_attempt(
+    *,
+    certificate_val_and_grad_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    certificate_hvp_fn: Callable[[jax.Array, jax.Array], jax.Array],
+    factor_hvp_fn: Callable[[jax.Array, jax.Array], jax.Array],
+    x: jax.Array,
+    value: jax.Array,
+    gradient: jax.Array,
+    gradient_norm: jax.Array,
+    linear_tol: float | jax.Array,
+    stab: float | jax.Array,
+    proposal: bool,
+    max_refinement_corrections: int = _DENSE_IR_NEWTON_REFINEMENT_STEPS,
+) -> dict[str, jax.Array]:
+    """Take one live-certified dense-IR direction without low-precision apply.
+
+    Proposal matrices may be factorized in FP32, but packed factor values are
+    widened before triangular application, refinement updates, and live-operator
+    residuals. The incumbent is retained when the certified direction or FP64
+    candidate evaluation fails.
+    """
+    dtype = jnp.asarray(x).dtype
+    stab_value = _optimizer_scalar(stab, dtype=dtype)
+
+    def live_matvec(vector: jax.Array) -> jax.Array:
+        return certificate_hvp_fn(x, vector) + stab_value * vector
+
+    matrix = (
+        _materialize_dense_ir_proposal_matrix(
+            factor_hvp_fn,
+            x,
+            gradient,
+            stab=stab,
+        )
+        if proposal
+        else _dense_square_operator_matrix(
+            live_matvec,
+            gradient,
+            matrix_dtype=dtype,
+            sweep_dtype=dtype,
+        )
+    )
+    factorization_lu, factorization_piv = jsp_linalg.lu_factor(matrix)
+    application_lu_piv = (
+        jnp.asarray(factorization_lu, dtype=dtype),
+        factorization_piv,
+    )
+    (
+        direction,
+        linear_status,
+        refinement_telemetry,
+    ) = _solve_dense_ir_system_with_contraction_telemetry(
+        live_matvec,
+        application_lu_piv,
+        gradient,
+        tol=linear_tol,
+        max_refinement_corrections=max_refinement_corrections,
+    )
+    ir_history = _fixed_dense_ir_history(
+        refinement_telemetry,
+        source=(
+            DenseIrHistorySource.FP32_PROPOSAL_FACTORS
+            if proposal
+            else DenseIrHistorySource.FP64_CERTIFICATE_FACTORS
+        ),
+    )
+    direction_finite = jnp.all(jnp.isfinite(direction))
+
+    def run_backtracking(_: None) -> dict[str, jax.Array]:
+        return _backtracking_value_grad_step(
+            certificate_val_and_grad_fn,
+            x,
+            direction,
+            value,
+            gradient,
+            gradient_norm,
+        )
+
+    def reject_without_backtracking(_: None) -> dict[str, jax.Array]:
+        return {
+            "iteration": _device_int32(0, like=x),
+            "alpha": _staged_like(x, 0.0, dtype=dtype),
+            "x": x,
+            "val": value,
+            "grad": gradient,
+            "norm": gradient_norm,
+            "accepted": jnp.asarray(False, dtype=jnp.bool_),
+        }
+
+    candidate = lax.cond(
+        linear_status.success & direction_finite,
+        run_backtracking,
+        reject_without_backtracking,
+        operand=None,
+    )
+    accepted = linear_status.success & direction_finite & candidate["accepted"]
+    accepted_alpha = lax.select(
+        accepted,
+        candidate["alpha"] * _staged_like(x, 2.0, dtype=dtype),
+        _staged_like(x, 0.0, dtype=dtype),
+    )
+    return {
+        "x": lax.select(accepted, candidate["x"], x),
+        "value": lax.select(accepted, candidate["val"], value),
+        "gradient": lax.select(accepted, candidate["grad"], gradient),
+        "gradient_norm": lax.select(
+            accepted,
+            candidate["norm"],
+            gradient_norm,
+        ),
+        "attempted": jnp.asarray(True, dtype=jnp.bool_),
+        "accepted": accepted,
+        "direction_norm": jnp.linalg.norm(direction),
+        "direction_finite": direction_finite,
+        "linear_success": linear_status.success,
+        "linear_iterations": linear_status.iterations,
+        "linear_ir_correction_count": linear_status.iterations,
+        "linear_ir_residual_relative_trace": ir_history.residual_relative_trace,
+        "linear_ir_contraction_ratio_trace": ir_history.contraction_ratio_trace,
+        "linear_ir_trace_length": ir_history.trace_length,
+        "linear_ir_history_source_code": ir_history.source_code,
+        "linear_residual_norm": linear_status.residual,
+        "linear_residual_scale": linear_status.residual_scale,
+        "linear_residual_relative": linear_status.residual_relative,
+        "linear_requested_tolerance": linear_status.requested_tolerance,
+        "linear_effective_tolerance": linear_status.effective_tolerance,
+        # Compatibility alias retained for readers of the historical flat
+        # result. Its value has always been the requested Eisenstat-Walker input.
+        "linear_tolerance": _staged_like(x, linear_tol, dtype=dtype),
+        "live_operator_certificate": jnp.asarray(True, dtype=jnp.bool_),
+        "backtracking_iterations": candidate["iteration"],
+        "accepted_alpha": accepted_alpha,
+        "factorization_dtype_bits": _device_int32(
+            np.dtype(matrix.dtype).itemsize * 8,
+            like=x,
+        ),
+        "factor_application_dtype_bits": _device_int32(
+            np.dtype(application_lu_piv[0].dtype).itemsize * 8,
+            like=x,
+        ),
+        "residual_dtype_bits": _device_int32(
+            np.dtype(linear_status.residual.dtype).itemsize * 8,
+            like=x,
+        ),
+        "certificate_value_dtype_bits": _device_int32(
+            np.dtype(candidate["val"].dtype).itemsize * 8,
+            like=x,
+        ),
+        "certificate_gradient_dtype_bits": _device_int32(
+            np.dtype(candidate["grad"].dtype).itemsize * 8,
+            like=x,
+        ),
+    }
+
+
+def _inactive_bounded_newton_attempt(
+    x: jax.Array,
+    value: jax.Array,
+    gradient: jax.Array,
+    gradient_norm: jax.Array,
+) -> dict[str, jax.Array]:
+    dtype = jnp.asarray(x).dtype
+    ir_history = _inactive_dense_ir_history(x)
+    return {
+        "x": x,
+        "value": value,
+        "gradient": gradient,
+        "gradient_norm": gradient_norm,
+        "attempted": jnp.asarray(False, dtype=jnp.bool_),
+        "accepted": jnp.asarray(False, dtype=jnp.bool_),
+        "direction_norm": _staged_like(x, np.nan, dtype=dtype),
+        "direction_finite": jnp.asarray(False, dtype=jnp.bool_),
+        "linear_success": jnp.asarray(False, dtype=jnp.bool_),
+        "linear_iterations": _device_int32(
+            _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+            like=x,
+        ),
+        "linear_ir_correction_count": _device_int32(
+            _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+            like=x,
+        ),
+        "linear_ir_residual_relative_trace": ir_history.residual_relative_trace,
+        "linear_ir_contraction_ratio_trace": ir_history.contraction_ratio_trace,
+        "linear_ir_trace_length": ir_history.trace_length,
+        "linear_ir_history_source_code": ir_history.source_code,
+        "linear_residual_norm": _staged_like(x, np.nan, dtype=dtype),
+        "linear_residual_scale": _staged_like(x, np.nan, dtype=dtype),
+        "linear_residual_relative": _staged_like(x, np.nan, dtype=dtype),
+        "linear_requested_tolerance": _staged_like(x, np.nan, dtype=dtype),
+        "linear_effective_tolerance": _staged_like(x, np.nan, dtype=dtype),
+        "linear_tolerance": _staged_like(x, np.nan, dtype=dtype),
+        "live_operator_certificate": jnp.asarray(False, dtype=jnp.bool_),
+        "backtracking_iterations": _device_int32(
+            _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+            like=x,
+        ),
+        "accepted_alpha": _staged_like(x, np.nan, dtype=dtype),
+        "factorization_dtype_bits": _device_int32(0, like=x),
+        "factor_application_dtype_bits": _device_int32(0, like=x),
+        "residual_dtype_bits": _device_int32(0, like=x),
+        "certificate_value_dtype_bits": _device_int32(0, like=x),
+        "certificate_gradient_dtype_bits": _device_int32(0, like=x),
+    }
+
+
+def _bounded_newton_attempt_trace(
+    attempts: tuple[dict[str, jax.Array], ...],
+    *,
+    fp64_refactor_retry: tuple[jax.Array, ...],
+) -> _BoundedNewtonAttemptTrace:
+    """Stack one ordered attempt sequence without changing its semantics."""
+    if len(attempts) != len(fp64_refactor_retry):
+        raise ValueError("Bounded Newton attempt and retry trace lengths differ")
+    linear_success = jnp.stack([attempt["linear_success"] for attempt in attempts])
+    step_finite = jnp.stack([attempt["direction_finite"] for attempt in attempts])
+    return _BoundedNewtonAttemptTrace(
+        active=jnp.stack([attempt["attempted"] for attempt in attempts]),
+        accepted=jnp.stack([attempt["accepted"] for attempt in attempts]),
+        linear_success=linear_success,
+        linear_iterations=jnp.stack(
+            [attempt["linear_iterations"] for attempt in attempts]
+        ),
+        linear_ir_correction_count=jnp.stack(
+            [attempt["linear_ir_correction_count"] for attempt in attempts]
+        ),
+        linear_ir_residual_relative=jnp.stack(
+            [attempt["linear_ir_residual_relative_trace"] for attempt in attempts]
+        ),
+        linear_ir_contraction_ratio=jnp.stack(
+            [attempt["linear_ir_contraction_ratio_trace"] for attempt in attempts]
+        ),
+        linear_ir_length=jnp.stack(
+            [attempt["linear_ir_trace_length"] for attempt in attempts]
+        ),
+        linear_ir_source_code=jnp.stack(
+            [attempt["linear_ir_history_source_code"] for attempt in attempts]
+        ),
+        linear_residual=jnp.stack(
+            [attempt["linear_residual_relative"] for attempt in attempts]
+        ),
+        linear_residual_norm=jnp.stack(
+            [attempt["linear_residual_norm"] for attempt in attempts]
+        ),
+        linear_residual_scale=jnp.stack(
+            [attempt["linear_residual_scale"] for attempt in attempts]
+        ),
+        linear_requested_tolerance=jnp.stack(
+            [attempt["linear_requested_tolerance"] for attempt in attempts]
+        ),
+        linear_effective_tolerance=jnp.stack(
+            [attempt["linear_effective_tolerance"] for attempt in attempts]
+        ),
+        live_operator_certificate=jnp.stack(
+            [attempt["live_operator_certificate"] for attempt in attempts]
+        ),
+        factorization_dtype_bits=jnp.stack(
+            [attempt["factorization_dtype_bits"] for attempt in attempts]
+        ),
+        factor_application_dtype_bits=jnp.stack(
+            [attempt["factor_application_dtype_bits"] for attempt in attempts]
+        ),
+        residual_dtype_bits=jnp.stack(
+            [attempt["residual_dtype_bits"] for attempt in attempts]
+        ),
+        certificate_value_dtype_bits=jnp.stack(
+            [attempt["certificate_value_dtype_bits"] for attempt in attempts]
+        ),
+        certificate_gradient_dtype_bits=jnp.stack(
+            [attempt["certificate_gradient_dtype_bits"] for attempt in attempts]
+        ),
+        step_norm=jnp.stack([attempt["direction_norm"] for attempt in attempts]),
+        step_finite=step_finite,
+        backtracking_attempted=linear_success & step_finite,
+        backtracking_iterations=jnp.stack(
+            [attempt["backtracking_iterations"] for attempt in attempts]
+        ),
+        accepted_alpha=jnp.stack([attempt["accepted_alpha"] for attempt in attempts]),
+        fp64_refactor_retry=jnp.stack(fp64_refactor_retry),
+    )
+
+
+def _bounded_newton_certificate_attempt_required(
+    certificate_gradient_norm: jax.Array,
+    tolerance: jax.Array,
+) -> jax.Array:
+    """Return whether the certified incumbent requires the second attempt."""
+    return certificate_gradient_norm > tolerance
+
+
+def _bounded_mixed_certificate_attempt(
+    *,
+    certificate_val_and_grad_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    certificate_hvp_fn: Callable[[jax.Array, jax.Array], jax.Array],
+    proposal_hvp_fn: Callable[[jax.Array, jax.Array], jax.Array],
+    x: jax.Array,
+    value: jax.Array,
+    gradient: jax.Array,
+    gradient_norm: jax.Array,
+    linear_tol: float | jax.Array,
+    stab: float | jax.Array,
+) -> _BoundedMixedCertificateAttempts:
+    """Try FP32 factors against the FP64 operator, then one FP64 refactor."""
+    proposal_factor_attempt = _bounded_dense_ir_newton_attempt(
+        certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+        certificate_hvp_fn=certificate_hvp_fn,
+        factor_hvp_fn=proposal_hvp_fn,
+        x=x,
+        value=value,
+        gradient=gradient,
+        gradient_norm=gradient_norm,
+        linear_tol=linear_tol,
+        stab=stab,
+        proposal=True,
+        max_refinement_corrections=MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
+    )
+    fp64_refactor_retry = ~proposal_factor_attempt["accepted"]
+
+    def run_fp64_refactor(_: None) -> dict[str, jax.Array]:
+        attempt = _bounded_fp64_certificate_attempt(
+            certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+            certificate_hvp_fn=certificate_hvp_fn,
+            x=x,
+            value=value,
+            gradient=gradient,
+            gradient_norm=gradient_norm,
+            linear_tol=linear_tol,
+            stab=stab,
+        )
+        return {
+            **attempt,
+            "linear_ir_history_source_code": _device_int32(
+                DenseIrHistorySource.FP64_REFACTOR_RETRY.value,
+                like=x,
+            ),
+        }
+
+    def skip_fp64_refactor(_: None) -> dict[str, jax.Array]:
+        return _inactive_bounded_newton_attempt(
+            x,
+            value,
+            gradient,
+            gradient_norm,
+        )
+
+    fp64_factor_attempt = lax.cond(
+        fp64_refactor_retry,
+        run_fp64_refactor,
+        skip_fp64_refactor,
+        operand=None,
+    )
+    selected_attempt = {
+        key: lax.select(
+            fp64_refactor_retry,
+            fp64_factor_attempt[key],
+            proposal_factor_attempt[key],
+        )
+        for key in proposal_factor_attempt
+    }
+    factorization_dtype_bits = jnp.stack(
+        (
+            proposal_factor_attempt["factorization_dtype_bits"],
+            fp64_factor_attempt["factorization_dtype_bits"],
+        )
+    )
+    factorization_count = proposal_factor_attempt["attempted"].astype(
+        jnp.int32
+    ) + fp64_factor_attempt["attempted"].astype(jnp.int32)
+    return _BoundedMixedCertificateAttempts(
+        selected=selected_attempt,
+        primary=proposal_factor_attempt,
+        retry=fp64_factor_attempt,
+        fp64_refactor_retry=fp64_refactor_retry,
+        factorization_dtype_bits=factorization_dtype_bits,
+        factorization_count=factorization_count,
+    )
+
+
+def _bounded_fp64_certificate_attempt(
+    *,
+    certificate_val_and_grad_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    certificate_hvp_fn: Callable[[jax.Array, jax.Array], jax.Array],
+    x: jax.Array,
+    value: jax.Array,
+    gradient: jax.Array,
+    gradient_norm: jax.Array,
+    linear_tol: float | jax.Array,
+    stab: float | jax.Array,
+) -> dict[str, jax.Array]:
+    """Take one canonical FP64-factor certificate attempt."""
+    return _bounded_dense_ir_newton_attempt(
+        certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+        certificate_hvp_fn=certificate_hvp_fn,
+        factor_hvp_fn=certificate_hvp_fn,
+        x=x,
+        value=value,
+        gradient=gradient,
+        gradient_norm=gradient_norm,
+        linear_tol=linear_tol,
+        stab=stab,
+        proposal=False,
+    )
+
+
+def bounded_mixed_newton_polish_traceable(
+    objective_fn: _ArrayObjectiveWithArgs,
+    x0: jax.Array,
+    *,
+    tol: float | jax.Array = 1e-11,
+    stab: float | jax.Array = 0.0,
+    args: tuple[object, ...] = (),
+    materialize_hessian: bool = False,
+    max_dense_hessian_bytes: int | None = None,
+) -> dict[str, object]:
+    """Run the V5 stage-local Newton composition with at most two attempts.
+
+    Mixed mode takes one FP32 dense-IR proposal from the FP64 incumbent. After
+    an accepted step, its second logical attempt uses fresh FP32 factors at the
+    new state, with exactly one FP64 refactor retry after rejection. A rejected
+    first proposal goes directly to the FP64 certificate attempt at the same
+    state instead of rebuilding identical FP32 factors. Pure FP64 takes only
+    the canonical FP64 attempt. This bounded composition does not call the
+    general runner; both use the shared Armijo-aware candidate acceptance policy.
+    """
+    policy = get_backend_policy()
+    compute_dtype = np.dtype(policy.compute_dtype)
+    certificate_dtype = np.dtype(policy.runtime_dtype)
+    if certificate_dtype != np.dtype(np.float64):
+        raise RuntimeError("bounded V5 Newton requires an FP64 runtime certificate")
+
+    x_initial = jnp.asarray(x0, dtype=certificate_dtype)
+    if not _dense_square_operator_lu_materialization_allowed(x_initial):
+        raise RuntimeError("bounded V5 Newton requires an allowed dense LU operator")
+    normalized_args = _normalize_solver_args(args)
+    certificate_args = _cast_floating_tree(normalized_args, certificate_dtype)
+
+    def certificate_objective(x: jax.Array) -> jax.Array:
+        return objective_fn(x, *certificate_args)
+
+    certificate_val_and_grad_fn = jax.value_and_grad(certificate_objective)
+    certificate_grad_fn = jax.grad(certificate_objective)
+
+    def certificate_hvp_fn(x: jax.Array, vector: jax.Array) -> jax.Array:
+        return jax.jvp(certificate_grad_fn, (x,), (vector,))[1]
+
+    value_initial, gradient_initial = certificate_val_and_grad_fn(x_initial)
+    gradient_norm_initial = jnp.linalg.norm(gradient_initial)
+    tol_value = _staged_like(x_initial, tol, dtype=certificate_dtype)
+    mixed_proposal_enabled = compute_dtype == np.dtype(
+        np.float32
+    ) and certificate_dtype == np.dtype(np.float64)
+
+    if mixed_proposal_enabled:
+        proposal_args = _cast_floating_tree(normalized_args, compute_dtype)
+
+        def proposal_objective(x: jax.Array) -> jax.Array:
+            return objective_fn(x, *proposal_args)
+
+        proposal_grad_fn = jax.grad(proposal_objective)
+
+        def proposal_hvp_fn(x: jax.Array, vector: jax.Array) -> jax.Array:
+            return jax.jvp(proposal_grad_fn, (x,), (vector,))[1]
+
+        proposal_linear_tol = _eisenstat_walker_choice2_tolerance(
+            gradient_norm_initial,
+            gradient_norm_initial,
+            tol=tol_value,
+        )
+
+        def run_initial_proposal(_: None) -> dict[str, jax.Array]:
+            return _bounded_dense_ir_newton_attempt(
+                certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+                certificate_hvp_fn=certificate_hvp_fn,
+                factor_hvp_fn=proposal_hvp_fn,
+                x=x_initial,
+                value=value_initial,
+                gradient=gradient_initial,
+                gradient_norm=gradient_norm_initial,
+                linear_tol=proposal_linear_tol,
+                stab=stab,
+                proposal=True,
+            )
+
+        def skip_initial_proposal(_: None) -> dict[str, jax.Array]:
+            return _inactive_bounded_newton_attempt(
+                x_initial,
+                value_initial,
+                gradient_initial,
+                gradient_norm_initial,
+            )
+
+        proposal_attempt = lax.cond(
+            gradient_norm_initial > tol_value,
+            run_initial_proposal,
+            skip_initial_proposal,
+            operand=None,
+        )
+        certificate_x = proposal_attempt["x"]
+        certificate_value = proposal_attempt["value"]
+        certificate_gradient = proposal_attempt["gradient"]
+        certificate_gradient_norm = proposal_attempt["gradient_norm"]
+    else:
+        proposal_attempt = _inactive_bounded_newton_attempt(
+            x_initial,
+            value_initial,
+            gradient_initial,
+            gradient_norm_initial,
+        )
+        certificate_x = x_initial
+        certificate_value = value_initial
+        certificate_gradient = gradient_initial
+        certificate_gradient_norm = gradient_norm_initial
+
+    certificate_linear_tol = _eisenstat_walker_choice2_tolerance(
+        certificate_gradient_norm,
+        gradient_norm_initial,
+        tol=tol_value,
+    )
+    if mixed_proposal_enabled:
+
+        def direct_fp64_certificate_attempt(
+            _: None,
+        ) -> _BoundedMixedCertificateAttempts:
+            attempt = _bounded_fp64_certificate_attempt(
+                certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+                certificate_hvp_fn=certificate_hvp_fn,
+                x=certificate_x,
+                value=certificate_value,
+                gradient=certificate_gradient,
+                gradient_norm=certificate_gradient_norm,
+                linear_tol=certificate_linear_tol,
+                stab=stab,
+            )
+            retry = _inactive_bounded_newton_attempt(
+                certificate_x,
+                certificate_value,
+                certificate_gradient,
+                certificate_gradient_norm,
+            )
+            return _BoundedMixedCertificateAttempts(
+                selected=attempt,
+                primary=attempt,
+                retry=retry,
+                fp64_refactor_retry=jnp.asarray(False, dtype=jnp.bool_),
+                factorization_dtype_bits=jnp.stack(
+                    (
+                        attempt["factorization_dtype_bits"],
+                        _device_int32(0, like=certificate_x),
+                    )
+                ),
+                factorization_count=attempt["attempted"].astype(jnp.int32),
+            )
+
+        def inactive_certificate_attempt(
+            _: None,
+        ) -> _BoundedMixedCertificateAttempts:
+            attempt = _inactive_bounded_newton_attempt(
+                certificate_x,
+                certificate_value,
+                certificate_gradient,
+                certificate_gradient_norm,
+            )
+            return _BoundedMixedCertificateAttempts(
+                selected=attempt,
+                primary=attempt,
+                retry=attempt,
+                fp64_refactor_retry=jnp.asarray(False, dtype=jnp.bool_),
+                factorization_dtype_bits=jnp.zeros((2,), dtype=jnp.int32),
+                factorization_count=_device_int32(0, like=certificate_x),
+            )
+
+        def run_mixed_certificate_attempt(
+            _: None,
+        ) -> _BoundedMixedCertificateAttempts:
+            return _bounded_mixed_certificate_attempt(
+                certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+                certificate_hvp_fn=certificate_hvp_fn,
+                proposal_hvp_fn=proposal_hvp_fn,
+                x=certificate_x,
+                value=certificate_value,
+                gradient=certificate_gradient,
+                gradient_norm=certificate_gradient_norm,
+                linear_tol=certificate_linear_tol,
+                stab=stab,
+            )
+
+        def run_active_certificate_attempt(
+            _: None,
+        ) -> _BoundedMixedCertificateAttempts:
+            return lax.cond(
+                proposal_attempt["accepted"],
+                run_mixed_certificate_attempt,
+                direct_fp64_certificate_attempt,
+                operand=None,
+            )
+
+        certificate_attempts = lax.cond(
+            _bounded_newton_certificate_attempt_required(
+                certificate_gradient_norm,
+                tol_value,
+            ),
+            run_active_certificate_attempt,
+            inactive_certificate_attempt,
+            operand=None,
+        )
+        certificate_attempt = certificate_attempts.selected
+        certificate_primary_attempt = certificate_attempts.primary
+        certificate_retry_attempt = certificate_attempts.retry
+        certificate_fp64_refactor_retry = certificate_attempts.fp64_refactor_retry
+        certificate_factorization_dtype_bits = (
+            certificate_attempts.factorization_dtype_bits
+        )
+        certificate_factorization_count = certificate_attempts.factorization_count
+    else:
+
+        def run_fp64_certificate_attempt(_: None) -> dict[str, jax.Array]:
+            return _bounded_fp64_certificate_attempt(
+                certificate_val_and_grad_fn=certificate_val_and_grad_fn,
+                certificate_hvp_fn=certificate_hvp_fn,
+                x=certificate_x,
+                value=certificate_value,
+                gradient=certificate_gradient,
+                gradient_norm=certificate_gradient_norm,
+                linear_tol=certificate_linear_tol,
+                stab=stab,
+            )
+
+        def skip_fp64_certificate_attempt(_: None) -> dict[str, jax.Array]:
+            return _inactive_bounded_newton_attempt(
+                certificate_x,
+                certificate_value,
+                certificate_gradient,
+                certificate_gradient_norm,
+            )
+
+        certificate_attempt = lax.cond(
+            _bounded_newton_certificate_attempt_required(
+                certificate_gradient_norm,
+                tol_value,
+            ),
+            run_fp64_certificate_attempt,
+            skip_fp64_certificate_attempt,
+            operand=None,
+        )
+        certificate_primary_attempt = certificate_attempt
+        certificate_retry_attempt = _inactive_bounded_newton_attempt(
+            certificate_x,
+            certificate_value,
+            certificate_gradient,
+            certificate_gradient_norm,
+        )
+        certificate_fp64_refactor_retry = jnp.asarray(False, dtype=jnp.bool_)
+        certificate_factorization_dtype_bits = jnp.zeros((2,), dtype=jnp.int32)
+        certificate_factorization_count = _device_int32(0, like=certificate_x)
+
+    final_x = certificate_attempt["x"]
+    final_value = certificate_attempt["value"]
+    final_gradient = certificate_attempt["gradient"]
+    final_gradient_norm = certificate_attempt["gradient_norm"]
+    final_hessian_dtype = compute_dtype if mixed_proposal_enabled else certificate_dtype
+    materialize_final_hessian, final_hessian_report = (
+        _resolve_dense_hessian_materialization(
+            materialize_hessian,
+            int(final_x.shape[0]),
+            final_hessian_dtype,
+            max_dense_hessian_bytes,
+        )
+    )
+    final_hessian_materialization_status_code = (
+        _DENSE_HESSIAN_MATERIALIZATION_COMPLETE
+        if materialize_final_hessian
+        else (
+            _DENSE_HESSIAN_MATERIALIZATION_BYTE_LIMIT
+            if materialize_hessian
+            else _DENSE_HESSIAN_MATERIALIZATION_NOT_REQUESTED
+        )
+    )
+    # This solver is itself a JAX transform boundary. Human-readable report
+    # strings are not valid JAX leaves, so expose a typed status code here and
+    # leave text rendering to host-side reporting.
+    final_hessian_report = {
+        **final_hessian_report,
+        "failure_category": None,
+        "failure_stage": None,
+        "message": None,
+    }
+    final_hessian = None
+    if materialize_final_hessian:
+        final_hessian_stabilization = adjoint_hessian_stabilization(stab)
+        if mixed_proposal_enabled:
+            final_hessian = _materialize_dense_ir_proposal_matrix(
+                proposal_hvp_fn,
+                final_x,
+                final_gradient,
+                stab=final_hessian_stabilization,
+            )
+        else:
+            certificate_stab = _staged_like(
+                final_x,
+                final_hessian_stabilization,
+                dtype=certificate_dtype,
+            )
+
+            def final_certificate_matvec(vector):
+                return certificate_hvp_fn(final_x, vector) + certificate_stab * vector
+
+            final_hessian = _dense_square_operator_matrix(
+                final_certificate_matvec,
+                final_gradient,
+                matrix_dtype=certificate_dtype,
+                sweep_dtype=certificate_dtype,
+            )
+        final_hessian = _symmetrize_dense_hessian(final_hessian)
+    success = (
+        jnp.all(jnp.isfinite(final_x))
+        & jnp.isfinite(final_value)
+        & jnp.all(jnp.isfinite(final_gradient))
+        & (final_gradient_norm <= tol_value)
+    )
+    proposal_attempted = proposal_attempt["attempted"]
+    certificate_attempted = certificate_attempt["attempted"]
+    attempted_iterations = proposal_attempted.astype(
+        jnp.int32
+    ) + certificate_attempted.astype(jnp.int32)
+    accepted_iterations = proposal_attempt["accepted"].astype(
+        jnp.int32
+    ) + certificate_attempt["accepted"].astype(jnp.int32)
+    certificate_fallback = (
+        proposal_attempted & (~proposal_attempt["accepted"]) & certificate_attempted
+    )
+    certificate_started_from_proposal = (
+        proposal_attempt["accepted"] & certificate_attempted
+    )
+    if mixed_proposal_enabled:
+        factorization_dtype_bits_trace = jnp.concatenate(
+            (
+                jnp.reshape(proposal_attempt["factorization_dtype_bits"], (1,)),
+                certificate_factorization_dtype_bits,
+            )
+        )
+        factorization_event_count = (
+            proposal_attempted.astype(jnp.int32) + certificate_factorization_count
+        )
+    else:
+        factorization_dtype_bits_trace = jnp.concatenate(
+            (
+                jnp.reshape(certificate_attempt["factorization_dtype_bits"], (1,)),
+                jnp.zeros((2,), dtype=jnp.int32),
+            )
+        )
+        factorization_event_count = certificate_attempted.astype(jnp.int32)
+
+    if mixed_proposal_enabled:
+        trace_attempts = (proposal_attempt, certificate_attempt)
+        attempt_kind_codes = (
+            _BOUNDED_NEWTON_ATTEMPT_FP32_PROPOSAL,
+            _BOUNDED_NEWTON_ATTEMPT_FP64_CERTIFICATE,
+        )
+        trace_value_before = (value_initial, certificate_value)
+        trace_norm_before = (gradient_norm_initial, certificate_gradient_norm)
+        trace_linear_tolerances = (proposal_linear_tol, certificate_linear_tol)
+    else:
+        inactive = _inactive_bounded_newton_attempt(
+            final_x,
+            final_value,
+            final_gradient,
+            final_gradient_norm,
+        )
+        trace_attempts = (certificate_attempt, inactive)
+        attempt_kind_codes = (
+            _BOUNDED_NEWTON_ATTEMPT_FP64_CERTIFICATE,
+            _BOUNDED_NEWTON_ATTEMPT_NONE,
+        )
+        trace_value_before = (value_initial, final_value)
+        trace_norm_before = (gradient_norm_initial, final_gradient_norm)
+        trace_linear_tolerances = (certificate_linear_tol, certificate_linear_tol)
+
+    false_retry = jnp.asarray(False, dtype=jnp.bool_)
+    trace = _bounded_newton_attempt_trace(
+        trace_attempts,
+        fp64_refactor_retry=(
+            (false_retry, certificate_fp64_refactor_retry)
+            if mixed_proposal_enabled
+            else (false_retry, false_retry)
+        ),
+    )
+    trace_active = trace.active
+    trace_accepted = trace.accepted
+    trace_linear_success = trace.linear_success
+    trace_linear_iterations = trace.linear_iterations
+    trace_linear_ir_correction_count = trace.linear_ir_correction_count
+    trace_linear_ir_residual_relative = trace.linear_ir_residual_relative
+    trace_linear_ir_contraction_ratio = trace.linear_ir_contraction_ratio
+    trace_linear_ir_length = trace.linear_ir_length
+    trace_linear_ir_source_code = trace.linear_ir_source_code
+    trace_linear_residual = trace.linear_residual
+    trace_linear_residual_norm = trace.linear_residual_norm
+    trace_linear_residual_scale = trace.linear_residual_scale
+    trace_linear_requested_tolerance = trace.linear_requested_tolerance
+    trace_linear_effective_tolerance = trace.linear_effective_tolerance
+    trace_live_operator_certificate = trace.live_operator_certificate
+    trace_factorization_dtype_bits = trace.factorization_dtype_bits
+    trace_factor_application_dtype_bits = trace.factor_application_dtype_bits
+    trace_residual_dtype_bits = trace.residual_dtype_bits
+    trace_certificate_value_dtype_bits = trace.certificate_value_dtype_bits
+    trace_certificate_gradient_dtype_bits = trace.certificate_gradient_dtype_bits
+    trace_step_norm = trace.step_norm
+    trace_step_finite = trace.step_finite
+    trace_backtracking_attempted = trace.backtracking_attempted
+    trace_backtracking = trace.backtracking_iterations
+    trace_alpha = trace.accepted_alpha
+    trace_fp64_refactor_retry = trace.fp64_refactor_retry
+
+    actual_trace_attempts = (
+        proposal_attempt,
+        certificate_primary_attempt,
+        certificate_retry_attempt,
+    )
+    actual_trace = _bounded_newton_attempt_trace(
+        actual_trace_attempts,
+        fp64_refactor_retry=(
+            false_retry,
+            false_retry,
+            certificate_fp64_refactor_retry,
+        ),
+    )
+    trace_backend_code = jnp.full(
+        (_BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,),
+        _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ],
+        dtype=jnp.int32,
+    )
+    nominal_dense_ir_budget = _device_int32(
+        _DENSE_IR_NEWTON_MATVEC_BUDGET,
+        like=final_x,
+    )
+    mixed_certificate_dense_ir_budget = _device_int32(
+        MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS + 1,
+        like=final_x,
+    )
+    certificate_dense_ir_budget = lax.select(
+        proposal_attempt["accepted"],
+        mixed_certificate_dense_ir_budget
+        + nominal_dense_ir_budget * certificate_fp64_refactor_retry.astype(jnp.int32),
+        nominal_dense_ir_budget,
+    )
+    trace_budget = jnp.stack(
+        (
+            nominal_dense_ir_budget,
+            certificate_dense_ir_budget,
+        )
+        if mixed_proposal_enabled
+        else (
+            nominal_dense_ir_budget,
+            nominal_dense_ir_budget,
+        )
+    )
+    if mixed_proposal_enabled:
+        last_attempt = {
+            key: lax.select(
+                certificate_attempted,
+                certificate_attempt[key],
+                proposal_attempt[key],
+            )
+            for key in proposal_attempt
+        }
+    else:
+        last_attempt = certificate_attempt
+    stalled = (~success) & (attempted_iterations > 0) & (~last_attempt["accepted"])
+    selected_attempt_kind_code = jnp.select(
+        [certificate_attempt["accepted"], proposal_attempt["accepted"]],
+        [
+            _device_int32(
+                _BOUNDED_NEWTON_ATTEMPT_FP64_CERTIFICATE,
+                like=final_x,
+            ),
+            _device_int32(
+                _BOUNDED_NEWTON_ATTEMPT_FP32_PROPOSAL,
+                like=final_x,
+            ),
+        ],
+        default=_device_int32(_BOUNDED_NEWTON_ATTEMPT_NONE, like=final_x),
+    ).astype(jnp.int32)
+    stop_reason_code = jnp.select(
+        [success, stalled, ~jnp.isfinite(final_gradient_norm)],
+        [_NEWTON_STOP_SUCCESS, _NEWTON_STOP_STALLED, _NEWTON_STOP_NONFINITE],
+        default=_NEWTON_STOP_MAXITER,
+    ).astype(jnp.int32)
+    return {
+        "x": final_x,
+        "fun": final_value,
+        "grad": final_gradient,
+        "hessian": final_hessian,
+        "nit": accepted_iterations,
+        "newton_iter": accepted_iterations,
+        "success": success,
+        "initial_gradient_norm": gradient_norm_initial,
+        "final_gradient_norm": final_gradient_norm,
+        "final_gradient_inf_norm": jnp.linalg.norm(final_gradient, ord=jnp.inf),
+        "newton_attempted_iterations": attempted_iterations,
+        "newton_stalled": stalled,
+        "newton_stop_reason_code": stop_reason_code,
+        "newton_last_step_accepted": last_attempt["accepted"],
+        "newton_last_step_norm": last_attempt["direction_norm"],
+        "newton_last_step_finite": last_attempt["direction_finite"],
+        "newton_last_linear_solve_success": last_attempt["linear_success"],
+        "newton_last_linear_solve_iterations": last_attempt["linear_iterations"],
+        "newton_last_linear_ir_correction_count": last_attempt[
+            "linear_ir_correction_count"
+        ],
+        "newton_last_linear_ir_residual_relative_trace": last_attempt[
+            "linear_ir_residual_relative_trace"
+        ],
+        "newton_last_linear_ir_contraction_ratio_trace": last_attempt[
+            "linear_ir_contraction_ratio_trace"
+        ],
+        "newton_last_linear_ir_trace_length": last_attempt["linear_ir_trace_length"],
+        "newton_last_linear_ir_history_source_code": last_attempt[
+            "linear_ir_history_source_code"
+        ],
+        "newton_last_linear_solve_matvec_budget": lax.select(
+            certificate_attempted,
+            certificate_dense_ir_budget,
+            nominal_dense_ir_budget,
+        ),
+        "newton_last_linear_residual_relative": last_attempt[
+            "linear_residual_relative"
+        ],
+        "newton_last_linear_residual_norm": last_attempt["linear_residual_norm"],
+        "newton_last_linear_residual_scale": last_attempt["linear_residual_scale"],
+        "newton_last_linear_requested_tolerance": last_attempt[
+            "linear_requested_tolerance"
+        ],
+        "newton_last_linear_effective_tolerance": last_attempt[
+            "linear_effective_tolerance"
+        ],
+        # Legacy requested-tolerance alias. New readers must not use it as the
+        # adjusted acceptance threshold.
+        "newton_last_linear_tolerance": last_attempt["linear_tolerance"],
+        "newton_last_linear_live_operator_certificate": last_attempt[
+            "live_operator_certificate"
+        ],
+        "newton_last_linear_factorization_dtype_bits": last_attempt[
+            "factorization_dtype_bits"
+        ],
+        "newton_last_linear_factor_application_dtype_bits": last_attempt[
+            "factor_application_dtype_bits"
+        ],
+        "newton_last_linear_residual_dtype_bits": last_attempt["residual_dtype_bits"],
+        "newton_last_certificate_value_dtype_bits": last_attempt[
+            "certificate_value_dtype_bits"
+        ],
+        "newton_last_certificate_gradient_dtype_bits": last_attempt[
+            "certificate_gradient_dtype_bits"
+        ],
+        "newton_last_backtracking_iterations": last_attempt["backtracking_iterations"],
+        "newton_last_accepted_alpha": last_attempt["accepted_alpha"],
+        "newton_linear_solve_backend_code": _device_int32(
+            _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+            ],
+            like=final_x,
+        ),
+        "newton_trace_active": trace_active,
+        "newton_trace_step_accepted": trace_accepted,
+        "newton_trace_value_before": jnp.stack(trace_value_before),
+        "newton_trace_gradient_norm_before": jnp.stack(trace_norm_before),
+        "newton_trace_linear_tol": jnp.stack(trace_linear_tolerances),
+        "newton_trace_step_norm": trace_step_norm,
+        "newton_trace_step_finite": trace_step_finite,
+        "newton_trace_linear_solve_success": trace_linear_success,
+        "newton_trace_linear_solve_iterations": trace_linear_iterations,
+        "newton_trace_linear_ir_correction_count": (trace_linear_ir_correction_count),
+        "newton_trace_linear_ir_residual_relative": (trace_linear_ir_residual_relative),
+        "newton_trace_linear_ir_contraction_ratio": (trace_linear_ir_contraction_ratio),
+        "newton_trace_linear_ir_trace_length": trace_linear_ir_length,
+        "newton_trace_linear_ir_history_source_code": (trace_linear_ir_source_code),
+        "newton_trace_linear_solve_backend_code": trace_backend_code,
+        "newton_trace_linear_solve_matvec_budget": trace_budget,
+        "newton_trace_linear_residual_relative": trace_linear_residual,
+        "newton_trace_linear_residual_norm": trace_linear_residual_norm,
+        "newton_trace_linear_residual_scale": trace_linear_residual_scale,
+        "newton_trace_linear_requested_tolerance": trace_linear_requested_tolerance,
+        "newton_trace_linear_effective_tolerance": trace_linear_effective_tolerance,
+        "newton_trace_linear_live_operator_certificate": (
+            trace_live_operator_certificate
+        ),
+        "newton_trace_linear_factorization_dtype_bits": (
+            trace_factorization_dtype_bits
+        ),
+        "newton_trace_linear_factor_application_dtype_bits": (
+            trace_factor_application_dtype_bits
+        ),
+        "newton_trace_linear_residual_dtype_bits": trace_residual_dtype_bits,
+        "newton_trace_certificate_value_dtype_bits": (
+            trace_certificate_value_dtype_bits
+        ),
+        "newton_trace_certificate_gradient_dtype_bits": (
+            trace_certificate_gradient_dtype_bits
+        ),
+        "newton_trace_backtracking_attempted": trace_backtracking_attempted,
+        "newton_trace_backtracking_accepted": trace_accepted,
+        "newton_trace_backtracking_iterations": trace_backtracking,
+        "newton_trace_accepted_alpha": trace_alpha,
+        "newton_trace_fp64_refactor_retry": trace_fp64_refactor_retry,
+        "bounded_newton_actual_correction_limit": _device_int32(
+            _BOUNDED_MIXED_NEWTON_ACTUAL_CORRECTION_LIMIT,
+            like=final_x,
+        ),
+        "bounded_newton_actual_trace_active": actual_trace.active,
+        "bounded_newton_actual_trace_accepted": actual_trace.accepted,
+        "bounded_newton_actual_trace_linear_success": actual_trace.linear_success,
+        "bounded_newton_actual_trace_linear_iterations": (
+            actual_trace.linear_iterations
+        ),
+        "bounded_newton_actual_trace_ir_correction_count": (
+            actual_trace.linear_ir_correction_count
+        ),
+        "bounded_newton_actual_trace_ir_residual_relative": (
+            actual_trace.linear_ir_residual_relative
+        ),
+        "bounded_newton_actual_trace_ir_contraction_ratio": (
+            actual_trace.linear_ir_contraction_ratio
+        ),
+        "bounded_newton_actual_trace_ir_length": actual_trace.linear_ir_length,
+        "bounded_newton_actual_trace_ir_source_code": (
+            actual_trace.linear_ir_source_code
+        ),
+        "bounded_newton_actual_trace_residual_relative": (actual_trace.linear_residual),
+        "bounded_newton_actual_trace_residual_norm": (
+            actual_trace.linear_residual_norm
+        ),
+        "bounded_newton_actual_trace_residual_scale": (
+            actual_trace.linear_residual_scale
+        ),
+        "bounded_newton_actual_trace_requested_tolerance": (
+            actual_trace.linear_requested_tolerance
+        ),
+        "bounded_newton_actual_trace_effective_tolerance": (
+            actual_trace.linear_effective_tolerance
+        ),
+        "bounded_newton_actual_trace_live_operator_certificate": (
+            actual_trace.live_operator_certificate
+        ),
+        "bounded_newton_actual_trace_factorization_dtype_bits": (
+            actual_trace.factorization_dtype_bits
+        ),
+        "bounded_newton_actual_trace_factor_application_dtype_bits": (
+            actual_trace.factor_application_dtype_bits
+        ),
+        "bounded_newton_actual_trace_residual_dtype_bits": (
+            actual_trace.residual_dtype_bits
+        ),
+        "bounded_newton_actual_trace_certificate_value_dtype_bits": (
+            actual_trace.certificate_value_dtype_bits
+        ),
+        "bounded_newton_actual_trace_certificate_gradient_dtype_bits": (
+            actual_trace.certificate_gradient_dtype_bits
+        ),
+        "bounded_newton_actual_trace_direction_norm": actual_trace.step_norm,
+        "bounded_newton_actual_trace_direction_finite": actual_trace.step_finite,
+        "bounded_newton_actual_trace_backtracking_attempted": (
+            actual_trace.backtracking_attempted
+        ),
+        "bounded_newton_actual_trace_backtracking_accepted": (actual_trace.accepted),
+        "bounded_newton_actual_trace_backtracking_iterations": (
+            actual_trace.backtracking_iterations
+        ),
+        "bounded_newton_actual_trace_accepted_alpha": actual_trace.accepted_alpha,
+        "bounded_newton_actual_trace_fp64_refactor_retry": (
+            actual_trace.fp64_refactor_retry
+        ),
+        "bounded_newton_attempt_limit": _device_int32(
+            _BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
+            like=final_x,
+        ),
+        "bounded_newton_factorization_event_limit": _device_int32(
+            _BOUNDED_MIXED_NEWTON_FACTORIZATION_EVENT_LIMIT,
+            like=final_x,
+        ),
+        "bounded_newton_factorization_event_count": factorization_event_count,
+        "newton_factorization_event_count": factorization_event_count,
+        "newton_fp64_refactor_retry_count": (
+            certificate_fp64_refactor_retry.astype(jnp.int32)
+        ),
+        "bounded_newton_factorization_dtype_bits_trace": (
+            factorization_dtype_bits_trace
+        ),
+        "bounded_newton_attempt_kind_codes": jnp.asarray(
+            attempt_kind_codes,
+            dtype=jnp.int32,
+        ),
+        "bounded_newton_proposal_attempted": proposal_attempted,
+        "bounded_newton_proposal_accepted": proposal_attempt["accepted"],
+        "bounded_newton_proposal_attempt_identity_code": lax.select(
+            proposal_attempted,
+            _device_int32(
+                _BOUNDED_NEWTON_ATTEMPT_FP32_PROPOSAL,
+                like=final_x,
+            ),
+            _device_int32(_BOUNDED_NEWTON_ATTEMPT_NONE, like=final_x),
+        ),
+        "bounded_newton_selected_attempt_identity_code": selected_attempt_kind_code,
+        "bounded_newton_final_accepted": selected_attempt_kind_code
+        != _device_int32(_BOUNDED_NEWTON_ATTEMPT_NONE, like=final_x),
+        "bounded_newton_second_correction_attempted": certificate_attempted,
+        "bounded_newton_second_correction_accepted": certificate_attempt["accepted"],
+        "bounded_newton_fp64_certification_covered": jnp.asarray(
+            np.dtype(value_initial.dtype) == np.dtype(np.float64)
+            and np.dtype(gradient_initial.dtype) == np.dtype(np.float64)
+            and np.dtype(final_gradient_norm.dtype) == np.dtype(np.float64),
+            dtype=jnp.bool_,
+        ),
+        "bounded_newton_fp64_value_dtype_bits": _device_int32(
+            np.dtype(value_initial.dtype).itemsize * 8,
+            like=final_x,
+        ),
+        "bounded_newton_fp64_gradient_dtype_bits": _device_int32(
+            np.dtype(gradient_initial.dtype).itemsize * 8,
+            like=final_x,
+        ),
+        "bounded_newton_final_gradient_norm_dtype_bits": _device_int32(
+            np.dtype(final_gradient_norm.dtype).itemsize * 8,
+            like=final_x,
+        ),
+        "bounded_newton_final_gradient_tolerance": tol_value,
+        # Historical aliases retained for the v1 reader. They describe the
+        # conditional second correction, never overall certification coverage.
+        "bounded_newton_certificate_attempted": certificate_attempted,
+        "bounded_newton_certificate_accepted": certificate_attempt["accepted"],
+        "bounded_newton_certificate_fallback": certificate_fallback,
+        "bounded_newton_certificate_fp64_refactor_retry": (
+            certificate_fp64_refactor_retry
+        ),
+        "bounded_newton_certificate_started_from_proposal": (
+            certificate_started_from_proposal
+        ),
+        "hessian_materialized": bool(materialize_final_hessian),
+        "dense_hessian_materialization_status_code": _device_int32(
+            final_hessian_materialization_status_code,
+            like=final_x,
+        ),
+        **final_hessian_report,
     }
 
 
