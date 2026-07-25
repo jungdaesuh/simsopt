@@ -50,6 +50,9 @@ _CPU_RUN_CODE_BENCHMARK_PATH = (
 _JAX_SUBPROCESS_CASES_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "jax_runtime_cases.py"
 )
+_PRECISION_RUNTIME_CASES_PATH = (
+    Path(_REPO_ROOT) / "tests" / "subprocess" / "precision_runtime_cases.py"
+)
 _IMPORT_SMOKE_CASES_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "import_smoke_cases.py"
 )
@@ -78,6 +81,7 @@ _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
 )
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
+    "SIMSOPT_PRECISION",
     "SIMSOPT_BACKEND_STRICT",
     "SIMSOPT_DEBUG",
     "SIMSOPT_JAX_DEBUG_NANS",
@@ -896,6 +900,26 @@ def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
 def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
     """Repeated identical bfgs-ondevice calls must not recompile run_solver."""
     _assert_ondevice_optimizer_reuses_compiled_solver("bfgs-ondevice")
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    (
+        "precision-env-inherited",
+        "precision-explicit-mixed",
+        "precision-explicit-mode-default",
+        "precision-smoke-mode-default",
+        "precision-invalid-environment",
+        "precision-mixed-runtime-config",
+        "precision-fp64-runtime-default",
+    ),
+)
+def test_precision_selection_roundtrips_through_fresh_process(case_name: str):
+    _assert_python_script_passes(
+        _PRECISION_RUNTIME_CASES_PATH,
+        args=(case_name,),
+        failure_message=f"{case_name} precision roundtrip failed",
+    )
 
 
 def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and_grad_calls():

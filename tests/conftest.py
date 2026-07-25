@@ -41,6 +41,7 @@ if jax is not None:
 
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
+    "SIMSOPT_PRECISION",
     "SIMSOPT_BACKEND_STRICT",
     "SIMSOPT_DEBUG",
     "SIMSOPT_JAX_DEBUG_NANS",
@@ -338,6 +339,7 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict):
         invalidate_backend_cache()
         set_backend(
             previous.mode,
+            precision=previous.precision,
             strict=previous.strict,
             debug_nans=previous.debug_nans,
             transfer_guard=previous.transfer_guard,

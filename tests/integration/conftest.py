@@ -12,7 +12,7 @@ so they can be imported alongside the CPU reference.
 import os
 import sys
 
-from _backend_test_helpers import (
+from ._backend_test_helpers import (
     assert_arrays_on_device,
     device_float64,
     enable_non_strict_jax_backend,

@@ -1166,6 +1166,7 @@ def _restore_backend_config(config):
 
     set_backend(
         config.mode,
+        precision=config.precision,
         strict=config.strict,
         debug_nans=config.debug_nans,
         disable_jit=config.disable_jit,

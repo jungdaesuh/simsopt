@@ -157,6 +157,7 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict):
         invalidate_backend_cache()
         set_backend(
             previous.mode,
+            precision=previous.precision,
             strict=previous.strict,
             debug_nans=previous.debug_nans,
             transfer_guard=previous.transfer_guard,
