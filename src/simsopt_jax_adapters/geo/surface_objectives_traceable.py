@@ -1018,6 +1018,7 @@ def _traceable_general_forward_result(
     coil_dofs,
     objective_coil_dofs=None,
     certificate_coil_set_spec=None,
+    certificate_coil_set_spec_from_dofs=None,
     baseline_x,
     baseline_value,
     baseline_linear_solve_factors,
@@ -1026,6 +1027,7 @@ def _traceable_general_forward_result(
     linear_solve_stab,
     optimize_G,
     baseline_coil_dofs,
+    baseline_certificate_coil_dofs=None,
     predictor_kind,
     objective_kwargs,
     success_filter,
@@ -1043,6 +1045,8 @@ def _traceable_general_forward_result(
     warmstart_x, warmstart_linear_solve_success = _traceable_predict_warmstart_x(
         booz_jax,
         coil_set_spec_from_dofs,
+        certificate_coil_set_spec_from_dofs=(certificate_coil_set_spec_from_dofs),
+        baseline_certificate_coil_dofs=baseline_certificate_coil_dofs,
         coil_dofs=coil_dofs,
         baseline_coil_dofs=baseline_coil_dofs,
         baseline_x=baseline_x,
@@ -1171,6 +1175,7 @@ def _traceable_forward_result(
     coil_dofs,
     objective_coil_dofs=None,
     certificate_coil_set_spec=None,
+    certificate_coil_set_spec_from_dofs=None,
     baseline_x,
     baseline_value,
     baseline_linear_solve_factors,
@@ -1223,6 +1228,7 @@ def _traceable_forward_result(
             coil_dofs=coil_dofs,
             objective_coil_dofs=objective_coil_dofs,
             certificate_coil_set_spec=certificate_coil_set_spec,
+            certificate_coil_set_spec_from_dofs=(certificate_coil_set_spec_from_dofs),
             baseline_x=baseline_x,
             baseline_value=baseline_value,
             baseline_linear_solve_factors=baseline_linear_solve_factors,
@@ -1231,6 +1237,7 @@ def _traceable_forward_result(
             linear_solve_stab=linear_solve_stab,
             optimize_G=optimize_G,
             baseline_coil_dofs=baseline_coil_dofs,
+            baseline_certificate_coil_dofs=baseline_objective_coil_dofs,
             predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
             success_filter=success_filter,
@@ -1448,10 +1455,12 @@ def _traceable_objective_gradient_parts(
     return direct_grad, implicit_grad, total_grad, linear_solve_success
 
 
-def _traceable_predict_warmstart_from_anchor(
+def _traceable_predict_warmstart_result_from_anchor(
     booz_jax,
     coil_set_spec_from_dofs,
     *,
+    certificate_coil_set_spec_from_dofs=None,
+    anchor_certificate_coil_dofs=None,
     coil_dofs,
     anchor_coil_dofs,
     anchor_x,
@@ -1461,9 +1470,26 @@ def _traceable_predict_warmstart_from_anchor(
     linear_solve_stab,
     predictor_kind,
     objective_kwargs,
+    predictor_coil_use_compute_dtype=True,
+    predictor_state_use_compute_dtype=False,
 ):
-    """Predict a warm start from one caller-authorized solved anchor."""
-    delta = coil_dofs - anchor_coil_dofs
+    """Predict a warm start and retain its linear-solve certificate."""
+    anchor_certificate_coil_dofs = _as_jax_float64(
+        anchor_coil_dofs
+        if anchor_certificate_coil_dofs is None
+        else anchor_certificate_coil_dofs
+    )
+    predictor_anchor_coil_dofs = (
+        _as_compute_array(anchor_coil_dofs)
+        if predictor_coil_use_compute_dtype
+        else _as_jax_float64(anchor_coil_dofs)
+    )
+    predictor_coil_dofs = (
+        _as_compute_array(coil_dofs)
+        if predictor_coil_use_compute_dtype
+        else _as_jax_float64(coil_dofs)
+    )
+    delta = predictor_coil_dofs - predictor_anchor_coil_dofs
 
     if predictor_kind == "exact":
         exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
@@ -1477,24 +1503,31 @@ def _traceable_predict_warmstart_from_anchor(
 
         forcing = jax.jvp(
             anchor_residual_of_coils,
-            (anchor_coil_dofs,),
+            (predictor_anchor_coil_dofs,),
             (delta,),
         )[1]
     else:
         inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
         forcing = _traceable_inner_stationarity_coil_jvp(
-            anchor_x,
-            anchor_coil_dofs,
+            _as_compute_array(anchor_x)
+            if predictor_state_use_compute_dtype
+            else anchor_x,
+            predictor_anchor_coil_dofs,
             delta,
             coil_set_spec_from_dofs,
             **inner_objective_kwargs,
         )
 
+    live_coil_set_spec_from_dofs = (
+        coil_set_spec_from_dofs
+        if certificate_coil_set_spec_from_dofs is None
+        else certificate_coil_set_spec_from_dofs
+    )
     dx, linear_solve_status = _traceable_solve_linearization(
         booz_jax,
-        anchor_x,
-        -forcing,
-        coil_set_spec_from_dofs(anchor_coil_dofs),
+        _as_jax_float64(anchor_x),
+        _as_jax_float64(-forcing),
+        live_coil_set_spec_from_dofs(anchor_certificate_coil_dofs),
         objective_kwargs,
         linear_solve_factors=anchor_linear_solve_factors,
         linearization_kind=linearization_kind,
@@ -1511,16 +1544,55 @@ def _traceable_predict_warmstart_from_anchor(
         predictor_kind == "exact" or linearization_kind == "exact_jacobian"
     )
     if preserve_failed_predictor:
-        return predicted_x, linear_solve_success
+        return forcing, predicted_x, linear_solve_status, linear_solve_success
     return (
+        forcing,
         lax.cond(
             linear_solve_success,
             lambda _: predicted_x,
             lambda _: anchor_x,
             operand=None,
         ),
+        linear_solve_status,
         linear_solve_success,
     )
+
+
+def _traceable_predict_warmstart_from_anchor(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    certificate_coil_set_spec_from_dofs=None,
+    anchor_certificate_coil_dofs=None,
+    coil_dofs,
+    anchor_coil_dofs,
+    anchor_x,
+    anchor_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    predictor_kind,
+    objective_kwargs,
+):
+    """Predict a warm start from one caller-authorized solved anchor."""
+    _, predicted_x, _, linear_solve_success = (
+        _traceable_predict_warmstart_result_from_anchor(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            certificate_coil_set_spec_from_dofs=(certificate_coil_set_spec_from_dofs),
+            anchor_certificate_coil_dofs=anchor_certificate_coil_dofs,
+            coil_dofs=coil_dofs,
+            anchor_coil_dofs=anchor_coil_dofs,
+            anchor_x=anchor_x,
+            anchor_linear_solve_factors=anchor_linear_solve_factors,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            predictor_kind=predictor_kind,
+            objective_kwargs=objective_kwargs,
+        )
+    )
+    return predicted_x, linear_solve_success
 
 
 def _traceable_select_predictor_linear_solve_factors(
@@ -1547,6 +1619,8 @@ def _traceable_predict_warmstart_x(
     booz_jax,
     coil_set_spec_from_dofs,
     *,
+    certificate_coil_set_spec_from_dofs=None,
+    baseline_certificate_coil_dofs=None,
     coil_dofs,
     baseline_coil_dofs,
     baseline_x,
@@ -1561,6 +1635,8 @@ def _traceable_predict_warmstart_x(
     return _traceable_predict_warmstart_from_anchor(
         booz_jax,
         coil_set_spec_from_dofs,
+        certificate_coil_set_spec_from_dofs=(certificate_coil_set_spec_from_dofs),
+        anchor_certificate_coil_dofs=baseline_certificate_coil_dofs,
         coil_dofs=coil_dofs,
         anchor_coil_dofs=baseline_coil_dofs,
         anchor_x=baseline_x,
@@ -1789,6 +1865,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
                 coil_dofs=proposal_coil_dofs,
                 objective_coil_dofs=objective_coil_dofs,
                 certificate_coil_set_spec=certificate_coil_set_spec,
+                certificate_coil_set_spec_from_dofs=coil_set_spec_from_dofs,
                 baseline_x=baseline_x,
                 baseline_value=_as_jax_float64(baseline_value),
                 baseline_linear_solve_factors=baseline_linear_solve_factors,
@@ -1797,6 +1874,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
                 linear_solve_stab=linear_solve_stab,
                 optimize_G=optimize_G,
                 baseline_coil_dofs=proposal_baseline_coil_dofs,
+                baseline_certificate_coil_dofs=baseline_coil_dofs,
                 predictor_kind=predictor_kind,
                 objective_kwargs=objective_kwargs,
                 success_filter=success_filter,
@@ -1807,6 +1885,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             coil_dofs=proposal_coil_dofs,
             objective_coil_dofs=objective_coil_dofs,
             certificate_coil_set_spec=certificate_coil_set_spec,
+            certificate_coil_set_spec_from_dofs=coil_set_spec_from_dofs,
             baseline_x=baseline_x,
             baseline_value=_as_jax_float64(baseline_value),
             baseline_linear_solve_factors=baseline_linear_solve_factors,
