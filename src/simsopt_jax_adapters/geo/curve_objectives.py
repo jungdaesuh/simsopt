@@ -552,7 +552,7 @@ class CurveCurveDistanceJAX(_CurveCurveDistanceJAXBase):
         minimum_distance = _as_jax_float64(self.minimum_distance)
         for i, j in self._iter_curve_pair_indices():
             res += cc_distance_pure(*self._pair_data(i, j), minimum_distance)
-        return res
+        return _host_float(res)
 
     @derivative_dec
     def dJ(self):
@@ -670,7 +670,7 @@ class CurveSurfaceDistanceJAX(Optimizable):
                 surface_normals,
                 minimum_distance,
             )
-        return res
+        return _host_float(res)
 
     @derivative_dec
     def dJ(self):

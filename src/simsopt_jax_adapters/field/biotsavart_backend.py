@@ -96,6 +96,17 @@ def _device_zero_like(value: object) -> jax.Array:
     return array - array
 
 
+def _place_array_tree_on_device(tree, device):
+    """Place dynamic array leaves on one device while preserving static metadata."""
+
+    def place_array(leaf):
+        if isinstance(leaf, (jax.Array, np.ndarray, np.generic)):
+            return runtime_device_put(leaf, device=device)
+        return leaf
+
+    return jax.tree.map(place_array, tree)
+
+
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartFieldPullback",
@@ -812,8 +823,12 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         if coil_dofs is None:
             coil_dofs = self.x
         coil_dofs = _as_jax_float64(coil_dofs)
-        return _jitted_coil_cotangents_to_dofs_gradient(
+        extraction_spec = _place_array_tree_on_device(
             self._coil_dof_extraction_spec,
+            coil_dofs.device,
+        )
+        return _jitted_coil_cotangents_to_dofs_gradient(
+            extraction_spec,
             d_coil_arrays,
             _canonical_coil_indices(coil_indices),
             coil_dofs,
@@ -2125,8 +2140,12 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             coil_dofs = self.x.copy()
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
         if _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays):
-            return _jitted_coil_cotangents_to_dofs_gradient(
+            extraction_spec = _place_array_tree_on_device(
                 self._coil_dof_extraction_spec,
+                coil_dofs.device,
+            )
+            return _jitted_coil_cotangents_to_dofs_gradient(
+                extraction_spec,
                 d_coil_arrays,
                 _canonical_coil_indices(coil_indices),
                 coil_dofs,

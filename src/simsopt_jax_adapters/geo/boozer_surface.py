@@ -887,6 +887,17 @@ def _place_active_replicated_geometry(
     return _place_active_replicated_tree(geometry)
 
 
+def _place_runtime_tree(tree):
+    """Place every array leaf of ``tree`` on the runtime JAX device."""
+
+    def place_array(leaf):
+        if isinstance(leaf, jax.Array):
+            return runtime_device_put(leaf)
+        return leaf
+
+    return jax.tree_util.tree_map(place_array, tree)
+
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class _BoozerForwardLocalFieldTerms:
@@ -2838,8 +2849,6 @@ def _build_ls_group_vjp_callback(
         solve_generation=solve_generation,
         weight_inv_modB=weight_inv_modB,
     )
-    coil_arrays = grouped_field_inputs_from_spec(snapshot.coil_set_spec)
-
     def vjp_groups(lm, _booz_surf, _iota, _G):
         current_generation = getattr(booz_surf, "_solver_generation", None)
         if (
@@ -2850,15 +2859,22 @@ def _build_ls_group_vjp_callback(
                 "BoozerSurfaceJAX LS grouped VJP callback is stale; "
                 "re-run boozer_surface.run_code(...) before requesting adjoints."
             )
-        bar_field_terms, bar_G = _ls_field_term_cotangents(snapshot, lm)
-        field_terms_builder = _select_structured_field_terms_builder(
-            snapshot.label_type
+        runtime_snapshot = _place_runtime_tree(snapshot)
+        coil_arrays = grouped_field_inputs_from_spec(runtime_snapshot.coil_set_spec)
+        bar_field_terms, bar_G = _place_runtime_tree(
+            _ls_field_term_cotangents(runtime_snapshot, lm)
         )
-        points = _field_points_from_geometry(snapshot.geometry)
-        field_shape = _field_shape_from_geometry(snapshot.geometry)
-        label_points = _field_points_from_geometry(snapshot.label_geometry)
-        label_field_shape = _field_shape_from_geometry(snapshot.label_geometry)
-        for group_array, group_index_tuple in zip(coil_arrays, snapshot.coil_indices):
+        field_terms_builder = _select_structured_field_terms_builder(
+            runtime_snapshot.label_type
+        )
+        points = _field_points_from_geometry(runtime_snapshot.geometry)
+        field_shape = _field_shape_from_geometry(runtime_snapshot.geometry)
+        label_points = _field_points_from_geometry(runtime_snapshot.label_geometry)
+        label_field_shape = _field_shape_from_geometry(runtime_snapshot.label_geometry)
+        for group_array, group_index_tuple in zip(
+            coil_arrays,
+            runtime_snapshot.coil_indices,
+        ):
 
             def field_terms_of_group(group):
                 return field_terms_builder(
@@ -2875,7 +2891,7 @@ def _build_ls_group_vjp_callback(
                 d_group,
                 group_array,
                 bar_G,
-                optimize_G=snapshot.optimize_G,
+                optimize_G=runtime_snapshot.optimize_G,
             )
             yield d_group, list(group_index_tuple)
 
@@ -4321,11 +4337,13 @@ class BoozerSurfaceJAX(Optimizable):
             )
         G = self.res["G"]
         solved_G = None if G is None else _as_jax_float64(G)
-        return _BoozerSolvedRuntimeState(
-            sdofs=_as_jax_float64(self.res["sdofs"]),
-            iota=_as_jax_float64(self.res["iota"]),
-            G=solved_G,
-            weight_inv_modB=bool(self.res["weight_inv_modB"]),
+        return _place_runtime_tree(
+            _BoozerSolvedRuntimeState(
+                sdofs=_as_jax_float64(self.res["sdofs"]),
+                iota=_as_jax_float64(self.res["iota"]),
+                G=solved_G,
+                weight_inv_modB=bool(self.res["weight_inv_modB"]),
+            )
         )
 
     def install_value_only_solved_runtime_state(
@@ -4450,12 +4468,11 @@ class BoozerSurfaceJAX(Optimizable):
         compute_device = x.device
 
         def stage_linearization_factor(factor, *, dtype=None):
-            array = (
-                jnp.asarray(factor)
-                if dtype is None
-                else jnp.asarray(factor, dtype=dtype)
+            return runtime_device_put(
+                factor,
+                dtype=dtype,
+                device=compute_device,
             )
-            return runtime_device_put(array, device=compute_device)
 
         def dense_condition_estimate(matrix, *, lu_piv=None):
             condition_estimate = self.res.get("ls_condition_estimate")
