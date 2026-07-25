@@ -7,6 +7,7 @@ single-stage target optimization and diagnostics. The legacy
 compatibility with existing callers.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import NamedTuple
@@ -127,6 +128,23 @@ _TRACEABLE_LABEL_GEOMETRY_KEYS = (
     "label_stellsym",
     "label_scatter_indices",
     "label_surface_kind",
+)
+
+_TRACEABLE_NEWTON_TRACE_KEYS = (
+    "newton_trace_active",
+    "newton_trace_step_accepted",
+    "newton_trace_linear_solve_success",
+    "newton_trace_linear_residual_relative",
+    "newton_trace_linear_residual_norm",
+    "newton_trace_linear_residual_scale",
+    "newton_trace_linear_requested_tolerance",
+    "newton_trace_linear_effective_tolerance",
+    "newton_trace_linear_live_operator_certificate",
+    "newton_trace_linear_factorization_dtype_bits",
+    "newton_trace_linear_factor_application_dtype_bits",
+    "newton_trace_linear_residual_dtype_bits",
+    "newton_trace_certificate_value_dtype_bits",
+    "newton_trace_certificate_gradient_dtype_bits",
 )
 
 _TRACEABLE_LABEL_OBJECTIVE_KEYS = (
@@ -952,13 +970,111 @@ def _pack_traceable_forward_result(
     success,
     primal_success,
     adjoint_linear_solve_available,
+    newton_trace_capacity: int,
+    newton_trace_active: jax.Array | None = None,
+    newton_trace_step_accepted: jax.Array | None = None,
+    newton_trace_linear_solve_success: jax.Array | None = None,
+    newton_trace_linear_residual_relative: jax.Array | None = None,
+    newton_trace_linear_residual_norm: jax.Array | None = None,
+    newton_trace_linear_residual_scale: jax.Array | None = None,
+    newton_trace_linear_requested_tolerance: jax.Array | None = None,
+    newton_trace_linear_effective_tolerance: jax.Array | None = None,
+    newton_trace_linear_live_operator_certificate: jax.Array | None = None,
+    newton_trace_linear_factorization_dtype_bits: jax.Array | None = None,
+    newton_trace_linear_factor_application_dtype_bits: jax.Array | None = None,
+    newton_trace_linear_residual_dtype_bits: jax.Array | None = None,
+    newton_trace_certificate_value_dtype_bits: jax.Array | None = None,
+    newton_trace_certificate_gradient_dtype_bits: jax.Array | None = None,
+    newton_trace_presence: Mapping[str, jax.Array | None] | None = None,
     newton_linear_solve_backend_code=None,
     dense_hessian_bytes=None,
     max_dense_hessian_bytes=None,
     outer_raw_terms=None,
 ):
     """Return the normalized traceable forward-result contract."""
+    missing_bool = _staged_like(value, False, dtype=jnp.bool_)
+    missing_int = _staged_like(value, np.iinfo(np.int32).min, dtype=jnp.int32)
+    missing_float = _staged_like(value, np.nan, dtype=jnp.float64)
+
+    def newton_trace_field(
+        trace_value: jax.Array | None,
+        *,
+        dtype: jnp.dtype,
+        missing_value: jax.Array,
+    ) -> jax.Array:
+        if trace_value is None:
+            return jnp.full(
+                (newton_trace_capacity,),
+                missing_value,
+                dtype=dtype,
+            )
+        trace = jnp.asarray(trace_value, dtype=dtype)
+        if trace.ndim != 1 or trace.shape[0] > newton_trace_capacity:
+            raise ValueError(
+                "Newton trace must be one-dimensional and fit its static capacity."
+            )
+        return jnp.pad(
+            trace,
+            (0, newton_trace_capacity - trace.shape[0]),
+            constant_values=missing_value,
+        )
+
+    def newton_bool_trace_field(trace_value: jax.Array | None) -> jax.Array:
+        return newton_trace_field(
+            trace_value,
+            dtype=jnp.dtype(jnp.bool_),
+            missing_value=missing_bool,
+        )
+
+    def newton_float_trace_field(trace_value: jax.Array | None) -> jax.Array:
+        return newton_trace_field(
+            trace_value,
+            dtype=jnp.dtype(jnp.float64),
+            missing_value=missing_float,
+        )
+
+    def newton_int_trace_field(trace_value: jax.Array | None) -> jax.Array:
+        return newton_trace_field(
+            trace_value,
+            dtype=jnp.dtype(jnp.int32),
+            missing_value=missing_int,
+        )
+
     backend_code_present = newton_linear_solve_backend_code is not None
+    trace_values = {
+        "newton_trace_active": newton_trace_active,
+        "newton_trace_step_accepted": newton_trace_step_accepted,
+        "newton_trace_linear_solve_success": newton_trace_linear_solve_success,
+        "newton_trace_linear_residual_relative": (
+            newton_trace_linear_residual_relative
+        ),
+        "newton_trace_linear_residual_norm": newton_trace_linear_residual_norm,
+        "newton_trace_linear_residual_scale": newton_trace_linear_residual_scale,
+        "newton_trace_linear_requested_tolerance": (
+            newton_trace_linear_requested_tolerance
+        ),
+        "newton_trace_linear_effective_tolerance": (
+            newton_trace_linear_effective_tolerance
+        ),
+        "newton_trace_linear_live_operator_certificate": (
+            newton_trace_linear_live_operator_certificate
+        ),
+        "newton_trace_linear_factorization_dtype_bits": (
+            newton_trace_linear_factorization_dtype_bits
+        ),
+        "newton_trace_linear_factor_application_dtype_bits": (
+            newton_trace_linear_factor_application_dtype_bits
+        ),
+        "newton_trace_linear_residual_dtype_bits": (
+            newton_trace_linear_residual_dtype_bits
+        ),
+        "newton_trace_certificate_value_dtype_bits": (
+            newton_trace_certificate_value_dtype_bits
+        ),
+        "newton_trace_certificate_gradient_dtype_bits": (
+            newton_trace_certificate_gradient_dtype_bits
+        ),
+    }
     packed = {
         "value": value,
         "x": x,
@@ -969,6 +1085,46 @@ def _pack_traceable_forward_result(
         "success": success,
         "primal_success": primal_success,
         "adjoint_linear_solve_available": adjoint_linear_solve_available,
+        "newton_trace_active": newton_bool_trace_field(newton_trace_active),
+        "newton_trace_step_accepted": newton_bool_trace_field(
+            newton_trace_step_accepted
+        ),
+        "newton_trace_linear_solve_success": newton_bool_trace_field(
+            newton_trace_linear_solve_success
+        ),
+        "newton_trace_linear_residual_relative": newton_float_trace_field(
+            newton_trace_linear_residual_relative
+        ),
+        "newton_trace_linear_residual_norm": newton_float_trace_field(
+            newton_trace_linear_residual_norm
+        ),
+        "newton_trace_linear_residual_scale": newton_float_trace_field(
+            newton_trace_linear_residual_scale
+        ),
+        "newton_trace_linear_requested_tolerance": newton_float_trace_field(
+            newton_trace_linear_requested_tolerance
+        ),
+        "newton_trace_linear_effective_tolerance": newton_float_trace_field(
+            newton_trace_linear_effective_tolerance
+        ),
+        "newton_trace_linear_live_operator_certificate": (
+            newton_bool_trace_field(newton_trace_linear_live_operator_certificate)
+        ),
+        "newton_trace_linear_factorization_dtype_bits": newton_int_trace_field(
+            newton_trace_linear_factorization_dtype_bits
+        ),
+        "newton_trace_linear_factor_application_dtype_bits": (
+            newton_int_trace_field(newton_trace_linear_factor_application_dtype_bits)
+        ),
+        "newton_trace_linear_residual_dtype_bits": newton_int_trace_field(
+            newton_trace_linear_residual_dtype_bits
+        ),
+        "newton_trace_certificate_value_dtype_bits": newton_int_trace_field(
+            newton_trace_certificate_value_dtype_bits
+        ),
+        "newton_trace_certificate_gradient_dtype_bits": newton_int_trace_field(
+            newton_trace_certificate_gradient_dtype_bits
+        ),
         "newton_linear_solve_backend_code": _runtime_int32_scalar(
             0
             if newton_linear_solve_backend_code is None
@@ -976,6 +1132,17 @@ def _pack_traceable_forward_result(
         ),
         "newton_linear_solve_backend_code_present": _runtime_bool(backend_code_present),
     }
+    for key in _TRACEABLE_NEWTON_TRACE_KEYS:
+        explicit_presence = (
+            None if newton_trace_presence is None else newton_trace_presence.get(key)
+        )
+        packed[f"{key}_present"] = _staged_like(
+            value,
+            trace_values[key] is not None
+            if explicit_presence is None
+            else explicit_presence,
+            dtype=jnp.bool_,
+        )
     packed["outer_raw_terms_present"] = _runtime_bool(outer_raw_terms is not None)
     missing_int64 = _staged_like(
         value,
@@ -1094,6 +1261,7 @@ def _traceable_general_forward_result(
     predictor_kind,
     objective_kwargs,
     success_filter,
+    newton_trace_capacity: int,
 ):
     """Run the general traceable inner solve without the baseline fast path."""
     objective_coil_dofs = (
@@ -1183,6 +1351,49 @@ def _traceable_general_forward_result(
             success=success,
             primal_success=primal_success,
             adjoint_linear_solve_available=adjoint_linear_solve_available,
+            newton_trace_capacity=newton_trace_capacity,
+            newton_trace_active=solve_result.get("newton_trace_active"),
+            newton_trace_step_accepted=solve_result.get("newton_trace_step_accepted"),
+            newton_trace_linear_solve_success=solve_result.get(
+                "newton_trace_linear_solve_success"
+            ),
+            newton_trace_linear_residual_relative=solve_result.get(
+                "newton_trace_linear_residual_relative"
+            ),
+            newton_trace_linear_residual_norm=solve_result.get(
+                "newton_trace_linear_residual_norm"
+            ),
+            newton_trace_linear_residual_scale=solve_result.get(
+                "newton_trace_linear_residual_scale"
+            ),
+            newton_trace_linear_requested_tolerance=solve_result.get(
+                "newton_trace_linear_requested_tolerance"
+            ),
+            newton_trace_linear_effective_tolerance=solve_result.get(
+                "newton_trace_linear_effective_tolerance"
+            ),
+            newton_trace_linear_live_operator_certificate=solve_result.get(
+                "newton_trace_linear_live_operator_certificate"
+            ),
+            newton_trace_linear_factorization_dtype_bits=solve_result.get(
+                "newton_trace_linear_factorization_dtype_bits"
+            ),
+            newton_trace_linear_factor_application_dtype_bits=solve_result.get(
+                "newton_trace_linear_factor_application_dtype_bits"
+            ),
+            newton_trace_linear_residual_dtype_bits=solve_result.get(
+                "newton_trace_linear_residual_dtype_bits"
+            ),
+            newton_trace_certificate_value_dtype_bits=solve_result.get(
+                "newton_trace_certificate_value_dtype_bits"
+            ),
+            newton_trace_certificate_gradient_dtype_bits=solve_result.get(
+                "newton_trace_certificate_gradient_dtype_bits"
+            ),
+            newton_trace_presence={
+                key: solve_result.get(f"{key}_present")
+                for key in _TRACEABLE_NEWTON_TRACE_KEYS
+            },
             newton_linear_solve_backend_code=solve_result.get(
                 "newton_linear_solve_backend_code"
             ),
@@ -1223,6 +1434,7 @@ def _traceable_general_forward_result(
             success=failure,
             primal_success=failure,
             adjoint_linear_solve_available=failure,
+            newton_trace_capacity=newton_trace_capacity,
         )
 
     return lax.cond(
@@ -1253,6 +1465,7 @@ def _traceable_forward_result(
     predictor_kind,
     objective_kwargs,
     success_filter,
+    newton_trace_capacity: int,
 ):
     """Run the pure traceable inner solve and return value plus solver data."""
     objective_coil_dofs = (
@@ -1284,6 +1497,7 @@ def _traceable_forward_result(
             success=_runtime_bool(True),
             primal_success=_runtime_bool(True),
             adjoint_linear_solve_available=_runtime_bool(False),
+            newton_trace_capacity=newton_trace_capacity,
         )
 
     def general_case(_):
@@ -1306,6 +1520,7 @@ def _traceable_forward_result(
             predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
             success_filter=success_filter,
+            newton_trace_capacity=newton_trace_capacity,
         )
 
     return jax.lax.cond(same_coils, baseline_case, general_case, operand=None)
@@ -1860,6 +2075,7 @@ def _build_traceable_objective_cache_state(
     baseline_linear_solve_factors = None
     linear_solve_tol = booz_jax._linear_solve_tolerance()
     linear_solve_stab = float(booz_jax.options.get("newton_stab", 0.0))
+    newton_trace_capacity = booz_jax.traceable_newton_trace_capacity(objective_method)
 
     return {
         "objective_kwargs": objective_kwargs,
@@ -1879,6 +2095,7 @@ def _build_traceable_objective_cache_state(
         "linearization_kind": linearization_kind,
         "linear_solve_tol": linear_solve_tol,
         "linear_solve_stab": linear_solve_stab,
+        "newton_trace_capacity": newton_trace_capacity,
     }
 
 
@@ -1917,6 +2134,7 @@ def _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state):
         "linearization_kind": cache_state["linearization_kind"],
         "linear_solve_tol": cache_state["linear_solve_tol"],
         "linear_solve_stab": cache_state["linear_solve_stab"],
+        "newton_trace_capacity": cache_state["newton_trace_capacity"],
     }
 
 
@@ -1981,6 +2199,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
     linearization_kind = state["linearization_kind"]
     linear_solve_tol = state["linear_solve_tol"]
     linear_solve_stab = state["linear_solve_stab"]
+    newton_trace_capacity = state["newton_trace_capacity"]
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
 
     def _forward_result_for(coil_dofs):
@@ -2008,6 +2227,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
                 predictor_kind=predictor_kind,
                 objective_kwargs=objective_kwargs,
                 success_filter=success_filter,
+                newton_trace_capacity=newton_trace_capacity,
             )
         return _traceable_forward_result(
             booz_jax,
@@ -2028,6 +2248,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
             success_filter=success_filter,
+            newton_trace_capacity=newton_trace_capacity,
         )
 
     jitted_forward_result_for = jax.jit(_forward_result_for)
@@ -3707,6 +3928,7 @@ def diagnose_traceable_objective_runtime(
         success=baseline_success,
         primal_success=baseline_success,
         adjoint_linear_solve_available=baseline_success,
+        newton_trace_capacity=state["newton_trace_capacity"],
     )
     _traceable_diag_progress("baseline_total_gradient")
     total_value = baseline_value

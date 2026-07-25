@@ -113,6 +113,7 @@ _SURFACE_TYPES = (
     "SurfaceRZFourier",
     "SurfaceXYZTensorFourier",
 )
+_TEST_NEWTON_TRACE_CAPACITY = 40
 
 
 def _surface_spec(surface):
@@ -173,6 +174,7 @@ def _minimal_traceable_objective_state():
         "linearization_kind": "hessian",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
+        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
     }
 
 
@@ -395,6 +397,7 @@ def _make_test_exact_failure_profile_suite(
             "linearization_kind": "exact_jacobian",
             "linear_solve_tol": 1.0e-10,
             "linear_solve_stab": 0.0,
+            "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
         },
     }
@@ -1519,6 +1522,88 @@ def test_traceable_batched_value_and_grad_preserves_caller_jax_buffer() -> None:
     np.testing.assert_allclose(np.asarray(jnp.sum(coil_dofs_batch)), 12.0)
 
 
+def test_traceable_forward_result_uses_one_static_full_newton_trace_capacity(
+    monkeypatch,
+) -> None:
+    trace_capacity = _TEST_NEWTON_TRACE_CAPACITY
+    baseline_coil_dofs = jnp.asarray([1.0], dtype=jnp.float64)
+    active_trace = jnp.zeros((2,), dtype=jnp.bool_).at[:].set(True)
+
+    def general_forward_result(*_args, **kwargs):
+        return surfaceobjectives_traceable_jax_module._pack_traceable_forward_result(
+            value=jnp.asarray(9.0, dtype=jnp.float64),
+            x=jnp.asarray([0.5, 0.3], dtype=jnp.float64),
+            sdofs=jnp.asarray([0.5], dtype=jnp.float64),
+            iota=jnp.asarray(0.3, dtype=jnp.float64),
+            G=None,
+            linear_solve_factors=None,
+            success=jnp.asarray(True),
+            primal_success=jnp.asarray(True),
+            adjoint_linear_solve_available=jnp.asarray(False),
+            newton_trace_capacity=kwargs["newton_trace_capacity"],
+            newton_trace_active=active_trace,
+        )
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_general_forward_result",
+        general_forward_result,
+    )
+
+    @jax.jit
+    def forward_result(objective_coil_dofs):
+        return surfaceobjectives_traceable_jax_module._traceable_forward_result(
+            object(),
+            lambda dofs: dofs,
+            coil_dofs=objective_coil_dofs,
+            objective_coil_dofs=objective_coil_dofs,
+            certificate_coil_set_spec=objective_coil_dofs,
+            baseline_x=jnp.asarray([0.0, 0.2], dtype=jnp.float64),
+            baseline_value=jnp.asarray(3.0, dtype=jnp.float64),
+            baseline_linear_solve_factors=None,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            optimize_G=False,
+            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_objective_coil_dofs=baseline_coil_dofs,
+            predictor_kind="ls",
+            objective_kwargs={},
+            success_filter=None,
+            newton_trace_capacity=trace_capacity,
+        )
+
+    baseline_result = forward_result(baseline_coil_dofs)
+    candidate_result = forward_result(jnp.asarray([1.1], dtype=jnp.float64))
+    trace_keys = (
+        "newton_trace_active",
+        "newton_trace_step_accepted",
+        "newton_trace_linear_solve_success",
+        "newton_trace_linear_residual_relative",
+        "newton_trace_linear_residual_norm",
+        "newton_trace_linear_residual_scale",
+        "newton_trace_linear_requested_tolerance",
+        "newton_trace_linear_effective_tolerance",
+        "newton_trace_linear_live_operator_certificate",
+        "newton_trace_linear_factorization_dtype_bits",
+        "newton_trace_linear_factor_application_dtype_bits",
+        "newton_trace_linear_residual_dtype_bits",
+        "newton_trace_certificate_value_dtype_bits",
+        "newton_trace_certificate_gradient_dtype_bits",
+    )
+    for result in (baseline_result, candidate_result):
+        for key in trace_keys:
+            assert result[key].shape == (trace_capacity,)
+            assert result[f"{key}_present"].shape == ()
+    assert int(jnp.sum(baseline_result["newton_trace_active"])) == 0
+    assert int(jnp.sum(candidate_result["newton_trace_active"])) == 2
+    for key in trace_keys:
+        assert not bool(baseline_result[f"{key}_present"])
+    assert bool(candidate_result["newton_trace_active_present"])
+    for key in trace_keys[1:]:
+        assert not bool(candidate_result[f"{key}_present"])
+
+
 @pytest.mark.parametrize("linearization_kind", ["exact_jacobian", "hessian"])
 def test_operator_adjoint_signoff_gate_failed_solve_returns_nan_gradient(
     monkeypatch,
@@ -1538,6 +1623,7 @@ def test_operator_adjoint_signoff_gate_failed_solve_returns_nan_gradient(
         "linearization_kind": linearization_kind,
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
+        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
     }
 
     def fake_forward_result(_booz_jax, _coil_set_spec_from_dofs, **_kwargs):
@@ -2575,6 +2661,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
         predictor_kind="exact",
         objective_kwargs={},
         success_filter=None,
+        newton_trace_capacity=_TEST_NEWTON_TRACE_CAPACITY,
     )
 
     assert bool(result["success"]) is False
@@ -2625,6 +2712,10 @@ def test_traceable_general_forward_passes_distinct_certificate_coil_source(
             "G": None,
             "primal_success": jnp.asarray(True),
             "adjoint_linear_solve_available": jnp.asarray(True),
+            "newton_trace_active": jnp.asarray([True, False]),
+            "newton_trace_active_present": jnp.asarray(True),
+            "newton_trace_step_accepted": jnp.asarray([False, False]),
+            "newton_trace_step_accepted_present": jnp.asarray(False),
         }
 
     booz = types.SimpleNamespace(
@@ -2653,6 +2744,7 @@ def test_traceable_general_forward_passes_distinct_certificate_coil_source(
         predictor_kind="ls",
         objective_kwargs={},
         success_filter=None,
+        newton_trace_capacity=_TEST_NEWTON_TRACE_CAPACITY,
     )
 
     assert np.dtype(captured["proposal_spec"].dtype) == np.dtype(np.float32)
@@ -2660,6 +2752,12 @@ def test_traceable_general_forward_passes_distinct_certificate_coil_source(
     assert captured["objective_coils"] is objective_coils
     assert captured["objective_spec"] is certificate_spec
     assert bool(result["success"])
+    assert bool(result["newton_trace_active_present"])
+    np.testing.assert_array_equal(
+        np.asarray(result["newton_trace_active"][:2]),
+        np.asarray([True, False]),
+    )
+    assert not bool(result["newton_trace_step_accepted_present"])
 
 
 def test_traceable_profile_suite_warmstart_predict_surfaces_exact_failure(
@@ -2772,6 +2870,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
             "linearization_kind": "hessian",
             "linear_solve_tol": 1.0e-10,
             "linear_solve_stab": 0.0,
+            "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
         }
     )
 
@@ -2819,6 +2918,7 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         boozer_type="ls",
         _resolve_optimizer_method=lambda: "bfgs-ondevice",
         _collect_optimizer_options=lambda *, method: {},
+        traceable_newton_trace_capacity=(lambda _method: _TEST_NEWTON_TRACE_CAPACITY),
         _traceable_solve_state_token=31,
         _traceable_runtime_entry_cache=None,
         options={},
@@ -3031,6 +3131,7 @@ def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_sta
         predictor_kind="ls",
         objective_kwargs={},
         success_filter=lambda _coil_dofs, _solved_x: jnp.asarray(True, dtype=bool),
+        newton_trace_capacity=_TEST_NEWTON_TRACE_CAPACITY,
     )
 
     assert bool(result["primal_success"]) is True
@@ -3551,6 +3652,9 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         def _linear_solve_tolerance(self):
             return 1.0e-10
 
+        def traceable_newton_trace_capacity(self, _method):
+            return _TEST_NEWTON_TRACE_CAPACITY
+
         def _pack_decision_vector(self, iota, G, *, sdofs):
             return jnp.concatenate(
                 [
@@ -3677,6 +3781,9 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
 
         def _linear_solve_tolerance(self):
             return 1.0e-10
+
+        def traceable_newton_trace_capacity(self, _method):
+            return _TEST_NEWTON_TRACE_CAPACITY
 
         def _pack_decision_vector(self, iota, G, *, sdofs):
             return jnp.concatenate(
@@ -4319,6 +4426,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
             solve_state_token=_booz._traceable_solve_state_token,
             coil_dof_state_token=_bs._coil_dof_state_token,
@@ -4438,6 +4546,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
             solve_state_token=_booz._traceable_solve_state_token,
             coil_dof_state_token=_bs._coil_dof_state_token,
@@ -4564,6 +4673,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
             solve_state_token=_booz._traceable_solve_state_token,
             coil_dof_state_token=_bs._coil_dof_state_token,
@@ -4675,6 +4785,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
             solve_state_token=_booz._traceable_solve_state_token,
             coil_dof_state_token=_bs._coil_dof_state_token,
@@ -5347,6 +5458,7 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
         },
         "objective": object(),
@@ -5831,6 +5943,7 @@ def test_traceable_compiled_bundle_general_only_forward_avoids_public_same_coils
         "linearization_kind": "hessian",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
+        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
     }
     calls = {"general_forward": 0}
 
@@ -5898,6 +6011,7 @@ def test_traceable_compiled_bundle_separates_proposal_and_certificate_coils(
         "linearization_kind": "hessian",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
+        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
     }
     captured = {}
 
@@ -5980,6 +6094,7 @@ def test_traceable_value_and_grad_rejected_candidate_gradient_depends_on_primal_
         "linearization_kind": "hessian",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
+        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
     }
 
     def fake_forward_result(_booz_jax, _coil_set_spec_from_dofs, **_kwargs):
@@ -6038,6 +6153,7 @@ def test_traceable_value_and_grad_rejected_candidate_surfaces_baseline_adjoint_f
         "linearization_kind": "hessian",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
+        "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
     }
 
     def fake_forward_result(_booz_jax, _coil_set_spec_from_dofs, **_kwargs):
@@ -6123,6 +6239,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
         },
         "objective": lambda _coil_dofs: (_ for _ in ()).throw(
@@ -6247,6 +6364,7 @@ def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
                 "linearization_kind": "exact_jacobian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
         },
         "objective": lambda _coil_dofs: (_ for _ in ()).throw(
@@ -7176,6 +7294,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
                 "linearization_kind": "hessian",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
+                "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
             },
         }
     }

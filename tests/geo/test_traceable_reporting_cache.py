@@ -36,6 +36,7 @@ def _packed_result(
         success=jnp.asarray(True),
         primal_success=jnp.asarray(True),
         adjoint_linear_solve_available=jnp.asarray(True),
+        newton_trace_capacity=40,
         dense_hessian_bytes=dense_hessian_bytes,
         max_dense_hessian_bytes=max_dense_hessian_bytes,
         outer_raw_terms=outer_raw_terms,

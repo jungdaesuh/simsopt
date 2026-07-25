@@ -60,7 +60,7 @@ from simsopt_jax.runtime.host_boundary import (
     host_scalar as _host_scalar,
     host_tree as _hostify_tree,
 )
-from simsopt_jax.core.state_tokens import make_state_token_factory
+from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
     as_jax_float64 as _as_jax_float64,
@@ -69,6 +69,7 @@ from simsopt_jax.core._math_utils import (
     concat_jax_float64 as _concat_jax_float64,
     runtime_device_put,
 )
+from simsopt_jax.core.state_tokens import make_state_token_factory
 from simsopt._core.optimizable import Optimizable
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
@@ -303,27 +304,61 @@ _BOOZER_LINEARIZED_RESULT_KEYS = frozenset(
         "linearization_residency",
     }
 )
-_BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
-    {
-        "hessian_materialized",
-        "dense_hessian_shape",
-        "dense_hessian_bytes",
-        "max_dense_hessian_bytes",
-        "dense_newton_steps_materialized",
-        "dense_newton_steps_message",
-        "newton_iter",
-        "newton_linear_solve_backend_code",
-        "newton_trace_linear_solve_backend_code",
-        "final_gradient_norm",
-        "final_gradient_inf_norm",
-        "iterative_refinement_ran",
-        "final_step_iterative_refinement_ran",
-        "dense_refinement_ran",
-        "final_step_dense_refinement_ran",
-        "failure_category",
-        "failure_stage",
-        "message",
-    }
+_BOOZER_NEWTON_BOOL_TRACE_RESULT_KEYS = (
+    "newton_trace_active",
+    "newton_trace_step_accepted",
+    "newton_trace_linear_solve_success",
+    "newton_trace_linear_live_operator_certificate",
+)
+_BOOZER_NEWTON_FLOAT_TRACE_RESULT_KEYS = (
+    "newton_trace_linear_residual_relative",
+    "newton_trace_linear_residual_norm",
+    "newton_trace_linear_residual_scale",
+    "newton_trace_linear_requested_tolerance",
+    "newton_trace_linear_effective_tolerance",
+)
+_BOOZER_NEWTON_INT_TRACE_RESULT_KEYS = (
+    "newton_trace_linear_factorization_dtype_bits",
+    "newton_trace_linear_factor_application_dtype_bits",
+    "newton_trace_linear_residual_dtype_bits",
+    "newton_trace_certificate_value_dtype_bits",
+    "newton_trace_certificate_gradient_dtype_bits",
+)
+_BOOZER_NEWTON_TRACE_RESULT_KEYS = frozenset(
+    (
+        *_BOOZER_NEWTON_BOOL_TRACE_RESULT_KEYS,
+        *_BOOZER_NEWTON_FLOAT_TRACE_RESULT_KEYS,
+        *_BOOZER_NEWTON_INT_TRACE_RESULT_KEYS,
+    )
+)
+_BOOZER_NEWTON_TRACE_PRESENCE_RESULT_KEYS = frozenset(
+    f"{key}_present" for key in _BOOZER_NEWTON_TRACE_RESULT_KEYS
+)
+_BOOZER_HESSIAN_REPORTING_RESULT_KEYS = (
+    frozenset(
+        {
+            "hessian_materialized",
+            "dense_hessian_shape",
+            "dense_hessian_bytes",
+            "max_dense_hessian_bytes",
+            "dense_newton_steps_materialized",
+            "dense_newton_steps_message",
+            "newton_iter",
+            "newton_linear_solve_backend_code",
+            "newton_trace_linear_solve_backend_code",
+            "final_gradient_norm",
+            "final_gradient_inf_norm",
+            "iterative_refinement_ran",
+            "final_step_iterative_refinement_ran",
+            "dense_refinement_ran",
+            "final_step_dense_refinement_ran",
+            "failure_category",
+            "failure_stage",
+            "message",
+        }
+    )
+    | _BOOZER_NEWTON_TRACE_RESULT_KEYS
+    | _BOOZER_NEWTON_TRACE_PRESENCE_RESULT_KEYS
 )
 _BOOZER_EXACT_REPORTING_RESULT_KEYS = frozenset(
     {
@@ -3435,6 +3470,8 @@ def _exact_newton_reporting_fields(result):
 def _ls_newton_reporting_fields(result):
     """Pack Newton-polish Hessian diagnostics without changing solve paths."""
     return {
+        **{key: result.get(key) for key in _BOOZER_NEWTON_TRACE_RESULT_KEYS},
+        **{key: result.get(key) for key in _BOOZER_NEWTON_TRACE_PRESENCE_RESULT_KEYS},
         "hessian_materialized": result.get("hessian_materialized"),
         "dense_hessian_shape": result.get("dense_hessian_shape"),
         "dense_hessian_bytes": result.get("dense_hessian_bytes"),
@@ -6391,6 +6428,11 @@ class BoozerSurfaceJAX(Optimizable):
             max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
         )
 
+    def traceable_newton_trace_capacity(self, method: str | None) -> int:
+        """Return the configured full Newton budget for every production lane."""
+        del method
+        return int(self.options["newton_maxiter"])
+
     def _run_traceable_mixed_pipeline(
         self,
         proposal_coil_set_spec,
@@ -6431,6 +6473,7 @@ class BoozerSurfaceJAX(Optimizable):
         original_value, original_gradient = certificate_value_and_grad(original_seed)
         proposal_value, proposal_gradient = certificate_value_and_grad(proposal_seed)
         original_gradient_norm = jnp.linalg.norm(original_gradient)
+        newton_trace_capacity = self.traceable_newton_trace_capacity(method)
         seed_gate_accepted, _proposal_gradient_norm = (
             _optimizer_jax._newton_candidate_status(
                 proposal_seed,
@@ -6445,6 +6488,64 @@ class BoozerSurfaceJAX(Optimizable):
         )
         seed_gate_accepted = seed_gate_accepted & proposal_pre_newton["success"]
 
+        def normalize_trace_fields(
+            result: Mapping[str, object],
+            reference: jax.Array,
+        ) -> dict[str, jax.Array]:
+            normalized: dict[str, jax.Array] = {}
+            trace_specs = (
+                (
+                    _BOOZER_NEWTON_BOOL_TRACE_RESULT_KEYS,
+                    jnp.dtype(jnp.bool_),
+                    False,
+                ),
+                (
+                    _BOOZER_NEWTON_FLOAT_TRACE_RESULT_KEYS,
+                    jnp.dtype(jnp.float64),
+                    np.nan,
+                ),
+                (
+                    _BOOZER_NEWTON_INT_TRACE_RESULT_KEYS,
+                    jnp.dtype(jnp.int32),
+                    np.iinfo(np.int32).min,
+                ),
+            )
+            for keys, dtype, missing_value in trace_specs:
+                staged_missing = _staged_like(
+                    reference,
+                    missing_value,
+                    dtype=dtype,
+                )
+                for key in keys:
+                    trace_value = result.get(key)
+                    presence_value = result.get(f"{key}_present")
+                    if trace_value is None:
+                        trace = jnp.broadcast_to(
+                            staged_missing,
+                            (newton_trace_capacity,),
+                        )
+                    else:
+                        trace = jnp.asarray(trace_value, dtype=dtype)
+                        if trace.ndim != 1 or trace.shape[0] > newton_trace_capacity:
+                            raise ValueError(
+                                "Newton trace must be one-dimensional and fit its "
+                                "static capacity."
+                            )
+                        trace = jnp.pad(
+                            trace,
+                            (0, newton_trace_capacity - trace.shape[0]),
+                            constant_values=staged_missing,
+                        )
+                    normalized[key] = trace
+                    normalized[f"{key}_present"] = _staged_like(
+                        reference,
+                        trace_value is not None
+                        if presence_value is None
+                        else presence_value,
+                        dtype=jnp.bool_,
+                    )
+            return normalized
+
         def normalize_result(
             pre_newton,
             result,
@@ -6457,6 +6558,7 @@ class BoozerSurfaceJAX(Optimizable):
             if hessian is not None:
                 hessian = jnp.asarray(hessian, dtype=runtime_dtype)
             gradient = jnp.asarray(result["grad"], dtype=runtime_dtype)
+            trace_fields = normalize_trace_fields(result, gradient)
             return {
                 "x": jnp.asarray(result["x"], dtype=runtime_dtype),
                 "fun": jnp.asarray(result["fun"], dtype=runtime_dtype),
@@ -6492,6 +6594,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "canonical_fallback_used": jnp.asarray(
                     canonical_fallback_used, dtype=jnp.bool_
                 ),
+                **trace_fields,
             }
 
         def run_canonical_pipeline(_):

@@ -8699,7 +8699,48 @@ class TestBoozerSurfaceJAXExactPath:
                 "compute_dtype_bits": jnp.asarray(bits, dtype=jnp.int32),
             }
 
-        def newton_result(x, *, success):
+        def newton_trace(marker):
+            marker_float = float(marker)
+            return {
+                "newton_trace_active": jnp.asarray([True, True]),
+                "newton_trace_step_accepted": jnp.asarray([True, False]),
+                "newton_trace_linear_solve_success": jnp.asarray([False, True]),
+                "newton_trace_linear_residual_relative": jnp.asarray(
+                    [marker_float + 0.1, marker_float + 0.2], dtype=jnp.float64
+                ),
+                "newton_trace_linear_residual_norm": jnp.asarray(
+                    [marker_float + 1.1, marker_float + 1.2], dtype=jnp.float64
+                ),
+                "newton_trace_linear_residual_scale": jnp.asarray(
+                    [marker_float + 2.1, marker_float + 2.2], dtype=jnp.float64
+                ),
+                "newton_trace_linear_requested_tolerance": jnp.asarray(
+                    [marker_float + 3.1, marker_float + 3.2], dtype=jnp.float64
+                ),
+                "newton_trace_linear_effective_tolerance": jnp.asarray(
+                    [marker_float + 4.1, marker_float + 4.2], dtype=jnp.float64
+                ),
+                "newton_trace_linear_live_operator_certificate": jnp.asarray(
+                    [False, False]
+                ),
+                "newton_trace_linear_factorization_dtype_bits": jnp.asarray(
+                    [marker, marker + 1], dtype=jnp.int32
+                ),
+                "newton_trace_linear_factor_application_dtype_bits": jnp.asarray(
+                    [marker + 10, marker + 11], dtype=jnp.int32
+                ),
+                "newton_trace_linear_residual_dtype_bits": jnp.asarray(
+                    [marker + 20, marker + 21], dtype=jnp.int32
+                ),
+                "newton_trace_certificate_value_dtype_bits": jnp.asarray(
+                    [marker + 30, marker + 31], dtype=jnp.int32
+                ),
+                "newton_trace_certificate_gradient_dtype_bits": jnp.asarray(
+                    [marker + 40, marker + 41], dtype=jnp.int32
+                ),
+            }
+
+        def newton_result(x, *, success, trace_marker):
             return {
                 "x": x,
                 "fun": jnp.asarray(0.0, dtype=x.dtype),
@@ -8707,19 +8748,26 @@ class TestBoozerSurfaceJAXExactPath:
                 "hessian": jnp.eye(x.shape[0], dtype=x.dtype),
                 "nit": jnp.asarray(1, dtype=jnp.int32),
                 "success": jnp.asarray(success),
+                **newton_trace(trace_marker),
             }
 
         monkeypatch.setattr(booz, "_run_traceable_pre_newton_stage", fake_pre_newton)
         monkeypatch.setattr(
             booz,
             "_run_traceable_newton_polish_stage",
-            lambda _spec, x, _method, **_kwargs: newton_result(x, success=True),
+            lambda _spec, x, _method, **_kwargs: newton_result(
+                x,
+                success=True,
+                trace_marker=64,
+            ),
         )
         monkeypatch.setattr(
             booz,
             "_run_traceable_bounded_mixed_newton_stage",
             lambda _spec, x, _method, **_kwargs: newton_result(
-                x, success=bounded_success
+                x,
+                success=bounded_success,
+                trace_marker=32,
             ),
         )
 
@@ -8756,6 +8804,19 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(result["canonical_fallback_used"]) is expected_fallback
         assert np.dtype(result["x"].dtype) == np.dtype(np.float64)
         assert np.dtype(result["hessian"].dtype) == np.dtype(np.float64)
+        expected_trace_marker = 64 if expected_fallback else 32
+        assert result["newton_trace_active"].shape == (booz.options["newton_maxiter"],)
+        expected_trace = newton_trace(expected_trace_marker)
+        for key in _bsj._BOOZER_NEWTON_TRACE_RESULT_KEYS:
+            assert bool(result[f"{key}_present"])
+            actual = np.asarray(result[key])
+            np.testing.assert_array_equal(actual[:2], np.asarray(expected_trace[key]))
+            if key in _bsj._BOOZER_NEWTON_BOOL_TRACE_RESULT_KEYS:
+                np.testing.assert_array_equal(actual[2:], False)
+            elif key in _bsj._BOOZER_NEWTON_FLOAT_TRACE_RESULT_KEYS:
+                assert np.all(np.isnan(actual[2:]))
+            else:
+                np.testing.assert_array_equal(actual[2:], np.iinfo(np.int32).min)
         if expected_fallback:
             np.testing.assert_array_equal(
                 np.asarray(result["x"]),
@@ -8893,6 +8954,14 @@ class TestBoozerSurfaceJAXExactPath:
         assert np.dtype(result["grad"].dtype) == np.dtype(np.float64)
         assert int(result["pre_newton_compute_dtype_bits"]) in (32, 64)
         assert float(result["final_gradient_norm"]) <= booz.options["newton_tol"]
+
+    def test_traceable_newton_trace_capacity_uses_full_configured_budget(self):
+        booz = _make_mock_boozer_surface()
+        booz.options["newton_maxiter"] = 37
+
+        assert booz.traceable_newton_trace_capacity("bfgs-ondevice") == 37
+        assert booz.traceable_newton_trace_capacity("lbfgs-ondevice") == 37
+        assert booz.traceable_newton_trace_capacity(None) == 37
 
     def test_traceable_mixed_public_factors_satisfy_live_fp64_operator(
         self, monkeypatch
@@ -9428,7 +9497,12 @@ class TestBoozerSurfaceJAXExactPath:
         G = jnp.asarray(0.05, dtype=jnp.float64)
 
         def fake_minimize(_fun, x0, **_kwargs):
-            return types.SimpleNamespace(x_k=x0)
+            return types.SimpleNamespace(
+                x_k=x0,
+                converged=jnp.asarray(False),
+                failed=jnp.asarray(False),
+                k=jnp.asarray(0, dtype=jnp.int32),
+            )
 
         def fake_newton_polish(
             obj_fn,

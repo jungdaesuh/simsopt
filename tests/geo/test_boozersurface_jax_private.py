@@ -82,6 +82,7 @@ def test_traceable_forward_result_packs_newton_linear_solver_backend_code():
         success=jnp.asarray(True),
         primal_success=jnp.asarray(True),
         adjoint_linear_solve_available=jnp.asarray(False),
+        newton_trace_capacity=40,
         newton_linear_solve_backend_code=jnp.asarray(code, dtype=jnp.int32),
     )
 
