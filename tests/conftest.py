@@ -22,7 +22,11 @@ bootstrap_local_simsopt(_REPO_ROOT / "src")
 import numpy as np
 import pytest
 
-from simsopt_jax.backend import get_backend_config, invalidate_backend_cache, set_backend
+from simsopt_jax.backend import (
+    get_backend_config,
+    invalidate_backend_cache,
+    set_backend,
+)
 
 try:
     import jax
@@ -666,9 +670,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.slow)
         if relpath_str in _ADAPTER_BOUNDARY_TEST_FILES:
             item.add_marker(pytest.mark.adapter_boundary)
-        if (
-            relpath_str in _NATIVE_CPU_REFERENCE_TEST_FILES
-            or _item_nodeid_matches(item, _NATIVE_CPU_REFERENCE_NODE_PREFIXES)
+        if relpath_str in _NATIVE_CPU_REFERENCE_TEST_FILES or _item_nodeid_matches(
+            item, _NATIVE_CPU_REFERENCE_NODE_PREFIXES
         ):
             item.add_marker(pytest.mark.native_cpu_reference)
         if relpath_str in _BUILD_COMPAT_NATIVE_TEST_FILES:

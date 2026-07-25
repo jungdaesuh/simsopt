@@ -448,7 +448,9 @@ def test_simsopt_jax_package_has_no_absolute_legacy_imports():
         str(path.relative_to(src_root)): _find_absolute_legacy_import_lines(path)
         for path in package_root.rglob("*.py")
     }
-    legacy_imports = {path: imports for path, imports in legacy_imports.items() if imports}
+    legacy_imports = {
+        path: imports for path, imports in legacy_imports.items() if imports
+    }
 
     assert legacy_imports == {}
 
@@ -1388,10 +1390,7 @@ def test_framedcurve_direct_module_import_smoke():
 def test_biotsavart_jax_backend_does_not_import_coil_unwrap_helper():
     """The JAX backend must not depend on field/coil.py for graph unwrapping."""
     backend_path = (
-        Path(_SRC_DIR)
-        / "simsopt_jax_adapters"
-        / "field"
-        / "biotsavart_backend.py"
+        Path(_SRC_DIR) / "simsopt_jax_adapters" / "field" / "biotsavart_backend.py"
     )
     tree = ast.parse(backend_path.read_text(encoding="utf-8"))
 
@@ -1414,10 +1413,7 @@ def test_biotsavart_jax_backend_does_not_import_coil_unwrap_helper():
 def test_surfaceobjectives_jax_has_no_tensor_surface_imports():
     """Single-stage JAX wrappers should not instantiate tensor surfaces internally."""
     objectives_path = (
-        Path(_SRC_DIR)
-        / "simsopt_jax_adapters"
-        / "geo"
-        / "surface_objectives.py"
+        Path(_SRC_DIR) / "simsopt_jax_adapters" / "geo" / "surface_objectives.py"
     )
     tree = ast.parse(objectives_path.read_text(encoding="utf-8"))
 

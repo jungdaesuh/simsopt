@@ -1128,16 +1128,17 @@ implementation.
   `python scripts/jax_where_division_lint.py src/simsopt_jax src/simsopt_jax_adapters`
   and `python -m pytest -q tests/test_jax_import_smoke.py` to preserve the
   existing JAX CI lint and static import boundary.
-- [ ] Run `ruff check src/simsopt src/simsopt_jax src/simsopt_jax_adapters`, then
+- [x] Run `ruff check src/simsopt src/simsopt_jax src/simsopt_jax_adapters`, then
   pipe the NUL-delimited changed Python manifest from
   `git diff --name-only -z --diff-filter=ACMR "$upgrade_base"..HEAD -- '*.py'`
   through `xargs -0 -r ruff check`.
-- [ ] Pipe that same changed Python manifest through
+- [x] Pipe that same changed Python manifest through
   `xargs -0 -r ruff format --check`.
-  **Current-slice evidence:** after formatting the two live deltas identified by
-  the repository CI manifest, its 23-file format command passes, as does the
-  three-file check covering the adjoint-authority regressions. This does not
-  replace the final `upgrade_base..HEAD` manifest gate.
+  **Current-lineage evidence:** on 2026-07-25, Ruff lint passed for the complete
+  production source trees and the 76-file `85cde8d83..HEAD` changed-Python
+  manifest. After formatting the three remaining changed test-support files,
+  Ruff format reported all 76 files already formatted. `git diff --check` also
+  passed.
 - [ ] Run
   `rg -n '(from|import) examples|examples\.single_stage_optimization' src/simsopt src/simsopt_jax src/simsopt_jax_adapters`
   and require no production imports. Repeat the same scan over the changed test
