@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -333,6 +334,84 @@ def test_hessian_least_squares_dispatches_to_lsmr_j(monkeypatch):
         rtol=1e-8,
         atol=1e-10,
     )
+
+
+def test_hessian_dense_dispatch_uses_mixed_proposal_with_runtime_key(monkeypatch):
+    certificate_matrix = jnp.asarray(
+        ((4.00000003, 0.25000007), (0.25000007, 2.50000011)),
+        dtype=jnp.float64,
+    )
+    proposal_matrix = jnp.asarray(certificate_matrix, dtype=jnp.float32)
+    rhs = jnp.asarray((1.25, -0.75), dtype=jnp.float64)
+    certificate_probe_key = jax.random.wrap_key_data(
+        jnp.asarray((11, 17), dtype=jnp.uint32),
+        impl="threefry2x32",
+    )
+    monkeypatch.setattr(
+        _optimizer,
+        "get_backend_policy",
+        lambda: SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+            max_dense_jacobian_bytes=1 << 20,
+            linear_solve_tolerance_floor=1.0e-14,
+            linear_solve_tolerance_cap=1.0e-10,
+        ),
+    )
+
+    def certificate_objective(state):
+        return 0.5 * jnp.vdot(state, certificate_matrix @ state).real
+
+    def proposal_objective(state):
+        return 0.5 * jnp.vdot(state, proposal_matrix @ state).real
+
+    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
+        certificate_objective,
+        jnp.zeros_like(rhs),
+        rhs,
+        stab=0.0,
+        tol=1.0e-12,
+        proposal_objective_fn=proposal_objective,
+        certificate_probe_key=certificate_probe_key,
+        solver="dense",
+    )
+
+    assert isinstance(status, _optimizer._MixedDenseIrSolveStatus)
+    assert bool(status.success)
+    np.testing.assert_array_equal(
+        np.asarray(status.trust.certificate_probe_key_data),
+        np.asarray((11, 17), dtype=np.uint32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.linalg.solve(np.asarray(certificate_matrix), np.asarray(rhs)),
+        rtol=1.0e-11,
+        atol=1.0e-12,
+    )
+
+
+def test_hessian_dense_mixed_proposal_requires_runtime_key(monkeypatch):
+    monkeypatch.setattr(
+        _optimizer,
+        "get_backend_policy",
+        lambda: SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+            max_dense_jacobian_bytes=1 << 20,
+        ),
+    )
+    objective = lambda state: 0.5 * jnp.vdot(state, state).real
+
+    with pytest.raises(ValueError, match="runtime certificate key"):
+        _optimizer._solve_hessian_least_squares_system_with_status(
+            objective,
+            jnp.zeros((2,), dtype=jnp.float64),
+            jnp.ones((2,), dtype=jnp.float64),
+            stab=0.0,
+            tol=1.0e-12,
+            proposal_objective_fn=objective,
+            solver="dense",
+        )
 
 
 def test_lsmr_j_dispatch_requires_residual_fn_and_positive_stab(monkeypatch):

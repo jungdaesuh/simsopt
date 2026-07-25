@@ -5,9 +5,10 @@ primitive, mixed Boozer producer, and initial Phase 6 reporting/predictor slices
 are present on the candidate lineage. The accepted-state public Hessian now
 comes from the live FP64 certificate operator; widening an FP32 proposal matrix
 is not accepted as adjoint authority. Focused CPU and local RTX 5090 gates are
-recorded below. Snapshot restoration, speculative callback isolation, complete
-random-key authority, lifecycle/provider integration, trace-capacity propagation,
-and the remaining roadmap stay open and are not one PR.
+recorded below. Randomized adjoint-certificate authority is now explicit and
+fail-closed. Snapshot restoration, speculative callback isolation,
+lifecycle/provider integration, trace-capacity propagation, and the remaining
+roadmap stay open and are not one PR.
 **Last updated:** 2026-07-25
 
 ## Purpose
@@ -625,13 +626,18 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      tolerance normalization, factor authority, and fallback termination
      semantics. The correction histories have one typed fixed-capacity policy
      owner and retain only the valid device-side prefix.
-   - [ ] Preserve the randomized contraction-certificate contract: pass the
+   - [x] Preserve the randomized contraction-certificate contract: pass the
      complete two-word `uint32` Threefry key, mint fresh entropy only after the
      live operator inputs are frozen, distinguish fresh-run authority from an
      explicitly requested replay key, and preserve the exact key through
      serialization even when x64 is disabled. Label the finite-PRNG sampling
      evidence separately from the ideal-Gaussian probability-model bound; do
-     not present the latter as an unconditional PRNG failure probability.
+     not present the latter as an unconditional PRNG failure probability. The
+     certified seeded-adjoint boundary now freezes operator state before minting
+     fresh authority, accepts an exact replay key, binds the observed device key
+     and trust/fallback decision to a typed evidence owner, and fails closed on
+     mismatch. Certified results are not memoized, so fresh calls cannot reuse a
+     prior challenge and replay keys cannot retain unbounded device results.
    - [x] Require a live FP64 certificate before accepting a mixed proposal;
      never return an uncertified FP32 endpoint. This is closed for the optimizer
      primitive and current outer producer; snapshot and callback-isolation
@@ -689,16 +695,22 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      failed final certificate, the exact seed-gate direction and shared
      stationarity/Armijo threshold owner, speculative callback isolation, full key
      round-trip/fresh-versus-replay authority, and the forward/adjoint
-     factor-routing invariant.
+     factor-routing invariant. **Progress:** full key round-trip,
+     fresh-versus-replay source, post-freeze ordering, challenge/observation
+     binding, trust/fallback consistency, replay claim ineligibility, and
+     precision-sensitive cache identity are covered. Snapshot restoration and
+     speculative callback isolation keep this composite item open.
    - [ ] Add an explicit regression proving the bounded mixed primitive is
      independent of the default Newton runner and its iteration shape; adapt
      only the example-independent assertion from the source test to the typed
      precision API.
-   - [ ] Create or port `tests/test_runtime_host_boundary.py` for the exact
+   - [x] Create or port `tests/test_runtime_host_boundary.py` for the exact
      two-word `uint32` contraction-probe key, strict transfer-guard behavior,
      post-freeze fresh entropy, explicit replay authority, and x64-disabled
      round-trip. Keep the test independent of examples and historical
-     artifacts.
+     artifacts. **Result:** `20 passed` on CPU, including the x64-disabled
+     subprocess round-trip; the focused RTX 5090 production/key set passed
+     `5/5` with zero skips.
    - [ ] Do not add `src/simsopt_jax/newton_telemetry.py` unless a production
      API—not a benchmark consumer—requires its schema.
 
@@ -1323,9 +1335,11 @@ with no strict-placement skips.
   calls `_newton_candidate_status` with unit step and
   `dx = original_seed - proposal_seed`, and shares its exact stationarity and
   Armijo thresholds without a duplicate acceptance formula.
-- [ ] Under both fresh and explicit-replay contraction probes, verify the full
+- [x] Under both fresh and explicit-replay contraction probes, verify the full
   two-word `uint32` key round-trip with x64 disabled, post-freeze entropy
   ordering, and distinct finite-PRNG versus ideal-Gaussian evidence labels.
+  The strict evidence parser also rejects observed-key, trust/rebuild,
+  fallback-success, and replay-as-fresh-claim mismatches.
 - [ ] Verify supplied factor reuse is accepted only when its exact identity and
   certificate authority match the current state.
 - [ ] Verify SciPy callbacks accept the latest exact duplicate and leave unknown
