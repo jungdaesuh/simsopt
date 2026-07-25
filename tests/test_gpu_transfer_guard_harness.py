@@ -176,8 +176,7 @@ def test_stale_signoff_dry_run_isolates_focused_abort_repros(tmp_path):
         for selector in path.read_text().splitlines()
     ]
     assert (
-        len(batch_deselectors)
-        == summary["integration_focused_selector_deselect_count"]
+        len(batch_deselectors) == summary["integration_focused_selector_deselect_count"]
     )
     assert composite_selector in batch_deselectors
     assert runtime_selector in batch_deselectors
@@ -192,7 +191,9 @@ def test_stale_signoff_dry_run_isolates_focused_abort_repros(tmp_path):
         if (REPO_ROOT / selector.split("::", maxsplit=1)[0]).exists()
     }
     repro_deselectors = [
-        selector for selector in batch_deselectors if selector in expected_present_selectors
+        selector
+        for selector in batch_deselectors
+        if selector in expected_present_selectors
     ]
     lane_deselectors = [
         selector
@@ -219,9 +220,7 @@ def test_stale_signoff_dry_run_isolates_focused_abort_repros(tmp_path):
     assert (
         focused_dir / "batch_012_strict_gpu_public_wrapper_dj_transfer_guard.log"
     ).is_file()
-    assert (
-        focused_dir / "batch_012_branch_stable_ondevice_m5_values.log"
-    ).is_file()
+    assert (focused_dir / "batch_012_branch_stable_ondevice_m5_values.log").is_file()
     assert (
         focused_dir / "batch_012_short_single_stage_stationary_outer_opt.log"
     ).is_file()
@@ -233,9 +232,7 @@ def test_stale_signoff_dry_run_cleans_stale_focused_deselector_sidecars(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
 
     stale_sidecar = (
-        tmp_path
-        / "integration_batches"
-        / "batch_001_focused_selector_deselectors.txt"
+        tmp_path / "integration_batches" / "batch_001_focused_selector_deselectors.txt"
     )
     stale_sidecar.write_text("stale-selector\n")
     stale_focused_outputs = (

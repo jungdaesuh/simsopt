@@ -61,7 +61,9 @@ from simsopt_jax.core import (
     curve_torsion_from_dofs,
     curve_torsion_from_spec,
 )
-from simsopt_jax.core.curve_geometry import _curve_geometry_with_third_derivative_from_dofs
+from simsopt_jax.core.curve_geometry import (
+    _curve_geometry_with_third_derivative_from_dofs,
+)
 from simsopt_jax.core.framedcurve import frenet_frame
 from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
 
@@ -235,7 +237,9 @@ def test_curve_curvature_torsion_and_kappadash_derivatives_match_cpu_methods():
         atol=1.0e-10,
     )
     np.testing.assert_allclose(
-        np.asarray(curve_dtorsion_by_dcoeff_from_dofs(spec, spec.dofs), dtype=np.float64),
+        np.asarray(
+            curve_dtorsion_by_dcoeff_from_dofs(spec, spec.dofs), dtype=np.float64
+        ),
         np.asarray(curve.dtorsion_by_dcoeff(), dtype=np.float64),
         rtol=1.0e-10,
         atol=1.0e-10,

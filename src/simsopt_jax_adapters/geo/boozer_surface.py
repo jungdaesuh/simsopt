@@ -1022,7 +1022,10 @@ class _BoozerAdjointRuntimeState:
     @property
     def plu(self):
         """Dense-factor compatibility alias for legacy readers."""
-        if self.linear_solve_factors is not None and len(self.linear_solve_factors) == 5:
+        if (
+            self.linear_solve_factors is not None
+            and len(self.linear_solve_factors) == 5
+        ):
             return self.linear_solve_factors[:3]
         return self.linear_solve_factors
 
@@ -2849,6 +2852,7 @@ def _build_ls_group_vjp_callback(
         solve_generation=solve_generation,
         weight_inv_modB=weight_inv_modB,
     )
+
     def vjp_groups(lm, _booz_surf, _iota, _G):
         current_generation = getattr(booz_surf, "_solver_generation", None)
         if (
@@ -4517,6 +4521,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_forward = _solution_only(solve_forward_with_status)
             solve_transpose = _solution_only(solve_transpose_with_status)
             if linear_solve_factors is not None:
+
                 def stage_public_linear_solve_factor(factor):
                     factor_array = jnp.asarray(factor)
                     factor_dtype = (
@@ -5956,6 +5961,7 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 resolved_constraint_weight,
             )
+
             def jacobian_fn(x, coil_set_spec):
                 # Assemble the dense Jacobian in column batches (jax.lax.map
                 # batch_size) instead of jax.jacfwd's parallel vmap over all N
@@ -6701,8 +6707,7 @@ class BoozerSurfaceJAX(Optimizable):
             least_squares_runner = (
                 host_jax_least_squares
                 if self.options["optimizer_backend"] == "host-jax"
-                else
-                target_least_squares
+                else target_least_squares
                 if method.endswith("-ondevice")
                 else reference_least_squares
             )
@@ -6716,9 +6721,7 @@ class BoozerSurfaceJAX(Optimizable):
             if self.options["optimizer_backend"] == "host-jax":
                 least_squares_kwargs["args"] = residual_args
                 least_squares_kwargs["state_fn"] = host_jax_state_fn
-                least_squares_kwargs["jacobian_block_fn"] = (
-                    host_jax_jacobian_block_fn
-                )
+                least_squares_kwargs["jacobian_block_fn"] = host_jax_jacobian_block_fn
             result = least_squares_runner(
                 residual_fn,
                 x0,
@@ -7117,9 +7120,7 @@ class BoozerSurfaceJAX(Optimizable):
             )
             self._set_surface_dofs(sdofs_final)
             ls_residual_jacobian_condition_estimate = (
-                _dense_residual_jacobian_condition_estimate_or_none(
-                    result["jacobian"]
-                )
+                _dense_residual_jacobian_condition_estimate_or_none(result["jacobian"])
             )
             resdict = {
                 "residual": result["residual"],

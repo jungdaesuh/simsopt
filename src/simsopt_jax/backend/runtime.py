@@ -1032,9 +1032,7 @@ def _primary_jax_platforms_env_platform() -> str | None:
     platforms = _optional_env_value(_JAX_PLATFORMS_ENV)
     if platforms is None:
         return None
-    parts = tuple(
-        part.strip().lower() for part in platforms.split(",") if part.strip()
-    )
+    parts = tuple(part.strip().lower() for part in platforms.split(",") if part.strip())
     if not parts:
         return None
     primary_platform = parts[0]

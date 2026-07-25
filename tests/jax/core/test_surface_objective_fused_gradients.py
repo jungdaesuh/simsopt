@@ -33,9 +33,7 @@ def test_fused_direct_and_inner_gradients_obey_strict_gpu_transfer_guard(
         xc, yc, zc = dofs_to_xyzc(inner_dofs, scatter_indices, 1, 1)
         return jnp.sum(coil_dofs) + jnp.sum(xc) + jnp.sum(yc) + jnp.sum(zc)
 
-    value_and_gradients = _make_cached_strict_scalar_value_and_two_gradients(
-        objective
-    )
+    value_and_gradients = _make_cached_strict_scalar_value_and_two_gradients(objective)
     with parity_default_device("gpu"):
         device = jax.devices("gpu")[0]
         coil_dofs = jax.device_put(
@@ -129,9 +127,7 @@ def _make_public_boozer_fixture() -> tuple[
         },
     )
     permeability = 4.0 * np.pi * 1.0e-7
-    initial_G = permeability * sum(
-        abs(coil.current.get_value()) for coil in coils
-    )
+    initial_G = permeability * sum(abs(coil.current.get_value()) for coil in coils)
     result = boozer_surface.run_code(0.3, initial_G)
     assert result is not None and result.get("success", False)
     return boozer_surface, biotsavart, base_curves[0]
@@ -218,9 +214,7 @@ def test_public_fused_objectives_rebuild_after_coil_dof_fix_and_unfix(
         lineage_before_base_curve = biotsavart.unique_dof_lineage[
             :base_curve_lineage_index
         ]
-        base_free_start = sum(
-            opt.local_dof_size for opt in lineage_before_base_curve
-        )
+        base_free_start = sum(opt.local_dof_size for opt in lineage_before_base_curve)
         base_full_start = sum(
             opt.local_full_dof_size for opt in lineage_before_base_curve
         )

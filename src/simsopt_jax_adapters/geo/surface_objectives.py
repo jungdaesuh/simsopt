@@ -161,9 +161,7 @@ def _surface_spec_from_surface(surface):
             stellsym=surface.stellsym,
             mpol=surface.mpol,
             ntor=surface.ntor,
-            clamped_dims=tuple(
-                getattr(surface, "clamped_dims", (False, False, False))
-            ),
+            clamped_dims=tuple(getattr(surface, "clamped_dims", (False, False, False))),
         )
     raise NotImplementedError(
         "JAX surface objective adapters require an explicit spec builder for "
@@ -178,6 +176,7 @@ def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
     gamma1 = gamma1.reshape((-1, 3))
     gamma2 = gamma2.reshape((-1, 3))
     return pairwise_thresholded_mean_square_distance_pure(gamma1, gamma2, mdist)
+
 
 __all__ = [
     "AreaJAX",
@@ -304,6 +303,7 @@ class SurfaceSurfaceDistance(Optimizable):
                 ),
             }
         )
+
 
 _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "optimizer_backend",
@@ -2760,13 +2760,11 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             G,
             sdofs=solved_state.sdofs,
         )
-        value, direct_gradient, dJ_ds = (
-            self._direct_objective_value_and_gradients(
-                current_coil_dofs,
-                x_inner,
-                optimize_G,
-                weight_inv_modB,
-            )
+        value, direct_gradient, dJ_ds = self._direct_objective_value_and_gradients(
+            current_coil_dofs,
+            x_inner,
+            optimize_G,
+            weight_inv_modB,
         )
         adjoint_state = _resolved_boozer_adjoint_runtime_state(self.boozer_surface)
         adjoint = _solve_boozer_adjoint(adjoint_state, dJ_ds)
@@ -3001,9 +2999,7 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
         host_extraction_spec = _traceable_runtime_hostify_tree(
             self.biotsavart.coil_dof_extraction_spec()
         )
-        host_qs_kwargs = _traceable_runtime_hostify_tree(
-            self._qs_objective_kwargs()
-        )
+        host_qs_kwargs = _traceable_runtime_hostify_tree(self._qs_objective_kwargs())
 
         def objective(coil_dofs, surface_dofs):
             return _qs_ratio_pure(
@@ -3081,8 +3077,7 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
             (
                 dJ_ds_surface,
                 _zeros(
-                    _adjoint_state_decision_size(adjoint_state)
-                    - dJ_ds_surface.size,
+                    _adjoint_state_decision_size(adjoint_state) - dJ_ds_surface.size,
                     dtype=dJ_ds_surface.dtype,
                 ),
             )

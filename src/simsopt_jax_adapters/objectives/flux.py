@@ -312,8 +312,8 @@ class SquaredFluxJAX(Optimizable):
         field.set_points_from_spec(field_eval_spec)
         self._field_points_version = field._points_version
         self._field_dof_layout_version = _strict_field_dof_layout_version(field)
-        self._field_coil_dof_extraction_spec = (
-            _strict_field_coil_dof_extraction_spec(field)
+        self._field_coil_dof_extraction_spec = _strict_field_coil_dof_extraction_spec(
+            field
         )
         # Surface DOFs are baked into the JIT-captured ``_flux_spec``.
         # We capture a fingerprint here

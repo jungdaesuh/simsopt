@@ -3644,10 +3644,9 @@ _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 # m18, but the materialization stays guarded by that policy.  Read once at
 # import (selects a static trace-time branch); default OFF so the operator-GMRES
 # path remains the baseline for A/B comparison.
-_EXACT_ADJOINT_DENSE_LU = (
-    os.environ.get("SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0").strip().lower()
-    not in ("", "0", "false", "off", "no")
-)
+_EXACT_ADJOINT_DENSE_LU = os.environ.get(
+    "SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0"
+).strip().lower() not in ("", "0", "false", "off", "no")
 
 
 def _lineax_lsmr_solver(*, rtol, atol, max_steps=None):
@@ -3671,7 +3670,11 @@ def _materialize_dense_linear_operator(linear_operator_fn, x):
     # BiotSavart JVP). Mirrors the chunked dense Boozer-Jacobian fix in
     # simsopt_jax_adapters/geo/boozer_surface.py (commit dcd70a2ae); without it the
     # dense linearization OOMs under XLA preallocation.
-    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye, batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
+    cols = lax.map(
+        lambda basis: linear_operator_fn(x, basis),
+        eye,
+        batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE,
+    )
     return jnp.swapaxes(cols, 0, 1)
 
 
@@ -4675,10 +4678,12 @@ def _solve_square_vector_system_operator_only(
         solution, residual, status, can_refine, accept_first_correction = carry
 
         def refine(_):
-            correction, correction_residual, correction_info = _gmres_solve_array_system(
-                matvec,
-                residual,
-                tol=effective_tol,
+            correction, correction_residual, correction_info = (
+                _gmres_solve_array_system(
+                    matvec,
+                    residual,
+                    tol=effective_tol,
+                )
             )
             correction_finite = _linear_solve_finite(correction, correction_residual)
             refined_solution = lax.cond(
@@ -4779,9 +4784,9 @@ def _dense_square_operator_matrix_bytes_allowed(rhs):
     ``rhs`` is a single vector or a column-batched ``(n, k)`` right-hand side."""
     rhs = jnp.asarray(rhs)
     dimension = int(rhs.shape[0])
-    matrix_bytes = dimension * dimension * _dense_square_operator_matrix_dtype(
-        rhs
-    ).itemsize
+    matrix_bytes = (
+        dimension * dimension * _dense_square_operator_matrix_dtype(rhs).itemsize
+    )
     return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
 
 
@@ -5032,6 +5037,7 @@ def _solve_symmetric_operator_cg_with_status(matvec, rhs, *, tol):
     """
     rhs = jnp.asarray(rhs)
     if rhs.ndim != 1:
+
         def solve_column(column):
             return _solve_symmetric_operator_cg_with_status(matvec, column, tol=tol)
 
@@ -6098,7 +6104,9 @@ def host_jax_least_squares(
 ):
     """Host LM control over a compiled JAX residual evaluator."""
     if method != "lm":
-        raise ValueError(f"host_jax_least_squares() only supports method='lm'. Got {method!r}.")
+        raise ValueError(
+            f"host_jax_least_squares() only supports method='lm'. Got {method!r}."
+        )
     options = dict(options or {})
     if callback is not None:
         options["callback"] = callback
@@ -6161,9 +6169,7 @@ def host_jax_least_squares(
             materialize_dense_linearization=bool(
                 options.get("materialize_dense_linearization", True)
             ),
-            max_dense_linearization_bytes=options.get(
-                "max_dense_linearization_bytes"
-            ),
+            max_dense_linearization_bytes=options.get("max_dense_linearization_bytes"),
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
         )
@@ -6376,7 +6382,9 @@ def host_jax_minimize_value_and_grad(
             "method='bfgs' or method='lbfgs'."
         )
     if not value_and_grad:
-        raise ValueError("host_jax_minimize_value_and_grad() requires value_and_grad=True.")
+        raise ValueError(
+            "host_jax_minimize_value_and_grad() requires value_and_grad=True."
+        )
     options = dict(options or {})
     fun = wrap_strict_target_lane_value_and_grad(fun)
     fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(

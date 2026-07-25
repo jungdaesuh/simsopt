@@ -81,9 +81,7 @@ def test_public_curve_geometry_values_and_derivatives_obey_strict_gpu_guard(
             results = tuple(
                 (
                     objective.J(),
-                    tuple(
-                        objective.dJ(partials=True)(owner) for owner in owners
-                    ),
+                    tuple(objective.dJ(partials=True)(owner) for owner in owners),
                 )
                 for objective, owners in objectives_and_owners
             )
