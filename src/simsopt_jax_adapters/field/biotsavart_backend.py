@@ -24,7 +24,7 @@ from simsopt_jax.runtime.host_boundary import host_array, host_float
 from simsopt._core.optimizable import Optimizable
 from simsopt_jax.backend import get_field_kernel_tuning
 from simsopt_jax.core.state_tokens import make_state_token_factory
-from simsopt_jax.backend.dtypes import runtime_device_put
+from simsopt_jax.backend.dtypes import as_runtime_array, runtime_device_put
 from simsopt_jax.core import (
     coil_set_spec_from_dof_extraction_spec,
     coil_specs_from_dof_extraction_spec,
@@ -481,11 +481,19 @@ class SpecBackedCurve(Optimizable):
         )
         return Derivative({self._owner: host_array(owner_gradient, dtype=np.float64)})
 
+    def _rotate_cotangent_to_base_frame(self, values: object) -> jax.Array:
+        cotangent = _as_jax_float64(values)
+        rotmat = as_runtime_array(
+            self._symmetry.rotmat,
+            dtype=np.float64,
+            reference=cotangent,
+        )
+        return cotangent @ rotmat.T
+
     def _curve_pullback_derivative(self, dg: object, dgd: object) -> Derivative:
         if self._symmetry.has_rotation:
-            rotmat_t = _as_jax_float64(self._symmetry.rotmat).T
-            dg = _as_jax_float64(dg) @ rotmat_t
-            dgd = _as_jax_float64(dgd) @ rotmat_t
+            dg = self._rotate_cotangent_to_base_frame(dg)
+            dgd = self._rotate_cotangent_to_base_frame(dgd)
         curve_spec = self._current_curve_spec()
         coeff_cotangent, _surface_cotangent = curve_pullback_from_dofs(
             curve_spec,
