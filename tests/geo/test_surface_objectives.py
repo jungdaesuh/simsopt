@@ -319,6 +319,61 @@ class IotasTests(unittest.TestCase):
 
 
 class NonQSRatioTests(unittest.TestCase):
+    def test_fixed_surface_value_matches_production_value(self):
+        bs, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="exact",
+            optimize_G=True,
+        )
+        objective = NonQuasiSymmetricRatio(
+            boozer_surface,
+            bs,
+            quasi_poloidal=False,
+        )
+
+        production_value = objective.J()
+        fixed_surface_value, _ = objective.fixed_surface_value_and_derivative()
+
+        np.testing.assert_allclose(
+            fixed_surface_value,
+            production_value,
+            rtol=0.0,
+            atol=5e-15,
+        )
+
+    def test_fixed_surface_physical_partial_matches_directional_difference(self):
+        bs, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="exact",
+            optimize_G=True,
+        )
+        objective = NonQuasiSymmetricRatio(
+            boozer_surface,
+            bs,
+            quasi_poloidal=False,
+        )
+        surface = objective.in_surface
+        baseline = surface.get_dofs()
+        direction = np.random.default_rng(20260725).standard_normal(baseline.size)
+        direction /= np.linalg.norm(direction)
+
+        _, derivative = objective.fixed_surface_value_and_derivative()
+        analytic = float(derivative.data[surface] @ direction)
+        step = 1.0e-6
+        surface.set_dofs(baseline + step * direction)
+        plus, _ = objective.fixed_surface_value_and_derivative()
+        surface.set_dofs(baseline - step * direction)
+        minus, _ = objective.fixed_surface_value_and_derivative()
+        surface.set_dofs(baseline)
+        finite_difference = (plus - minus) / (2.0 * step)
+
+        np.testing.assert_allclose(
+            analytic,
+            finite_difference,
+            rtol=3.0e-6,
+            atol=1.0e-10,
+        )
+
     def test_nonQSratio_derivative(self):
         """
         Taylor test for derivative of surface non QS ratio wrt coil parameters
@@ -360,6 +415,172 @@ class NonQSRatioTests(unittest.TestCase):
 
 
 class BoozerResidualTests(unittest.TestCase):
+    def test_fixed_surface_value_matches_production_value(self):
+        for optimize_G in (True, False):
+            with self.subTest(optimize_G=optimize_G):
+                bs, boozer_surface = get_boozer_surface(
+                    label="Volume",
+                    boozer_type="ls",
+                    optimize_G=optimize_G,
+                    weight_inv_modB=False,
+                )
+                objective = BoozerResidual(boozer_surface, bs)
+
+                production_value = objective.J()
+                solved_G = boozer_surface.res["G"]
+                fixed_surface_value, _, y_partial = (
+                    objective.fixed_surface_value_derivative_and_y_partial(
+                        float(boozer_surface.res["iota"]),
+                        None if solved_G is None else float(solved_G),
+                        weight_inv_modB=bool(
+                            boozer_surface.res["weight_inv_modB"]
+                        ),
+                    )
+                )
+
+                np.testing.assert_allclose(
+                    fixed_surface_value,
+                    production_value,
+                    rtol=0.0,
+                    atol=5e-15,
+                )
+                self.assertEqual(y_partial.shape, (2 if optimize_G else 1,))
+
+    def test_fixed_surface_y_partial_matches_directional_difference(self):
+        bs, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="ls",
+            optimize_G=True,
+            weight_inv_modB=False,
+        )
+        objective = BoozerResidual(boozer_surface, bs)
+        iota = float(boozer_surface.res["iota"])
+        G = float(boozer_surface.res["G"])
+        weight_inv_modB = bool(boozer_surface.res["weight_inv_modB"])
+        _, _, y_partial = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        direction = np.asarray([0.6, -0.8], dtype=np.float64)
+        step = 1.0e-6
+        plus, _, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota + step * direction[0],
+            G + step * direction[1],
+            weight_inv_modB=weight_inv_modB,
+        )
+        minus, _, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota - step * direction[0],
+            G - step * direction[1],
+            weight_inv_modB=weight_inv_modB,
+        )
+        finite_difference = (plus - minus) / (2.0 * step)
+        analytic = float(y_partial @ direction)
+
+        np.testing.assert_allclose(
+            analytic,
+            finite_difference,
+            rtol=3.0e-6,
+            atol=1.0e-10,
+        )
+
+    def test_fixed_surface_coil_partial_matches_directional_difference(self):
+        bs, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="ls",
+            optimize_G=True,
+            weight_inv_modB=False,
+        )
+        objective = BoozerResidual(boozer_surface, bs)
+        iota = float(boozer_surface.res["iota"])
+        G = float(boozer_surface.res["G"])
+        weight_inv_modB = bool(boozer_surface.res["weight_inv_modB"])
+        baseline = bs.x
+        direction = np.random.default_rng(20260725).standard_normal(baseline.size)
+        direction /= np.linalg.norm(direction)
+        _, derivative, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        analytic = float(derivative(bs) @ direction)
+        step = 1.0e-6
+        bs.x = baseline + step * direction
+        plus, _, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        bs.x = baseline - step * direction
+        minus, _, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        bs.x = baseline
+        finite_difference = (plus - minus) / (2.0 * step)
+
+        np.testing.assert_allclose(
+            analytic,
+            finite_difference,
+            rtol=3.0e-6,
+            atol=1.0e-10,
+        )
+
+    def test_fixed_surface_physical_partial_survives_fix_all(self):
+        bs, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="ls",
+            optimize_G=True,
+            weight_inv_modB=False,
+        )
+        objective = BoozerResidual(boozer_surface, bs)
+        surface = objective.in_surface
+        baseline = surface.get_dofs()
+        rng = np.random.default_rng(20260725)
+        offset = rng.standard_normal(baseline.size)
+        offset /= np.linalg.norm(offset)
+        baseline = baseline + 1.0e-3 * offset
+        surface.set_dofs(baseline)
+        surface.fix_all()
+        iota = float(boozer_surface.res["iota"])
+        G = float(boozer_surface.res["G"])
+        weight_inv_modB = bool(boozer_surface.res["weight_inv_modB"])
+        _, derivative, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        physical_partial = derivative.data[surface]
+        self.assertEqual(physical_partial.shape, baseline.shape)
+        self.assertTrue(np.all(np.isfinite(physical_partial)))
+
+        direction = rng.standard_normal(baseline.size)
+        direction /= np.linalg.norm(direction)
+        analytic = float(physical_partial @ direction)
+        step = 1.0e-6
+        surface.set_dofs(baseline + step * direction)
+        plus, _, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        surface.set_dofs(baseline - step * direction)
+        minus, _, _ = objective.fixed_surface_value_derivative_and_y_partial(
+            iota,
+            G,
+            weight_inv_modB=weight_inv_modB,
+        )
+        surface.set_dofs(baseline)
+        finite_difference = (plus - minus) / (2.0 * step)
+
+        np.testing.assert_allclose(
+            analytic,
+            finite_difference,
+            rtol=3.0e-6,
+            atol=1.0e-10,
+        )
+
     def test_boozerresidual_derivative(self):
         """
         Taylor test for derivative of surface non QS ratio wrt coil parameters

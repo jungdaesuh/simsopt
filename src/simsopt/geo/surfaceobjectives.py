@@ -1,3 +1,5 @@
+from typing import Optional, Tuple
+
 import numpy as np
 
 import simsoptpp as sopp
@@ -742,35 +744,48 @@ class NonQuasiSymmetricRatio(Optimizable):
             self.compute()
         return self._dJ
 
+    def _fixed_surface_value(self) -> float:
+        """Evaluate the primitive objective at the installed surface state."""
+        self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
+        axis = self.axis
+        surface = self.surface
+        nphi = surface.quadpoints_phi.size
+        ntheta = surface.quadpoints_theta.size
+        magnetic_field = self.biotsavart.B().reshape((nphi, ntheta, 3))
+        field_magnitude = np.linalg.norm(magnetic_field, axis=2)
+        normal_magnitude = np.linalg.norm(surface.normal(), axis=2)
+        symmetric_field = (
+            np.mean(field_magnitude * normal_magnitude, axis=axis)
+            / np.mean(normal_magnitude, axis=axis)
+        )
+        if axis == 0:
+            symmetric_field = symmetric_field[None, :]
+        else:
+            symmetric_field = symmetric_field[:, None]
+        non_symmetric_field = field_magnitude - symmetric_field
+        return float(
+            np.mean(normal_magnitude * non_symmetric_field**2)
+            / np.mean(normal_magnitude * symmetric_field**2)
+        )
+
+    def fixed_surface_value_and_derivative(self) -> Tuple[float, Derivative]:
+        """Return direct coil and physical-surface derivatives without reduction."""
+        self.surface.set_dofs(self.in_surface.get_dofs())
+        value = self._fixed_surface_value()
+        coil_derivative = self.biotsavart.B_vjp(
+            self.dJ_by_dB().reshape((-1, 3))
+        )
+        surface_derivative = Derivative(
+            {self.in_surface: self.dJ_by_dsurfacecoefficients()}
+        )
+        return value, coil_derivative + surface_derivative
+
     def compute(self):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
             res = self.boozer_surface.run_code(res['iota'], G=res['G'])
 
-        self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
-        axis = self.axis
-
-        # compute J
-        surface = self.surface
-        nphi = surface.quadpoints_phi.size
-        ntheta = surface.quadpoints_theta.size
-
-        B = self.biotsavart.B()
-        B = B.reshape((nphi, ntheta, 3))
-        modB = np.sqrt(B[:, :, 0]**2 + B[:, :, 1]**2 + B[:, :, 2]**2)
-
-        nor = surface.normal()
-        dS = np.sqrt(nor[:, :, 0]**2 + nor[:, :, 1]**2 + nor[:, :, 2]**2)
-
-        B_QS = np.mean(modB * dS, axis=axis) / np.mean(dS, axis=axis)
-
-        if axis == 0:
-            B_QS = B_QS[None, :]
-        else:
-            B_QS = B_QS[:, None]
-
-        B_nonQS = modB - B_QS
-        self._J = np.mean(dS * B_nonQS**2) / np.mean(dS * B_QS**2)
+        self._J = self._fixed_surface_value()
 
         booz_surf = self.boozer_surface
         iota = booz_surf.res['iota']
@@ -988,6 +1003,64 @@ class BoozerResidual(Optimizable):
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
+
+    def fixed_surface_value_derivative_and_y_partial(
+        self,
+        iota: float,
+        G: Optional[float],
+        *,
+        weight_inv_modB: bool,
+    ) -> Tuple[float, Derivative, RealArray]:
+        """Evaluate the unreduced residual term at one explicit surface and y."""
+        self.surface.set_dofs(self.in_surface.get_dofs())
+        self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
+        residual, residual_jacobian = boozer_surface_residual(
+            self.surface,
+            iota,
+            G,
+            self.biotsavart,
+            derivatives=1,
+            weight_inv_modB=weight_inv_modB,
+        )
+        residual_component_count = np.float64(residual.size)
+        residual_value = np.float64(0.5) * np.sum(
+            residual * residual,
+            dtype=np.float64,
+        ) / residual_component_count
+        surface_dof_count = self.in_surface.local_full_dof_size
+        surface_partial = (
+            residual_jacobian[:, :surface_dof_count].T @ residual
+        ) / residual_component_count
+        y_partial = (
+            residual_jacobian[:, surface_dof_count:].T @ residual
+        ) / residual_component_count
+
+        residual_by_field = boozer_surface_residual_dB(
+            self.surface,
+            iota,
+            G,
+            self.biotsavart,
+            derivatives=0,
+            weight_inv_modB=weight_inv_modB,
+        )[1]
+        field_cotangent = np.sum(
+            (residual[:, None] * residual_by_field).reshape((-1, 3, 3)),
+            axis=1,
+        ) / residual_component_count
+        direct_derivative = self.biotsavart.B_vjp(field_cotangent) + Derivative(
+            {self.in_surface: surface_partial}
+        )
+
+        label_value = float(self.boozer_surface.label.J())
+        label_delta = label_value - float(self.boozer_surface.targetlabel)
+        label_scale = self.constraint_weight * label_delta
+        label_penalty = np.float64(0.5) * self.constraint_weight * label_delta**2
+        label_derivative = self.boozer_surface.label.dJ(partials=True)
+        return (
+            float(residual_value + label_penalty),
+            direct_derivative + label_scale * label_derivative,
+            np.asarray(y_partial, dtype=np.float64),
+        )
 
     def compute(self):
         if self.boozer_surface.need_to_run_code:

@@ -82,7 +82,14 @@ class Obj(Optimizable):
 
     @derivative_dec
     def dJ(self):
+        """Return the objective derivative."""
         return self.inter_a.dbar_vjp([self.inter_b.bar()]) + self.inter_b.dbar_vjp([self.inter_a.bar()])
+
+
+def test_derivative_decorator_preserves_public_callable_metadata():
+    assert Obj.dJ.__name__ == "dJ"
+    assert Obj.dJ.__doc__ == "Return the objective derivative."
+    assert Obj.dJ.__wrapped__ is not None
 
 
 def taylor_test(obj):
@@ -115,6 +122,19 @@ def taylor_test(obj):
 
 
 class DerivativeTests(unittest.TestCase):
+
+    def test_projection_over_fully_fixed_lineage_is_empty(self):
+        opt = Opt(n=3)
+        derivative = Derivative(
+            {opt: np.ones(opt.local_full_dof_size, dtype=np.float64)}
+        )
+        opt.fix_all()
+
+        projected = derivative(opt)
+
+        self.assertEqual(projected.shape, (0,))
+        self.assertEqual(projected.dtype, np.dtype(np.float64))
+        self.assertEqual(float(np.linalg.norm(projected)), 0.0)
 
     def test_taylor_graph(self):
         # built a reasonably complex graph of two inputs, that both feed into
