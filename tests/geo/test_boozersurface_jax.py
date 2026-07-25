@@ -8963,6 +8963,12 @@ class TestBoozerSurfaceJAXExactPath:
         assert booz.traceable_newton_trace_capacity("lbfgs-ondevice") == 37
         assert booz.traceable_newton_trace_capacity(None) == 37
 
+    def test_traceable_newton_trace_capacity_fits_bounded_mixed_attempts(self):
+        booz = _make_mock_boozer_surface()
+        booz.options["newton_maxiter"] = 1
+
+        assert booz.traceable_newton_trace_capacity("bfgs-ondevice") == 2
+
     def test_traceable_mixed_public_factors_satisfy_live_fp64_operator(
         self, monkeypatch
     ):

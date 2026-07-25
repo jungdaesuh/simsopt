@@ -6434,9 +6434,12 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
     def traceable_newton_trace_capacity(self, method: str | None) -> int:
-        """Return the configured full Newton budget for every production lane."""
+        """Return capacity for both general and bounded Newton trace shapes."""
         del method
-        return int(self.options["newton_maxiter"])
+        return max(
+            int(self.options["newton_maxiter"]),
+            _optimizer_jax._BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
+        )
 
     def _run_traceable_mixed_pipeline(
         self,
