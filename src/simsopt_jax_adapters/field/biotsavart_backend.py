@@ -65,7 +65,10 @@ from simsopt_jax.core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
-from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
+from simsopt_jax.core._math_utils import (
+    as_compute_array as _as_compute_array,
+    as_jax_float64 as _as_jax_float64,
+)
 from simsopt_jax.core.specs import (
     BiotSavartSpec,
     CoilSetDofExtractionSpec,
@@ -218,15 +221,18 @@ def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch
     relying instead on the JAX kernel cache for compile-time reuse
     within a quadrature group.
     """
+    compute_points = _as_compute_array(points)
     ncoils = sum(len(group.coil_indices) for group in coil_set_spec.groups)
     result_by_index: dict[int, jax.Array] = {}
     for group in coil_set_spec.groups:
-        unit_current = jnp.ones((1,), dtype=group.currents.dtype)
+        compute_gammas = _as_compute_array(group.gammas)
+        compute_gammadashs = _as_compute_array(group.gammadashs)
+        unit_current = _as_compute_array(jnp.ones((1,), dtype=group.currents.dtype))
 
         def evaluate_single(coil_geometry):
             gamma, gammadash = coil_geometry
             return kernel(
-                points,
+                compute_points,
                 gamma[jnp.newaxis, ...],
                 gammadash[jnp.newaxis, ...],
                 unit_current,
@@ -235,11 +241,11 @@ def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch
         if batch_size <= 0:
             group_results = jax.vmap(
                 lambda gamma, gammadash: evaluate_single((gamma, gammadash))
-            )(group.gammas, group.gammadashs)
+            )(compute_gammas, compute_gammadashs)
         else:
             group_results = jax.lax.map(
                 evaluate_single,
-                (group.gammas, group.gammadashs),
+                (compute_gammas, compute_gammadashs),
                 batch_size=batch_size,
             )
         for position, coil_index in enumerate(group.coil_indices):
