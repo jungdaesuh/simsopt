@@ -1241,6 +1241,12 @@ def _traceable_total_gradient_with_status(
     return total_grad, linear_solve_success
 
 
+def _traceable_adjoint_rhs_exactly_zero(rhs):
+    """Test exact zero entirely on device without staging a scalar constant."""
+    rhs = jnp.asarray(rhs)
+    return jnp.logical_not(jnp.any(rhs))
+
+
 def _traceable_objective_gradient_parts(
     booz_jax,
     coil_set_spec_from_dofs,
@@ -1312,20 +1318,33 @@ def _traceable_objective_gradient_parts(
             lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
             solved_x,
         )
-        adjoint, linear_solve_status = _traceable_solve_linearization(
-            booz_jax,
-            solved_x,
-            dJ_dx,
-            coil_set_spec,
-            objective_kwargs,
-            linear_solve_factors=solved_linear_solve_factors,
-            linearization_kind=linearization_kind,
-            linear_solve_tol=linear_solve_tol,
-            linear_solve_stab=linear_solve_stab,
-            transpose=True,
-        )
-        linear_solve_success = _optimizer_jax._linear_solve_status_success(
-            linear_solve_status
+
+        def zero_adjoint(_):
+            return _runtime_zeros_like(solved_x), _runtime_bool(True)
+
+        def solve_adjoint(_):
+            adjoint_value, linear_solve_status = _traceable_solve_linearization(
+                booz_jax,
+                solved_x,
+                dJ_dx,
+                coil_set_spec,
+                objective_kwargs,
+                linear_solve_factors=solved_linear_solve_factors,
+                linearization_kind=linearization_kind,
+                linear_solve_tol=linear_solve_tol,
+                linear_solve_stab=linear_solve_stab,
+                transpose=True,
+            )
+            return (
+                adjoint_value,
+                _optimizer_jax._linear_solve_status_success(linear_solve_status),
+            )
+
+        adjoint, linear_solve_success = lax.cond(
+            _traceable_adjoint_rhs_exactly_zero(dJ_dx),
+            zero_adjoint,
+            solve_adjoint,
+            operand=None,
         )
 
     if not depends_on_coil_dofs:
