@@ -192,9 +192,12 @@ def test_dense_ir_contraction_certificate_uses_the_caller_key():
     assert float(fresh_upper) >= 1.0
 
 
-def test_bounded_mixed_newton_keeps_fp64_authority_and_fp32_proposal_hessian():
+def test_bounded_mixed_newton_materializes_live_fp64_public_hessian():
     _set_test_precision("mixed")
-    matrix = jnp.asarray(((2.0, 0.5), (0.5, 3.0)), dtype=jnp.float64)
+    matrix = jnp.asarray(
+        ((2.00000003, 0.50000007), (0.50000007, 3.00000011)),
+        dtype=jnp.float64,
+    )
     right_hand_side = jnp.asarray((1.0, 2.0), dtype=jnp.float64)
 
     def objective(state: jax.Array) -> jax.Array:
@@ -215,7 +218,7 @@ def test_bounded_mixed_newton_keeps_fp64_authority_and_fp32_proposal_hessian():
     assert int(result["bounded_newton_fp64_value_dtype_bits"]) == 64
     assert int(result["bounded_newton_fp64_gradient_dtype_bits"]) == 64
     assert result["grad"].dtype == jnp.dtype(np.float64)
-    assert result["hessian"].dtype == jnp.dtype(np.float32)
+    assert result["hessian"].dtype == jnp.dtype(np.float64)
     np.testing.assert_allclose(
         np.asarray(result["x"]),
         np.asarray(jnp.linalg.solve(matrix, right_hand_side)),
@@ -225,8 +228,8 @@ def test_bounded_mixed_newton_keeps_fp64_authority_and_fp32_proposal_hessian():
     np.testing.assert_allclose(
         np.asarray(result["hessian"]),
         np.asarray(matrix),
-        rtol=1.0e-6,
-        atol=1.0e-6,
+        rtol=1.0e-12,
+        atol=1.0e-12,
     )
 
 

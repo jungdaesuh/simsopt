@@ -7751,7 +7751,7 @@ def bounded_mixed_newton_polish_traceable(
     final_value = certificate_attempt["value"]
     final_gradient = certificate_attempt["gradient"]
     final_gradient_norm = certificate_attempt["gradient_norm"]
-    final_hessian_dtype = compute_dtype if mixed_proposal_enabled else certificate_dtype
+    final_hessian_dtype = certificate_dtype
     materialize_final_hessian, final_hessian_report = (
         _resolve_dense_hessian_materialization(
             materialize_hessian,
@@ -7781,29 +7781,21 @@ def bounded_mixed_newton_polish_traceable(
     final_hessian = None
     if materialize_final_hessian:
         final_hessian_stabilization = adjoint_hessian_stabilization(stab)
-        if mixed_proposal_enabled:
-            final_hessian = _materialize_dense_ir_proposal_matrix(
-                proposal_hvp_fn,
-                final_x,
-                final_gradient,
-                stab=final_hessian_stabilization,
-            )
-        else:
-            certificate_stab = _staged_like(
-                final_x,
-                final_hessian_stabilization,
-                dtype=certificate_dtype,
-            )
+        certificate_stab = _staged_like(
+            final_x,
+            final_hessian_stabilization,
+            dtype=certificate_dtype,
+        )
 
-            def final_certificate_matvec(vector):
-                return certificate_hvp_fn(final_x, vector) + certificate_stab * vector
+        def final_certificate_matvec(vector):
+            return certificate_hvp_fn(final_x, vector) + certificate_stab * vector
 
-            final_hessian = _dense_square_operator_matrix(
-                final_certificate_matvec,
-                final_gradient,
-                matrix_dtype=certificate_dtype,
-                sweep_dtype=certificate_dtype,
-            )
+        final_hessian = _dense_square_operator_matrix(
+            final_certificate_matvec,
+            final_gradient,
+            matrix_dtype=certificate_dtype,
+            sweep_dtype=certificate_dtype,
+        )
         final_hessian = _symmetrize_dense_hessian(final_hessian)
     success = (
         jnp.all(jnp.isfinite(final_x))
