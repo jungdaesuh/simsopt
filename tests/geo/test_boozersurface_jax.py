@@ -2268,15 +2268,11 @@ class TestOptimizerAdapter:
         with jax.transfer_guard("disallow"):
             assert _ls_hessian_symmetry_rel(symmetric) == 0.0
 
-        rectangular_jacobian = jnp.asarray(
-            [[3.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+        rectangular_jacobian = jnp.asarray([[3.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+        assert _dense_residual_jacobian_condition_estimate_or_none(None) is None
+        assert (
+            _dense_residual_jacobian_condition_estimate_or_none(jnp.ones((2,))) is None
         )
-        assert _dense_residual_jacobian_condition_estimate_or_none(
-            None
-        ) is None
-        assert _dense_residual_jacobian_condition_estimate_or_none(
-            jnp.ones((2,))
-        ) is None
         condition_estimate = _dense_residual_jacobian_condition_estimate_or_none(
             rectangular_jacobian
         )
@@ -4554,9 +4550,7 @@ class TestBoozerSurfaceJAXClass:
 
     def test_single_stage_routing_accepts_host_jax_inner_boozer_backend(self):
         assert resolve_boozer_optimizer_backend("host-jax", None) == "host-jax"
-        assert (
-            resolve_boozer_optimizer_backend("scipy-jax", "host-jax") == "host-jax"
-        )
+        assert resolve_boozer_optimizer_backend("scipy-jax", "host-jax") == "host-jax"
         assert resolve_boozer_limited_memory("host-jax", True) is True
         assert (
             resolve_boozer_optimizer_method(
@@ -6464,9 +6458,7 @@ class TestBoozerSurfaceJAXClass:
         raw_relative_error = np.linalg.norm(
             np.asarray(raw_solution) - true_solution_np
         ) / np.linalg.norm(true_solution_np)
-        assert condition_estimate > (
-            _opt._FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE
-        )
+        assert condition_estimate > (_opt._FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE)
         assert raw_relative_error > 1.0e-4
 
         booz.res = {
@@ -6649,9 +6641,7 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(RuntimeError, match="Unsupported BoozerSurfaceJAX"):
             booz.get_adjoint_runtime_state()
 
-    def test_get_adjoint_runtime_state_dense_hessian_is_undamped(
-        self, monkeypatch
-    ):
+    def test_get_adjoint_runtime_state_dense_hessian_is_undamped(self, monkeypatch):
         """Configured Newton damping must not alter dense adjoint equations."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
@@ -6713,7 +6703,11 @@ class TestBoozerSurfaceJAXClass:
         )
 
     def test_linear_solve_tolerance_uses_float32_smoke_floor(self, request):
-        from simsopt_jax.backend import get_backend_config, get_backend_policy, set_backend
+        from simsopt_jax.backend import (
+            get_backend_config,
+            get_backend_policy,
+            set_backend,
+        )
 
         previous_backend = get_backend_config()
         request.addfinalizer(lambda: _restore_backend_config(previous_backend))
@@ -6737,9 +6731,7 @@ class TestBoozerSurfaceJAXClass:
 
         assert booz._linear_solve_tolerance() == pytest.approx(1.0e-11)
 
-    def test_dense_backward_error_tolerance_lifts_large_float64_floor(
-        self, request
-    ):
+    def test_dense_backward_error_tolerance_lifts_large_float64_floor(self, request):
         from simsopt_jax.backend import get_backend_config, set_backend
 
         previous_backend = get_backend_config()
@@ -6753,12 +6745,8 @@ class TestBoozerSurfaceJAXClass:
         large_rhs = jnp.ones((1024,), dtype=jnp.float64)
 
         generic_tol = _opt._effective_linear_solve_tolerance(large_rhs, 1.0e-16)
-        small_tol = _opt._effective_dense_backward_error_tolerance(
-            small_rhs, 1.0e-16
-        )
-        large_tol = _opt._effective_dense_backward_error_tolerance(
-            large_rhs, 1.0e-16
-        )
+        small_tol = _opt._effective_dense_backward_error_tolerance(small_rhs, 1.0e-16)
+        large_tol = _opt._effective_dense_backward_error_tolerance(large_rhs, 1.0e-16)
         eps = np.finfo(np.float64).eps
         factor = _opt._DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR
         expected_small = factor * small_rhs.shape[0] * eps
@@ -8608,9 +8596,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert int(result["line_search_status"]) == int(expected_status)
         assert result["residual_jacobian_condition_estimate"] is None
 
-    def test_traceable_newton_stage_delegates_full_configured_policy(
-        self, monkeypatch
-    ):
+    def test_traceable_newton_stage_delegates_full_configured_policy(self, monkeypatch):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         x0 = booz._pack_decision_vector(
@@ -8649,9 +8635,7 @@ class TestBoozerSurfaceJAXExactPath:
             "tol": booz.options["newton_tol"],
             "stab": booz.options["newton_stab"],
             "materialize_hessian": False,
-            "max_dense_hessian_bytes": booz.options[
-                "max_dense_linearization_bytes"
-            ],
+            "max_dense_hessian_bytes": booz.options["max_dense_linearization_bytes"],
             "objective_args": (booz.coil_set_spec,),
         }
 
@@ -8845,7 +8829,9 @@ class TestBoozerSurfaceJAXExactPath:
             booz,
             "_run_traceable_pre_newton_stage",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("mixed routing must own the speculative pre-Newton stage")
+                AssertionError(
+                    "mixed routing must own the speculative pre-Newton stage"
+                )
             ),
         )
 
@@ -8906,6 +8892,70 @@ class TestBoozerSurfaceJAXExactPath:
         assert int(result["pre_newton_compute_dtype_bits"]) in (32, 64)
         assert float(result["final_gradient_norm"]) <= booz.options["newton_tol"]
 
+    def test_traceable_mixed_public_factors_satisfy_live_fp64_operator(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = False
+        booz.options["newton_polish_policy"] = "full"
+        booz.options["bfgs_maxiter"] = 1
+        booz.options["newton_maxiter"] = 1
+        booz.options["newton_tol"] = 1.0e-12
+        booz.options["newton_stab"] = 0.0
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        target = booz._pack_decision_vector(iota, G, sdofs=sdofs)
+        coefficients = 1.0 + 3.0e-8 * jnp.arange(
+            1,
+            target.size + 1,
+            dtype=jnp.float64,
+        )
+        policy = types.SimpleNamespace(
+            compute_dtype=np.dtype(np.float32),
+            runtime_dtype=np.dtype(np.float64),
+            resolved_precision="mixed",
+            max_dense_jacobian_bytes=1 << 20,
+            linear_solve_tolerance_floor=1.0e-13,
+            linear_solve_tolerance_cap=None,
+        )
+
+        def objective(x, *_args):
+            typed_target = jnp.asarray(target, dtype=x.dtype)
+            typed_coefficients = jnp.asarray(coefficients, dtype=x.dtype)
+            delta = x - typed_target
+            return 0.5 * jnp.vdot(delta, typed_coefficients * delta).real
+
+        monkeypatch.setattr(_bsj, "get_backend_policy", lambda: policy)
+        monkeypatch.setattr(_opt, "get_backend_policy", lambda: policy)
+        monkeypatch.setattr(
+            booz,
+            "_make_penalty_objective_with",
+            lambda *_args, **_kwargs: lambda x: objective(x),
+        )
+        monkeypatch.setattr(
+            booz,
+            "_get_traceable_penalty_objective",
+            lambda *_args: objective,
+        )
+
+        result = booz.run_code_traceable(booz.coil_set_spec, sdofs, iota, G)
+        rhs = jnp.linspace(1.0, 2.0, target.size, dtype=jnp.float64)
+        solution = _opt._lu_solve_dense_hessian(
+            result["lu_piv"],
+            rhs,
+            transpose=False,
+        )
+        live_hessian = jnp.diag(coefficients)
+        relative_residual = jnp.linalg.norm(
+            live_hessian @ solution - rhs
+        ) / jnp.linalg.norm(rhs)
+
+        assert bool(result["success"])
+        assert result["hessian"].dtype == jnp.dtype(np.float64)
+        assert float(relative_residual) <= 1.0e-12
+
     def test_run_code_traceable_ls_skip_policy_does_not_call_newton(self, monkeypatch):
         """Traceable LS skip policy must return the LS state without Newton lowering."""
         booz = _make_mock_boozer_surface()
@@ -8945,9 +8995,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["dense_newton_steps_materialized"] is False
         assert result["newton_iter"] == 0
 
-    def test_run_code_traceable_limited_memory_uses_monolithic_lbfgs(
-        self, monkeypatch
-    ):
+    def test_run_code_traceable_limited_memory_uses_monolithic_lbfgs(self, monkeypatch):
         """Traceable limited-memory LS must use the jit-compatible L-BFGS mode."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
@@ -10914,7 +10962,10 @@ class TestUpstreamFactoryBoozerMatrix:
             closed_curve_self_intersection_min_distance._cache_size()
             == self_intersection_cache
         )
-        assert pairwise_thresholded_mean_square_distance_pure._cache_size() == pairwise_cache
+        assert (
+            pairwise_thresholded_mean_square_distance_pure._cache_size()
+            == pairwise_cache
+        )
 
     def test_host_jax_kernel_bundle_survives_same_signature_coil_refresh(self):
         """Outer host refreshes dynamic coil values without rebuilding kernels."""
@@ -11378,12 +11429,17 @@ class TestUpstreamFactoryBoozerMatrix:
             result.convergence_metadata["linear_solve_probe_backend"]
             == "dense-lu-jacobian-transpose"
         )
-        assert float(
-            np.asarray(result.convergence_metadata["linear_solve_residual_relative"])
-        ) < 1e-10
-        assert int(
-            np.asarray(result.convergence_metadata["linear_solve_iterations"])
-        ) == 0
+        assert (
+            float(
+                np.asarray(
+                    result.convergence_metadata["linear_solve_residual_relative"]
+                )
+            )
+            < 1e-10
+        )
+        assert (
+            int(np.asarray(result.convergence_metadata["linear_solve_iterations"])) == 0
+        )
 
     def test_solve_boozer_state_helper_dense_lu_gate_does_not_mask_nonlinear_failure(
         self,
@@ -12301,7 +12357,9 @@ class TestBuildBoozerSurfaceRuntimeState:
 
     def test_runtime_state_fields_match_surface(self):
         """build_boozer_surface_runtime_state captures correct surface metadata."""
-        from simsopt_jax_adapters.geo.boozer_surface import build_boozer_surface_runtime_state
+        from simsopt_jax_adapters.geo.boozer_surface import (
+            build_boozer_surface_runtime_state,
+        )
 
         s = self._make_real_surface()
         rs = build_boozer_surface_runtime_state(s)
@@ -12316,7 +12374,9 @@ class TestBuildBoozerSurfaceRuntimeState:
 
     def test_runtime_state_non_stellsym_has_no_scatter(self):
         """Non-stellsym surface produces scatter_indices=None."""
-        from simsopt_jax_adapters.geo.boozer_surface import build_boozer_surface_runtime_state
+        from simsopt_jax_adapters.geo.boozer_surface import (
+            build_boozer_surface_runtime_state,
+        )
 
         s = self._make_real_surface(stellsym=False)
         rs = build_boozer_surface_runtime_state(s)
@@ -12326,7 +12386,9 @@ class TestBuildBoozerSurfaceRuntimeState:
 
     def test_constructor_uses_prebuilt_runtime_state(self):
         """BoozerSurfaceJAX uses pre-built runtime state without re-querying surface."""
-        from simsopt_jax_adapters.geo.boozer_surface import build_boozer_surface_runtime_state
+        from simsopt_jax_adapters.geo.boozer_surface import (
+            build_boozer_surface_runtime_state,
+        )
 
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         rs = build_boozer_surface_runtime_state(s)

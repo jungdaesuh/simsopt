@@ -1616,9 +1616,7 @@ def _geometry_from_surface_dofs(
     use_compute_dtype = np.dtype(geometry_dtype) == np.dtype(
         get_backend_policy().compute_dtype
     )
-    quadpoints_phi = _as_boozer_penalty_compute_array(
-        quadpoints_phi, geometry_dtype
-    )
+    quadpoints_phi = _as_boozer_penalty_compute_array(quadpoints_phi, geometry_dtype)
     quadpoints_theta = _as_boozer_penalty_compute_array(
         quadpoints_theta, geometry_dtype
     )
@@ -6476,15 +6474,9 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
                 "final_gradient_norm": jnp.linalg.norm(gradient),
                 "final_gradient_inf_norm": jnp.linalg.norm(gradient, ord=jnp.inf),
-                "pre_newton_iter": jnp.asarray(
-                    pre_newton["nit"], dtype=jnp.int32
-                ),
-                "pre_newton_nfev": jnp.asarray(
-                    pre_newton["nfev"], dtype=jnp.int32
-                ),
-                "pre_newton_ngev": jnp.asarray(
-                    pre_newton["ngev"], dtype=jnp.int32
-                ),
+                "pre_newton_iter": jnp.asarray(pre_newton["nit"], dtype=jnp.int32),
+                "pre_newton_nfev": jnp.asarray(pre_newton["nfev"], dtype=jnp.int32),
+                "pre_newton_ngev": jnp.asarray(pre_newton["ngev"], dtype=jnp.int32),
                 "pre_newton_line_search_status": jnp.asarray(
                     pre_newton["line_search_status"], dtype=jnp.int32
                 ),
@@ -6725,9 +6717,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "pre_newton_iter": pre_newton["nit"],
                 "pre_newton_nfev": pre_newton["nfev"],
                 "pre_newton_ngev": pre_newton["ngev"],
-                "pre_newton_line_search_status": pre_newton[
-                    "line_search_status"
-                ],
+                "pre_newton_line_search_status": pre_newton["line_search_status"],
                 **_skipped_newton_polish_fields(
                     self.options["max_dense_linearization_bytes"],
                     jnp.asarray(0, dtype=jnp.int32),
@@ -6850,9 +6840,7 @@ class BoozerSurfaceJAX(Optimizable):
             "mixed_bounded_certificate_accepted": newton_result.get(
                 "mixed_bounded_certificate_accepted"
             ),
-            "canonical_fallback_used": newton_result.get(
-                "canonical_fallback_used"
-            ),
+            "canonical_fallback_used": newton_result.get("canonical_fallback_used"),
             "ls_condition_estimate": ls_condition_estimate,
             "ls_residual_jacobian_condition_estimate": (
                 ls_residual_jacobian_condition_estimate
