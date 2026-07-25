@@ -1,9 +1,8 @@
 # JAX Upstream Final Upgrades Implementation Plan
 
 **Status:** The bounded Phase 0 implementation is present on the clean
-candidate lineage and has a dedicated local acceptance gate below. The full
-master roadmap and authoritative Perlmutter signoff remain open and are not one
-PR.
+candidate lineage and has passed its authoritative local RTX 5090 acceptance
+gate below. The full master roadmap remains open and is not one PR.
 **Last updated:** 2026-07-24
 
 ## Purpose
@@ -254,10 +253,10 @@ the compatibility default and mixed precision is selected explicitly.
   `benchmarks/paired_bca.py` is its reusable, dependency-light statistical
   utility, not a second benchmark owner. Both must use native, synthetic
   fixtures and must not read campaign artifacts or import examples.
-- Authoritative GPU signoff runs on one Perlmutter GPU allocation. FP64 and
+- Authoritative GPU signoff runs on the designated local RTX 5090. FP64 and
   mixed lanes run sequentially on the same recorded GPU UUID, environment, and
-  source commit. If that allocation is unavailable, GPU signoff is blocked;
-  results from unmatched devices are diagnostic only.
+  source commit. If that device is unavailable, GPU signoff is blocked;
+  results from unmatched devices or environments are diagnostic only.
 
 ## Implementation Plan
 
@@ -982,8 +981,8 @@ implementation.
    - [ ] Add the CPU-safe focused tests to `.github/workflows/jax_smoke.yml`,
      install the repository-supported JAX/JAXLIB pins there, and add the
      strict-GPU correctness subset to `.github/workflows/jax_gpu_parity.yml`.
-     Keep the authoritative paired performance signoff on Perlmutter; do not
-     port source campaign workflows wholesale.
+     Keep the authoritative paired performance signoff on the designated local
+     RTX 5090; do not port source campaign workflows wholesale.
    - [ ] Keep the deferred QFM change `0d4f82ddc` out of the selected core PRs.
    - [ ] Audit three explicit exclusion seams before finalizing the manifest:
      retain the target `backend/runtime.py` and `config.py` base without the
@@ -1118,6 +1117,10 @@ it does not redefine the full-roadmap regression suite below.
 Local receipt on 2026-07-24: `31 passed, 2 skipped` in 20.62 s. Both skips
 were the CUDA-only parameterizations of the two `SquaredFluxJAX` contract
 tests; every CPU-owned node executed.
+
+Static receipt on 2026-07-24: Ruff lint and format checks passed for all 16
+changed Python files relative to `85cde8d83`. The exact 23-file Ruff format
+list owned by `.github/workflows/jax_smoke.yml` also passed.
 
 ### Full four-file CPU roadmap diagnostic
 
@@ -1260,22 +1263,24 @@ with no strict-placement skips.
 
 ### GPU validation
 
-- [ ] In one Perlmutter allocation, record `jax.__version__`, `jaxlib` version,
-  device model, GPU UUID, driver, backend, x64 state, Python/import origins,
-  dependency check, and source commit before GPU execution.
-- [x] Run the canonical strict-mode local gate before authoritative allocation
-  signoff:
+- [x] On the designated local RTX 5090, record `jax.__version__`, `jaxlib`
+  version, device model, GPU UUID, driver, backend, x64 state, Python/import
+  origins, dependency check, and source commit before GPU execution.
+- [x] Run the canonical strict-mode authoritative gate:
   `SIMSOPT_BACKEND_MODE=jax_gpu_parity JAX_PLATFORMS=cuda SIMSOPT_JAX_PLATFORM=cuda python -m pytest -q -rs tests/jax/core/test_surface_objective_fused_gradients.py tests/geo/test_curve_objectives_strict_gpu_jax.py tests/geo/test_surface_objectives_strict_gpu_jax.py`.
   Require private-helper and public objective value/derivative tests to execute
   on CUDA with zero skips; collection success or a CUDA-unavailable skip is not
   placement evidence.
-  Local receipt on 2026-07-24: `6 passed` with zero skips in 73.46 s on
+  Authoritative receipt on 2026-07-24 at clean source commit
+  `37d0b93e5b556e1c8623f8fdcd556fbc3c81b65c`: `6 passed` with zero skips in
+  73.08 s on
   `NVIDIA GeForce RTX 5090`, UUID
   `GPU-7951f78e-c05d-e01c-303f-d644f4341fe1`, driver `595.84`, Python
   3.11.15, JAX/JAXLIB 0.10.0, and x64 enabled by the test fixture. `simsopt`
   resolved from this checkout; `simsoptpp`, JAX, and JAXLIB resolved from the
-  isolated environment's installed dependency paths. This closes local strict
-  collection but does not substitute for the authoritative Perlmutter receipt.
+  isolated environment's installed dependency paths, and `pip check` reported
+  no broken requirements. This closes the Phase 0 authoritative strict-GPU
+  collection gate.
 - [ ] Run the focused FP64 and mixed kernel/optimizer tests sequentially on that
   same GPU UUID with `jax.transfer_guard("disallow")` active around the public
   solver entry points, not only around pure kernels.
@@ -1505,7 +1510,7 @@ with no strict-placement skips.
   review change, not an implementation-time choice. Update the resolved design,
   caller inventory, compatibility tests, docs, migration example, and rollback
   notes atomically before adopting it.
-- An unavailable Perlmutter GPU allocation blocks final GPU signoff. Do not
+- An unavailable designated local RTX 5090 blocks final GPU signoff. Do not
   replace the matched-device gate with results from different GPU models or
   separate environments.
 - Any additional benchmark, QFM change, Diffrax integration, campaign schema, or
