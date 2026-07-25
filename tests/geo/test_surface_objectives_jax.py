@@ -3562,9 +3562,7 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
 def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkeypatch):
     obj = object.__new__(surfaceobjectives_jax_module.BoozerResidualJAX)
     obj.boozer_surface = types.SimpleNamespace(res={"success": True})
-    obj.biotsavart, obj._coil_dof_extraction_spec = (
-        _make_static_coil_dof_contract()
-    )
+    obj.biotsavart, obj._coil_dof_extraction_spec = _make_static_coil_dof_contract()
     obj._coil_dof_layout_version = 0
     obj._J = None
     obj._dJ = None
@@ -3640,9 +3638,7 @@ def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkey
     assert obj._J == 2.5
     assert obj._dJ is None
     assert len(observed_inner_states) == 1
-    np.testing.assert_allclose(
-        observed_inner_states[0], np.asarray([0.1, 0.2])
-    )
+    np.testing.assert_allclose(observed_inner_states[0], np.asarray([0.1, 0.2]))
 
 
 def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch):
@@ -3705,9 +3701,7 @@ def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch)
 def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypatch):
     obj = object.__new__(surfaceobjectives_jax_module.NonQuasiSymmetricRatioJAX)
     obj.boozer_surface = types.SimpleNamespace(res={"success": True})
-    obj.biotsavart, obj._coil_dof_extraction_spec = (
-        _make_static_coil_dof_contract()
-    )
+    obj.biotsavart, obj._coil_dof_extraction_spec = _make_static_coil_dof_contract()
     obj._coil_dof_layout_version = 0
     obj._J = None
     obj._dJ = None
@@ -3784,9 +3778,7 @@ def test_public_dJ_projects_cached_native_gradient_without_recomputing(
     wrapper_cls,
 ):
     obj = object.__new__(wrapper_cls)
-    obj.biotsavart, obj._coil_dof_extraction_spec = (
-        _make_static_coil_dof_contract()
-    )
+    obj.biotsavart, obj._coil_dof_extraction_spec = _make_static_coil_dof_contract()
     obj._coil_dof_layout_version = 0
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = jnp.asarray([2.0, -3.0], dtype=jnp.float64)

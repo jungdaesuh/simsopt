@@ -1320,7 +1320,9 @@ class TestBiotSavartJaxChunkedSelfConsistency:
                 )
                 expected_entries = unbounded_vmap_reference(kernel)
                 assert len(actual_entries) == len(expected_entries)
-                for actual, expected in zip(actual_entries, expected_entries, strict=True):
+                for actual, expected in zip(
+                    actual_entries, expected_entries, strict=True
+                ):
                     np.testing.assert_allclose(
                         np.asarray(actual),
                         np.asarray(expected),
