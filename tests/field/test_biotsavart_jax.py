@@ -2350,6 +2350,56 @@ class TestBiotSavartJAXCoilStateToken:
         np.testing.assert_allclose(recorder.free_x_written, updated)
         assert recorder.full_x_written is None
 
+    def test_spec_backed_rotated_curve_vjp_places_rotation_with_gpu_cotangent(
+        self,
+    ):
+        gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
+        if not gpu_devices:
+            pytest.skip(
+                "CUDA device required for strict rotated-VJP placement coverage"
+            )
+        from simsopt.field import coils_via_symmetries
+        from simsopt_jax_adapters.field.biotsavart_backend import (
+            BiotSavartJAX,
+            SpecBackedBiotSavartJAX,
+        )
+        from simsopt_jax.core.specs import make_biot_savart_spec
+
+        seed_coil = self._make_two_basic_coils()[0]
+        symmetry_coils = coils_via_symmetries(
+            [seed_coil.curve],
+            [seed_coil.current],
+            2,
+            True,
+        )
+        bs_jax = BiotSavartJAX(symmetry_coils)
+        spec = make_biot_savart_spec(
+            coil_dof_extraction=bs_jax.coil_dof_extraction_spec(),
+            coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
+        )
+        spec_backed = SpecBackedBiotSavartJAX(spec)
+        rotated_curve = next(
+            coil.curve
+            for coil in spec_backed.coils
+            if coil.curve._symmetry.has_rotation
+        )
+        cotangent_values = np.arange(
+            np.prod(rotated_curve.gamma().shape),
+            dtype=np.float64,
+        ).reshape(rotated_curve.gamma().shape)
+        expected = rotated_curve.dgamma_by_dcoeff_vjp(cotangent_values)
+        cotangent = jax.device_put(cotangent_values, gpu_devices[0])
+
+        with jax.transfer_guard("disallow"):
+            actual = rotated_curve.dgamma_by_dcoeff_vjp(cotangent)
+
+        np.testing.assert_allclose(
+            np.asarray(actual(spec_backed)),
+            np.asarray(expected(spec_backed)),
+            rtol=0.0,
+            atol=0.0,
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
