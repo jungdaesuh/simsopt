@@ -490,7 +490,10 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      formulations. Adapt the helper to the target's existing adjoint selector:
      support the selected `"lsmr_j"` path, and do not import the source-only
      `HessianLinearSolver.LSMR_IR` enum member or its environment-selected
-     comparator.
+     comparator. **Progress:** the helper, host-controlled final Hessian,
+     traceable final Hessian, and Boozer dense/CG/`"lsmr_j"` adjoint ownership
+     are ported. This remains open until the Phase 5 bounded-mixed producer
+     exists and consumes the same owner.
    - [x] Add the exact typed `linear_solver` keyword and
      `BoozerSurfaceJAX.options["newton_linear_solver"]` contract from the
      resolved decisions. Keep `operator_gmres` as the target default; require
@@ -517,7 +520,9 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      runtime state, and cache/bundle identity independence from dense Newton
      step damping. Adapt the solver-specific parameterization to the selected
      dense, CG, and existing `"lsmr_j"` routes; do not copy the deferred
-     `LSMR_IR` case.
+     `LSMR_IR` case. **Progress:** host-controlled, traceable, dense-adjoint,
+     dense-bundle, and `"lsmr_j"` ownership regressions are ported; only the
+     bounded-mixed regression remains gated on the Phase 5 producer.
 
 4. Thread mixed compute dtype through pure kernels and private optimizers.
    - [ ] Port compute-dtype propagation through
@@ -679,7 +684,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
    - [ ] Port mixed compute/certificate routing into
      `src/simsopt_jax_adapters/geo/boozer_surface.py` while preserving current
      FP64 result keys and public behavior.
-   - [ ] Reconcile every Boozer adapter consumer of Newton stabilization with
+   - [x] Reconcile every Boozer adapter consumer of Newton stabilization with
      the Phase 3 final/adjoint owner. In `get_adjoint_runtime_state()`, pass
      `adjoint_hessian_stabilization(newton_stab)` into the Hessian solve and
      retain the residual closure for the existing `"lsmr_j"` route. In the

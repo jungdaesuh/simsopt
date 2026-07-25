@@ -4800,7 +4800,11 @@ class BoozerSurfaceJAX(Optimizable):
                 hostify_inputs=False,
             )
             hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
-            stab = float(self.options["newton_stab"])
+            stab = float(
+                _optimizer_jax.adjoint_hessian_stabilization(
+                    self.options["newton_stab"]
+                )
+            )
             residual_kwargs = {}
             if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
                 residual_kwargs["residual_fn"] = self._make_penalty_residual_with(
@@ -5958,7 +5962,11 @@ class BoozerSurfaceJAX(Optimizable):
     ) -> BoozerKernelBundle:
         resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
         linear_solve_tol = self._linear_solve_tolerance()
-        linear_solve_stab = float(self.options.get("newton_stab", 0.0))
+        linear_solve_stab = float(
+            _optimizer_jax.adjoint_hessian_stabilization(
+                self.options.get("newton_stab", 0.0)
+            )
+        )
         key = self._penalty_kernel_signature(
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,

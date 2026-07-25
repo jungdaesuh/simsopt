@@ -4673,8 +4673,18 @@ class TestBoozerSurfaceJAXClass:
         ):
             require_target_backend_x64(optimizer_backend)
 
-    def test_newton_polish_returns_stabilized_hessian_when_requested(self):
-        """Returned Hessian must match the stabilized linear system."""
+    @pytest.mark.parametrize(
+        "runner",
+        (newton_polish, _opt.newton_polish_traceable),
+        ids=("host-controlled", "traceable"),
+    )
+    def test_newton_polish_stabilizes_step_but_returns_undamped_hessian(
+        self,
+        monkeypatch,
+        runner,
+    ):
+        """Step damping must not alter the accepted-state linearization."""
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "dense")
         A = jnp.array([[2.0, 0.5], [0.5, 3.0]])
         b = jnp.array([1.0, 2.0])
         stab = 0.25
@@ -4682,12 +4692,31 @@ class TestBoozerSurfaceJAXClass:
         def obj(x):
             return 0.5 * x @ A @ x - b @ x
 
-        result = newton_polish(obj, jnp.zeros(2), maxiter=5, tol=1e-14, stab=stab)
+        result = runner(obj, jnp.zeros(2), maxiter=1, tol=1e-14, stab=stab)
+        undamped_result = runner(
+            obj,
+            jnp.zeros(2),
+            maxiter=1,
+            tol=1e-14,
+            stab=0.0,
+        )
+        assert not np.allclose(result["x"], undamped_result["x"])
         np.testing.assert_allclose(
             result["hessian"],
-            np.asarray(A + stab * jnp.eye(2)),
+            np.asarray(A),
             atol=1e-12,
         )
+
+    @pytest.mark.parametrize(
+        ("solver", "expected"),
+        (("dense", 0.0), ("cg", 0.0), ("lsmr_j", 0.25)),
+    )
+    def test_adjoint_hessian_stabilization_owns_solver_regularization(
+        self,
+        solver,
+        expected,
+    ):
+        assert _opt.adjoint_hessian_stabilization(0.25, solver=solver) == expected
 
     def test_newton_polish_dense_hessian_matches_jacfwd_grad_candidate(self):
         """Benchmark candidates must preserve the current dense Hessian value."""
@@ -6592,10 +6621,10 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(RuntimeError, match="Unsupported BoozerSurfaceJAX"):
             booz.get_adjoint_runtime_state()
 
-    def test_get_adjoint_runtime_state_hessian_uses_configured_stab_once(
+    def test_get_adjoint_runtime_state_dense_hessian_is_undamped(
         self, monkeypatch
     ):
-        """Hessian runtime solves must not mutate into a hidden retry ridge."""
+        """Configured Newton damping must not alter dense adjoint equations."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         booz.options["newton_stab"] = 1.0e-4
@@ -6616,6 +6645,7 @@ class TestBoozerSurfaceJAXClass:
 
         recorded_stabs = []
 
+        monkeypatch.setattr(_bsj._optimizer_jax, "_ADJOINT_LINEAR_SOLVER", "dense")
         monkeypatch.setattr(
             _bsj._optimizer_jax,
             "_hessian_vector_product_fn",
@@ -6646,7 +6676,7 @@ class TestBoozerSurfaceJAXClass:
         solved, success = adjoint_state.solve_transpose_with_status(rhs)
 
         assert bool(np.asarray(success.success)) is True
-        np.testing.assert_allclose(recorded_stabs, np.asarray([1.0e-4]))
+        np.testing.assert_allclose(recorded_stabs, np.asarray([0.0]))
         np.testing.assert_allclose(
             np.asarray(adjoint_state.apply_transpose(solved)),
             np.asarray(rhs),
@@ -10580,8 +10610,12 @@ class TestUpstreamFactoryBoozerMatrix:
 
         assert refreshed_bundle is not bundle
 
-    def test_host_jax_kernel_bundle_rebuilds_on_solver_static_option_change(self):
-        """Solver options captured in kernels must split the bundle signature."""
+    def test_host_jax_dense_kernel_bundle_ignores_newton_step_stabilization(
+        self,
+        monkeypatch,
+    ):
+        """Nonlinear Newton damping must not split dense adjoint bundles."""
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "dense")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         bundle = booz._get_penalty_kernel_bundle(
             True,
@@ -10590,6 +10624,29 @@ class TestUpstreamFactoryBoozerMatrix:
         )
 
         booz.options["newton_stab"] = 1e-4
+        refreshed_bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+
+        assert refreshed_bundle is bundle
+
+    def test_host_jax_lsmr_j_bundle_owns_regularization_identity(
+        self,
+        monkeypatch,
+    ):
+        """Residual-J augmentation keeps regularization in bundle identity."""
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+        booz = _make_mock_boozer_surface(mpol=1, ntor=1)
+        booz.options["newton_stab"] = 1.0e-4
+        bundle = booz._get_penalty_kernel_bundle(
+            True,
+            booz.options["weight_inv_modB"],
+            booz.constraint_weight,
+        )
+
+        booz.options["newton_stab"] = 2.0e-4
         refreshed_bundle = booz._get_penalty_kernel_bundle(
             True,
             booz.options["weight_inv_modB"],
@@ -10672,6 +10729,7 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """The bundle path must supply a residual-J operator to ``lsmr_j``."""
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         booz.options["newton_stab"] = 1.0e-4
         bundle = booz._get_penalty_kernel_bundle(
@@ -10701,7 +10759,6 @@ class TestUpstreamFactoryBoozerMatrix:
             assert probe.shape[0] == jacobian_operator["shape"][0]
             return current_rhs, _mock_linear_solve_status(True)
 
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         monkeypatch.setattr(
             _opt,
             "_solve_regularized_normal_system_lsmr_j_with_status",
@@ -10725,6 +10782,7 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """The real residual-J LSMR bundle entrypoint stays transfer-clean."""
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         booz.options["newton_stab"] = 1.0e-4
         bundle = booz._get_penalty_kernel_bundle(
@@ -10740,8 +10798,6 @@ class TestUpstreamFactoryBoozerMatrix:
         )
         rhs = jax.device_put(jnp.zeros_like(x))
         coil_set_spec = jax.tree.map(jax.device_put, booz.coil_set_spec)
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
-
         warmup_solution, warmup_status = bundle.linear_solve(x, rhs, coil_set_spec)
         warmup_solution.block_until_ready()
         assert bool(np.asarray(warmup_status.success))
@@ -10755,6 +10811,7 @@ class TestUpstreamFactoryBoozerMatrix:
 
     def test_host_jax_kernel_bundle_lsmr_j_rejects_zero_stab(self, monkeypatch):
         """The production bundle path fails closed for unsupported ``stab=0``."""
+        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         bundle = booz._get_penalty_kernel_bundle(
             True,
@@ -10766,8 +10823,6 @@ class TestUpstreamFactoryBoozerMatrix:
             dtype=jnp.float64,
         )
         rhs = jnp.ones_like(x)
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
-
         with pytest.raises(ValueError, match="requires positive newton_stab"):
             bundle.linear_solve(x, rhs, booz.coil_set_spec)
 
