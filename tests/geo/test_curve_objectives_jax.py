@@ -556,3 +556,33 @@ def test_public_curve_surface_distance_jax_wrapper_matches_cpu_value_and_gradien
         CurveSurfaceDistance([curve], surface, minimum_distance=0.8),
         CurveSurfaceDistanceJAX([curve], surface, minimum_distance=0.8),
     )
+
+
+def test_public_distance_jax_values_compose_at_the_host_boundary():
+    curve1 = _build_offset_nonplanar_curve(0.0)
+    curve2 = _build_offset_nonplanar_curve(0.3)
+    surface = SurfaceRZFourier(
+        nfp=1,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0.0, 1.0, 10, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 10, endpoint=False),
+    )
+    surface.set("rc(0,0)", 1.0)
+    surface.set("rc(1,0)", 0.2)
+    surface.set("zs(1,0)", 0.2)
+    objectives = (
+        CurveCurveDistanceJAX(
+            [curve1, curve2],
+            minimum_distance=0.75,
+            num_basecurves=2,
+        ),
+        CurveSurfaceDistanceJAX([curve1], surface, minimum_distance=0.8),
+    )
+
+    for objective in objectives:
+        value = objective.J()
+        scaled_value = (3.0 * objective).J()
+
+        assert isinstance(value, float)
+        np.testing.assert_allclose(scaled_value, 3.0 * value, rtol=0.0, atol=0.0)

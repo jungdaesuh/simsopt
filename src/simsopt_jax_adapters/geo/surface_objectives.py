@@ -265,8 +265,8 @@ class SurfaceSurfaceDistance(Optimizable):
         super().__init__(depends_on=[surf1, surf2])
 
     def _flattened_surface_gammas(self):
-        gamma1 = jnp.asarray(self.surf1.gamma(), dtype=jnp.float64)
-        gamma2 = jnp.asarray(self.surf2.gamma(), dtype=jnp.float64)
+        gamma1 = _as_jax_float64(self.surf1.gamma())
+        gamma2 = _as_jax_float64(self.surf2.gamma())
         return (
             jnp.reshape(gamma1, (-1, 3)),
             jnp.reshape(gamma2, (-1, 3)),
@@ -2653,16 +2653,45 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             if constraint_weight is None
             else float(constraint_weight)
         )
+        self._init_boozer_objective(boozer_surface, biotsavart)
+        direct_objective = self._build_cached_direct_objective()
         self._direct_objective_value_and_grad = (
-            _make_cached_strict_scalar_value_and_grad(self._direct_objective_of_coils)
+            _make_cached_strict_scalar_value_and_grad(direct_objective)
         )
         self._direct_objective_value_and_gradients = (
             _make_cached_strict_scalar_value_and_two_gradients(
-                self._direct_objective_of_coils,
+                direct_objective,
                 static_argnums=(2, 3),
             )
         )
-        self._init_boozer_objective(boozer_surface, biotsavart)
+
+    def _build_cached_direct_objective(self):
+        """Build the compiled closure from explicitly host-staged constants."""
+        host_extraction_spec = _traceable_runtime_hostify_tree(
+            self.biotsavart.coil_dof_extraction_spec()
+        )
+        host_geometry_kwargs = _traceable_runtime_hostify_tree(
+            self._residual_geometry_kwargs()
+        )
+
+        def direct_objective(
+            coil_dofs,
+            x_inner,
+            optimize_G,
+            weight_inv_modB,
+        ):
+            return _boozer_residual_J_of_x_inner(
+                x_inner,
+                coil_set_spec=coil_set_spec_from_dof_extraction_spec(
+                    host_extraction_spec,
+                    coil_dofs,
+                ),
+                **host_geometry_kwargs,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+            )
+
+        return direct_objective
 
     def _direct_objective_of_coils(
         self,
@@ -2769,6 +2798,14 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
         return dJ_ds_jax
 
     def _residual_objective_kwargs(self, *, optimize_G, weight_inv_modB):
+        return dict(
+            **self._residual_geometry_kwargs(),
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+        )
+
+    def _residual_geometry_kwargs(self):
+        """Return coil-DOF-independent geometry shared by eager and JIT paths."""
         booz_surf = self.boozer_surface
         return dict(
             quadpoints_phi=booz_surf.quadpoints_phi,
@@ -2787,8 +2824,6 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             label_stellsym=booz_surf.label_stellsym,
             label_scatter_indices=booz_surf.label_scatter_indices,
             label_surface_kind=booz_surf._label_surface_geometry_kind,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
             targetlabel=booz_surf.targetlabel,
             constraint_weight=self.constraint_weight,
             label_type=booz_surf.label_type,
