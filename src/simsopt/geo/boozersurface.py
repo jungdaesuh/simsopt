@@ -159,6 +159,10 @@ class BoozerSurface(Optimizable):
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
 
+    def _label_surface_gradient(self) -> np.ndarray:
+        """Return the label gradient in intrinsic surface coordinates."""
+        return np.asarray(self.label.dJ_by_dsurfacecoefficients())
+
     def run_code(self, iota, G=None):
         """
         Run the default solvers, i.e., run Newton's method directly if you are computing a BoozerExact surface,
@@ -296,7 +300,7 @@ class BoozerSurface(Optimizable):
 
         dl = np.zeros(dofs.shape)
         drz = np.zeros(dofs.shape)
-        dl[:nsurfdofs] = self.label.dJ(partials=True)(s)
+        dl[:nsurfdofs] = self._label_surface_gradient()
         drz[:nsurfdofs] = s.dgamma_by_dcoeff()[0, 0, 2, :]
 
         Jnl = boozer[1]
@@ -366,7 +370,7 @@ class BoozerSurface(Optimizable):
         dl = np.zeros((xl.shape[0]-2,))
 
         l = self.label.J()
-        dl[:nsurfdofs] = self.label.dJ(partials=True)(s)
+        dl[:nsurfdofs] = self._label_surface_gradient()
         drz = np.zeros((xl.shape[0]-2,))
         g = [l-self.targetlabel]
         rz = (s.gamma()[0, 0, 2] - 0.)
@@ -760,7 +764,7 @@ class BoozerSurface(Optimizable):
         # Get constraint derivatives - shape should match J shape (which already has correct number of columns)
         dl = np.zeros(J.shape[1])
         drz = np.zeros(J.shape[1])
-        dl[:nsurfdofs] = self.label.dJ(partials=True)(s)
+        dl[:nsurfdofs] = self._label_surface_gradient()
         drz[:nsurfdofs] = s.dgamma_by_dcoeff()[0, 0, 2, :]
 
         J = np.vstack((J, np.sqrt(constraint_weight) * dl[None, :], np.sqrt(constraint_weight) * drz[None, :]))
@@ -1012,12 +1016,12 @@ class BoozerSurface(Optimizable):
             if s.stellsym:
                 J = np.vstack((
                     J[mask, :],
-                    np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+                    np.concatenate((self._label_surface_gradient(), [0., 0.])),
                 ))
             else:
                 J = np.vstack((
                     J[mask, :],
-                    np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+                    np.concatenate((self._label_surface_gradient(), [0., 0.])),
                     np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
                 ))
             dx = np.linalg.solve(J, b)
@@ -1043,12 +1047,12 @@ class BoozerSurface(Optimizable):
         if s.stellsym:
             J = np.vstack((
                 J[mask, :],
-                np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+                np.concatenate((self._label_surface_gradient(), [0., 0.])),
             ))
         else:
             J = np.vstack((
                 J[mask, :],
-                np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
+                np.concatenate((self._label_surface_gradient(), [0., 0.])),
                 np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
             ))
 

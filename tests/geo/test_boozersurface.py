@@ -15,6 +15,39 @@ stellsym_list = [True, False]
 
 
 class BoozerSurfaceTests(unittest.TestCase):
+    def test_fixed_outer_surface_keeps_intrinsic_label_gradient(self):
+        _, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="ls",
+            optimize_G=True,
+            converge=False,
+        )
+        surface = boozer_surface.surface
+        state = np.concatenate((surface.get_dofs(), [-0.406, -2.0]))
+
+        expected_value, expected_gradient = (
+            boozer_surface.boozer_penalty_constraints_vectorized(
+                state,
+                derivatives=1,
+                constraint_weight=100.0,
+                optimize_G=True,
+            )
+        )
+        surface.fix_all()
+        actual_value, actual_gradient = (
+            boozer_surface.boozer_penalty_constraints_vectorized(
+                state,
+                derivatives=1,
+                constraint_weight=100.0,
+                optimize_G=True,
+            )
+        )
+
+        self.assertEqual(surface.local_dof_size, 0)
+        self.assertEqual(actual_gradient.shape, state.shape)
+        np.testing.assert_array_equal(actual_value, expected_value)
+        np.testing.assert_array_equal(actual_gradient, expected_gradient)
+
     def test_residual(self):
         """
         This test loads a SurfaceXYZFourier that interpolates the xyz

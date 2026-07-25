@@ -2440,6 +2440,8 @@ def _qs_ratio_pure(
     scatter_indices,
     surface_kind,
     axis,
+    *,
+    use_compute_dtype=True,
 ):
     """Pure JAX QS ratio: ``mean(dS * B_nonQS^2) / mean(dS * B_QS^2)``.
 
@@ -2456,6 +2458,7 @@ def _qs_ratio_pure(
         stellsym,
         scatter_indices,
         surface_kind=surface_kind,
+        use_compute_dtype=use_compute_dtype,
     )
     normal = jnp.cross(xphi, xtheta)
     dS = jnp.sqrt(jnp.sum(normal * normal, axis=-1))
@@ -3028,6 +3031,7 @@ class NonQuasiSymmetricRatioJAX(_BoozerObjectiveBase):
             scatter_indices=booz_surf.scatter_indices,
             surface_kind=booz_surf._surface_geometry_kind,
             axis=self.axis,
+            use_compute_dtype=False,
         )
 
     def _compute_value(self, sdofs, coil_set_spec):
