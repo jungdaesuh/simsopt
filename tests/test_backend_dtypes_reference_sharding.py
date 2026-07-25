@@ -21,6 +21,7 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from simsopt_jax.backend import dtypes
 from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
+from simsopt_jax.core import _device_scalars
 from simsopt_jax.core._device_scalars import staged_like
 
 
@@ -74,6 +75,25 @@ def test_staged_scalar_uses_replicated_named_sharding() -> None:
     assert scalar.ndim == 0
     assert isinstance(scalar.sharding, NamedSharding)
     assert scalar.sharding.spec == P()
+
+
+def test_staged_like_tracer_does_not_embed_a_runtime_device_put(monkeypatch):
+    def unexpected_explicit_placement(*args, **kwargs):
+        raise AssertionError("traced literals must remain uncommitted")
+
+    monkeypatch.setattr(
+        _device_scalars,
+        "explicit_device_array",
+        unexpected_explicit_placement,
+    )
+
+    @jax.jit
+    def add_staged_scalar(reference):
+        return reference + staged_like(reference, 1.0)
+
+    result = add_staged_scalar(jnp.asarray((1.0, 2.0), dtype=jnp.float64))
+
+    np.testing.assert_array_equal(np.asarray(result), np.asarray((2.0, 3.0)))
 
 
 def test_reference_sharding_handles_tracer_leaf_in_sequence():
