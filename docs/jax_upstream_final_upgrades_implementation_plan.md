@@ -749,11 +749,22 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      through traceable objective state/signatures rather than storing raw Newton
      step damping as adjoint identity. Do not add the deferred `"lsmr_ir"`
      selector or source environment dispatch.
-   - [ ] Port large-constant staging, runtime-dtype predictor solves, seeded/K2
-     FP64 certificate rules, and accepted-state ownership into
-     `surface_objectives_traceable.py`. **Progress:** runtime-dtype predictor
-     solves now separate FP32 proposal forcing from the FP64 certificate anchor
-     and operator; K2/accepted-state closure still requires a dedicated audit.
+   - [x] Preserve runtime-dtype predictor solves: FP32 proposal forcing remains
+     separate from the FP64 certificate anchor, right-hand side, operator, and
+     solve result. The public anchor regression in
+     `tests/geo/test_traceable_warmstart_anchor.py` supersedes the donor's
+     duplicate `test_traceable_predictor_dtype_guard.py`.
+   - [x] Remove the supported tensor-Fourier path's large captured scatter
+     constants at their representation owner. The donor's uncommitted staging
+     helper did not prevent JAX 0.10 from constant-folding repeated FP32
+     literals on either CPU or CUDA, so it is superseded by the existing typed
+     one-dimensional index-scatter path; only the generic compatibility surface
+     retains a dense matrix fallback. Full mixed value-and-gradient lowering
+     contains no floating scatter matrix at either dtype (`1/1` CPU and `1/1`
+     local RTX 5090).
+   - [ ] Audit seeded/K2 FP64 certificate rules and accepted-state ownership in
+     `surface_objectives_traceable.py`; do not infer closure from the predictor
+     contract.
    - [x] Port the dependency-complete reporting and warm-start state from
      selected `3c7a9d787` before applying later reporting/predictor commits:
      packed `outer_raw_terms_present`, the raw-term leaves and
@@ -913,9 +924,13 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      cannot dereference a missing field.
    - [x] Preserve bitwise agreement between the direct primal entry point and
      the custom-JVP primal while fusing primal and tangent source traversal.
-   - [ ] Port the stellarator-symmetry index-scatter representation across
+   - [x] Port the stellarator-symmetry index-scatter representation across
      `surface_fourier.py`, `surface_fourier_kernels.py`, `boozer_residual.py`,
-     and the Boozer adapter.
+     and the Boozer adapter. Supported real surface families now snapshot a
+     one-dimensional `int32` map; the generic compatibility surface retains its
+     explicit two-dimensional fallback. The complete mixed traceable bundle
+     lowering proves that the tensor-Fourier adapter no longer embeds the former
+     FP64 or FP32 scatter matrices.
    - [x] Stage the scatter zero on the active device and verify that strict
      transfer guards do not introduce a host scalar.
    - [x] Port the selected `ef8626e5` differentiated scatter contract: factor

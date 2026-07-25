@@ -12156,6 +12156,8 @@ class TestUpstreamFactoryBoozerMatrix:
 
         assert runtime_state.surface_kind == expected_kind
         assert runtime_state.scatter_indices is not None
+        assert runtime_state.scatter_indices.ndim == 1
+        assert runtime_state.scatter_indices.dtype == jnp.int32
         assert runtime_state.mpol == surface.mpol
         assert runtime_state.ntor == surface.ntor
 
