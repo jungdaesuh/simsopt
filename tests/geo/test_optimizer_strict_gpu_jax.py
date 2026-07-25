@@ -114,3 +114,44 @@ def test_dense_condition_estimate_aligns_cached_cpu_factors_with_gpu_result(
     assert all(factor.devices() == {cpu} for factor in lu_piv_cpu)
     assert estimate.devices() == {gpu}
     assert float(np.asarray(estimate)) == pytest.approx(1.0e5, rel=1.0e-10)
+
+
+def test_traceable_dense_ir_polish_stays_on_gpu_under_strict_transfer_guard(
+    monkeypatch,
+    request,
+) -> None:
+    enable_strict_parity_backend(monkeypatch, request, "gpu")
+    gpu = _gpu_device()
+    x0 = jax.device_put(
+        np.full(5, 2.0e-5 / np.sqrt(5.0), dtype=np.float64),
+        gpu,
+    )
+
+    def objective(candidate):
+        return jnp.dot(candidate, candidate)
+
+    with parity_default_device("gpu"), jax.transfer_guard("disallow"):
+        result = _optimizer.newton_polish_traceable(
+            objective,
+            x0,
+            maxiter=4,
+            tol=1.0e-6,
+            stab=0.0,
+            materialize_hessian=False,
+            linear_solver="hybrid_final_dense_ir",
+        )
+        jax.block_until_ready(result)
+
+    active = np.asarray(result["newton_trace_active"], dtype=bool)
+    backend_codes = np.asarray(
+        result["newton_trace_linear_solve_backend_code"]
+    )[active]
+    dense_ir_code = _optimizer._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+        _optimizer._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+    ]
+    assert result["x"].devices() == {gpu}
+    assert bool(result["success"])
+    np.testing.assert_array_equal(
+        backend_codes,
+        np.asarray([dense_ir_code], dtype=np.int32),
+    )

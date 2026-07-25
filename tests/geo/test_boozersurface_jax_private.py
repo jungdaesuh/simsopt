@@ -67,6 +67,27 @@ def test_solve_boozer_adjoint_raises_on_failed_operator_runtime():
         _soj._solve_boozer_adjoint(adjoint_state, jnp.ones((2,), dtype=jnp.float64))
 
 
+def test_traceable_forward_result_packs_newton_linear_solver_backend_code():
+    code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+        _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU
+    ]
+    result = _soj._pack_traceable_forward_result(
+        value=jnp.asarray(1.25, dtype=jnp.float64),
+        x=jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        sdofs=jnp.asarray([1.0], dtype=jnp.float64),
+        iota=jnp.asarray(0.1, dtype=jnp.float64),
+        G=jnp.asarray(-2.0, dtype=jnp.float64),
+        linear_solve_factors=None,
+        success=jnp.asarray(True),
+        primal_success=jnp.asarray(True),
+        adjoint_linear_solve_available=jnp.asarray(False),
+        newton_linear_solve_backend_code=jnp.asarray(code, dtype=jnp.int32),
+    )
+
+    assert bool(result["newton_linear_solve_backend_code_present"])
+    assert int(result["newton_linear_solve_backend_code"]) == code
+
+
 def _assert_plu_tuple_matches(actual, expected) -> None:
     for actual_part, expected_part in zip(actual, expected):
         np.testing.assert_allclose(actual_part, expected_part, atol=1e-14)
@@ -3103,6 +3124,335 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert _opt._gmres_iteration_limits(39) == (39, 10)
         assert _opt._gmres_iteration_limits(663) == (64, 10)
 
+    @pytest.mark.parametrize(
+        "linear_solver",
+        (
+            "operator_gmres",
+            "dense_lu",
+            "hybrid_final_dense_lu",
+            "hybrid_final_dense_ir",
+        ),
+    )
+    def test_traceable_newton_linear_solver_accepts_exact_canonical_values(
+        self, linear_solver
+    ):
+        assert _opt._resolve_traceable_newton_linear_solver(linear_solver) == (
+            linear_solver
+        )
+
+    @pytest.mark.parametrize(
+        "linear_solver",
+        ("operator", "gmres", "dense", "lu", "dense-ir", ""),
+    )
+    def test_traceable_newton_linear_solver_rejects_aliases(self, linear_solver):
+        with pytest.raises(ValueError, match="linear_solver must be one of"):
+            _opt._resolve_traceable_newton_linear_solver(linear_solver)
+
+    def test_traceable_newton_runner_cache_identity_includes_linear_solver(self):
+        def objective(x):
+            return 0.5 * jnp.dot(x, x)
+
+        common_arguments = (
+            objective,
+            2,
+            1e-11,
+            0.0,
+            False,
+            None,
+            False,
+            False,
+        )
+        operator_runner = _opt._make_traceable_newton_polish_runner(
+            *common_arguments,
+            "operator_gmres",
+        )
+        dense_ir_runner = _opt._make_traceable_newton_polish_runner(
+            *common_arguments,
+            "hybrid_final_dense_ir",
+        )
+        repeated_operator_runner = _opt._make_traceable_newton_polish_runner(
+            *common_arguments,
+            "operator_gmres",
+        )
+
+        assert operator_runner is repeated_operator_runner
+        assert operator_runner is not dense_ir_runner
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_default_ignores_legacy_solver_environment(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER",
+            "hybrid_final_dense_ir",
+        )
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        backend_codes = np.asarray(result["newton_trace_linear_solve_backend_code"])[
+            active
+        ]
+        operator_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+        ]
+
+        np.testing.assert_array_equal(
+            backend_codes,
+            np.asarray([operator_code], dtype=np.int32),
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_uses_lazy_near_target_chord(self):
+        tol = 1e-6
+        x0 = jnp.full((5,), 2e-5, dtype=jnp.float64) / np.sqrt(5.0)
+        result = _opt.newton_polish_traceable(
+            lambda x: jnp.dot(x, x),
+            x0,
+            maxiter=4,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+            linear_solver="hybrid_final_dense_ir",
+        )
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        backend_codes = np.asarray(result["newton_trace_linear_solve_backend_code"])[
+            active
+        ]
+        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ]
+
+        assert bool(result["success"]) is True
+        assert int(result["nit"]) == 1
+        np.testing.assert_array_equal(
+            backend_codes,
+            np.asarray([dense_ir_code], dtype=np.int32),
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_solve_dense_ir_system_refines_against_current_operator(self):
+        matrix_live = jnp.diag(jnp.asarray([2.0, 3.0, 4.0, 5.0]))
+        matrix_stale = 1.02 * matrix_live
+        lu_piv = _opt.jsp_linalg.lu_factor(matrix_stale)
+        rhs = jnp.asarray([1.0, -2.0, 3.0, -4.0], dtype=jnp.float64)
+
+        solution, status = _opt._solve_dense_ir_system_with_status(
+            lambda vector: matrix_live @ vector,
+            lu_piv,
+            rhs,
+            tol=1e-4,
+        )
+
+        assert bool(status.success) is True
+        assert int(status.iterations) == _opt._DENSE_IR_NEWTON_REFINEMENT_STEPS
+        np.testing.assert_allclose(
+            np.asarray(matrix_live @ solution),
+            np.asarray(rhs),
+            rtol=0.0,
+            atol=1e-4,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_solve_dense_ir_system_stale_factors_fail_loud(self):
+        matrix_live = 3.0 * jnp.eye(3, dtype=jnp.float64)
+        lu_piv = _opt.jsp_linalg.lu_factor(jnp.eye(3, dtype=jnp.float64))
+        rhs = jnp.asarray([1.0, 2.0, 3.0], dtype=jnp.float64)
+
+        _solution, status = _opt._solve_dense_ir_system_with_status(
+            lambda vector: matrix_live @ vector,
+            lu_piv,
+            rhs,
+            tol=1e-10,
+        )
+
+        assert bool(status.success) is False
+        assert np.isfinite(float(status.residual_relative))
+        assert float(status.residual_relative) > 1e-10
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_matches_dense_lu(self):
+        tol = 1e-6
+        hessian_diag = jnp.asarray(np.logspace(0.0, 5.0, 6), dtype=jnp.float64)
+        minimum = jnp.ones((6,), dtype=jnp.float64)
+
+        def objective(x):
+            delta = x - minimum
+            return 0.5 * jnp.dot(delta, hessian_diag * delta)
+
+        gradient_scale = 4e-5 / np.sqrt(6.0)
+        x0 = minimum + gradient_scale / hessian_diag
+        common_options = {
+            "maxiter": 6,
+            "tol": tol,
+            "stab": 0.0,
+            "materialize_hessian": False,
+        }
+        result_ir = _opt.newton_polish_traceable(
+            objective,
+            x0,
+            linear_solver="hybrid_final_dense_ir",
+            **common_options,
+        )
+        result_lu = _opt.newton_polish_traceable(
+            objective,
+            x0,
+            linear_solver="dense_lu",
+            **common_options,
+        )
+
+        assert bool(result_ir["success"]) is True
+        assert bool(result_lu["success"]) is True
+        np.testing.assert_allclose(
+            np.asarray(result_ir["x"]),
+            np.asarray(result_lu["x"]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_retries_loose_operator_direction(
+        self, monkeypatch
+    ):
+        tol = 1e-3
+        strict_cap = _opt._eisenstat_walker_strict_cap(
+            jnp.asarray(tol, dtype=jnp.float64),
+            dtype=jnp.float64,
+        )
+
+        def tolerance_sensitive_solve(_matvec, rhs, *, tol):
+            loose = tol > strict_cap
+            direction = jnp.where(loose, -rhs, rhs)
+            return direction, _opt._LinearSolveStatus(
+                success=~loose,
+                residual=jnp.where(loose, 1.0, 0.0).astype(jnp.float64),
+                residual_relative=jnp.where(loose, 0.5, 0.0).astype(jnp.float64),
+                iterations=jnp.asarray(7, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_traceable_newton_operator_gmres_with_status",
+            tolerance_sensitive_solve,
+        )
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            jnp.asarray([1.0], dtype=jnp.float64),
+            maxiter=6,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+            linear_solver="operator_gmres",
+        )
+
+        assert bool(result["success"]) is True
+        assert int(result["newton_attempted_iterations"]) == 2
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        accepted = np.asarray(result["newton_trace_step_accepted"])[active]
+        linear_tols = np.asarray(result["newton_trace_linear_tol"])[active]
+        np.testing.assert_array_equal(accepted, np.asarray([False, True]))
+        assert linear_tols[0] > float(strict_cap)
+        assert linear_tols[1] <= float(strict_cap)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_dense_ir_factors_at_near_target(self, monkeypatch):
+        def objective(x):
+            return 0.5 * jnp.dot(x, x) + (8.0 / 6.0) * jnp.sum(x**3)
+
+        def damped_far_operator_solve(matvec, rhs, *, tol):
+            del tol
+            hessian_diagonal = matvec(jnp.ones_like(rhs))
+            return 0.55 * rhs / hessian_diagonal, _opt._LinearSolveStatus(
+                success=jnp.asarray(True),
+                residual=jnp.asarray(0.0, dtype=jnp.float64),
+                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
+                iterations=jnp.asarray(3, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_traceable_newton_operator_gmres_with_status",
+            damped_far_operator_solve,
+        )
+        tol = 1e-9
+        maxiter = 40
+        result = _opt.newton_polish_traceable(
+            objective,
+            jnp.asarray([2.5], dtype=jnp.float64),
+            maxiter=maxiter,
+            tol=tol,
+            stab=0.0,
+            materialize_hessian=False,
+            linear_solver="hybrid_final_dense_ir",
+        )
+        active = np.asarray(result["newton_trace_active"], dtype=bool)
+        backend_codes = np.asarray(result["newton_trace_linear_solve_backend_code"])[
+            active
+        ]
+        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
+        ]
+        dense_ir_iterations = int((backend_codes == dense_ir_code).sum())
+
+        assert bool(result["success"]) is True
+        assert float(result["final_gradient_norm"]) <= tol
+        assert int(result["nit"]) < maxiter
+        assert dense_ir_iterations <= 3
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_exact_traceable_retries_loose_operator_direction(self, monkeypatch):
+        tol = 1e-3
+        strict_cap = _opt._eisenstat_walker_strict_cap(
+            jnp.asarray(tol, dtype=jnp.float64),
+            dtype=jnp.float64,
+        )
+
+        def tolerance_sensitive_exact_solve(_jvp_fn, _x, rhs, *, tol):
+            loose = tol > strict_cap
+            direction = jnp.where(loose, -rhs, rhs)
+            return direction, jnp.zeros_like(rhs), jnp.asarray(0, dtype=jnp.int32)
+
+        monkeypatch.setattr(
+            _opt,
+            "_gmres_solve_exact_newton_system",
+            tolerance_sensitive_exact_solve,
+        )
+        result = _opt.newton_exact_traceable(
+            lambda x: x,
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+            maxiter=6,
+            tol=tol,
+        )
+
+        assert bool(result["success"]) is True
+        assert int(result["nit"]) == 1
+        np.testing.assert_allclose(np.asarray(result["x"]), np.zeros(2), atol=1e-15)
+
+    def test_traceable_matvec_counts_rearm_across_kernel_executions(self):
+        token = _opt._register_traceable_matvec_counter(3)
+        try:
+            _opt._invoke_traceable_matvec_counter(token, 0)
+            _opt._invoke_traceable_matvec_counter(token, 0)
+            _opt._invoke_traceable_matvec_counter(token, 1)
+            assert _opt.traceable_newton_matvec_counts_from_token(token) == (2, 1, 0)
+            _opt._invoke_traceable_matvec_counter(token, 0)
+            assert _opt.traceable_newton_matvec_counts_from_token(token) == (1, 0, 0)
+        finally:
+            _opt._unregister_traceable_matvec_counter(token)
+
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_skips_debug_callback_without_progress(
@@ -3144,16 +3494,13 @@ class TestBoozerSurfaceJAXClassPrivate:
     ):
         """Dense compatibility metadata must not force dense Newton steps."""
 
-        observed = {"calls": 0}
-
         def exact_operator_solve(_matvec, rhs, *, tol):
             del tol
-            observed["calls"] += 1
             return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _opt,
-            "_solve_square_array_system_operator_only",
+            "_solve_traceable_newton_operator_gmres_with_status",
             exact_operator_solve,
         )
 
@@ -3179,7 +3526,14 @@ class TestBoozerSurfaceJAXClassPrivate:
         )
         assert bool(result["success"]) is True
         assert bool(result["hessian_materialized"]) is True
-        assert observed["calls"] == 1
+        assert (
+            int(result["newton_linear_solve_backend_code"])
+            == (
+                _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
+                    _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
+                ]
+            )
+        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -3194,7 +3548,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         monkeypatch.setattr(
             _opt,
-            "_solve_square_array_system_operator_only",
+            "_solve_traceable_newton_operator_gmres_with_status",
             finite_descent_step_failed_status,
         )
 
@@ -3224,7 +3578,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
             del _matvec, tol
-            return jnp.full_like(rhs, jnp.nan), jnp.array(False, dtype=bool)
+            return jnp.full_like(rhs, jnp.nan), _mock_linear_solve_status(False)
 
         def forbid_dense_hessian(*_args, **_kwargs):
             raise AssertionError(
@@ -3233,7 +3587,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         monkeypatch.setattr(
             _opt,
-            "_solve_square_array_system_operator_only",
+            "_solve_traceable_newton_operator_gmres_with_status",
             fake_operator_only_linear_solve,
         )
         monkeypatch.setattr(_opt, "_materialize_dense_hessian", forbid_dense_hessian)
@@ -3263,11 +3617,11 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
             del _matvec, tol
-            return -rhs, jnp.array(True, dtype=bool)
+            return -rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
             _opt,
-            "_solve_square_array_system_operator_only",
+            "_solve_traceable_newton_operator_gmres_with_status",
             fake_operator_only_linear_solve,
         )
 
