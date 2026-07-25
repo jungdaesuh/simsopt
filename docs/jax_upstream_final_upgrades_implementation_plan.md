@@ -6,9 +6,10 @@ are present on the candidate lineage. The accepted-state public Hessian now
 comes from the live FP64 certificate operator; widening an FP32 proposal matrix
 is not accepted as adjoint authority. Focused CPU and local RTX 5090 gates are
 recorded below. Randomized adjoint-certificate authority is now explicit and
-fail-closed. Snapshot restoration, speculative callback isolation,
-lifecycle/provider integration, trace-capacity propagation, and the remaining
-roadmap stay open and are not one PR.
+fail-closed. Snapshot restoration, speculative callback isolation, and the
+remaining follow-up roadmap stay open and are not one PR. SciPy
+lifecycle/provider integration and static Newton trace-capacity propagation are
+implemented and covered by the recorded CPU and local RTX 5090 gates.
 **Last updated:** 2026-07-25
 
 ## Purpose
@@ -1756,11 +1757,13 @@ recorded above; no campaign or example fixture is required for their authority.
 
 ## Completion Criteria
 
-### Production-port objective closure
+### Source-only production-port objective closure
 
-The source-only production port requested for `pr/jax-port-squashed` is
-complete independently of the optional benchmark-infrastructure, native
-invalid-axis, Perlmutter, and PR-submission follow-ups:
+The source-only production-port objective requested for
+`pr/jax-port-squashed` is complete. The broader roadmap is not complete: its
+53 unchecked items remain deliberately deferred across optional
+benchmark-infrastructure, native invalid-axis, historical diagnostic, and
+PR-submission follow-ups.
 
 - [x] Typed precision/runtime policy is public, immutable after resolution,
   cache-identified, FP64-default, and covered by subprocess compatibility tests.
@@ -1797,8 +1800,10 @@ port and must not be used to infer that the source port is incomplete.
 ### Phase 0 completion
 
 - [x] `752ed0193` is integrated as the bounded functional fusion slice; only
-  the two selected adapter files from `4d52c19b2` are present, and `_bfgs.py`
-  is unchanged from `upgrade_base`.
+  the two selected adapter files from `4d52c19b2` were included at that phase,
+  and `_bfgs.py` was unchanged in the bounded Phase 0 slice. The later,
+  independently reviewed Phase 4 commit `f4c699ada` intentionally adds mixed
+  private-optimizer support to `_bfgs.py`.
 - [x] The narrow `0bfcf79b7` public host/input-placement behavior is
   reconstructed with target-owned tests and without donor-only wrapper,
   example, campaign, or `.Codex/` dependencies.
@@ -1806,9 +1811,11 @@ port and must not be used to infer that the source port is incomplete.
   under strict transfer guard with zero skips, all imports resolve to the
   candidate environment, FP64 defaults are unchanged, and the bounded Phase 0
   CPU/static subset passes.
-- [x] Phase 0 release notes state that rotated-VJP placement and scatter custom
-  JVP/VJP placement remain deferred; no complete strict-placement claim is
-  made.
+- [x] Phase 0 release notes correctly record rotated-VJP and scatter custom
+  JVP/VJP placement as historical boundaries of that bounded slice; Phase 0
+  alone makes no complete strict-placement claim. The later reviewed commits
+  `b7e629202` and `2b14a7f26` complete those two placement slices and their
+  focused tests.
 
 ### Follow-up B completion
 
