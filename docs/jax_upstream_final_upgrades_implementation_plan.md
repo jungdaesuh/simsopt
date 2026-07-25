@@ -856,14 +856,16 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
    - [ ] Port the stellarator-symmetry index-scatter representation across
      `surface_fourier.py`, `surface_fourier_kernels.py`, `boozer_residual.py`,
      and the Boozer adapter.
-   - [ ] Stage the scatter zero on the active device and verify that strict
+   - [x] Stage the scatter zero on the active device and verify that strict
      transfer guards do not introduce a host scalar.
-   - [ ] Port the selected `ef8626e5` differentiated scatter contract: factor
+   - [x] Port the selected `ef8626e5` differentiated scatter contract: factor
      `dofs_to_xyzc()` through one shared implementation and provide an explicit
      custom JVP whose symbolic-zero and concrete tangent paths use the same
      operand-relative placement as the primal. Test both JVP and transpose/VJP
      under `jax.transfer_guard("disallow")`; primal placement alone is not
-     sufficient.
+     sufficient. **Result:** primal, JVP, and JIT-transposed VJP placement pass
+     `3/3` on both CPU and the local RTX 5090; the existing surface-Fourier CPU
+     suite remains `158/158`.
    - [ ] Add focused online Biot-Savart, additive/homogeneous JVP, scatter
      equivalence, and device-placement tests.
    - [ ] Create or port `tests/field/test_biotsavart_online.py` and
