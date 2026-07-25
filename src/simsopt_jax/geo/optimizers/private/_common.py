@@ -17,8 +17,13 @@ import numpy as np
 from jax import lax
 
 from simsopt_jax.runtime.host_boundary import host_array as _callback_host_array
-from simsopt_jax.backend import get_backend_policy, is_float32_smoke_policy
-from simsopt_jax.core.sharding import place_active_replicated
+from simsopt_jax.backend import (
+    get_backend_policy,
+    get_runtime_jax_device,
+    is_float32_smoke_policy,
+    maybe_initialize_distributed_jax,
+)
+from simsopt_jax.core.sharding import active_replicated_sharding
 from .._shared import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
@@ -35,7 +40,25 @@ _PRIVATE_SOLVER_CACHE_ATTR = "_simsopt_cached_private_solver"
 
 
 def _private_optimizer_device_put(value, *, dtype):
-    return place_active_replicated(value, dtype=dtype)
+    sharding = active_replicated_sharding()
+    if not isinstance(value, jax.Array) and hasattr(value, "aval"):
+        array = jnp.asarray(value, dtype=dtype)
+        if sharding is None:
+            return array
+        return lax.with_sharding_constraint(array, sharding)
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        array = jnp.asarray(value, dtype=dtype)
+    elif isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        array = np.asarray(value, dtype=np.dtype(dtype))
+    else:
+        array = jnp.asarray(value, dtype=dtype)
+    maybe_initialize_distributed_jax()
+    if sharding is not None:
+        return jax.device_put(array, sharding)
+    runtime_device = get_runtime_jax_device()
+    if runtime_device is None:
+        return jax.device_put(array)
+    return jax.device_put(array, runtime_device)
 
 
 def _as_jax_dtype(value, dtype):
@@ -158,9 +181,10 @@ def _scalar_value_and_grad(fun):
     def wrapped(x):
         dtype = _pytree_inexact_dtype(x)
         value, pullback = jax.vjp(fun, x)
-        value = jnp.asarray(value, dtype=dtype)
-        cotangent = _as_jax_dtype(1.0, value.dtype)
+        value_dtype = jnp.asarray(value).dtype
+        cotangent = _as_jax_dtype(1.0, value_dtype)
         (grad,) = pullback(cotangent)
+        value = jnp.asarray(value, dtype=dtype)
         grad = jax.tree.map(
             lambda leaf: jnp.asarray(leaf, dtype=dtype),
             grad,
@@ -196,7 +220,7 @@ def _promote_dtypes_inexact(*args):
     return tuple(_as_jax_dtype(arg, dtype) for arg in args)
 
 
-def _require_private_optimizer_runtime(x0):
+def _require_private_optimizer_runtime(x0, *, dtype=None):
     if not private_optimizer_runtime_is_supported(jax.__version__):
         raise RuntimeError(
             f"On-device optimizer requires JAX >= "
@@ -209,7 +233,8 @@ def _require_private_optimizer_runtime(x0):
             "On-device optimizer requires jax_enable_x64=True before import/use."
         )
 
-    x0 = _as_jax_dtype(x0, jnp.dtype(policy.runtime_dtype))
+    target_dtype = jnp.dtype(policy.runtime_dtype if dtype is None else dtype)
+    x0 = _as_jax_dtype(x0, target_dtype)
     if x0.ndim != 1:
         raise ValueError(
             f"On-device optimizer expects a flat 1-D decision vector, got {x0.shape}."

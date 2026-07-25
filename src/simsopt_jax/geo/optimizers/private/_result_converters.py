@@ -161,6 +161,7 @@ def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
         njev=_host_int(state.ngev),
         nhev=_host_int(state.nhev),
         success=_host_bool(state.converged) and not invalid_state,
+        failed=_host_bool(state.failed),
         status=status,
         message=_status_message_bfgs(status, invalid_state),
         hess_inv=_as_host_numpy(state.H_k),

@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 from conftest import enable_strict_parity_backend, parity_default_device
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
+from simsopt_jax.geo.optimizers.private import _bfgs as _private_bfgs
+from simsopt_jax.geo.optimizers.private import _lbfgs as _private_lbfgs
 
 
 def _gpu_device() -> jax.Device:
@@ -143,9 +145,7 @@ def test_traceable_dense_ir_polish_stays_on_gpu_under_strict_transfer_guard(
         jax.block_until_ready(result)
 
     active = np.asarray(result["newton_trace_active"], dtype=bool)
-    backend_codes = np.asarray(
-        result["newton_trace_linear_solve_backend_code"]
-    )[active]
+    backend_codes = np.asarray(result["newton_trace_linear_solve_backend_code"])[active]
     dense_ir_code = _optimizer._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
         _optimizer._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
     ]
@@ -155,3 +155,44 @@ def test_traceable_dense_ir_polish_stays_on_gpu_under_strict_transfer_guard(
         backend_codes,
         np.asarray([dense_ir_code], dtype=np.int32),
     )
+
+
+def test_private_quasi_newton_compute_state_stays_fp32_on_gpu(
+    monkeypatch,
+    request,
+) -> None:
+    monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+    enable_strict_parity_backend(monkeypatch, request, "gpu")
+    gpu = _gpu_device()
+    x0 = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64), gpu)
+
+    def objective(candidate):
+        one = jnp.exp(jnp.sum(candidate - candidate))
+        half = one / (one + one)
+        return half * jnp.dot(candidate, candidate)
+
+    with parity_default_device("gpu"), jax.transfer_guard("disallow"):
+        bfgs_state = _private_bfgs._minimize_bfgs_private(
+            objective,
+            x0,
+            maxiter=10,
+            gtol=1.0e-5,
+            x_dtype=jnp.float32,
+        )
+        lbfgs_state = _private_lbfgs._minimize_lbfgs_private(
+            objective,
+            x0,
+            maxiter=10,
+            gtol=1.0e-5,
+            maxcor=5,
+            x_dtype=jnp.float32,
+        )
+        jax.block_until_ready((bfgs_state, lbfgs_state))
+
+    assert bfgs_state.x_k.dtype == jnp.float32
+    assert bfgs_state.g_k.dtype == jnp.float32
+    assert bfgs_state.H_k.dtype == jnp.float32
+    assert lbfgs_state.x_k.dtype == jnp.float32
+    assert lbfgs_state.g_k.dtype == jnp.float32
+    assert bfgs_state.x_k.devices() == {gpu}
+    assert lbfgs_state.x_k.devices() == {gpu}

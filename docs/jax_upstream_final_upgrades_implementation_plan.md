@@ -558,7 +558,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `lax.slice_in_dim` path so VJP on three-component axes remains valid under
      `jax.transfer_guard("disallow")`. Reconcile the same commit's selected
      static selector/update portion of `curve_geometry.py`.
-   - [ ] Port mixed-dtype support through private BFGS, LBFGS, common optimizer,
+   - [x] Port mixed-dtype support through private BFGS, LBFGS, common optimizer,
      line-search, and result-conversion modules.
    - [ ] Ensure proposal arrays and explicitly compute-dtype intermediates may
      use FP32 while kernel-declared FP64 reductions/results, decision state,

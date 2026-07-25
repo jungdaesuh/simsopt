@@ -441,7 +441,11 @@ def _resolve_lbfgsb_run_mode_for_runtime(
 ) -> str:
     if not isinstance(x0, jax.core.Tracer):
         return run_mode
-    if callback is not None or progress_callback is not None or record_optimizer_state_trace:
+    if (
+        callback is not None
+        or progress_callback is not None
+        or record_optimizer_state_trace
+    ):
         raise ValueError(
             "lbfgs-ondevice host observation is not available while "
             "tracing a JAX function."
@@ -467,8 +471,7 @@ def _lbfgsb_workspace_bytes(
     float_slots = lbfgsb.lbfgsb_workspace_size(int(n), int(maxcor)) + 29
     int_slots = lbfgsb.lbfgsb_iwa_size(int(n)) + 2 + 2 + 4 + 44
     workspace_bytes = (
-        float_slots * np.dtype(dtype).itemsize
-        + int_slots * np.dtype(np.int32).itemsize
+        float_slots * np.dtype(dtype).itemsize + int_slots * np.dtype(np.int32).itemsize
     )
     if record_optimizer_state_trace:
         iterations = max(1, int(maxiter_limit))
@@ -700,9 +703,7 @@ def _lbfgsb_stepwise_driver(
         else:
             step_result = advance_from_search(state, value_and_grad_consts)
         state = step_result.state
-        if accepted_step_callback is not None and host_bool(
-            step_result.accepted_new_x
-        ):
+        if accepted_step_callback is not None and host_bool(step_result.accepted_new_x):
             try:
                 accepted_step_callback(
                     state.n_iterations,
@@ -740,6 +741,7 @@ def _minimize_lbfgs_private_impl(
     max_optimizer_state_trace_bytes=None,
     diagnostic_event_callback=None,
     run_mode=_LBFGS_RUN_MODE_STEPWISE,
+    x_dtype=None,
 ):
     run_mode = _check_lbfgsb_run_mode(str(run_mode))
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
@@ -748,7 +750,7 @@ def _minimize_lbfgs_private_impl(
         value_and_grad=True,
         callback=callback,
     )
-    x0 = _require_private_optimizer_runtime(x0)
+    x0 = _require_private_optimizer_runtime(x0, dtype=x_dtype)
     run_mode = _resolve_lbfgsb_run_mode_for_runtime(
         run_mode,
         x0,
@@ -951,6 +953,7 @@ def _minimize_lbfgs_private(
     max_optimizer_state_trace_bytes=None,
     diagnostic_event_callback=None,
     run_mode=_LBFGS_RUN_MODE_STEPWISE,
+    x_dtype=None,
 ):
     return _minimize_lbfgs_private_impl(
         _scalar_value_and_grad(fun),
@@ -969,6 +972,7 @@ def _minimize_lbfgs_private(
         max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
         diagnostic_event_callback=diagnostic_event_callback,
         run_mode=run_mode,
+        x_dtype=x_dtype,
     )
 
 
@@ -989,6 +993,7 @@ def _minimize_lbfgs_private_value_and_grad(
     max_optimizer_state_trace_bytes=None,
     diagnostic_event_callback=None,
     run_mode=_LBFGS_RUN_MODE_STEPWISE,
+    x_dtype=None,
 ):
     return _minimize_lbfgs_private_impl(
         fun,
@@ -1008,4 +1013,5 @@ def _minimize_lbfgs_private_value_and_grad(
         max_optimizer_state_trace_bytes=max_optimizer_state_trace_bytes,
         diagnostic_event_callback=diagnostic_event_callback,
         run_mode=run_mode,
+        x_dtype=x_dtype,
     )
