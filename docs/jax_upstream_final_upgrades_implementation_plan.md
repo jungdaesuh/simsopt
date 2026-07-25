@@ -826,19 +826,24 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      **Result:** the dedicated boundary regression passes `2/2` on CPU and
      `2/2` on the local RTX 5090 for both unbounded `vmap` and bounded
      `lax.map` dispatch.
-   - [ ] Preserve spec-backed Biot-Savart graph identity through rotated/scaled
+   - [x] Preserve spec-backed Biot-Savart graph identity through rotated/scaled
      curve and current wrappers, give spec-backed fields the required
      `clear_points()` behavior, and include symmetry-current owner segments in
      cache identity using selected `7d488caacc`, `8120b0ede`, and
-     `5df801e1b` production hunks. Do not port campaign consumers.
-   - [ ] Port the final strict-placement adapter behavior from selected
+     `5df801e1b` production hunks. Do not port campaign consumers. **Result:**
+     graph ownership, point clearing, and state-token behavior pass `3/3` on
+     CPU; graph ownership, point clearing, and rotated-cotangent placement pass
+     `3/3` on the local RTX 5090.
+   - [x] Port the final strict-placement adapter behavior from selected
      `ef8626e5` and `a473ec6a6`: place every array leaf in extraction-spec and
      grouped-VJP state trees relative to their owning device operands, place
      solved-state trees and cotangents at the adapter boundary, and stage the
      rotated-curve host matrix relative to the incoming cotangent before both
      gamma VJPs. Use static imports and the shared placement owner; do not copy
      the detached lineage's function-local imports or one-off helper variants.
-   - [ ] Port the fused surface-objective derivative seam introduced by
+     Concrete single-device placement uses `explicit_device_array`; named-only
+     sharding helpers are insufficient for a local CUDA cotangent.
+   - [x] Port the fused surface-objective derivative seam introduced by
      `22dc53c26` and finalized by `ef8626e5`: one compiled VJP must return the
      value, direct coil gradient, and inner-surface RHS for BoozerResidual and
      NonQuasiSymmetricRatio paths. Validate through public objective behavior;
@@ -846,14 +851,15 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      Create or port
      `tests/jax/core/test_surface_objective_fused_gradients.py`, but adapt its
      detached private-helper coverage into at least one public-objective
-     regression.
-   - [ ] Complete the public JAX geometry-objective host boundary from selected
+     regression. **Result:** private and public strict-placement regressions
+     pass `2/2` on the local RTX 5090.
+   - [x] Complete the public JAX geometry-objective host boundary from selected
      `1ae141973` and `0bfcf79b7`: `LpCurveCurvatureJAX`,
      `CurveCurveDistanceJAX`, and `CurveSurfaceDistanceJAX` must return host
      scalars suitable for generic Optimizable/scaled-objective composition,
      while SurfaceSurfaceDistance stages both surface inputs through the shared
-     placement-aware conversion. Test values and finite derivatives under a
-     strict GPU transfer guard.
+     placement-aware conversion. Dedicated strict-GPU modules collect values
+     and finite derivatives through the public objective family.
    - [x] Introduce `_evaluation_lifecycle.py` and `_evaluation_provider.py` as
      optimizer-owned abstractions, then route `_shared.py`, `optimizer.py`, and
      `reference.py` through them. The selected port preserves tuple-callable,
