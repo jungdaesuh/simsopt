@@ -248,6 +248,7 @@ __all__ = [
     "TargetObjectiveRoute",
     "TargetOptimizerContract",
     "TraceableNewtonLinearSolver",
+    "adjoint_hessian_stabilization",
     "adam_optimize",
     "adam_optimize_traceable",
     "private_optimizer_runtime_is_supported",
@@ -3771,9 +3772,27 @@ def dense_operator_chunk_batch_size():
 # residual Jacobian ``[J; sqrt(stab) I]``.  The unstabilized production
 # ``stab=0`` case needs a KKT/two-solve formulation, not a disguised normal-
 # equation solve.  Read once at import (selects a static trace-time branch).
+_AdjointHessianLinearSolver = Literal["dense", "cg", "lsmr_j"]
 _ADJOINT_LINEAR_SOLVER = (
     os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower()
 )
+
+
+def adjoint_hessian_stabilization(
+    newton_stabilization: float | jax.Array,
+    *,
+    solver: _AdjointHessianLinearSolver | None = None,
+) -> float | jax.Array:
+    """Return the stabilization owned by the final/adjoint linearization.
+
+    Newton damping changes iteration directions, not the accepted-state
+    Hessian. The residual-J LSMR formulation is the sole exception because its
+    augmented operator explicitly includes the positive regularization.
+    """
+    selected_solver = _ADJOINT_LINEAR_SOLVER if solver is None else solver
+    if selected_solver == "lsmr_j":
+        return newton_stabilization
+    return 0.0
 
 # Operator-only square solves historically performed one residual-correction
 # solve. Keep that default for LS/Hessian fallback callers; exact-jacobian
@@ -5918,7 +5937,7 @@ def newton_polish(
                 x,
                 symmetrize=True,
             ),
-            stab,
+            adjoint_hessian_stabilization(stab),
         )
 
     return {
@@ -6585,7 +6604,7 @@ def _build_traceable_newton_polish_runner(
         if materialize_final_hessian:
             H = _stabilize_dense_hessian(
                 _materialize_dense_hessian(hvp_fn, state["x"]),
-                stab,
+                adjoint_hessian_stabilization(stab),
             )
 
         return {
