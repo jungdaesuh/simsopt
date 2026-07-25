@@ -1,9 +1,13 @@
 # JAX Upstream Final Upgrades Implementation Plan
 
-**Status:** The bounded Phase 0 implementation and the production mixed
-dense-IR primitive are present on the clean candidate lineage. Both have passed
-their authoritative local RTX 5090 gates below. Phase 5 producer/adapter
-integration and the rest of the master roadmap remain open and are not one PR.
+**Status:** The bounded Phase 0 implementation, production mixed dense-IR
+primitive, mixed Boozer producer, and initial Phase 6 reporting/predictor slices
+are present on the candidate lineage. The accepted-state public Hessian now
+comes from the live FP64 certificate operator; widening an FP32 proposal matrix
+is not accepted as adjoint authority. Focused CPU and local RTX 5090 gates are
+recorded below. Snapshot restoration, speculative callback isolation, complete
+random-key authority, lifecycle/provider integration, trace-capacity propagation,
+and the remaining roadmap stay open and are not one PR.
 **Last updated:** 2026-07-25
 
 ## Purpose
@@ -101,13 +105,13 @@ commit.
 - The target already contains the base JAX port and FP64 hardening, including
   patch-equivalent dense-solve, rejected-gradient, residual-J LSMR, and Boozer
   warm-start fixes.
-- The target does not contain `src/simsopt_jax/numerical_policy.py`,
+- The target now contains `src/simsopt_jax/numerical_policy.py` and
+  `src/simsopt_jax/runtime/exact_numeric_identity.py`. It still does not contain
   `src/simsopt_jax/core/biotsavart_online.py`,
-  `src/simsopt_jax/runtime/exact_numeric_identity.py`,
   `src/simsopt_jax/geo/optimizers/_evaluation_lifecycle.py`, or
   `src/simsopt_jax/geo/optimizers/_evaluation_provider.py`.
-- The target does not expose the source branch's mixed-precision or
-  `hybrid_final_dense_ir` implementation symbols.
+- The target now exposes explicit mixed precision and
+  `hybrid_final_dense_ir`; neither changes the existing FP64 defaults.
 - Source tests and benchmark harnesses contain direct imports from
   `examples.single_stage_optimization`; those consumers cannot be copied into
   an example-free upstream slice.
@@ -482,7 +486,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
    - [x] Port the static CUDA dense-operator chunk auto-sizing finalized by
      `ecdba5011` and `aa7612a05`, retaining explicit override and the
      conservative non-CUDA default. Keep the helper private.
-   - [ ] Port `adjoint_hessian_stabilization()` from selected `5df801e1b` and
+   - [x] Port `adjoint_hessian_stabilization()` from selected `5df801e1b` and
      its final application from `e7b74254a`. Apply it consistently when
      materializing the host-controlled, bounded-mixed, and traceable Newton
      final Hessians. Damping may change the Newton step, but the returned
@@ -493,8 +497,8 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `HessianLinearSolver.LSMR_IR` enum member or its environment-selected
      comparator. **Progress:** the helper, host-controlled final Hessian,
      traceable final Hessian, and Boozer dense/CG/`"lsmr_j"` adjoint ownership
-     are ported. This remains open until the Phase 5 bounded-mixed producer
-     exists and consumes the same owner.
+     are ported. The Phase 5 bounded-mixed producer now consumes the same owner
+     and materializes its public Hessian from the accepted-state live FP64 HVP.
    - [x] Add the exact typed `linear_solver` keyword and
      `BoozerSurfaceJAX.options["newton_linear_solver"]` contract from the
      resolved decisions. Keep `operator_gmres` as the target default; require
@@ -514,7 +518,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
    - [x] Add the `4abc6982e`/`3a64837b2` regressions: an x-dependent Hessian
      near-target fixture that distinguishes factorization at the correct state,
      plus fail-loud equivalence tests for ill-conditioned and rejected solves.
-   - [ ] Port the focused final-Hessian ownership regressions from
+   - [x] Port the focused final-Hessian ownership regressions from
      `tests/geo/test_boozersurface_jax.py`: host and traceable Newton step
      damping with an undamped returned Hessian, solver-specific stabilization
      ownership, bounded-mixed final-Hessian behavior, undamped dense adjoint
@@ -522,8 +526,10 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      step damping. Adapt the solver-specific parameterization to the selected
      dense, CG, and existing `"lsmr_j"` routes; do not copy the deferred
      `LSMR_IR` case. **Progress:** host-controlled, traceable, dense-adjoint,
-     dense-bundle, and `"lsmr_j"` ownership regressions are ported; only the
-     bounded-mixed regression remains gated on the Phase 5 producer.
+     dense-bundle, and `"lsmr_j"` ownership regressions are ported. The
+     bounded-mixed regression uses FP64 coefficients that do not round-trip
+     through FP32 and requires the public factors to meet a `1e-12` residual
+     against the independently constructed live FP64 operator.
 
 4. Thread mixed compute dtype through pure kernels and private optimizers.
    - [x] Port compute-dtype propagation through
@@ -597,20 +603,24 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      command is run.
 
 5. Port mixed dense-IR certification and fallback.
-   - [ ] Port the production-only traceable stage owners from `512d89716` before
+   - [x] Port the production-only traceable stage owners from `512d89716` before
      their later callers: `_run_traceable_pre_newton_stage()` and
      `_run_traceable_newton_polish_stage()`, including pre-Newton result/status
      accounting and the Newton-polish handoff. Adapt applicable integration
      regressions without importing the source benchmark or example diagnostics.
    - [x] Port FP32 proposal-matrix construction into `optimizer.py`. Certify
-     against the live matrix-free FP64 operator through FP64 matvecs; do not
-     materialize a separate FP64 certificate matrix. A single canonical FP64
-     dense refactor/solve is allowed only as the bounded fallback attempt.
+     proposal steps against the live matrix-free FP64 operator through FP64
+     matvecs; do not materialize a separate FP64 matrix merely to accept a
+     proposal step. A single canonical FP64 dense refactor/solve is allowed only
+     as the bounded fallback attempt. After the endpoint is accepted, materialize
+     its public adjoint Hessian from the live FP64 certificate HVP; an FP32 matrix
+     widened to FP64 is not public adjoint authority.
      **Primitive result:** `tests/geo/test_mixed_dense_ir_optimizer.py` proves
      FP32 factorization, widened FP64 factor application, and live FP64
-     residuals on CPU and the RTX 5090. Source inspection confines FP64 matrix
-     materialization to the single fallback function. Production stage
-     ownership remains with the open adapter items below.
+     residuals on CPU and the RTX 5090. The accepted-state public-Hessian
+     regression separately proves that its LU factors satisfy the live FP64
+     operator to `1e-12`. Production stage ownership is now present; the
+     remaining outer snapshot/callback gates stay open below.
    - [x] Port bounded refinement history, contraction checks, effective linear
      tolerance normalization, factor authority, and fallback termination
      semantics. The correction histories have one typed fixed-capacity policy
@@ -657,9 +667,9 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      certification. Publish only the accepted attempt's ordered lifecycle; on
      canonical fallback, discard speculative events so external observers never
      receive an abandoned trajectory that array/token restoration cannot undo.
-   - [ ] Keep mixed and FP64 Newton producers distinct until they normalize into
+   - [x] Keep mixed and FP64 Newton producers distinct until they normalize into
      the common public result contract.
-   - [ ] Port only production-required portions of
+   - [x] Port only production-required portions of
      `src/simsopt_jax_adapters/geo/factor_handoff_identity.py`.
    - [x] Add its direct production dependency
      `src/simsopt_jax/runtime/exact_numeric_identity.py` from selected
@@ -667,7 +677,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      bytes, and rejects object/nonfinite leaves in a new dependency-light
      `tests/test_exact_numeric_identity.py`; do not import the source campaign
      probe.
-   - [ ] Port the `950fb5ca7` routing invariant: an explicit adjoint selector
+   - [x] Port the `950fb5ca7` routing invariant: an explicit adjoint selector
      overrides supplied factor metadata, and selecting LSMR for the adjoint
      path never changes the K1 forward predictor, with or without supplied
      factors.
@@ -692,9 +702,11 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      API—not a benchmark consumer—requires its schema.
 
 6. Reconcile Boozer and surface-objective adapters.
-   - [ ] Port mixed compute/certificate routing into
+   - [x] Port mixed compute/certificate routing into
      `src/simsopt_jax_adapters/geo/boozer_surface.py` while preserving current
-     FP64 result keys and public behavior.
+     FP64 result keys and public behavior. The mixed producer keeps FP32 work
+     private, normalizes accepted values/gradients to FP64, and constructs public
+     factors only from the accepted-state live FP64 Hessian.
    - [x] Reconcile every Boozer adapter consumer of Newton stabilization with
      the Phase 3 final/adjoint owner. In `get_adjoint_runtime_state()`, pass
      `adjoint_hessian_stabilization(newton_stab)` into the Hessian solve and
@@ -707,8 +719,10 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      selector or source environment dispatch.
    - [ ] Port large-constant staging, runtime-dtype predictor solves, seeded/K2
      FP64 certificate rules, and accepted-state ownership into
-     `surface_objectives_traceable.py`.
-   - [ ] Port the dependency-complete reporting and warm-start state from
+     `surface_objectives_traceable.py`. **Progress:** runtime-dtype predictor
+     solves now separate FP32 proposal forcing from the FP64 certificate anchor
+     and operator; K2/accepted-state closure still requires a dedicated audit.
+   - [x] Port the dependency-complete reporting and warm-start state from
      selected `3c7a9d787` before applying later reporting/predictor commits:
      packed `outer_raw_terms_present`, the raw-term leaves and
      `traceable_forward_result_outer_raw_terms()`,
@@ -719,19 +733,19 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      immutable state tokens, and structural signatures; keep raw terms,
      coil/anchor vectors, factors, and eligibility state as explicit runtime
      values or JIT arguments.
-   - [ ] Port `_traceable_adjoint_rhs_exactly_zero()` from selected
+   - [x] Port `_traceable_adjoint_rhs_exactly_zero()` from selected
      `67bdde1a7` using `jnp.logical_not(jnp.any(rhs))`; do not reintroduce a
      Python scalar conversion or the earlier elementwise-equality reduction.
      Add a focused strict-transfer regression.
-   - [ ] Preserve dense-size metadata as `int64` at all pack, unpack, and report
+   - [x] Preserve dense-size metadata as `int64` at all pack, unpack, and report
      boundaries using selected `e359bfd81`; add a value above `2**32` so the
      test cannot pass with an `int32` implementation.
-   - [ ] Port the selected `2a134a677` device-quadrature boundary: use the
+   - [x] Port the selected `2a134a677` device-quadrature boundary: use the
      explicit host boundary in `surface_objectives.py` only when host data is
      required, and stage already-device-resident quadrature directly in
      `surface_objectives_traceable.py`. Add the source strict-transfer
      regression without example imports.
-   - [ ] Port only the production lowerable-gradient seam from `7c934adc2`:
+   - [x] Port only the production lowerable-gradient seam from `7c934adc2`:
      construct one `lowerable_total_gradient_for`, reuse it in lazy and eager
      production routes, and expose that exact callable to prewarm/lowering.
      Exclude the commit's compile-evidence and campaign bundle.
@@ -799,10 +813,10 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `7f6bf6192` companion fixture changes in
      `tests/geo/boozersurface_jax_test_helpers.py` so clones and mocks preserve
      `clamped_dims`.
-   - [ ] Add the `aa47aa741` strict-transfer regression at the lazy reporting
+   - [x] Add the `aa47aa741` strict-transfer regression at the lazy reporting
      boundary, proving host booleans are staged outside traced/device code and
      do not cause an implicit host-to-device transfer.
-   - [ ] Complete the selected `0412de980` reporting boundary by staging both
+   - [x] Complete the selected `0412de980` reporting boundary by staging both
      the cached `outer_raw_terms` presence flag and every cached raw-term leaf
      relative to `solved_x`; add a strict-transfer regression.
    - [ ] Reconcile only the dependency-complete fixture portions of
@@ -1109,6 +1123,10 @@ implementation.
   through `xargs -0 -r ruff check`.
 - [ ] Pipe that same changed Python manifest through
   `xargs -0 -r ruff format --check`.
+  **Current-slice evidence:** after formatting the two live deltas identified by
+  the repository CI manifest, its 23-file format command passes, as does the
+  three-file check covering the adjoint-authority regressions. This does not
+  replace the final `upgrade_base..HEAD` manifest gate.
 - [ ] Run
   `rg -n '(from|import) examples|examples\.single_stage_optimization' src/simsopt src/simsopt_jax src/simsopt_jax_adapters`
   and require no production imports. Repeat the same scan over the changed test
@@ -1275,8 +1293,10 @@ with no strict-placement skips.
   after the port when no mixed mode is selected.
 - [ ] Verify mixed proposals use FP32 compute buffers while live matrix-free
   certificate matvecs, final gradients, and accepted public results satisfy the
-  FP64 contract; assert no FP64 certificate matrix is materialized before the
-  single canonical fallback.
+  FP64 contract. Assert that proposal-step acceptance does not materialize an
+  FP64 certificate matrix before the single canonical fallback, while an
+  explicitly requested accepted-state public Hessian is materialized from the
+  live FP64 certificate HVP rather than widened proposal values.
 - [ ] Force each mixed rejection condition and verify deterministic canonical
   FP64 fallback: nonfinite proposal, failed refinement, contraction failure,
   unsafe condition estimate, and tolerance miss. Separately force a
@@ -1332,6 +1352,18 @@ with no strict-placement skips.
   isolated environment's installed dependency paths, and `pip check` reported
   no broken requirements. This closes the Phase 0 authoritative strict-GPU
   collection gate.
+- [x] Run the dense optimizer placement gate with both backends available:
+  `JAX_PLATFORMS=cuda,cpu SIMSOPT_JAX_PLATFORM=cuda python -m pytest -q tests/geo/test_optimizer_strict_gpu_jax.py`.
+  The CPU backend is required because the tests deliberately place cached
+  factors/closure state on CPU and solve on CUDA. **Result:** `5 passed` in
+  12.78 s on the local RTX 5090 on 2026-07-25; a CUDA-only platform list is not
+  the contract for this file.
+- [x] Run the focused accepted-state authority regression on CPU and CUDA. The
+  mixed solver materializes the public Hessian in FP64, and the Boozer adapter's
+  public LU factors solve an independently constructed live FP64 operator with
+  relative residual at most `1e-12`. **Result:** CPU focused set `14 passed` in
+  16.37 s; authoritative CPU/CUDA authority nodes `2 passed` in 6.13 s and
+  `2 passed` in 11.00 s, respectively.
 - [ ] Run the focused FP64 and mixed kernel/optimizer tests sequentially on that
   same GPU UUID with `jax.transfer_guard("disallow")` active around the public
   solver entry points, not only around pure kernels.
