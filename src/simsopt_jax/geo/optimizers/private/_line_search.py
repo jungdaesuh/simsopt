@@ -652,20 +652,13 @@ def _line_search_from_restricted_func_and_grad(
             jnp.where(state.i > maxiter_jax, _int_scalar(3), _int_scalar(0)),
         ),
     )
-    alpha_k = jnp.asarray(state.a_star)
-    if jnp.finfo(alpha_k.dtype).bits != 64:
-        alpha_k = jnp.where(
-            jnp.abs(alpha_k) < _as_jax_dtype(1e-8, alpha_k.dtype),
-            jnp.sign(alpha_k) * _as_jax_dtype(1e-8, alpha_k.dtype),
-            alpha_k,
-        )
     return _LineSearchResults(
         failed=state.failed | (~state.done),
         nit=state.i - _int_scalar(1),
         nfev=state.nfev,
         ngev=state.ngev,
         k=state.i,
-        a_k=alpha_k,
+        a_k=jnp.asarray(state.a_star),
         f_k=state.phi_star,
         g_k=state.g_star,
         status=status,

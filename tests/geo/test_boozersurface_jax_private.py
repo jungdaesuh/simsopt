@@ -19,6 +19,7 @@ from simsopt_jax.geo.optimizers.private import (
     _line_search_module,
     _line_search_value_and_grad,
 )
+from simsopt_jax.geo.optimizers.private import _result_converters
 from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -127,11 +128,10 @@ def test_private_lbfgs_workspace_bytes_reports_bounded_state_size():
     maxcor = 4
     dtype = np.dtype(np.float64)
     expected = (
-        (_private_lbfgs.lbfgsb.lbfgsb_workspace_size(n, maxcor) + 29)
-        * dtype.itemsize
-        + (_private_lbfgs.lbfgsb.lbfgsb_iwa_size(n) + 2 + 2 + 4 + 44)
-        * np.dtype(np.int32).itemsize
-    )
+        _private_lbfgs.lbfgsb.lbfgsb_workspace_size(n, maxcor) + 29
+    ) * dtype.itemsize + (
+        _private_lbfgs.lbfgsb.lbfgsb_iwa_size(n) + 2 + 2 + 4 + 44
+    ) * np.dtype(np.int32).itemsize
 
     assert _private_lbfgs._lbfgsb_workspace_bytes(n, maxcor, dtype) == expected
 
@@ -166,8 +166,7 @@ def test_lbfgs_ondevice_fast_path_selection_is_bounds_derived():
     assert _private_lbfgs._LBFGSB_PRIVATE_BOUNDS is None
     assert _private_lbfgs._lbfgsb_unconstrained_fast_path_enabled(None) is True
     assert (
-        _private_lbfgs._lbfgsb_unconstrained_fast_path_enabled([(None, None)])
-        is False
+        _private_lbfgs._lbfgsb_unconstrained_fast_path_enabled([(None, None)]) is False
     )
     assert "unconstrained_fast_path=True" not in kernel_source
     assert "unconstrained_fast_path=unconstrained_fast_path" in kernel_source
@@ -1071,6 +1070,145 @@ class TestOptimizerAdapterPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_line_search_fp32_step_matches_returned_value_and_gradient(self):
+        """A small FP32 step and its returned value/gradient share one state."""
+
+        def steep_quad(x):
+            return jnp.asarray(0.5e12, dtype=x.dtype) * jnp.dot(x, x)
+
+        x0 = jnp.asarray([1.0], dtype=jnp.float32)
+        f0, g0 = jax.value_and_grad(steep_quad)(x0)
+        direction = -g0
+        result = _line_search(
+            steep_quad,
+            x0,
+            direction,
+            old_fval=f0,
+            old_old_fval=f0 + jnp.linalg.norm(g0) * jnp.float32(0.5),
+            gfk=g0,
+            maxiter=20,
+        )
+        evaluated_x = x0 + result.a_k * direction
+        expected_f, expected_g = jax.value_and_grad(steep_quad)(evaluated_x)
+
+        assert bool(result.failed) is False
+        assert float(result.a_k) < 1.0e-8
+        np.testing.assert_allclose(result.f_k, expected_f, rtol=1.0e-5)
+        np.testing.assert_allclose(result.g_k, expected_g, rtol=1.0e-5)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @pytest.mark.parametrize(
+        ("dtype", "next_value", "next_gradient", "expected_failed"),
+        (
+            (jnp.float32, 0.5 * 0.99**2, 0.99, False),
+            (jnp.float32, 2.0, -2.0, True),
+            (jnp.float64, 0.5 * 0.99**2, 0.99, True),
+        ),
+    )
+    def test_bfgs_reduced_precision_fallback_requires_objective_decrease(
+        self,
+        monkeypatch,
+        dtype,
+        next_value,
+        next_gradient,
+        expected_failed,
+    ):
+        """Only FP32 may accept a finite decreasing non-Wolfe fallback."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def non_wolfe_step(*_args, **_kwargs):
+            return _LineSearchResults(
+                failed=jnp.asarray(False),
+                nit=jnp.asarray(1, dtype=jnp.int32),
+                nfev=jnp.asarray(1, dtype=jnp.int32),
+                ngev=jnp.asarray(1, dtype=jnp.int32),
+                k=jnp.asarray(1, dtype=jnp.int32),
+                a_k=jnp.asarray(0.01, dtype=dtype),
+                f_k=jnp.asarray(next_value, dtype=dtype),
+                g_k=jnp.asarray([next_gradient], dtype=dtype),
+                status=jnp.asarray(0, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(_private_bfgs, "_line_search", non_wolfe_step)
+        state = _private_bfgs._minimize_bfgs_private(
+            quad,
+            jnp.asarray([1.0], dtype=dtype),
+            maxiter=1,
+            gtol=0.0,
+            x_dtype=dtype,
+        )
+
+        assert bool(state.failed) is expected_failed
+        result = _result_converters._private_bfgs_result_to_optimize_result(state)
+        assert result.failed is expected_failed
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_bfgs_cache_separates_dtype_and_shape_policy(self, monkeypatch):
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        quad._simsopt_cache_jit_value_and_grad = True
+
+        def decreasing_non_wolfe_step(_fun, x, *_args, **_kwargs):
+            dtype = x.dtype
+            next_gradient = jnp.full_like(x, jnp.asarray(0.99, dtype=dtype))
+            return _LineSearchResults(
+                failed=jnp.asarray(False),
+                nit=jnp.asarray(1, dtype=jnp.int32),
+                nfev=jnp.asarray(1, dtype=jnp.int32),
+                ngev=jnp.asarray(1, dtype=jnp.int32),
+                k=jnp.asarray(1, dtype=jnp.int32),
+                a_k=jnp.asarray(0.01, dtype=dtype),
+                f_k=jnp.asarray(0.5, dtype=dtype)
+                * jnp.dot(next_gradient, next_gradient),
+                g_k=next_gradient,
+                status=jnp.asarray(0, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(
+            _private_bfgs,
+            "_line_search",
+            decreasing_non_wolfe_step,
+        )
+        cases = (
+            (jnp.float32, (1,)),
+            (jnp.float32, (2,)),
+            (jnp.float64, (1,)),
+        )
+        states = tuple(
+            _private_bfgs._minimize_bfgs_private(
+                quad,
+                jnp.ones(shape, dtype=dtype),
+                maxiter=1,
+                gtol=0.0,
+                x_dtype=dtype,
+            )
+            for dtype, shape in cases
+        )
+
+        assert tuple(bool(state.failed) for state in states) == (False, False, True)
+        assert len(quad._simsopt_cached_private_solver) == 3
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_bfgs_fp32_stall_scale_uses_machine_epsilon(self):
+        _, _, _, fp32_step_eps = _private_bfgs._bfgs_curvature_terms(
+            jnp.asarray([1.0], dtype=jnp.float32),
+            jnp.asarray([1.0], dtype=jnp.float32),
+            x_dtype=jnp.float32,
+        )
+        _, _, _, fp64_step_eps = _private_bfgs._bfgs_curvature_terms(
+            jnp.asarray([1.0], dtype=jnp.float64),
+            jnp.asarray([1.0], dtype=jnp.float64),
+            x_dtype=jnp.float64,
+        )
+
+        assert float(fp32_step_eps) == pytest.approx(np.finfo(np.float32).eps)
+        assert float(fp64_step_eps) == pytest.approx(np.sqrt(np.finfo(np.float64).eps))
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_bfgs_private_solves_simple_quadratic(self):
         """Direct private BFGS should keep its simple quadratic contract."""
 
@@ -1136,6 +1274,7 @@ class TestOptimizerAdapterPrivate:
         monkeypatch,
     ):
         """Post-loop gradient refresh must not turn a failed iterate into success."""
+
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
@@ -1233,6 +1372,71 @@ class TestOptimizerAdapterPrivate:
 
         assert np.asarray(state.x_k).dtype == np.float32
         assert np.asarray(state.g_k).dtype == np.float32
+        assert bool(state.failed) is False
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_scalar_value_and_grad_accepts_wider_objective_dtype(self):
+        def quad_wide_value(x):
+            x_wide = jnp.asarray(x, dtype=jnp.float64)
+            return 0.5 * jnp.dot(x_wide, x_wide)
+
+        value, grad = _opt_common._scalar_value_and_grad(quad_wide_value)(
+            jnp.asarray([1.0, -2.0], dtype=jnp.float32)
+        )
+
+        assert value.dtype == jnp.float32
+        assert grad.dtype == jnp.float32
+        np.testing.assert_allclose(value, np.float32(2.5))
+        np.testing.assert_allclose(grad, np.asarray([1.0, -2.0]))
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_private_bfgs_honors_explicit_compute_dtype_under_mixed_policy(
+        self,
+        monkeypatch,
+        request,
+    ):
+        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_cpu_fast")
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        state = _private_bfgs._minimize_bfgs_private(
+            quad,
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+            maxiter=10,
+            gtol=1.0e-5,
+            x_dtype=jnp.float32,
+        )
+
+        assert state.x_k.dtype == jnp.float32
+        assert state.g_k.dtype == jnp.float32
+        assert state.H_k.dtype == jnp.float32
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_private_lbfgs_honors_explicit_compute_dtype_under_mixed_policy(
+        self,
+        monkeypatch,
+        request,
+    ):
+        monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
+        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_cpu_fast")
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        state = _private_lbfgs._minimize_lbfgs_private(
+            quad,
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+            maxiter=10,
+            gtol=1.0e-5,
+            maxcor=5,
+            x_dtype=jnp.float32,
+        )
+
+        assert state.x_k.dtype == jnp.float32
+        assert state.g_k.dtype == jnp.float32
         assert bool(state.failed) is False
 
     @PRIVATE_OPTIMIZER_RUNTIME
@@ -1913,6 +2117,7 @@ class TestLBFGSMethodPrivate:
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_does_not_call_custom_host_core(self, monkeypatch):
         """lbfgs-ondevice must run the SciPy-compatible JAX state machine."""
+
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
@@ -2152,9 +2357,15 @@ class TestLBFGSMethodPrivate:
         def fail_bounded_geometry(*_args, **_kwargs):
             raise AssertionError("unconstrained lbfgs-ondevice traced bounded geometry")
 
-        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_cauchy", fail_bounded_geometry)
-        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_formk", fail_bounded_geometry)
-        monkeypatch.setattr(_private_lbfgs.lbfgsb, "lbfgsb_subsm", fail_bounded_geometry)
+        monkeypatch.setattr(
+            _private_lbfgs.lbfgsb, "lbfgsb_cauchy", fail_bounded_geometry
+        )
+        monkeypatch.setattr(
+            _private_lbfgs.lbfgsb, "lbfgsb_formk", fail_bounded_geometry
+        )
+        monkeypatch.setattr(
+            _private_lbfgs.lbfgsb, "lbfgsb_subsm", fail_bounded_geometry
+        )
 
         matrix = jnp.asarray(
             [[3.0, 0.25], [0.25, 1.75]],
@@ -2996,9 +3207,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             lambda vector: vector,
             rhs,
             tol=1e-11,
-            max_refinement_steps=(
-                _opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
-            ),
+            max_refinement_steps=(_opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS),
         )
 
         np.testing.assert_allclose(np.asarray(solution), np.asarray(rhs), atol=1e-11)
@@ -3064,9 +3273,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             lambda vector: vector,
             rhs,
             tol=1e-11,
-            max_refinement_steps=(
-                _opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
-            ),
+            max_refinement_steps=(_opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS),
         )
 
         np.testing.assert_allclose(np.asarray(solution), np.asarray([0.9999]))

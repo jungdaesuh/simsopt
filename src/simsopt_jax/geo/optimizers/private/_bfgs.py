@@ -30,15 +30,20 @@ def _bfgs_curvature_terms(s_k, y_k, *, x_dtype):
     """Return ``(sTy, rho, valid_curvature)`` for the dense BFGS update."""
     rho_k_inv = _dot(y_k, s_k)
     rho_k = jnp.reciprocal(rho_k_inv)
-    step_eps = jnp.sqrt(_as_jax_dtype(jnp.finfo(x_dtype).eps, x_dtype))
+    machine_eps = _as_jax_dtype(jnp.finfo(x_dtype).eps, x_dtype)
+    curvature_eps = jnp.sqrt(machine_eps)
     curvature_scale = _norm(s_k) * _norm(y_k)
-    curvature_tol = step_eps * _as_jax_dtype(curvature_scale, rho_k_inv.dtype)
+    curvature_tol = curvature_eps * _as_jax_dtype(
+        curvature_scale,
+        rho_k_inv.dtype,
+    )
     valid_curvature = (
         jnp.isfinite(rho_k_inv)
         & jnp.isfinite(rho_k)
         & jnp.isfinite(curvature_scale)
         & (rho_k_inv > curvature_tol)
     )
+    step_eps = machine_eps if jnp.finfo(x_dtype).bits < 64 else curvature_eps
     return rho_k_inv, rho_k, valid_curvature, step_eps
 
 
@@ -54,6 +59,7 @@ def _minimize_bfgs_private(
     callback=None,
     progress_callback=None,
     value_and_grad=False,
+    x_dtype=None,
 ):
     fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         fun,
@@ -61,7 +67,7 @@ def _minimize_bfgs_private(
         value_and_grad=value_and_grad,
         callback=callback,
     )
-    x0 = _require_private_optimizer_runtime(x0)
+    x0 = _require_private_optimizer_runtime(x0, dtype=x_dtype)
     if maxiter is None:
         maxiter = np.size(x0) * 200
     maxiter = int(maxiter)
@@ -75,6 +81,7 @@ def _minimize_bfgs_private(
     half_value = np.asarray(0.5, dtype=np.dtype(x0.dtype)).item()
     wolfe_c1_value = np.asarray(1e-4, dtype=np.dtype(x0.dtype)).item()
     wolfe_c2_value = np.asarray(0.9, dtype=np.dtype(x0.dtype)).item()
+    allow_decreasing_fallback = jnp.finfo(x0.dtype).bits < 64
     maxiter_value = np.int32(maxiter)
     base_identity_host = np.eye(d, dtype=np.dtype(x0.dtype))
     if initial_state is None:
@@ -163,6 +170,10 @@ def _minimize_bfgs_private(
             & (f_kp1 <= state.f_k + wolfe_c1 * line_search_results.a_k * dphi_0)
             & (jnp.abs(dphi_kp1) <= -wolfe_c2 * dphi_0)
         )
+        decreasing_fallback = (
+            allow_decreasing_fallback & jnp.isfinite(f_kp1) & (f_kp1 < state.f_k)
+        )
+        wolfe_failure = (~strong_wolfe) & (~decreasing_fallback)
         step_tol = step_eps * jnp.maximum(
             _as_jax_dtype(1.0, state.x_k.dtype),
             _norm(state.x_k),
@@ -177,7 +188,7 @@ def _minimize_bfgs_private(
             line_search_results.failed,
             line_search_status,
             jnp.where(
-                stalled_step | (~strong_wolfe),
+                stalled_step | wolfe_failure,
                 _as_jax_dtype(0, state.line_search_status.dtype),
                 line_search_status,
             ),
@@ -224,7 +235,7 @@ def _minimize_bfgs_private(
             nonfinite_step,
             nonfinite_step_result,
             lambda _: lax.cond(
-                line_search_results.failed | stalled_step | (~strong_wolfe),
+                line_search_results.failed | stalled_step | wolfe_failure,
                 failed_step,
                 accepted_step,
                 operand=None,
@@ -274,6 +285,8 @@ def _minimize_bfgs_private(
         cache_key=(
             "bfgs",
             bool(value_and_grad),
+            np.dtype(x0.dtype).str,
+            tuple(int(dim) for dim in x0.shape),
             norm,
             int(line_search_maxiter),
             float(gtol_value),
