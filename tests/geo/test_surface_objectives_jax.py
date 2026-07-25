@@ -775,9 +775,13 @@ def test_surface_surface_distance_stages_public_host_geometry_under_strict_gpu_g
     with parity_default_device("gpu"):
         with jax.transfer_guard("disallow"):
             value = objective.J()
-            jax.block_until_ready(value)
+            derivative = objective.dJ(partials=True)
+            gradient1 = derivative(surface1)
+            gradient2 = derivative(surface2)
 
     assert np.isfinite(value)
+    assert np.all(np.isfinite(gradient1))
+    assert np.all(np.isfinite(gradient2))
 
 
 def test_curve_curve_signed_constraint_chunking_matches_dense_value_and_grad(
@@ -3522,6 +3526,15 @@ def test_iotas_jax_value_path_reads_solved_runtime_state(monkeypatch):
     np.testing.assert_allclose(np.asarray(obj._J), 0.37)
 
 
+def _make_static_coil_dof_contract():
+    extraction_spec = object()
+    biotsavart = types.SimpleNamespace(
+        dof_layout_version=0,
+        coil_dof_extraction_spec=lambda: extraction_spec,
+    )
+    return biotsavart, extraction_spec
+
+
 def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -3557,6 +3570,7 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
         )[-1],
     )
 
+    fake_biotsavart, extraction_spec = _make_static_coil_dof_contract()
     fake_booz = types.SimpleNamespace(
         res={"success": True, "primal_success": True},
         need_to_run_code=False,
@@ -3575,12 +3589,14 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
             solve_transpose=lambda rhs: rhs,
             stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
         ),
-        biotsavart=object(),
+        biotsavart=fake_biotsavart,
     )
 
     obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
     obj.boozer_surface = fake_booz
     obj.biotsavart = fake_booz.biotsavart
+    obj._coil_dof_layout_version = 0
+    obj._coil_dof_extraction_spec = extraction_spec
     obj._J = None
     obj._dJ = None
     obj.compute(compute_gradient=True)
@@ -3591,7 +3607,10 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
 def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkeypatch):
     obj = object.__new__(surfaceobjectives_jax_module.BoozerResidualJAX)
     obj.boozer_surface = types.SimpleNamespace(res={"success": True})
-    obj.biotsavart = object()
+    obj.biotsavart, obj._coil_dof_extraction_spec = (
+        _make_static_coil_dof_contract()
+    )
+    obj._coil_dof_layout_version = 0
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
@@ -3695,6 +3714,7 @@ def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch)
     )
     _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch)
 
+    fake_biotsavart, extraction_spec = _make_static_coil_dof_contract()
     fake_booz = types.SimpleNamespace(
         res={"success": True, "primal_success": True},
         need_to_run_code=False,
@@ -3709,11 +3729,13 @@ def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch)
             dtype=jnp.float64,
             stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
         ),
-        biotsavart=object(),
+        biotsavart=fake_biotsavart,
     )
     obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
     obj.boozer_surface = fake_booz
     obj.biotsavart = fake_booz.biotsavart
+    obj._coil_dof_layout_version = 0
+    obj._coil_dof_extraction_spec = extraction_spec
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
@@ -3728,7 +3750,10 @@ def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch)
 def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypatch):
     obj = object.__new__(surfaceobjectives_jax_module.NonQuasiSymmetricRatioJAX)
     obj.boozer_surface = types.SimpleNamespace(res={"success": True})
-    obj.biotsavart = object()
+    obj.biotsavart, obj._coil_dof_extraction_spec = (
+        _make_static_coil_dof_contract()
+    )
+    obj._coil_dof_layout_version = 0
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
@@ -3804,7 +3829,10 @@ def test_public_dJ_projects_cached_native_gradient_without_recomputing(
     wrapper_cls,
 ):
     obj = object.__new__(wrapper_cls)
-    obj.biotsavart = object()
+    obj.biotsavart, obj._coil_dof_extraction_spec = (
+        _make_static_coil_dof_contract()
+    )
+    obj._coil_dof_layout_version = 0
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
     projected = surfaceobjectives_jax_module.Derivative({})
@@ -3883,6 +3911,7 @@ def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
         "coil_dofs_gradient_to_derivative",
         lambda _biotsavart, gradient: np.asarray(gradient, dtype=float),
     )
+    fake_biotsavart, extraction_spec = _make_static_coil_dof_contract()
     fake_booz = types.SimpleNamespace(
         res={"success": True, "primal_success": True},
         need_to_run_code=False,
@@ -3893,12 +3922,14 @@ def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
             weight_inv_modB=True,
         ),
         get_adjoint_runtime_state=lambda: adjoint_state,
-        biotsavart=object(),
+        biotsavart=fake_biotsavart,
     )
 
     obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
     obj.boozer_surface = fake_booz
     obj.biotsavart = fake_booz.biotsavart
+    obj._coil_dof_layout_version = 0
+    obj._coil_dof_extraction_spec = extraction_spec
     obj._J = None
     obj._dJ = None
     obj.compute(compute_gradient=True)
@@ -7094,7 +7125,7 @@ def test_qfm_residual_jax_constructor_does_not_mutate_biotsavart_graph():
     _bs_cpu, bs_jax = _make_qfm_biotsavart_pair()
     parents_before = tuple(bs_jax.parents)
     dof_size_before = bs_jax.dof_size
-    layout_version_before = bs_jax._dof_layout_version
+    layout_version_before = bs_jax.dof_layout_version
     points_version_before = bs_jax._points_version
 
     qfm = surfaceobjectives_jax_module.QfmResidualJAX(surface, bs_jax)
@@ -7102,7 +7133,7 @@ def test_qfm_residual_jax_constructor_does_not_mutate_biotsavart_graph():
 
     assert tuple(bs_jax.parents) == parents_before
     assert bs_jax.dof_size == dof_size_before
-    assert bs_jax._dof_layout_version == layout_version_before
+    assert bs_jax.dof_layout_version == layout_version_before
     assert bs_jax._points_version == points_version_before
 
 
@@ -8125,6 +8156,11 @@ def test_major_radius_jax_value_and_native_adjoint_gradient():
     class _FakeBiotSavart:
         x = np.asarray([1.0, -2.0], dtype=np.float64)
         unique_dof_lineage = (lineage_opt,)
+        dof_layout_version = 0
+        _extraction_spec = object()
+
+        def coil_dof_extraction_spec(self):
+            return self._extraction_spec
 
         def coil_cotangents_to_dofs_gradient(
             self,
@@ -8179,6 +8215,8 @@ def test_major_radius_jax_value_and_native_adjoint_gradient():
     obj.boozer_surface = fake_booz
     obj.surface = surface
     obj.biotsavart = fake_booz.biotsavart
+    obj._coil_dof_layout_version = 0
+    obj._coil_dof_extraction_spec = obj.biotsavart.coil_dof_extraction_spec()
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
@@ -8262,6 +8300,11 @@ def test_major_radius_jax_re_solve_directional_finite_difference(
 
     class _FakeBiotSavart:
         x = np.asarray([0.4, -0.2], dtype=np.float64)
+        dof_layout_version = 0
+        _extraction_spec = object()
+
+        def coil_dof_extraction_spec(self):
+            return self._extraction_spec
 
         def coil_cotangents_to_dofs_gradient(
             self,
@@ -8321,6 +8364,8 @@ def test_major_radius_jax_re_solve_directional_finite_difference(
     obj.boozer_surface = fake_booz
     obj.surface = surface
     obj.biotsavart = fake_biotsavart
+    obj._coil_dof_layout_version = 0
+    obj._coil_dof_extraction_spec = obj.biotsavart.coil_dof_extraction_spec()
     obj._J = None
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None

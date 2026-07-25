@@ -2156,11 +2156,30 @@ class TestBiotSavartJAXCoilStateToken:
             coil_dofs=np.asarray(bs_jax.x, dtype=np.float64),
         )
         spec_backed = SpecBackedBiotSavartJAX(spec)
-        initial_version = spec_backed._dof_layout_version
+        initial_version = spec_backed.dof_layout_version
 
         spec_backed.fix(0)
 
-        assert spec_backed._dof_layout_version > initial_version
+        assert spec_backed.dof_layout_version > initial_version
+
+    def test_biotsavart_extraction_spec_changes_only_for_captured_dof_contract(self):
+        from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+
+        coils = self._make_two_basic_coils()
+        field = BiotSavartJAX(list(coils))
+        curve = coils[0].curve
+        initial_spec = field.coil_dof_extraction_spec()
+        initial_value = float(curve.local_full_x[0])
+
+        curve.set(0, initial_value + 1.0e-3)
+        assert field.coil_dof_extraction_spec() is initial_spec
+
+        curve.fix(0)
+        fixed_spec = field.coil_dof_extraction_spec()
+        assert fixed_spec is not initial_spec
+
+        curve.set(0, initial_value + 2.0e-3)
+        assert field.coil_dof_extraction_spec() is not fixed_spec
 
     def test_spec_backed_biotsavart_x_setter_writes_free_dofs(self):
         from simsopt_jax_adapters.field.biotsavart_backend import (

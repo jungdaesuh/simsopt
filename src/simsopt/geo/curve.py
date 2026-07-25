@@ -1,7 +1,7 @@
 from math import sin, cos
 
 import numpy as np
-from jax import vjp, jacfwd, jvp
+from jax import device_get, device_put, jacfwd, jvp, vjp
 import jax.numpy as jnp
 
 import simsoptpp as sopp
@@ -248,8 +248,9 @@ class Curve(Optimizable):
         r"""
         This function implements the curvature, :math:`\kappa(\varphi)`.
         """
-        kappa[:] = np.asarray(kappa_pure(
-            self.gammadash(), self.gammadashdash()))
+        d1gamma = device_put(self.gammadash())
+        d2gamma = device_put(self.gammadashdash())
+        kappa[:] = np.asarray(device_get(kappa_pure(d1gamma, d2gamma)))
 
     def dkappa_by_dcoeff_impl(self, dkappa_by_dcoeff):
         r"""
@@ -312,8 +313,18 @@ class Curve(Optimizable):
         where :math:`\mathbf c` are the curve dofs and :math:`\kappa` is the curvature.
         """
 
-        return self.dgammadash_by_dcoeff_vjp(kappavjp0(self.gammadash(), self.gammadashdash(), v)) \
-            + self.dgammadashdash_by_dcoeff_vjp(kappavjp1(self.gammadash(), self.gammadashdash(), v))
+        d1gamma = device_put(self.gammadash())
+        d2gamma = device_put(self.gammadashdash())
+        cotangent = device_put(v)
+        d1_cotangent = np.asarray(
+            device_get(kappavjp0(d1gamma, d2gamma, cotangent))
+        )
+        d2_cotangent = np.asarray(
+            device_get(kappavjp1(d1gamma, d2gamma, cotangent))
+        )
+        return self.dgammadash_by_dcoeff_vjp(
+            d1_cotangent
+        ) + self.dgammadashdash_by_dcoeff_vjp(d2_cotangent)
 
     def dtorsion_by_dcoeff_vjp(self, v):
         r"""

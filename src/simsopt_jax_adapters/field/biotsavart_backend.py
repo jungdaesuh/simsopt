@@ -770,6 +770,11 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     def coils(self) -> tuple[SpecBackedCoil, ...]:
         return self._coils
 
+    @property
+    def dof_layout_version(self) -> int:
+        """Return the monotonic free/fixed DOF-layout version."""
+        return self._dof_layout_version
+
     def coil_dof_extraction_spec(self) -> CoilSetDofExtractionSpec:
         return self._coil_dof_extraction_spec
 
@@ -1372,6 +1377,9 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._introspect_coils()
         self._free_dof_layout_ready = True
         self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
+        self._fixed_coil_dof_template_fingerprint = (
+            self._current_fixed_coil_dof_template_fingerprint()
+        )
 
     def update_free_dof_size_indices(self) -> None:
         super().update_free_dof_size_indices()
@@ -1379,6 +1387,26 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         if self._free_dof_layout_ready:
             self._dof_layout_version += 1
             self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
+            self._fixed_coil_dof_template_fingerprint = (
+                self._current_fixed_coil_dof_template_fingerprint()
+            )
+
+    def _current_fixed_coil_dof_template_fingerprint(self) -> tuple[bytes, ...]:
+        return tuple(
+            np.ascontiguousarray(
+                np.asarray(opt.local_full_x, dtype=np.float64)[
+                    ~np.asarray(opt.local_dofs_free_status, dtype=bool)
+                ]
+            ).tobytes()
+            for opt in self.unique_dof_lineage
+        )
+
+    def _refresh_fixed_coil_dof_template(self) -> None:
+        fingerprint = self._current_fixed_coil_dof_template_fingerprint()
+        if fingerprint == self._fixed_coil_dof_template_fingerprint:
+            return
+        self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
+        self._fixed_coil_dof_template_fingerprint = fingerprint
 
     def _advance_coil_dof_state(self) -> None:
         self._coil_dofs_generation += 1
@@ -1391,15 +1419,24 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             and not self._suppress_dependency_coil_dof_state
         ):
             self._advance_coil_dof_state()
+            self._refresh_fixed_coil_dof_template()
         super().set_recompute_flag(parent=parent)
 
-    def _set_global_coil_dofs(self, optimizable_setter, coil_dofs):
+    def _set_global_coil_dofs(
+        self,
+        optimizable_setter,
+        coil_dofs,
+        *,
+        rebuild_extraction_spec,
+    ):
         self._suppress_dependency_coil_dof_state = True
         try:
             optimizable_setter(self, coil_dofs)
         finally:
             self._suppress_dependency_coil_dof_state = False
         self._advance_coil_dof_state()
+        if rebuild_extraction_spec:
+            self._refresh_fixed_coil_dof_template()
 
     @property
     def x(self):
@@ -1407,7 +1444,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     @x.setter
     def x(self, coil_dofs):
-        self._set_global_coil_dofs(Optimizable.x.fset, coil_dofs)
+        self._set_global_coil_dofs(
+            Optimizable.x.fset,
+            coil_dofs,
+            rebuild_extraction_spec=False,
+        )
 
     @property
     def full_x(self):
@@ -1415,7 +1456,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     @full_x.setter
     def full_x(self, coil_dofs):
-        self._set_global_coil_dofs(Optimizable.full_x.fset, coil_dofs)
+        self._set_global_coil_dofs(
+            Optimizable.full_x.fset,
+            coil_dofs,
+            rebuild_extraction_spec=True,
+        )
 
     def _local_free_positions(self, opt):
         cached = self._local_free_positions_by_opt.get(opt)
@@ -1529,6 +1574,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract."""
         return self._coil_dof_extraction_spec
+
+    @property
+    def dof_layout_version(self) -> int:
+        """Return the monotonic free/fixed DOF-layout version."""
+        return self._dof_layout_version
 
     def _coil_arrays_in_order_from_dofs_generic_jax(self, coil_dofs):
         """Rebuild per-coil arrays for curve sets with immutable JAX specs."""
