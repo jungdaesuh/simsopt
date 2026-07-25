@@ -1385,6 +1385,95 @@ def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
     }
 
 
+def test_traceable_solved_pair_reuses_compiled_bundle_adjoint_kernel(
+    monkeypatch,
+) -> None:
+    observed_jit_names: list[str] = []
+    gradient_calls: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+
+    def recording_jit(fun=None, **_kwargs):
+        def wrapped(inner):
+            observed_jit_names.append(inner.__name__)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    def reject_standalone_builder(*_args, **_kwargs):
+        raise AssertionError(
+            "decomposed solved-pair must reuse the optimizer compiled bundle"
+        )
+
+    def fake_total_objective(solved_x, coil_dofs, coil_set_spec, objective_kwargs):
+        assert coil_set_spec[0] == "coil-set"
+        assert objective_kwargs["sentinel"] == 23
+        return jnp.sum(solved_x) + jnp.sum(coil_dofs)
+
+    def compiled_total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
+        gradient_calls.append((tuple(coil_dofs.shape), tuple(solved_x.shape)))
+        assert solved_linear_solve_factors == "factors"
+        return 4.0 * coil_dofs, jnp.asarray(True, dtype=bool)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module.jax,
+        "jit",
+        recording_jit,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_build_traceable_solved_state_value_and_grad_from_state",
+        reject_standalone_builder,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_evaluate_traceable_total_objective",
+        fake_total_objective,
+    )
+
+    state = {
+        **_minimal_traceable_objective_state(),
+        "objective_kwargs": {"sentinel": 23},
+        "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
+    }
+    compiled_bundle = {
+        "state": state,
+        "compiled_forward_result_for": lambda coil_dofs: {
+            "value": jnp.sum(coil_dofs),
+            "x": jnp.asarray([3.0], dtype=jnp.float64),
+            "linear_solve_factors": "factors",
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+        },
+        "compiled_total_gradient_for": compiled_total_gradient_for,
+    }
+    runtime_entry = {
+        "optimizer_compiled_bundle": compiled_bundle,
+        "optimizer_solved_pair": None,
+    }
+
+    pair = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_solved_pair(
+        runtime_entry,
+        object(),
+    )
+    cached_pair = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_solved_pair(
+        runtime_entry,
+        object(),
+    )
+    value, grad = pair.value_grad_from_solved(
+        jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        jnp.asarray([4.0], dtype=jnp.float64),
+        "factors",
+    )
+
+    assert pair is cached_pair
+    assert pair.solve_fn is compiled_bundle["compiled_forward_result_for"]
+    assert observed_jit_names == ["_solved_state_value_and_grad_for"]
+    assert gradient_calls == [((2,), (1,))]
+    np.testing.assert_allclose(np.asarray(value), np.asarray(7.0))
+    np.testing.assert_allclose(np.asarray(grad), np.asarray([4.0, 8.0]))
+
+
 def test_solved_pair_matches_fused_value_and_grad():
     """The decomposed (solve_fn, value_grad_from_solved) pair is a faithful
     numerical split of the fused make_traceable_objective_value_and_grad.
@@ -5956,6 +6045,113 @@ def test_traceable_certified_seed_rejects_mismatched_observed_key(monkeypatch):
         )
 
 
+def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
+    observed_jit_names: list[str] = []
+    mark_calls: list[object] = []
+    original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad
+
+    def recording_jit(fun=None, **_kwargs):
+        def wrapped(inner):
+            observed_jit_names.append(inner.__name__)
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    def counting_mark(fun):
+        mark_calls.append(fun)
+        return original_mark(fun)
+
+    def fake_general_forward_result(_booz_jax, _coil_set_spec_from_dofs, **kwargs):
+        coil_dofs = kwargs["coil_dofs"]
+        return {
+            "value": jnp.sum(coil_dofs),
+            "x": jnp.asarray([1.0], dtype=jnp.float64),
+            "sdofs": jnp.asarray([1.0], dtype=jnp.float64),
+            "iota": jnp.asarray(0.1, dtype=jnp.float64),
+            "G": None,
+            "linear_solve_factors": None,
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "adjoint_linear_solve_available": jnp.asarray(True, dtype=bool),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module.jax,
+        "jit",
+        recording_jit,
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_mark_cacheable_jit_value_and_grad",
+        counting_mark,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_general_forward_result",
+        fake_general_forward_result,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_forward_result",
+        lambda *_args, **_kwargs: pytest.fail(
+            "general-only bundle must not use the public same-coils path"
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_total_gradient_with_status",
+        lambda _booz_jax, _coil_set_spec_from_dofs, **kwargs: (
+            2.0 * kwargs["coil_dofs"],
+            jnp.asarray(True, dtype=bool),
+        ),
+    )
+
+    state = {
+        **_minimal_traceable_objective_state(),
+        "baseline_coil_dofs": jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+        "baseline_x": jnp.asarray([1.0], dtype=jnp.float64),
+    }
+    bundle = surfaceobjectives_traceable_jax_module._build_traceable_objective_compiled_bundle_from_state(
+        object(),
+        state,
+        general_only_forward=True,
+    )
+
+    assert observed_jit_names == ["_forward_result_for"]
+    assert len(mark_calls) == 1
+    assert (
+        getattr(
+            bundle["compiled_value_and_grad_for"],
+            optimizer_jax_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
+            False,
+        )
+        is True
+    )
+
+    grad, success = bundle["compiled_total_gradient_for"](
+        jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        jnp.asarray([3.0], dtype=jnp.float64),
+        None,
+    )
+    assert observed_jit_names == ["_forward_result_for", "_total_gradient_for"]
+    np.testing.assert_allclose(np.asarray(grad), np.asarray([2.0, -4.0]))
+    assert bool(np.asarray(success))
+
+    value, value_grad = bundle["compiled_value_and_grad_for"](
+        jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    )
+    assert observed_jit_names == [
+        "_forward_result_for",
+        "_total_gradient_for",
+        "_value_and_grad_for",
+    ]
+    assert len(mark_calls) == 2
+    np.testing.assert_allclose(np.asarray(value), np.asarray(-1.0))
+    np.testing.assert_allclose(np.asarray(value_grad), np.asarray([2.0, -4.0]))
+
+
 def test_traceable_optimizer_value_and_grad_builds_general_only_bundle_without_seed(
     monkeypatch,
 ):
@@ -6299,6 +6495,15 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
     monkeypatch,
 ):
     baseline_coil_dofs = np.asarray([0.5, -0.25], dtype=np.float64)
+    baseline_gradient_calls = []
+
+    def compiled_baseline_gradient(*_args):
+        baseline_gradient_calls.append(True)
+        return (
+            jnp.asarray([0.5, -0.75], dtype=jnp.float64),
+            jnp.asarray(True, dtype=bool),
+        )
+
     cacheable_public_value_and_grad = (
         optimizer_jax_module._mark_cacheable_jit_value_and_grad(
             lambda coil_dofs: coil_dofs
@@ -6309,6 +6514,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
             "compiled_value_and_grad_for": lambda _coil_dofs: (_ for _ in ()).throw(
                 AssertionError("baseline peel should skip compiled value_and_grad")
             ),
+            "compiled_total_gradient_for": compiled_baseline_gradient,
             "state": {
                 "baseline_coil_dofs": baseline_coil_dofs,
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
@@ -6337,14 +6543,6 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         "host_reporting_metrics": None,
     }
 
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_traceable_total_gradient_with_status",
-        lambda *_args, **_kwargs: (
-            jnp.asarray([0.5, -0.75], dtype=jnp.float64),
-            jnp.asarray(True, dtype=bool),
-        ),
-    )
     monkeypatch.setattr(
         surfaceobjectives_traceable_jax_module,
         "_traceable_reporting_metrics_from_solution",
@@ -6383,15 +6581,19 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         runtime_entry,
         object(),
     )
+    assert baseline_gradient_calls == []
 
     assert runtime_entry["host_objective"](baseline_coil_dofs.copy()) == pytest.approx(
         1.25
     )
+    assert baseline_gradient_calls == []
     value, grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.tolist())
+    assert baseline_gradient_calls == [True]
     assert value == pytest.approx(1.25)
     np.testing.assert_allclose(grad, np.asarray([0.5, -0.75], dtype=np.float64))
     grad[0] = 99.0
     _, second_grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.copy())
+    assert baseline_gradient_calls == [True]
     np.testing.assert_allclose(second_grad, np.asarray([0.5, -0.75], dtype=np.float64))
     assert runtime_entry["host_reporting_metrics"](
         baseline_coil_dofs.copy(),
@@ -6428,16 +6630,24 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
     )
 
 
-def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
-    monkeypatch,
-):
+def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient():
     baseline_coil_dofs = np.asarray([0.5, -0.25], dtype=np.float64)
     failed_gradient = np.asarray([0.5, -0.75], dtype=np.float64)
+    baseline_gradient_calls = []
+
+    def compiled_failed_baseline_gradient(*_args):
+        baseline_gradient_calls.append(True)
+        return (
+            jnp.asarray(failed_gradient, dtype=jnp.float64),
+            jnp.asarray(False, dtype=bool),
+        )
+
     runtime_entry = {
         "compiled_bundle": {
             "compiled_value_and_grad_for": lambda _coil_dofs: (_ for _ in ()).throw(
                 AssertionError("baseline peel should skip compiled value_and_grad")
             ),
+            "compiled_total_gradient_for": compiled_failed_baseline_gradient,
             "state": {
                 "baseline_coil_dofs": baseline_coil_dofs,
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
@@ -6461,21 +6671,14 @@ def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
         "host_reporting_metrics": None,
     }
 
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_traceable_total_gradient_with_status",
-        lambda *_args, **_kwargs: (
-            jnp.asarray(failed_gradient, dtype=jnp.float64),
-            jnp.asarray(False, dtype=bool),
-        ),
-    )
-
     surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_host_wrappers(
         runtime_entry,
         object(),
     )
+    assert baseline_gradient_calls == []
 
     value, grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.copy())
+    assert baseline_gradient_calls == [True]
     _assert_primal_value_with_nonfinite_gradient(value, grad, 1.25)
 
 
@@ -6703,7 +6906,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
             surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
@@ -6724,7 +6927,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     )
     np.testing.assert_allclose(total_grad, np.asarray([1.0, 2.0], dtype=np.float64))
     assert bool(np.asarray(linear_solve_success))
-    assert vjp_calls["count"] == 3
+    assert vjp_calls["count"] == 2
 
 
 def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
@@ -6777,7 +6980,7 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
             surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
@@ -6992,7 +7195,7 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
             surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,
@@ -7051,7 +7254,7 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
     objective_kwargs = {"outer_objective_config": {"non_qs_weight": 0.0}}
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
             surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda current_coil_dofs: current_coil_dofs,
@@ -7139,7 +7342,7 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
     }
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
             surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda current_coil_dofs: current_coil_dofs,
@@ -7242,7 +7445,7 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
     solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+        direct_grad, implicit_grad, total_grad, linear_solve_success, _trust = (
             surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
                 object(),
                 lambda coil_dofs: coil_dofs,

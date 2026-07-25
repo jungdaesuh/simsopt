@@ -323,8 +323,6 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "max_dense_linearization_bytes",
 )
 
-_TRACEABLE_ADJOINT_FAIL_GRAD_SENTINEL = np.nan
-
 
 def _traceable_diag_progress(message):
     """Emit optional progress logs for the target-lane baseline diagnosis."""
@@ -1040,7 +1038,8 @@ def _runtime_float64_scalar(value, *, reference):
 
 
 def _traceable_adjoint_fail_gradient_like(gradient):
-    return jnp.full_like(gradient, _TRACEABLE_ADJOINT_FAIL_GRAD_SENTINEL)
+    zero = gradient - gradient
+    return zero / zero
 
 
 def _traceable_rejected_objective_value(value, reference_value):

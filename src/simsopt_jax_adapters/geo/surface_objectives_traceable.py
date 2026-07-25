@@ -10,6 +10,7 @@ compatibility with existing callers.
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
+from threading import Lock
 from typing import NamedTuple
 
 import jax
@@ -1701,15 +1702,37 @@ def _traceable_objective_gradient_parts(
             )
         )
 
+    direct_grad = None
     if not depends_on_x_inner:
         dJ_dx = _runtime_zeros_like(solved_x)
         adjoint = _runtime_zeros_like(solved_x)
         linear_solve_success = _runtime_bool(True)
     else:
-        dJ_dx = _strict_scalar_grad(
-            lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
-            solved_x,
-        )
+        if depends_on_coil_dofs:
+
+            def _evaluate_objective_of_x_and_coils(
+                current_x_inner,
+                current_coil_dofs,
+            ):
+                return _evaluate_objective(
+                    current_x_inner,
+                    current_coil_dofs,
+                    coil_set_spec_from_dofs(current_coil_dofs),
+                )
+
+            objective_value, pullback = jax.vjp(
+                _evaluate_objective_of_x_and_coils,
+                solved_x,
+                coil_dofs,
+            )
+            dJ_dx, direct_grad = pullback(
+                _explicit_scalar_pullback_seed(objective_value)
+            )
+        else:
+            dJ_dx = _strict_scalar_grad(
+                lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
+                solved_x,
+            )
 
         def zero_adjoint(_):
             return (
@@ -1763,7 +1786,7 @@ def _traceable_objective_gradient_parts(
         # these constant-in-coils scalars under strict transfer guard because
         # null tangent paths instantiate host scalar zeros.
         direct_grad = _runtime_zeros_like(coil_dofs)
-    else:
+    elif direct_grad is None:
         direct_grad = _strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)
 
     if not depends_on_x_inner:
@@ -2271,7 +2294,8 @@ def _build_traceable_objective_compiled_bundle_from_state(
             objective_kwargs=objective_kwargs,
         )
 
-    compiled_total_gradient_for = jax.jit(_total_gradient_for)
+    def _build_compiled_total_gradient_for():
+        return jax.jit(_total_gradient_for)
 
     def _total_gradient_for_with_certificate_key(
         coil_dofs,
@@ -2294,68 +2318,141 @@ def _build_traceable_objective_compiled_bundle_from_state(
             certificate_probe_key=certificate_probe_key,
         )
 
-    compiled_total_gradient_for_with_certificate_key = jax.jit(
-        _total_gradient_for_with_certificate_key
-    )
+    def _build_compiled_total_gradient_for_with_certificate_key():
+        return jax.jit(_total_gradient_for_with_certificate_key)
 
-    def _value_and_grad_for(coil_dofs):
-        result = jitted_forward_result_for(coil_dofs)
+    def _build_value_and_grad_for(compiled_total_gradient_for):
+        def _value_and_grad_for(coil_dofs):
+            result = jitted_forward_result_for(coil_dofs)
 
-        def _total_gradient_at(candidate_coil_dofs, candidate_x, linear_solve_factors):
-            return compiled_total_gradient_for(
+            def _total_gradient_at(
                 candidate_coil_dofs,
                 candidate_x,
                 linear_solve_factors,
-            )
+            ):
+                return compiled_total_gradient_for(
+                    candidate_coil_dofs,
+                    candidate_x,
+                    linear_solve_factors,
+                )
 
-        def _accepted_candidate_gradient(_):
-            return _total_gradient_at(
-                coil_dofs,
-                result["x"],
-                result["linear_solve_factors"],
-            )
-
-        def _rejected_candidate_gradient(_):
-            return lax.cond(
-                result["primal_success"],
-                lambda _: _total_gradient_at(
+            def _accepted_candidate_gradient(_):
+                return _total_gradient_at(
                     coil_dofs,
                     result["x"],
                     result["linear_solve_factors"],
-                ),
-                lambda _: _total_gradient_at(
-                    baseline_coil_dofs,
-                    baseline_x,
-                    baseline_linear_solve_factors,
-                ),
+                )
+
+            def _rejected_candidate_gradient(_):
+                return lax.cond(
+                    result["primal_success"],
+                    lambda _: _total_gradient_at(
+                        coil_dofs,
+                        result["x"],
+                        result["linear_solve_factors"],
+                    ),
+                    lambda _: _total_gradient_at(
+                        baseline_coil_dofs,
+                        baseline_x,
+                        baseline_linear_solve_factors,
+                    ),
+                    operand=None,
+                )
+
+            grad, linear_solve_success = lax.cond(
+                result["success"],
+                _accepted_candidate_gradient,
+                _rejected_candidate_gradient,
                 operand=None,
             )
+            return result["value"], _traceable_adjoint_gradient_or_nan(
+                grad,
+                linear_solve_success,
+            )
 
-        grad, linear_solve_success = lax.cond(
-            result["success"],
-            _accepted_candidate_gradient,
-            _rejected_candidate_gradient,
-            operand=None,
-        )
-        return result["value"], _traceable_adjoint_gradient_or_nan(
-            grad,
-            linear_solve_success,
-        )
+        return _value_and_grad_for
 
     jit_kwargs = {}
     if get_backend_policy().supports_buffer_donation:
         jit_kwargs["donate_argnums"] = (0,)
-    jitted_value_and_grad_for = jax.jit(_value_and_grad_for, **jit_kwargs)
+
+    def _build_compiled_value_and_grad_for(compiled_total_gradient_for):
+        jitted_value_and_grad_for = jax.jit(
+            _build_value_and_grad_for(compiled_total_gradient_for),
+            **jit_kwargs,
+        )
+        return _optimizer_jax._mark_cacheable_jit_value_and_grad(
+            _make_traceable_runtime_jax_array_boundary(
+                jitted_value_and_grad_for,
+                "compiled_value_and_grad_for",
+            )
+        )
+
     compiled_forward_result_for = _make_traceable_runtime_jax_array_boundary(
         jitted_forward_result_for,
         "compiled_forward_result_for",
     )
-    compiled_value_and_grad_for = _optimizer_jax._mark_cacheable_jit_value_and_grad(
-        _make_traceable_runtime_jax_array_boundary(
-            jitted_value_and_grad_for,
-            "compiled_value_and_grad_for",
+    if general_only_forward:
+        compiled_total_gradient_impl = None
+        compiled_total_gradient_with_key_impl = None
+        compiled_value_and_grad_impl = None
+        gradient_lock = Lock()
+        keyed_gradient_lock = Lock()
+        value_and_grad_lock = Lock()
+
+        def _lazy_compiled_total_gradient_for(*args):
+            nonlocal compiled_total_gradient_impl
+            if compiled_total_gradient_impl is None:
+                with gradient_lock:
+                    if compiled_total_gradient_impl is None:
+                        compiled_total_gradient_impl = (
+                            _build_compiled_total_gradient_for()
+                        )
+            return compiled_total_gradient_impl(*args)
+
+        def _lazy_compiled_total_gradient_for_with_certificate_key(*args):
+            nonlocal compiled_total_gradient_with_key_impl
+            if compiled_total_gradient_with_key_impl is None:
+                with keyed_gradient_lock:
+                    if compiled_total_gradient_with_key_impl is None:
+                        compiled_total_gradient_with_key_impl = (
+                            _build_compiled_total_gradient_for_with_certificate_key()
+                        )
+            return compiled_total_gradient_with_key_impl(*args)
+
+        def _lazy_compiled_value_and_grad_for(coil_dofs):
+            nonlocal compiled_total_gradient_impl, compiled_value_and_grad_impl
+            if compiled_value_and_grad_impl is None:
+                with value_and_grad_lock:
+                    if compiled_value_and_grad_impl is None:
+                        if compiled_total_gradient_impl is None:
+                            with gradient_lock:
+                                if compiled_total_gradient_impl is None:
+                                    compiled_total_gradient_impl = (
+                                        _build_compiled_total_gradient_for()
+                                    )
+                        compiled_value_and_grad_impl = (
+                            _build_compiled_value_and_grad_for(
+                                compiled_total_gradient_impl
+                            )
+                        )
+            return compiled_value_and_grad_impl(coil_dofs)
+
+        compiled_total_gradient_for = _lazy_compiled_total_gradient_for
+        compiled_total_gradient_for_with_certificate_key = (
+            _lazy_compiled_total_gradient_for_with_certificate_key
         )
-    )
+        compiled_value_and_grad_for = _optimizer_jax._mark_cacheable_jit_value_and_grad(
+            _lazy_compiled_value_and_grad_for
+        )
+    else:
+        compiled_total_gradient_for = _build_compiled_total_gradient_for()
+        compiled_total_gradient_for_with_certificate_key = (
+            _build_compiled_total_gradient_for_with_certificate_key()
+        )
+        compiled_value_and_grad_for = _build_compiled_value_and_grad_for(
+            compiled_total_gradient_for
+        )
 
     return {
         "state": state,
@@ -2402,6 +2499,42 @@ def _build_traceable_solved_state_value_and_grad_from_state(booz_jax, state):
             linear_solve_tol=linear_solve_tol,
             linear_solve_stab=linear_solve_stab,
             objective_kwargs=objective_kwargs,
+        )
+        return value, _traceable_adjoint_gradient_or_nan(
+            grad,
+            linear_solve_success,
+        )
+
+    return jax.jit(_solved_state_value_and_grad_for)
+
+
+def _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
+    compiled_bundle,
+):
+    """Build solved-state value/grad while reusing the bundle's adjoint kernel."""
+    state = compiled_bundle["state"]
+    objective_kwargs = state["objective_kwargs"]
+    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+    compiled_total_gradient_for = compiled_bundle["compiled_total_gradient_for"]
+
+    def _solved_state_value_and_grad_for(
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+    ):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        solved_x = _as_jax_float64(solved_x)
+        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+        value = _evaluate_traceable_total_objective(
+            solved_x,
+            coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        )
+        grad, linear_solve_success = compiled_total_gradient_for(
+            coil_dofs,
+            solved_x,
+            _traceable_runtime_deviceify_tree(solved_linear_solve_factors),
         )
         return value, _traceable_adjoint_gradient_or_nan(
             grad,
@@ -2767,9 +2900,8 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
         optimizer_solved_pair = TraceableObjectiveSolvedPair(
             solve_fn=optimizer_compiled_bundle["compiled_forward_result_for"],
             value_grad_from_solved=(
-                _build_traceable_solved_state_value_and_grad_from_state(
-                    booz_jax,
-                    optimizer_compiled_bundle["state"],
+                _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
+                    optimizer_compiled_bundle
                 )
             ),
         )
@@ -2982,47 +3114,53 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
             baseline_coil_dofs=baseline_coil_dofs,
             baseline_return=baseline_value,
         )
-        baseline_coil_dofs_jax = _traceable_runtime_deviceify_tree(
-            state["baseline_coil_dofs"]
-        )
-        baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
-        baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
-            state["baseline_linear_solve_factors"]
-        )
-        baseline_value_jax = _traceable_runtime_deviceify_tree(state["baseline_value"])
-        with jax.transfer_guard_host_to_device("allow"):
-            baseline_gradient, baseline_linear_solve_success = (
-                _traceable_total_gradient_with_status(
-                    booz_jax,
-                    state["coil_set_spec_from_dofs"],
-                    coil_dofs=baseline_coil_dofs_jax,
-                    solved_x=baseline_x,
-                    solved_linear_solve_factors=baseline_linear_solve_factors,
-                    linearization_kind=state["linearization_kind"],
-                    linear_solve_tol=state["linear_solve_tol"],
-                    linear_solve_stab=state["linear_solve_stab"],
-                    objective_kwargs=state["objective_kwargs"],
+        baseline_value_and_grad = None
+        baseline_value_and_grad_lock = Lock()
+
+        def compute_baseline_value_and_grad():
+            baseline_coil_dofs_jax = _traceable_runtime_deviceify_tree(
+                state["baseline_coil_dofs"]
+            )
+            baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
+            baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
+                state["baseline_linear_solve_factors"]
+            )
+            with jax.transfer_guard_host_to_device("allow"):
+                baseline_gradient, baseline_linear_solve_success = compiled_bundle[
+                    "compiled_total_gradient_for"
+                ](
+                    baseline_coil_dofs_jax,
+                    baseline_x,
+                    baseline_linear_solve_factors,
                 )
-            )
-        baseline_gradient = _traceable_adjoint_gradient_or_nan(
-            baseline_gradient,
-            baseline_linear_solve_success,
-        )
-        with jax.transfer_guard_device_to_host("allow"):
-            baseline_gradient = _host_array(
+            baseline_gradient = _traceable_adjoint_gradient_or_nan(
                 baseline_gradient,
-                dtype=np.float64,
+                baseline_linear_solve_success,
             )
-            baseline_value_for_value_and_grad = float(
-                _host_scalar(baseline_value_jax, dtype=np.float64)
+            with jax.transfer_guard_device_to_host("allow"):
+                return (
+                    baseline_value,
+                    _host_array(
+                        baseline_gradient,
+                        dtype=np.float64,
+                    ),
+                )
+
+        def baseline_value_and_grad_return():
+            nonlocal baseline_value_and_grad
+            if baseline_value_and_grad is None:
+                with baseline_value_and_grad_lock:
+                    if baseline_value_and_grad is None:
+                        baseline_value_and_grad = compute_baseline_value_and_grad()
+            baseline_value_for_value_and_grad, baseline_gradient = (
+                baseline_value_and_grad
             )
+            return baseline_value_for_value_and_grad, baseline_gradient.copy()
+
         runtime_entry["host_value_and_grad"] = _make_traceable_host_value_and_grad(
             compiled_bundle["compiled_value_and_grad_for"],
             baseline_coil_dofs=baseline_coil_dofs,
-            baseline_return=lambda: (
-                baseline_value_for_value_and_grad,
-                baseline_gradient.copy(),
-            ),
+            baseline_return=baseline_value_and_grad_return,
         )
         runtime_entry["host_reporting_metrics"] = (
             _make_traceable_lazy_host_reporting_metrics(runtime_entry)
@@ -4973,6 +5111,7 @@ from .surface_objectives import (
     _curve_stacks_from_grouped_spec,
     _curve_surface_point_pair_batches_from_stacks,
     _evaluate_traceable_weighted_single_stage_outer_term,
+    _explicit_scalar_pullback_seed,
     _resolved_boozer_solved_runtime_state,
     _runtime_bool,
     _runtime_float64_array,
