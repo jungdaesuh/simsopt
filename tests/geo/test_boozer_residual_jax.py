@@ -274,6 +274,7 @@ def test_split_decision_vector_float32_vjp_under_transfer_guard():
     finally:
         set_backend(
             previous.mode,
+            precision=previous.precision,
             strict=previous.strict,
             debug_nans=previous.debug_nans,
             transfer_guard=previous.transfer_guard,

@@ -17,44 +17,53 @@ The mode API is the SSOT. The older ``SIMSOPT_BACKEND`` /
 
 from __future__ import annotations
 
-from contextvars import ContextVar
-from dataclasses import dataclass
 import logging
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
 import threading
-from typing import Callable, Literal, TypeVar
 import warnings
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Literal, TypeVar, cast
 
 import numpy as np
+
+from simsopt_jax.numerical_policy import CertificateDType
 
 _LOGGER = logging.getLogger(__name__)
 
 _ExplicitT = TypeVar("_ExplicitT")
 _ResolvedT = TypeVar("_ResolvedT")
 
+PrecisionSelection = Literal["mode_default", "fp64", "mixed"]
+ResolvedPrecision = Literal["fp32_smoke", "fp64", "mixed"]
+
 __all__ = [
     "VALID_BACKEND_MODES",
     "BackendConfig",
+    "BackendPolicy",
     "ChunkTuning",
     "DistributedRuntimeConfig",
     "FieldKernelTuning",
-    "BackendPolicy",
+    "PrecisionSelection",
+    "ResolvedPrecision",
     "ShardingTuning",
     "apply_jax_runtime_config",
+    "get_active_cuda_device_index",
     "get_backend",
     "get_backend_config",
     "get_backend_mode",
     "get_backend_policy",
-    "get_active_cuda_device_index",
+    "get_certificate_dtype",
     "get_chunk_policy",
     "get_chunk_tuning",
     "get_coil_chunk_size",
     "get_compilation_cache_dir",
     "get_compilation_cache_policy",
+    "get_compute_dtype",
     "get_debug_nans",
     "get_disable_jit",
     "get_distributed_runtime_config",
@@ -62,11 +71,13 @@ __all__ = [
     "get_jax_platform",
     "get_pairwise_penalty_chunk_size",
     "get_point_chunk_size",
+    "get_precision",
+    "get_provenance_label",
+    "get_quadrature_block_size",
+    "get_resolved_precision",
     "get_runtime_jax_device",
     "get_sharding_strategy",
     "get_sharding_tuning",
-    "get_provenance_label",
-    "get_quadrature_block_size",
     "get_tolerance_tier",
     "get_transfer_guard",
     "invalidate_backend_cache",
@@ -76,27 +87,28 @@ __all__ = [
     "is_parity_mode",
     "maybe_initialize_distributed_jax",
     "query_active_gpu_memory_mb",
-    "register_backend_cache_clear",
-    "should_shard_coil_groups",
-    "should_shard_points",
-    "should_shard_pairwise_rows",
     "raise_if_strict_jax_fallback",
     "raise_if_target_lane_bypass",
+    "register_backend_cache_clear",
     "requires_x64",
     "set_backend",
     "should_eagerly_configure_jax",
+    "should_shard_coil_groups",
+    "should_shard_pairwise_rows",
+    "should_shard_points",
+    "strict_target_lane_purity",
+    "target_lane_purity_active",
+    "target_lane_purity_requested",
     "use_runtime",
     "validate_cuda_determinism_environment",
     "warn_if_jax_fallback",
     "with_cpu_device_for_construction",
-    "strict_target_lane_purity",
-    "target_lane_purity_active",
-    "target_lane_purity_requested",
 ]
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda")
 _VALID_POLICY_DTYPES = ("float32", "float64")
+_VALID_PRECISION_SELECTIONS = ("mode_default", "fp64", "mixed")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 _BACKEND_ENV = "SIMSOPT_BACKEND"
@@ -104,6 +116,8 @@ _BACKEND_LEGACY_ENV = "STAGE2_BACKEND"
 _PLATFORM_ENV = "SIMSOPT_JAX_PLATFORM"
 _PLATFORM_LEGACY_ENV = "SIMSOPT_JAX_BACKEND"
 _MODE_ENV = "SIMSOPT_BACKEND_MODE"
+_PRECISION_ENV = "SIMSOPT_PRECISION"
+_OBSOLETE_MIXED_PRECISION_ENV = "SIMSOPT_MIXED_PRECISION"
 _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
 _TARGET_LANE_STRICT_ENV = "SIMSOPT_TARGET_LANE_STRICT"
 _DEBUG_ENV = "SIMSOPT_DEBUG"
@@ -173,6 +187,7 @@ _EXPLICIT_SELECTOR_ENV_VARS = (
 )
 _SYNCED_RUNTIME_ENV_VALUES = (
     (_MODE_ENV, "mode"),
+    (_PRECISION_ENV, "precision"),
     (_STRICT_ENV, "strict"),
     (_DEBUG_NANS_ENV, "debug_nans"),
     (_DISABLE_JIT_ENV, "disable_jit"),
@@ -512,6 +527,7 @@ class BackendConfig:
     mode: str
     backend: str
     jax_platform: str
+    precision: PrecisionSelection = "mode_default"
     strict: bool = False
     debug_nans: bool = False
     disable_jit: bool = False
@@ -616,8 +632,12 @@ class BackendPolicy:
     strict: bool
     parity_mode: bool
     requires_x64: bool
+    precision: PrecisionSelection
+    resolved_precision: ResolvedPrecision
     runtime_dtype: str
     host_dtype: str
+    compute_dtype: str
+    certificate_dtype: CertificateDType | None
     default_residency: str
     default_optimizer_backend: str
     supports_host_callback: bool
@@ -819,6 +839,54 @@ def _validate_mode(mode: str) -> str:
             f"Backend mode {mode!r} is not valid. Accepted: {VALID_BACKEND_MODES}"
         )
     return mode
+
+
+def _validate_precision_selection(
+    value: object,
+    *,
+    source: str,
+) -> PrecisionSelection:
+    if value not in _VALID_PRECISION_SELECTIONS:
+        raise ValueError(
+            f"{source}={value!r} is not valid. Accepted: {_VALID_PRECISION_SELECTIONS}"
+        )
+    return cast(PrecisionSelection, value)
+
+
+def _reject_obsolete_precision_environment() -> None:
+    if _OBSOLETE_MIXED_PRECISION_ENV in os.environ:
+        raise ValueError(
+            f"{_OBSOLETE_MIXED_PRECISION_ENV} is not supported; "
+            f"use {_PRECISION_ENV}=mixed instead."
+        )
+
+
+def _validate_precision_for_mode(
+    mode: str,
+    precision: PrecisionSelection,
+) -> PrecisionSelection:
+    if mode == "jax_cpu_float32_smoke" and precision != "mode_default":
+        raise ValueError(
+            "jax_cpu_float32_smoke only supports precision='mode_default'; "
+            "its full-FP32 contract cannot be overridden."
+        )
+    if mode == "native_cpu" and precision == "mixed":
+        raise ValueError(
+            "native_cpu does not support mixed precision; use precision='fp64' "
+            "or precision='mode_default'."
+        )
+    return precision
+
+
+def _resolved_precision_for_mode(
+    mode: str,
+    precision: PrecisionSelection,
+) -> ResolvedPrecision:
+    if mode == "jax_cpu_float32_smoke":
+        return "fp32_smoke"
+    if precision == "mixed":
+        return "mixed"
+    return "fp64"
 
 
 def _validate_transfer_guard(value: str | None, *, source: str) -> str | None:
@@ -1402,6 +1470,7 @@ def _config_from_mode(
     mode: str,
     *,
     strict: bool,
+    precision: PrecisionSelection | None = None,
     debug_nans: bool | None = None,
     disable_jit: bool | None = None,
     transfer_guard: str | None = None,
@@ -1411,10 +1480,27 @@ def _config_from_mode(
     xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
     tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
 ) -> BackendConfig:
+    _reject_obsolete_precision_environment()
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
     debug_overlay = _debug_overlay_enabled()
     defaults = _get_mode_policy_defaults(mode)
+    resolved_precision = _validate_precision_for_mode(
+        mode,
+        _resolve_kwarg(
+            precision,
+            parse_explicit=lambda value: _validate_precision_selection(
+                value,
+                source="precision",
+            ),
+            env_names=(_PRECISION_ENV,),
+            parse_env=lambda value, source: _validate_precision_selection(
+                value,
+                source=source,
+            ),
+            read_default=lambda: "mode_default",
+        ),
+    )
     if debug_overlay:
         resolved_debug_nans = True
         resolved_disable_jit = True
@@ -1514,6 +1600,7 @@ def _config_from_mode(
         mode=mode,
         backend=backend,
         jax_platform=jax_platform,
+        precision=resolved_precision,
         strict=bool(strict) or debug_overlay,
         debug_nans=resolved_debug_nans,
         disable_jit=resolved_disable_jit,
@@ -1570,6 +1657,16 @@ def _optional_float_policy_default(value: object) -> float | None:
 
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     defaults = _get_mode_policy_defaults(config.mode)
+    resolved_precision = _resolved_precision_for_mode(
+        config.mode,
+        config.precision,
+    )
+    compute_dtype = (
+        "float32" if resolved_precision in ("fp32_smoke", "mixed") else "float64"
+    )
+    certificate_dtype: CertificateDType | None = (
+        "float64" if resolved_precision == "mixed" else None
+    )
     return BackendPolicy(
         mode=config.mode,
         backend=config.backend,
@@ -1577,6 +1674,8 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         strict=config.strict,
         parity_mode=bool(defaults["parity_mode"]),
         requires_x64=bool(defaults["requires_x64"]),
+        precision=config.precision,
+        resolved_precision=resolved_precision,
         runtime_dtype=_validate_policy_dtype(
             defaults["runtime_dtype"],
             mode=config.mode,
@@ -1587,6 +1686,8 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
             mode=config.mode,
             field="host_dtype",
         ),
+        compute_dtype=compute_dtype,
+        certificate_dtype=certificate_dtype,
         default_residency=_validate_default_residency(
             defaults["default_residency"],
             mode=config.mode,
@@ -1600,7 +1701,11 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         chunk_policy=str(defaults["chunk_policy"]),
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
-        matmul_precision=str(defaults["matmul_precision"]),
+        matmul_precision=(
+            "highest"
+            if resolved_precision == "mixed"
+            else str(defaults["matmul_precision"])
+        ),
         max_dense_jacobian_bytes=_resolve_policy_max_dense_jacobian_bytes(
             config,
             defaults,
@@ -1741,6 +1846,26 @@ def get_backend_config() -> BackendConfig:
 def get_backend_mode() -> str:
     """Return the resolved backend mode."""
     return get_backend_config().mode
+
+
+def get_precision(mode: str | None = None) -> PrecisionSelection:
+    """Return the explicit precision selection for a backend mode."""
+    return get_backend_policy(mode).precision
+
+
+def get_resolved_precision(mode: str | None = None) -> ResolvedPrecision:
+    """Return the effective precision route for a backend mode."""
+    return get_backend_policy(mode).resolved_precision
+
+
+def get_compute_dtype(mode: str | None = None) -> str:
+    """Return the compute dtype name for a backend mode."""
+    return get_backend_policy(mode).compute_dtype
+
+
+def get_certificate_dtype(mode: str | None = None) -> CertificateDType | None:
+    """Return the optional FP64 certificate dtype for a backend mode."""
+    return get_backend_policy(mode).certificate_dtype
 
 
 def get_backend() -> str:
@@ -2462,6 +2587,7 @@ def with_cpu_device_for_construction():
 def set_backend(
     mode: str,
     *,
+    precision: PrecisionSelection | None = None,
     strict: bool = False,
     debug_nans: bool | None = None,
     disable_jit: bool | None = None,
@@ -2485,6 +2611,7 @@ def set_backend(
     config = _config_from_mode(
         mode,
         strict=bool(strict),
+        precision=precision,
         debug_nans=debug_nans,
         disable_jit=disable_jit,
         transfer_guard=transfer_guard,
@@ -2513,6 +2640,7 @@ def set_backend(
 def use_runtime(
     mode: str,
     *,
+    precision: PrecisionSelection | None = None,
     debug: bool = False,
     strict: bool = False,
     debug_nans: bool | None = None,
@@ -2528,6 +2656,7 @@ def use_runtime(
     """Set runtime mode with the strict debug overlay when requested."""
     return set_backend(
         mode,
+        precision=precision,
         strict=bool(strict) or bool(debug),
         debug_nans=True if debug else debug_nans,
         disable_jit=True if debug else disable_jit,

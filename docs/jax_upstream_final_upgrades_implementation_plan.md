@@ -352,68 +352,103 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      implementation types; and adapter refinement, solve, fallback,
      fresh-versus-replay challenge, probability/sampling, and K-seed evidence
      consumed by selected production callers.
-   - [ ] Do not include benchmark report schemas or historical campaign payload
+   - [x] Do not include benchmark report schemas or historical campaign payload
      migration, comparator schemas, cross-lane limits, final-gradient campaign
      policy, or producer-lineage schemas unless a selected production caller
      demonstrably requires them.
-   - [ ] Add the defaulted `precision="mode_default"` stored selection to
+   - [x] Add the defaulted `precision="mode_default"` stored selection to
      `BackendConfig`, add the omission-sentinel signature
      `precision: PrecisionSelection | None = None` to `set_backend()` and
      `use_runtime()`, and extend `BackendPolicy` in
      `src/simsopt_jax/backend/runtime.py` with the resolved precision, compute
      dtype, and `CertificateDType | None`. Keep runtime and host result dtype
      FP64 in mixed mode; keep `jax_cpu_float32_smoke` fully FP32.
-   - [ ] Preserve every existing mode's current default dtype and behavior.
-   - [ ] Set JAX matmul precision to `"highest"` only for resolved mixed FP32
+   - [x] Preserve every existing mode's current default dtype and behavior.
+   - [x] Set JAX matmul precision to `"highest"` only for resolved mixed FP32
      execution so TF32 cannot weaken the numerical contract. Preserve the
      target's current matmul setting for `mode_default`, explicit FP64, and
      `jax_cpu_float32_smoke`; add tests for both TF32 blocking and compatibility
      defaults.
-   - [ ] Export `PrecisionSelection`, `ResolvedPrecision`, and the resolved
+   - [x] Export `PrecisionSelection`, `ResolvedPrecision`, and the resolved
      precision helpers through the
      existing backend/config public surface. Do not add a parallel
      `PrecisionPolicy` object. Parse and synchronize only `SIMSOPT_PRECISION`;
      reject the source branch's `SIMSOPT_MIXED_PRECISION` spelling.
-   - [ ] Port the required helpers and exports in
+   - [x] Port the required helpers and exports in
      `src/simsopt_jax/backend/dtypes.py`, `src/simsopt_jax/config.py`, and
      `src/simsopt_jax/runtime/host_boundary.py`.
-   - [ ] Port the selected `1f71046a7` placement semantics so
+   - [x] Port the selected `1f71046a7` placement semantics so
      `_device_put_preserving_dtype()` and `explicit_device_array()` preserve an
      explicitly requested FP32 dtype rather than reapplying the runtime FP64
      dtype. Add the direct regression to
      `tests/test_backend_dtypes_reference_sharding.py`.
-   - [ ] Add a backend/precision compatibility matrix and tests proving that
+   - [x] Add a backend/precision compatibility matrix and tests proving that
      omitted precision preserves every existing mode, including
      `jax_cpu_float32_smoke`, and that unsupported native/smoke combinations
      fail loudly.
-   - [ ] Inventory every in-repository caller of `BackendConfig`,
+   - [x] Inventory every in-repository caller of `BackendConfig`,
      `BackendPolicy`, `set_backend()`, and `use_runtime()`; add a migration
      example for explicit mixed selection and a constructor-compatibility test
      for the defaulted field.
-   - [ ] Extend the static, typed cases in
-     `tests/subprocess/jax_runtime_cases.py` and add subprocess tests proving the
+   - [x] Add static, typed subprocess cases proving the
      normalized `PrecisionSelection` in `SIMSOPT_PRECISION` round-trips through
      `set_backend()` and a fresh interpreter. Cover omitted selection honoring
      the environment, explicit `mixed` winning over a conflict, explicit
      `mode_default` clearing a conflict, and smoke-mode propagation retaining
      `SIMSOPT_PRECISION=mode_default` rather than serializing `fp32_smoke`.
-     Invoke those named cases through the existing subprocess harness; do not
-     generate Python source or use `exec`, `compile`, or `python -c`.
-   - [ ] Add `SIMSOPT_PRECISION` to the root `tests/conftest.py` runtime
+     These resolver-only cases live in
+     `tests/subprocess/precision_runtime_cases.py` rather than the existing
+     `jax_runtime_cases.py`, whose eager geometry and optimizer imports both
+     initialize JAX too early and impose a roughly 30-second cold-start cost per
+     policy case. Invoke the named cases through the existing subprocess
+     harness; do not generate Python source or use `exec`, `compile`, or
+     `python -c`.
+   - [x] Add `SIMSOPT_PRECISION` to the root `tests/conftest.py` runtime
      environment snapshot/restore owner so precision selection cannot leak
      between tests. Do not add the source branch's obsolete
      `SIMSOPT_MIXED_PRECISION` spelling.
-   - [ ] Port the selected `1f71046a7` mixed-collection bootstrap atomically:
+   - [x] Port the selected `1f71046a7` mixed-collection bootstrap atomically:
      add `tests/integration/__init__.py` and change
      `tests/integration/conftest.py` to import
      `._backend_test_helpers` relatively. The package marker must give the
      integration conftest a qualified module name so it cannot shadow the root
      `tests/conftest.py` when one pytest invocation collects root, geo, and
      integration paths.
-   - [ ] Reject every value outside `{"mode_default", "fp64", "mixed"}` with an actionable
+   - [x] Reject every value outside `{"mode_default", "fp64", "mixed"}` with an actionable
      `ValueError` from the runtime resolver before JAX runtime initialization;
      test invalid explicit and environment inputs through the public entrypoint
      and a fresh subprocess.
+
+### Phase 2 typed-precision API evolution receipt
+
+- Observable behavior delta: omitting `precision` is policy-compatible
+  with each existing mode's dtype and matmul policy. Explicit `mixed` keeps
+  public/runtime/host results and certificates FP64 while selecting FP32
+  proposal compute and `matmul_precision="highest"`. Invalid values,
+  unsupported native/smoke combinations, and the never-supported
+  `SIMSOPT_MIXED_PRECISION` spelling now fail before JAX initialization.
+- Caller inventory: production calls occur in
+  `benchmarks/biot_savart_kernel_scaling.py`,
+  `benchmarks/non_banana_example_parity_fixtures.py`, and the runtime owner.
+  Test consumers occur in the root and integration backend fixtures, Boozer
+  residual/surface tests, JAX solve value-gradient tests, and the static
+  subprocess programs. All omitted-argument callers remain source compatible;
+  every fixture that restores a captured `BackendConfig` now restores its
+  `precision` field.
+- Migration example: select mixed proposals with
+  `set_backend("jax_gpu_parity", precision="mixed")`, or transport the same
+  selection to a fresh process with `SIMSOPT_PRECISION=mixed`. Use
+  `precision="mode_default"` to explicitly clear an inherited selection.
+- Compatibility proof: `tests/test_backend_precision_policy.py` owns the full
+  mode/precision matrix and public precedence contract;
+  `tests/test_backend_dtypes_reference_sharding.py` owns explicit FP32 device
+  placement under an FP64 runtime; `tests/test_runtime_host_boundary.py` owns
+  typed certificate-key construction; and
+  `tests/test_jax_import_smoke.py` invokes the fresh-process cases.
+- Deprecation: none. `SIMSOPT_MIXED_PRECISION` was never a target API and is
+  rejected rather than silently interpreted.
+- Rollback: revert the typed-policy commit and unset `SIMSOPT_PRECISION`. No
+  persisted data or source migration is involved.
 
 3. Port the FP64 dense-IR solver as an opt-in capability.
    - [ ] Reconcile the factor-once dense-IR materialization and solve path into

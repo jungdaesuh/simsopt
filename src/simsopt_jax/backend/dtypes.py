@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.sharding import NamedSharding, PartitionSpec as P
+import numpy as np
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from simsopt_jax.backend.runtime import (
     get_backend_policy,
+    get_compute_dtype,
     get_runtime_jax_device,
     maybe_initialize_distributed_jax,
 )
 
 __all__ = [
+    "as_compute_array",
     "as_jax_array",
     "as_jax_float64",
     "as_jax_int32",
     "as_runtime_array",
     "as_runtime_float64",
     "as_runtime_value",
+    "compute_dtype",
+    "compute_jnp_dtype",
+    "compute_np_dtype",
     "explicit_device_array",
     "host_dtype",
     "require_float64_dtype",
@@ -171,6 +177,16 @@ def runtime_jnp_dtype():
     return _jnp_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
 
 
+def compute_jnp_dtype():
+    dtype_name = get_compute_dtype()
+    return _jnp_dtype_from_name(dtype_name, source="BackendPolicy.compute_dtype")
+
+
+def compute_np_dtype() -> np.dtype:
+    dtype_name = get_compute_dtype()
+    return _np_dtype_from_name(dtype_name, source="BackendPolicy.compute_dtype")
+
+
 def runtime_np_dtype() -> np.dtype:
     dtype_name = get_backend_policy().runtime_dtype
     return _np_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
@@ -199,22 +215,37 @@ def _device_put_target(target, device):
     return device if device is not None else target
 
 
-def _runtime_device_put_dtype(value, dtype) -> np.dtype | None:
+def _runtime_device_put_dtype(
+    value,
+    dtype,
+    *,
+    preserve_float_dtype: bool,
+) -> np.dtype | None:
     if dtype is not None:
         dtype = np.dtype(dtype)
-        if dtype.kind == "f":
+        if dtype.kind == "f" and not preserve_float_dtype:
             return runtime_np_dtype()
         return dtype
     value_dtype = _array_like_dtype(value)
-    if value_dtype is not None and value_dtype.kind == "f":
+    if value_dtype is not None and value_dtype.kind == "f" and not preserve_float_dtype:
         return runtime_np_dtype()
     return None
 
 
-def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Array:
-    """Place host values on a JAX device using runtime policy for float dtypes."""
+def _device_put(
+    value,
+    *,
+    dtype,
+    target,
+    device,
+    preserve_float_dtype: bool,
+) -> jax.Array:
     placement = _device_put_target(target, device)
-    resolved_dtype = _runtime_device_put_dtype(value, dtype)
+    resolved_dtype = _runtime_device_put_dtype(
+        value,
+        dtype,
+        preserve_float_dtype=preserve_float_dtype,
+    )
     if _has_jax_array_value(value):
         array = jnp.asarray(value, dtype=resolved_dtype)
     elif resolved_dtype is None:
@@ -228,6 +259,44 @@ def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Ar
             return jax.device_put(array)
         return jax.device_put(array, runtime_device)
     return jax.device_put(array, placement)
+
+
+def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Array:
+    """Place host values on a JAX device using runtime policy for float dtypes."""
+    return _device_put(
+        value,
+        dtype=dtype,
+        target=target,
+        device=device,
+        preserve_float_dtype=False,
+    )
+
+
+def _device_put_preserving_dtype(
+    value,
+    *,
+    dtype,
+    target=None,
+    device=None,
+) -> jax.Array:
+    """Place an explicitly typed value without applying runtime float policy."""
+    return _device_put(
+        value,
+        dtype=dtype,
+        target=target,
+        device=device,
+        preserve_float_dtype=True,
+    )
+
+
+def _compute_device_put(value, *, dtype, target=None, device=None) -> jax.Array:
+    resolved_dtype = _resolve_np_dtype(dtype, source="dtype")
+    return _device_put_preserving_dtype(
+        value,
+        dtype=resolved_dtype,
+        target=target,
+        device=device,
+    )
 
 
 def as_jax_array(value, *, dtype) -> jax.Array:
@@ -256,6 +325,27 @@ def as_runtime_array(value, *, dtype=None, reference=None):
     return as_jax_array(value, dtype=resolved_dtype)
 
 
+def as_compute_array(value, *, dtype=None, reference=None) -> jax.Array:
+    """Place proposal data using compute dtype and optional reference sharding."""
+    resolved_dtype = (
+        compute_jnp_dtype()
+        if dtype is None
+        else _resolve_jnp_dtype(dtype, source="dtype")
+    )
+    if _has_only_traced_jax_leaves(value):
+        return jnp.asarray(value, dtype=resolved_dtype)
+    reference_sharding = _reference_sharding(reference, ndim=_value_ndim(value))
+    if reference_sharding is not None:
+        return _compute_device_put(
+            value,
+            dtype=resolved_dtype,
+            target=reference_sharding,
+        )
+    if _has_jax_array_value(value):
+        return jnp.asarray(value, dtype=resolved_dtype)
+    return _compute_device_put(value, dtype=resolved_dtype)
+
+
 def as_runtime_value(value, *, reference, dtype=None):
     require_runtime_dtype("reference", reference, dtype=dtype)
     return as_runtime_array(value, dtype=dtype, reference=reference)
@@ -282,6 +372,10 @@ def runtime_dtype():
     return runtime_jnp_dtype()
 
 
+def compute_dtype():
+    return compute_jnp_dtype()
+
+
 def host_dtype() -> np.dtype:
     return runtime_host_dtype()
 
@@ -295,4 +389,4 @@ def runtime_eye(n: int) -> jax.Array:
 
 
 def explicit_device_array(value, *, dtype) -> jax.Array:
-    return runtime_device_put(value, dtype=dtype)
+    return _device_put_preserving_dtype(value, dtype=dtype)

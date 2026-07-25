@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import jax
 import numpy as np
+from numpy.typing import NDArray
 
 from simsopt_jax.backend.dtypes import runtime_device_put
+from simsopt_jax.numerical_policy import (
+    MIXED_DENSE_IR_CERTIFICATE_PRNG_IMPL,
+    CertificateProbeKeyData,
+)
 
 
 def host_array(value, *, dtype=None):
@@ -82,3 +87,13 @@ def explicit_cotangent_basis(length: int, index: int, *, dtype):
     basis = np.zeros(int(length), dtype=np.dtype(dtype))
     basis[int(index)] = 1.0
     return runtime_device_put(basis, dtype=dtype)
+
+
+def runtime_certificate_probe_key(key_data: CertificateProbeKeyData) -> jax.Array:
+    """Construct a typed Threefry certificate key on the runtime device."""
+    key_words: NDArray[np.uint32] = np.asarray(key_data.words, dtype=np.uint32)
+    device_key_data = runtime_device_put(key_words, dtype=np.uint32)
+    return jax.random.wrap_key_data(
+        device_key_data,
+        impl=MIXED_DENSE_IR_CERTIFICATE_PRNG_IMPL,
+    )
