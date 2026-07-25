@@ -100,6 +100,46 @@ Choose an optimizer lane explicitly and verify that the objective supports its
 traceability contract.  Host callbacks, Python mutation, and implicit NumPy
 conversion cannot occur inside a compiled on-device loop.
 
+Precision and certificate authority
+-----------------------------------
+
+Precision is an independent, typed runtime selection.  Existing applications
+that omit it retain their current mode-owned defaults.  New applications can
+select FP64 or mixed proposal compute programmatically::
+
+    import simsopt_jax.config as simsopt_config
+
+    simsopt_config.set_backend("jax_gpu_fast", precision="fp64")
+    # Or, for supported proposal paths:
+    simsopt_config.set_backend("jax_gpu_fast", precision="mixed")
+
+For subprocesses, use ``SIMSOPT_PRECISION=fp64`` or
+``SIMSOPT_PRECISION=mixed``.  An explicit ``precision=`` value takes
+precedence over the environment.  The compatibility value
+``precision="mode_default"`` restores the selected mode's established policy.
+The source-only ``SIMSOPT_MIXED_PRECISION`` spelling is rejected, and the
+import-time ``SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER`` selector is not part of
+the public API.
+
+Mixed precision changes proposal computation, not acceptance authority.  A
+mixed candidate must pass live FP64 residual, refinement, condition, and final
+accuracy gates.  A failed gate routes to the canonical FP64 fallback or fails
+closed; cast-up FP32 values are never treated as an FP64 certificate.
+
+Dense iterative refinement is opt-in through the typed Newton policy.  The
+default remains ``"operator_gmres"``.  Select the hybrid dense-IR path only at
+an explicit solver boundary::
+
+    from simsopt_jax.geo.optimizers import TraceableNewtonLinearSolver
+
+    linear_solver: TraceableNewtonLinearSolver = "hybrid_final_dense_ir"
+    boozer.options["newton_linear_solver"] = linear_solver
+
+The other exact selections are ``"dense_lu"`` and
+``"hybrid_final_dense_lu"``.  Dense-IR is not self-selected from problem size
+or environment state, so upgrading SIMSOPT does not silently change the
+existing operator-GMRES route.
+
 VJP callback convention
 -----------------------
 
@@ -126,8 +166,11 @@ Migration checklist
 
 #. Keep a native CPU run as the numerical reference.
 #. Select a JAX runtime mode before importing JAX-heavy modules.
+#. Select precision explicitly only when departing from the mode default.
 #. Replace one native object with its adapter and compare values and
    derivatives in FP64.
+#. For mixed compute, verify the live FP64 certificate and fallback path rather
+   than comparing proposal values alone.
 #. Move immutable numerical state into ``simsopt_jax.core`` only when the
    workflow benefits from a larger compiled region.
 #. Measure first-call compilation, steady-state time, device transfers, and
