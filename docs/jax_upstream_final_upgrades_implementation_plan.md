@@ -1030,23 +1030,27 @@ implementation.
 ### Remaining master-roadmap phases
 
 9. Port derivative and replay correctness as independently scoped core PRs.
-   - [ ] Add full-gradient projection behavior for fully fixed Optimizable
+   - [x] Add full-gradient projection behavior for fully fixed Optimizable
      lineages in `src/simsopt/_core/derivative.py`.
-   - [ ] Reconcile the source-anchor companion behavior in the same module:
+   - [x] Reconcile the source-anchor companion behavior in the same module:
      `Derivative.__call__()` returns `np.empty((0,), dtype=np.float64)` when no
      free lineage contributes instead of calling `np.concatenate([])`, and
      `derivative_dec` preserves the wrapped callable's metadata with
      `functools.wraps`.
-   - [ ] Implement that projection without copying the source commit's new
+   - [x] Implement that projection without copying the source commit's new
      function-local import. Reuse the existing validated derivative path or
      move the runtime type dependency to a static module boundary without
-     creating an import cycle.
-   - [ ] Port the explicit public replay allowlist from `df4b5b711`:
+     creating an import cycle. **Result:** the decorator now has one cycle-free
+     static owner in `_derivative_decorator.py`; `derivative.py` statically
+     imports `Optimizable`, and `optimizable.py` no longer imports the
+     derivative container during module initialization.
+   - [x] Port the explicit public replay allowlist from `df4b5b711`:
      `NonQuasiSymmetricRatio._fixed_surface_value()`,
      `NonQuasiSymmetricRatio.fixed_surface_value_and_derivative()`, and
      `BoozerResidual.fixed_surface_value_derivative_and_y_partial()`. Reconcile
-     only the later `G: float | None` annotation from `5e3208281`.
-   - [ ] Exclude `BoozerSurfaceReducedAdjointCertificate`,
+     only the later optional-`G` annotation from `5e3208281`; use
+     Python-3.8-compatible `Optional[float]` rather than the donor's `|` syntax.
+   - [x] Exclude `BoozerSurfaceReducedAdjointCertificate`,
      `BoozerSurfaceReducedObjective`, and
      `boozer_surface_y_stationarity_outer_vjp()` from the selected core PRs;
      they require
@@ -1077,16 +1081,25 @@ implementation.
      callable-owned documentation and `docs/source/geo.rst` cannot drift apart.
    - [ ] Preserve the physical derivative basis for fixed surfaces, including
      the selected `5df801e1b` Boozer label-gradient fix after
-     `surface.fix_all()`.
-   - [ ] Ensure replay values and primitive partials come from the same FP64
+     `surface.fix_all()`. The native replay owner and its fixed-surface
+     directional finite-difference gate are complete; the matching JAX
+     `NonQuasiSymmetricRatioJAX` precision route remains open.
+   - [x] Ensure replay values and primitive partials come from the same FP64
      source of truth.
    - [ ] Add focused tests that construct native Optimizable fixtures directly;
      do not import the single-stage example package. Include owner and
      directional finite-difference coverage for native and JAX curve-surface
-     objectives and the fixed-surface Boozer label-gradient regression.
-   - [ ] Add an independent finite-difference directional-derivative spot check
+     objectives and the fixed-surface Boozer label-gradient regression. The
+     replay portion now has native owner, value-parity, optional-y, and
+     fixed-surface physical-basis coverage; native/JAX curve-surface coverage
+     remains with its still-open owner slice.
+   - [x] Add an independent finite-difference directional-derivative spot check
      for one fixed-surface objective so value replay, primitive partials, and
      the physical derivative basis are not validated only against each other.
+     **Result:** `20/20` focused derivative/replay tests passed, including
+     independent fixed-surface, coil, and solved-parameter directional
+     finite-difference gates, and all changed production files parse with the
+     Python 3.8 grammar.
 
 10. Close packaging, documentation, and source-boundary work.
    - [ ] Export only intentional public precision and solver-policy symbols from
