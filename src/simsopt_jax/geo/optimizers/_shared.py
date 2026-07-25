@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Callable
+from typing import Callable, Generic, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -12,11 +12,28 @@ import numpy as np
 from jax.flatten_util import ravel_pytree
 
 from simsopt_jax.core._math_utils import _explicit_device_array, runtime_device_put
+from simsopt_jax.geo.optimizers._evaluation_provider import (
+    TargetScipyDeviceEvaluation,
+    TargetScipyDevicePacketLayout,
+    TargetScipyEvaluationProvider,
+    TargetScipyHostEvaluation,
+    TargetScipyHostFinalizer,
+    _require_host_numeric_leaf,
+)
 
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.10.0"
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
+
+
+_DecisionTreeT = TypeVar("_DecisionTreeT")
+_DevicePacketT = TypeVar("_DevicePacketT")
+_HostPacketT = TypeVar("_HostPacketT")
+_DeviceValueT = TypeVar("_DeviceValueT")
+_DeviceGradientTreeT = TypeVar("_DeviceGradientTreeT")
+_HostValueT = TypeVar("_HostValueT")
+_HostGradientTreeT = TypeVar("_HostGradientTreeT")
 
 
 def _version_key(raw_version: str) -> tuple[int, ...]:
@@ -107,9 +124,9 @@ def _is_flat_optimizer_vector(x0) -> bool:
 
 
 @dataclass(frozen=True)
-class _OptimizerPytreeAdapter:
+class _OptimizerPytreeAdapter(Generic[_DecisionTreeT]):
     flat_dtype: np.dtype
-    unravel: Callable[[jax.Array], object]
+    unravel: Callable[[jax.Array], _DecisionTreeT]
     tree_def: object
     leaf_signature: tuple[tuple[tuple[int, ...], str], ...]
 
@@ -126,25 +143,62 @@ class _OptimizerPytreeAdapter:
 
             return wrapped_fun
 
+        if isinstance(fun, TargetScipyEvaluationProvider):
+            return _PytreeTargetScipyEvaluationProvider(
+                adapter=self,
+                provider=fun,
+            )
+
         def wrapped_value_and_grad(flat_x):
             flat_x = _optimizer_flat_vector(flat_x)
             value, grad_tree = fun(self.unravel(flat_x))
-            _, grad_tree_def = jax.tree.flatten(grad_tree)
-            if grad_tree_def != self.tree_def:
-                raise ValueError(
-                    "Explicit value-and-gradient objectives must return a gradient "
-                    "with the same pytree structure as x0."
-                )
-            flat_grad, _ = ravel_pytree(grad_tree)
-            flat_grad = _optimizer_flat_vector(flat_grad, dtype=flat_x.dtype)
-            if flat_grad.shape != flat_x.shape:
-                raise ValueError(
-                    "Explicit value-and-gradient objectives must return a gradient "
-                    f"matching the flattened x0 shape {flat_x.shape}, got {flat_grad.shape}."
-                )
-            return _optimizer_scalar(value, dtype=flat_x.dtype), flat_grad
+            return self.flatten_device_value_and_gradient(
+                flat_x,
+                value,
+                grad_tree,
+            )
 
         return wrapped_value_and_grad
+
+    def flatten_device_value_and_gradient(self, flat_x, value, grad_tree):
+        flat_x = _optimizer_flat_vector(flat_x)
+        _, grad_tree_def = jax.tree.flatten(grad_tree)
+        if grad_tree_def != self.tree_def:
+            raise ValueError(
+                "Explicit value-and-gradient objectives must return a gradient "
+                "with the same pytree structure as x0."
+            )
+        flat_grad, _ = ravel_pytree(grad_tree)
+        flat_grad = _optimizer_flat_vector(flat_grad, dtype=flat_x.dtype)
+        if flat_grad.shape != flat_x.shape:
+            raise ValueError(
+                "Explicit value-and-gradient objectives must return a gradient "
+                f"matching the flattened x0 shape {flat_x.shape}, got {flat_grad.shape}."
+            )
+        return _optimizer_scalar(value, dtype=flat_x.dtype), flat_grad
+
+    def flatten_host_gradient(self, gradient_tree) -> np.ndarray:
+        leaves, tree_def = jax.tree.flatten(gradient_tree)
+        if tree_def != self.tree_def:
+            raise ValueError(
+                "Explicit value-and-gradient objectives must return a gradient "
+                "with the same pytree structure as x0."
+            )
+        for leaf in leaves:
+            _require_host_numeric_leaf(leaf)
+        host_leaves = tuple(np.asarray(leaf, dtype=self.flat_dtype) for leaf in leaves)
+        for leaf, (expected_shape, _expected_dtype) in zip(
+            host_leaves,
+            self.leaf_signature,
+        ):
+            if leaf.shape != expected_shape:
+                raise ValueError(
+                    "Explicit value-and-gradient objectives must return gradient "
+                    "leaves matching the corresponding x0 shapes."
+                )
+        if not host_leaves:
+            return np.empty((0,), dtype=self.flat_dtype)
+        return np.concatenate(tuple(leaf.reshape(-1) for leaf in host_leaves))
 
     def wrap_callback(self, callback):
         if callback is None:
@@ -167,6 +221,97 @@ class _OptimizerPytreeAdapter:
             self.flat_dtype.str,
             repr(self.tree_def),
             self.leaf_signature,
+        )
+
+
+@dataclass(frozen=True)
+class _PytreeTargetScipyHostFinalizer(
+    Generic[_DecisionTreeT, _HostPacketT, _HostValueT, _HostGradientTreeT]
+):
+    adapter: _OptimizerPytreeAdapter[_DecisionTreeT]
+    finalize_host: TargetScipyHostFinalizer[
+        _HostPacketT,
+        _HostValueT,
+        _HostGradientTreeT,
+    ]
+
+    def __call__(
+        self,
+        host_decision_vector: np.ndarray,
+        host_packet: _HostPacketT,
+        device_layout: TargetScipyDevicePacketLayout,
+        /,
+    ) -> TargetScipyHostEvaluation[_HostValueT, np.ndarray]:
+        evaluation = self.finalize_host(
+            host_decision_vector,
+            host_packet,
+            device_layout,
+        )
+        return TargetScipyHostEvaluation(
+            value=evaluation.value,
+            gradient=self.adapter.flatten_host_gradient(evaluation.gradient),
+            lifecycle=evaluation.lifecycle,
+        )
+
+
+@dataclass(frozen=True)
+class _PytreeTargetScipyEvaluationProvider(
+    Generic[
+        _DecisionTreeT,
+        _DevicePacketT,
+        _HostPacketT,
+        _DeviceValueT,
+        _DeviceGradientTreeT,
+        _HostValueT,
+        _HostGradientTreeT,
+    ]
+):
+    adapter: _OptimizerPytreeAdapter[_DecisionTreeT]
+    provider: TargetScipyEvaluationProvider[
+        _DecisionTreeT,
+        _DevicePacketT,
+        _HostPacketT,
+        _DeviceValueT,
+        _DeviceGradientTreeT,
+        _HostValueT,
+        _HostGradientTreeT,
+    ]
+
+    def __call__(
+        self,
+        flat_decision_vector: jax.Array,
+        /,
+    ) -> tuple[jax.Array, jax.Array]:
+        flat_decision_vector = _optimizer_flat_vector(flat_decision_vector)
+        value, gradient = self.provider(self.adapter.unravel(flat_decision_vector))
+        return self.adapter.flatten_device_value_and_gradient(
+            flat_decision_vector,
+            value,
+            gradient,
+        )
+
+    def evaluate_target_scipy(
+        self,
+        flat_decision_vector: jax.Array,
+        host_decision_vector: np.ndarray,
+        /,
+    ) -> TargetScipyDeviceEvaluation[
+        _DevicePacketT,
+        _HostPacketT,
+        _HostValueT,
+        np.ndarray,
+    ]:
+        flat_decision_vector = _optimizer_flat_vector(flat_decision_vector)
+        evaluation = self.provider.evaluate_target_scipy(
+            self.adapter.unravel(flat_decision_vector),
+            host_decision_vector,
+        )
+        return TargetScipyDeviceEvaluation(
+            device_packet=evaluation.device_packet,
+            finalize_host=_PytreeTargetScipyHostFinalizer(
+                adapter=self.adapter,
+                finalize_host=evaluation.finalize_host,
+            ),
         )
 
 

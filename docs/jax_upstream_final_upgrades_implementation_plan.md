@@ -831,14 +831,34 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      while SurfaceSurfaceDistance stages both surface inputs through the shared
      placement-aware conversion. Test values and finite derivatives under a
      strict GPU transfer guard.
-   - [ ] Introduce `_evaluation_lifecycle.py` and `_evaluation_provider.py` as
+   - [x] Introduce `_evaluation_lifecycle.py` and `_evaluation_provider.py` as
      optimizer-owned abstractions, then route `_shared.py`, `optimizer.py`, and
-     `reference.py` through them.
-   - [ ] Port SciPy callback resolution against the latest exact evaluation from
+     `reference.py` through them. The selected port preserves tuple-callable,
+     strict-purity, and pytree adaptation while materializing one complete
+     single-device packet before its typed host finalizer. No example or
+     campaign provider was copied.
+   - [x] Port SciPy callback resolution against the latest exact evaluation from
      `f35f83515`; do not synthesize accepted state from an inexact callback
-     vector.
-   - [ ] Add public-surface tests for accepted, rejected, duplicate, and
-     unresolved SciPy trial lifecycles.
+     vector. Candidate identity includes dtype, shape, and exact bytes, so
+     signed-zero-distinct evaluations are not conflated. One unexposed snapshot
+     owns attribution; providers and host finalizers receive separate disposable
+     copies rather than SciPy's mutable buffer or the authoritative snapshot.
+     Exact duplicate candidates resolve to the latest evaluation and an unknown
+     callback vector raises before lifecycle attribution.
+   - [x] Add public-surface tests for accepted, rejected, duplicate, and
+     unresolved SciPy trial lifecycles. **Result:** the focused optimizer and
+     driver set passed `75/75` on CPU, import boundaries passed `7/7`, and the
+     complete provider/lifecycle suite passed `46/46` on both CPU and the local
+     RTX 5090. Packet validation uses an explicit recursive arrays-only grammar,
+     requires exact agreement with JAX tree traversal, and rejects host leaves,
+     empty containers, opaque subclasses, non-exact string dictionary keys, and
+     hidden non-array payloads before transfer. The packet device must equal the
+     decision-vector device. Host
+     outputs use a closed real-numeric grammar that rejects complex, boolean,
+     string, datetime, object, opaque, scalar subclasses, behavior-overriding
+     tuple values.
+     Host finalizers and lifecycle observers execute with implicit transfers
+     disallowed in both directions.
    - [ ] Propagate clamped dimension and static-basis metadata as immutable
      runtime state through the geometry dispatcher and the public
      `BoozerSurfaceJAX` entrypoint. Include both in cache identities and result
@@ -1368,8 +1388,10 @@ with no strict-placement skips.
   fallback-success, and replay-as-fresh-claim mismatches.
 - [ ] Verify supplied factor reuse is accepted only when its exact identity and
   certificate authority match the current state.
-- [ ] Verify SciPy callbacks accept the latest exact duplicate and leave unknown
-  callback states unresolved rather than fabricating evidence.
+- [x] Verify SciPy callbacks accept the latest exact duplicate and leave unknown
+  callback states unresolved rather than fabricating evidence. Both contracts
+  are covered through the public target SciPy-control adapter, alongside a real
+  BFGS/L-BFGS trajectory-preservation regression.
 - [ ] Verify the exact-zero RHS path returns a successful zero solution without
   entering GMRES, while a nonzero ill-conditioned solve remains fail-closed and
   does not receive the excluded tiny-solution exception.

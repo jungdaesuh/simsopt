@@ -119,7 +119,16 @@ from enum import Enum
 from functools import lru_cache, partial, wraps
 from itertools import count
 from threading import Lock
-from typing import Callable, Final, Literal, NamedTuple, Protocol, cast
+from typing import (
+    Callable,
+    Final,
+    Generic,
+    Literal,
+    NamedTuple,
+    Protocol,
+    TypeVar,
+    cast,
+)
 from weakref import ref
 
 import jax
@@ -169,6 +178,10 @@ from simsopt_jax.geo.optimizers._shared import (
     _prepare_optimizer_pytree_adapter,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
+)
+from simsopt_jax.geo.optimizers._evaluation_provider import (
+    TargetScipyDeviceEvaluation,
+    TargetScipyEvaluationProvider,
 )
 from simsopt_jax.geo.optimizers.private import (
     _minimize_bfgs_private as _private_minimize_bfgs,
@@ -1334,10 +1347,69 @@ def _mark_structured_private_solver_cacheable(fun, *, cache_token):
     return _mark_traceable_runner_cacheable(fun, cache_token=cache_token)
 
 
+_StrictDecisionT = TypeVar("_StrictDecisionT")
+_StrictDevicePacketT = TypeVar("_StrictDevicePacketT")
+_StrictHostPacketT = TypeVar("_StrictHostPacketT")
+_StrictDeviceValueT = TypeVar("_StrictDeviceValueT")
+_StrictDeviceGradientT = TypeVar("_StrictDeviceGradientT")
+_StrictHostValueT = TypeVar("_StrictHostValueT")
+_StrictHostGradientT = TypeVar("_StrictHostGradientT")
+
+
+@dataclass(frozen=True)
+class _StrictTargetScipyEvaluationProvider(
+    Generic[
+        _StrictDecisionT,
+        _StrictDevicePacketT,
+        _StrictHostPacketT,
+        _StrictDeviceValueT,
+        _StrictDeviceGradientT,
+        _StrictHostValueT,
+        _StrictHostGradientT,
+    ]
+):
+    provider: TargetScipyEvaluationProvider[
+        _StrictDecisionT,
+        _StrictDevicePacketT,
+        _StrictHostPacketT,
+        _StrictDeviceValueT,
+        _StrictDeviceGradientT,
+        _StrictHostValueT,
+        _StrictHostGradientT,
+    ]
+
+    def __call__(
+        self,
+        decision_vector: _StrictDecisionT,
+        /,
+    ) -> tuple[_StrictDeviceValueT, _StrictDeviceGradientT]:
+        with strict_target_lane_purity():
+            return self.provider(decision_vector)
+
+    def evaluate_target_scipy(
+        self,
+        decision_vector: _StrictDecisionT,
+        host_decision_vector: np.ndarray,
+        /,
+    ) -> TargetScipyDeviceEvaluation[
+        _StrictDevicePacketT,
+        _StrictHostPacketT,
+        _StrictHostValueT,
+        _StrictHostGradientT,
+    ]:
+        with strict_target_lane_purity():
+            return self.provider.evaluate_target_scipy(
+                decision_vector,
+                host_decision_vector,
+            )
+
+
 def wrap_strict_target_lane_value_and_grad(fun):
     """Wrap target-lane value/grad calls in the stack-scoped purity guard."""
     if not target_lane_purity_requested():
         return fun
+    if isinstance(fun, TargetScipyEvaluationProvider):
+        return _StrictTargetScipyEvaluationProvider(provider=fun)
 
     @wraps(fun)
     def wrapped(*args, **kwargs):
