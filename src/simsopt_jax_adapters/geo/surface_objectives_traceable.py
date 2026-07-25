@@ -25,6 +25,7 @@ from simsopt_jax.runtime.host_boundary import (
 )
 from simsopt_jax.backend import get_backend_policy
 from simsopt_jax.core._math_utils import (
+    as_compute_array as _as_compute_array,
     as_jax_float64 as _as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
 )
@@ -682,6 +683,8 @@ def _traceable_general_forward_result(
     coil_set_spec_from_dofs,
     *,
     coil_dofs,
+    objective_coil_dofs=None,
+    certificate_coil_set_spec=None,
     baseline_x,
     baseline_value,
     baseline_linear_solve_factors,
@@ -695,7 +698,15 @@ def _traceable_general_forward_result(
     success_filter,
 ):
     """Run the general traceable inner solve without the baseline fast path."""
+    objective_coil_dofs = (
+        coil_dofs if objective_coil_dofs is None else objective_coil_dofs
+    )
     coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+    certificate_coil_set_spec = (
+        coil_set_spec
+        if certificate_coil_set_spec is None
+        else certificate_coil_set_spec
+    )
     warmstart_x, warmstart_linear_solve_success = _traceable_predict_warmstart_x(
         booz_jax,
         coil_set_spec_from_dofs,
@@ -723,13 +734,14 @@ def _traceable_general_forward_result(
             warmstart_sdofs,
             warmstart_iota,
             warmstart_G,
+            certificate_coil_source=certificate_coil_set_spec,
             materialize_dense_linearization=False,
         )
         solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
             booz_jax,
             solve_result,
             optimize_G=optimize_G,
-            coil_set_spec=coil_set_spec,
+            coil_set_spec=certificate_coil_set_spec,
         )
         primal_success = solve_result["primal_success"]
         adjoint_linear_solve_available = solve_result["adjoint_linear_solve_available"]
@@ -737,14 +749,14 @@ def _traceable_general_forward_result(
         if success_filter is not None:
             success = success & jax.lax.cond(
                 primal_success,
-                lambda _: success_filter(coil_dofs, solve_result["x"]),
+                lambda _: success_filter(objective_coil_dofs, solve_result["x"]),
                 lambda _: _runtime_bool(False),
                 operand=None,
             )
         objective_value = _evaluate_traceable_total_objective(
             solve_result["x"],
-            coil_dofs,
-            coil_set_spec,
+            objective_coil_dofs,
+            certificate_coil_set_spec,
             objective_kwargs,
         )
         filtered_objective_value = jax.lax.cond(
@@ -787,8 +799,8 @@ def _traceable_general_forward_result(
         )
         failure_value = _evaluate_traceable_total_objective(
             warmstart_x,
-            coil_dofs,
-            coil_set_spec,
+            objective_coil_dofs,
+            certificate_coil_set_spec,
             objective_kwargs,
         )
         filtered_failure_value = _traceable_rejected_objective_value(
@@ -821,6 +833,8 @@ def _traceable_forward_result(
     coil_set_spec_from_dofs,
     *,
     coil_dofs,
+    objective_coil_dofs=None,
+    certificate_coil_set_spec=None,
     baseline_x,
     baseline_value,
     baseline_linear_solve_factors,
@@ -829,12 +843,21 @@ def _traceable_forward_result(
     linear_solve_stab,
     optimize_G,
     baseline_coil_dofs,
+    baseline_objective_coil_dofs=None,
     predictor_kind,
     objective_kwargs,
     success_filter,
 ):
     """Run the pure traceable inner solve and return value plus solver data."""
-    same_coils = jnp.all(coil_dofs == baseline_coil_dofs)
+    objective_coil_dofs = (
+        coil_dofs if objective_coil_dofs is None else objective_coil_dofs
+    )
+    baseline_objective_coil_dofs = (
+        baseline_coil_dofs
+        if baseline_objective_coil_dofs is None
+        else baseline_objective_coil_dofs
+    )
+    same_coils = jnp.all(objective_coil_dofs == baseline_objective_coil_dofs)
 
     def baseline_case(_):
         baseline_sdofs, baseline_iota, baseline_G = _split_x_inner_runtime(
@@ -862,6 +885,8 @@ def _traceable_forward_result(
             booz_jax,
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
+            objective_coil_dofs=objective_coil_dofs,
+            certificate_coil_set_spec=certificate_coil_set_spec,
             baseline_x=baseline_x,
             baseline_value=baseline_value,
             baseline_linear_solve_factors=baseline_linear_solve_factors,
@@ -1359,11 +1384,17 @@ def _build_traceable_objective_compiled_bundle_from_state(
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
 
     def _forward_result_for(coil_dofs):
+        objective_coil_dofs = _as_jax_float64(coil_dofs)
+        proposal_coil_dofs = _as_compute_array(objective_coil_dofs)
+        proposal_baseline_coil_dofs = _as_compute_array(baseline_coil_dofs)
+        certificate_coil_set_spec = coil_set_spec_from_dofs(objective_coil_dofs)
         if general_only_forward:
             return _traceable_general_forward_result(
                 booz_jax,
                 coil_set_spec_from_dofs,
-                coil_dofs=coil_dofs,
+                coil_dofs=proposal_coil_dofs,
+                objective_coil_dofs=objective_coil_dofs,
+                certificate_coil_set_spec=certificate_coil_set_spec,
                 baseline_x=baseline_x,
                 baseline_value=_as_jax_float64(baseline_value),
                 baseline_linear_solve_factors=baseline_linear_solve_factors,
@@ -1371,7 +1402,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
                 linear_solve_tol=linear_solve_tol,
                 linear_solve_stab=linear_solve_stab,
                 optimize_G=optimize_G,
-                baseline_coil_dofs=baseline_coil_dofs,
+                baseline_coil_dofs=proposal_baseline_coil_dofs,
                 predictor_kind=predictor_kind,
                 objective_kwargs=objective_kwargs,
                 success_filter=success_filter,
@@ -1379,7 +1410,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
         return _traceable_forward_result(
             booz_jax,
             coil_set_spec_from_dofs,
-            coil_dofs=coil_dofs,
+            coil_dofs=proposal_coil_dofs,
+            objective_coil_dofs=objective_coil_dofs,
+            certificate_coil_set_spec=certificate_coil_set_spec,
             baseline_x=baseline_x,
             baseline_value=_as_jax_float64(baseline_value),
             baseline_linear_solve_factors=baseline_linear_solve_factors,
@@ -1387,7 +1420,8 @@ def _build_traceable_objective_compiled_bundle_from_state(
             linear_solve_tol=linear_solve_tol,
             linear_solve_stab=linear_solve_stab,
             optimize_G=optimize_G,
-            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_coil_dofs=proposal_baseline_coil_dofs,
+            baseline_objective_coil_dofs=baseline_coil_dofs,
             predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
             success_filter=success_filter,
