@@ -23,6 +23,8 @@ For stellarator symmetry the caller must zero out the forbidden entries
 *before* calling these functions; no masking is applied here.
 """
 
+from functools import partial
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -1129,6 +1131,64 @@ def _split_flat_to_xyzc(flat, mpol, ntor, *, use_compute_dtype=False):
     )
 
 
+def _dofs_to_xyzc_index_scatter_impl(
+    sdofs,
+    scatter_indices,
+    mpol,
+    ntor,
+    use_compute_dtype,
+):
+    sdofs_jax = (
+        _as_compute_array(sdofs) if use_compute_dtype else _as_jax_float64(sdofs)
+    )
+    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
+    scatter_indices_1d = _as_jax_int32(scatter_indices).reshape(-1, 1)
+    zero = jnp.sum(sdofs_jax - sdofs_jax)
+    flat = lax.scatter(
+        jnp.broadcast_to(zero, (3 * n_per_coord,)),
+        scatter_indices_1d,
+        sdofs_jax,
+        _SCATTER_SET_DIMS_1D,
+        indices_are_sorted=True,
+        unique_indices=True,
+        mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
+    )
+    return _split_flat_to_xyzc(flat, mpol, ntor, use_compute_dtype=use_compute_dtype)
+
+
+_dofs_to_xyzc_index_scatter_with_jvp = partial(
+    jax.custom_jvp,
+    nondiff_argnums=(2, 3, 4),
+)(_dofs_to_xyzc_index_scatter_impl)
+
+
+@partial(_dofs_to_xyzc_index_scatter_with_jvp.defjvp, symbolic_zeros=True)
+def _dofs_to_xyzc_index_scatter_jvp(
+    mpol,
+    ntor,
+    use_compute_dtype,
+    primals,
+    tangents,
+):
+    sdofs, scatter_indices = primals
+    sdofs_tangent, _scatter_indices_tangent = tangents
+    primal = _dofs_to_xyzc_index_scatter_impl(
+        sdofs,
+        scatter_indices,
+        mpol,
+        ntor,
+        use_compute_dtype,
+    )
+    tangent = _dofs_to_xyzc_index_scatter_impl(
+        sdofs_tangent,
+        scatter_indices,
+        mpol,
+        ntor,
+        use_compute_dtype,
+    )
+    return primal, tangent
+
+
 def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor, *, use_compute_dtype=False):
     """Scatter surface DOFs into full ``(xc, yc, zc)`` coefficient matrices.
 
@@ -1142,38 +1202,39 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor, *, use_compute_dtype=False)
     Returns:
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
-    sdofs_jax = (
-        _as_compute_array(sdofs) if use_compute_dtype else _as_jax_float64(sdofs)
-    )
-    scatter_operand = scatter_indices
-    scatter_ndim = getattr(scatter_operand, "ndim", np.ndim(scatter_operand))
+    scatter_ndim = getattr(scatter_indices, "ndim", np.ndim(scatter_indices))
     if scatter_ndim == 2:
+        sdofs_jax = (
+            _as_compute_array(sdofs) if use_compute_dtype else _as_jax_float64(sdofs)
+        )
         scatter_matrix = (
             _compute_array_like_reference(
-                scatter_operand,
+                scatter_indices,
                 dtype=sdofs_jax.dtype,
                 reference=sdofs_jax,
             )
             if use_compute_dtype
-            else _as_jax_float64(scatter_operand)
+            else _as_jax_float64(scatter_indices)
         )
         flat = scatter_matrix @ sdofs_jax
         return _split_flat_to_xyzc(
-            flat, mpol, ntor, use_compute_dtype=use_compute_dtype
+            flat,
+            mpol,
+            ntor,
+            use_compute_dtype=use_compute_dtype,
         )
-
-    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
-    scatter_indices_1d = _as_jax_int32(scatter_operand).reshape(-1, 1)
-    flat = lax.scatter(
-        jnp.zeros((3 * n_per_coord,), dtype=sdofs_jax.dtype),
-        scatter_indices_1d,
-        sdofs_jax,
-        _SCATTER_SET_DIMS_1D,
-        indices_are_sorted=True,
-        unique_indices=True,
-        mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
+    if scatter_ndim != 1:
+        raise ValueError(
+            "scatter_indices must be a one-dimensional integer index vector or "
+            f"a two-dimensional scatter matrix; got rank {scatter_ndim}"
+        )
+    return _dofs_to_xyzc_index_scatter_with_jvp(
+        sdofs,
+        scatter_indices,
+        mpol,
+        ntor,
+        use_compute_dtype,
     )
-    return _split_flat_to_xyzc(flat, mpol, ntor, use_compute_dtype=use_compute_dtype)
 
 
 def _dofs_to_xyzc_any(
