@@ -1,3 +1,5 @@
 """JAX-native geometry optimizers."""
 
-__all__ = ()
+from .policy import TraceableNewtonLinearSolver
+
+__all__ = ("TraceableNewtonLinearSolver",)

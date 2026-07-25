@@ -183,6 +183,7 @@ from simsopt_jax.geo.optimizers._evaluation_provider import (
     TargetScipyDeviceEvaluation,
     TargetScipyEvaluationProvider,
 )
+from simsopt_jax.geo.optimizers.policy import TraceableNewtonLinearSolver
 from simsopt_jax.geo.optimizers.private import (
     _minimize_bfgs_private as _private_minimize_bfgs,
 )
@@ -435,12 +436,6 @@ _TRACEABLE_LM_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_MATVEC_COUNT_ENV = "SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS"
-TraceableNewtonLinearSolver = Literal[
-    "operator_gmres",
-    "dense_lu",
-    "hybrid_final_dense_lu",
-    "hybrid_final_dense_ir",
-]
 _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: TraceableNewtonLinearSolver = (
     "operator_gmres"
 )

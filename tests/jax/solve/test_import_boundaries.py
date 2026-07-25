@@ -1,3 +1,4 @@
+import ast
 import os
 from pathlib import Path
 import subprocess
@@ -9,6 +10,20 @@ import tomllib
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 RUNTIME_OPTIMIZER_MODULES = ("optax", "optimistix", "lineax")
+
+
+def _benchmark_imports(path: Path) -> tuple[str, ...]:
+    module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports: list[str] = []
+    for node in ast.walk(module):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            if node.module == "benchmarks" or node.module.startswith("benchmarks."):
+                imports.append(f"line {node.lineno}: from {node.module}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "benchmarks" or alias.name.startswith("benchmarks."):
+                    imports.append(f"line {node.lineno}: import {alias.name}")
+    return tuple(imports)
 
 
 def _run_python_import_probe(source: str) -> subprocess.CompletedProcess[str]:
@@ -128,6 +143,32 @@ def test_public_jax_runtime_api_keeps_dispatch_out_of_package_root():
     assert result.returncode == 0, result.stderr
 
 
+def test_public_policy_packages_are_lightweight_and_explicit():
+    result = _run_python_import_probe(
+        """
+        import sys
+        modules_before_policy_import = set(sys.modules)
+        from simsopt_jax.geo.optimizers import TraceableNewtonLinearSolver
+
+        assert TraceableNewtonLinearSolver is not None
+        unexpected = [
+            name
+            for name in ("jax", "optax", "optimistix", "lineax")
+            if name in sys.modules and name not in modules_before_policy_import
+        ]
+        if unexpected:
+            raise SystemExit(f"unexpected policy-package imports: {unexpected}")
+
+        from simsopt_jax.backend import PrecisionSelection, ResolvedPrecision
+
+        assert PrecisionSelection is not None
+        assert ResolvedPrecision is not None
+        """
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_jax_gpu_extra_declares_public_runtime_optimizer_dependencies():
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     jax_gpu_deps = "\n".join(pyproject["project"]["optional-dependencies"]["JAX_GPU"])
@@ -162,3 +203,17 @@ def test_deploy_extras_do_not_route_through_stale_optimistix_alias():
         "shapely>=2.1,<3",
         "numba>=0.64,<0.66",
     ]
+
+
+def test_production_and_examples_never_import_benchmark_modules():
+    violations = {
+        str(path.relative_to(REPO_ROOT)): imports
+        for root in (REPO_ROOT / "src", REPO_ROOT / "examples")
+        for path in sorted(root.rglob("*.py"))
+        if (imports := _benchmark_imports(path))
+    }
+
+    assert violations == {}, (
+        "Production and example modules must import runtime contracts from "
+        f"their canonical owners, not benchmark orchestration: {violations!r}"
+    )

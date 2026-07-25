@@ -27,6 +27,10 @@ in ``pyproject.toml``.  The ``JAX_GPU`` extra uses the CUDA libraries packaged
 for the Python environment.  Avoid placing incompatible system CUDA libraries
 ahead of those packages through ``LD_LIBRARY_PATH``.
 
+Base SIMSOPT remains installable on Python ``>=3.8``.  The pinned ``JAX`` and
+``JAX_GPU`` extras require Python ``>=3.11``; use a Python 3.11 or newer
+environment before installing either extra.
+
 Verify that JAX can see a GPU before running a GPU workload::
 
     python - <<'PY'
@@ -75,6 +79,36 @@ Applications can configure it programmatically instead::
 Select the mode before importing JAX-heavy SIMSOPT modules.  Backend selection,
 precision, allocator configuration, and compilation-cache policy are process
 settings; changing them after JAX initializes a device is not supported.
+
+Precision policy
+----------------
+
+The runtime keeps the existing mode defaults unless precision is selected
+explicitly.  Use the typed ``precision`` argument to ``set_backend``::
+
+    import simsopt_jax.config as simsopt_config
+
+    simsopt_config.set_backend(
+        "jax_gpu_fast",
+        precision="mixed",
+        strict=True,
+    )
+
+The accepted selections are ``"mode_default"``, ``"fp64"``, and ``"mixed"``.
+``"mode_default"`` preserves the historical dtype policy for the selected
+runtime mode.  ``"fp64"`` requests FP64 explicitly.  ``"mixed"`` uses FP32
+only for supported proposal computations while retaining FP64 result and
+certificate dtypes.  The equivalent process setting is
+``SIMSOPT_PRECISION=mode_default|fp64|mixed``; an explicit non-``None``
+``precision`` argument takes precedence.
+
+Mixed precision never promotes widened FP32 proposal values into accepted
+evidence.  Supported mixed solvers validate candidates with the live FP64
+operator, refine against that operator, and use the canonical FP64 fallback
+when a proposal, refinement, condition, contraction, or tolerance gate fails.
+Accepted public results and certificate-side gradients therefore retain FP64
+authority.  The native CPU default and every omitted-precision JAX route remain
+unchanged.
 
 Quick smoke benchmark
 ---------------------

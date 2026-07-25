@@ -12,8 +12,8 @@ This JAX port implements a self-contained Dormand-Prince RK4(5)
 adaptive integrator (cf. Hairer, Norsett & Wanner, *Solving Ordinary
 Differential Equations I*, Section II.5) inside
 ``jax.lax.while_loop`` so the entire iota computation is JIT-able.
-The integrator uses the classic PI(0.7, 0.4) error controller with a
-configurable safety factor and per-step accept/reject branch.
+The integrator uses the local DOPRI5 error exponent with a configurable
+safety factor and per-step accept/reject branch.
 
 Forward-mode AD (``jax.jvp``, ``jax.jacfwd``) is supported through
 ``jax.lax.while_loop``. Reverse-mode AD (``jax.grad``, ``jax.vjp``,
@@ -426,7 +426,7 @@ def _dopri5_step(
     return y_new, y_err, k7
 
 
-# ── PI step controller ────────────────────────────────────────────────
+# ── Adaptive step controller ─────────────────────────────────────────
 
 
 # Reference: Hairer et al. eq. (4.13). Order=5, exponent = 1/5.
@@ -447,8 +447,8 @@ _INITIAL_STEP_FRACTION = 1.0 / 100.0
 def _initial_step_size(phi0, phi_end) -> jax.Array:
     """Conservative starting step at ``1/100`` of the integration interval.
 
-    The Greene tangent map has smooth periodic coefficients, so the PI
-    controller adapts up quickly. Starting much smaller than the
+    The Greene tangent map has smooth periodic coefficients, so the
+    adaptive DOPRI5 controller expands quickly. Starting much smaller than the
     expected steady-state step (~1e-3) avoids an early rejection
     cascade; starting at the interval length tends to fail the first
     error test and waste budget. ``1/100`` is the canonical compromise
