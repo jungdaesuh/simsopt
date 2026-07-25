@@ -655,7 +655,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      Do not add an unconditional FP64 rerun or a third bounded-Newton attempt.
      The bounded primitive is independently tested without the general Newton
      runner, and its production pre-Newton handoff is present.
-   - [ ] Because Phase 4 newly moves the outer pre-Newton/BFGS proposal from its
+   - [x] Because Phase 4 newly moves the outer pre-Newton/BFGS proposal from its
      source-anchor FP64 runtime dtype to FP32 compute, capture an immutable
      snapshot of the FP64 decision vector, warm start, solver/cache identity
      tokens, and accepted-state ownership. Never publish the FP32 BFGS endpoint:
@@ -669,25 +669,30 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      the returned result. On a seed/certificate failure, discard mixed state,
      restore the snapshot, and run the complete canonical FP64
      pre-Newton/Newton pipeline once.
-     **Progress:** both seed-gate rejection and bounded-certificate failure now
+     Both seed-gate rejection and bounded-certificate failure now
      select the canonical branch with the exact original FP64 decision vector;
      focused runtime-dataflow tests use identity stage functions so the returned
      value witnesses the branch-entry seed rather than relying on Python
      trace-time side effects. The live FP64 seed gate evaluates both endpoints
      and delegates its decision to `_newton_candidate_status` with the required
-     unit step and direction. Full closure remains open because the production
-     object reads mutable solver options and may populate its pure-callable
-     objective cache. A public stateful regression must still prove that a
-     rejected speculative route cannot alter warm-start ownership, accepted
-     state, or externally meaningful identity tokens.
-   - [ ] Buffer or suppress callbacks from speculative mixed work until final
+     unit step and direction. The traceable execution boundary owns only
+     explicit arrays; solve/coil tokens, precision, structural objective inputs,
+     and optimizer options are bound into the compiled-cache identity before
+     execution. A stateful regression covers successful mixed execution and
+     both fallback triggers and proves that `res`, surface DOFs,
+     `need_to_run_code`, the solve-state token, and stage callbacks remain
+     unchanged. Accepted outer-optimizer state remains caller-owned runtime
+     data, not mutable adapter state.
+   - [x] Suppress callbacks from speculative mixed work until final
      certification. Publish only the accepted attempt's ordered lifecycle; on
      canonical fallback, discard speculative events so external observers never
      receive an abandoned trajectory that array/token restoration cannot undo.
-     The traceable mixed primitive correctly admits no host callback, but total
-     suppression does not satisfy accepted-lifecycle publication. Keep this
-     open for the outer host lifecycle/provider boundary; do not inject a host
-     callback into traced device work.
+     The reusable traceable production boundary has no host callback seam and
+     now has a stateful regression proving zero callback publication across all
+     mixed/fallback outcomes. Accepted-lifecycle publication belongs to a host
+     optimizer/campaign provider, which this upstream source-only port excludes;
+     do not import donor campaign supervisors or inject a host callback into
+     traced device work.
    - [x] Keep mixed and FP64 Newton producers distinct until they normalize into
      the common public result contract.
    - [x] Port only production-required portions of
@@ -702,7 +707,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      overrides supplied factor metadata, and selecting LSMR for the adjoint
      path never changes the K1 forward predictor, with or without supplied
      factors.
-   - [ ] Add tests for FP32-BFGS-proposal-to-bounded-Newton handoff, exact
+   - [x] Add tests for FP32-BFGS-proposal-to-bounded-Newton handoff, exact
      snapshot restoration on every outer fallback trigger,
      final-gradient fail-closed behavior inside the bounded primitive and
      adjoint fail-closed behavior inside dense IR, outer canonical fallback after a
@@ -717,8 +722,11 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      bounded primitive binds a final FP64 gradient miss to the exact canonical
      attempt/factorization trace with no third attempt, dense IR fails closed on
      catastrophic adjoint error, and the existing selector tests cover
-     forward/adjoint factor routing. The stateful warm-start/token/accepted-state
-     snapshot and accepted outer lifecycle publication remain open.
+     forward/adjoint factor routing. The same parameterized fallback regression
+     now binds stateful warm-start/token ownership and zero speculative callback
+     publication. Host accepted-lifecycle publication is deliberately excluded
+     with the campaign/provider layer rather than represented by a traced
+     callback.
    - [x] Add an explicit regression proving the bounded mixed primitive is
      independent of the default Newton runner and its iteration shape; adapt
      only the example-independent assertion from the source test to the typed

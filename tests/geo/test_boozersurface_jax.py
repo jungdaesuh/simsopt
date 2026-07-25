@@ -8655,6 +8655,14 @@ class TestBoozerSurfaceJAXExactPath:
         expected_fallback,
     ):
         booz = _make_mock_boozer_surface()
+        stage_events = []
+        booz.options["stage_callback"] = lambda label, **payload: stage_events.append(
+            (label, payload)
+        )
+        accepted_result = booz.res
+        accepted_surface_dofs = np.asarray(booz.surface.get_dofs()).copy()
+        accepted_need_to_run_code = booz.need_to_run_code
+        accepted_solve_state_token = booz._traceable_solve_state_token
         original_seed = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         proposal_seed = jnp.asarray([0.5, -1.0], dtype=jnp.float32)
         captured = {}
@@ -8827,6 +8835,14 @@ class TestBoozerSurfaceJAXExactPath:
                 np.asarray(result["x"]),
                 np.asarray(proposal_seed, dtype=np.float64),
             )
+        assert booz.res is accepted_result
+        np.testing.assert_array_equal(
+            np.asarray(booz.surface.get_dofs()),
+            accepted_surface_dofs,
+        )
+        assert booz.need_to_run_code is accepted_need_to_run_code
+        assert booz._traceable_solve_state_token == accepted_solve_state_token
+        assert stage_events == []
 
     def test_run_code_traceable_routes_mixed_bfgs_through_certified_pipeline(
         self, monkeypatch
