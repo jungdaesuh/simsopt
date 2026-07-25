@@ -108,31 +108,31 @@ well; both paths use public JAX APIs.
 
 from __future__ import annotations
 
+import logging
+import os
+import sys
+import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache, partial, wraps
 from itertools import count
-import logging
-import sys
 from threading import Lock
 from typing import Callable, NamedTuple
-import warnings
-import os
 from weakref import ref
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
-from jax.flatten_util import ravel_pytree
-from jax import lax
-from jax.scipy.sparse.linalg import gmres
 import lineax
+import numpy as np
 import optimistix as optx
 import scipy.linalg
+from jax import lax
+from jax.extend import core as jax_core
+from jax.flatten_util import ravel_pytree
+from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import OptimizeResult
 
 from simsopt_jax.backend import (
@@ -143,41 +143,8 @@ from simsopt_jax.backend import (
     strict_target_lane_purity,
     target_lane_purity_requested,
 )
-from simsopt_jax.runtime.host_boundary import host_bool as _host_bool
-from simsopt_jax.runtime.host_boundary import host_scalar as _host_scalar
+from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.core._math_utils import _explicit_device_array, runtime_device_put
-from simsopt_jax.solve.driver import (
-    Driver,
-    legacy_reference_least_squares_method,
-    legacy_reference_minimize_method,
-    legacy_target_method,
-    legacy_target_scipy_control_method,
-)
-from simsopt_jax.solve.minimize_runtime import (
-    run_optax_minimize,
-    run_optimistix_minimize,
-)
-from simsopt_jax.geo.optimizers.private import (
-    _minimize_bfgs_private as _private_minimize_bfgs,
-    _minimize_lbfgs_private as _private_minimize_lbfgs,
-    _minimize_lbfgs_private_value_and_grad as _private_minimize_lbfgs_value_and_grad,
-    _private_bfgs_result_to_optimize_result as _private_bfgs_result_to_optimize_result_impl,
-    _private_lbfgs_result_to_optimize_result as _private_lbfgs_result_to_optimize_result_impl,
-)
-from simsopt_jax.solve.optax import OptaxLBFGSOptions
-from simsopt_jax.solve.optimistix import OptimistixLBFGSOptions
-from simsopt_jax.geo.optimizers._shared import (
-    PRIVATE_OPTIMIZER_JAX_VERSION,
-    _CACHEABLE_VALUE_AND_GRAD_ATTR,
-    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
-    _hostify_optimizer_tree,
-    _is_flat_optimizer_vector,
-    _optimizer_scalar,
-    _prepare_optimizer_callable_inputs,
-    _prepare_optimizer_pytree_adapter,
-    _x64_enabled,
-    private_optimizer_runtime_is_supported,
-)
 from simsopt_jax.geo._optimizer_backend_choices import (
     CONCRETE_OPTIMIZER_BACKENDS,
     HOST_JAX_OUTER_OPTIMIZER_BACKEND,
@@ -190,6 +157,48 @@ from simsopt_jax.geo._optimizer_backend_choices import (
     VALID_OUTER_OPTIMIZER_BACKENDS,
     render_invalid_optimizer_backend_message,
 )
+from simsopt_jax.geo.optimizers._shared import (
+    _CACHEABLE_VALUE_AND_GRAD_ATTR,
+    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
+    PRIVATE_OPTIMIZER_JAX_VERSION,
+    _hostify_optimizer_tree,
+    _is_flat_optimizer_vector,
+    _optimizer_scalar,
+    _prepare_optimizer_callable_inputs,
+    _prepare_optimizer_pytree_adapter,
+    _x64_enabled,
+    private_optimizer_runtime_is_supported,
+)
+from simsopt_jax.geo.optimizers.private import (
+    _minimize_bfgs_private as _private_minimize_bfgs,
+)
+from simsopt_jax.geo.optimizers.private import (
+    _minimize_lbfgs_private as _private_minimize_lbfgs,
+)
+from simsopt_jax.geo.optimizers.private import (
+    _minimize_lbfgs_private_value_and_grad as _private_minimize_lbfgs_value_and_grad,
+)
+from simsopt_jax.geo.optimizers.private import (
+    _private_bfgs_result_to_optimize_result as _private_bfgs_result_to_optimize_result_impl,
+)
+from simsopt_jax.geo.optimizers.private import (
+    _private_lbfgs_result_to_optimize_result as _private_lbfgs_result_to_optimize_result_impl,
+)
+from simsopt_jax.runtime.host_boundary import host_bool as _host_bool
+from simsopt_jax.runtime.host_boundary import host_scalar as _host_scalar
+from simsopt_jax.solve.driver import (
+    Driver,
+    legacy_reference_least_squares_method,
+    legacy_reference_minimize_method,
+    legacy_target_method,
+    legacy_target_scipy_control_method,
+)
+from simsopt_jax.solve.minimize_runtime import (
+    run_optax_minimize,
+    run_optimistix_minimize,
+)
+from simsopt_jax.solve.optax import OptaxLBFGSOptions
+from simsopt_jax.solve.optimistix import OptimistixLBFGSOptions
 
 
 class _PrivateOptimizerRuntime(NamedTuple):
@@ -3597,15 +3606,54 @@ def jax_least_squares_optimistix(
 # ---------------------------------------------------------------------------
 
 
-# Chunk size for assembling dense Jacobian/Hessian operators column-by-column via
-# ``lax.map``.  Bounded batches stop XLA from constant-folding the full identity
-# matrix (the mpol10 "pole-1" compile hang) and cap peak memory to ``batch_size``
-# parallel JVP/HVPs.  Default 8 is OOM-safe at high resolution; raise it (e.g. 32-64)
-# on a large GPU to recover parallelism and cut per-eval wall time.  Read once at
-# import because ``lax.map`` requires a static (compile-time) ``batch_size``.
-_DENSE_OPERATOR_CHUNK_BATCH_SIZE = max(
-    1, int(os.environ.get("SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE", "8"))
-)
+# Static column batch for dense Jacobian/Hessian materialization. An explicit
+# override wins; otherwise CUDA derives a conservative value from the backend
+# dense-operator budget while non-CUDA lanes retain the historical batch of 8.
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV = "SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE"
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK = 8
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX = 64
+_DENSE_OPERATOR_DEFAULT_BUDGET_BYTES = 256 * 1024 * 1024
+_DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN = 32 * 1024 * 1024
+_DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN = 3072 * 1024 * 1024
+
+
+def _dense_operator_chunk_batch_size_from_budget(max_dense_operator_bytes):
+    if max_dense_operator_bytes is None:
+        return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
+    byte_budget = int(max_dense_operator_bytes)
+    if byte_budget <= _DENSE_OPERATOR_DEFAULT_BUDGET_BYTES:
+        return max(
+            1,
+            min(
+                _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
+                byte_budget // _DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN,
+            ),
+        )
+    return max(
+        _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
+        min(
+            _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX,
+            byte_budget // _DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN,
+        ),
+    )
+
+
+def _resolve_dense_operator_chunk_batch_size():
+    env_value = os.environ.get(_DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV)
+    if env_value is not None:
+        return max(1, int(env_value))
+    policy = get_backend_policy()
+    if policy.jax_platform not in {"cuda", "gpu"}:
+        return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
+    return _dense_operator_chunk_batch_size_from_budget(policy.max_dense_jacobian_bytes)
+
+
+_DENSE_OPERATOR_CHUNK_BATCH_SIZE = _resolve_dense_operator_chunk_batch_size()
+
+
+def dense_operator_chunk_batch_size():
+    """Return the static dense-operator column batch used by JAX kernels."""
+    return int(_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
 
 
 # Solver for the inner-Boozer Gauss-Newton adjoint system (``J^T J + stab I``,
@@ -3688,7 +3736,10 @@ def _hessian_vector_product_fn(objective_fn):
 
             return jax.jvp(grad_for_x, (x,), (v,))[1]
 
-        return jax.jit(hvp)
+        # Dense assembly stages this HVP inside an outer scan. Inlining exposes
+        # objective closure arrays to that trace so they can remain operands,
+        # rather than becoming device-backed constants in a nested call.
+        return jax.jit(hvp, inline=True)
 
     return _cached_jit_linear_operator(objective_fn, _CACHED_HVP_ATTR, build_compiled)
 
@@ -3709,7 +3760,24 @@ def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
 
 
 def _materialize_dense_hessian_host(hvp_fn, x, *, symmetrize=True):
-    return _materialize_dense_hessian(hvp_fn, x, symmetrize=symmetrize)
+    x_array = jnp.asarray(x)
+    dtype = np.dtype(x_array.dtype)
+    dimension = int(x_array.shape[0])
+    dense_host = np.empty((dimension, dimension), dtype=dtype)
+    basis = np.zeros(dimension, dtype=dtype)
+    for column_index in range(dimension):
+        basis[column_index] = 1
+        basis_vector = jnp.asarray(basis, dtype=x_array.dtype)
+        column = np.asarray(
+            jax.device_get(hvp_fn(x_array, basis_vector)),
+            dtype=dtype,
+        )
+        dense_host[:, column_index] = column
+        basis[column_index] = 0
+    if not bool(symmetrize):
+        return jnp.asarray(dense_host, dtype=x_array.dtype)
+    upper = np.triu(dense_host)
+    return jnp.asarray(upper + np.triu(dense_host, 1).T, dtype=x_array.dtype)
 
 
 def _materialize_dense_jacobian(jvp_fn, x):
@@ -4465,23 +4533,51 @@ def _matrix_one_norm(matrix):
     return jnp.max(jnp.sum(jnp.abs(matrix), axis=0))
 
 
+def _place_like_concrete_array(value, reference, *, dtype=None):
+    if isinstance(value, jax.core.Tracer) or isinstance(reference, jax.core.Tracer):
+        return jnp.asarray(value, dtype=dtype)
+    resolved_dtype = getattr(value, "dtype", None) if dtype is None else dtype
+    if resolved_dtype is None:
+        resolved_dtype = np.asarray(value).dtype
+    return _explicit_device_array(
+        value,
+        dtype=resolved_dtype,
+        reference=reference,
+    )
+
+
+def _place_like_concrete_scalar(value, reference):
+    return _place_like_concrete_array(value, reference, dtype=reference.dtype)
+
+
 def _hager_higham_inverse_1_norm_estimate(
     solve,
     transpose_solve,
     *,
     size,
     dtype,
+    placement_reference,
     iterations=_HAGER_HIGHAM_CONDITION_ITERATIONS,
 ):
-    one = _device_scalar(1.0, dtype=dtype)
-    zero = _device_scalar(0.0, dtype=dtype)
-    indices = jnp.arange(size)
-    x0 = jnp.full((size,), one / _device_scalar(size, dtype=dtype), dtype=dtype)
+    """Estimate ``||A^-1||_1`` with loop state colocated with solve factors."""
+    one = _staged_like(placement_reference, 1.0, dtype=dtype)
+    zero = _staged_like(placement_reference, 0.0, dtype=dtype)
+    inf_value = _staged_like(placement_reference, np.inf, dtype=dtype)
+    size_scalar = _staged_like(placement_reference, size, dtype=dtype)
+    indices = _staged_like(
+        placement_reference,
+        np.arange(size, dtype=np.int32),
+        dtype=np.int32,
+    )
+    x0 = _staged_like(
+        placement_reference,
+        np.ones((size,), dtype=np.dtype(dtype)),
+        dtype=dtype,
+    )
+    x0 = x0 / size_scalar
 
     def unit_vector(index):
         return jnp.where(indices == index, one, zero)
-
-    inf_value = _device_scalar(jnp.inf, dtype=dtype)
 
     def body_fun(_iteration, state):
         x, best_estimate = state
@@ -4525,13 +4621,6 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
         lu_piv = jsp_linalg.lu_factor(matrix)
     lu, piv = lu_piv
 
-    # Externally supplied factors may have been moved to the configured
-    # linearization-residency device while ``matrix`` remains on the compute
-    # device. Keep the matrix norm and inverse-norm estimate co-located with the
-    # concrete factors; under tracing the enclosing computation owns placement.
-    if not isinstance(lu, jax.core.Tracer):
-        matrix = jax.device_put(matrix, lu.sharding)
-
     def solve(rhs):
         return jsp_linalg.lu_solve((lu, piv), rhs, trans=0)
 
@@ -4544,7 +4633,9 @@ def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
         transpose_solve,
         size=size,
         dtype=matrix.dtype,
+        placement_reference=lu,
     )
+    inverse_norm = _place_like_concrete_scalar(inverse_norm, matrix_norm)
     return matrix_norm * inverse_norm
 
 
@@ -4660,6 +4751,43 @@ def _solve_square_vector_system_operator_only(
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     """Solve one square linear system with bounded operator-GMRES refinement."""
+    rhs = jnp.asarray(rhs)
+
+    def zero_rhs_solution(_unused):
+        solution = jnp.zeros_like(rhs)
+        residual = jnp.zeros_like(rhs)
+        status = _linear_solve_status(
+            solution,
+            residual,
+            rhs,
+            tol=tol,
+            iterations=_device_int32(0),
+        )
+        return solution, status
+
+    def nonzero_rhs_solution(_unused):
+        return _solve_square_vector_system_operator_only_nonzero_rhs(
+            matvec,
+            rhs,
+            tol=tol,
+            max_refinement_steps=max_refinement_steps,
+        )
+
+    return lax.cond(
+        jnp.all(rhs == jnp.zeros((), dtype=rhs.dtype)),
+        zero_rhs_solution,
+        nonzero_rhs_solution,
+        operand=None,
+    )
+
+
+def _solve_square_vector_system_operator_only_nonzero_rhs(
+    matvec,
+    rhs,
+    *,
+    tol,
+    max_refinement_steps,
+):
     effective_tol = _effective_linear_solve_tolerance(rhs, tol)
     solution, residual, info = _gmres_solve_array_system(
         matvec,
@@ -4811,34 +4939,114 @@ def _dense_square_operator_lu_materialization_allowed(rhs):
     return _dense_square_operator_matrix_bytes_allowed(rhs)
 
 
-def _dense_square_operator_matrix(matvec, rhs):
+def _dense_square_operator_matrix(
+    matvec,
+    rhs,
+    *,
+    matrix_dtype=None,
+    sweep_dtype=None,
+):
     rhs = jnp.asarray(rhs)
     dimension = int(rhs.shape[0])
-    matrix_dtype = _dense_square_operator_matrix_dtype(rhs)
-    # ``jnp.eye`` in JAX 0.10 emits an implicit int64 H→D transfer that breaks
-    # ``transfer_guard("disallow")`` contracts; route via explicit device_put.
-    eye = _explicit_device_array(
-        np.eye(dimension, dtype=matrix_dtype),
-        dtype=matrix_dtype,
+    if sweep_dtype is None:
+        sweep_dtype = _dense_square_operator_matrix_dtype(rhs)
+    else:
+        sweep_dtype = np.dtype(sweep_dtype)
+    if matrix_dtype is None:
+        matrix_dtype = _dense_square_operator_matrix_dtype(rhs)
+    else:
+        matrix_dtype = np.dtype(matrix_dtype)
+
+    column_indices = _staged_like(
+        rhs,
+        np.arange(dimension, dtype=np.int32),
+        dtype=np.int32,
     )
-    # Assemble the dense operator in bounded column batches via ``lax.map`` rather
-    # than an unchunked ``vmap`` over all N identity columns.  ``eye`` is a
-    # compile-time constant, so an unchunked map lets XLA constant-fold the full
-    # N-wide ``dot(constant, constant)`` -- this never finishes at high mode counts
-    # (mpol10 -> N=1323; the documented pole-1 compile hang, RUNBOOK sec 6.4).
-    # ``lax.map`` lowers to a loop XLA does not fold across, and bounds peak memory
-    # to ``batch_size`` HVPs.  Numerically identical up to floating-point reduction
-    # order.  Mirrors the forward chunk in ``_materialize_dense_linear_operator``
-    # and the chunked Boozer Jacobian in ``boozer_surface.py``.  ``eye`` is
-    # symmetric, so mapping over its rows yields ``matvec(e_j)`` = column ``j`` of the
-    # operator; transpose back to the (row, col) layout the dense solve expects.
-    columns = lax.map(matvec, eye, batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
-    return jnp.swapaxes(columns, 0, 1)
+    chunk_size = min(_DENSE_OPERATOR_CHUNK_BATCH_SIZE, dimension)
+    chunk_count = dimension // chunk_size
+    chunked_dimension = chunk_count * chunk_size
+    column_index_chunks = _staged_like(
+        rhs,
+        np.arange(chunked_dimension, dtype=np.int32).reshape(
+            chunk_count,
+            chunk_size,
+        ),
+        dtype=np.int32,
+    )
+    example_basis = _staged_like(
+        rhs,
+        np.zeros(dimension, dtype=sweep_dtype),
+        dtype=sweep_dtype,
+    )
+    matvec_closed_jaxpr = jax.make_jaxpr(matvec)(example_basis)
+    matvec_jaxpr = matvec_closed_jaxpr.jaxpr
+    matvec_closure_args = tuple(
+        _place_like_concrete_array(constant, rhs)
+        for constant in matvec_closed_jaxpr.consts
+    )
+    scan_carry = (column_indices, matvec_closure_args)
+
+    def converted_matvec(basis_vector, *closure_args):
+        closed_jaxpr = jax_core.ClosedJaxpr(matvec_jaxpr, closure_args)
+        return jax_core.jaxpr_as_fun(closed_jaxpr)(basis_vector)[0]
+
+    def materialize_column(column_index, basis_indices, closure_args):
+        basis_vector = jnp.asarray(
+            basis_indices == column_index,
+            dtype=sweep_dtype,
+        )
+        return converted_matvec(basis_vector, *closure_args)
+
+    def materialize_chunk(carry, chunk_column_indices):
+        basis_indices, closure_args = carry
+        columns = jax.vmap(materialize_column, in_axes=(0, None, None))(
+            chunk_column_indices,
+            basis_indices,
+            closure_args,
+        )
+        return carry, columns
+
+    def materialize_remainder_column(carry, column_index):
+        basis_indices, closure_args = carry
+        return carry, materialize_column(
+            column_index,
+            basis_indices,
+            closure_args,
+        )
+
+    _, chunked_columns = lax.scan(
+        materialize_chunk,
+        scan_carry,
+        column_index_chunks,
+    )
+    columns = jnp.reshape(
+        chunked_columns,
+        (chunked_dimension, dimension),
+    )
+    if chunked_dimension < dimension:
+        remainder_indices = _staged_like(
+            rhs,
+            np.arange(chunked_dimension, dimension, dtype=np.int32),
+            dtype=np.int32,
+        )
+        _, remainder_columns = lax.scan(
+            materialize_remainder_column,
+            scan_carry,
+            remainder_indices,
+        )
+        columns = jnp.concatenate((columns, remainder_columns), axis=0)
+    return jnp.asarray(jnp.swapaxes(columns, 0, 1), dtype=matrix_dtype)
 
 
-def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *, tol):
+def _solve_dense_square_operator_least_squares_system_with_status(
+    matvec,
+    rhs,
+    *,
+    tol,
+    sweep_dtype=None,
+):
     rhs_dtype = jnp.asarray(rhs).dtype
-    matrix = _dense_square_operator_matrix(matvec, rhs)
+    matrix = _dense_square_operator_matrix(matvec, rhs, sweep_dtype=sweep_dtype)
     rhs = jnp.asarray(rhs, dtype=matrix.dtype)
     solution = jnp.linalg.lstsq(matrix, rhs, rcond=None)[0]
     residual = rhs - matrix @ solution
@@ -4870,7 +5078,13 @@ def _solve_dense_square_operator_least_squares_system_with_status(matvec, rhs, *
     )
 
 
-def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
+def _solve_dense_square_operator_lu_system_with_status(
+    matvec,
+    rhs,
+    *,
+    tol,
+    sweep_dtype=None,
+):
     """Direct LU solve of one square system from an operator matvec.
 
     Materializes the dense square operator implied by ``matvec`` (reusing the
@@ -4884,7 +5098,7 @@ def _solve_dense_square_operator_lu_system_with_status(matvec, rhs, *, tol):
     resolve.
     """
     rhs_dtype = jnp.asarray(rhs).dtype
-    matrix = _dense_square_operator_matrix(matvec, rhs)
+    matrix = _dense_square_operator_matrix(matvec, rhs, sweep_dtype=sweep_dtype)
     rhs = jnp.asarray(rhs, dtype=matrix.dtype)
     lu_piv = jsp_linalg.lu_factor(matrix)
     solution = jsp_linalg.lu_solve(lu_piv, rhs)
@@ -5001,6 +5215,8 @@ def _solve_hessian_system(
     stab,
     tol,
 ):
+    rhs = jnp.asarray(rhs)
+    x = _place_like_concrete_array(x, rhs)
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
     solution, _ = _solve_square_array_system_operator_only(
         operator["matvec"],
@@ -5018,6 +5234,8 @@ def _solve_hessian_system_with_status(
     stab,
     tol,
 ):
+    rhs = jnp.asarray(rhs)
+    x = _place_like_concrete_array(x, rhs)
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
     return _solve_square_array_system_operator_only(
         operator["matvec"],
@@ -5178,8 +5396,9 @@ def _solve_hessian_least_squares_system_with_status(
     residual_fn=None,
 ):
     """Solve a Hessian adjoint system without forming normal equations."""
-    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
     rhs = jnp.asarray(rhs)
+    x = _place_like_concrete_array(x, rhs)
+    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
     if _ADJOINT_LINEAR_SOLVER == "cg":
         return _solve_symmetric_operator_cg_with_status(
             operator["matvec"],

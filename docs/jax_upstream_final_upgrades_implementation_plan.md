@@ -460,9 +460,9 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      default `operator_gmres` route.
    - [ ] Preserve existing fail-closed condition, backward-error, and
      ill-conditioning gates already present on the target.
-   - [ ] Generate dense operator columns without materializing a quadratic
+   - [x] Generate dense operator columns without materializing a quadratic
      identity constant, using the final behavior from `b9732104b`.
-   - [ ] Extend that materializer with the final detached-lineage behavior from
+   - [x] Extend that materializer with the final detached-lineage behavior from
      `9f286b626`, `b53989742`, `d9fae2809`, `88d7ec769`, and `62de304d5`:
      pre-shape device-resident column chunks, carry dynamic HVP operands through
      an explicit `lax.scan`, inline the jitted HVP, colocate captured closure
@@ -471,14 +471,14 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      every dense/CG operator. Reconcile the implementation with the target's
      rank-aware `NamedSharding` helpers rather than copying the candidate's
      local placement helper wholesale.
-   - [ ] Port `_materialize_dense_hessian_host()` as an independent host
+   - [x] Port `_materialize_dense_hessian_host()` as an independent host
      implementation from selected `9ca8929f5`; it must not call the device
      `lax.map` materializer. Preserve the existing monkeypatch regression and
      add `tests/geo/test_optimizer_jax_item19.py` to focused validation.
-   - [ ] Port the exact-zero-RHS operator-solve short circuit from selected
+   - [x] Port the exact-zero-RHS operator-solve short circuit from selected
      `7d488caacc`: return a successful zero solution without invoking GMRES.
      Do not port the separate tiny-nonzero-solution condition exception.
-   - [ ] Port the static CUDA dense-operator chunk auto-sizing finalized by
+   - [x] Port the static CUDA dense-operator chunk auto-sizing finalized by
      `ecdba5011` and `aa7612a05`, retaining explicit override and the
      conservative non-CUDA default. Keep the helper private.
    - [ ] Port `adjoint_hessian_stabilization()` from selected `5df801e1b` and
