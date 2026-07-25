@@ -262,6 +262,49 @@ def test_bounded_mixed_newton_accounts_public_hessian_in_fp64_bytes():
     assert int(result["dense_hessian_materialization_status_code"]) == 2
 
 
+def test_bounded_mixed_newton_fails_closed_after_its_canonical_attempt():
+    _set_test_precision("mixed")
+
+    def objective(state: jax.Array) -> jax.Array:
+        scale = jnp.asarray(
+            0.0 if np.dtype(state.dtype) == np.dtype(np.float32) else 1.0,
+            dtype=state.dtype,
+        )
+        return scale * jnp.exp(state[0])
+
+    result = _optimizer.bounded_mixed_newton_polish_traceable(
+        objective,
+        jnp.asarray((0.0,), dtype=jnp.float64),
+        tol=1.0e-12,
+        stab=0.0,
+    )
+
+    assert not bool(result["success"])
+    assert int(result["newton_attempted_iterations"]) == 2
+    assert int(result["bounded_newton_attempt_limit"]) == 2
+    assert int(result["newton_iter"]) == 1
+    assert bool(result["bounded_newton_proposal_attempted"])
+    assert not bool(result["bounded_newton_proposal_accepted"])
+    assert bool(result["bounded_newton_second_correction_attempted"])
+    assert bool(result["bounded_newton_second_correction_accepted"])
+    assert int(result["bounded_newton_factorization_event_count"]) == 2
+    np.testing.assert_array_equal(
+        np.asarray(result["bounded_newton_factorization_dtype_bits_trace"]),
+        np.asarray((32, 64, 0), dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(result["bounded_newton_actual_trace_active"]),
+        np.asarray((True, True, False)),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(result["bounded_newton_actual_trace_accepted"]),
+        np.asarray((False, True, False)),
+    )
+    assert int(result["newton_fp64_refactor_retry_count"]) == 0
+    assert bool(result["bounded_newton_fp64_certification_covered"])
+    assert float(result["final_gradient_norm"]) > 1.0e-12
+
+
 def test_default_fp64_bounded_newton_is_independent_of_the_general_runner(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -287,6 +330,49 @@ def test_default_fp64_bounded_newton_is_independent_of_the_general_runner(
         np.asarray(result["bounded_newton_factorization_dtype_bits_trace"]),
         np.asarray((64, 0, 0), dtype=np.int32),
     )
+
+
+def test_bounded_mixed_newton_has_an_independent_fixed_attempt_shape(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_test_precision("mixed")
+
+    def objective(state: jax.Array) -> jax.Array:
+        target = jnp.asarray((1.0, -2.0), dtype=state.dtype)
+        return jnp.sum(jnp.square(state - target))
+
+    initial = jnp.asarray((0.0, 0.0), dtype=jnp.float64)
+    default = _optimizer.newton_polish_traceable(
+        objective,
+        initial,
+        maxiter=3,
+        tol=1.0e-11,
+        materialize_hessian=False,
+    )
+    monkeypatch.setattr(
+        _optimizer,
+        "_make_traceable_newton_polish_runner",
+        lambda *args, **kwargs: pytest.fail("bounded solver called the general runner"),
+    )
+    bounded = jax.jit(
+        lambda state: _optimizer.bounded_mixed_newton_polish_traceable(
+            objective,
+            state,
+            tol=1.0e-11,
+        )
+    )(initial)
+
+    assert bool(bounded["success"])
+    assert int(bounded["newton_attempted_iterations"]) <= 2
+    assert int(bounded["newton_attempted_iterations"]) == int(
+        np.count_nonzero(np.asarray(bounded["newton_trace_active"]))
+    )
+    np.testing.assert_array_equal(
+        np.asarray(bounded["bounded_newton_attempt_kind_codes"]),
+        np.asarray((1, 2), dtype=np.int32),
+    )
+    assert bounded["newton_trace_active"].shape == (2,)
+    assert default["newton_trace_active"].shape == (3,)
 
 
 def test_newton_candidate_acceptance_uses_the_shared_armijo_merit_owner():
