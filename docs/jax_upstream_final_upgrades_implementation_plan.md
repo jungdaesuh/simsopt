@@ -634,7 +634,8 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      not present the latter as an unconditional PRNG failure probability.
    - [x] Require a live FP64 certificate before accepting a mixed proposal;
      never return an uncertified FP32 endpoint. This is closed for the optimizer
-     primitive; outer producer publication remains open below.
+     primitive and current outer producer; snapshot and callback-isolation
+     publication gates remain open below.
    - [x] Reserve the single canonical FP64 fallback for proposal,
      refinement/tolerance, contraction, or condition rejection. After that
      attempt, a nonfinite or out-of-tolerance final gradient or adjoint result
@@ -648,7 +649,7 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      rejected, go directly to the canonical FP64 attempt at the same incumbent.
      Do not add an unconditional FP64 rerun or a third bounded-Newton attempt.
      The bounded primitive is independently tested without the general Newton
-     runner; its production pre-Newton handoff remains open.
+     runner, and its production pre-Newton handoff is present.
    - [ ] Because Phase 4 newly moves the outer pre-Newton/BFGS proposal from its
      source-anchor FP64 runtime dtype to FP32 compute, capture an immutable
      snapshot of the FP64 decision vector, warm start, solver/cache identity
@@ -746,8 +747,9 @@ PRs with independent acceptance criteria; they are not Phase 0 dependencies.
      `surface_objectives_traceable.py`. Add the source strict-transfer
      regression without example imports.
    - [x] Port only the production lowerable-gradient seam from `7c934adc2`:
-     construct one `lowerable_total_gradient_for`, reuse it in lazy and eager
-     production routes, and expose that exact callable to prewarm/lowering.
+     construct one `_total_gradient_for` owner, compile it once as
+     `compiled_total_gradient_for`, reuse it in lazy and eager production
+     routes, and expose that exact compiled callable to prewarm/lowering.
      Exclude the commit's compile-evidence and campaign bundle.
    - [ ] Port the final stable-anchor traceable-adapter performance behavior as
      one dependency-ordered slice from `004684265`, `3b24fa5f5`, `e690422a2`,

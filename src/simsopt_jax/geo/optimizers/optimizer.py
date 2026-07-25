@@ -7509,12 +7509,13 @@ def bounded_mixed_newton_polish_traceable(
     """Run the V5 stage-local Newton composition with at most two attempts.
 
     Mixed mode takes one FP32 dense-IR proposal from the FP64 incumbent. After
-    an accepted step, its second logical attempt uses fresh FP32 factors at the
-    new state, with exactly one FP64 refactor retry after rejection. A rejected
-    first proposal goes directly to the FP64 certificate attempt at the same
-    state instead of rebuilding identical FP32 factors. Pure FP64 takes only
-    the canonical FP64 attempt. This bounded composition does not call the
-    general runner; both use the shared Armijo-aware candidate acceptance policy.
+    an accepted step that remains above tolerance, its second logical attempt
+    uses fresh FP32 factors at the new state, with exactly one FP64 refactor
+    retry after rejection. A rejected first proposal goes directly to the FP64
+    certificate attempt at the same state instead of rebuilding identical FP32
+    factors. Pure FP64 takes only the canonical FP64 attempt. This bounded
+    composition does not call the general runner; both use the shared
+    Armijo-aware candidate acceptance policy.
     """
     policy = get_backend_policy()
     compute_dtype = np.dtype(policy.compute_dtype)

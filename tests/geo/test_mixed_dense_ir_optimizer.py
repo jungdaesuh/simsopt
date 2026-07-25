@@ -233,6 +233,35 @@ def test_bounded_mixed_newton_materializes_live_fp64_public_hessian():
     )
 
 
+def test_bounded_mixed_newton_accounts_public_hessian_in_fp64_bytes():
+    _set_test_precision("mixed")
+    matrix = jnp.asarray(
+        ((2.00000003, 0.50000007), (0.50000007, 3.00000011)),
+        dtype=jnp.float64,
+    )
+    right_hand_side = jnp.asarray((1.0, 2.0), dtype=jnp.float64)
+
+    def objective(state: jax.Array) -> jax.Array:
+        return 0.5 * state @ matrix @ state - right_hand_side @ state
+
+    fp32_dense_bytes = matrix.size * np.dtype(np.float32).itemsize
+    fp64_dense_bytes = matrix.size * np.dtype(np.float64).itemsize
+    result = _optimizer.bounded_mixed_newton_polish_traceable(
+        objective,
+        jnp.zeros(2, dtype=jnp.float64),
+        tol=1.0e-12,
+        stab=0.0,
+        materialize_hessian=True,
+        max_dense_hessian_bytes=(fp32_dense_bytes + fp64_dense_bytes) // 2,
+    )
+
+    assert bool(result["success"])
+    assert not result["hessian_materialized"]
+    assert result["hessian"] is None
+    assert int(result["dense_hessian_bytes"]) == fp64_dense_bytes
+    assert int(result["dense_hessian_materialization_status_code"]) == 2
+
+
 def test_default_fp64_bounded_newton_is_independent_of_the_general_runner(
     monkeypatch: pytest.MonkeyPatch,
 ):
