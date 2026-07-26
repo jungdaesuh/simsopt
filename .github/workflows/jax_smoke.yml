@@ -11,6 +11,7 @@ on:
       - 'docs/jax*/**'
       - 'pyproject.toml'
       - 'envs/jax.yml'
+      - 'examples/jax/**'
       - 'src/simsopt/__init__.py'
       - 'src/simsopt/geo/__init__.py'
       - 'src/simsopt_jax/**'
@@ -31,6 +32,7 @@ on:
       - 'docs/jax*/**'
       - 'pyproject.toml'
       - 'envs/jax.yml'
+      - 'examples/jax/**'
       - 'src/simsopt/__init__.py'
       - 'src/simsopt/geo/__init__.py'
       - 'src/simsopt_jax/**'
@@ -220,6 +222,9 @@ jobs:
             tests/geo/test_surface_objective_precision_authority.py \
             -v --tb=short
 
+      - name: Run JAX examples CPU smoke lane
+        run: python examples/jax/run_examples.py --lane cpu-smoke
+
   jax-gpu-strict-purity:
     name: JAX GPU strict purity (CUDA, transfer_guard=disallow)
     runs-on: [self-hosted, gpu]
@@ -261,6 +266,11 @@ jobs:
             python -m pytest tests/test_jax_import_smoke.py \
             -k "gpu_ondevice_loops_with_host_constants or grouped_biot_savart_gpu_spec_eval or grouped_biot_savart_gpu_current_arrays" \
             -v --tb=short
+
+      - name: Run JAX examples strict GPU lane
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_examples.py --lane gpu-strict
 
       - name: Run remaining JAX surface CUDA import mode matrix
         run: |

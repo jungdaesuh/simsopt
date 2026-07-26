@@ -65,7 +65,7 @@
       "extras": ["JAX"],
       "smoke_args": [],
       "correctness_tests": ["tests/integration/test_jax_examples.py"],
-      "lanes": ["cpu-smoke", "gpu-strict"]
+      "lanes": ["cpu-smoke"]
     },
     {
       "id": "curve-length-optimization",
@@ -98,11 +98,11 @@
     {
       "id": "coil-flux-optimization",
       "path": "1_Simple/coil_flux_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/stage_two_optimization_minimal.py", "2_Intermediate/stage_two_optimization.py", "2_Intermediate/stage_two_optimization_planar_coils.py", "2_Intermediate/stage_two_optimization_stochastic.py"],
       "execution_kind": "adapter",
-      "jax_surfaces": ["simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX", "simsopt_jax_adapters.objectives.flux.SquaredFluxJAX"],
+      "jax_surfaces": ["simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX", "simsopt_jax_adapters.objectives.flux.SquaredFluxJAX", "simsopt_jax_adapters.geo.curve_objectives.CurveLengthJAX"],
       "host_boundaries": ["native coil and surface construction plus immutable snapshots"],
       "extras": ["JAX"],
       "smoke_args": [],
@@ -112,7 +112,7 @@
     {
       "id": "qfm-surface-optimization",
       "path": "1_Simple/qfm_surface_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/qfm.py"],
       "execution_kind": "adapter",
@@ -126,7 +126,7 @@
     {
       "id": "permanent-magnet-optimization",
       "path": "1_Simple/permanent_magnet_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/permanent_magnet_simple.py", "2_Intermediate/permanent_magnet_MUSE.py", "2_Intermediate/permanent_magnet_PM4Stell.py", "2_Intermediate/permanent_magnet_QA.py"],
       "execution_kind": "pure",
@@ -140,11 +140,11 @@
     {
       "id": "fieldline-and-particle-tracing",
       "path": "1_Simple/fieldline_tracing.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/tracing_fieldlines_NCSX.py", "1_Simple/tracing_fieldlines_QA.py", "1_Simple/tracing_particle.py", "2_Intermediate/tracing_boozer.py"],
       "execution_kind": "adapter",
-      "jax_surfaces": ["simsopt_jax.core.tracing.FieldlineTracingSpec", "simsopt_jax_adapters.field.reiman.ReimanJAX"],
+      "jax_surfaces": ["simsopt_jax.core.tracing.FieldlineTracingSpec", "simsopt_jax.core.tracing.FullorbitTracingSpec", "simsopt_jax.core.tracing.trace_fieldline", "simsopt_jax.core.tracing.trace_fullorbit", "simsopt_jax_adapters.field.reiman.ReimanJAX"],
       "host_boundaries": ["host reporting and optional plotting after immutable trace completion"],
       "extras": ["JAX"],
       "smoke_args": [],

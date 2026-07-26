@@ -95,6 +95,8 @@ def test_lane_environment_owns_runtime_selection_before_child_startup() -> None:
     assert cpu["JAX_PLATFORMS"] == "cpu"
     assert cpu["JAX_ENABLE_X64"] == "1"
     assert cpu["CUDA_VISIBLE_DEVICES"] == ""
+    assert cpu["MPI4PY_RC_INITIALIZE"] == "false"
+    assert gpu["MPI4PY_RC_INITIALIZE"] == "false"
     assert (
         gpu
         | {
@@ -321,3 +323,131 @@ def test_surface_geometry_example_matches_axisymmetric_torus_oracle() -> None:
         observables["volume_oracle"], rel=1.0e-9, abs=1.0e-10
     )
     assert observables["residual_norm"] <= 1.0e-9
+
+
+def test_permanent_magnet_example_matches_greedy_coordinate_oracle() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "permanent-magnet-optimization"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["moments"] == [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+    assert observables["residual_norm"] == pytest.approx(5.0**0.5 / 5.0)
+    assert observables["selected_dipoles"] == [0, 1]
+
+
+def test_fieldline_example_matches_pure_toroidal_orbit_oracle() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "fieldline-and-particle-tracing"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["integrator_status"] == 0
+    assert observables["event_count"] == 0
+    assert observables["final_state"] == pytest.approx(
+        observables["analytic_final_state"], rel=1.0e-9, abs=1.0e-10
+    )
+
+
+def test_coil_flux_example_has_independent_gradient_oracle_and_reduces_flux() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "coil-flux-optimization"
+    )
+
+    assert example.status == "ready"
+    assert example.execution_kind == "adapter"
+    assert example.host_boundaries == (
+        "native coil and surface construction plus immutable snapshots",
+    )
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["gradient_fd_error"] <= 1.0e-8
+    assert observables["final_flux"] <= 1.0e-6 * observables["initial_flux"]
+    assert observables["coil_length"] == pytest.approx(
+        observables["coil_length_oracle"], rel=1.0e-12, abs=1.0e-12
+    )
+
+
+def test_qfm_example_reduces_penalty_and_publishes_final_surface() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "qfm-surface-optimization"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["final_penalty"] < observables["initial_penalty"]
+    assert observables["surface_update_norm"] > 0.0
+    assert observables["gradient_norm"] < observables["initial_gradient_norm"]

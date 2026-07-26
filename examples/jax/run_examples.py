@@ -91,6 +91,7 @@ def build_lane_environment(
 
     environment = dict(base_environment)
     environment.update(_LANE_ENVIRONMENT[lane])
+    environment["MPI4PY_RC_INITIALIZE"] = "false"
     if repo_root is not None:
         source_root = str(repo_root / "src")
         inherited_pythonpath = environment.get("PYTHONPATH")
