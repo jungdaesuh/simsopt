@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+from examples.jax._manifest import (
+    ManifestValidationError,
+    derive_source_coverage,
+    load_manifest,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
+NATIVE_TIERS = {
+    "1_Simple",
+    "2_Intermediate",
+    "3_Advanced",
+    "stellarator_benchmarks",
+}
+
+
+def _tracked_native_examples() -> set[str]:
+    examples_root = REPO_ROOT / "examples"
+    return {
+        path.relative_to(examples_root).as_posix()
+        for tier in NATIVE_TIERS
+        for path in (examples_root / tier).glob("*.py")
+    }
+
+
+def _manifest_document() -> dict[str, object]:
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    return document
+
+
+def _write_manifest(tmp_path: Path, document: dict[str, object]) -> Path:
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def _source_records(document: dict[str, object]) -> list[dict[str, object]]:
+    records = document["source_catalog"]
+    assert isinstance(records, list)
+    assert all(isinstance(record, dict) for record in records)
+    return records
+
+
+def _jax_records(document: dict[str, object]) -> list[dict[str, object]]:
+    records = document["jax_examples"]
+    assert isinstance(records, list)
+    assert all(isinstance(record, dict) for record in records)
+    return records
+
+
+def test_source_catalog_exactly_matches_native_python_examples() -> None:
+    manifest = load_manifest(MANIFEST_PATH, repo_root=REPO_ROOT)
+
+    assert {record.source for record in manifest.source_catalog} == (
+        _tracked_native_examples()
+    )
+    assert len(manifest.source_catalog) == 51
+
+
+def test_manifest_derives_coverage_without_storing_inverse_links() -> None:
+    manifest = load_manifest(MANIFEST_PATH, repo_root=REPO_ROOT)
+
+    coverage = derive_source_coverage(manifest)
+
+    assert set(coverage) == _tracked_native_examples()
+    assert set(coverage.values()) <= {"planned", "covered", "deferred"}
+    assert any(state == "planned" for state in coverage.values())
+    assert any(state == "deferred" for state in coverage.values())
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_message"),
+    [
+        ("duplicate_source", "duplicate source path"),
+        ("missing_source", "source catalog does not match"),
+        ("invalid_disposition", "invalid disposition"),
+        ("stored_inverse", "unexpected source fields"),
+        ("candidate_reason", "candidate must not define deferred_reason"),
+        ("deferred_without_reason", "deferred source requires deferred_reason"),
+        ("unlinked_candidate", "candidate source is not linked"),
+        ("linked_deferred", "deferred source must not be linked"),
+        ("invalid_inspiration", "unknown inspiration source"),
+        ("pure_with_boundary", "pure example must not declare host boundaries"),
+        ("adapter_without_boundary", "adapter example requires host boundaries"),
+        ("ready_without_cpu_lane", "ready example requires cpu-smoke lane"),
+        ("ready_without_test", "ready example requires correctness tests"),
+        ("ready_without_file", "ready example path does not exist"),
+    ],
+)
+def test_manifest_rejects_invalid_contracts(
+    tmp_path: Path, mutation: str, expected_message: str
+) -> None:
+    document = deepcopy(_manifest_document())
+    sources = _source_records(document)
+    examples = _jax_records(document)
+    candidate = next(
+        record for record in sources if record["disposition"] == "candidate"
+    )
+    deferred = next(record for record in sources if record["disposition"] == "deferred")
+    planned = next(record for record in examples if record["status"] == "planned")
+
+    if mutation == "duplicate_source":
+        sources.append(deepcopy(sources[0]))
+    elif mutation == "missing_source":
+        sources.pop()
+    elif mutation == "invalid_disposition":
+        candidate["disposition"] = "ready"
+    elif mutation == "stored_inverse":
+        candidate["jax_example_ids"] = [planned["id"]]
+    elif mutation == "candidate_reason":
+        candidate["deferred_reason"] = "should not be present"
+    elif mutation == "deferred_without_reason":
+        deferred.pop("deferred_reason")
+    elif mutation == "unlinked_candidate":
+        source = candidate["source"]
+        for example in examples:
+            inspired_by = example["inspired_by"]
+            assert isinstance(inspired_by, list)
+            example["inspired_by"] = [item for item in inspired_by if item != source]
+    elif mutation == "linked_deferred":
+        inspired_by = planned["inspired_by"]
+        assert isinstance(inspired_by, list)
+        inspired_by.append(deferred["source"])
+    elif mutation == "invalid_inspiration":
+        planned["inspired_by"] = ["1_Simple/does_not_exist.py"]
+    elif mutation == "pure_with_boundary":
+        planned["execution_kind"] = "pure"
+        planned["host_boundaries"] = ["native setup"]
+    elif mutation == "adapter_without_boundary":
+        planned["execution_kind"] = "adapter"
+        planned["host_boundaries"] = []
+    elif mutation == "ready_without_cpu_lane":
+        planned["status"] = "ready"
+        planned["lanes"] = ["gpu-strict"]
+    elif mutation == "ready_without_test":
+        planned["status"] = "ready"
+        planned["correctness_tests"] = []
+    elif mutation == "ready_without_file":
+        planned["status"] = "ready"
+        planned["path"] = "1_Simple/not_present.py"
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+
+    with pytest.raises(ManifestValidationError, match=expected_message):
+        load_manifest(_write_manifest(tmp_path, document), repo_root=REPO_ROOT)
+
+
+def test_ready_examples_are_public_jax_workflows_not_forwarders() -> None:
+    manifest = load_manifest(MANIFEST_PATH, repo_root=REPO_ROOT)
+
+    for example in manifest.jax_examples:
+        if example.status != "ready":
+            continue
+        source = (REPO_ROOT / "examples" / "jax" / example.path).read_text(
+            encoding="utf-8"
+        )
+        assert "simsopt_jax" in source
+        assert "runpy" not in source
+        assert "examples.1_Simple" not in source
+        assert "examples.2_Intermediate" not in source
+        assert "examples.3_Advanced" not in source
