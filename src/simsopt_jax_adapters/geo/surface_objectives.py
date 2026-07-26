@@ -1279,11 +1279,11 @@ def _curve_surface_penalty_from_grouped_spec(
     return total
 
 
-def _banana_curve_penalties_from_coil_dofs(
+def _optimized_coil_penalties_from_coil_dofs(
     coil_dofs,
     coil_dof_extraction_spec,
     *,
-    banana_curve_index,
+    optimized_coil_index,
     length_target,
     curvature_threshold,
     curvature_p_norm,
@@ -1291,31 +1291,31 @@ def _banana_curve_penalties_from_coil_dofs(
     coil_specs = coil_specs_from_dof_extraction_spec(
         coil_dof_extraction_spec, coil_dofs
     )
-    banana_curve_spec = coil_specs[int(banana_curve_index)].curve
-    _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
-        banana_curve_spec
+    optimized_coil_curve_spec = coil_specs[int(optimized_coil_index)].curve
+    _gamma, optimized_gammadash, optimized_gammadashdash = curve_geometry_from_spec(
+        optimized_coil_curve_spec
     )
-    banana_curve_length = curve_length_pure(
-        incremental_arclength_pure(banana_gammadash)
+    optimized_curve_length = curve_length_pure(
+        incremental_arclength_pure(optimized_gammadash)
     )
-    zero = _runtime_float64_scalar(0.0, reference=banana_curve_length)
-    half = _runtime_float64_scalar(0.5, reference=banana_curve_length)
+    zero = _runtime_float64_scalar(0.0, reference=optimized_curve_length)
+    half = _runtime_float64_scalar(0.5, reference=optimized_curve_length)
     length_target_jax = _runtime_float64_scalar(
-        length_target, reference=banana_curve_length
+        length_target, reference=optimized_curve_length
     )
     curvature_threshold_jax = _runtime_float64_scalar(
         curvature_threshold,
-        reference=banana_curve_length,
+        reference=optimized_curve_length,
     )
     curvature_p_norm_jax = _runtime_float64_scalar(
         curvature_p_norm,
-        reference=banana_curve_length,
+        reference=optimized_curve_length,
     )
-    length_delta = jnp.maximum(banana_curve_length - length_target_jax, zero)
+    length_delta = jnp.maximum(optimized_curve_length - length_target_jax, zero)
     length_penalty = half * (length_delta * length_delta)
     curvature_penalty = Lp_curvature_pure(
-        kappa_pure(banana_gammadash, banana_gammadashdash),
-        banana_gammadash,
+        kappa_pure(optimized_gammadash, optimized_gammadashdash),
+        optimized_gammadash,
         curvature_p_norm_jax,
         curvature_threshold_jax,
     )
@@ -1420,10 +1420,10 @@ def _traceable_single_stage_outer_term_values(
         axis=int(outer_objective_config["non_qs_axis"]),
     )
 
-    length_penalty, curvature_penalty = _banana_curve_penalties_from_coil_dofs(
+    length_penalty, curvature_penalty = _optimized_coil_penalties_from_coil_dofs(
         coil_dofs,
         coil_dof_extraction_spec,
-        banana_curve_index=int(outer_objective_config["banana_curve_index"]),
+        optimized_coil_index=int(outer_objective_config["optimized_coil_index"]),
         length_target=outer_objective_config["length_target"],
         curvature_threshold=outer_objective_config["curvature_threshold"],
         curvature_p_norm=outer_objective_config["curvature_p_norm"],
@@ -1510,29 +1510,29 @@ def _traceable_smoothmax_selected(values, temperature):
     return hard_max + bounded_temperature * jax.nn.logsumexp(masked_logits)
 
 
-def _traceable_single_stage_banana_curve_runtime_metrics(
+def _traceable_single_stage_optimized_coil_runtime_metrics(
     coil_dofs,
     coil_dof_extraction_spec,
     *,
-    banana_curve_index,
+    optimized_coil_index,
     curvature_smoothing,
 ):
     coil_specs = coil_specs_from_dof_extraction_spec(
         coil_dof_extraction_spec, coil_dofs
     )
-    banana_curve_spec = coil_specs[int(banana_curve_index)].curve
-    _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
-        banana_curve_spec
+    optimized_coil_curve_spec = coil_specs[int(optimized_coil_index)].curve
+    _gamma, optimized_gammadash, optimized_gammadashdash = curve_geometry_from_spec(
+        optimized_coil_curve_spec
     )
-    coil_length = curve_length_pure(incremental_arclength_pure(banana_gammadash))
+    coil_length = curve_length_pure(incremental_arclength_pure(optimized_gammadash))
     max_curvature = _traceable_smoothmax_selected(
-        kappa_pure(banana_gammadash, banana_gammadashdash),
+        kappa_pure(optimized_gammadash, optimized_gammadashdash),
         temperature=curvature_smoothing,
     )
-    banana_current = jnp.abs(
-        _take_runtime_scalar(coil_specs[int(banana_curve_index)].current.value, 0)
+    optimized_current = jnp.abs(
+        _take_runtime_scalar(coil_specs[int(optimized_coil_index)].current.value, 0)
     )
-    return coil_length, max_curvature, banana_current
+    return coil_length, max_curvature, optimized_current
 
 
 def _traceable_single_stage_coil_gammas(
@@ -1636,11 +1636,11 @@ def _traceable_single_stage_hardware_constraint_values(
         coil_dofs,
         objective_kwargs["coil_dof_extraction_spec"],
     )
-    coil_length, max_curvature, banana_current = (
-        _traceable_single_stage_banana_curve_runtime_metrics(
+    coil_length, max_curvature, optimized_current = (
+        _traceable_single_stage_optimized_coil_runtime_metrics(
             coil_dofs,
             objective_kwargs["coil_dof_extraction_spec"],
-            banana_curve_index=int(outer_objective_config["banana_curve_index"]),
+            optimized_coil_index=int(outer_objective_config["optimized_coil_index"]),
             curvature_smoothing=alm_config["curvature_smoothing"],
         )
     )
@@ -1672,10 +1672,10 @@ def _traceable_single_stage_hardware_constraint_values(
             outer_objective_config["length_target"],
             reference=coil_length,
         ),
-        "banana_current_upper_bound": banana_current
+        "optimized_coil_current_upper_bound": optimized_current
         - _runtime_float64_scalar(
-            alm_config["banana_current_threshold"],
-            reference=banana_current,
+            alm_config["optimized_coil_current_threshold"],
+            reference=optimized_current,
         ),
     }
 

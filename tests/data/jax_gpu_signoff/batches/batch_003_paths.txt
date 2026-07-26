@@ -1,7 +1,0 @@
-tests/field/test_interpolated_boozer_field_jax.py
-tests/field/test_interpolated_field_jax_item15.py
-tests/field/test_magnetic_axis_helpers_jax_item21.py
-tests/field/test_magnetic_field_composition_jax.py
-tests/field/test_magneticfieldclasses_jax_item15.py
-tests/field/test_sampling_jax_item22.py
-tests/field/test_scalar_potential_rz_jax_item23.py

@@ -3416,7 +3416,7 @@ def _traceable_reporting_metrics_from_solution(
         )
 
     coil_dof_extraction_spec = objective_kwargs["coil_dof_extraction_spec"]
-    banana_curve_index = int(outer_objective_config["banana_curve_index"])
+    optimized_coil_index = int(outer_objective_config["optimized_coil_index"])
     coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
 
     def compute_raw_terms():
@@ -3467,15 +3467,19 @@ def _traceable_reporting_metrics_from_solution(
         coil_dof_extraction_spec,
         coil_dofs,
     )
-    banana_curve_spec = coil_specs[banana_curve_index].curve
-    banana_current = jnp.abs(
-        _take_runtime_scalar(coil_specs[banana_curve_index].current.value, 0)
+    optimized_coil_curve_spec = coil_specs[optimized_coil_index].curve
+    optimized_current = jnp.abs(
+        _take_runtime_scalar(coil_specs[optimized_coil_index].current.value, 0)
     )
-    _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
-        banana_curve_spec
+    _gamma, optimized_gammadash, optimized_gammadashdash = curve_geometry_from_spec(
+        optimized_coil_curve_spec
     )
-    coil_length = curve_length_pure(incremental_arclength_pure(banana_gammadash))
-    max_curvature = jnp.max(kappa_pure(banana_gammadash, banana_gammadashdash))
+    coil_length = curve_length_pure(
+        incremental_arclength_pure(optimized_gammadash)
+    )
+    max_curvature = jnp.max(
+        kappa_pure(optimized_gammadash, optimized_gammadashdash)
+    )
     inf = _runtime_float64_scalar(np.inf, reference=surface_gamma)
     curve_curve_min_dist = inf
     curve_surface_min_dist = inf
@@ -3520,7 +3524,7 @@ def _traceable_reporting_metrics_from_solution(
         "final_curvature_penalty": raw_terms["curvature"],
         "coil_length": coil_length,
         "max_curvature": max_curvature,
-        "banana_current_A": banana_current,
+        "optimized_coil_current_A": optimized_current,
         "field_error": field_error,
         "curve_curve_min_dist": curve_curve_min_dist,
         "curve_surface_min_dist": curve_surface_min_dist,
@@ -3717,7 +3721,7 @@ def _hostify_traceable_reporting_metrics(metrics, *, include_distance_metrics):
         "final_curvature_penalty",
         "coil_length",
         "max_curvature",
-        "banana_current_A",
+        "optimized_coil_current_A",
         "field_error",
         "final_volume",
         "final_iota",

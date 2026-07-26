@@ -1,7 +1,0 @@
-tests/geo/test_surface_xyz_tensor_clamped_jax.py
-tests/integration/test_factor_once_adjoint_phase2.py
-tests/integration/test_jax_native_path.py
-tests/integration/test_remaining_jax_surfaces_mode_matrix.py
-tests/integration/test_section6_public_lane_split.py
-tests/integration/test_single_stage_dof_mapping.py
-tests/integration/test_single_stage_jax.py

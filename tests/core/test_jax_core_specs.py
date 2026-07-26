@@ -430,9 +430,9 @@ def test_single_stage_runtime_spec_is_a_real_jittable_pytree():
         self_intersection_mode="supported-surface-jax",
         schema_version=1,
         num_tf_coils=1,
-        banana_curve_index=0,
+        optimized_coil_index=0,
         tf_current_A=80000.0,
-        banana_current_A=123.0,
+        optimized_coil_current_A=123.0,
     )
     runtime = make_single_stage_runtime_spec(
         seed=seed,
@@ -453,9 +453,9 @@ def test_single_stage_runtime_spec_is_a_real_jittable_pytree():
     _assert_is_float64_array(rebuilt.seed.boozer_G)
     _assert_is_float64_array(rebuilt.seed.coil_dofs)
     assert rebuilt.seed.num_tf_coils == 1
-    assert rebuilt.seed.banana_curve_index == 0
+    assert rebuilt.seed.optimized_coil_index == 0
     assert rebuilt.seed.tf_current_A == 80000.0
-    assert rebuilt.seed.banana_current_A == 123.0
+    assert rebuilt.seed.optimized_coil_current_A == 123.0
 
     @jax.jit
     def seed_scalar(spec):

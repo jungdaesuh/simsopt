@@ -1,8 +1,0 @@
-tests/jax/core/test_tracing_jax_fullorbit.py
-tests/jax/core/test_tracing_jax_fullorbit_events.py
-tests/jax/core/test_tracing_jax_gc_boozer.py
-tests/jax/core/test_tracing_jax_guiding_center.py
-tests/jax/core/test_tracing_jax_item14.py
-tests/jax/core/test_tracing_jax_levelset_events.py
-tests/jax/core/test_tracing_jax_phi_events.py
-tests/jax/core/test_tree_signature.py

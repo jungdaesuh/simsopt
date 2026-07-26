@@ -93,9 +93,7 @@ def _cpp_boozer_residual_scalar(G, iota, B, xphi, xtheta, *, weight_inv_modB):
     accumulates ``0.5 * sum_ij(r_ij**2)`` without normalisation
     (see ``src/simsoptpp/boozerresidual_impl.h``); dividing by
     ``num_res = 3 * nphi * ntheta`` recovers the JAX
-    ``boozer_residual_scalar`` convention. The same vector→scalar
-    boundary is used by the integration parity fixture in
-    ``tests/integration/test_single_stage_jax_cpu_reference.py``.
+    ``boozer_residual_scalar`` convention.
 
     Oracle: C++ reference symbol (acceptable oracle type 1; see
     ``tests/REVIEWER_ORACLE_LINT.md``). Caller must call

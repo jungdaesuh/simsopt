@@ -167,24 +167,6 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_branch_stable_state": True,
         "branch_divergence_downgrades_to_health_only": True,
     },
-    # Absolute cross-machine state-parity gate for the well-conditioned LS
-    # path, measured on the oversampled ``build_ls_parity_problem(ncoils=4,
-    # nphi=16, ntheta=8)`` fixture. ``sdofs_inf`` ranged from ``1.9e-14``
-    # to ``3.6e-12`` across two macOS hardware platforms running the same
-    # source tree; the ``1e-11`` ceiling provides ~2.7× headroom over the
-    # worst measured value. ``max_hessian_condition_number`` enforces that
-    # the fixture stays well-conditioned on **both** backends — the fixture
-    # is supposed to be well-conditioned and a κ regression on either side
-    # is itself a real signal. Canonical consumer:
-    # ``tests/integration/test_single_stage_jax_cpu_reference.py::``
-    # ``TestRunCodeLSParity::test_ls_solve_state_parity_production_scale``.
-    "ls_state_parity": {
-        "sdofs_inf_atol": 1e-11,
-        "gamma_inf_atol": 1e-11,
-        "G_abs_atol": 1e-12,
-        "iota_abs_atol": 1e-14,
-        "max_hessian_condition_number": 1e8,
-    },
     "fd_gradient": {
         "directional_fd_rtol": 1e-5,
         "directional_fd_atol": 1e-7,
@@ -513,9 +495,9 @@ def quantity_parity_tolerance(
 ) -> tuple[str, float, float]:
     """Return ``(bucket, rtol, atol)`` for a named parity quantity.
 
-    The mapping preserves the non-banana harness contract: strict runtime
-    tiers route through quantity buckets, while the float32 smoke tier
-    selects value/objective/gradient tolerances from its runtime lane.
+    The mapping preserves the generic parity-harness contract: strict runtime
+    tiers route through quantity buckets, while the float32 smoke tier selects
+    value/objective/gradient tolerances from its runtime lane.
     """
     bucket = QUANTITY_TOLERANCE_BUCKETS.get(quantity, "direct_kernel")
     runtime_tier_key = _normalize_contract_key(runtime_tier)
@@ -541,7 +523,7 @@ def quantity_parity_tolerance(
     if runtime_tier_key not in STRICT_RUNTIME_TOLERANCE_TIERS:
         raise RuntimeError(
             f"Unsupported runtime tolerance tier {runtime_tier!r} for "
-            "non-banana example parity harness."
+            "generic example parity harness."
         )
 
     tolerances = parity_ladder_tolerances(bucket)

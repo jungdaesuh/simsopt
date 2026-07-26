@@ -1,2 +1,0 @@
-tests/test_jax_import_smoke.py
-tests/test_jax_where_division_lint.py

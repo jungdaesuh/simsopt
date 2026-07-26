@@ -1,5 +1,0 @@
-tests/field/test_selffieldforces.py
-tests/field/test_trace_boozer_analytic_jax.py
-tests/field/test_tracing_jax_item16.py
-tests/field/test_tracing_jax_item16_extended.py
-tests/field/test_wireframefield_jax_item30.py
