@@ -327,6 +327,36 @@ class MixedDenseIrAccuracyPolicy:
     linear_solve_tolerance_cap: float
     forward_error_tolerance_multiplier: float
 
+    def __post_init__(self) -> None:
+        if self.certificate_dtype != "float64":
+            raise ValueError(
+                "Mixed dense-IR accuracy policy requires certificate_dtype='float64'."
+            )
+        if (
+            not math.isfinite(self.linear_solve_tolerance_floor)
+            or self.linear_solve_tolerance_floor <= 0.0
+        ):
+            raise ValueError(
+                "Mixed dense-IR accuracy policy requires a finite positive "
+                "linear-solve tolerance floor."
+            )
+        if (
+            not math.isfinite(self.linear_solve_tolerance_cap)
+            or self.linear_solve_tolerance_cap < self.linear_solve_tolerance_floor
+        ):
+            raise ValueError(
+                "Mixed dense-IR accuracy policy requires a finite tolerance cap "
+                "at least as large as its floor."
+            )
+        if (
+            not math.isfinite(self.forward_error_tolerance_multiplier)
+            or self.forward_error_tolerance_multiplier <= 0.0
+        ):
+            raise ValueError(
+                "Mixed dense-IR accuracy policy requires a finite positive "
+                "forward-error tolerance multiplier."
+            )
+
     def forward_error_tolerance(self, linear_solve_tolerance: float) -> float:
         """Derive the relative forward-error limit from a certified solve input."""
         tolerance = float(linear_solve_tolerance)

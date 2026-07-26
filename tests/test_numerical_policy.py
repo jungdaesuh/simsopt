@@ -17,6 +17,7 @@ from simsopt_jax.numerical_policy import (
     MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
     NEWTON_ARMIJO_C1,
     DenseIrHistorySource,
+    MixedDenseIrAccuracyPolicy,
     dense_ir_factorization_precision_evidence_is_complete,
     mixed_dense_ir_certificate_dtype_name,
 )
@@ -63,6 +64,36 @@ def test_mixed_dense_ir_forward_error_limit_rejects_out_of_policy_tolerance(
 ):
     with pytest.raises(ValueError, match="outside the FP64 policy"):
         MIXED_DENSE_IR_ACCURACY_POLICY.forward_error_tolerance(tolerance)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"certificate_dtype": "float32"},
+        {"linear_solve_tolerance_floor": 0.0},
+        {"linear_solve_tolerance_floor": math.nan},
+        {"linear_solve_tolerance_cap": math.inf},
+        {
+            "linear_solve_tolerance_floor": 1.0e-9,
+            "linear_solve_tolerance_cap": 1.0e-10,
+        },
+        {"forward_error_tolerance_multiplier": 0.0},
+        {"forward_error_tolerance_multiplier": math.nan},
+    ),
+)
+def test_mixed_dense_ir_accuracy_policy_rejects_invalid_values_before_jit(
+    overrides: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "certificate_dtype": "float64",
+        "linear_solve_tolerance_floor": 1.0e-14,
+        "linear_solve_tolerance_cap": 1.0e-10,
+        "forward_error_tolerance_multiplier": 10.0,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match="Mixed dense-IR accuracy policy"):
+        MixedDenseIrAccuracyPolicy(**values)
 
 
 @pytest.mark.parametrize(
