@@ -5802,7 +5802,9 @@ class TestBoozerSurfaceJAXClass:
             "iota": jnp.asarray(0.0, dtype=jnp.float64),
         }
 
-        result = jax_least_squares(residual_fn, x0, method="lm", maxiter=25, tol=1e-12)
+        result = _opt.reference_least_squares(
+            residual_fn, x0, method="lm", maxiter=25, tol=1e-12
+        )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
@@ -5815,7 +5817,7 @@ class TestBoozerSurfaceJAXClass:
             _make_structured_quadratic_problem()
         )
 
-        result = jax_minimize(
+        result = _opt.reference_minimize(
             objective_fn,
             x0,
             method="adam",
@@ -5855,7 +5857,7 @@ class TestBoozerSurfaceJAXClass:
             _make_structured_quadratic_problem()
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             objective_fn,
             x0,
             method="adam-ondevice",
@@ -5938,7 +5940,9 @@ class TestBoozerSurfaceJAXClass:
             ),
         )
 
-        result = jax_least_squares(residual_fn, x0, method="lm", maxiter=25, tol=1e-12)
+        result = _opt.reference_least_squares(
+            residual_fn, x0, method="lm", maxiter=25, tol=1e-12
+        )
 
         assert result.success is True
         np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))

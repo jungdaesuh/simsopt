@@ -47,7 +47,7 @@ from simsopt_jax.core.framedcurve import (
     rotation_dcoeff,
     rotationdash_dcoeff,
 )
-
+from simsopt_jax.runtime.host_boundary import host_float64 as _host_float64
 
 __all__ = [
     "FrameRotationJAX",
@@ -66,11 +66,6 @@ def _zero_dependency(*values: jax.Array) -> jax.Array:
     for value in values[1:]:
         zero = zero + jnp.sum(value - value)
     return zero
-
-
-def _host_float64(value: object) -> np.ndarray:
-    with jax.transfer_guard_device_to_host("allow"):
-        return np.asarray(jax.device_get(value), dtype=np.float64)
 
 
 def _frame_twist(
@@ -329,7 +324,6 @@ class FrameRotationJAX(Optimizable):
             _as_jax_float64(quadpoints),
             self.order,
         )
-
 
     def alpha(self, quadpoints: object) -> jax.Array:
         return self._rotation_value(rotation_alpha, quadpoints)

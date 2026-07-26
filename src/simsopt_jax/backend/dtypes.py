@@ -1,4 +1,14 @@
-"""Policy-owned JAX dtype and device-placement helpers."""
+"""Policy-owned JAX dtype and device-placement helpers (H2D / on-device SSOT).
+
+Ownership split:
+
+* This module — **device placement and dtype policy**: ``runtime_device_put``
+  (runtime float policy), ``explicit_device_array`` (exact requested dtype),
+  ``as_runtime_array`` / ``as_compute_array`` (policy + optional reference
+  sharding). Do not reimplement ``device_put`` with ad-hoc float coercion.
+* ``simsopt_jax.runtime.host_boundary`` — **host materialization** (D2H):
+  ``host_array`` / ``host_scalar`` / ``host_tree`` and ready variants.
+"""
 
 from __future__ import annotations
 

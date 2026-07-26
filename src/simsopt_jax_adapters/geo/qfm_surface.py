@@ -9,6 +9,7 @@ import numpy as np
 from simsopt_jax.runtime.host_boundary import (
     host_array as _host_array,
     host_bool as _host_bool,
+    host_int as _host_int,
     host_scalar as _host_scalar,
 )
 from simsopt_jax.backend import is_jax_backend
@@ -27,12 +28,8 @@ from .surface_objectives import _surface_spec_from_surface
 __all__ = ["QfmSurfaceJAX"]
 
 
-def _host_int(value: object) -> int:
-    return int(np.asarray(jax.device_get(value)).reshape(()).item())
-
-
 def _write_surface_dofs(surface, dofs: object) -> None:
-    surface.x = np.asarray(jax.device_get(dofs), dtype=np.float64)
+    surface.x = _host_array(dofs, dtype=np.float64)
 
 
 def _host_value_and_optional_gradient(value_fn, dofs: object, derivatives: int):

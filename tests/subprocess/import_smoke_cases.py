@@ -1207,8 +1207,8 @@ def case_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
     import simsopt_jax.config as simsopt_config
     from simsopt_jax.geo.optimizers.optimizer import (
         PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
-        jax_minimize,
         private_optimizer_runtime_is_supported,
+        target_minimize,
     )
 
     simsopt_config.set_backend(
@@ -1230,8 +1230,8 @@ def case_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
         return half * jnp.dot(diff, diff)
 
     baseline = float(jax.device_get(closure_quad(x0)))
-    bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=5)
-    lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=5)
+    bfgs = target_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=5)
+    lbfgs = target_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=5)
 
     assert float(bfgs.fun) < baseline
     assert float(lbfgs.fun) < baseline
@@ -1248,8 +1248,8 @@ def case_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
     import simsopt_jax.config as simsopt_config
     from simsopt_jax.geo.optimizers.optimizer import (
         PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
-        jax_minimize,
         private_optimizer_runtime_is_supported,
+        target_minimize,
     )
 
     gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
@@ -1275,8 +1275,8 @@ def case_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
         return jnp.dot(squared + diff, squared + diff)
 
     baseline = float(jax.device_get(closure_quad(x0)))
-    bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=2)
-    lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=2)
+    bfgs = target_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=2)
+    lbfgs = target_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=2)
 
     assert float(bfgs.fun) < baseline
     assert float(lbfgs.fun) < baseline

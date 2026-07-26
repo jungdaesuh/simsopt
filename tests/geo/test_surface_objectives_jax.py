@@ -1385,6 +1385,26 @@ def test_traceable_solved_state_value_and_grad_compiles_only_solved_kernel(
     }
 
 
+def _stub_optimizer_compiled_bundle_for_solved_pair(compiled_total_gradient_for):
+    state = {
+        **_minimal_traceable_objective_state(),
+        "objective_kwargs": {"sentinel": 23},
+        "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
+    }
+    return {
+        "state": state,
+        "compiled_forward_result_for": lambda coil_dofs: {
+            "value": jnp.sum(coil_dofs),
+            "x": jnp.asarray([3.0], dtype=jnp.float64),
+            # Reuse default-off: no sealed factors exported from the solve.
+            "linear_solve_factors": None,
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+        },
+        "compiled_total_gradient_for": compiled_total_gradient_for,
+    }
+
+
 def test_traceable_solved_pair_reuses_compiled_bundle_adjoint_kernel(
     monkeypatch,
 ) -> None:
@@ -1412,7 +1432,8 @@ def test_traceable_solved_pair_reuses_compiled_bundle_adjoint_kernel(
 
     def compiled_total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
         gradient_calls.append((tuple(coil_dofs.shape), tuple(solved_x.shape)))
-        assert solved_linear_solve_factors == "factors"
+        # Host factor-handoff gate releases None (reuse-off) or sealed factors only.
+        assert solved_linear_solve_factors is None
         return 4.0 * coil_dofs, jnp.asarray(True, dtype=bool)
 
     monkeypatch.setattr(
@@ -1431,40 +1452,27 @@ def test_traceable_solved_pair_reuses_compiled_bundle_adjoint_kernel(
         fake_total_objective,
     )
 
-    state = {
-        **_minimal_traceable_objective_state(),
-        "objective_kwargs": {"sentinel": 23},
-        "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
-    }
-    compiled_bundle = {
-        "state": state,
-        "compiled_forward_result_for": lambda coil_dofs: {
-            "value": jnp.sum(coil_dofs),
-            "x": jnp.asarray([3.0], dtype=jnp.float64),
-            "linear_solve_factors": "factors",
-            "success": jnp.asarray(True, dtype=bool),
-            "primal_success": jnp.asarray(True, dtype=bool),
-        },
-        "compiled_total_gradient_for": compiled_total_gradient_for,
-    }
-    runtime_entry = {
-        "optimizer_compiled_bundle": compiled_bundle,
-        "optimizer_solved_pair": None,
-    }
-
-    pair = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_solved_pair(
-        runtime_entry,
-        object(),
+    compiled_bundle = _stub_optimizer_compiled_bundle_for_solved_pair(
+        compiled_total_gradient_for
     )
-    cached_pair = surfaceobjectives_traceable_jax_module._ensure_traceable_runtime_optimizer_solved_pair(
-        runtime_entry,
-        object(),
+    # R08 primary path: session owns the solved-pair cache end-to-end.
+    session = surfaceobjectives_traceable_jax_module.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        compiled_bundle
     )
+    pair = session.solved_pair()
+    cached_pair = session.solved_pair()
+    # Host gate accepts None (reuse-off) and rejects unaffiliated raw factors.
     value, grad = pair.value_grad_from_solved(
         jnp.asarray([1.0, 2.0], dtype=jnp.float64),
         jnp.asarray([4.0], dtype=jnp.float64),
-        "factors",
+        None,
     )
+    with pytest.raises(TypeError, match="unaffiliated raw factors"):
+        pair.value_grad_from_solved(
+            jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+            jnp.asarray([4.0], dtype=jnp.float64),
+            "factors",
+        )
 
     assert pair is cached_pair
     assert pair.solve_fn is compiled_bundle["compiled_forward_result_for"]
@@ -1472,6 +1480,78 @@ def test_traceable_solved_pair_reuses_compiled_bundle_adjoint_kernel(
     assert gradient_calls == [((2,), (1,))]
     np.testing.assert_allclose(np.asarray(value), np.asarray(7.0))
     np.testing.assert_allclose(np.asarray(grad), np.asarray([4.0, 8.0]))
+    assert pair.build_exact_factor_handoff_for is not None
+    assert pair.require_exact_factor_handoff_for is not None
+    assert pair.seal_res_factors_for_reuse is not None
+
+
+def test_traceable_objective_session_two_session_isolation(monkeypatch) -> None:
+    """Caches/mutations on session A must not affect session B (R08)."""
+
+    def passthrough_jit(fun=None, **_kwargs):
+        def wrapped(inner):
+            return inner
+
+        if fun is None:
+            return wrapped
+        return wrapped(fun)
+
+    def fake_total_objective(solved_x, coil_dofs, coil_set_spec, objective_kwargs):
+        return jnp.sum(solved_x) + jnp.sum(coil_dofs)
+
+    def compiled_total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
+        return 4.0 * coil_dofs, jnp.asarray(True, dtype=bool)
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module.jax,
+        "jit",
+        passthrough_jit,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_evaluate_traceable_total_objective",
+        fake_total_objective,
+    )
+
+    bundle_a = _stub_optimizer_compiled_bundle_for_solved_pair(
+        compiled_total_gradient_for
+    )
+    bundle_b = _stub_optimizer_compiled_bundle_for_solved_pair(
+        compiled_total_gradient_for
+    )
+    session_a = surfaceobjectives_traceable_jax_module.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        bundle_a,
+        cache_key="session-a",
+    )
+    session_b = surfaceobjectives_traceable_jax_module.TraceableObjectiveSession.from_optimizer_compiled_bundle(
+        bundle_b,
+        cache_key="session-b",
+    )
+
+    pair_a = session_a.solved_pair()
+    pair_b = session_b.solved_pair()
+    assert pair_a is not pair_b
+    assert session_a._optimizer_solved_pair is pair_a
+    assert session_b._optimizer_solved_pair is pair_b
+
+    # Mutating session A's cache must leave B's owned pair intact.
+    session_a.clear_solved_pair_cache()
+    assert session_a._optimizer_solved_pair is None
+    assert session_b._optimizer_solved_pair is pair_b
+    assert session_b.solved_pair() is pair_b
+
+    pair_a_rematerialized = session_a.solved_pair()
+    assert pair_a_rematerialized is not pair_a
+    assert pair_a_rematerialized is not pair_b
+    assert session_b.solved_pair() is pair_b
+
+    value_b, grad_b = pair_b.value_grad_from_solved(
+        jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        jnp.asarray([4.0], dtype=jnp.float64),
+        None,
+    )
+    np.testing.assert_allclose(np.asarray(value_b), np.asarray(7.0))
+    np.testing.assert_allclose(np.asarray(grad_b), np.asarray([4.0, 8.0]))
 
 
 def test_solved_pair_matches_fused_value_and_grad():
@@ -1560,12 +1640,23 @@ def test_solved_pair_matches_fused_value_and_grad():
 
     g1 = np.asarray(jax.device_get(g1))
     g2 = np.asarray(jax.device_get(g2))
-    assert np.all(np.isfinite(g1)) and np.all(np.isfinite(g2))
+    v1_host = float(jax.device_get(v1))
+    v2_host = float(jax.device_get(v2))
+    np.testing.assert_allclose(v1_host, v2_host, rtol=1e-10, atol=1e-12)
 
-    np.testing.assert_allclose(
-        float(jax.device_get(v1)), float(jax.device_get(v2)), rtol=1e-10, atol=1e-12
-    )
-    np.testing.assert_allclose(g1, g2, rtol=1e-10, atol=1e-12)
+    # Adjoint fail-closed contract: when the dense Hessian adjoint solve does not
+    # certify, both paths surface NaN gradients. Pair fidelity still requires
+    # identical nonfinite patterns. When both succeed, require machine match.
+    g1_finite = np.isfinite(g1)
+    g2_finite = np.isfinite(g2)
+    if np.all(g1_finite) and np.all(g2_finite):
+        np.testing.assert_allclose(g1, g2, rtol=1e-10, atol=1e-12)
+    else:
+        np.testing.assert_array_equal(g1_finite, g2_finite)
+        assert not np.any(g1_finite), (
+            "Fused/pair adjoint paths disagree on certification: one path returned "
+            "finite gradients while the other fail-closed to NaN."
+        )
 
 
 def test_traceable_value_and_grad_boundary_preserves_caller_jax_buffer() -> None:

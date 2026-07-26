@@ -7,11 +7,14 @@ single-stage target optimization and diagnostics. The legacy
 compatibility with existing callers.
 """
 
-from collections.abc import Mapping
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from threading import Lock
 from typing import NamedTuple
+import hashlib
 
 import jax
 import jax.numpy as jnp
@@ -68,6 +71,11 @@ from .boozer_surface import (
 from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
 from simsopt_jax.geo.surface_fourier import surface_volume
+from simsopt_jax_adapters.geo.factor_handoff_identity import (
+    ExactFactorHandoff,
+    build_exact_factor_handoff,
+    require_exact_factor_handoff,
+)
 
 
 def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
@@ -79,6 +87,7 @@ def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
 __all__ = [
     "TraceableObjectiveCertifiedSeededValueAndGrad",
     "TraceableObjectiveSeededValueAndGrad",
+    "TraceableObjectiveSession",
     "TraceableObjectiveSolvedPair",
     "diagnose_traceable_objective_runtime",
     "make_traceable_objective",
@@ -86,6 +95,7 @@ __all__ = [
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_certified_seeded_value_and_grad",
     "make_traceable_objective_seeded_value_and_grad",
+    "make_traceable_objective_session",
     "make_traceable_objective_solved_pair",
     "make_traceable_objective_value_and_grad",
     "make_traceable_solved_state_value_and_grad",
@@ -1207,6 +1217,14 @@ def _build_linear_solve_factors_from_res(res):
     factors under ``res["LU_PIV"]``. When both are present the linear
     solve helpers receive the 5-tuple ``(P, L, U, lu, piv)`` so adjoint
     solves consume the same packed factor bytes as the forward solve.
+
+    Host drivers that cross an evaluation boundary with these factors must
+    seal them via :func:`_host_seal_linear_solve_factors_for_reuse` /
+    :func:`build_exact_factor_handoff` and release them only through
+    :func:`_host_require_exact_factor_handoff` /
+    :func:`require_exact_factor_handoff`. This helper still returns the raw
+    factor tuple for in-process JIT paths that certify against the live
+    operator; it is not a substitute for the integrity-receipt consumer API.
     """
     plu = res.get("PLU")
     if plu is None:
@@ -1215,6 +1233,113 @@ def _build_linear_solve_factors_from_res(res):
     if lu_piv is None:
         return plu
     return (plu[0], plu[1], plu[2], lu_piv[0], lu_piv[1])
+
+
+def _host_seal_linear_solve_factors_for_reuse(
+    factors,
+    *,
+    state,
+    coil_dofs,
+    solved_x,
+    producer_graph_sha256,
+):
+    """Seal exported factors for cross-evaluation reuse (producer boundary).
+
+    ``None`` stays ``None`` so reuse remains default-off when no factors were
+    produced. An already-sealed :class:`ExactFactorHandoff` is returned as-is.
+    Raw factor trees are sealed into an atomic integrity receipt; callers cannot
+    re-affiliate unaffiliated factors after the fact without going through
+    :func:`build_exact_factor_handoff`.
+    """
+    if factors is None:
+        return None
+    if isinstance(factors, ExactFactorHandoff):
+        return factors
+    return build_exact_factor_handoff(
+        state,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        factors=factors,
+        producer_graph_sha256=producer_graph_sha256,
+    )
+
+
+def _host_seal_linear_solve_factors_from_res(
+    res,
+    *,
+    state,
+    coil_dofs,
+    solved_x,
+    producer_graph_sha256,
+):
+    """Extract public factors from a solved ``res`` and seal them for reuse."""
+    return _host_seal_linear_solve_factors_for_reuse(
+        _build_linear_solve_factors_from_res(res),
+        state=state,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        producer_graph_sha256=producer_graph_sha256,
+    )
+
+
+def _host_require_exact_factor_handoff(
+    handoff,
+    *,
+    state,
+    coil_dofs,
+    solved_x,
+    producer_graph_sha256,
+):
+    """Host factor-consumer boundary: release factors only after re-seal.
+
+    This is the Python-side gate for factors that leave a producer evaluation
+    and re-enter a consumer path. JIT-internal PLU refine paths that certify
+    via the live operator are unchanged and do not call this helper.
+    """
+    return require_exact_factor_handoff(
+        handoff,
+        state=state,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        producer_graph_sha256=producer_graph_sha256,
+    )
+
+
+def _host_unwrap_linear_solve_factors_for_consumption(
+    factors_or_handoff,
+    *,
+    state,
+    coil_dofs,
+    solved_x,
+    producer_graph_sha256,
+):
+    """Release sealed factors at the host handoff gate; reject raw trees.
+
+    Host gate contract (``host_factor_handoff_gate=True``):
+
+    * ``None`` — reuse-off / no factors; pass through.
+    * :class:`ExactFactorHandoff` — re-seal integrity receipt, then release.
+    * raw unaffiliated factor trees — fail closed (must seal at the producer).
+
+    JIT-internal callers keep ``host_factor_handoff_gate=False`` and never enter
+    this helper, so live-operator-certified in-process PLU refine paths remain
+    numerically unchanged.
+    """
+    if factors_or_handoff is None:
+        return None
+    if isinstance(factors_or_handoff, ExactFactorHandoff):
+        return _host_require_exact_factor_handoff(
+            factors_or_handoff,
+            state=state,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            producer_graph_sha256=producer_graph_sha256,
+        )
+    raise TypeError(
+        "Host factor-handoff gate rejects unaffiliated raw factors; seal with "
+        "ExactFactorHandoff / build_exact_factor_handoff_for before "
+        "cross-evaluation reuse."
+    )
 
 
 def _resolve_traceable_solved_state(
@@ -2510,8 +2635,20 @@ def _build_traceable_solved_state_value_and_grad_from_state(booz_jax, state):
 
 def _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
     compiled_bundle,
+    *,
+    producer_graph_sha256=None,
+    host_factor_handoff_gate=False,
 ):
-    """Build solved-state value/grad while reusing the bundle's adjoint kernel."""
+    """Build solved-state value/grad while reusing the bundle's adjoint kernel.
+
+    When ``host_factor_handoff_gate`` is true, the returned callable is a host
+    Python wrapper that accepts only ``None`` or a sealed
+    :class:`ExactFactorHandoff` and re-requires the integrity receipt before
+    entering the jitted device kernel. Unaffiliated raw factor trees fail
+    closed at this host boundary. JIT-internal callers keep
+    ``host_factor_handoff_gate=False`` so raw factor trees and live-operator
+    certification paths remain numerically unchanged.
+    """
     state = compiled_bundle["state"]
     objective_kwargs = state["objective_kwargs"]
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
@@ -2541,7 +2678,30 @@ def _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
             linear_solve_success,
         )
 
-    return jax.jit(_solved_state_value_and_grad_for)
+    compiled_value_and_grad = jax.jit(_solved_state_value_and_grad_for)
+    if not host_factor_handoff_gate:
+        return compiled_value_and_grad
+    if producer_graph_sha256 is None:
+        raise ValueError(
+            "host_factor_handoff_gate requires producer_graph_sha256 for integrity "
+            "receipt re-validation."
+        )
+
+    def _host_value_and_grad_from_solved(
+        coil_dofs,
+        solved_x,
+        solved_linear_solve_factors,
+    ):
+        factors = _host_unwrap_linear_solve_factors_for_consumption(
+            solved_linear_solve_factors,
+            state=state,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            producer_graph_sha256=producer_graph_sha256,
+        )
+        return compiled_value_and_grad(coil_dofs, solved_x, factors)
+
+    return _host_value_and_grad_from_solved
 
 
 def _traceable_runtime_option_signature(booz_jax, state):
@@ -2879,17 +3039,91 @@ def _ensure_traceable_runtime_optimizer_value_and_grad(runtime_entry, booz_jax):
     return optimizer_value_and_grad
 
 
-def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
-    """Materialize the host-driven (solve, value_grad_from_solved) pair on demand.
+def _producer_graph_sha256_for_traceable_state(state):
+    """State-contract graph id for host integrity receipts (R06).
 
-    Both halves are built from the same ``optimizer_compiled_bundle`` state so the
-    forward result produced by ``solve_fn`` is exactly what
-    ``value_grad_from_solved`` consumes. This is the decomposed form of the fused
-    ``_ensure_traceable_runtime_optimizer_value_and_grad`` callable: instead of one
-    jit that runs the forward Boozer solve and the adjoint together, the host can
-    call the device forward-solve kernel, then a separate device value/adjoint
-    kernel from the solved state -- so the optimizer's per-step jit never encloses
-    the forward solve.
+    StableHLO-based producer-graph hashing is deferred; this binds the compiled-
+    bundle configuration without changing JIT-internal PLU refine paths.
+    """
+    return hashlib.sha256(
+        repr(
+            _traceable_cache_tree_signature(
+                {
+                    "linearization_kind": state["linearization_kind"],
+                    "linear_solve_tol": state["linear_solve_tol"],
+                    "linear_solve_stab": state["linear_solve_stab"],
+                    "objective_kwargs": state["objective_kwargs"],
+                    "optimize_G": state["optimize_G"],
+                    "predictor_kind": state["predictor_kind"],
+                }
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _build_traceable_optimizer_solved_pair(optimizer_compiled_bundle):
+    """Build the gated decomposed solved-pair from one optimizer compiled bundle.
+
+    Both halves share ``optimizer_compiled_bundle`` so ``solve_fn`` outputs are
+    exactly what ``value_grad_from_solved`` consumes after host seal/require.
+    Cross-evaluation factor reuse is default-off (``None`` factors pass through);
+    when factors are exported they must travel as :class:`ExactFactorHandoff`.
+    Host gate stays on via ``host_factor_handoff_gate=True``.
+    """
+    state = optimizer_compiled_bundle["state"]
+    producer_graph_sha256 = _producer_graph_sha256_for_traceable_state(state)
+
+    def build_exact_factor_handoff_for(coil_dofs, solved_x, factors):
+        """Producer: seal raw factors (or pass through None / sealed handoff)."""
+        return _host_seal_linear_solve_factors_for_reuse(
+            factors,
+            state=state,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            producer_graph_sha256=producer_graph_sha256,
+        )
+
+    def seal_res_factors_for_reuse(res, *, coil_dofs, solved_x):
+        """Producer: extract public factors from a solved res and seal them."""
+        return _host_seal_linear_solve_factors_from_res(
+            res,
+            state=state,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            producer_graph_sha256=producer_graph_sha256,
+        )
+
+    def require_exact_factor_handoff_for(handoff, *, coil_dofs, solved_x):
+        """Consumer: release factors only after integrity re-seal."""
+        return _host_require_exact_factor_handoff(
+            handoff,
+            state=state,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            producer_graph_sha256=producer_graph_sha256,
+        )
+
+    return TraceableObjectiveSolvedPair(
+        solve_fn=optimizer_compiled_bundle["compiled_forward_result_for"],
+        value_grad_from_solved=(
+            _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
+                optimizer_compiled_bundle,
+                producer_graph_sha256=producer_graph_sha256,
+                host_factor_handoff_gate=True,
+            )
+        ),
+        build_exact_factor_handoff_for=build_exact_factor_handoff_for,
+        require_exact_factor_handoff_for=require_exact_factor_handoff_for,
+        seal_res_factors_for_reuse=seal_res_factors_for_reuse,
+    )
+
+
+def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
+    """Residual dict-entry materializer for the decomposed solved pair.
+
+    Prefer :meth:`TraceableObjectiveSession.solved_pair` for new call sites.
+    This path remains for residual ``runtime_entry`` consumers that still store
+    lazy fields on the booz-attached cache dict (not yet session-owned).
     """
     optimizer_solved_pair = runtime_entry.get("optimizer_solved_pair")
     if optimizer_solved_pair is None:
@@ -2897,13 +3131,8 @@ def _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax):
             runtime_entry,
             booz_jax,
         )
-        optimizer_solved_pair = TraceableObjectiveSolvedPair(
-            solve_fn=optimizer_compiled_bundle["compiled_forward_result_for"],
-            value_grad_from_solved=(
-                _build_traceable_solved_state_value_and_grad_from_compiled_bundle(
-                    optimizer_compiled_bundle
-                )
-            ),
+        optimizer_solved_pair = _build_traceable_optimizer_solved_pair(
+            optimizer_compiled_bundle
         )
         runtime_entry["optimizer_solved_pair"] = optimizer_solved_pair
     return optimizer_solved_pair
@@ -3474,12 +3703,8 @@ def _traceable_reporting_metrics_from_solution(
     _gamma, optimized_gammadash, optimized_gammadashdash = curve_geometry_from_spec(
         optimized_coil_curve_spec
     )
-    coil_length = curve_length_pure(
-        incremental_arclength_pure(optimized_gammadash)
-    )
-    max_curvature = jnp.max(
-        kappa_pure(optimized_gammadash, optimized_gammadashdash)
-    )
+    coil_length = curve_length_pure(incremental_arclength_pure(optimized_gammadash))
+    max_curvature = jnp.max(kappa_pure(optimized_gammadash, optimized_gammadashdash))
     inf = _runtime_float64_scalar(np.inf, reference=surface_gamma)
     curve_curve_min_dist = inf
     curve_surface_min_dist = inf
@@ -4367,23 +4592,215 @@ class TraceableObjectiveSolvedPair(NamedTuple):
     solved_linear_solve_factors) -> (value, grad)`` evaluates the objective and the
     IFT adjoint gradient from an already-solved state, performing no forward solve.
 
+    Cross-evaluation factor-reuse routing (host gate, always on for this pair):
+
+    * **Producer** — seal with ``build_exact_factor_handoff_for(coil_dofs, x,
+      factors)`` or ``seal_res_factors_for_reuse(res, coil_dofs=..., solved_x=...)``.
+      ``None`` factors stay ``None`` (reuse default-off).
+    * **Consumer** — pass the sealed :class:`ExactFactorHandoff` (or ``None``)
+      into ``value_grad_from_solved``. The host gate re-requires the integrity
+      receipt before device consumption and rejects unaffiliated raw factor
+      trees. JIT-internal PLU refine paths are separate and keep raw trees
+      under live-operator certification.
+
     Together they are a faithful split of the fused
     :func:`make_traceable_objective_value_and_grad` callable -- both halves are
     built from one shared compiled-bundle state, so ``forward_result["x"]`` /
-    ``forward_result["linear_solve_factors"]`` are exactly what
-    ``value_grad_from_solved`` consumes. A host driver that consumes this pair owns
-    the optimizer loop and line search, so the per-step jit never encloses the
-    forward solve (the macro-step breadth-exclusion gate).
+    sealed ``forward_result["linear_solve_factors"]`` are exactly what
+    ``value_grad_from_solved`` consumes after the host seal/require boundary. A
+    host driver that consumes this pair owns the optimizer loop and line search,
+    so the per-step jit never encloses the forward solve (the macro-step
+    breadth-exclusion gate).
 
     Parity note: the fused callable gates on ``forward_result["success"]`` and
     falls back to the baseline state for the gradient on solver failure. A host
     driver MUST replicate that branch (inspect ``forward_result["success"]`` and
     pick the baseline-vs-candidate solved state before calling
     ``value_grad_from_solved``) to match the fused path's failure handling.
+
+    Prefer constructing this pair via :class:`TraceableObjectiveSession` so the
+    owning session, not ambient ``booz_jax`` attributes, holds mutable caches.
     """
 
-    solve_fn: callable
-    value_grad_from_solved: callable
+    solve_fn: Callable
+    value_grad_from_solved: Callable
+    build_exact_factor_handoff_for: Callable | None = None
+    require_exact_factor_handoff_for: Callable | None = None
+    seal_res_factors_for_reuse: Callable | None = None
+
+
+class TraceableObjectiveSession:
+    """Owned session for the decomposed traceable objective path (R08 first slice).
+
+    Owns compiled/traceable runners and the mutable per-session caches that used
+    to live as ambient attributes on ``booz_jax`` or as closed-over nonlocal
+    state. Two sessions never share those caches: mutations on session A cannot
+    affect session B.
+
+    Configuration needed by the solve / value_grad pair is captured in
+    ``compiled_bundle["state"]`` at construction. Lazy fields are explicit
+    instance attributes (not dynamic ``setattr`` bags).
+
+    Residual: fused ``make_traceable_objective*`` / runtime-bundle entrypoints
+    still use the booz-attached ``_traceable_runtime_entry_cache`` dict until a
+    later R08 slice migrates them onto sessions.
+    """
+
+    __slots__ = (
+        "cache_key",
+        "success_filter",
+        "compiled_bundle",
+        "booz_jax",
+        "_optimizer_compiled_bundle",
+        "_optimizer_solved_pair",
+        "_materialize_lock",
+    )
+
+    def __init__(
+        self,
+        *,
+        cache_key,
+        success_filter,
+        compiled_bundle,
+        booz_jax,
+        optimizer_compiled_bundle=None,
+    ):
+        self.cache_key = cache_key
+        self.success_filter = success_filter
+        self.compiled_bundle = compiled_bundle
+        self.booz_jax = booz_jax
+        self._optimizer_compiled_bundle = optimizer_compiled_bundle
+        self._optimizer_solved_pair = None
+        self._materialize_lock = Lock()
+
+    @classmethod
+    def from_optimizer_compiled_bundle(
+        cls,
+        optimizer_compiled_bundle,
+        *,
+        booz_jax=None,
+        cache_key=None,
+        success_filter=None,
+        compiled_bundle=None,
+    ):
+        """Build a session that already owns the optimizer compiled bundle.
+
+        Used by focused unit tests and residual bridges that materialize the
+        general-only-forward optimizer bundle without re-entering the factory.
+        """
+        if compiled_bundle is None:
+            compiled_bundle = optimizer_compiled_bundle
+        return cls(
+            cache_key=cache_key,
+            success_filter=success_filter,
+            compiled_bundle=compiled_bundle,
+            booz_jax=booz_jax,
+            optimizer_compiled_bundle=optimizer_compiled_bundle,
+        )
+
+    def ensure_optimizer_compiled_bundle(self):
+        """Return the general-only-forward optimizer compiled bundle (session-owned)."""
+        if self._optimizer_compiled_bundle is not None:
+            return self._optimizer_compiled_bundle
+        with self._materialize_lock:
+            if self._optimizer_compiled_bundle is not None:
+                return self._optimizer_compiled_bundle
+            if self.booz_jax is None:
+                raise RuntimeError(
+                    "TraceableObjectiveSession cannot build an optimizer compiled "
+                    "bundle without booz_jax; pass optimizer_compiled_bundle at "
+                    "construction or construct via make_traceable_objective_session()."
+                )
+            state = self.compiled_bundle["state"]
+            self._optimizer_compiled_bundle = (
+                _build_traceable_objective_compiled_bundle_from_state(
+                    self.booz_jax,
+                    state,
+                    success_filter=self.success_filter,
+                    general_only_forward=True,
+                )
+            )
+            return self._optimizer_compiled_bundle
+
+    def solved_pair(self) -> TraceableObjectiveSolvedPair:
+        """Return the session-owned ``(solve_fn, value_grad_from_solved)`` pair.
+
+        Materializes once per session. R06 host factor-handoff gates remain on
+        ``value_grad_from_solved`` and the pair's handoff builders.
+        """
+        if self._optimizer_solved_pair is not None:
+            return self._optimizer_solved_pair
+        with self._materialize_lock:
+            if self._optimizer_solved_pair is not None:
+                return self._optimizer_solved_pair
+            optimizer_compiled_bundle = self._optimizer_compiled_bundle
+            if optimizer_compiled_bundle is None:
+                if self.booz_jax is None:
+                    raise RuntimeError(
+                        "TraceableObjectiveSession cannot build an optimizer "
+                        "compiled bundle without booz_jax; pass "
+                        "optimizer_compiled_bundle at construction or construct "
+                        "via make_traceable_objective_session()."
+                    )
+                state = self.compiled_bundle["state"]
+                optimizer_compiled_bundle = (
+                    _build_traceable_objective_compiled_bundle_from_state(
+                        self.booz_jax,
+                        state,
+                        success_filter=self.success_filter,
+                        general_only_forward=True,
+                    )
+                )
+                self._optimizer_compiled_bundle = optimizer_compiled_bundle
+            self._optimizer_solved_pair = _build_traceable_optimizer_solved_pair(
+                optimizer_compiled_bundle
+            )
+            return self._optimizer_solved_pair
+
+    def clear_solved_pair_cache(self):
+        """Drop the session-local solved-pair cache (isolation / reset helper)."""
+        with self._materialize_lock:
+            self._optimizer_solved_pair = None
+
+
+def make_traceable_objective_session(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+):
+    """Build an owned :class:`TraceableObjectiveSession` for decomposed objectives.
+
+    The session owns compiled runners and mutable caches. It does **not** attach
+    cache state to ``booz_jax``; callers that need isolation construct one session
+    per optimizer run. Public solved-pair entrypoints construct a session
+    internally and return its pair.
+    """
+    cache_state = _build_traceable_objective_cache_state(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+    )
+    cache_key = _traceable_runtime_cache_key(
+        booz_jax,
+        cache_state,
+        success_filter=success_filter,
+    )
+    state = _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
+    compiled_bundle = _build_traceable_objective_compiled_bundle_from_state(
+        booz_jax,
+        state,
+        success_filter=success_filter,
+    )
+    return TraceableObjectiveSession(
+        cache_key=cache_key,
+        success_filter=success_filter,
+        compiled_bundle=compiled_bundle,
+        booz_jax=booz_jax,
+    )
 
 
 def make_traceable_objective_solved_pair(
@@ -4403,17 +4820,21 @@ def make_traceable_objective_solved_pair(
     compiled-bundle state. The optimizer can then run the forward solve and the
     solved-state value/adjoint as separate device kernels under a host-owned loop.
 
+    Thin public adapter: constructs a :class:`TraceableObjectiveSession` and
+    returns its session-owned pair. Prefer :func:`make_traceable_objective_session`
+    when the host needs isolatable ownership of caches and runners.
+
     See :class:`TraceableObjectiveSolvedPair` for the contract and the failure-mode
     parity note the host driver must honor.
     """
-    runtime_entry = _get_cached_traceable_runtime_entry(
+    session = make_traceable_objective_session(
         booz_jax,
         bs_jax,
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
-    return _ensure_traceable_runtime_optimizer_solved_pair(runtime_entry, booz_jax)
+    return session.solved_pair()
 
 
 def _make_traceable_forward_value_pipeline(compiled_forward_result_for):

@@ -1,4 +1,17 @@
-"""Shared runtime/host boundary helpers for JAX-backed compatibility lanes."""
+"""Device-to-host materialization SSOT for JAX-backed compatibility lanes.
+
+Ownership split (do not reimplement these patterns in adapters):
+
+* ``simsopt_jax.runtime.host_boundary`` — **host materialization** (D2H):
+  ``host_array``, ``host_scalar``, ``host_float``, ``host_tree``, and the
+  ready variants that ``block_until_ready`` before materializing.
+* ``simsopt_jax.backend.dtypes`` — **device placement** (H2D / on-device cast):
+  policy ``runtime_device_put`` / ``as_runtime_array`` / ``as_compute_array``,
+  and exact-dtype ``explicit_device_array`` (preserves requested float dtype).
+
+Local thin wrappers that only re-export the same semantics should import from
+these owners rather than re-coding ``device_get`` / ``device_put``.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +27,7 @@ from simsopt_jax.numerical_policy import (
 
 
 def host_array(value, *, dtype=None):
+    """Materialize ``value`` to a writeable NumPy array at an explicit D2H boundary."""
     with jax.transfer_guard_device_to_host("allow"):
         array = np.asarray(jax.device_get(value))
     if dtype is not None:
@@ -29,6 +43,21 @@ def host_scalar(value, *, dtype=None):
 
 def host_float(value, *, dtype=np.float64) -> float:
     return float(host_scalar(value, dtype=dtype))
+
+
+def host_array_after_ready(value, *, dtype=None):
+    """Wait for device completion, then materialize via :func:`host_array`.
+
+    Distinct from plain :func:`host_array`: solver packaging and callback
+    paths need a completion barrier before D2H so timings and host-side
+    consumers see finished values.
+    """
+    return host_array(jax.block_until_ready(value), dtype=dtype)
+
+
+def host_float_after_ready(value, *, dtype=np.float64) -> float:
+    """Wait for device completion, then materialize a Python float."""
+    return host_float(jax.block_until_ready(value), dtype=dtype)
 
 
 def host_float64(value, *, has_jax: bool = True) -> np.ndarray:
