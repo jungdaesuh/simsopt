@@ -10,6 +10,9 @@ derivatives — no hand-coded ``dJ``, ``d2J`` needed.
 """
 
 import jax.numpy as jnp
+import numpy as np
+
+from simsopt_jax.core._device_scalars import staged_like
 
 from .surface_fourier import surface_area as area_jax
 from .surface_fourier import surface_volume as volume_jax
@@ -20,6 +23,8 @@ __all__ = [
     "toroidal_flux_jax",
     "compute_G_from_currents",
 ]
+
+_MU0 = np.float64(4.0 * np.pi * 1.0e-7)
 
 
 def toroidal_flux_jax(A, gammadash2_at_phi, ntheta):
@@ -60,5 +65,4 @@ def compute_G_from_currents(currents):
     Returns:
         Scalar G.
     """
-    mu0 = 4.0 * jnp.pi * 1e-7
-    return mu0 * jnp.sum(jnp.abs(currents))
+    return staged_like(currents, _MU0) * jnp.sum(jnp.abs(currents))

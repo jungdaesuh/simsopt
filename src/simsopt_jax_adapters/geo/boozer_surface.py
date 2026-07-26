@@ -1518,16 +1518,25 @@ class _BoozerPenaltyKernelSignature:
     linear_solve_stab: float
 
 
+def _concat_boozer_state(vector, *scalars):
+    vector_array = _as_jax_float64(vector)
+    return _concat_jax_float64(
+        vector_array,
+        *(jnp.reshape(_staged_like(vector_array, scalar), (1,)) for scalar in scalars),
+    )
+
+
 def _boozer_penalty_optimizer_state_to_vector(x, *, optimize_G):
     optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
     if optimize_G:
-        return _concat_jax_float64(
+        return _concat_boozer_state(
             optimizer_state.surface_dofs,
-            [optimizer_state.iota, optimizer_state.G],
+            optimizer_state.iota,
+            optimizer_state.G,
         )
-    return _concat_jax_float64(
+    return _concat_boozer_state(
         optimizer_state.surface_dofs,
-        [optimizer_state.iota],
+        optimizer_state.iota,
     )
 
 
@@ -1798,10 +1807,10 @@ def _penalty_params(
         iota=place_active_replicated(_as_boozer_penalty_compute_array(iota, dtype)),
         G=place_active_replicated(_as_boozer_penalty_compute_array(G_value, dtype)),
         targetlabel=place_active_replicated(
-            _as_boozer_penalty_compute_array(targetlabel, dtype)
+            _staged_like(iota, targetlabel, dtype=dtype)
         ),
         constraint_weight=place_active_replicated(
-            _as_boozer_penalty_compute_array(constraint_weight, dtype)
+            _staged_like(iota, constraint_weight, dtype=dtype)
         ),
         label_type=label_type,
         phi_idx=phi_idx,
@@ -2395,7 +2404,7 @@ def _penalty_from_geometry_and_field_terms(
         _surface_sample_z(geometry.gamma),
         params.iota.dtype,
     )
-    half = _as_boozer_penalty_compute_array(0.5, params.iota.dtype)
+    half = _staged_like(params.iota, 0.5, dtype=params.iota.dtype)
     label_delta = label_val - params.targetlabel
     J_label = half * params.constraint_weight * label_delta * label_delta
     J_z = half * params.constraint_weight * gamma_axis_z * gamma_axis_z
@@ -2898,7 +2907,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
         the coil_arrays pytree structure.
     """
     sdofs = booz_surf._get_cached_surface_dofs()
-    x = _concat_jax_float64(sdofs, [iota, G])
+    x = _concat_boozer_state(sdofs, iota, G)
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
     coil_arrays = booz_surf._coil_arrays
@@ -2943,7 +2952,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
 def _build_exact_group_vjp_callback(booz_surf, iota, G):
     """Build stable exact-solve group runners for repeated streaming VJPs."""
     sdofs = booz_surf._get_cached_surface_dofs()
-    x = _concat_jax_float64(sdofs, [iota, G])
+    x = _concat_boozer_state(sdofs, iota, G)
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
     coil_arrays = booz_surf._coil_arrays
@@ -3406,9 +3415,9 @@ def _ls_decision_vector(booz_surf, iota, G):
     optimize_G = G is not None
     sdofs = booz_surf._get_cached_surface_dofs()
     if optimize_G:
-        x = _concat_jax_float64(sdofs, [iota, G])
+        x = _concat_boozer_state(sdofs, iota, G)
     else:
-        x = _concat_jax_float64(sdofs, [iota])
+        x = _concat_boozer_state(sdofs, iota)
     return x, optimize_G
 
 
@@ -5388,8 +5397,8 @@ class BoozerSurfaceJAX(Optimizable):
         if sdofs is None:
             sdofs = self._get_surface_dofs()
         if G is not None:
-            return _concat_jax_float64(sdofs, [iota, G])
-        return _concat_jax_float64(sdofs, [iota])
+            return _concat_boozer_state(sdofs, iota, G)
+        return _concat_boozer_state(sdofs, iota)
 
     def _unpack_decision_vector(self, x, optimize_G):
         """Unpack decision vector → (sdofs, iota, G_or_None)."""
@@ -6799,7 +6808,7 @@ class BoozerSurfaceJAX(Optimizable):
                     grouped_coil_currents_from_spec(certificate_coil_set_spec)
                 )
             )
-            x0 = _concat_jax_float64(sdofs, [iota, G_exact])
+            x0 = _concat_boozer_state(sdofs, iota, G_exact)
             res_fn = self._get_traceable_exact_residual(weight_inv_modB)
             result = newton_exact_traceable(
                 res_fn,
@@ -7072,7 +7081,7 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
     ):
         """Evaluate the LS residual vector at an explicit solved state."""
-        x = _concat_jax_float64(sdofs, [iota, G])
+        x = _concat_boozer_state(sdofs, iota, G)
         residual_fn = self._make_penalty_residual_with(
             optimize_G=True,
             weight_inv_modB=weight_inv_modB,
@@ -7242,9 +7251,7 @@ class BoozerSurfaceJAX(Optimizable):
         iota_out = ls_res["iota"]
         G_out = ls_res["G"]
         G_for_res = (
-            G_out
-            if G_out is not None
-            else float(compute_G_from_currents(self.coil_currents))
+            G_out if G_out is not None else compute_G_from_currents(self.coil_currents)
         )
         residual_vec = self._compute_residual_vector(
             sdofs_final,
@@ -7660,9 +7667,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         G_for_res = (
-            G_out
-            if G_out is not None
-            else float(compute_G_from_currents(self.coil_currents))
+            G_out if G_out is not None else compute_G_from_currents(self.coil_currents)
         )
         residual_vec = self._compute_residual_vector(
             sdofs_final,
@@ -8027,10 +8032,10 @@ class BoozerSurfaceJAX(Optimizable):
         verbose = verbose if verbose is not None else self.options["verbose"]
 
         if G is None:
-            G = float(compute_G_from_currents(self.coil_currents))
+            G = compute_G_from_currents(self.coil_currents)
 
         sdofs = self._get_surface_dofs()
-        x0 = _concat_jax_float64(sdofs, [iota, G])
+        x0 = _concat_boozer_state(sdofs, iota, G)
 
         mask_indices = self._compute_stellsym_mask_indices()
         res_fn = self._make_exact_residual(mask_indices)
@@ -8279,7 +8284,7 @@ class BoozerSurfaceJAX(Optimizable):
                 )
 
             if self.stellsym:
-                xl = _concat_jax_float64(xl[:-1] - dx, [xl[-1]])
+                xl = _concat_boozer_state(xl[:-1] - dx, xl[-1])
             else:
                 xl = xl - dx
             residual, jacobian = residual_and_jacobian(xl)

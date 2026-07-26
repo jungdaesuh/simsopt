@@ -10,11 +10,13 @@ import jax.numpy as jnp
 from simsopt_jax.backend.dtypes import explicit_device_array
 
 from ._math_utils import as_jax_float64, as_runtime_float64
-from .field import grouped_biot_savart_A_from_spec, grouped_biot_savart_B_from_spec
 from ._surface_dofs_dispatch import (
     surface_gamma_tangents_from_dofs as _surface_gamma_tangents_from_dofs,
+)
+from ._surface_dofs_dispatch import (
     surface_volume_from_dofs as _surface_volume_from_dofs,
 )
+from .field import grouped_biot_savart_A_from_spec, grouped_biot_savart_B_from_spec
 
 __all__ = [
     "QfmAugmentedLagrangianInfo",
@@ -145,8 +147,8 @@ def _surface_normal_from_tangents(gammadash1: object, gammadash2: object):
 def _surface_norm(normal: object):
     normal_arr: jax.Array = as_jax_float64(normal)
     norm_sq = jnp.sum(normal_arr * normal_arr, axis=-1)
-    one = norm_sq**0
-    zero = one - one
+    zero = norm_sq - norm_sq
+    one = jnp.exp(zero)
     has_norm = norm_sq > zero
     safe_norm_sq = jnp.where(has_norm, norm_sq, one)
     return jnp.where(has_norm, jnp.sqrt(safe_norm_sq), zero)
@@ -163,12 +165,13 @@ def qfm_residual_jax_from_dofs(spec, dofs: object, coil_set_spec: object):
     gamma, gammadash1, gammadash2 = _surface_gamma_tangents_from_dofs(spec, dofs)
     normal = _surface_normal_from_tangents(gammadash1, gammadash2)
     norm_normal = _surface_norm(normal)
-    has_normal = norm_normal > 0.0
-    safe_norm_normal = jnp.where(has_normal, norm_normal, 1.0)
+    zero_norm = norm_normal - norm_normal
+    has_normal = norm_normal > zero_norm
+    safe_norm_normal = jnp.where(has_normal, norm_normal, jnp.exp(zero_norm))
     unitnormal = jnp.where(
         has_normal[:, :, None],
         normal / safe_norm_normal[:, :, None],
-        jnp.zeros_like(normal),
+        normal - normal,
     )
     nphi, ntheta = gamma.shape[:2]
     B = grouped_biot_savart_B_from_spec(gamma.reshape(-1, 3), coil_set_spec).reshape(
@@ -180,9 +183,11 @@ def qfm_residual_jax_from_dofs(spec, dofs: object, coil_set_spec: object):
     B_norm_squared = jnp.sum(B * B, axis=2)
     numerator = jnp.sum(B_normal * B_normal * norm_normal)
     denominator = jnp.sum(B_norm_squared * norm_normal)
-    has_denominator = denominator > 0.0
-    safe_denominator = jnp.where(has_denominator, denominator, 1.0)
-    return jnp.where(has_denominator, numerator / safe_denominator, 0.0)
+    zero = denominator - denominator
+    one = jnp.exp(zero)
+    has_denominator = denominator > zero
+    safe_denominator = jnp.where(has_denominator, denominator, one)
+    return jnp.where(has_denominator, numerator / safe_denominator, zero)
 
 
 def qfm_label_jax_from_dofs(
@@ -250,7 +255,12 @@ def _qfm_penalty_from_metrics(
         constraint_weight,
         reference=metrics.qfm_value,
     )
-    return metrics.qfm_value + 0.5 * weight * metrics.label_residual**2
+    one = jnp.exp(metrics.qfm_value - metrics.qfm_value)
+    half = one / (one + one)
+    return (
+        metrics.qfm_value
+        + half * weight * metrics.label_residual * metrics.label_residual
+    )
 
 
 def _qfm_augmented_from_metrics(
@@ -261,10 +271,12 @@ def _qfm_augmented_from_metrics(
 ) -> jax.Array:
     multiplier_value = as_runtime_float64(multiplier, reference=metrics.qfm_value)
     penalty_value = as_runtime_float64(penalty_weight, reference=metrics.qfm_value)
+    one = jnp.exp(metrics.qfm_value - metrics.qfm_value)
+    half = one / (one + one)
     return (
         metrics.qfm_value
         + multiplier_value * metrics.label_residual
-        + 0.5 * penalty_value * metrics.label_residual**2
+        + half * penalty_value * metrics.label_residual * metrics.label_residual
     )
 
 
@@ -715,14 +727,23 @@ def qfm_penalty_solve_jax(
         max_iter=max_iter,
         tol=tol,
     )
+    initial_dofs = as_jax_float64(init_dofs)
+    targetlabel_value = as_runtime_float64(
+        targetlabel,
+        reference=initial_dofs,
+    )
+    constraint_weight_value = as_runtime_float64(
+        constraint_weight,
+        reference=initial_dofs,
+    )
     result = run_bfgs(
-        as_jax_float64(init_dofs),
+        initial_dofs,
         spec,
         coil_set_spec,
         label_spec,
         label_coil_set_spec,
-        targetlabel,
-        constraint_weight,
+        targetlabel_value,
+        constraint_weight_value,
     )
     final_dofs = as_jax_float64(result.x)
     return (
@@ -735,8 +756,8 @@ def qfm_penalty_solve_jax(
             label=label,
             label_spec=label_spec,
             label_coil_set_spec=label_coil_set_spec,
-            targetlabel=targetlabel,
-            constraint_weight=constraint_weight,
+            targetlabel=targetlabel_value,
+            constraint_weight=constraint_weight_value,
             toroidal_flux_idx=toroidal_flux_idx,
         ),
     )

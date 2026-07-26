@@ -91,6 +91,7 @@ def test_manifest_derives_coverage_without_storing_inverse_links() -> None:
         ("pure_with_boundary", "pure example must not declare host boundaries"),
         ("adapter_without_boundary", "adapter example requires host boundaries"),
         ("ready_without_cpu_lane", "ready example requires cpu-smoke lane"),
+        ("ready_without_gpu_lane", "ready example requires gpu-strict lane"),
         ("ready_without_test", "ready example requires correctness tests"),
         ("ready_without_file", "ready example path does not exist"),
     ],
@@ -120,7 +121,16 @@ def test_manifest_rejects_invalid_contracts(
     elif mutation == "deferred_without_reason":
         deferred.pop("deferred_reason")
     elif mutation == "unlinked_candidate":
-        source = candidate["source"]
+        source = next(
+            record["source"]
+            for record in sources
+            if record["disposition"] == "candidate"
+            and any(
+                record["source"] in example["inspired_by"]
+                and len(example["inspired_by"]) > 1
+                for example in examples
+            )
+        )
         for example in examples:
             inspired_by = example["inspired_by"]
             assert isinstance(inspired_by, list)
@@ -140,6 +150,9 @@ def test_manifest_rejects_invalid_contracts(
     elif mutation == "ready_without_cpu_lane":
         planned["status"] = "ready"
         planned["lanes"] = ["gpu-strict"]
+    elif mutation == "ready_without_gpu_lane":
+        planned["status"] = "ready"
+        planned["lanes"] = ["cpu-smoke"]
     elif mutation == "ready_without_test":
         planned["status"] = "ready"
         planned["correctness_tests"] = []

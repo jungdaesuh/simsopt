@@ -32,8 +32,7 @@ _TreeT = TypeVar("_TreeT")
 
 def host_value(value: _TreeT) -> _TreeT:
     """Materialize a JAX value or pytree while preserving its Python structure."""
-    with jax.transfer_guard_device_to_host("allow"):
-        return jax.device_get(value)
+    return jax.device_get(value)
 
 
 def host_array(value, *, dtype=None):

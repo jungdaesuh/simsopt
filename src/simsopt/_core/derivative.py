@@ -1,8 +1,11 @@
-import numpy as np
-import numbers
 import collections
+import numbers
 
-from ._derivative_decorator import derivative_dec  # noqa: F401 - compatibility re-export
+import numpy as np
+
+from ._derivative_decorator import (
+    derivative_dec,  # noqa: F401 - compatibility re-export
+)
 from .optimizable import Optimizable
 
 __all__ = ["Derivative"]
@@ -203,7 +206,9 @@ class Derivative:
                 if np.any(k.dofs_free_status):
                     local_derivs = np.zeros(k.local_dof_size)
                     for opt in k.dofs.dep_opts():
-                        local_derivs += self.data[opt][opt.local_dofs_free_status]
+                        local_derivs += np.asarray(self.data[opt])[
+                            opt.local_dofs_free_status
+                        ]
                     derivs.append(local_derivs)
             if not derivs:
                 return np.empty((0,), dtype=np.float64)

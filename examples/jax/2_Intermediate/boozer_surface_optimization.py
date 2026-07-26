@@ -97,9 +97,11 @@ def _solve(max_steps: int) -> ExampleResult:
     if result is None:
         raise RuntimeError("fresh BoozerSurfaceJAX unexpectedly returned no result")
     final_dofs = np.asarray(boozer.surface.get_dofs(), dtype=np.float64)
-    residual_norm = float(np.linalg.norm(np.asarray(result["residual"])))
-    residual_objective = float(BoozerResidualJAX(boozer, field).J())
-    gradient_inf_norm = float(result["final_gradient_inf_norm"])
+    residual_norm = float(
+        np.linalg.norm(np.asarray(jax.device_get(result["residual"])))
+    )
+    residual_objective = float(jax.device_get(BoozerResidualJAX(boozer, field).J()))
+    gradient_inf_norm = float(jax.device_get(result["final_gradient_inf_norm"]))
     update_norm = float(np.linalg.norm(final_dofs - initial_dofs))
     solver_success = bool(result["success"])
     is_correct = bool(
@@ -111,12 +113,12 @@ def _solve(max_steps: int) -> ExampleResult:
     )
     return ExampleResult(
         solver_success=solver_success,
-        iterations=int(result["iter"]),
+        iterations=int(jax.device_get(result["iter"])),
         residual_norm=residual_norm,
         residual_objective=residual_objective,
         final_gradient_inf_norm=gradient_inf_norm,
         surface_update_norm=update_norm,
-        iota=float(result["iota"]),
+        iota=float(jax.device_get(result["iota"])),
         status="ok" if is_correct else "failed",
     )
 

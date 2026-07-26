@@ -7,6 +7,148 @@ root. The CPU environment is `../.venv-simsopt-linux-x86/bin/python` (Python
 `monty` dependency was an environment preflight failure and is not counted as
 a RED receipt.
 
+## Backend-neutral CPU/GPU serial solvers (2026-07-26)
+
+### RED
+
+The following focused contract command was run before replacing the implicit
+optional backend and before assigning every ready example to both lanes:
+
+```console
+MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
+  tests/solve/test_serial_jax.py::test_serial_jax_has_no_implicit_optional_optimizer_backend \
+  tests/solve/test_serial_jax.py::test_serial_jax_numerical_solves_do_not_use_host_callbacks \
+  tests/integration/test_jax_examples.py::test_every_ready_repository_example_runs_on_cpu_and_gpu
+```
+
+Observed result: 3 failed. The serial wrapper imported Optimistix directly,
+used `jax.debug.callback`, and the traceable least-squares example declared
+only `cpu-smoke`. A second failing-first check found
+`scipy.optimize` in the curve-length GPU implementation.
+
+### GREEN
+
+After routing least-squares through `Driver.SIMSOPT_LM_GMRES`, scalar
+minimization through `Driver.SIMSOPT_BFGS`, converting the curve and surface
+examples to those public APIs, and making optional solvers explicit:
+
+```console
+MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
+  tests/solve/test_serial_jax.py \
+  tests/integration/test_jax_examples.py::test_gpu_examples_do_not_import_host_scipy_optimizers \
+  tests/integration/test_jax_examples.py::test_every_ready_repository_example_runs_on_cpu_and_gpu
+```
+
+Observed result: `9 passed in 4.37s`.
+
+The real CPU and CUDA FP64 executions of `traceable_least_squares.py` returned
+identical parameters, objective, residual norm, gradient norm, driver, status,
+iteration count, function-evaluation count, and Jacobian-evaluation count:
+
+```text
+driver=simsopt_lm_gmres status=1 success=true
+iterations=4 function_evaluations=5 jacobian_evaluations=5
+solution=[0.9999999999999845, 1.999999999999998, 2.9999999999999996]
+objective=2.5016751456821337e-28
+residual_norm=1.5816684689536343e-14
+gradient_inf_norm=1.554312234475219e-14
+```
+
+The first RTX 5090 run was not accepted as strict-transfer evidence: it set the
+SIMSOPT policy variable but did not set JAX's own process-wide transfer guard.
+Adding `JAX_TRANSFER_GUARD=disallow` was the next RED step. It exposed implicit
+transfers in example setup, QFM and Boozer closure constants, post-solve Newton
+assembly, tracing state, and native derivative publication. Those transfers
+were removed or made explicit at named host boundaries. This is not evidence
+that no scoped guard override exists anywhere below the examples: the custom
+operator-GMRES path retains a pre-existing host-to-device-only allowance around
+JAX's `gmres`, whose internal scalar literals otherwise trip the guard. The
+allowance does not cover device-to-host transfers or the surrounding SIMSOPT
+numerical path.
+
+The final CPU and RTX 5090 validations each ran all ten current-checkout
+scripts with JAX's real transfer guard set to `disallow`. The CUDA command
+template below was instantiated once for each manifest-ready path, replacing
+`<ready-example>` with that exact path and retaining `--smoke --json`:
+
+```console
+GPU_ENV=/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default
+PYTHONPATH="$PWD/src:$GPU_ENV/lib/python3.11/site-packages" \
+MPI4PY_RC_INITIALIZE=false \
+SIMSOPT_BACKEND_MODE=jax_gpu_parity SIMSOPT_BACKEND_STRICT=1 \
+SIMSOPT_JAX_TRANSFER_GUARD=disallow SIMSOPT_PRECISION=fp64 \
+JAX_TRANSFER_GUARD=disallow JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+XLA_FLAGS=--xla_gpu_exclude_nondeterministic_ops=true \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+"$GPU_ENV/bin/python" -S <ready-example> --smoke --json
+```
+
+Every CPU child reported `platform="cpu"`, and every CUDA child reported
+`platform="gpu"`; all twenty results reported `precision="fp64"` and
+`status="ok"`. The least-squares example matched CPU and GPU exactly for its
+published parameters, objective, residual, gradient, driver, status, and
+evaluation counts. Other examples matched their independent scientific
+oracles and CPU/GPU tolerances but were not bitwise identical; for example,
+the curve directional-gradient errors were `1.70e-10` on CPU and `1.61e-9`
+on GPU, both below the `1e-6` contract.
+
+The GPU environment's normal site initialization contains a stale editable
+mapping to `/home/jungdaesuh/code/columbia/simopt-jax-clean-local`. Therefore
+the current-source GPU receipt used `python -S` with this checkout's `src/`
+first on `PYTHONPATH`. The normal runner's failure is retained as an
+environment-provenance failure rather than misreported as a product failure.
+
+The reviewed implementation started from source HEAD
+`6547da3a4350dcbc67ce7188886c2d353e6ddbbc`. Two unrelated parity-plan
+documentation commits advanced the live branch while validation was running;
+the final scoped index was therefore based on
+`2b352c436c9d1a62cbff88f1f1d88ded9384719c`. Excluding this receipt itself,
+the staged implementation diff SHA256 was
+`7397f8799cf53db630522dc5d580ac7ff877d5b352b33f30a391e237610e6bec`.
+The CPU and GPU JSONL result SHA256 values were respectively
+`82843570e6efe6ed72afe3ecaeb9cfbf54e6b1db601ecd31c09e138f2e225152`
+and `700d863f0a30fcc462c12cd18e9d56e38d885979d3f23cf12814c0d70bb9bc3c`.
+The hash-bound payloads are preserved in
+[`jax_examples_cpu_strict_results.jsonl`](jax_examples_cpu_strict_results.jsonl)
+and
+[`jax_examples_gpu_strict_results.jsonl`](jax_examples_gpu_strict_results.jsonl).
+
+### REFACTOR
+
+Host logging is bounded to initial and final records after each numerical
+solve. `constrained_serial_solve_jax()` now fails explicitly until a
+SIMSOPT-owned backend-neutral constrained solver exists. The manifest is the
+single owner of the two-lane assignment, and the example author contract now
+forbids a hidden SciPy optimizer in ready JAX examples.
+
+The broader `tests/jax/solve` refactor gate then exposed one strict-transfer
+regression in the shared host-boundary owner: an explicit `jax.device_get` was
+wrapped in a temporary device-to-host `allow` context. The existing contract
+test was RED because strict mode must not be weakened around an explicit
+materialization. Removing that redundant override made the focused test GREEN;
+the full solver suite passed with `65 passed, 2 skipped`.
+
+The first clean-room audit caught two fail-open behaviors. The QFM example had
+accepted a five-iteration unsuccessful result, and the serial wrappers had
+published unsuccessful result state. The repaired QFM smoke contract requires
+solver success and a final gradient norm at most `1e-8`; its CPU and GPU runs
+both converged in 54 iterations with gradient norms near `1.36e-9`. Both serial
+wrappers now raise before logging or changing `prob.x` when a typed result is
+unsuccessful. Focused tests also reject legacy optimizer spellings when the
+typed API has no behavior-equivalent driver rather than silently changing the
+algorithm.
+
+After those review fixes, the final serial/manifest/example gate passed with
+`57 passed in 141.19s`. The public solver suite passed with
+`71 passed, 2 skipped`; the remaining import-boundary tests passed with
+`8 passed, 1 deselected`, excluding an unrelated untracked parity artifact's
+benchmark import.
+Ruff `F` and format checks, compileall, and `git diff --check` were rerun after
+the final source changes. The fresh standalone `uvx mypy` attempt was not accepted
+as a gate because its isolated environment lacked the project's NumPy/JAX
+dependencies; the earlier dependency-complete focused mypy receipt remains the
+type-check evidence rather than being misreported as a fresh rerun.
+
 ## Manifest schema and source catalog
 
 ### RED

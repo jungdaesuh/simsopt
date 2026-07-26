@@ -13,22 +13,24 @@ from threading import Lock
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from jax import lax
 
-from simsopt_jax.runtime.host_boundary import host_array as _callback_host_array
 from simsopt_jax.backend import (
     get_backend_policy,
     is_float32_smoke_policy,
 )
 from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core.sharding import active_replicated_sharding
+from simsopt_jax.runtime.host_boundary import host_array as _callback_host_array
+
 from .._shared import (
-    PRIVATE_OPTIMIZER_JAX_VERSION,
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
-    _optimizer_dtype as _optimizer_dtype,
+    PRIVATE_OPTIMIZER_JAX_VERSION,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
+)
+from .._shared import (
+    _optimizer_dtype as _optimizer_dtype,
 )
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
@@ -176,8 +178,7 @@ def _scalar_value_and_grad(fun):
     def wrapped(x):
         dtype = _pytree_inexact_dtype(x)
         value, pullback = jax.vjp(fun, x)
-        value_dtype = jnp.asarray(value).dtype
-        cotangent = _as_jax_dtype(1.0, value_dtype)
+        cotangent = jnp.ones_like(value)
         (grad,) = pullback(cotangent)
         value = jnp.asarray(value, dtype=dtype)
         grad = jax.tree.map(
@@ -186,7 +187,7 @@ def _scalar_value_and_grad(fun):
         )
         return value, grad
 
-    return wrapped
+    return jax.jit(wrapped)
 
 
 def _cached_private_solver(cache_owner, *, cache_key, builder):

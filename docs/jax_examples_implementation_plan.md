@@ -10,7 +10,10 @@ native Python examples, the isolated runner and structured-result contract are
 implemented, all seven Wave 1 lessons are ready, and the CPU and strict-GPU CI
 lanes are reachable from changes beneath `examples/jax/**`. Three additional
 bounded lessons (Boozer surface, wireframe, and force/finite-build) also passed
-their RED → GREEN contracts and are ready.
+their RED → GREEN contracts and are ready. Every ready lesson now declares and
+passes both the CPU-smoke and strict-GPU lanes through the same JAX code path.
+The public serial least-squares and scalar APIs default to SIMSOPT-owned JAX
+drivers; Optimistix and Optax are explicit optional choices only.
 
 The single-stage vacuum record remains `planned`: bounded live probes construct
 the public traceable session and return a finite objective, but the
@@ -47,10 +50,11 @@ or another unported boundary.
 - Demonstrate the public JAX API at the correct abstraction level: pure
   `simsopt_jax` kernels for traceable workflows and `simsopt_jax_adapters` for
   legacy `Optimizable` workflows.
-- Prove each implemented JAX example with a deterministic CPU smoke lane and
-  independent correctness checks for the scientific observables it claims.
-- Add strict GPU execution only for examples whose manifest contract requires
-  GPU residency; GPU jobs must fail rather than silently skip or fall back.
+- Prove each implemented JAX example with deterministic CPU-smoke and
+  strict-GPU lanes plus independent correctness checks for the scientific
+  observables it claims.
+- Use the same public solver, convergence contract, and result schema on CPU
+  and GPU; GPU jobs must fail rather than silently skip or fall back.
 - Reuse canonical example inputs instead of copying data files into the JAX
   tree.
 
@@ -209,6 +213,36 @@ contract. The design is therefore fixed before test-first implementation:
   plan.
 - Rollback: revert the JAX workflow steps, documentation links, and
   `examples/jax/` slice together; native runners and inputs remain independent.
+
+### Backend-neutral serial-solver evolution
+
+- Observable delta: `least_squares_serial_solve_jax()` now defaults to
+  `Driver.SIMSOPT_LM_GMRES`, `serial_solve_jax()` defaults to
+  `Driver.SIMSOPT_BFGS`, and both return the existing typed `OptimizerResult`.
+  CPU and GPU select placement only. Optimistix/Optax require an explicit
+  `Driver`; SciPy remains a separate CPU reference implementation.
+- Caller inventory: the three serial APIs, their unit tests, and the ready
+  curve/surface/traceable examples. No native `simsopt.solve` caller changes.
+- Migration: the legacy least-squares `optimizer="lm"` spelling remains a
+  deprecated alias for `Driver.OPTIMISTIX_LM`. The former
+  `optimizer="gauss_newton"` and scalar `optimizer="bfgs"` spellings fail
+  explicitly because the typed API has no behavior-equivalent Optimistix
+  Gauss-Newton or BFGS driver. Those callers must choose the backend-neutral
+  defaults or deliberately select a different available algorithm such as
+  `Driver.OPTIMISTIX_LM` or `Driver.OPTIMISTIX_LBFGS`.
+- Failure publication: an unsuccessful typed result raises before a log is
+  written or `prob.x` is changed. Only a successful completed solve may publish
+  state through the serial wrapper.
+- Constrained compatibility: `constrained_serial_solve_jax()` fails explicitly
+  with `NotImplementedError` until a SIMSOPT-owned backend-neutral constrained
+  contract exists; it cannot silently substitute an optional backend.
+- Compatibility proof: focused tests assert default driver/result semantics,
+  bounded post-solve logging, and absence of numerical host callbacks. Recorded
+  CPU/GPU executions compare parameters, objective, residual, gradient, status,
+  and counts; the unit tests do not claim to perform that cross-platform
+  comparison themselves.
+- Rollback: restore the serial wrapper and the three affected examples as one
+  slice; the underlying typed driver API and native CPU solvers remain intact.
 
 ## Proposed Layout
 

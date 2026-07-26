@@ -1,23 +1,35 @@
-"""JAX-aware serial least-squares solve for explicit residual problems."""
+"""Backend-neutral serial JAX solves for explicit immutable problems."""
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import time
-from typing import TextIO
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optimistix as optx
 
 from simsopt_jax.core._finite_difference import (
     forward_jacobian_shard_map,
     forward_jacobian_vmap,
 )
-from simsopt_jax.runtime.host_boundary import block_until_ready, host_array, host_float
+from simsopt_jax.runtime.host_boundary import host_array, host_float
+from simsopt_jax.solve.contracts import OptimizerResult
+from simsopt_jax.solve.dispatch import least_squares, minimize
+from simsopt_jax.solve.driver import Driver
+from simsopt_jax.solve.optax.contracts import OptaxLBFGSOptions
+from simsopt_jax.solve.optimistix.contracts import (
+    OptimistixLBFGSOptions,
+    OptimistixLMOptions,
+)
+from simsopt_jax.solve.simsopt.contracts import (
+    SimsoptBFGSOptions,
+    SimsoptLMGMRESOptions,
+    SimsoptLMQROptions,
+)
 
 __all__ = [
     "TraceableEqualityConstrainedProblem",
@@ -36,13 +48,23 @@ class TraceableLeastSquaresProblem:
 
     residual_fn: Callable[[jax.Array], jax.Array]
     x: jax.Array
+    _solver_residual_fn: Callable[[jax.Array], jax.Array] = field(
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        residual_fn = self.residual_fn
+        self._solver_residual_fn = jax.jit(
+            lambda x: jnp.ravel(residual_fn(jnp.asarray(x)))
+        )
 
     @property
     def dof_size(self) -> int:
         return int(jnp.ravel(self.x).size)
 
     def residuals(self, x: jax.Array | None = None) -> jax.Array:
-        return jnp.ravel(self.residual_fn(self.x if x is None else jnp.asarray(x)))
+        return self._solver_residual_fn(self.x if x is None else x)
 
     def objective(self, x: jax.Array | None = None) -> jax.Array:
         residuals = self.residuals(x)
@@ -55,18 +77,34 @@ class TraceableScalarProblem:
 
     objective_fn: Callable[[jax.Array], jax.Array]
     x: jax.Array
+    _solver_objective_fn: Callable[[jax.Array], jax.Array] = field(
+        init=False,
+        repr=False,
+    )
+    _solver_value_and_grad_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]] = (
+        field(init=False, repr=False)
+    )
+
+    def __post_init__(self) -> None:
+        objective_fn = self.objective_fn
+        self._solver_objective_fn = jax.jit(
+            lambda x: jnp.asarray(objective_fn(jnp.asarray(x)))
+        )
+        self._solver_value_and_grad_fn = jax.jit(
+            jax.value_and_grad(self._solver_objective_fn)
+        )
 
     @property
     def dof_size(self) -> int:
         return int(jnp.ravel(self.x).size)
 
     def objective(self, x: jax.Array | None = None) -> jax.Array:
-        return jnp.asarray(self.objective_fn(self.x if x is None else jnp.asarray(x)))
+        return self._solver_objective_fn(self.x if x is None else x)
 
 
 @dataclass
 class TraceableEqualityConstrainedProblem:
-    """Scalar objective plus equality constraints for the JAX AL solve."""
+    """Equality-constrained state awaiting a SIMSOPT-owned JAX solver."""
 
     objective_fn: Callable[[jax.Array], jax.Array]
     equality_constraint_fn: Callable[[jax.Array], jax.Array]
@@ -113,20 +151,6 @@ def traceable_least_squares_jacobian(
     raise ValueError(f"Unsupported JAX least-squares Jacobian method {method!r}.")
 
 
-def _optimistix_solver(name: str, *, rtol: float, atol: float):
-    if name == "lm":
-        return optx.LevenbergMarquardt(rtol=rtol, atol=atol)
-    if name == "gauss_newton":
-        return optx.GaussNewton(rtol=rtol, atol=atol)
-    raise ValueError(f"Unsupported JAX least-squares optimizer {name!r}.")
-
-
-def _optimistix_minimizer(name: str, *, rtol: float, atol: float):
-    if name == "bfgs":
-        return optx.BFGS(rtol=rtol, atol=atol)
-    raise ValueError(f"Unsupported JAX scalar optimizer {name!r}.")
-
-
 def _write_log_header(objective_file, *, problem_type: str, ndofs: int) -> None:
     objective_file.write(f"Problem type:\n{problem_type}\nnparams:\n{ndofs}\n")
     objective_file.write("function_evaluation,seconds")
@@ -152,84 +176,107 @@ def _write_log_row(
     objective_file.flush()
 
 
-@dataclass
-class _ObjectiveEvaluationLogger:
-    objective_file: TextIO
-    start_time: float
-    next_eval_index: int = 0
-
-    def __call__(self, x: jax.Array, objective_value: jax.Array) -> None:
-        _write_log_row(
-            self.objective_file,
-            eval_index=self.next_eval_index,
-            elapsed_seconds=time() - self.start_time,
-            x=x,
-            objective_value=objective_value,
-        )
-        self.next_eval_index += 1
-
-
-def _write_constraint_header(
-    constraint_file,
+def _least_squares_options(
+    driver: Driver,
     *,
+    rtol: float,
+    atol: float,
+    max_steps: int,
+) -> SimsoptLMGMRESOptions | SimsoptLMQROptions | OptimistixLMOptions:
+    if driver == Driver.SIMSOPT_LM_GMRES:
+        return SimsoptLMGMRESOptions(
+            maxiter=max_steps,
+            ftol=rtol,
+            xtol=atol,
+            gtol=min(rtol, atol),
+            materialize_dense_linearization=False,
+        )
+    if driver == Driver.SIMSOPT_LM_QR:
+        return SimsoptLMQROptions(
+            maxiter=max_steps,
+            ftol=rtol,
+            xtol=atol,
+            gtol=min(rtol, atol),
+        )
+    if driver == Driver.OPTIMISTIX_LM:
+        return OptimistixLMOptions(maxiter=max_steps, tol=min(rtol, atol))
+    raise ValueError(
+        "least_squares_serial_solve_jax driver must be simsopt_lm_gmres, "
+        "simsopt_lm_qr, or the explicit optional optimistix_lm driver."
+    )
+
+
+def _scalar_options(
+    driver: Driver,
+    *,
+    rtol: float,
+    atol: float,
+    max_steps: int,
+) -> SimsoptBFGSOptions | OptaxLBFGSOptions | OptimistixLBFGSOptions:
+    if driver == Driver.SIMSOPT_BFGS:
+        return SimsoptBFGSOptions(maxiter=max_steps, gtol=atol, xrtol=rtol)
+    if driver == Driver.OPTAX_LBFGS:
+        return OptaxLBFGSOptions(maxiter=max_steps, gtol=atol)
+    if driver == Driver.OPTIMISTIX_LBFGS:
+        return OptimistixLBFGSOptions(maxiter=max_steps, tol=min(rtol, atol))
+    raise ValueError(
+        "serial_solve_jax driver must be simsopt_bfgs or an explicitly selected "
+        "optional optax_lbfgs or optimistix_lbfgs driver."
+    )
+
+
+def _write_bounded_objective_log(
+    *,
+    problem_type: str,
     ndofs: int,
-    constraint_count: int,
+    initial_x: jax.Array,
+    initial_objective: jax.Array,
+    final_x: jax.Array,
+    final_objective: jax.Array,
+    start_time: float,
 ) -> None:
-    constraint_file.write(f"Problem type:\nconstrained\nnparams:\n{ndofs}\n")
-    constraint_file.write("function_evaluation,seconds")
-    for index in range(ndofs):
-        constraint_file.write(f",x({index})")
-    for index in range(constraint_count):
-        constraint_file.write(f",F({index})")
-    constraint_file.write("\n")
-
-
-def _write_constraint_row(
-    constraint_file,
-    *,
-    eval_index: int,
-    elapsed_seconds: float,
-    x: jax.Array,
-    constraint_value: jax.Array,
-) -> None:
-    constraint_file.write(f"{eval_index:6d},{elapsed_seconds:12.4e}")
-    x_host = np.ravel(host_array(x))
-    constraint_host = np.ravel(host_array(constraint_value))
-    for value in x_host:
-        constraint_file.write(f",{value:24.16e}")
-    for value in constraint_host:
-        constraint_file.write(f",{value:24.16e}")
-    constraint_file.write("\n")
-    constraint_file.flush()
-
-
-@dataclass
-class _ConstraintEvaluationLogger:
-    constraint_file: TextIO
-    start_time: float
-    next_eval_index: int = 0
-
-    def __call__(self, x: jax.Array, constraint_value: jax.Array) -> None:
-        _write_constraint_row(
-            self.constraint_file,
-            eval_index=self.next_eval_index,
-            elapsed_seconds=time() - self.start_time,
-            x=x,
-            constraint_value=constraint_value,
+    datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
+    with open(f"simsopt_{datestr}.dat", "w") as objective_file:
+        _write_log_header(
+            objective_file,
+            problem_type=problem_type,
+            ndofs=ndofs,
         )
-        self.next_eval_index += 1
+        _write_log_row(
+            objective_file,
+            eval_index=0,
+            elapsed_seconds=0.0,
+            x=initial_x,
+            objective_value=initial_objective,
+        )
+        _write_log_row(
+            objective_file,
+            eval_index=1,
+            elapsed_seconds=time() - start_time,
+            x=final_x,
+            objective_value=final_objective,
+        )
+
+
+def _require_success(result: OptimizerResult, *, operation: str) -> None:
+    if not result.success:
+        raise RuntimeError(
+            f"{operation} failed with driver={result.driver.value}, "
+            f"status={result.status}: {result.message}"
+        )
 
 
 def least_squares_serial_solve_jax(
     prob: TraceableLeastSquaresProblem,
     *,
-    optimizer: str = "lm",
+    driver: Driver = Driver.SIMSOPT_LM_GMRES,
+    optimizer: str | None = None,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,
     **kwargs,
-) -> None:
-    """Solve a traceable JAX least-squares problem and update ``prob.x``."""
+) -> OptimizerResult:
+    """Solve on the active JAX device and publish the completed state."""
     if not isinstance(prob, TraceableLeastSquaresProblem):
         raise TypeError(
             "least_squares_serial_solve_jax requires TraceableLeastSquaresProblem."
@@ -237,87 +284,109 @@ def least_squares_serial_solve_jax(
     if kwargs:
         unsupported = ", ".join(sorted(kwargs))
         raise TypeError(f"Unsupported JAX least-squares options: {unsupported}")
+    if optimizer is not None:
+        if driver != Driver.SIMSOPT_LM_GMRES:
+            raise TypeError("Specify only driver or the deprecated optimizer keyword.")
+        if optimizer == "gauss_newton":
+            raise NotImplementedError(
+                "optimizer='gauss_newton' has no typed backend-neutral driver; "
+                "use driver=Driver.OPTIMISTIX_LM for the explicit optional LM path."
+            )
+        if optimizer != "lm":
+            raise ValueError(f"Unsupported JAX least-squares optimizer {optimizer!r}.")
+        warnings.warn(
+            "optimizer='lm' is deprecated; use driver=Driver.OPTIMISTIX_LM.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        driver = Driver.OPTIMISTIX_LM
 
-    x0 = jnp.asarray(prob.x)
-    solver = _optimistix_solver(optimizer, rtol=rtol, atol=atol)
-
-    datestr = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    initial_x = jnp.asarray(prob.x)
+    initial_objective = prob.objective(initial_x)
     start_time = time()
-    with open(f"simsopt_{datestr}.dat", "w") as objective_file:
-        _write_log_header(
-            objective_file,
-            problem_type="least_squares",
-            ndofs=prob.dof_size,
-        )
-        evaluation_logger = _ObjectiveEvaluationLogger(objective_file, start_time)
-
-        def residuals_for_solver(x, _args):
-            residual_values = prob.residuals(x)
-            objective_value = jnp.sum(residual_values * residual_values)
-            jax.debug.callback(evaluation_logger, x, objective_value, ordered=False)
-            return residual_values
-
-        solution = optx.least_squares(
-            residuals_for_solver,
-            solver,
-            x0,
-            options={"jac": "fwd"},
+    result = least_squares(
+        prob._solver_residual_fn,
+        initial_x,
+        driver=driver,
+        options=_least_squares_options(
+            driver,
+            rtol=rtol,
+            atol=atol,
             max_steps=max_steps,
-            throw=True,
-        )
-        final_x = solution.value
-        block_until_ready(final_x)
-        jax.effects_barrier()
-
+        ),
+    )
+    _require_success(result, operation="JAX least-squares solve")
+    final_x = jax.device_put(result.x, initial_x.sharding)
+    final_objective = prob.objective(final_x)
+    _write_bounded_objective_log(
+        problem_type="least_squares",
+        ndofs=prob.dof_size,
+        initial_x=initial_x,
+        initial_objective=initial_objective,
+        final_x=final_x,
+        final_objective=final_objective,
+        start_time=start_time,
+    )
     prob.x = final_x
+    return result
 
 
 def serial_solve_jax(
     prob: TraceableScalarProblem,
     *,
-    optimizer: str = "bfgs",
+    driver: Driver = Driver.SIMSOPT_BFGS,
+    optimizer: str | None = None,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,
     **kwargs,
-) -> None:
-    """Solve a traceable JAX scalar objective and update ``prob.x``."""
+) -> OptimizerResult:
+    """Minimize on the active JAX device and publish the completed state."""
     if not isinstance(prob, TraceableScalarProblem):
         raise TypeError("serial_solve_jax requires TraceableScalarProblem.")
     if kwargs:
         unsupported = ", ".join(sorted(kwargs))
         raise TypeError(f"Unsupported JAX scalar solve options: {unsupported}")
+    if optimizer is not None:
+        if driver != Driver.SIMSOPT_BFGS:
+            raise TypeError("Specify only driver or the deprecated optimizer keyword.")
+        if optimizer != "bfgs":
+            raise ValueError(f"Unsupported JAX scalar optimizer {optimizer!r}.")
+        raise NotImplementedError(
+            "optimizer='bfgs' selected Optimistix BFGS and has no "
+            "behavior-equivalent typed driver. Choose driver=Driver.SIMSOPT_BFGS "
+            "for the backend-neutral default or explicitly opt into the distinct "
+            "driver=Driver.OPTIMISTIX_LBFGS algorithm."
+        )
 
-    x0 = jnp.asarray(prob.x)
-    solver = _optimistix_minimizer(optimizer, rtol=rtol, atol=atol)
-
-    datestr = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    initial_x = jnp.asarray(prob.x)
+    initial_objective = prob.objective(initial_x)
     start_time = time()
-    with open(f"simsopt_{datestr}.dat", "w") as objective_file:
-        _write_log_header(
-            objective_file,
-            problem_type="general",
-            ndofs=prob.dof_size,
-        )
-        evaluation_logger = _ObjectiveEvaluationLogger(objective_file, start_time)
-
-        def objective_for_solver(x, _args):
-            objective_value = prob.objective(x)
-            jax.debug.callback(evaluation_logger, x, objective_value, ordered=False)
-            return objective_value
-
-        solution = optx.minimise(
-            objective_for_solver,
-            solver,
-            x0,
+    result = minimize(
+        prob._solver_value_and_grad_fn,
+        initial_x,
+        driver=driver,
+        options=_scalar_options(
+            driver,
+            rtol=rtol,
+            atol=atol,
             max_steps=max_steps,
-            throw=True,
-        )
-        final_x = solution.value
-        block_until_ready(final_x)
-        jax.effects_barrier()
-
+        ),
+    )
+    _require_success(result, operation="JAX scalar solve")
+    final_x = jax.device_put(result.x, initial_x.sharding)
+    final_objective = prob.objective(final_x)
+    _write_bounded_objective_log(
+        problem_type="general",
+        ndofs=prob.dof_size,
+        initial_x=initial_x,
+        initial_objective=initial_objective,
+        final_x=final_x,
+        final_objective=final_objective,
+        start_time=start_time,
+    )
     prob.x = final_x
+    return result
 
 
 def constrained_serial_solve_jax(
@@ -333,95 +402,13 @@ def constrained_serial_solve_jax(
     max_penalty_weight: float = 1.0e8,
     **kwargs,
 ) -> None:
-    """Solve a traceable equality-constrained objective by augmented Lagrangian."""
+    """Reject until SIMSOPT owns a backend-neutral constrained JAX solver."""
     if not isinstance(prob, TraceableEqualityConstrainedProblem):
         raise TypeError(
             "constrained_serial_solve_jax requires TraceableEqualityConstrainedProblem."
         )
-    if kwargs:
-        unsupported = ", ".join(sorted(kwargs))
-        raise TypeError(f"Unsupported JAX constrained solve options: {unsupported}")
-    max_outer_value = int(max_outer)
-    inner_max_steps_value = int(inner_max_steps)
-    if max_outer_value < 1:
-        raise ValueError("max_outer must be positive.")
-    if inner_max_steps_value < 1:
-        raise ValueError("inner_max_steps must be positive.")
-
-    x = jnp.asarray(prob.x)
-    objective = jax.jit(prob.objective)
-    equality_constraints = jax.jit(prob.equality_constraints)
-    constraints0 = equality_constraints(x)
-    multipliers = jnp.zeros_like(constraints0)
-    penalty_weight = jnp.asarray(initial_penalty_weight, dtype=x.dtype)
-    solver = _optimistix_minimizer(optimizer, rtol=rtol, atol=atol)
-
-    datestr = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    start_time = time()
-    with open(f"simsopt_{datestr}.dat", "w") as objective_file:
-        with open(f"constraints_{datestr}.dat", "w") as constraint_file:
-            current_x = x
-            current_multipliers = multipliers
-            current_penalty_weight = penalty_weight
-
-            _write_log_header(
-                objective_file,
-                problem_type="constrained",
-                ndofs=prob.dof_size,
-            )
-            _write_constraint_header(
-                constraint_file,
-                ndofs=prob.dof_size,
-                constraint_count=int(constraints0.size),
-            )
-            objective_logger = _ObjectiveEvaluationLogger(objective_file, start_time)
-            constraint_logger = _ConstraintEvaluationLogger(constraint_file, start_time)
-
-            def augmented_objective(candidate_x, al_state):
-                al_multipliers, al_penalty_weight = al_state
-                constraints = equality_constraints(candidate_x)
-                objective_value = objective(candidate_x)
-                jax.debug.callback(
-                    objective_logger,
-                    candidate_x,
-                    objective_value,
-                    ordered=False,
-                )
-                jax.debug.callback(
-                    constraint_logger,
-                    candidate_x,
-                    constraints,
-                    ordered=False,
-                )
-                return (
-                    objective_value
-                    + jnp.dot(al_multipliers, constraints)
-                    + 0.5 * al_penalty_weight * jnp.sum(constraints * constraints)
-                )
-
-            for _outer_index in range(max_outer_value):
-                solution = optx.minimise(
-                    augmented_objective,
-                    solver,
-                    current_x,
-                    args=(current_multipliers, current_penalty_weight),
-                    max_steps=inner_max_steps_value,
-                    throw=True,
-                )
-                current_x = solution.value
-                constraints = equality_constraints(current_x)
-                current_multipliers = (
-                    current_multipliers + current_penalty_weight * constraints
-                )
-                current_penalty_weight = jnp.minimum(
-                    current_penalty_weight * float(penalty_growth),
-                    jnp.asarray(
-                        max_penalty_weight,
-                        dtype=current_penalty_weight.dtype,
-                    ),
-                )
-
-            block_until_ready(current_x)
-            jax.effects_barrier()
-
-    prob.x = current_x
+    raise NotImplementedError(
+        "constrained_serial_solve_jax has no SIMSOPT-owned constrained solver "
+        "with one backend-neutral CPU/GPU contract. Use the native CPU "
+        "constrained_serial_solve reference until that contract is implemented."
+    )

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
 from simsopt_jax.core.tracing import (
@@ -68,12 +67,16 @@ def _solve(smoke: bool) -> ExampleResult:
     )
     fieldline = trace_fieldline(
         fieldline_spec,
-        jnp.asarray((RADIUS, 0.0, 0.0), dtype=jnp.float64),
+        jax.device_put(np.asarray((RADIUS, 0.0, 0.0), dtype=np.float64)),
         field.jax_B_at,
     )
-    final_state_array = np.asarray(
-        fieldline.trajectory[int(fieldline.steps_taken), 1:4], dtype=np.float64
+    fieldline_trajectory = np.asarray(
+        jax.device_get(fieldline.trajectory),
+        dtype=np.float64,
     )
+    final_state_array = fieldline_trajectory[
+        int(jax.device_get(fieldline.steps_taken)), 1:4
+    ]
     angle = -FIELDLINE_TMAX / RADIUS
     analytic = np.asarray(
         (RADIUS * np.cos(angle), RADIUS * np.sin(angle), 0.0), dtype=np.float64
@@ -89,20 +92,22 @@ def _solve(smoke: bool) -> ExampleResult:
     )
     particle = trace_fullorbit(
         particle_spec,
-        jnp.asarray((RADIUS, 0.0, 0.0, 0.1, 0.2, 0.3), dtype=jnp.float64),
+        jax.device_put(np.asarray((RADIUS, 0.0, 0.0, 0.1, 0.2, 0.3), dtype=np.float64)),
         field.jax_B_at,
         m=1.0,
         q=1.0,
     )
-    particle_final = np.asarray(
-        particle.trajectory[int(particle.steps_taken), 1:7], dtype=np.float64
+    particle_trajectory = np.asarray(
+        jax.device_get(particle.trajectory),
+        dtype=np.float64,
     )
+    particle_final = particle_trajectory[int(jax.device_get(particle.steps_taken)), 1:7]
     initial_energy = 0.5 * float(np.dot((0.1, 0.2, 0.3), (0.1, 0.2, 0.3)))
     final_energy = 0.5 * float(np.dot(particle_final[3:], particle_final[3:]))
     energy_relative_error = abs(final_energy - initial_energy) / initial_energy
-    fieldline_status = int(fieldline.status)
-    event_count = int(fieldline.phi_hits_count)
-    particle_status = int(particle.status)
+    fieldline_status = int(jax.device_get(fieldline.status))
+    event_count = int(jax.device_get(fieldline.phi_hits_count))
+    particle_status = int(jax.device_get(particle.status))
     is_correct = bool(
         fieldline_status == 0
         and event_count == 0

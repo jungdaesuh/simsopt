@@ -78,54 +78,117 @@ from jax.typing import ArrayLike
 from simsopt_jax.backend.dtypes import explicit_device_array
 
 from ._device_scalars import two_pi as _device_two_pi
-from .boozer_radial_field import (
-    BoozerRadialInterpolantFrozenState,
-    _eval_dGds as _radial_dGds,
-    _eval_dIds as _radial_dIds,
-    _eval_dKdtheta as _radial_dKdtheta,
-    _eval_dKdtheta_from_columns as _radial_dKdtheta_from_columns,
-    _eval_dKdzeta as _radial_dKdzeta,
-    _eval_dKdzeta_from_columns as _radial_dKdzeta_from_columns,
-    _eval_dmodBds as _radial_dmodBds,
-    _eval_dmodBds_from_columns as _radial_dmodBds_from_columns,
-    _eval_dmodBdtheta as _radial_dmodBdtheta,
-    _eval_dmodBdtheta_from_columns as _radial_dmodBdtheta_from_columns,
-    _eval_dmodBdzeta as _radial_dmodBdzeta,
-    _eval_dmodBdzeta_from_columns as _radial_dmodBdzeta_from_columns,
-    _eval_G as _radial_G,
-    _eval_I as _radial_I,
-    _eval_iota as _radial_iota,
-    _eval_K as _radial_K,
-    _eval_K_from_columns as _radial_K_from_columns,
-    _eval_modB as _radial_modB,
-    _eval_modB_from_columns as _radial_modB_from_columns,
-    _eval_radial_rhs_columns as _radial_eval_rhs_columns,
-)
 from .boozer_analytic import (
     BoozerAnalyticFrozenState,
+)
+from .boozer_analytic import (
     _eval_dGds as _analytic_dGds,
+)
+from .boozer_analytic import (
     _eval_dIds as _analytic_dIds,
+)
+from .boozer_analytic import (
     _eval_dKdtheta as _analytic_dKdtheta,
+)
+from .boozer_analytic import (
     _eval_dKdzeta as _analytic_dKdzeta,
+)
+from .boozer_analytic import (
     _eval_dmodBds as _analytic_dmodBds,
+)
+from .boozer_analytic import (
     _eval_dmodBdtheta as _analytic_dmodBdtheta,
+)
+from .boozer_analytic import (
     _eval_dmodBdzeta as _analytic_dmodBdzeta,
+)
+from .boozer_analytic import (
     _eval_G as _analytic_G,
+)
+from .boozer_analytic import (
     _eval_I as _analytic_I,
+)
+from .boozer_analytic import (
     _eval_iota as _analytic_iota,
+)
+from .boozer_analytic import (
     _eval_K as _analytic_K,
+)
+from .boozer_analytic import (
     _eval_modB as _analytic_modB,
 )
+from .boozer_radial_field import (
+    BoozerRadialInterpolantFrozenState,
+)
+from .boozer_radial_field import (
+    _eval_dGds as _radial_dGds,
+)
+from .boozer_radial_field import (
+    _eval_dIds as _radial_dIds,
+)
+from .boozer_radial_field import (
+    _eval_dKdtheta as _radial_dKdtheta,
+)
+from .boozer_radial_field import (
+    _eval_dKdtheta_from_columns as _radial_dKdtheta_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_dKdzeta as _radial_dKdzeta,
+)
+from .boozer_radial_field import (
+    _eval_dKdzeta_from_columns as _radial_dKdzeta_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_dmodBds as _radial_dmodBds,
+)
+from .boozer_radial_field import (
+    _eval_dmodBds_from_columns as _radial_dmodBds_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_dmodBdtheta as _radial_dmodBdtheta,
+)
+from .boozer_radial_field import (
+    _eval_dmodBdtheta_from_columns as _radial_dmodBdtheta_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_dmodBdzeta as _radial_dmodBdzeta,
+)
+from .boozer_radial_field import (
+    _eval_dmodBdzeta_from_columns as _radial_dmodBdzeta_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_G as _radial_G,
+)
+from .boozer_radial_field import (
+    _eval_I as _radial_I,
+)
+from .boozer_radial_field import (
+    _eval_iota as _radial_iota,
+)
+from .boozer_radial_field import (
+    _eval_K as _radial_K,
+)
+from .boozer_radial_field import (
+    _eval_K_from_columns as _radial_K_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_modB as _radial_modB,
+)
+from .boozer_radial_field import (
+    _eval_modB_from_columns as _radial_modB_from_columns,
+)
+from .boozer_radial_field import (
+    _eval_radial_rhs_columns as _radial_eval_rhs_columns,
+)
 from .interpolated_boozer_field import (
-    InterpolatedBoozerFieldFrozenState,
     _INTERP_EVALUATORS,
+    InterpolatedBoozerFieldFrozenState,
 )
 from .sharding import (
     maybe_shard_trajectory_batch_inputs,
     replicate_tree_on_mesh,
     trajectory_batch_sharding_config,
 )
-
 
 TracingStateInput = jax.Array | list[ArrayLike] | tuple[ArrayLike, ...]
 
@@ -2596,16 +2659,11 @@ def _run_dopri5_4state(
         [jnp.asarray([t_final], dtype=dtype), y_final.reshape((4,))]
     )
 
-    def fill_padding(idx, traj_carry):
-        row_active = mask_final[idx]
-        return jax.lax.cond(
-            row_active,
-            lambda c: c,
-            lambda c: c.at[idx].set(last_row),
-            operand=traj_carry,
-        )
-
-    traj_padded = jax.lax.fori_loop(0, max_steps + 1, fill_padding, traj_final)
+    traj_padded = jnp.where(
+        mask_final[:, None],
+        traj_final,
+        jnp.broadcast_to(last_row, traj_final.shape),
+    )
 
     eps_t = jnp.asarray(1.0e-12, dtype=dtype) * jnp.maximum(
         jnp.abs(tmax), jnp.asarray(1.0, dtype=dtype)
@@ -3872,16 +3930,15 @@ def fullorbit_vacuum_rhs(
         ``(q/m) v x B(x)``.
     """
 
-    qoverm = jnp.asarray(q / m, dtype=jnp.float64)
+    qoverm = _device_array(q / m, jnp.float64)
 
     def rhs(_t: jax.Array, y: jax.Array) -> jax.Array:
         del _t  # Field is autonomous; signature kept for ODE-driver shape.
-        position = y[:3]
-        velocity = y[3:6]
+        position, velocity = jnp.split(y, (3,))
         B_raw = magnetic_field_fn(position)
         B = jnp.asarray(B_raw, dtype=y.dtype).reshape((3,))
         acceleration = qoverm * jnp.cross(velocity, B)
-        return jnp.concatenate([velocity, acceleration])
+        return jnp.concatenate((velocity, acceleration))
 
     return rhs
 
@@ -3941,12 +3998,12 @@ def trace_fullorbit(
     """
 
     dtype = jnp.float64
-    y0_arr = jnp.asarray(y0, dtype=dtype).reshape((6,))
-    tmax = jnp.asarray(spec.tmax, dtype=dtype)
-    rtol = jnp.asarray(spec.rtol, dtype=dtype)
-    atol = jnp.asarray(spec.atol, dtype=dtype)
-    dtmax = jnp.asarray(spec.dtmax, dtype=dtype)
-    t0 = jnp.asarray(0.0, dtype=dtype)
+    y0_arr = _as_device_array(y0, dtype).reshape((6,))
+    tmax = _as_device_array(spec.tmax, dtype)
+    rtol = _as_device_array(spec.rtol, dtype)
+    atol = _as_device_array(spec.atol, dtype)
+    dtmax = _as_device_array(spec.dtmax, dtype)
+    t0 = _device_array(0.0, dtype)
     max_steps = int(spec.max_steps)
     if max_steps <= 0:
         raise ValueError(f"max_steps must be positive, got {max_steps}")
@@ -3958,28 +4015,33 @@ def trace_fullorbit(
     rhs = fullorbit_vacuum_rhs(magnetic_field_fn, m, q)
     h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
     k0 = rhs(t0, y0_arr)
-    one = jnp.asarray(1.0, dtype=dtype)
+    one = _device_array(1.0, dtype)
     lane_zero, lane_zero_i32, lane_false = _lane_axis_carry_zeroes(y0_arr)
-    accepted_count_init = jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32
+    accepted_count_init = _device_array(0, jnp.int32) + lane_zero_i32
     t0_init = t0 + lane_zero
 
     # Pre-allocate the trajectory carry with columns
     # ``(t, x, y, z, vx, vy, vz)``. Row 0 holds the initial state;
     # rows 1..max_steps fill in as accepted steps occur. Padding rows
     # at the end of the run get the final accepted state.
-    traj = jnp.zeros((max_steps + 1, 7), dtype=dtype)
-    traj = traj.at[0, 0].set(t0)
-    traj = traj.at[0, 1:].set(y0_arr)
+    traj_init_row = jnp.concatenate((jnp.reshape(t0, (1,)), y0_arr), axis=0)
+    traj = jnp.concatenate(
+        (
+            jnp.reshape(traj_init_row, (1, 7)),
+            _device_zeros((max_steps, 7), dtype),
+        ),
+        axis=0,
+    )
     traj = traj + lane_zero
-    mask = jnp.zeros((max_steps + 1,), dtype=jnp.bool_)
-    mask = mask.at[0].set(True)
+    mask_indices = jax.lax.iota(jnp.int32, max_steps + 1)
+    mask = mask_indices == _device_array(0, jnp.int32)
     mask = mask | lane_false
 
     # Phi-plane crossing buffer. Each row is ``[t_hit, idx, x, y, z, vx,
     # vy, vz]`` (8 columns to match the upstream
     # ``sopp.particle_fullorbit_tracing`` row shape).
-    phi_hits_buf = jnp.zeros((max_phi_hits, 8), dtype=dtype)
-    phi_hits_count_init = jnp.asarray(0, dtype=jnp.int32)
+    phi_hits_buf = _device_zeros((max_phi_hits, 8), dtype)
+    phi_hits_count_init = _device_array(0, jnp.int32)
     phi_hits_buf, phi_hits_count_init = _event_carry_with_lane_axis(
         phi_hits_buf,
         phi_hits_count_init,
@@ -3987,18 +4049,21 @@ def trace_fullorbit(
     )
 
     if phis is None:
-        phis_arr = jnp.zeros((0,), dtype=dtype)
+        phis_arr = _device_zeros((0,), dtype)
     else:
-        phis_arr = jnp.asarray(phis, dtype=dtype).reshape((-1,))
+        phis_arr = _as_device_array(phis, dtype).reshape((-1,))
     num_phis = int(phis_arr.shape[0])
 
     # Initial unwrapped phi seed (C++ tracing.cpp uses pi).
     phi_init = _continuous_phi(
-        y0_arr[0], y0_arr[1], jnp.asarray(np.pi, dtype=dtype), dtype
+        _take_entry(y0_arr, 0),
+        _take_entry(y0_arr, 1),
+        _device_array(np.pi, dtype),
+        dtype,
     )
 
     init_carry = (
-        jnp.asarray(0, dtype=jnp.int32),  # step_count
+        _device_array(0, jnp.int32),  # step_count
         accepted_count_init,
         t0_init,
         y0_arr,
@@ -4010,12 +4075,12 @@ def trace_fullorbit(
         phi_hits_count_init,
         phi_init,  # running phi_last
         phi_init,  # transit criterion baseline, set on first accepted step
-        jnp.asarray(0, dtype=jnp.int32) + lane_zero_i32,  # status_event
+        _device_index(0) + lane_zero_i32,  # status_event
         lane_false,  # stop flag
     )
 
-    max_steps_i32 = jnp.asarray(max_steps, dtype=jnp.int32)
-    max_phi_hits_i32 = jnp.asarray(max_phi_hits, dtype=jnp.int32)
+    max_steps_i32 = _device_index(max_steps)
+    max_phi_hits_i32 = _device_index(max_phi_hits)
     two_pi = _device_two_pi(one)
 
     def cond(carry):
@@ -4124,7 +4189,7 @@ def trace_fullorbit(
         )
 
         # ── Stopping criteria check on accepted state ──
-        first_accepted_step = accepted_count == jnp.asarray(0, dtype=jnp.int32)
+        first_accepted_step = accepted_count == _device_index(0)
         phi_init_for_criteria = jnp.where(
             first_accepted_step,
             phi_current,
@@ -4156,7 +4221,7 @@ def trace_fullorbit(
                 max_hits_i32=max_phi_hits_i32,
             )
 
-        iter_count_post = step_count + jnp.asarray(1, dtype=jnp.int32)
+        iter_count_post = step_count + _device_index(1)
 
         (
             phi_hits_after,
@@ -4171,7 +4236,7 @@ def trace_fullorbit(
                 phi_hits_after,
                 phi_count_after,
                 status_event,
-                jnp.asarray(False),
+                _device_false(),
                 iter_count_post,
                 phi_current,
                 phi_init_for_criteria,
@@ -4197,7 +4262,7 @@ def trace_fullorbit(
         )
 
         return (
-            step_count + jnp.asarray(1, dtype=jnp.int32),
+            step_count + _device_index(1),
             accepted_next,
             t_next,
             y_next,
@@ -4230,29 +4295,21 @@ def trace_fullorbit(
         stop_at_exit,
     ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
 
-    last_row = jnp.concatenate(
-        [jnp.asarray([t_final], dtype=dtype), y_final.reshape((6,))]
+    last_row = jnp.concatenate((jnp.reshape(t_final, (1,)), y_final.reshape((6,))))
+    traj_padded = jnp.where(
+        mask_final[:, None],
+        traj_final,
+        jnp.broadcast_to(last_row, traj_final.shape),
     )
 
-    def fill_padding(idx, traj_carry):
-        row_active = mask_final[idx]
-        return jax.lax.cond(
-            row_active,
-            lambda c: c,
-            lambda c: c.at[idx].set(last_row),
-            operand=traj_carry,
-        )
-
-    traj_padded = jax.lax.fori_loop(0, max_steps + 1, fill_padding, traj_final)
-
-    eps_t = jnp.asarray(1.0e-12, dtype=dtype) * jnp.maximum(
-        jnp.abs(tmax), jnp.asarray(1.0, dtype=dtype)
+    eps_t = _device_array(1.0e-12, dtype) * jnp.maximum(
+        jnp.abs(tmax), _device_array(1.0, dtype)
     )
     reached = (tmax - t_final) <= eps_t
     status_normal = jnp.where(
         reached,
-        jnp.asarray(0, dtype=jnp.int32),
-        jnp.asarray(1, dtype=jnp.int32),
+        _device_index(0),
+        _device_index(1),
     )
     status = jnp.where(stop_at_exit, status_event_final, status_normal)
 

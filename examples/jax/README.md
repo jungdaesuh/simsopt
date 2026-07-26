@@ -22,9 +22,31 @@ python examples/jax/run_examples.py --lane gpu-strict
 The CPU lane selects strict FP64 `jax_cpu_parity` and disables mpi4py
 auto-initialization because these are serial examples. The GPU lane selects
 strict FP64 `jax_gpu_parity`, disables preallocation, enables the transfer
-guard, and fails on a skip, unsupported result, CPU fallback, wrong precision,
-or malformed output. Lane membership and bounded smoke arguments live only in
-[`manifest.json`](manifest.json).
+guard through both the SIMSOPT policy and JAX's process-wide
+`JAX_TRANSFER_GUARD=disallow`, and fails on a skip, unsupported result, CPU
+fallback, wrong precision, or malformed output. Lane membership and bounded
+smoke arguments live only in [`manifest.json`](manifest.json).
+
+`gpu-strict` means the process-wide JAX guard remains `disallow` across example
+setup, SIMSOPT orchestration, result publication, and all device-to-host
+transfers. The custom operator-GMRES implementation retains one documented,
+host-to-device-only allowance scoped inside JAX's `gmres` call because that
+upstream routine lowers internal scalar literals through host-to-device
+conversion. It does not permit device-to-host materialization, and the
+surrounding numerical path remains guarded.
+
+Every ready example runs in both lanes through the same JAX implementation.
+Device selection changes placement, not the algorithm or public result
+contract. Native SciPy solves may be used only by correctness tests as CPU
+reference oracles; a ready example must not use `scipy.optimize` as its JAX
+lane implementation. Optimistix and Optax remain explicit optional driver
+choices and are never selected implicitly by the serial example APIs.
+The serial wrappers publish `problem.x` and their bounded log only after a
+successful solve. A failed result raises and leaves the caller-owned state
+unchanged. The deprecated least-squares `optimizer="lm"` alias still selects
+explicit Optimistix LM; legacy `gauss_newton` and scalar `bfgs` spellings are
+rejected because the typed API does not expose behavior-equivalent Optimistix
+drivers for those algorithms.
 
 ## Choosing an example
 
@@ -55,7 +77,9 @@ Every runnable script must:
 5. name every host boundary in both its opening comment and the manifest;
 6. accept `--output-dir` or use a temporary directory if it writes artifacts;
 7. reuse canonical repository inputs read-only and never forward to a native
-   example module.
+   example module;
+8. declare both `cpu-smoke` and `gpu-strict` while it is `ready`, and use the
+   same public JAX solver and algorithm in both lanes.
 
 Add the behavioral correctness test first and preserve its authentic
 RED → GREEN → REFACTOR commands in
