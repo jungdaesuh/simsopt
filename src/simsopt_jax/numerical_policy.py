@@ -353,6 +353,14 @@ MIXED_DENSE_IR_ACCURACY_POLICY: Final[MixedDenseIrAccuracyPolicy] = (
         forward_error_tolerance_multiplier=10.0,
     )
 )
+# Halko–Martinsson–Tropp contraction-probe constants for mixed dense-IR
+# certificates. Owned here so production kernels and validators share one SSOT.
+MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT: Final[int] = 64
+MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA: Final[float] = 2.0
+MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT: Final[float] = 0.9
+MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND: Final[float] = (
+    MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA**-MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT
+)
 MIXED_DENSE_IR_CERTIFICATE_PRNG_IMPL: Final[CertificateProbePrngImpl] = "threefry2x32"
 MIXED_DENSE_IR_CERTIFICATE_PROBE_SAMPLING_MODEL: Final[
     CertificateProbeSamplingModel
@@ -360,3 +368,8 @@ MIXED_DENSE_IR_CERTIFICATE_PROBE_SAMPLING_MODEL: Final[
 MIXED_DENSE_IR_CERTIFICATE_PROBABILITY_MODEL: Final[CertificateProbabilityModel] = (
     "independent_ideal_standard_gaussian"
 )
+
+
+def mixed_dense_ir_certificate_dtype_name() -> CertificateDType:
+    """Return the policy certificate dtype name (numpy/JAX-compatible string)."""
+    return MIXED_DENSE_IR_ACCURACY_POLICY.certificate_dtype

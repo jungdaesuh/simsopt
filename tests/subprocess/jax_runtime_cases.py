@@ -1818,14 +1818,12 @@ def _run_mutable_objective_state_case() -> None:
         _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
-    from simsopt_jax.geo.optimizers.optimizer import jax_minimize  # type: ignore[import-untyped]
-
     objective = _ShiftedQuadratic([0.0, 0.0])
     x0 = jnp.asarray(np.array([2.0, -1.0], dtype=np.float64))
 
-    first = jax_minimize(objective, x0, method="bfgs-ondevice", maxiter=20)
+    first = target_minimize(objective, x0, method="bfgs-ondevice", maxiter=20)
     objective.target = np.asarray([1.5, -0.5], dtype=np.float64)
-    second = jax_minimize(objective, x0, method="bfgs-ondevice", maxiter=20)
+    second = target_minimize(objective, x0, method="bfgs-ondevice", maxiter=20)
 
     np.testing.assert_allclose(
         np.asarray(first.x),

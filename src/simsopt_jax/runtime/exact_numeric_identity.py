@@ -9,10 +9,7 @@ import math
 import jax
 import numpy as np
 
-
-def _host_array(value: object) -> np.ndarray:
-    with jax.transfer_guard_device_to_host("allow"):
-        return np.asarray(jax.device_get(value))
+from simsopt_jax.runtime.host_boundary import host_array as _host_array
 
 
 def exact_numeric_tree_sha256(value: object) -> str:

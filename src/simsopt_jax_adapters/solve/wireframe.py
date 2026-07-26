@@ -29,6 +29,10 @@ from simsopt_jax.core.wireframe_workflow import (
     _gsco_opposite_candidate_index as _gsco_opposite_candidate_index,
     greedy_stellarator_coil_optimization_jax,
 )
+from simsopt_jax.runtime.host_boundary import (
+    host_array as _host_array,
+    host_tree as _host_pytree,
+)
 
 __all__ = [
     "WireframeGSCOResult",
@@ -243,22 +247,6 @@ def _insert_free_segment_solution(
 ) -> jax.Array:
     x = jnp.zeros((int(n_segments), 1), dtype=xfree.dtype)
     return x.at[free_segments, :].set(xfree)
-
-
-def _host_pytree(value: object):
-    with jax.transfer_guard_device_to_host("allow"):
-        return jax.device_get(value)
-
-
-def _host_array(value: object, *, dtype=None) -> np.ndarray:
-    out = _host_pytree(value)
-    if dtype is None:
-        return np.asarray(out)
-    return np.asarray(out, dtype=dtype)
-
-
-def _host_scalar(value: object):
-    return _host_array(value).reshape(()).item()
 
 
 def gsco_wireframe_jax(

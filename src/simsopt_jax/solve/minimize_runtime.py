@@ -12,6 +12,11 @@ import optimistix as optx
 from jax.extend import core as jax_core
 from scipy.optimize import OptimizeResult
 
+from simsopt_jax.runtime.host_boundary import (
+    host_array_after_ready as host_array,
+    host_float_after_ready as host_float,
+    host_int,
+)
 from .contracts import (
     Callback,
     Driver,
@@ -22,14 +27,6 @@ from .contracts import (
 )
 from .optax.contracts import OptaxAdamOptions, OptaxLBFGSOptions, OptaxLineSearch
 from .optimistix.contracts import OptimistixLBFGSOptions
-
-
-def host_array(value) -> np.ndarray:
-    return np.asarray(jax.device_get(jax.block_until_ready(value)))
-
-
-def host_float(value) -> float:
-    return float(np.asarray(jax.device_get(jax.block_until_ready(value))).reshape(()))
 
 
 def block_jax_leaves(value) -> None:
@@ -266,9 +263,7 @@ def _emit_optax_callback(
             grad_norm_inf=grad_norm_inf,
             wallclock_s=wallclock_s,
             learning_rate=host_float(line_search_state.learning_rate),
-            num_linesearch_steps=int(
-                np.asarray(jax.device_get(line_search_state.info.num_linesearch_steps))
-            ),
+            num_linesearch_steps=host_int(line_search_state.info.num_linesearch_steps),
             decrease_error=host_float(line_search_state.info.decrease_error),
             curvature_error=host_float(line_search_state.info.curvature_error),
         )
@@ -328,7 +323,7 @@ def run_optimistix_minimize(
     ) = optimistix_result_metadata(solution.result)
     success = optimistix_success and bool(finite)
     status = 0 if success else 1 if finite else 2
-    num_steps = int(np.asarray(jax.device_get(solution.stats["num_steps"])))
+    num_steps = host_int(solution.stats["num_steps"])
     wallclock_s = time.perf_counter() - start
     if callback is not None:
         callback(

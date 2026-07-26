@@ -1,4 +1,9 @@
-"""Exact producer/consumer identities for dense linear-solve factor handoffs."""
+"""Exact producer/consumer identities for dense linear-solve factor handoffs.
+
+Terminology is identity / integrity receipt, never authorization or access-key.
+Factors cross a consumer boundary only when sealed into an atomic handoff and
+re-validated against the consumer's live state.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +12,17 @@ import hmac
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Callable, cast
 
 import numpy as np
 from simsopt_jax.backend import get_backend_policy, get_chunk_tuning
 from simsopt_jax.runtime.exact_numeric_identity import exact_numeric_tree_sha256
+
+# Private construction token: only :func:`build_exact_factor_handoff` may mint
+# a valid :class:`ExactFactorHandoff`. Callers cannot affiliate raw factors with
+# an integrity receipt after the fact by constructing the dataclass directly.
+_EXACT_FACTOR_HANDOFF_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -27,6 +37,37 @@ class ExactHandoffProducerSeal:
         payload = json.loads(self.canonical_payload_json)
         payload["same_state_key_sha256"] = self.same_state_key_sha256
         return payload
+
+
+@dataclass(frozen=True)
+class ExactFactorHandoff:
+    """Atomic factors plus producer integrity receipt.
+
+    Construct only via :func:`build_exact_factor_handoff`. Consumers obtain
+    factors exclusively through :func:`require_exact_factor_handoff`, which
+    re-seals from live state and fails closed on substitution or mismatch.
+    """
+
+    _factors: object = field(repr=False)
+    _integrity_receipt: ExactHandoffProducerSeal
+    _construction_token: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._construction_token is not _EXACT_FACTOR_HANDOFF_TOKEN:
+            raise RuntimeError(
+                "ExactFactorHandoff must be built via build_exact_factor_handoff; "
+                "raw factors cannot be affiliated with an integrity receipt "
+                "after the fact."
+            )
+        if not isinstance(self._integrity_receipt, ExactHandoffProducerSeal):
+            raise TypeError(
+                "ExactFactorHandoff integrity receipt must be ExactHandoffProducerSeal."
+            )
+
+    @property
+    def integrity_receipt(self) -> ExactHandoffProducerSeal:
+        """Return the sealed producer identity bound to these factors."""
+        return self._integrity_receipt
 
 
 def canonical_json_sha256(value: Mapping[str, object]) -> str:
@@ -102,6 +143,26 @@ def runtime_policy_identity() -> dict[str, object]:
     }
 
 
+def _certificate_coil_set_spec_from_dofs(
+    state: Mapping[str, object],
+) -> Callable[[object], object]:
+    """Resolve the certificate coil-set mapper from production or test state.
+
+    Production compiled-bundle state stores ``coil_set_spec_from_dofs`` and may
+    omit a separate certificate mapper. Prefer an explicit certificate mapper
+    when present; otherwise fall back to the production coil-set mapper.
+    """
+    certificate_spec_from_dofs = state.get("certificate_coil_set_spec_from_dofs")
+    if certificate_spec_from_dofs is None:
+        certificate_spec_from_dofs = state.get("coil_set_spec_from_dofs")
+    if certificate_spec_from_dofs is None:
+        raise KeyError(
+            "Factor handoff identity requires certificate_coil_set_spec_from_dofs "
+            "or coil_set_spec_from_dofs on state."
+        )
+    return cast(Callable[[object], object], certificate_spec_from_dofs)
+
+
 def build_exact_handoff_identity(
     state: Mapping[str, object],
     *,
@@ -112,11 +173,7 @@ def build_exact_handoff_identity(
 ) -> ExactHandoffProducerSeal:
     """Bind the live state and configuration consumed by one exact handoff."""
     objective_kwargs = cast(Mapping[str, object], state["objective_kwargs"])
-    certificate_spec_from_dofs = cast(
-        Callable[[object], object],
-        state["certificate_coil_set_spec_from_dofs"],
-    )
-    certificate_spec = certificate_spec_from_dofs(coil_dofs)
+    certificate_spec = _certificate_coil_set_spec_from_dofs(state)(coil_dofs)
     grid_modes = {
         name: objective_kwargs.get(name)
         for name in (
@@ -166,6 +223,75 @@ def build_exact_handoff_identity(
         "linear_solve_tolerance": float(cast(float, state["linear_solve_tol"])),
     }
     return seal_exact_handoff_identity(identity)
+
+
+def build_exact_factor_handoff(
+    state: Mapping[str, object],
+    *,
+    coil_dofs: object,
+    solved_x: object,
+    factors: object,
+    producer_graph_sha256: str,
+) -> ExactFactorHandoff:
+    """Seal live factors with a producer integrity receipt in one atomic handoff.
+
+    The integrity receipt is computed from the factors and live producer state at
+    construction time; callers cannot attach a receipt to unaffiliated factors.
+    """
+    if factors is None:
+        raise ValueError("Cannot build ExactFactorHandoff without factors.")
+    integrity_receipt = build_exact_handoff_identity(
+        state,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        factors=factors,
+        producer_graph_sha256=producer_graph_sha256,
+    )
+    return ExactFactorHandoff(
+        _factors=factors,
+        _integrity_receipt=integrity_receipt,
+        _construction_token=_EXACT_FACTOR_HANDOFF_TOKEN,
+    )
+
+
+def require_exact_factor_handoff(
+    handoff: object,
+    *,
+    state: Mapping[str, object],
+    coil_dofs: object,
+    solved_x: object,
+    producer_graph_sha256: str,
+) -> object:
+    """Release factors only after the consumer re-seals matching identity.
+
+    Rebuilds consumer identity from the handoff's factors plus the consumer's
+    live target state (coil dofs / solved decision vector / runtime policy /
+    producer graph). Calls :func:`validate_same_state_identity` and returns the
+    factors only on exact match. Fails closed on:
+
+    * raw / unaffiliated factors (not an :class:`ExactFactorHandoff`)
+    * forged or non-canonical integrity receipts
+    * factor substitution under a stolen receipt
+    * mismatched consumer state or producer graph
+    """
+    if not isinstance(handoff, ExactFactorHandoff):
+        raise TypeError(
+            "Factor consumer requires ExactFactorHandoff integrity receipt; "
+            "unaffiliated raw factors are rejected."
+        )
+    if handoff._construction_token is not _EXACT_FACTOR_HANDOFF_TOKEN:
+        raise RuntimeError(
+            "ExactFactorHandoff construction token is invalid; factors are not released."
+        )
+    consumer_identity = build_exact_handoff_identity(
+        state,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        factors=handoff._factors,
+        producer_graph_sha256=producer_graph_sha256,
+    )
+    validate_same_state_identity(handoff.integrity_receipt, consumer_identity)
+    return handoff._factors
 
 
 def validate_same_state_identity(

@@ -22,6 +22,19 @@ def _set_test_precision(precision: Literal["mixed", "fp64"]) -> None:
     set_backend(mode, precision=precision, configure_runtime=False)
 
 
+def test_dense_square_operator_solves_are_reexported_from_optimizer():
+    """R07 regression: LU/LSQ dense solves must remain on the optimizer facade."""
+    from simsopt_jax.geo.optimizers import optimizer as opt
+    from simsopt_jax.geo.optimizers.private import _dense_ir as dense_ir
+
+    for name in (
+        "_solve_dense_square_operator_lu_system_with_status",
+        "_solve_dense_square_operator_least_squares_system_with_status",
+    ):
+        assert hasattr(opt, name), name
+        assert getattr(opt, name) is getattr(dense_ir, name)
+
+
 def test_mixed_dense_ir_certifies_widened_factors_against_live_fp64_operator():
     certificate_matrix = jnp.asarray(
         ((4.1, 0.7), (0.7, 3.2)),

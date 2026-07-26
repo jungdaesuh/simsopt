@@ -94,6 +94,13 @@ from simsopt_jax_adapters.geo._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback as _guard_none_G_coil_gradient_callback,
     require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
 )
+from simsopt_jax_adapters.geo.pre_newton_seed_policy import (
+    combine_mixed_seed_gate,
+    mixed_bounded_result_flags,
+    mixed_canonical_fallback_flags,
+    route_after_bounded_attempt,
+    route_after_seed_gate,
+)
 from simsopt_jax.core.field import (
     _evaluate_grouped_field_group,
     grouped_biot_savart_A_from_inputs,
@@ -6594,7 +6601,7 @@ class BoozerSurfaceJAX(Optimizable):
         proposal_value, proposal_gradient = certificate_value_and_grad(proposal_seed)
         original_gradient_norm = jnp.linalg.norm(original_gradient)
         newton_trace_capacity = self.traceable_newton_trace_capacity(method)
-        seed_gate_accepted, _proposal_gradient_norm = (
+        seed_candidate_accepted, _proposal_gradient_norm = (
             _optimizer_jax._newton_candidate_status(
                 proposal_seed,
                 proposal_value,
@@ -6606,7 +6613,11 @@ class BoozerSurfaceJAX(Optimizable):
                 dx=original_seed - proposal_seed,
             )
         )
-        seed_gate_accepted = seed_gate_accepted & proposal_pre_newton["success"]
+        # SSOT: merit gate + proposal pre-Newton success (see pre_newton_seed_policy).
+        seed_gate_accepted = combine_mixed_seed_gate(
+            proposal_success=proposal_pre_newton["success"],
+            seed_candidate_accepted=seed_candidate_accepted,
+        )
 
         def normalize_trace_fields(
             result: Mapping[str, object],
@@ -6738,9 +6749,9 @@ class BoozerSurfaceJAX(Optimizable):
             return normalize_result(
                 canonical_pre_newton,
                 canonical_newton,
-                canonical_fallback_used=True,
-                mixed_seed_accepted=seed_gate_accepted,
-                mixed_bounded_certificate_accepted=False,
+                **mixed_canonical_fallback_flags(
+                    seed_gate_accepted=seed_gate_accepted,
+                ),
             )
 
         def run_bounded_or_canonical(_):
@@ -6755,22 +6766,22 @@ class BoozerSurfaceJAX(Optimizable):
             bounded_result = normalize_result(
                 proposal_pre_newton,
                 bounded_newton,
-                canonical_fallback_used=False,
-                mixed_seed_accepted=True,
-                mixed_bounded_certificate_accepted=bounded_newton["success"],
+                **mixed_bounded_result_flags(
+                    bounded_certificate_success=bounded_newton["success"],
+                ),
             )
-            return jax.lax.cond(
+            # SSOT step 3: keep bounded certificate or one canonical fallback.
+            return route_after_bounded_attempt(
                 bounded_newton["success"],
-                lambda _: bounded_result,
-                run_canonical_pipeline,
-                operand=None,
+                keep_bounded=lambda _: bounded_result,
+                run_canonical=run_canonical_pipeline,
             )
 
-        return jax.lax.cond(
+        # SSOT step 2: seed-gate accepted → bounded attempt; else canonical.
+        return route_after_seed_gate(
             seed_gate_accepted,
-            run_bounded_or_canonical,
-            run_canonical_pipeline,
-            operand=None,
+            when_accepted=run_bounded_or_canonical,
+            when_rejected=run_canonical_pipeline,
         )
 
     def run_code_traceable(

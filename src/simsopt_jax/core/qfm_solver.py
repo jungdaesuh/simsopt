@@ -438,13 +438,13 @@ def _bfgs_line_search(value_and_grad, x, fun, grad, direction):
     return best_x, best_fun, best_grad, accepted, n_evals
 
 
-def _bfgs_minimize(
+def _make_bfgs_runner(
     objective,
-    init_dofs: object,
-    *objective_args: object,
+    *,
     max_iter: int,
     tol: float,
 ):
+    """Build one compiled BFGS runner for repeated fixed-shape calls."""
     max_iter_value = int(max_iter)
     if max_iter_value < 0:
         raise ValueError("max_iter must be non-negative.")
@@ -573,7 +573,7 @@ def _bfgs_minimize(
             njev=final_state.njev,
         )
 
-    return run(as_jax_float64(init_dofs), *objective_args)
+    return run
 
 
 def _scalar_from_vector(reference: jax.Array, value: float) -> jax.Array:
@@ -708,17 +708,19 @@ def qfm_penalty_solve_jax(
             toroidal_flux_idx=toroidal_flux_idx,
         )
 
-    result = _bfgs_minimize(
+    run_bfgs = _make_bfgs_runner(
         objective,
-        init_dofs,
+        max_iter=max_iter,
+        tol=tol,
+    )
+    result = run_bfgs(
+        as_jax_float64(init_dofs),
         spec,
         coil_set_spec,
         label_spec,
         label_coil_set_spec,
         targetlabel,
         constraint_weight,
-        max_iter=max_iter,
-        tol=tol,
     )
     final_dofs = as_jax_float64(result.x)
     return (
@@ -864,6 +866,8 @@ def qfm_augmented_lagrangian_solve_jax(
     """Run a pure-JAX augmented-Lagrangian QFM solve."""
     _require_bfgs_optimizer(optimizer)
     dofs = as_jax_float64(init_dofs)
+    # Match the committed sharding returned by BFGS across every outer iteration.
+    dofs = jax.device_put(dofs, dofs.sharding)
     max_outer_value = int(max_outer)
     inner_max_iter_value = int(inner_max_iter)
     if max_outer_value < 1:
@@ -903,37 +907,40 @@ def qfm_augmented_lagrangian_solve_jax(
         )
         return next_multiplier, next_penalty_weight
 
+    def objective(
+        surface_dofs,
+        spec_value,
+        coil_set_spec_value,
+        label_spec_value,
+        label_coil_set_spec_value,
+        targetlabel_value,
+        multiplier_value,
+        penalty_weight_value,
+    ):
+        return _qfm_augmented_lagrangian_jax_from_dofs(
+            spec_value,
+            surface_dofs,
+            coil_set_spec_value,
+            label=label,
+            label_spec=label_spec_value,
+            label_coil_set_spec=label_coil_set_spec_value,
+            targetlabel=targetlabel_value,
+            multiplier=multiplier_value,
+            penalty_weight=penalty_weight_value,
+            toroidal_flux_idx=toroidal_flux_idx,
+        )
+
+    run_bfgs = _make_bfgs_runner(
+        objective,
+        max_iter=inner_max_iter_value,
+        tol=tol,
+    )
     result_multiplier = multiplier
     result_penalty_weight = penalty_weight
     for outer_index in range(max_outer_value):
         result_multiplier = multiplier
         result_penalty_weight = penalty_weight
-
-        def objective(
-            surface_dofs,
-            spec_value,
-            coil_set_spec_value,
-            label_spec_value,
-            label_coil_set_spec_value,
-            targetlabel_value,
-            multiplier_value,
-            penalty_weight_value,
-        ):
-            return _qfm_augmented_lagrangian_jax_from_dofs(
-                spec_value,
-                surface_dofs,
-                coil_set_spec_value,
-                label=label,
-                label_spec=label_spec_value,
-                label_coil_set_spec=label_coil_set_spec_value,
-                targetlabel=targetlabel_value,
-                multiplier=multiplier_value,
-                penalty_weight=penalty_weight_value,
-                toroidal_flux_idx=toroidal_flux_idx,
-            )
-
-        result = _bfgs_minimize(
-            objective,
+        result = run_bfgs(
             dofs,
             spec,
             coil_set_spec,
@@ -942,8 +949,6 @@ def qfm_augmented_lagrangian_solve_jax(
             targetlabel,
             multiplier,
             penalty_weight,
-            max_iter=inner_max_iter_value,
-            tol=tol,
         )
         dofs = as_jax_float64(result.x)
         if outer_index + 1 < max_outer_value:

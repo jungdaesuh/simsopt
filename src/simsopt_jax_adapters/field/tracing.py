@@ -21,6 +21,7 @@ from simsopt._core.tracing_metadata import (
 from simsopt.field.magneticfield import MagneticField
 from simsopt.field.tracing import gc_to_fullorbit_initial_guesses
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
+from simsopt_jax.runtime.host_boundary import host_array as _jax_trace_host_array
 from simsopt_jax.core.tracing import (
     FieldlineTracingSpec,
     FullorbitTracingSpec,
@@ -78,11 +79,6 @@ def _normalize_parallel_speeds(
             f"Expected {nparticles} parallel speeds, got shape {speed_par.shape}"
         )
     return speed_par
-
-
-def _jax_trace_host_array(value: object, *, dtype) -> np.ndarray:
-    with jax.transfer_guard_device_to_host("allow"):
-        return np.asarray(jax.device_get(value), dtype=dtype)
 
 
 def _allgather_flat(comm, values):
@@ -690,8 +686,9 @@ def _translate_stopping_criteria_to_jax(stopping_criteria: list) -> tuple:
             classifier_obj = levelset_classifier_for(crit) or getattr(
                 crit, "classifier", None
             )
-            if classifier_obj is not None and not supports_levelset_classifier_conversion(
-                classifier_obj
+            if (
+                classifier_obj is not None
+                and not supports_levelset_classifier_conversion(classifier_obj)
             ):
                 classifier_obj = levelset_classifier_from_interpolant(classifier_obj)
             if classifier_obj is None:

@@ -35,7 +35,6 @@ from .boozersurface_jax_test_helpers import (
     _soj,
     _successful_minimize_result,
     _successful_newton_polish_result,
-    jax_minimize,
 )
 
 
@@ -1784,7 +1783,7 @@ class TestOptimizerAdapterPrivate:
 
     def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
         with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):
-            jax_minimize(
+            _opt.jax_minimize(
                 lambda x: jnp.sum(x**2),
                 jnp.array([1.0, -1.0], dtype=jnp.float64),
                 method="bfgs-hybrid",
@@ -1805,7 +1804,7 @@ class TestOptimizerAdapterPrivate:
         x0 = _structured_optimizer_x0()
         callback_calls = []
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad,
             x0,
             method="bfgs-ondevice",
@@ -1996,7 +1995,7 @@ class TestOptimizerAdapterPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        result = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=0)
+        result = _opt.target_minimize(quad, x0, method="bfgs-ondevice", maxiter=0)
 
         np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
         assert result.nit == 0
@@ -2012,7 +2011,7 @@ class TestOptimizerAdapterPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.zeros(2, dtype=jnp.float64)
-        result = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
+        result = _opt.target_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
 
         np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
         assert result.nit == 0
@@ -2028,7 +2027,7 @@ class TestOptimizerAdapterPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        result = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=1)
+        result = _opt.target_minimize(quad, x0, method="bfgs-ondevice", maxiter=1)
 
         assert float(result.fun) < float(quad(x0))
         assert result.nit == 1
@@ -2049,7 +2048,7 @@ class TestOptimizerAdapterPrivate:
             )
 
         x0 = jnp.array([1.0], dtype=jnp.float64)
-        result = jax_minimize(
+        result = _opt.target_minimize(
             nan_after_first_step,
             x0,
             method="bfgs-ondevice",
@@ -2078,7 +2077,7 @@ class TestOptimizerAdapterPrivate:
             )
 
         x0 = jnp.array([1.0], dtype=jnp.float64)
-        result = jax_minimize(
+        result = _opt.target_minimize(
             inf_after_first_step,
             x0,
             method="bfgs-ondevice",
@@ -2100,8 +2099,8 @@ class TestOptimizerAdapterPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        first = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
-        second = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
+        first = _opt.target_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
+        second = _opt.target_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
 
         np.testing.assert_allclose(np.asarray(first.x), np.asarray(second.x))
         np.testing.assert_allclose(np.asarray(first.jac), np.asarray(second.jac))
@@ -2132,7 +2131,7 @@ class TestLBFGSMethodPrivate:
             raising=False,
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad,
             jnp.array([1.0, -2.0], dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2154,7 +2153,7 @@ class TestLBFGSMethodPrivate:
 
         monkeypatch.setattr(_opt_ref, "scipy_minimize", reject_scipy_minimize)
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad,
             jnp.array([1.0, -2.0], dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2180,7 +2179,7 @@ class TestLBFGSMethodPrivate:
             reject_legacy_mainlb,
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad,
             jnp.array([1.0, -2.0], dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2198,7 +2197,7 @@ class TestLBFGSMethodPrivate:
             return 0.5 * jnp.dot(x, x)
 
         with pytest.raises(ValueError, match="maxls must be positive"):
-            jax_minimize(
+            _opt.target_minimize(
                 quad,
                 jnp.array([1.0, -2.0], dtype=jnp.float64),
                 method="lbfgs-ondevice",
@@ -2228,7 +2227,7 @@ class TestLBFGSMethodPrivate:
             options={"maxiter": 0},
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_quad,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2272,7 +2271,7 @@ class TestLBFGSMethodPrivate:
             options=options,
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_rosenbrock,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2323,7 +2322,7 @@ class TestLBFGSMethodPrivate:
             options=options,
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_rosenbrock,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2377,7 +2376,7 @@ class TestLBFGSMethodPrivate:
         def shifted_quad(x):
             return 0.5 * x @ (matrix @ x) + linear @ x
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             shifted_quad,
             jnp.asarray([1.0, -2.0], dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2410,7 +2409,7 @@ class TestLBFGSMethodPrivate:
             options=options,
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_quad,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2440,7 +2439,7 @@ class TestLBFGSMethodPrivate:
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad,
             jnp.array([1.0, -2.0], dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2480,7 +2479,7 @@ class TestLBFGSMethodPrivate:
             options=options,
         )
 
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_quad,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2520,7 +2519,7 @@ class TestLBFGSMethodPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        result = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+        result = _opt.target_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
 
         assert result.success is True
         assert result.nit > 0
@@ -2537,7 +2536,7 @@ class TestLBFGSMethodPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad,
             x0,
             method="lbfgs-ondevice",
@@ -2558,7 +2557,7 @@ class TestLBFGSMethodPrivate:
             return 0.5 * jnp.dot(x, x)
 
         with pytest.raises(ValueError, match="optimizer_state_trace would allocate"):
-            jax_minimize(
+            _opt.target_minimize(
                 quad,
                 jnp.array([1.0, -2.0], dtype=jnp.float64),
                 method="lbfgs-ondevice",
@@ -2583,7 +2582,7 @@ class TestLBFGSMethodPrivate:
         progress_calls = []
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
         with jax.transfer_guard("disallow"):
-            result = jax_minimize(
+            result = _opt.target_minimize(
                 quad_value_and_grad,
                 x0,
                 method="lbfgs-ondevice",
@@ -2619,7 +2618,7 @@ class TestLBFGSMethodPrivate:
             return jnp.vdot(residual, residual), two * residual
 
         with jax.transfer_guard("disallow"):
-            result = jax_minimize(
+            result = _opt.target_minimize(
                 value_and_grad,
                 x0,
                 method="lbfgs-ondevice",
@@ -2769,7 +2768,7 @@ class TestLBFGSMethodPrivate:
 
         callback_calls = []
         progress_calls = []
-        result = jax_minimize(
+        result = _opt.target_minimize(
             quad_value_and_grad,
             jnp.array([1.0, -2.0], dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -2822,7 +2821,7 @@ class TestLBFGSMethodPrivate:
             raise StopIteration
 
         with jax.transfer_guard("disallow"):
-            result = jax_minimize(
+            result = _opt.target_minimize(
                 jax_value_and_grad,
                 jnp.asarray(x0, dtype=jnp.float64),
                 method="lbfgs-ondevice",
@@ -2866,7 +2865,7 @@ class TestLBFGSMethodPrivate:
         options = {"maxcor": 3, "maxls": 5, "ftol": 0.0, "gtol": 1e-8}
         scipy_callback_events = []
         scipy_progress_events = []
-        scipy_style = jax_minimize(
+        scipy_style = _opt.target_minimize(
             rosenbrock,
             x0,
             method="lbfgs-ondevice",
@@ -2877,7 +2876,7 @@ class TestLBFGSMethodPrivate:
         )
         optax_callback_events = []
         optax_progress_events = []
-        optax_style = jax_minimize(
+        optax_style = _opt.target_minimize(
             rosenbrock,
             x0,
             method="optax-lbfgs-ondevice",
@@ -2993,10 +2992,10 @@ class TestLBFGSMethodPrivate:
             return 0.5 * jnp.dot(x, x)
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        baseline = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+        baseline = _opt.target_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
 
         for _ in range(4):
-            current = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+            current = _opt.target_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
             np.testing.assert_allclose(np.asarray(current.x), np.asarray(baseline.x))
             np.testing.assert_allclose(
                 np.asarray(current.jac),
@@ -3016,7 +3015,7 @@ class TestLBFGSMethodPrivate:
             return 1e-15 * (jnp.sin(1e6 * x[0]) + 2.0)
 
         x0 = jnp.array([1e-6], dtype=jnp.float64)
-        result = jax_minimize(
+        result = _opt.target_minimize(
             tiny_wave,
             x0,
             method="lbfgs-ondevice",
@@ -3055,7 +3054,7 @@ class TestLBFGSMethodPrivate:
             method="L-BFGS-B",
             options={"maxiter": 5, "gtol": 1e-8},
         )
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_nan_at_origin,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",
@@ -3094,7 +3093,7 @@ class TestLBFGSMethodPrivate:
             method="L-BFGS-B",
             options={"maxiter": 5, "gtol": 1e-8},
         )
-        result = jax_minimize(
+        result = _opt.target_minimize(
             jax_inf_grad_at_origin,
             jnp.asarray(x0, dtype=jnp.float64),
             method="lbfgs-ondevice",

@@ -2,9 +2,12 @@
 
 This package contains the private BFGS and L-BFGS implementations maintained
 against the checked local JAX 0.10.0 runtime after the initial port from the
-upstream JAX optimizer sources.
+upstream JAX optimizer sources, plus the internal dense-IR solver owner
+(``_dense_ir``).
 
-The public API is in ``simsopt_jax.geo.optimizers.optimizer``.
+The public API is in ``simsopt_jax.geo.optimizers.optimizer``. Dense-IR symbols
+are re-exported from that module for adapter stability; import ``_dense_ir``
+directly only when the private owner boundary is intentional.
 """
 
 from . import _line_search as _line_search_module

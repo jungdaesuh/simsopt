@@ -15,6 +15,8 @@ from simsopt_jax.core._math_utils import (
     as_runtime_array as _as_runtime_array,
     as_runtime_value as _as_runtime_value,
 )
+from simsopt_jax.runtime.host_boundary import host_array as _host_array
+from simsopt_jax.runtime.host_boundary import host_float as _host_float
 from simsopt_jax.core.pm_optimization import (
     GPMOArbVecBacktrackingResult as _CoreGPMOArbVecBacktrackingResult,
     GPMOArbVecBacktrackingSpec,
@@ -93,8 +95,8 @@ def _is_tracing(value: object) -> bool:
 def _raise_if_infeasible_initial_condition(
     moments: jax.Array, projected: jax.Array
 ) -> None:
-    moments_host = np.asarray(jax.device_get(moments))
-    projected_host = np.asarray(jax.device_get(projected))
+    moments_host = _host_array(moments)
+    projected_host = _host_array(projected)
     if not np.allclose(moments_host, projected_host):
         raise ValueError(
             "Initial dipole guess must contain values that satisfy the "
@@ -103,10 +105,10 @@ def _raise_if_infeasible_initial_condition(
 
 
 def _host_scalar(name: str, value: jax.Array) -> float:
-    array = np.asarray(jax.device_get(value))
+    array = _host_array(value)
     if array.shape != ():
         raise ValueError(f"{name} must be scalar.")
-    return float(array)
+    return _host_float(array)
 
 
 @dataclass(frozen=True)
