@@ -154,7 +154,7 @@
     {
       "id": "boozer-surface-optimization",
       "path": "2_Intermediate/boozer_surface_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "2_Intermediate",
       "inspired_by": ["2_Intermediate/QH_fixed_resolution_boozer.py", "2_Intermediate/boozer.py", "2_Intermediate/boozerQA.py", "2_Intermediate/resolution_increase_boozer.py"],
       "execution_kind": "adapter",
@@ -168,7 +168,7 @@
     {
       "id": "wireframe-optimization",
       "path": "2_Intermediate/wireframe_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "2_Intermediate",
       "inspired_by": ["2_Intermediate/wireframe_gsco_modular.py", "2_Intermediate/wireframe_gsco_sector_saddle.py", "2_Intermediate/wireframe_rcls_basic.py", "2_Intermediate/wireframe_rcls_with_ports.py", "3_Advanced/wireframe_gsco_multistep.py"],
       "execution_kind": "adapter",
@@ -182,7 +182,7 @@
     {
       "id": "coil-force-and-finite-build",
       "path": "3_Advanced/coil_force_and_finite_build.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "3_Advanced",
       "inspired_by": ["2_Intermediate/strain_optimization.py", "3_Advanced/coil_forces.py", "3_Advanced/stage_two_optimization_finitebuild.py"],
       "execution_kind": "adapter",

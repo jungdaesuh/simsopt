@@ -364,3 +364,113 @@ existing CPU integration and strict-GPU jobs:
 ```text
 1 passed, 17 deselected in 0.10s
 ```
+
+## Boozer-surface optimization vertical slice
+
+### RED
+
+```console
+../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/integration/test_jax_examples.py -k boozer_example
+```
+
+The behavioral test failed at the delivery contract with
+`AssertionError: assert 'planned' == 'ready'` (1 failed, 17 deselected).
+
+### GREEN
+
+The identical command passed after adding a bounded NCSX surface solve,
+solver-success and stationarity certificates, residual evaluation through
+`BoozerResidualJAX`, and explicit accepted-surface publication:
+
+```text
+1 passed, 17 deselected in 32.21s
+```
+
+## Wireframe optimization vertical slice
+
+### RED
+
+```console
+MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/integration/test_jax_examples.py -k wireframe_example
+```
+
+The behavioral test failed at the delivery contract with
+`AssertionError: assert 'planned' == 'ready'` (1 failed, 18 deselected).
+
+### GREEN
+
+The identical command passed after adding native `ToroidalWireframe`
+construction, a public RCLS solve checked against an independently assembled
+KKT system, explicit current publication, and a bounded public GSCO multistep
+transition:
+
+```text
+1 passed, 18 deselected in 3.44s
+```
+
+## Force and finite-build vertical slice
+
+### RED
+
+```console
+MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/integration/test_jax_examples.py -k force_finite_build_example
+```
+
+The behavioral test failed at the delivery contract with
+`AssertionError: assert 'planned' == 'ready'` (1 failed, 19 deselected).
+
+### GREEN
+
+The first implementation run exposed the public framed-curve constructor
+contract (`ZeroRotationJAX` must be supplied explicitly). After correcting
+that contract, the identical command passed with a native force-integral
+oracle, directional finite-difference check, orthonormal-frame check, and the
+zero-torsion planar limit:
+
+```text
+1 passed, 19 deselected in 5.34s
+```
+
+## Single-stage Wave 3 readiness gate
+
+The single-stage record remains `planned`. Two bounded live probes—a symmetric
+two-coil fixture and the convergent NCSX fixture—successfully constructed
+`TraceableObjectiveSession` instances and returned finite outer values, but
+their representative derivative evaluations returned the contract's
+fail-closed all-NaN gradient. The plan requires a representative derivative
+oracle before implementation, so no script was added and no invalid accepted
+state was published. This is readiness evidence, not a RED/GREEN receipt.
+
+## Final refactor and public-surface gate
+
+Commands:
+
+```console
+uvx ruff check examples/jax tests/test_jax_examples_manifest.py tests/integration/test_jax_examples.py
+uvx ruff format --check examples/jax tests/test_jax_examples_manifest.py tests/integration/test_jax_examples.py
+python -m compileall -q examples/jax tests/test_jax_examples_manifest.py tests/integration/test_jax_examples.py
+MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/test_jax_examples_manifest.py tests/integration/test_jax_examples.py
+../.venv-simsopt-linux-x86/bin/python examples/jax/run_examples.py --lane cpu-smoke
+```
+
+Observed result:
+
+```text
+All checks passed!
+16 files already formatted
+38 passed in 86.98s
+PASS traceable-least-squares
+PASS curve-length-optimization
+PASS surface-geometry-optimization
+PASS coil-flux-optimization
+PASS qfm-surface-optimization
+PASS permanent-magnet-optimization
+PASS fieldline-and-particle-tracing
+PASS boozer-surface-optimization
+PASS wireframe-optimization
+PASS coil-force-and-finite-build
+```
+
+Focused underlying public-surface regressions then passed: 4 Boozer
+solver/objective cases in 27.77 seconds, 4 wireframe RCLS/GSCO cases in 3.72
+seconds, and 5 force/Frenet-frame cases in 2.07 seconds.

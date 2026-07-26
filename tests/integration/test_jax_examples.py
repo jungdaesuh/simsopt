@@ -451,3 +451,97 @@ def test_qfm_example_reduces_penalty_and_publishes_final_surface() -> None:
     assert observables["final_penalty"] < observables["initial_penalty"]
     assert observables["surface_update_norm"] > 0.0
     assert observables["gradient_norm"] < observables["initial_gradient_norm"]
+
+
+def test_boozer_example_reports_solver_certificate_and_final_surface() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "boozer-surface-optimization"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["solver_success"] is True
+    assert observables["surface_update_norm"] > 0.0
+    assert observables["residual_norm"] < 1.0
+    assert observables["final_gradient_inf_norm"] <= 1.0e-8
+
+
+def test_wireframe_example_matches_constrained_oracle_and_publishes_state() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "wireframe-optimization"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["solution_oracle_error"] <= 1.0e-10
+    assert observables["constraint_residual_norm"] <= 1.0e-10
+    assert observables["published_current_error"] == 0.0
+    assert observables["gsco_nonfinal_steps"] == 1
+    assert observables["gsco_enclosed_segments"] == 4
+
+
+def test_force_finite_build_example_matches_force_and_frame_oracles() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "coil-force-and-finite-build"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["force_objective_oracle_error"] <= 1.0e-12
+    assert observables["gradient_fd_error"] <= 1.0e-6
+    assert observables["frame_orthonormality_error"] <= 1.0e-12
+    assert observables["planar_torsion_max"] <= 1.0e-12
