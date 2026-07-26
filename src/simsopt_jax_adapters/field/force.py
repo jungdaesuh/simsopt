@@ -16,7 +16,9 @@ from simsopt.field.coil import (
     RegularizedCoil,
     ScaledCurrent,
 )
-from simsopt_jax_adapters.field._coil_graph import _unwrap_coil_curve_and_current_objects
+from simsopt_jax_adapters.field._coil_graph import (
+    _unwrap_coil_curve_and_current_objects,
+)
 from simsopt.field.selffield import B_regularized_pure
 from simsopt.geo.curve import (
     centroid_pure,
@@ -44,6 +46,7 @@ from simsopt_jax.core._math_utils import (
 )
 from simsopt_jax.core.curve_geometry import optimizable_input_dofs_from_map_spec
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
+from simsopt_jax.runtime.host_boundary import host_array as _host_array
 from simsopt_jax_adapters.geo.curve_specs import (
     curve_spec_from_adapter_curve,
     supports_adapter_curve_spec,
@@ -815,26 +818,28 @@ def _assemble_curve_current_derivative(
     deriv = 0
     if dgamma is not None:
         deriv += sum(
-            c.curve.dgamma_by_dcoeff_vjp(block)
+            c.curve.dgamma_by_dcoeff_vjp(_host_array(block, dtype=np.float64))
             for c, block in zip(coils, _iter_runtime_axis0_entries(dgamma), strict=True)
         )
     if dgammadash is not None:
         deriv += sum(
-            c.curve.dgammadash_by_dcoeff_vjp(block)
+            c.curve.dgammadash_by_dcoeff_vjp(_host_array(block, dtype=np.float64))
             for c, block in zip(
                 coils, _iter_runtime_axis0_entries(dgammadash), strict=True
             )
         )
     if dgammadashdash is not None:
         deriv += sum(
-            c.curve.dgammadashdash_by_dcoeff_vjp(block)
+            c.curve.dgammadashdash_by_dcoeff_vjp(_host_array(block, dtype=np.float64))
             for c, block in zip(
                 coils, _iter_runtime_axis0_entries(dgammadashdash), strict=True
             )
         )
     if dcurrent is not None:
         deriv += sum(
-            c.current.vjp(_reshape_current_derivative(block))
+            c.current.vjp(
+                _host_array(_reshape_current_derivative(block), dtype=np.float64)
+            )
             for c, block in zip(
                 coils, _iter_runtime_axis0_entries(dcurrent), strict=True
             )
@@ -1115,12 +1120,9 @@ def _coil_coil_inductances_pure(
             gammadashs[:, None, :, :] * gammadashs[i][None, :, None, :],
             axis=-1,
         )
-        mutual_row = jnp.sum(gammadash_prod / rij_norm, axis=(1, 2)) / (
-            n_quadpoints**2
-        )
+        mutual_row = jnp.sum(gammadash_prod / rij_norm, axis=(1, 2)) / (n_quadpoints**2)
         self_row = jnp.sum(
-            gammadash_prod
-            / jnp.sqrt(rij_norm**2 + regularizations[:, None, None]),
+            gammadash_prod / jnp.sqrt(rij_norm**2 + regularizations[:, None, None]),
             axis=(1, 2),
         ) / (n_quadpoints**2)
         return jnp.where(jnp.arange(N) == i, self_row, mutual_row)
@@ -1488,11 +1490,7 @@ def _net_fluxes_pure(
             )
             / n_source_quadpoints
         )
-        return (
-            1e-7
-            * jnp.sum(vector_potential * gammadash_target)
-            / n_target_quadpoints
-        )
+        return 1e-7 * jnp.sum(vector_potential * gammadash_target) / n_target_quadpoints
 
     return lax.map(
         target_flux,

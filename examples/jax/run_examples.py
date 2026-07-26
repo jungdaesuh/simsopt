@@ -44,6 +44,7 @@ _LANE_ENVIRONMENT: dict[Lane, dict[str, str]] = {
         "SIMSOPT_BACKEND_MODE": "jax_gpu_parity",
         "SIMSOPT_BACKEND_STRICT": "1",
         "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_TRANSFER_GUARD": "disallow",
         "SIMSOPT_PRECISION": "fp64",
         "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=true",
         "JAX_PLATFORMS": "cuda",

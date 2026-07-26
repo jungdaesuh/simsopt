@@ -14,7 +14,6 @@ from typing import Literal
 import jax
 import numpy as np
 from simsopt.field import Current, RegularizedCoil
-from simsopt.field.selffield import regularization_circ
 from simsopt.geo import CurveXYZFourier
 from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
 from simsopt_jax_adapters.field.force import LpCurveForce
@@ -65,30 +64,33 @@ def _directional_fd_error(objective: LpCurveForce) -> float:
     initial_dofs = np.asarray(objective.x, dtype=np.float64).copy()
     direction = np.sin(np.arange(initial_dofs.size, dtype=np.float64) + 1.0)
     direction /= np.linalg.norm(direction)
-    directional_gradient = float(np.dot(np.asarray(objective.dJ()), direction))
+    directional_gradient = float(
+        np.dot(np.asarray(jax.device_get(objective.dJ())), direction)
+    )
     step = 1.0e-5
     objective.x = initial_dofs + step * direction
-    value_plus = float(objective.J())
+    value_plus = float(jax.device_get(objective.J()))
     objective.x = initial_dofs - step * direction
-    value_minus = float(objective.J())
+    value_minus = float(jax.device_get(objective.J()))
     objective.x = initial_dofs
     return abs(directional_gradient - (value_plus - value_minus) / (2.0 * step))
 
 
 def _solve() -> ExampleResult:
     current = 1.7e4
+    regularization = 0.05**2 / np.sqrt(np.e)
     target = RegularizedCoil(
         _circle(1.0, 32),
         Current(current),
-        regularization_circ(0.05),
+        regularization,
     )
     source = RegularizedCoil(
         _circle(1.3, 32),
         Current(-current),
-        regularization_circ(0.05),
+        regularization,
     )
     force_objective = LpCurveForce(target, [target, source], p=2.0, threshold=0.0)
-    objective_value = float(force_objective.J())
+    objective_value = float(jax.device_get(force_objective.J()))
 
     tangent_norm = np.linalg.norm(target.curve.gammadash(), axis=1)
     force_norm = np.linalg.norm(target.force([target, source]), axis=1) / 1.0e6
@@ -100,7 +102,7 @@ def _solve() -> ExampleResult:
         target.curve, ZeroRotationJAX(target.curve.quadpoints)
     )
     tangent, normal, binormal = (
-        np.asarray(component, dtype=np.float64)
+        np.asarray(jax.device_get(component), dtype=np.float64)
         for component in framed_curve.rotated_frame()
     )
     frame = np.stack((tangent, normal, binormal), axis=1)
@@ -108,7 +110,14 @@ def _solve() -> ExampleResult:
     identity = np.broadcast_to(np.eye(3), gram.shape)
     frame_orthonormality_error = float(np.max(np.abs(gram - identity)))
     planar_torsion_max = float(
-        np.max(np.abs(np.asarray(framed_curve.frame_torsion(), dtype=np.float64)))
+        np.max(
+            np.abs(
+                np.asarray(
+                    jax.device_get(framed_curve.frame_torsion()),
+                    dtype=np.float64,
+                )
+            )
+        )
     )
     is_correct = bool(
         objective_oracle_error <= 1.0e-12

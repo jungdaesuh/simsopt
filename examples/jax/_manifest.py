@@ -212,6 +212,10 @@ def _validate_ready_source(example: JaxExampleRecord, repo_root: Path) -> None:
         raise ManifestValidationError(
             f"ready example requires cpu-smoke lane: {example.id}"
         )
+    if "gpu-strict" not in example.lanes:
+        raise ManifestValidationError(
+            f"ready example requires gpu-strict lane: {example.id}"
+        )
     if not example.correctness_tests:
         raise ManifestValidationError(
             f"ready example requires correctness tests: {example.id}"

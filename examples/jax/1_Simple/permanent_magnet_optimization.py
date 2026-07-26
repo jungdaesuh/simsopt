@@ -40,19 +40,23 @@ class ExampleResult:
 
 
 def _fixed_grid() -> PermanentMagnetGridJAX:
-    response = jnp.eye(6, dtype=jnp.float64)
-    target = jnp.asarray((0.8, 0.0, 0.0, -0.6, 0.0, 0.0), dtype=jnp.float64)
-    zero_moments = jnp.zeros((2, 3), dtype=jnp.float64)
+    response = jax.device_put(np.eye(6, dtype=np.float64))
+    target = jax.device_put(
+        np.asarray((0.8, 0.0, 0.0, -0.6, 0.0, 0.0), dtype=np.float64)
+    )
+    zero_moments = jax.device_put(np.zeros((2, 3), dtype=np.float64))
     return PermanentMagnetGridJAX(
         A_obj=response,
         b_obj=target,
         ATb=jnp.reshape(response.T @ target, (2, 3)),
-        ATA_scale=jnp.asarray(1.0, dtype=jnp.float64),
+        ATA_scale=jax.device_put(np.asarray(1.0, dtype=np.float64)),
         m0=zero_moments,
         m=zero_moments,
         m_proxy=zero_moments,
-        m_maxima=jnp.ones(2, dtype=jnp.float64),
-        dipole_grid_xyz=jnp.asarray(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))),
+        m_maxima=jax.device_put(np.ones(2, dtype=np.float64)),
+        dipole_grid_xyz=jax.device_put(
+            np.asarray(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)), dtype=np.float64)
+        ),
         coordinate_flag="cartesian",
         R0=0.0,
         nfp=1,
@@ -66,9 +70,13 @@ def _fixed_grid() -> PermanentMagnetGridJAX:
 def _solve() -> ExampleResult:
     grid = _fixed_grid()
     result = GPMO_baseline_jax(grid, K=2)
-    moments_array = np.asarray(result.m, dtype=np.float64)
-    residual_norm = float(np.linalg.norm(np.asarray(result.core_result.residual)))
-    selected = tuple(int(value) for value in np.asarray(result.selected_dipoles))
+    moments_array = np.asarray(jax.device_get(result.m), dtype=np.float64)
+    residual_norm = float(
+        np.linalg.norm(np.asarray(jax.device_get(result.core_result.residual)))
+    )
+    selected = tuple(
+        int(value) for value in np.asarray(jax.device_get(result.selected_dipoles))
+    )
     expected = np.asarray(((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)))
     is_correct = bool(
         np.array_equal(moments_array, expected)

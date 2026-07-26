@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -45,6 +46,79 @@ def _record(
 
 def _manifest(record: JaxExampleRecord) -> JaxExamplesManifest:
     return JaxExamplesManifest(source_catalog=(), jax_examples=(record,))
+
+
+def test_every_ready_repository_example_runs_on_cpu_and_gpu() -> None:
+    """Ready JAX lessons use the same implementation on both real platforms."""
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json",
+        repo_root=repo_root,
+    )
+
+    for example in manifest.jax_examples:
+        if example.status == "ready":
+            assert example.lanes == ("cpu-smoke", "gpu-strict"), example.id
+
+
+def test_every_ready_example_runs_with_global_strict_transfer_guard_on_cpu() -> None:
+    """Exercise the global JAX guard without requiring CUDA in the CPU test job."""
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json",
+        repo_root=repo_root,
+    )
+    environment = build_lane_environment(
+        "cpu-smoke",
+        os.environ,
+        repo_root=repo_root,
+    )
+    environment["SIMSOPT_JAX_TRANSFER_GUARD"] = "disallow"
+    environment["JAX_TRANSFER_GUARD"] = "disallow"
+
+    for example in manifest.jax_examples:
+        if example.status != "ready":
+            continue
+        completed = subprocess.run(
+            build_child_command(example, repo_root=repo_root),
+            cwd=repo_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, f"{example.id}: {completed.stderr}"
+
+
+def test_gpu_examples_do_not_import_host_scipy_optimizers() -> None:
+    """A GPU-strict example cannot hide a CPU optimizer behind JAX metrics."""
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json",
+        repo_root=repo_root,
+    )
+
+    for example in manifest.jax_examples:
+        if example.status != "ready" or "gpu-strict" not in example.lanes:
+            continue
+        example_path = repo_root / "examples" / "jax" / example.path
+        syntax_tree = ast.parse(example_path.read_text(encoding="utf-8"))
+        imported_modules = {
+            alias.name
+            for node in ast.walk(syntax_tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module or ""
+            for node in ast.walk(syntax_tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+        scipy_modules = {
+            module
+            for module in imported_modules
+            if module == "scipy" or module.startswith("scipy.")
+        }
+        assert not scipy_modules, example.id
 
 
 def _write_child(repo_root: Path, filename: str, source: str) -> str:
@@ -97,6 +171,7 @@ def test_lane_environment_owns_runtime_selection_before_child_startup() -> None:
     assert cpu["CUDA_VISIBLE_DEVICES"] == ""
     assert cpu["MPI4PY_RC_INITIALIZE"] == "false"
     assert gpu["MPI4PY_RC_INITIALIZE"] == "false"
+    assert gpu["JAX_TRANSFER_GUARD"] == "disallow"
     assert (
         gpu
         | {
@@ -257,6 +332,14 @@ def test_traceable_least_squares_example_matches_analytic_optimum() -> None:
     assert result["status"] == "ok"
     assert result["observables"]["solution"] == pytest.approx([1.0, 2.0, 3.0])
     assert result["observables"]["objective"] <= 1.0e-16
+    assert result["observables"]["residual_norm"] <= 1.0e-12
+    assert result["observables"]["gradient_inf_norm"] <= 1.0e-12
+    assert result["observables"]["solver_driver"] == "simsopt_lm_gmres"
+    assert result["observables"]["solver_success"] is True
+    assert result["observables"]["solver_status"] in (0, 1, 2)
+    assert 0 < result["observables"]["iterations"] <= 32
+    assert result["observables"]["function_evaluations"] > 0
+    assert result["observables"]["jacobian_evaluations"] > 0
     assert set(repo_root.glob("simsopt_*.dat")) == existing_logs
 
 
@@ -448,9 +531,12 @@ def test_qfm_example_reduces_penalty_and_publishes_final_surface() -> None:
     result = json.loads(completed.stdout.splitlines()[-1])
     observables = result["observables"]
     assert result["status"] == "ok"
+    assert observables["solver_success"] is True
     assert observables["final_penalty"] < observables["initial_penalty"]
     assert observables["surface_update_norm"] > 0.0
     assert observables["gradient_norm"] < observables["initial_gradient_norm"]
+    assert observables["gradient_norm"] <= 1.0e-8
+    assert 0 < observables["iterations"] <= 75
 
 
 def test_boozer_example_reports_solver_certificate_and_final_surface() -> None:

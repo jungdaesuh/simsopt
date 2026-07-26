@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
 from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
@@ -80,33 +79,39 @@ def _constrained_oracle(
 
 
 def _gsco_transition() -> tuple[int, int]:
-    response = jnp.asarray(
-        (
-            (1.0, -0.3, 0.2, 0.0, 0.1, -0.2),
-            (0.2, 0.8, -0.4, 0.3, 0.0, 0.1),
-            (-0.1, 0.2, 0.7, -0.5, 0.3, 0.0),
-        ),
-        dtype=jnp.float64,
+    response = jax.device_put(
+        np.asarray(
+            (
+                (1.0, -0.3, 0.2, 0.0, 0.1, -0.2),
+                (0.2, 0.8, -0.4, 0.3, 0.0, 0.1),
+                (-0.1, 0.2, 0.7, -0.5, 0.3, 0.0),
+            ),
+            dtype=np.float64,
+        )
     )
-    loops = jnp.asarray(((0, 1, 2, 3), (2, 3, 4, 5)), dtype=jnp.int32)
-    segments = jnp.asarray(
-        ((0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (1, 3)),
-        dtype=jnp.int32,
+    loops = jax.device_put(np.asarray(((0, 1, 2, 3), (2, 3, 4, 5)), dtype=np.int32))
+    segments = jax.device_put(
+        np.asarray(
+            ((0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (1, 3)),
+            dtype=np.int32,
+        )
     )
-    connections = jnp.asarray(
-        ((0, 3, 4, 0), (0, 1, 5, 0), (1, 2, 4, 0), (2, 3, 5, 0)),
-        dtype=jnp.int32,
+    connections = jax.device_put(
+        np.asarray(
+            ((0, 3, 4, 0), (0, 1, 5, 0), (1, 2, 4, 0), (2, 3, 5, 0)),
+            dtype=np.int32,
+        )
     )
     params = WireframeGSCOLiveParams(
         A=response,
         loops=loops,
-        free_loops=jnp.ones(2, dtype=jnp.int32),
+        free_loops=jax.device_put(np.ones(2, dtype=np.int32)),
         segments=segments,
         connections=connections,
-        default_current=jnp.asarray(0.2, dtype=jnp.float64),
-        max_current=jnp.asarray(1.0, dtype=jnp.float64),
-        lambda_s=jnp.asarray(0.15, dtype=jnp.float64),
-        tol=jnp.asarray(2.0e-4, dtype=jnp.float64),
+        default_current=jax.device_put(np.asarray(0.2, dtype=np.float64)),
+        max_current=jax.device_put(np.asarray(1.0, dtype=np.float64)),
+        lambda_s=jax.device_put(np.asarray(0.15, dtype=np.float64)),
+        tol=jax.device_put(np.asarray(2.0e-4, dtype=np.float64)),
         max_loop_count=1,
         no_crossing=False,
         no_new_coils=False,
@@ -114,12 +119,12 @@ def _gsco_transition() -> tuple[int, int]:
     )
     multistep = wireframe_gsco_multistep_loop_jax(
         params,
-        jnp.asarray((0.1, -0.2, 0.3), dtype=jnp.float64),
-        jnp.zeros((6, 1), dtype=jnp.float64),
-        jnp.asarray((1, 0), dtype=jnp.int32),
+        jax.device_put(np.asarray((0.1, -0.2, 0.3), dtype=np.float64)),
+        jax.device_put(np.zeros((6, 1), dtype=np.float64)),
+        jax.device_put(np.asarray((1, 0), dtype=np.int32)),
         loops,
-        jnp.asarray(((1, 1, 1, 1), (0, 0, 0, 0)), dtype=jnp.int32),
-        jnp.zeros(6, dtype=bool),
+        jax.device_put(np.asarray(((1, 1, 1, 1), (0, 0, 0, 0)), dtype=np.int32)),
+        jax.device_put(np.zeros(6, dtype=np.bool_)),
         max_iter_per_step=0,
         max_outer_steps=1,
         initial_current_fraction=0.2,
@@ -128,8 +133,12 @@ def _gsco_transition() -> tuple[int, int]:
         final_max_current=0.22,
     )
     return (
-        int(np.asarray(multistep.nonfinal_steps)),
-        int(np.count_nonzero(np.asarray(multistep.enclosed_segment_mask))),
+        int(jax.device_get(multistep.nonfinal_steps)),
+        int(
+            np.count_nonzero(
+                np.asarray(jax.device_get(multistep.enclosed_segment_mask))
+            )
+        ),
     )
 
 
@@ -152,7 +161,7 @@ def _solve() -> ExampleResult:
         regularization,
         assume_no_crossings=False,
     )
-    solution = np.asarray(result.x, dtype=np.float64)
+    solution = np.asarray(jax.device_get(result.x), dtype=np.float64)
     oracle_free = _constrained_oracle(
         response[:, free_segments],
         target,
@@ -183,7 +192,7 @@ def _solve() -> ExampleResult:
         solution_oracle_error=solution_oracle_error,
         constraint_residual_norm=constraint_residual_norm,
         published_current_error=published_current_error,
-        objective=float(np.asarray(result.f)),
+        objective=float(jax.device_get(result.f)),
         gsco_nonfinal_steps=gsco_nonfinal_steps,
         gsco_enclosed_segments=gsco_enclosed_segments,
         status="ok" if is_correct else "failed",

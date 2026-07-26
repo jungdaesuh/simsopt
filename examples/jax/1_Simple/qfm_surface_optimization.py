@@ -89,25 +89,27 @@ def _solve(max_steps: int) -> ExampleResult:
         constraint_weight=1.0,
     )
     final_dofs = np.asarray(qfm.surface.get_dofs(), dtype=np.float64)
-    final_penalty = float(result["fun"])
-    final_gradient = np.asarray(result["gradient"], dtype=np.float64)
+    final_penalty = float(jax.device_get(result["fun"]))
+    final_gradient = np.asarray(jax.device_get(result["gradient"]), dtype=np.float64)
     initial_gradient_norm = float(np.linalg.norm(initial_gradient))
     gradient_norm = float(np.linalg.norm(final_gradient))
     update_norm = float(np.linalg.norm(final_dofs - initial_dofs))
     solver_success = bool(result["success"])
     is_correct = bool(
-        final_penalty < float(initial_penalty)
+        solver_success
+        and final_penalty < float(jax.device_get(initial_penalty))
         and gradient_norm < initial_gradient_norm
+        and gradient_norm <= 1.0e-8
         and update_norm > 0.0
     )
     return ExampleResult(
-        initial_penalty=float(initial_penalty),
+        initial_penalty=float(jax.device_get(initial_penalty)),
         final_penalty=final_penalty,
         initial_gradient_norm=initial_gradient_norm,
         gradient_norm=gradient_norm,
         surface_update_norm=update_norm,
         solver_success=solver_success,
-        iterations=int(result["iter"]),
+        iterations=int(jax.device_get(result["iter"])),
         status="ok" if is_correct else "failed",
     )
 
@@ -122,7 +124,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(arguments: list[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
-    result = _solve(options.max_steps or (5 if options.smoke else 50))
+    result = _solve(options.max_steps or (75 if options.smoke else 200))
     if options.json:
         print(json.dumps(result.json_object(), sort_keys=True))
     else:

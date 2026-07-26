@@ -90,14 +90,16 @@ def _build_objective() -> tuple[SquaredFluxJAX, CurveLengthJAX]:
 
 def _solve() -> ExampleResult:
     objective, length_objective = _build_objective()
-    initial = np.asarray(objective.x, dtype=np.float64)
-    initial_flux = float(objective.J())
-    analytic_gradient = float(np.asarray(objective.dJ(), dtype=np.float64)[0])
+    initial = np.asarray(jax.device_get(objective.x), dtype=np.float64)
+    initial_flux = float(jax.device_get(objective.J()))
+    analytic_gradient = float(
+        np.asarray(jax.device_get(objective.dJ()), dtype=np.float64)[0]
+    )
     epsilon = 1.0
     objective.x = initial + epsilon
-    value_plus = float(objective.J())
+    value_plus = float(jax.device_get(objective.J()))
     objective.x = initial - epsilon
-    value_minus = float(objective.J())
+    value_minus = float(jax.device_get(objective.J()))
     finite_difference = (value_plus - value_minus) / (2.0 * epsilon)
     gradient_fd_error = abs(analytic_gradient - finite_difference) / max(
         abs(analytic_gradient), 1.0e-30
@@ -107,8 +109,8 @@ def _solve() -> ExampleResult:
     # degree two. This is its exact one-dimensional Newton/line-minimizer step.
     optimized_current = float(initial[0] - 2.0 * initial_flux / analytic_gradient)
     objective.x = np.asarray((optimized_current,), dtype=np.float64)
-    final_flux = float(objective.J())
-    coil_length = float(length_objective.J())
+    final_flux = float(jax.device_get(objective.J()))
+    coil_length = float(jax.device_get(length_objective.J()))
     coil_length_oracle = 2.0 * np.pi * COIL_MINOR_RADIUS
     is_correct = bool(
         gradient_fd_error <= 1.0e-8

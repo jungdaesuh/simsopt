@@ -5,15 +5,14 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from simsopt_jax.runtime.host_boundary import (
-    host_array as _host_array,
-    host_bool as _host_bool,
-    host_int as _host_int,
-    host_scalar as _host_scalar,
-)
+from simsopt.geo.qfmsurface import QfmSurface
+from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
 from simsopt_jax.backend import is_jax_backend
-from simsopt_jax.core._math_utils import as_jax_float64, runtime_jnp_dtype
+from simsopt_jax.core._math_utils import (
+    as_jax_float64,
+    as_runtime_float64,
+    runtime_jnp_dtype,
+)
 from simsopt_jax.core.qfm_solver import (
     qfm_augmented_lagrangian_solve_jax,
     qfm_label_jax_from_dofs,
@@ -21,8 +20,19 @@ from simsopt_jax.core.qfm_solver import (
     qfm_penalty_solve_jax,
     qfm_residual_jax_from_dofs,
 )
-from simsopt.geo.qfmsurface import QfmSurface
-from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
+from simsopt_jax.runtime.host_boundary import (
+    host_array as _host_array,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_bool as _host_bool,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_int as _host_int,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_scalar as _host_scalar,
+)
+
 from .surface_objectives import _surface_spec_from_surface
 
 __all__ = ["QfmSurfaceJAX"]
@@ -32,10 +42,12 @@ def _write_surface_dofs(surface, dofs: object) -> None:
     surface.x = _host_array(dofs, dtype=np.float64)
 
 
-def _host_value_and_optional_gradient(value_fn, dofs: object, derivatives: int):
+def _host_value_and_optional_gradient(
+    value_fn, dofs: object, derivatives: int, *dynamic_args: object
+):
     if derivatives == 0:
-        return _host_scalar(value_fn(dofs))
-    value, gradient = jax.value_and_grad(value_fn)(dofs)
+        return _host_scalar(jax.jit(value_fn)(dofs, *dynamic_args))
+    value, gradient = jax.jit(jax.value_and_grad(value_fn))(dofs, *dynamic_args)
     return _host_scalar(value), _host_array(gradient)
 
 
@@ -103,20 +115,32 @@ class QfmSurfaceJAX:
         ) = self._solve_inputs()
         dofs = as_jax_float64(x)
 
-        def value_fn(surface_dofs):
+        targetlabel = as_runtime_float64(self.targetlabel, reference=dofs)
+
+        def value_fn(
+            surface_dofs,
+            label_spec_value,
+            label_coil_set_spec_value,
+            targetlabel_value,
+        ):
             label_value = qfm_label_jax_from_dofs(
-                label_spec,
+                label_spec_value,
                 surface_dofs,
-                label_coil_set_spec,
+                label_coil_set_spec_value,
                 label=label,
                 toroidal_flux_idx=toroidal_flux_idx,
             )
-            residual = label_value - jnp.asarray(
-                self.targetlabel, dtype=label_value.dtype
-            )
+            residual = label_value - targetlabel_value
             return 0.5 * residual * residual
 
-        return _host_value_and_optional_gradient(value_fn, dofs, derivatives)
+        return _host_value_and_optional_gradient(
+            value_fn,
+            dofs,
+            derivatives,
+            label_spec,
+            label_coil_set_spec,
+            targetlabel,
+        )
 
     def qfm_objective(self, x, derivatives=0):
         """Return the QFM residual and optional JAX gradient."""
@@ -133,14 +157,16 @@ class QfmSurfaceJAX:
         ) = self._solve_inputs()
         dofs = as_jax_float64(x)
 
-        def value_fn(surface_dofs):
+        def value_fn(surface_dofs, spec_value, coil_set_spec_value):
             return qfm_residual_jax_from_dofs(
-                spec,
+                spec_value,
                 surface_dofs,
-                coil_set_spec,
+                coil_set_spec_value,
             )
 
-        return _host_value_and_optional_gradient(value_fn, dofs, derivatives)
+        return _host_value_and_optional_gradient(
+            value_fn, dofs, derivatives, spec, coil_set_spec
+        )
 
     def qfm_penalty_constraints(self, x, derivatives=0, constraint_weight=1.0):
         """Return the QFM penalty objective and optional JAX gradient."""
@@ -156,21 +182,41 @@ class QfmSurfaceJAX:
             toroidal_flux_idx,
         ) = self._solve_inputs()
         dofs = as_jax_float64(x)
+        targetlabel = as_runtime_float64(self.targetlabel, reference=dofs)
+        weight = as_runtime_float64(constraint_weight, reference=dofs)
 
-        def value_fn(surface_dofs):
+        def value_fn(
+            surface_dofs,
+            spec_value,
+            coil_set_spec_value,
+            label_spec_value,
+            label_coil_set_spec_value,
+            targetlabel_value,
+            constraint_weight_value,
+        ):
             return qfm_penalty_jax_from_dofs(
-                spec,
+                spec_value,
                 surface_dofs,
-                coil_set_spec,
+                coil_set_spec_value,
                 label=label,
-                label_spec=label_spec,
-                label_coil_set_spec=label_coil_set_spec,
-                targetlabel=self.targetlabel,
-                constraint_weight=constraint_weight,
+                label_spec=label_spec_value,
+                label_coil_set_spec=label_coil_set_spec_value,
+                targetlabel=targetlabel_value,
+                constraint_weight=constraint_weight_value,
                 toroidal_flux_idx=toroidal_flux_idx,
             )
 
-        return _host_value_and_optional_gradient(value_fn, dofs, derivatives)
+        return _host_value_and_optional_gradient(
+            value_fn,
+            dofs,
+            derivatives,
+            spec,
+            coil_set_spec,
+            label_spec,
+            label_coil_set_spec,
+            targetlabel,
+            weight,
+        )
 
     def _penalty_result_dict(self, final_dofs: object, info) -> dict[str, object]:
         _write_surface_dofs(self.surface, final_dofs)

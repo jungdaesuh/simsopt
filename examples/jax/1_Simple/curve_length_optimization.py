@@ -1,23 +1,31 @@
 """Minimize Fourier deformations of a circle with ``CurveLengthJAX``.
 
-Host boundary: a native ``CurveXYZFourier`` owns coefficients and receives
-accepted optimizer states. Objective values and derivatives are evaluated by
-the public JAX-backed adapter.
+Host boundary: a native ``CurveXYZFourier`` supplies one immutable spec and
+receives only the completed optimizer state.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from contextlib import chdir
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 import jax
+import jax.numpy as jnp
 import numpy as np
-from scipy.optimize import minimize
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
-from simsopt_jax_adapters.geo.curve_objectives import CurveLengthJAX
+from simsopt_jax.core.curve_geometry import (
+    curve_incremental_arclength_from_spec,
+    curve_spec_with_dofs,
+)
+from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
+from simsopt_jax_adapters.geo.curve_objectives import CurveLengthJAX, curve_length_pure
+from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
 
 EXAMPLE_ID = "curve-length-optimization"
 RADIUS = 2.0
@@ -61,37 +69,59 @@ def _build_problem() -> tuple[CurveXYZFourier, CurveLengthJAX]:
     return curve, CurveLengthJAX(curve)
 
 
-def _solve(max_steps: int) -> ExampleResult:
+def _solve(output_directory: Path, max_steps: int) -> ExampleResult:
     curve, objective = _build_problem()
-
-    def value(parameters: np.ndarray) -> float:
-        curve.x = parameters
-        return float(objective.J())
-
-    def gradient(parameters: np.ndarray) -> np.ndarray:
-        curve.x = parameters
-        return np.asarray(objective.dJ(), dtype=np.float64)
-
-    initial = np.asarray(curve.x, dtype=np.float64)
-    direction = np.asarray((0.3, -0.4, 0.5), dtype=np.float64)
-    direction /= np.linalg.norm(direction)
-    epsilon = 1.0e-6
-    analytic_directional = float(np.dot(gradient(initial), direction))
-    finite_difference = (
-        value(initial + epsilon * direction) - value(initial - epsilon * direction)
-    ) / (2.0 * epsilon)
-    gradient_fd_error = abs(analytic_directional - finite_difference)
-    curve.x = initial
-
-    result = minimize(
-        value,
-        initial,
-        jac=gradient,
-        method="BFGS",
-        options={"maxiter": max_steps, "gtol": 1.0e-10},
+    curve_spec = jax.tree.map(
+        lambda leaf: (
+            np.asarray(jax.device_get(leaf)) if isinstance(leaf, jax.Array) else leaf
+        ),
+        curve_spec_from_adapter_curve(curve),
     )
-    curve.x = result.x
-    final_length = float(objective.J())
+    full_dofs_host = np.asarray(curve.local_full_x, dtype=np.float64)
+    free_positions = np.flatnonzero(curve.local_dofs_free_status)
+    fixed_full_dofs_host = full_dofs_host.copy()
+    fixed_full_dofs_host[free_positions] = 0.0
+    expansion_host = np.zeros((full_dofs_host.size, free_positions.size))
+    expansion_host[free_positions, np.arange(free_positions.size)] = 1.0
+    fixed_full_dofs = fixed_full_dofs_host
+    expansion = expansion_host
+
+    def value(parameters: jax.Array) -> jax.Array:
+        current_full_dofs = fixed_full_dofs + expansion @ parameters
+        current_spec = curve_spec_with_dofs(curve_spec, current_full_dofs)
+        return curve_length_pure(curve_incremental_arclength_from_spec(current_spec))
+
+    initial = jax.device_put(np.asarray(curve.x, dtype=np.float64))
+    direction = jax.device_put(np.asarray((0.3, -0.4, 0.5), dtype=np.float64))
+    direction /= jnp.linalg.norm(direction)
+
+    @jax.jit
+    def directional_derivative_error(
+        parameters: jax.Array,
+        tangent: jax.Array,
+    ) -> jax.Array:
+        epsilon = 1.0e-6
+        analytic_directional = jnp.dot(jax.grad(value)(parameters), tangent)
+        finite_difference = (
+            value(parameters + epsilon * tangent)
+            - value(parameters - epsilon * tangent)
+        ) / (2.0 * epsilon)
+        return jnp.abs(analytic_directional - finite_difference)
+
+    gradient_fd_error = float(
+        jax.device_get(directional_derivative_error(initial, direction))
+    )
+
+    problem = TraceableScalarProblem(objective_fn=value, x=initial)
+    with chdir(output_directory):
+        result = serial_solve_jax(
+            problem,
+            max_steps=max_steps,
+            rtol=1.0e-10,
+            atol=1.0e-8,
+        )
+    curve.x = np.asarray(jax.device_get(problem.x), dtype=np.float64)
+    final_length = float(jax.device_get(objective.J()))
     circle_oracle = 2.0 * np.pi * RADIUS
     is_correct = bool(
         result.success
@@ -112,12 +142,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--output-dir", type=Path)
     return parser
 
 
 def main(arguments: list[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
-    result = _solve(options.max_steps or (32 if options.smoke else 128))
+    max_steps = options.max_steps or (32 if options.smoke else 128)
+    if options.output_dir is not None:
+        options.output_dir.mkdir(parents=True, exist_ok=True)
+        result = _solve(options.output_dir, max_steps)
+    elif options.smoke:
+        with TemporaryDirectory(prefix="simsopt-jax-example-") as temporary:
+            result = _solve(Path(temporary), max_steps)
+    else:
+        result = _solve(Path.cwd(), max_steps)
     if options.json:
         print(json.dumps(result.json_object(), sort_keys=True))
     else:

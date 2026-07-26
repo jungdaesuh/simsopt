@@ -8,9 +8,10 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax import lax
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec as P
+from jax import lax
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from simsopt_jax.backend import (
     get_field_kernel_tuning,
@@ -18,6 +19,18 @@ from simsopt_jax.backend import (
     is_mixed_precision_enabled,
 )
 
+from ._math_utils import (
+    as_compute_array as _as_compute_array,
+)
+from ._math_utils import (
+    as_runtime_float64 as _as_runtime_float64,
+)
+from ._math_utils import (
+    pad_axis as _pad_axis,
+)
+from ._math_utils import (
+    runtime_device_put,
+)
 from .biotsavart import (
     biot_savart_A,
     biot_savart_B,
@@ -33,24 +46,17 @@ from .biotsavart import (
 from .biotsavart_online import (
     mixed_grouped_biot_savart_B_online,
 )
+from .curve_geometry import (
+    curve_gamma_and_dash_from_spec,
+    curve_spec_with_dofs,
+    optimizable_input_dofs_from_map_spec,
+)
 from .sharding import (
     _should_shard_points,
     coil_group_collective_config,
     collective_field_sharding_summary,
     maybe_shard_grouped_field_inputs,
 )
-from ._math_utils import (
-    as_compute_array as _as_compute_array,
-    as_runtime_float64 as _as_runtime_float64,
-    pad_axis as _pad_axis,
-    runtime_device_put,
-)
-from .curve_geometry import (
-    curve_gamma_and_dash_from_spec,
-    curve_spec_with_dofs,
-    optimizable_input_dofs_from_map_spec,
-)
-from .surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from .specs import (
     CoilDofExtractionSpec,
     CoilSetDofExtractionSpec,
@@ -60,6 +66,7 @@ from .specs import (
     apply_coil_symmetry,
     make_grouped_coil_set_spec,
 )
+from .surface_rzfourier import surface_rz_fourier_spec_from_dofs
 
 __all__ = [
     "GroupedBiotSavartBDispatchEvidence",
@@ -720,10 +727,27 @@ def grouped_coil_currents_from_spec(
         insert[positions, np.arange(positions.size)] = 1.0
         keep_mask = np.ones(coil_count, dtype=np.float64)
         keep_mask[positions] = 0.0
-        currents = (
-            currents * runtime_device_put(keep_mask, dtype=np.float64)
-            + runtime_device_put(insert, dtype=np.float64) @ group.currents
-        )
+        if isinstance(currents, jax.core.Tracer):
+            keep_mask_value = jnp.asarray(keep_mask, dtype=jnp.float64)
+            insert_value = jnp.asarray(insert, dtype=jnp.float64)
+            group_currents = jnp.asarray(group.currents, dtype=jnp.float64)
+        else:
+            target_sharding = currents.sharding
+            keep_mask_value = runtime_device_put(
+                keep_mask,
+                dtype=np.float64,
+                target=target_sharding,
+            )
+            insert_value = runtime_device_put(
+                insert,
+                dtype=np.float64,
+                target=target_sharding,
+            )
+            group_currents = _as_runtime_float64(
+                group.currents,
+                reference=currents,
+            )
+        currents = currents * keep_mask_value + insert_value @ group_currents
     return currents
 
 
