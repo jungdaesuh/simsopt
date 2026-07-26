@@ -38,6 +38,7 @@ _LANE_ENVIRONMENT: dict[Lane, dict[str, str]] = {
         "SIMSOPT_PRECISION": "fp64",
         "JAX_PLATFORMS": "cpu",
         "JAX_ENABLE_X64": "1",
+        "CUDA_VISIBLE_DEVICES": "",
     },
     "gpu-strict": {
         "SIMSOPT_BACKEND_MODE": "jax_gpu_parity",
@@ -81,12 +82,23 @@ def build_child_command(
 
 
 def build_lane_environment(
-    lane: Lane, base_environment: Mapping[str, str]
+    lane: Lane,
+    base_environment: Mapping[str, str],
+    *,
+    repo_root: Path | None = None,
 ) -> dict[str, str]:
     """Overlay one typed lane selection before the child can import JAX."""
 
     environment = dict(base_environment)
     environment.update(_LANE_ENVIRONMENT[lane])
+    if repo_root is not None:
+        source_root = str(repo_root / "src")
+        inherited_pythonpath = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = (
+            source_root
+            if not inherited_pythonpath
+            else os.pathsep.join((source_root, inherited_pythonpath))
+        )
     return environment
 
 
@@ -208,7 +220,7 @@ def run_lane(
         print(f"FAIL {lane}: no ready examples selected", file=stderr)
         return 1
 
-    environment = build_lane_environment(lane, base_environment)
+    environment = build_lane_environment(lane, base_environment, repo_root=repo_root)
     failed = False
     for example in selected:
         command = build_child_command(example, repo_root=repo_root)

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import io
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from examples.jax._manifest import JaxExampleRecord, JaxExamplesManifest
+from examples.jax._manifest import (
+    JaxExampleRecord,
+    JaxExamplesManifest,
+    derive_source_coverage,
+    load_manifest,
+)
 from examples.jax.run_examples import (
     build_child_command,
     build_lane_environment,
@@ -86,6 +94,7 @@ def test_lane_environment_owns_runtime_selection_before_child_startup() -> None:
     assert cpu["SIMSOPT_PRECISION"] == "fp64"
     assert cpu["JAX_PLATFORMS"] == "cpu"
     assert cpu["JAX_ENABLE_X64"] == "1"
+    assert cpu["CUDA_VISIBLE_DEVICES"] == ""
     assert (
         gpu
         | {
@@ -211,3 +220,104 @@ def test_gpu_strict_rejects_malformed_result(tmp_path: Path) -> None:
 
     assert exit_code == 1
     assert "final stdout line is not valid JSON" in stderr.getvalue()
+
+
+def test_traceable_least_squares_example_matches_analytic_optimum() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "traceable-least-squares"
+    )
+    coverage = derive_source_coverage(manifest)
+
+    assert example.status == "ready"
+    assert coverage["1_Simple/just_a_quadratic.py"] == "covered"
+    existing_logs = set(repo_root.glob("simsopt_*.dat"))
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    assert result["example_id"] == "traceable-least-squares"
+    assert result["backend_mode"] == "jax_cpu_parity"
+    assert result["platform"] == "cpu"
+    assert result["precision"] == "fp64"
+    assert result["status"] == "ok"
+    assert result["observables"]["solution"] == pytest.approx([1.0, 2.0, 3.0])
+    assert result["observables"]["objective"] <= 1.0e-16
+    assert set(repo_root.glob("simsopt_*.dat")) == existing_logs
+
+
+def test_curve_length_example_matches_circle_oracle_and_directional_fd() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "curve-length-optimization"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    assert result["example_id"] == "curve-length-optimization"
+    assert result["status"] == "ok"
+    assert result["observables"]["final_length"] == pytest.approx(
+        result["observables"]["circle_oracle"], rel=1.0e-10, abs=1.0e-10
+    )
+    assert result["observables"]["gradient_fd_error"] <= 1.0e-6
+
+
+def test_surface_geometry_example_matches_axisymmetric_torus_oracle() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
+    )
+    example = next(
+        record
+        for record in manifest.jax_examples
+        if record.id == "surface-geometry-optimization"
+    )
+
+    assert example.status == "ready"
+    completed = subprocess.run(
+        build_child_command(example, repo_root=repo_root),
+        cwd=repo_root,
+        env=build_lane_environment("cpu-smoke", os.environ, repo_root=repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
+    assert result["status"] == "ok"
+    assert observables["area"] == pytest.approx(
+        observables["area_oracle"], rel=1.0e-9, abs=1.0e-10
+    )
+    assert observables["volume"] == pytest.approx(
+        observables["volume_oracle"], rel=1.0e-9, abs=1.0e-10
+    )
+    assert observables["residual_norm"] <= 1.0e-9

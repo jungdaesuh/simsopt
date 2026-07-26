@@ -56,7 +56,7 @@
     {
       "id": "traceable-least-squares",
       "path": "1_Simple/traceable_least_squares.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/just_a_quadratic.py", "2_Intermediate/constrained_optimization.py"],
       "execution_kind": "pure",
@@ -70,7 +70,7 @@
     {
       "id": "curve-length-optimization",
       "path": "1_Simple/curve_length_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/minimize_curve_length.py"],
       "execution_kind": "adapter",
@@ -84,7 +84,7 @@
     {
       "id": "surface-geometry-optimization",
       "path": "1_Simple/surface_geometry_optimization.py",
-      "status": "planned",
+      "status": "ready",
       "tier": "1_Simple",
       "inspired_by": ["1_Simple/surf_vol_area.py"],
       "execution_kind": "adapter",

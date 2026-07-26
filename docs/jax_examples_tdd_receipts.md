@@ -99,3 +99,99 @@ All checks passed!
 ...........................                                              [100%]
 27 passed in 1.26s
 ```
+
+## Traceable least-squares vertical slice
+
+### RED
+
+```console
+../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/integration/test_jax_examples.py -k traceable_least_squares_example
+```
+
+The behavioral test reached the manifest entry and failed because the example
+was not executable yet: `AssertionError: assert 'planned' == 'ready'` (1
+failed, 10 deselected).
+
+### GREEN
+
+The identical command passed after adding the public traceable solver example:
+
+```text
+1 passed, 10 deselected in 0.98s
+```
+
+### REFACTOR
+
+The example uses a temporary output directory in smoke mode so the public
+solver's progress log cannot dirty the checkout. The lane runner reported:
+
+```text
+PASS traceable-least-squares
+```
+
+## Curve-length optimization vertical slice
+
+### RED
+
+```console
+../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/integration/test_jax_examples.py -k curve_length_example
+```
+
+The behavioral test failed at the absent delivery contract with
+`AssertionError: assert 'planned' == 'ready'` (1 failed, 11 deselected).
+
+### GREEN
+
+The identical command passed after adding the adapter-owned optimization,
+analytic circle-length oracle, and independent directional finite difference:
+
+```text
+1 passed, 11 deselected in 1.36s
+```
+
+## Surface-geometry optimization vertical slice
+
+### RED
+
+```console
+../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/integration/test_jax_examples.py -k surface_geometry_example
+```
+
+The behavioral test failed at the absent delivery contract with
+`AssertionError: assert 'planned' == 'ready'` (1 failed, 12 deselected).
+
+### GREEN
+
+The identical command passed after adding the two-metric optimization and
+independent axisymmetric-torus area and volume formulas:
+
+```text
+1 passed, 12 deselected in 13.37s
+```
+
+## Three-example refactor gate
+
+The runner now prepends the checkout's `src/` directory in one environment
+owner and hides CUDA devices in the CPU lane. The CUDA-isolation assertion was
+first observed RED as `KeyError: 'CUDA_VISIBLE_DEVICES'`, then GREEN with the
+identical focused command (1 passed, 13 deselected).
+
+Commands:
+
+```console
+uvx ruff check examples/jax/run_examples.py examples/jax/1_Simple/traceable_least_squares.py examples/jax/1_Simple/curve_length_optimization.py examples/jax/1_Simple/surface_geometry_optimization.py tests/integration/test_jax_examples.py
+uvx ruff format --check examples/jax/run_examples.py examples/jax/1_Simple/traceable_least_squares.py examples/jax/1_Simple/curve_length_optimization.py examples/jax/1_Simple/surface_geometry_optimization.py tests/integration/test_jax_examples.py
+../.venv-simsopt-linux-x86/bin/python -m pytest -q tests/test_jax_examples_manifest.py tests/integration/test_jax_examples.py
+../.venv-simsopt-linux-x86/bin/python examples/jax/run_examples.py --lane cpu-smoke
+```
+
+Observed result:
+
+```text
+All checks passed!
+5 files already formatted
+30 passed in 17.60s
+PASS traceable-least-squares
+PASS curve-length-optimization
+PASS surface-geometry-optimization
+```
