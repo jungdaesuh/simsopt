@@ -1,7 +1,27 @@
 # JAX Examples Directory Implementation Plan
 
-**Status:** Draft
+**Status:** Implemented — Wave 1 complete; later waves remain selective
 **Last updated:** 2026-07-26
+
+## Execution Outcome
+
+The required delivery is complete. The manifest accounts for all 51 tracked
+native Python examples, the isolated runner and structured-result contract are
+implemented, all seven Wave 1 lessons are ready, and the CPU and strict-GPU CI
+lanes are reachable from changes beneath `examples/jax/**`. Three additional
+bounded lessons (Boozer surface, wireframe, and force/finite-build) also passed
+their RED → GREEN contracts and are ready.
+
+The single-stage vacuum record remains `planned`: bounded live probes construct
+the public traceable session and return a finite objective, but the
+representative outer derivative is correctly fail-closed as all-NaN. It cannot
+be promoted until a bounded fixture supplies the independent derivative and
+accepted-state evidence required by Wave 3. External-code, MPI, and other
+deferred concepts remain inventory entries rather than placeholder scripts.
+
+Exact failing-first and passing commands are retained in
+`docs/jax_examples_tdd_receipts.md`; `examples/jax/manifest.json` remains the
+single source of truth for per-example readiness.
 
 ## Purpose
 
@@ -49,12 +69,12 @@ or another unported boundary.
 - Create placeholder JAX scripts that raise `NotImplementedError`; deferred
   coverage belongs in the inventory until a runnable workflow exists.
 
-## Current Context
+## Baseline Context at Plan Approval
 
-- Live HEAD `4bd849023` has 51 tracked Python examples: 10 in `1_Simple`, 26
+- Baseline HEAD `4bd849023` had 51 tracked Python examples: 10 in `1_Simple`, 26
   in `2_Intermediate`, 6 in `3_Advanced`, and 9 in
   `stellarator_benchmarks`.
-- No tracked `examples/jax/` directory or JAX-specific example runner exists.
+- No tracked `examples/jax/` directory or JAX-specific example runner existed.
 - Existing CI invokes `examples/run_serial_examples`,
   `examples/run_parallel_examples`, and `examples/run_vmec_examples`; those
   runners execute the native examples and remain unchanged by default.
@@ -69,8 +89,8 @@ or another unported boundary.
 - JAX runtime selection is process-wide and must occur before importing
   JAX-heavy modules, so the example runner must isolate examples in fresh
   subprocesses.
-- The checkout already contains unrelated modified and untracked work. The
-  implementation must preserve it and stage only the example-plan slice.
+- The checkout already contained unrelated modified and untracked work. The
+  implementation preserved it and staged only the example-plan slices.
 
 ## JAX-First Example Contract
 
@@ -276,8 +296,8 @@ table. This avoids two status ledgers drifting apart.
   source-shaped or output-identical mirrors.
 - Delivery method: each implementation slice follows test-first
   RED → GREEN → REFACTOR, with the failing and passing commands recorded.
-- Current deliverable: finalize this plan only; do not create the manifest,
-  examples, runner, tests, or CI changes yet.
+- Original plan-review authorization: finalize this plan only. This was
+  superseded by the user's explicit instruction to execute the plan.
 
 ## Assumptions
 
@@ -582,26 +602,26 @@ No implementation task starts before its RED test is reviewed.
 
 ## Completion Criteria
 
-- [ ] All 51 tracked native Python examples have exactly one valid manifest
+- [x] All 51 tracked native Python examples have exactly one valid manifest
   record.
-- [ ] Every candidate source derives as `planned` or `covered`; each covered
+- [x] Every candidate source derives as `planned` or `covered`; each covered
   source links through `inspired_by` to at least one ready, executable JAX
   example with public JAX surfaces, correctness owners, and required lanes.
-- [ ] Every deferred source names a concrete missing boundary, external
+- [x] Every deferred source names a concrete missing boundary, external
   limitation, or absent teaching objective plus a reconsideration criterion;
   it has no JAX link and no placeholder script.
-- [ ] Every implementation slice has an authentic behavioral RED receipt,
+- [x] Every implementation slice has an authentic behavioral RED receipt,
   identical-command GREEN receipt, and post-REFACTOR focused/broader receipt.
-- [ ] Wave 1 JAX examples pass CPU smoke and declared correctness tests.
-- [ ] GPU-required Wave 1 examples pass strict CUDA execution with no fallback or
+- [x] Wave 1 JAX examples pass CPU smoke and declared correctness tests.
+- [x] GPU-required Wave 1 examples pass strict CUDA execution with no fallback or
   skips.
-- [ ] Native example scripts, runners, and inputs retain their prior behavior.
-- [ ] Documentation tells users when to choose pure, adapter, or hybrid
+- [x] Native example scripts, runners, and inputs retain their prior behavior.
+- [x] Documentation tells users when to choose pure, adapter, or hybrid
   examples and how to run them.
-- [ ] No source package imports example code or manifest data.
-- [ ] Both JAX workflow path filters reach `examples/jax/**`; the existing JAX
+- [x] No source package imports example code or manifest data.
+- [x] Both JAX workflow path filters reach `examples/jax/**`; the existing JAX
   CPU and strict-GPU jobs invoke the corresponding runner lanes.
-- [ ] The path-scoped final diff passes formatting, static, focused test,
+- [x] The path-scoped final diff passes formatting, static, focused test,
   manifest, and dirty-tree scope checks.
 
 ## Open Questions
