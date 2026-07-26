@@ -8,7 +8,10 @@ import numpy as np
 import pytest
 from conftest import enable_strict_parity_backend, parity_default_device
 from simsopt_jax.backend import invalidate_backend_cache
-from simsopt_jax.geo.optimizers import optimizer as _optimizer
+from simsopt_jax.geo.optimizers import (
+    adjoint_linear_solve as _adjoint_linear_solve,
+    optimizer as _optimizer,
+)
 from simsopt_jax.geo.optimizers.private import _bfgs as _private_bfgs
 from simsopt_jax.geo.optimizers.private import _lbfgs as _private_lbfgs
 
@@ -29,7 +32,7 @@ def test_dense_hessian_solve_colocates_cpu_state_with_gpu_rhs(
     diagonal = jax.device_put(diagonal_values, gpu)
     state = jax.device_put(np.ones(dimension, dtype=np.float64), cpu)
     rhs = jax.device_put(np.ones(dimension, dtype=np.float64), gpu)
-    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "dense")
+    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
 
     def objective(candidate):
         return jnp.sum(diagonal * candidate * candidate)
@@ -67,7 +70,7 @@ def test_dense_hessian_solve_colocates_cpu_objective_closure_with_gpu_rhs(
     )
     state = jax.device_put(np.ones(dimension, dtype=np.float64), gpu)
     rhs = jax.device_put(np.ones(dimension, dtype=np.float64), gpu)
-    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "dense")
+    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
 
     def objective(candidate):
         return jnp.sum(closure_weights) * jnp.sum(candidate * candidate)

@@ -8,6 +8,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsopt_jax.geo.optimizers.reference as _opt_ref
+from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
+from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
+from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 import simsopt_jax.geo.optimizers.private._bfgs as _private_bfgs
 import simsopt_jax.geo.optimizers.private._common as _opt_common
 import simsopt_jax.geo.optimizers.private._lbfgs as _private_lbfgs
@@ -20,6 +23,7 @@ from simsopt_jax.geo.optimizers.private import (
     _line_search_value_and_grad,
 )
 from simsopt_jax.geo.optimizers.private import _result_converters
+from simsopt_jax.geo.optimizers._shared import mark_cacheable_jit_value_and_grad
 from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -238,7 +242,7 @@ def test_matrix_rhs_linear_operators_apply_columns():
     )
     H = A.T @ A + jnp.diag(jnp.asarray([0.4, 0.5, 0.6], dtype=jnp.float64))
 
-    jacobian_operator = _opt._jacobian_linear_operator(lambda y: A @ y, x)
+    jacobian_operator = _linear_solve._jacobian_linear_operator(lambda y: A @ y, x)
     np.testing.assert_allclose(
         np.asarray(jacobian_operator["matvec"](rhs)),
         np.asarray(A @ rhs),
@@ -252,7 +256,7 @@ def test_matrix_rhs_linear_operators_apply_columns():
         atol=1e-12,
     )
 
-    hessian_operator = _opt._hessian_linear_operator(
+    hessian_operator = _adjoint_linear_solve._hessian_linear_operator(
         lambda y: 0.5 * jnp.dot(y, H @ y),
         x,
         stab=0.25,
@@ -1664,7 +1668,7 @@ class TestOptimizerAdapterPrivate:
             return quad(x), jnp.asarray(x, dtype=x.dtype)
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-        cacheable_quad = _opt._mark_cacheable_jit_value_and_grad(quad_value_and_grad)
+        cacheable_quad = mark_cacheable_jit_value_and_grad(quad_value_and_grad)
         cache_owner, cache_key_prefix = _private_lbfgs._lbfgsb_cache_context(
             cacheable_quad,
             None,
@@ -1749,7 +1753,7 @@ class TestOptimizerAdapterPrivate:
         def residual(x):
             return jnp.asarray([x[0] + 2.0 * x[1], x[0] - x[1]], dtype=x.dtype)
 
-        cacheable_quad = _opt._mark_cacheable_jit_value_and_grad(quad)
+        cacheable_quad = mark_cacheable_jit_value_and_grad(quad)
         cacheable_residual = _opt._mark_cacheable_jit_linear_operator(residual)
 
         assert _opt._hessian_vector_product_fn(cacheable_quad) is (
@@ -3123,7 +3127,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             return 0.5 * jnp.dot(z, z)
 
         jaxpr = jax.make_jaxpr(
-            lambda vec: _opt._solve_hessian_system_with_status(
+            lambda vec: _adjoint_linear_solve._solve_hessian_system_with_status(
                 objective,
                 x,
                 vec,
@@ -3145,7 +3149,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         def objective(z):
             return 0.5 * jnp.dot(z, z)
 
-        solution, status = _opt._solve_hessian_system_with_status(
+        solution, status = _adjoint_linear_solve._solve_hessian_system_with_status(
             objective,
             x,
             rhs,
@@ -3173,18 +3177,20 @@ class TestBoozerSurfaceJAXClassPrivate:
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_linear_solve_unknown_iterations_remain_scalar_jax_array(self):
         rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-        status = _opt._linear_solve_status(
+        status = _linear_solve._linear_solve_status(
             rhs,
             jnp.zeros_like(rhs),
             rhs,
             tol=1e-10,
-            iterations=_opt._linear_solve_iteration_count(None),
+            iterations=_linear_solve._linear_solve_iteration_count(None),
         )
 
         assert isinstance(status.iterations, jax.Array)
         assert np.asarray(status.iterations).shape == ()
         assert int(np.asarray(status.iterations)) == -1
-        assert _opt._linear_solve_iterations_host_value(status.iterations) is None
+        assert (
+            _linear_solve._linear_solve_iterations_host_value(status.iterations) is None
+        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -3201,13 +3207,19 @@ class TestBoozerSurfaceJAXClassPrivate:
             residual = residual_fraction * solve_rhs
             return solution, residual, jnp.asarray(1, dtype=jnp.int32)
 
-        monkeypatch.setattr(_opt, "_gmres_solve_array_system", inexact_identity_solve)
+        monkeypatch.setattr(
+            _linear_solve,
+            "_gmres_solve_array_system",
+            inexact_identity_solve,
+        )
 
-        solution, status = _opt._solve_square_vector_system_operator_only(
+        solution, status = _linear_solve._solve_square_vector_system_operator_only(
             lambda vector: vector,
             rhs,
             tol=1e-11,
-            max_refinement_steps=(_opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS),
+            max_refinement_steps=(
+                _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            ),
         )
 
         np.testing.assert_allclose(np.asarray(solution), np.asarray(rhs), atol=1e-11)
@@ -3230,9 +3242,13 @@ class TestBoozerSurfaceJAXClassPrivate:
             residual = residual_fraction * solve_rhs
             return solution, residual, jnp.asarray(1, dtype=jnp.int32)
 
-        monkeypatch.setattr(_opt, "_gmres_solve_array_system", inexact_identity_solve)
+        monkeypatch.setattr(
+            _linear_solve,
+            "_gmres_solve_array_system",
+            inexact_identity_solve,
+        )
 
-        solution, status = _opt._solve_square_vector_system_operator_only(
+        solution, status = _linear_solve._solve_square_vector_system_operator_only(
             lambda vector: vector,
             rhs,
             tol=1e-11,
@@ -3267,13 +3283,19 @@ class TestBoozerSurfaceJAXClassPrivate:
             residual = solve_rhs - solution
             return solution, residual, jnp.asarray(1, dtype=jnp.int32)
 
-        monkeypatch.setattr(_opt, "_gmres_solve_array_system", staged_identity_solve)
+        monkeypatch.setattr(
+            _linear_solve,
+            "_gmres_solve_array_system",
+            staged_identity_solve,
+        )
 
-        solution, status = _opt._solve_square_vector_system_operator_only(
+        solution, status = _linear_solve._solve_square_vector_system_operator_only(
             lambda vector: vector,
             rhs,
             tol=1e-11,
-            max_refinement_steps=(_opt._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS),
+            max_refinement_steps=(
+                _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            ),
         )
 
         np.testing.assert_allclose(np.asarray(solution), np.asarray([0.9999]))
@@ -3291,12 +3313,14 @@ class TestBoozerSurfaceJAXClassPrivate:
             return 0.5 * jnp.dot(z, z)
 
         with jax.transfer_guard("disallow"):
-            solution, status = _opt._solve_hessian_least_squares_system_with_status(
-                objective,
-                x,
-                rhs,
-                stab=0.0,
-                tol=1e-10,
+            solution, status = (
+                _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+                    objective,
+                    x,
+                    rhs,
+                    stab=0.0,
+                    tol=1e-10,
+                )
             )
 
         assert bool(np.asarray(status.success))
@@ -3313,12 +3337,14 @@ class TestBoozerSurfaceJAXClassPrivate:
         def objective(z):
             return 0.5 * z[0] * z[0]
 
-        solution, status = _opt._solve_hessian_least_squares_system_with_status(
-            objective,
-            x,
-            rhs,
-            stab=0.0,
-            tol=1e-10,
+        solution, status = (
+            _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+                objective,
+                x,
+                rhs,
+                stab=0.0,
+                tol=1e-10,
+            )
         )
         hessian_residual = rhs - jnp.asarray([solution[0], 0.0], dtype=jnp.float64)
 
@@ -3328,8 +3354,8 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert float(np.asarray(status.residual_relative)) > 1e-10
 
     def test_gmres_iteration_limits_bound_hvp_work(self):
-        assert _opt._gmres_iteration_limits(39) == (39, 10)
-        assert _opt._gmres_iteration_limits(663) == (64, 10)
+        assert _linear_solve._gmres_iteration_limits(39) == (39, 10)
+        assert _linear_solve._gmres_iteration_limits(663) == (64, 10)
 
     @pytest.mark.parametrize(
         "linear_solver",
@@ -3452,7 +3478,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         lu_piv = _opt.jsp_linalg.lu_factor(matrix_stale)
         rhs = jnp.asarray([1.0, -2.0, 3.0, -4.0], dtype=jnp.float64)
 
-        solution, status = _opt._solve_dense_ir_system_with_status(
+        solution, status = _dense_ir._solve_dense_ir_system_with_status(
             lambda vector: matrix_live @ vector,
             lu_piv,
             rhs,
@@ -3460,7 +3486,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         )
 
         assert bool(status.success) is True
-        assert int(status.iterations) == _opt._DENSE_IR_NEWTON_REFINEMENT_STEPS
+        assert int(status.iterations) == _dense_ir._DENSE_IR_NEWTON_REFINEMENT_STEPS
         np.testing.assert_allclose(
             np.asarray(matrix_live @ solution),
             np.asarray(rhs),
@@ -3475,7 +3501,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         lu_piv = _opt.jsp_linalg.lu_factor(jnp.eye(3, dtype=jnp.float64))
         rhs = jnp.asarray([1.0, 2.0, 3.0], dtype=jnp.float64)
 
-        _solution, status = _opt._solve_dense_ir_system_with_status(
+        _solution, status = _dense_ir._solve_dense_ir_system_with_status(
             lambda vector: matrix_live @ vector,
             lu_piv,
             rhs,
@@ -3541,7 +3567,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         def tolerance_sensitive_solve(_matvec, rhs, *, tol):
             loose = tol > strict_cap
             direction = jnp.where(loose, -rhs, rhs)
-            return direction, _opt._LinearSolveStatus(
+            return direction, _linear_solve._LinearSolveStatus(
                 success=~loose,
                 residual=jnp.where(loose, 1.0, 0.0).astype(jnp.float64),
                 residual_relative=jnp.where(loose, 0.5, 0.0).astype(jnp.float64),
@@ -3581,7 +3607,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         def damped_far_operator_solve(matvec, rhs, *, tol):
             del tol
             hessian_diagonal = matvec(jnp.ones_like(rhs))
-            return 0.55 * rhs / hessian_diagonal, _opt._LinearSolveStatus(
+            return 0.55 * rhs / hessian_diagonal, _linear_solve._LinearSolveStatus(
                 success=jnp.asarray(True),
                 residual=jnp.asarray(0.0, dtype=jnp.float64),
                 residual_relative=jnp.asarray(0.0, dtype=jnp.float64),

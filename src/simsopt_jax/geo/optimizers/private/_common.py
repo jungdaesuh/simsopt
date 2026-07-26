@@ -19,10 +19,9 @@ from jax import lax
 from simsopt_jax.runtime.host_boundary import host_array as _callback_host_array
 from simsopt_jax.backend import (
     get_backend_policy,
-    get_runtime_jax_device,
     is_float32_smoke_policy,
-    maybe_initialize_distributed_jax,
 )
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core.sharding import active_replicated_sharding
 from .._shared import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
@@ -52,13 +51,9 @@ def _private_optimizer_device_put(value, *, dtype):
         array = np.asarray(value, dtype=np.dtype(dtype))
     else:
         array = jnp.asarray(value, dtype=dtype)
-    maybe_initialize_distributed_jax()
     if sharding is not None:
-        return jax.device_put(array, sharding)
-    runtime_device = get_runtime_jax_device()
-    if runtime_device is None:
-        return jax.device_put(array)
-    return jax.device_put(array, runtime_device)
+        return explicit_device_array(array, dtype=dtype, target=sharding)
+    return explicit_device_array(array, dtype=dtype)
 
 
 def _as_jax_dtype(value, dtype):

@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt_jax.core._math_utils import as_runtime_float64, runtime_device_put
+from simsopt_jax.runtime.host_boundary import host_array
 
 
 def _stack_point_clouds(point_clouds):
@@ -36,9 +37,7 @@ def _min_dist2_matrix(left_points, left_valid, right_points, right_valid):
 
 
 def _candidate_pairs_from_mask(mask) -> list[tuple[int, int]]:
-    with jax.transfer_guard_device_to_host("allow"):
-        mask_host = jax.device_get(mask)
-    rows, cols = np.nonzero(np.asarray(mask_host))
+    rows, cols = np.nonzero(host_array(mask))
     return list(zip(rows.tolist(), cols.tolist(), strict=True))
 
 

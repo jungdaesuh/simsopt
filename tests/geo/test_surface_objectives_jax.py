@@ -44,7 +44,12 @@ from simsopt.field.coil import Current, coils_via_symmetries
 from simsopt.configs.zoo import get_data
 from simsopt.geo.curve import create_equally_spaced_curves
 from simsopt.geo.boozersurface import BoozerSurface
-from simsopt_jax.geo.optimizers import optimizer as optimizer_jax_module
+from simsopt_jax.geo.optimizers import (
+    adjoint_linear_solve as adjoint_linear_solve_module,
+)
+from simsopt_jax.geo.optimizers import dense_ir as dense_ir_module
+from simsopt_jax.geo.optimizers import linear_solve as linear_solve_module
+from simsopt_jax.geo.optimizers import _shared as optimizer_shared_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
 import simsopt_jax_adapters.geo.surface_objectives as surfaceobjectives_jax_module
 import simsopt_jax_adapters.geo.surface_objectives_traceable as surfaceobjectives_traceable_jax_module
@@ -340,7 +345,7 @@ def _patch_traceable_hessian_solve(monkeypatch, solve_hessian_system_with_status
         lambda _objective_kwargs: {},
     )
     monkeypatch.setattr(
-        surfaceobjectives_jax_module._optimizer_jax,
+        adjoint_linear_solve_module,
         "_solve_hessian_least_squares_system_with_status",
         solve_hessian_system_with_status,
     )
@@ -1255,7 +1260,7 @@ def test_traceable_objective_bundle_donates_value_and_grad_input(monkeypatch):
 
 def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     marked: dict[str, object] = {}
-    original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad
+    original_mark = optimizer_shared_module.mark_cacheable_jit_value_and_grad
 
     def counting_mark(fun):
         marked["calls"] = int(marked.get("calls", 0)) + 1
@@ -1263,8 +1268,8 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         return original_mark(fun)
 
     monkeypatch.setattr(
-        optimizer_jax_module,
-        "_mark_cacheable_jit_value_and_grad",
+        surfaceobjectives_traceable_jax_module,
+        "mark_cacheable_jit_value_and_grad",
         counting_mark,
     )
 
@@ -1278,7 +1283,7 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     assert (
         getattr(
             bundle["compiled_value_and_grad_for"],
-            optimizer_jax_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
+            optimizer_shared_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
             False,
         )
         is True
@@ -2050,7 +2055,7 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
         return solve_rhs + 1.0, _mock_linear_solve_status(True)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module._optimizer_jax,
+        linear_solve_module,
         "_solve_jacobian_system_with_status",
         fake_solve_jacobian_system_with_status,
     )
@@ -2070,7 +2075,7 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
         "transpose": True,
         "tol": 1.0e-8,
         "max_refinement_steps": (
-            surfaceobjectives_jax_module._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            adjoint_linear_solve_module._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
         ),
     }
     assert bool(np.asarray(success))
@@ -2176,7 +2181,7 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
         return rhs, _mock_linear_solve_status(True)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module._optimizer_jax,
+        linear_solve_module,
         "_solve_jacobian_system_with_status",
         fake_solve_jacobian_system_with_status,
     )
@@ -2205,7 +2210,7 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
         "transpose": False,
         "tol": 1.0e-7,
         "max_refinement_steps": (
-            surfaceobjectives_jax_module._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            adjoint_linear_solve_module._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
         ),
     }
     assert bool(np.asarray(success)) is True
@@ -2271,7 +2276,7 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
         return jnp.linalg.solve(linear_operator, rhs), _mock_linear_solve_status(True)
 
     monkeypatch.setattr(
-        surfaceobjectives_jax_module._optimizer_jax,
+        linear_solve_module,
         "_solve_jacobian_system_with_status",
         fake_solve_jacobian_system_with_status,
     )
@@ -2296,7 +2301,7 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
         "transpose": False,
         "tol": 1.0e-7,
         "max_refinement_steps": (
-            surfaceobjectives_jax_module._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            adjoint_linear_solve_module._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
         ),
     }
     assert bool(np.asarray(success)) is True
@@ -2319,12 +2324,14 @@ def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch)
         *,
         stab,
         tol,
+        solver,
     ):
         del objective_fn, tol
         calls.append(stab)
         np.testing.assert_allclose(np.asarray(current_x), np.asarray(solved_x))
         np.testing.assert_allclose(np.asarray(current_rhs), np.asarray(rhs))
         assert stab == pytest.approx(1.0e-4)
+        assert solver == "dense"
         return 2.0 * current_rhs, _mock_linear_solve_status(True)
 
     _patch_traceable_hessian_solve(
@@ -2403,7 +2410,7 @@ def test_traceable_hessian_no_factor_uses_mixed_proposal_and_fp64_certificate(
         lambda: policy,
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
+        adjoint_linear_solve_module,
         "get_backend_policy",
         lambda: policy,
     )
@@ -2441,7 +2448,7 @@ def test_traceable_hessian_no_factor_uses_mixed_proposal_and_fp64_certificate(
         np.asarray(certificate_matrix) + stabilization * np.eye(2),
         np.asarray(rhs),
     )
-    assert isinstance(status, optimizer_jax_module._MixedDenseIrSolveStatus)
+    assert isinstance(status, dense_ir_module._MixedDenseIrSolveStatus)
     assert bool(status.success)
     assert bool(status.trust.active)
     assert constructed_objective_dtypes == [
@@ -2477,8 +2484,10 @@ def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
         *,
         stab,
         tol,
+        solver,
     ):
         del objective_fn, current_x, tol
+        assert solver == "dense"
         stab_value = jnp.asarray(stab, dtype=current_rhs.dtype)
         jax.debug.callback(_record_stab, stab_value, ordered=True)
         success = stab_value == jnp.asarray(1.0e-4, dtype=current_rhs.dtype)
@@ -2593,24 +2602,24 @@ def test_traceable_hessian_plu_solve_rejects_when_quality_gates_fail(monkeypatch
     rhs = jnp.asarray([0.2, -0.6], dtype=jnp.float64)
     linear_solve_factors = jax.scipy.linalg.lu(matrix)
     residual_norm_calls = {"count": 0}
-    original_relative_residual_1_norm = optimizer_jax_module._relative_residual_1_norm
+    original_relative_residual_1_norm = linear_solve_module._relative_residual_1_norm
 
     def relative_residual_1_norm(residual, current_rhs):
         residual_norm_calls["count"] += 1
         return original_relative_residual_1_norm(residual, current_rhs)
 
     monkeypatch.setattr(
-        optimizer_jax_module,
+        linear_solve_module,
         "_forward_error_success",
         lambda *_args, **_kwargs: jnp.asarray(False),
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
+        linear_solve_module,
         "_dense_matrix_backward_error_success",
         lambda *_args, **_kwargs: jnp.asarray(False),
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
+        linear_solve_module,
         "_relative_residual_1_norm",
         relative_residual_1_norm,
     )
@@ -2653,12 +2662,12 @@ def test_traceable_hessian_plu_solve_accepts_backward_error_success(monkeypatch)
         return jnp.asarray(True)
 
     monkeypatch.setattr(
-        optimizer_jax_module,
+        linear_solve_module,
         "_forward_error_success",
         lambda *_args, **_kwargs: jnp.asarray(False),
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
+        linear_solve_module,
         "_dense_matrix_backward_error_success",
         backward_error_success,
     )
@@ -3071,7 +3080,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert optimizer_option_methods == ["bfgs-ondevice"]
 
 
-def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
+def test_traceable_runtime_entries_are_isolated_per_session(
     monkeypatch,
 ):
     pack_calls = []
@@ -3101,7 +3110,6 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         _collect_optimizer_options=lambda *, method: {},
         traceable_newton_trace_capacity=(lambda _method: _TEST_NEWTON_TRACE_CAPACITY),
         _traceable_solve_state_token=31,
-        _traceable_runtime_entry_cache=None,
         options={},
         res={"linearization_kind": "hessian"},
         _linear_solve_tolerance=lambda: 1.0e-10,
@@ -3200,11 +3208,16 @@ def test_get_cached_traceable_runtime_entry_materializes_baseline_only_on_miss(
         0.23,
     )
 
-    assert entry1 is entry2
+    assert isinstance(
+        entry1,
+        surfaceobjectives_traceable_jax_module.TraceableObjectiveSession,
+    )
+    assert not hasattr(booz, "_traceable_runtime_entry_cache")
+    assert entry1 is not entry2
     assert entry3 is not entry2
     assert entry4 is not entry3
-    assert len(pack_calls) == 3
-    assert len(evaluate_calls) == 3
+    assert len(pack_calls) == 4
+    assert len(evaluate_calls) == 4
 
 
 def test_cached_strict_scalar_value_and_grad_builds_stable_jit(monkeypatch):
@@ -4564,7 +4577,7 @@ def test_major_radius_gradient_uses_boozer_surface_biotsavart_fallback():
     assert captured["coil_group_indices"] == [(0,)]
 
 
-def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
+def test_traceable_runtime_entry_reuse_requires_retaining_the_session(
     monkeypatch,
 ):
     build_cache_state_calls = []
@@ -4685,13 +4698,13 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solve_state(
         success_filter=None,
     )
 
-    assert entry1 is entry2
+    assert entry1 is not entry2
     assert len(build_cache_state_calls) == 2
-    assert len(materialize_state_calls) == 1
-    assert len(build_bundle_calls) == 1
+    assert len(materialize_state_calls) == 2
+    assert len(build_bundle_calls) == 2
 
 
-def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success_filter_signatures(
+def test_equivalent_success_filters_do_not_share_session_state(
     monkeypatch,
 ):
     build_bundle_calls = []
@@ -4814,8 +4827,8 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
         success_filter=success_filter_b,
     )
 
-    assert entry1 is entry2
-    assert len(build_bundle_calls) == 1
+    assert entry1 is not entry2
+    assert len(build_bundle_calls) == 2
 
 
 def test_get_cached_traceable_runtime_entry_invalidates_on_solve_state_change(
@@ -5291,11 +5304,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
     }
     build_counts = {name: 0 for name in expected_public_boundaries}
 
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_get_cached_traceable_runtime_entry",
-        lambda *_args, **_kwargs: runtime_entry,
-    )
+    session = types.SimpleNamespace(runtime_entry=runtime_entry)
 
     def build_boundary(name, boundary):
         def _build(*_args):
@@ -5336,6 +5345,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
             object(),
             0.23,
             include_profile_suite=False,
+            session=session,
         )
 
     for bundle in (build_runtime_bundle(), build_runtime_bundle()):
@@ -5343,6 +5353,73 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
             assert bundle[boundary_name] is expected_boundary
 
     assert build_counts == {name: 1 for name in expected_public_boundaries}
+
+
+def test_public_objective_factories_reuse_an_explicit_session(monkeypatch):
+    objective = object()
+    value_and_grad = object()
+    runtime_entry = {"objective": objective}
+    session = types.SimpleNamespace(runtime_entry=runtime_entry)
+    ensure_calls = []
+
+    def ensure_value_and_grad(entry, booz):
+        ensure_calls.append((entry, booz))
+        return value_and_grad
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_ensure_traceable_runtime_optimizer_value_and_grad",
+        ensure_value_and_grad,
+    )
+    booz = object()
+    bs = object()
+
+    assert (
+        surfaceobjectives_jax_module.make_traceable_objective(
+            booz,
+            bs,
+            0.23,
+            session=session,
+        )
+        is objective
+    )
+    assert (
+        surfaceobjectives_jax_module.make_traceable_objective_value_and_grad(
+            booz,
+            bs,
+            0.23,
+            session=session,
+        )
+        is value_and_grad
+    )
+    assert ensure_calls == [(runtime_entry, booz)]
+
+
+def test_public_alm_factory_reuses_bundle_from_an_explicit_session():
+    alm_config = {"constraint_names": ("flux",)}
+    cache_key = (
+        surfaceobjectives_traceable_jax_module._traceable_contract_tree_signature(
+            alm_config
+        )
+    )
+    expected_bundle = object()
+    runtime_entry = {
+        "alm_runtime_bundles": {cache_key: expected_bundle},
+    }
+    session = types.SimpleNamespace(runtime_entry=runtime_entry)
+
+    for _ in range(2):
+        assert (
+            surfaceobjectives_jax_module.make_traceable_single_stage_alm_runtime_bundle(
+                object(),
+                object(),
+                0.23,
+                outer_objective_config={"enabled": True},
+                alm_config=alm_config,
+                session=session,
+            )
+            is expected_bundle
+        )
 
 
 @pytest.mark.parametrize(
@@ -5997,7 +6074,7 @@ def test_traceable_seeded_mixed_key_is_post_freeze_and_replayable(monkeypatch):
     ):
         key_words = jax.random.key_data(certificate_probe_key)
         observed_key_words.append(tuple(int(word) for word in np.asarray(key_words)))
-        trust = optimizer_jax_module._inactive_mixed_dense_ir_trust_telemetry(
+        trust = dense_ir_module._inactive_mixed_dense_ir_trust_telemetry(
             solved_x
         )._replace(
             active=jnp.asarray(True),
@@ -6096,7 +6173,7 @@ def test_traceable_certified_seed_rejects_mismatched_observed_key(monkeypatch):
     def compiled_total_gradient_for_with_certificate_key(
         _coil_dofs, solved_x, _linear_solve_factors, _certificate_probe_key
     ):
-        trust = optimizer_jax_module._inactive_mixed_dense_ir_trust_telemetry(
+        trust = dense_ir_module._inactive_mixed_dense_ir_trust_telemetry(
             solved_x
         )._replace(
             active=jnp.asarray(True),
@@ -6140,7 +6217,7 @@ def test_traceable_certified_seed_rejects_mismatched_observed_key(monkeypatch):
 def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
     observed_jit_names: list[str] = []
     mark_calls: list[object] = []
-    original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad
+    original_mark = optimizer_shared_module.mark_cacheable_jit_value_and_grad
 
     def recording_jit(fun=None, **_kwargs):
         def wrapped(inner):
@@ -6175,8 +6252,8 @@ def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
         recording_jit,
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
-        "_mark_cacheable_jit_value_and_grad",
+        surfaceobjectives_traceable_jax_module,
+        "mark_cacheable_jit_value_and_grad",
         counting_mark,
     )
     monkeypatch.setattr(
@@ -6216,7 +6293,7 @@ def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):
     assert (
         getattr(
             bundle["compiled_value_and_grad_for"],
-            optimizer_jax_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
+            optimizer_shared_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
             False,
         )
         is True
@@ -6597,7 +6674,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
         )
 
     cacheable_public_value_and_grad = (
-        optimizer_jax_module._mark_cacheable_jit_value_and_grad(
+        optimizer_shared_module.mark_cacheable_jit_value_and_grad(
             lambda coil_dofs: coil_dofs
         )
     )
@@ -6715,7 +6792,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
     assert (
         getattr(
             runtime_entry["public_value_and_grad"],
-            optimizer_jax_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
+            optimizer_shared_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
             False,
         )
         is True
@@ -7158,12 +7235,12 @@ def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_nu
     monkeypatch,
 ):
     def unknown_status(rhs):
-        return optimizer_jax_module._linear_solve_status(
+        return linear_solve_module._linear_solve_status(
             rhs,
             jnp.zeros_like(rhs),
             rhs,
             tol=1.0e-10,
-            iterations=optimizer_jax_module._linear_solve_iteration_count(None),
+            iterations=linear_solve_module._linear_solve_iteration_count(None),
         )
 
     monkeypatch.setattr(
@@ -7198,12 +7275,12 @@ def test_traceable_term_adjoint_solve_report_serializes_unknown_iterations_as_nu
         lambda **_kwargs: lambda x_inner: 0.5 * jnp.dot(x_inner, x_inner),
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
+        adjoint_linear_solve_module,
         "_solve_hessian_least_squares_system_with_status",
         lambda _objective_fn, _x, rhs, **_kwargs: (rhs, unknown_status(rhs)),
     )
     monkeypatch.setattr(
-        optimizer_jax_module,
+        adjoint_linear_solve_module,
         "_solve_hessian_system_with_status",
         lambda _objective_fn, _x, rhs, **_kwargs: (rhs, unknown_status(rhs)),
     )
@@ -9603,7 +9680,7 @@ def test_explicit_adjoint_selector_overrides_supplied_dense_factors(
     residual_fn = object()
     observed = {}
     monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module._optimizer_jax,
+        adjoint_linear_solve_module,
         "_ADJOINT_LINEAR_SOLVER",
         selector,
     )
@@ -9651,7 +9728,7 @@ def test_explicit_adjoint_selector_overrides_supplied_dense_factors(
         return expected_solution, expected_status
 
     monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module._optimizer_jax,
+        adjoint_linear_solve_module,
         "_solve_hessian_least_squares_system_with_status",
         record_solve,
     )
@@ -9697,7 +9774,7 @@ def test_explicit_adjoint_selector_does_not_reroute_forward_predictor(
     expected_status = object()
     observed = {}
     monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module._optimizer_jax,
+        adjoint_linear_solve_module,
         "_ADJOINT_LINEAR_SOLVER",
         selector,
     )
@@ -9714,7 +9791,7 @@ def test_explicit_adjoint_selector_does_not_reroute_forward_predictor(
         live_matvec = object()
 
         monkeypatch.setattr(
-            surfaceobjectives_traceable_jax_module._optimizer_jax,
+            adjoint_linear_solve_module,
             "_hessian_linear_operator",
             lambda observed_objective_fn, observed_x, *, stab: (
                 observed.update(
@@ -9773,7 +9850,7 @@ def test_explicit_adjoint_selector_does_not_reroute_forward_predictor(
             return expected_solution, expected_status
 
         monkeypatch.setattr(
-            surfaceobjectives_traceable_jax_module._optimizer_jax,
+            adjoint_linear_solve_module,
             "_solve_hessian_least_squares_system_with_status",
             record_dense,
         )

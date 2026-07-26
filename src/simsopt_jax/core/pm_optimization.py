@@ -69,6 +69,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.runtime.host_boundary import host_array
+
 from ._math_utils import has_tracer_leaf as _has_tracer_leaf
 from ._math_utils import (
     as_runtime_array as _as_runtime_array,
@@ -135,7 +138,7 @@ def _scalar_like(reference: jax.Array, value: float) -> jax.Array:
 
 
 def _device_scalar(value: object, dtype) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+    return explicit_device_array(value, dtype=dtype)
 
 
 def _bool_scalar(value: bool) -> jax.Array:
@@ -182,7 +185,7 @@ def _argmin_finite_cost(costs: jax.Array, *, axis: int | None = None) -> jax.Arr
 def _host_scalar_for_validation(name: str, value, *, dtype=None):
     if _has_tracer_leaf(value):
         return None
-    host_value = np.asarray(jax.device_get(value), dtype=dtype)
+    host_value = host_array(value, dtype=dtype)
     if host_value.shape != ():
         raise ValueError(f"{name} must be a scalar; got shape {host_value.shape}.")
     return host_value
@@ -801,9 +804,7 @@ def gpmo_baseline_candidate_costs(
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = A_arr.T @ residual_arr
     col_sq_arr = (
-        jnp.sum(A_arr * A_arr, axis=0)
-        if col_sq is None
-        else _as_runtime_array(col_sq)
+        jnp.sum(A_arr * A_arr, axis=0) if col_sq is None else _as_runtime_array(col_sq)
     )
     plus = residual_sq + 2.0 * dot + col_sq_arr + penalty_arr
     minus = residual_sq - 2.0 * dot + col_sq_arr + penalty_arr
@@ -1524,10 +1525,8 @@ def initialize_gpmo_arbvec(
         [diff_pos, diff_neg, diff_null[:, None]], axis=1
     )  # (N, 2*n_vectors + 1)
     choice = _argmin_finite_cost(candidates, axis=1)  # (N,)
-    null_choice = jax.device_put(
-        np.asarray(2 * n_vectors, dtype=np.dtype(choice.dtype))
-    )
-    vector_count = jax.device_put(np.asarray(n_vectors, dtype=np.dtype(choice.dtype)))
+    null_choice = explicit_device_array(2 * n_vectors, dtype=choice.dtype)
+    vector_count = explicit_device_array(n_vectors, dtype=choice.dtype)
     chose_null = choice == null_choice
     chose_minus = (choice >= vector_count) & (~chose_null)
     zero_choice = choice - choice
@@ -2248,9 +2247,7 @@ def gpmo_multi_candidate_costs(
     residual_sq = jnp.sum(residual_arr * residual_arr)
     dot = A_arr.T @ residual_arr
     col_sq_arr = (
-        jnp.sum(A_arr * A_arr, axis=0)
-        if col_sq is None
-        else _as_runtime_array(col_sq)
+        jnp.sum(A_arr * A_arr, axis=0) if col_sq is None else _as_runtime_array(col_sq)
     )
     selected_dot = dot[selected_component_indices]
     selected_col_sq = col_sq_arr[selected_component_indices]

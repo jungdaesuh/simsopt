@@ -22,6 +22,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt_jax.geo.optimizers import (
+    adjoint_linear_solve as _adjoint_linear_solve,
+    linear_solve as _linear_solve,
+)
 import simsopt_jax.geo.optimizers.reference as _opt_ref
 import simsopt_jax.core.biotsavart as _biotsavart_jax_core
 import simsopt_jax.solve.dispatch as _solve_jax_dispatch
@@ -120,7 +124,7 @@ _STOKES_FLUX_RTOL = 1e-5
 _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
-_LINEAX_LSMR_AVAILABLE = hasattr(_opt.lineax, "LSMR")
+_LINEAX_LSMR_AVAILABLE = hasattr(_adjoint_linear_solve.lineax, "LSMR")
 _LINEAX_LSMR_SKIP_REASON = "lineax>=0.1.1 is required for LSMR comparator tests"
 
 _PUBLIC_LBFGS_RESULT_RECORD_TYPE = _bsj._BOOZER_RESULT_RECORD_TYPES["lbfgs"]
@@ -3060,12 +3064,11 @@ class TestBoozerSurfaceJAXClass:
         for source in (surface, label):
             booz.need_to_run_code = False
             token = booz._traceable_solve_state_token
-            booz._traceable_runtime_entry_cache = object()
             source.set_recompute_flag()
 
             assert booz.need_to_run_code is True
             assert booz._traceable_solve_state_token != token
-            assert booz._traceable_runtime_entry_cache is None
+            assert not hasattr(booz, "_traceable_runtime_entry_cache")
 
     def test_instantiation_accepts_spec_only_biotsavart(self):
         """The grouped-coil spec path must not require a legacy ``_coils`` list."""
@@ -4738,7 +4741,7 @@ class TestBoozerSurfaceJAXClass:
         runner,
     ):
         """Step damping must not alter the accepted-state linearization."""
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "dense")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
         A = jnp.array([[2.0, 0.5], [0.5, 3.0]])
         b = jnp.array([1.0, 2.0])
         stab = 0.25
@@ -4829,11 +4832,10 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         token = booz._traceable_solve_state_token
-        booz._traceable_runtime_entry_cache = object()
         booz.recompute_bell()
         assert booz.need_to_run_code is True
         assert booz._traceable_solve_state_token != token
-        assert booz._traceable_runtime_entry_cache is None
+        assert not hasattr(booz, "_traceable_runtime_entry_cache")
 
     def test_pack_unpack_roundtrip(self):
         """_pack and _unpack are inverses."""
@@ -6313,7 +6315,7 @@ class TestBoozerSurfaceJAXClass:
             return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _adjoint_linear_solve,
             "_solve_hessian_least_squares_system_with_status",
             fake_solve_hessian_system_with_status,
         )
@@ -6392,7 +6394,7 @@ class TestBoozerSurfaceJAXClass:
             "dense_linear_solve_factors_available": True,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
-        rejected_status = _opt._LinearSolveStatus(
+        rejected_status = _linear_solve._LinearSolveStatus(
             success=jnp.asarray(False),
             residual=jnp.asarray(1.0, dtype=jnp.float64),
             residual_relative=jnp.asarray(1.0, dtype=jnp.float64),
@@ -6412,12 +6414,12 @@ class TestBoozerSurfaceJAXClass:
             return jnp.asarray(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_dense_linear_solve_status",
             dense_linear_solve_status,
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_dense_matrix_backward_error_success",
             backward_error_success,
         )
@@ -6699,9 +6701,9 @@ class TestBoozerSurfaceJAXClass:
 
         recorded_stabs = []
 
-        monkeypatch.setattr(_bsj._optimizer_jax, "_ADJOINT_LINEAR_SOLVER", "dense")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_hessian_vector_product_fn",
             lambda _objective_fn: lambda _x, vec: vec,
         )
@@ -6720,7 +6722,7 @@ class TestBoozerSurfaceJAXClass:
             return rhs / (1.0 + stab_value), _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _adjoint_linear_solve,
             "_solve_hessian_least_squares_system_with_status",
             fake_solve_hessian_system_with_status,
         )
@@ -6831,7 +6833,7 @@ class TestBoozerSurfaceJAXClass:
             return jnp.asarray([2.0, -3.0], dtype=vec.dtype) * vec
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_hessian_vector_product_fn",
             lambda _objective_fn: vector_only_hvp,
         )
@@ -6869,7 +6871,7 @@ class TestBoozerSurfaceJAXClass:
         }
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_hessian_vector_product_fn",
             lambda _objective_fn: lambda _x, vec: vec,
         )
@@ -6886,7 +6888,7 @@ class TestBoozerSurfaceJAXClass:
             return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _adjoint_linear_solve,
             "_solve_hessian_least_squares_system_with_status",
             fake_solve_hessian_system_with_status,
         )
@@ -7045,7 +7047,7 @@ class TestBoozerSurfaceJAXClass:
             return operator
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_jacobian_linear_operator",
             fake_jacobian_linear_operator,
         )
@@ -7064,12 +7066,12 @@ class TestBoozerSurfaceJAXClass:
             assert tol_value == pytest.approx(booz._linear_solve_tolerance())
             assert (
                 int(max_refinement_steps)
-                == _bsj._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+                == _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
             )
             return rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_jacobian_operator_with_status",
             fake_solve_jacobian_operator_with_status,
         )
@@ -7137,7 +7139,7 @@ class TestBoozerSurfaceJAXClass:
             lambda _self, _mask: lambda _x: _x,
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_jacobian_linear_operator",
             lambda _residual_fn, _x: {
                 "matvec": lambda vec: vec,
@@ -7164,12 +7166,12 @@ class TestBoozerSurfaceJAXClass:
             return bad_solution, _mock_linear_solve_status(False)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_jacobian_operator",
             forbidden_solution_only_solve,
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_jacobian_operator_with_status",
             failing_solve_with_status,
         )
@@ -7314,7 +7316,7 @@ class TestBoozerSurfaceJAXClass:
             return rhs + 1.0, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_jacobian_operator_with_status",
             fake_operator_solve,
         )
@@ -7330,7 +7332,7 @@ class TestBoozerSurfaceJAXClass:
         assert operator_calls[0][1] == pytest.approx(booz._linear_solve_tolerance())
         assert (
             operator_calls[0][2]
-            == _bsj._optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            == _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
         )
         assert bool(np.asarray(success)) is True
         np.testing.assert_allclose(np.asarray(solved), np.asarray(rhs + 1.0))
@@ -11170,7 +11172,7 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """Nonlinear Newton damping must not split dense adjoint bundles."""
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "dense")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         bundle = booz._get_penalty_kernel_bundle(
             True,
@@ -11192,7 +11194,7 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """Residual-J augmentation keeps regularization in bundle identity."""
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         booz.options["newton_stab"] = 1.0e-4
         bundle = booz._get_penalty_kernel_bundle(
@@ -11284,7 +11286,7 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """The bundle path must supply a residual-J operator to ``lsmr_j``."""
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         booz.options["newton_stab"] = 1.0e-4
         bundle = booz._get_penalty_kernel_bundle(
@@ -11315,7 +11317,7 @@ class TestUpstreamFactoryBoozerMatrix:
             return current_rhs, _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _opt,
+            _adjoint_linear_solve,
             "_solve_regularized_normal_system_lsmr_j_with_status",
             fake_lsmr_j,
         )
@@ -11337,7 +11339,7 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """The real residual-J LSMR bundle entrypoint stays transfer-clean."""
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         booz.options["newton_stab"] = 1.0e-4
         bundle = booz._get_penalty_kernel_bundle(
@@ -11366,7 +11368,7 @@ class TestUpstreamFactoryBoozerMatrix:
 
     def test_host_jax_kernel_bundle_lsmr_j_rejects_zero_stab(self, monkeypatch):
         """The production bundle path fails closed for unsupported ``stab=0``."""
-        monkeypatch.setattr(_opt, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         bundle = booz._get_penalty_kernel_bundle(
             True,
@@ -11389,7 +11391,7 @@ class TestUpstreamFactoryBoozerMatrix:
         residual_relative,
         iterations,
     ):
-        return _opt._LinearSolveStatus(
+        return _linear_solve._LinearSolveStatus(
             success=jnp.asarray(success),
             residual=jnp.asarray(residual, dtype=jnp.float64),
             residual_relative=jnp.asarray(residual_relative, dtype=jnp.float64),
@@ -11492,9 +11494,9 @@ class TestUpstreamFactoryBoozerMatrix:
             success=True,
             message="converged",
         )
-        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
         real_dense_lu_system_with_status = (
-            _bsj._optimizer_jax._solve_dense_square_operator_lu_system_with_status
+            _linear_solve._solve_dense_square_operator_lu_system_with_status
         )
 
         def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
@@ -11510,7 +11512,7 @@ class TestUpstreamFactoryBoozerMatrix:
             return real_dense_lu_system_with_status(matvec, rhs, tol=tol)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_dense_square_operator_lu_system_with_status",
             fake_dense_lu_system_with_status,
         )
@@ -11598,7 +11600,7 @@ class TestUpstreamFactoryBoozerMatrix:
             success=False,
             message="nonlinear failed",
         )
-        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
         dense_lu_calls = []
 
         def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
@@ -11607,7 +11609,7 @@ class TestUpstreamFactoryBoozerMatrix:
             return jnp.zeros_like(x0), _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_dense_square_operator_lu_system_with_status",
             fake_dense_lu_system_with_status,
         )
@@ -11660,7 +11662,7 @@ class TestUpstreamFactoryBoozerMatrix:
             success=True,
             message="converged",
         )
-        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
         dense_lu_calls = []
 
         def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
@@ -11669,7 +11671,7 @@ class TestUpstreamFactoryBoozerMatrix:
             return jnp.zeros_like(x0), _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_dense_square_operator_lu_system_with_status",
             fake_dense_lu_system_with_status,
         )
@@ -11718,7 +11720,7 @@ class TestUpstreamFactoryBoozerMatrix:
             success=True,
             message="converged",
         )
-        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", True)
+        monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
         policy_calls = []
         dense_lu_calls = []
 
@@ -11732,12 +11734,12 @@ class TestUpstreamFactoryBoozerMatrix:
             return jnp.zeros_like(x0), _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_dense_square_operator_lu_materialization_allowed",
             fake_materialization_allowed,
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_dense_square_operator_lu_system_with_status",
             fake_dense_lu_system_with_status,
         )
@@ -11788,7 +11790,7 @@ class TestUpstreamFactoryBoozerMatrix:
             success=True,
             message="converged",
         )
-        monkeypatch.setattr(_bsj._optimizer_jax, "_EXACT_ADJOINT_DENSE_LU", False)
+        monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", False)
         dense_lu_calls = []
 
         def fake_dense_lu_system_with_status(matvec, rhs, *, tol):
@@ -11797,7 +11799,7 @@ class TestUpstreamFactoryBoozerMatrix:
             return jnp.zeros_like(x0), _mock_linear_solve_status(True)
 
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_dense_square_operator_lu_system_with_status",
             fake_dense_lu_system_with_status,
         )
@@ -13055,7 +13057,7 @@ class TestBuildBoozerSurfaceRuntimeState:
             lambda self, _mask: lambda _x: _x,
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_jacobian_linear_operator",
             lambda _residual_fn, _x: {
                 "matvec": lambda vec: vec,
@@ -13063,12 +13065,12 @@ class TestBuildBoozerSurfaceRuntimeState:
             },
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_jacobian_operator",
             lambda _operator, rhs, *, transpose, tol, max_refinement_steps: rhs,
         )
         monkeypatch.setattr(
-            _bsj._optimizer_jax,
+            _linear_solve,
             "_solve_jacobian_operator_with_status",
             lambda _operator, rhs, *, transpose, tol, max_refinement_steps: (
                 rhs,

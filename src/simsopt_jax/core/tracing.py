@@ -75,6 +75,8 @@ import numpy as np
 from jax.sharding import PartitionSpec as P
 from jax.typing import ArrayLike
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+
 from ._device_scalars import two_pi as _device_two_pi
 from .boozer_radial_field import (
     BoozerRadialInterpolantFrozenState,
@@ -289,11 +291,11 @@ def _lane_axis_carry_zeroes(
 
 
 def _device_array(value, dtype):
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+    return explicit_device_array(value, dtype=dtype)
 
 
 def _device_zeros(shape: tuple[int, ...], dtype):
-    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
+    return explicit_device_array(np.zeros(shape, dtype=np.dtype(dtype)), dtype=dtype)
 
 
 def _as_device_array(value, dtype) -> jax.Array:
@@ -316,12 +318,13 @@ def _as_device_array(value, dtype) -> jax.Array:
 
             def stage_leaf(leaf):
                 if isinstance(leaf, jax.Array):
-                    return jax.device_put(
-                        jnp.asarray(leaf, dtype=dtype), target_sharding
+                    return explicit_device_array(
+                        leaf, dtype=dtype, target=target_sharding
                     )
-                return jax.device_put(
-                    np.asarray(leaf, dtype=np.dtype(dtype)),
-                    target_sharding,
+                return explicit_device_array(
+                    leaf,
+                    dtype=dtype,
+                    target=target_sharding,
                 )
 
             return jnp.asarray(jax.tree.map(stage_leaf, value), dtype=dtype)
@@ -353,7 +356,7 @@ def _continuous_phi_from_state(
 
 
 def _take_entry(vector: jax.Array, index: int) -> jax.Array:
-    indices = jax.device_put(np.asarray((index,), dtype=np.int32))
+    indices = explicit_device_array((index,), dtype=np.int32)
     return jax.lax.squeeze(jnp.take(vector, indices, axis=0), (0,))
 
 

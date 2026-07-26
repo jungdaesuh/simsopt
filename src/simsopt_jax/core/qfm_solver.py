@@ -7,6 +7,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+
 from ._math_utils import as_jax_float64, as_runtime_float64
 from .field import grouped_biot_savart_A_from_spec, grouped_biot_savart_B_from_spec
 from ._surface_dofs_dispatch import (
@@ -867,7 +869,7 @@ def qfm_augmented_lagrangian_solve_jax(
     _require_bfgs_optimizer(optimizer)
     dofs = as_jax_float64(init_dofs)
     # Match the committed sharding returned by BFGS across every outer iteration.
-    dofs = jax.device_put(dofs, dofs.sharding)
+    dofs = explicit_device_array(dofs, dtype=dofs.dtype, reference=dofs)
     max_outer_value = int(max_outer)
     inner_max_iter_value = int(inner_max_iter)
     if max_outer_value < 1:

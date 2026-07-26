@@ -10,7 +10,7 @@ compatibility with existing callers.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from functools import partial
 from threading import Lock
 from typing import NamedTuple
@@ -56,7 +56,13 @@ from simsopt_jax.core.sharding import (
     maybe_shard_seed_batch_inputs,
     seed_batch_sharding_config,
 )
-from simsopt_jax.geo.optimizers import optimizer as _optimizer_jax
+from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
+from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
+from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
+from simsopt_jax.geo.optimizers._shared import (
+    cast_floating_tree,
+    mark_cacheable_jit_value_and_grad,
+)
 from simsopt_jax.geo._pairwise_reductions import (
     pairwise_min_distance_batched_pure,
     pairwise_min_distance_pure,
@@ -76,6 +82,30 @@ from simsopt_jax_adapters.geo.factor_handoff_identity import (
     build_exact_factor_handoff,
     require_exact_factor_handoff,
 )
+
+
+@dataclass
+class _LazyCompiledGradientState:
+    total_gradient: Callable | None = None
+    total_gradient_with_key: Callable | None = None
+    value_and_grad: Callable | None = None
+    gradient_lock: Lock = dataclass_field(default_factory=Lock)
+    keyed_gradient_lock: Lock = dataclass_field(default_factory=Lock)
+    value_and_grad_lock: Lock = dataclass_field(default_factory=Lock)
+
+
+@dataclass
+class _HostReportingState:
+    baseline_metrics: dict[bool, dict[str, object]] = dataclass_field(
+        default_factory=dict
+    )
+    resolved_reporting_metrics: Callable | None = None
+
+
+@dataclass
+class _BaselineValueAndGradState:
+    value_and_grad: tuple[float, np.ndarray] | None = None
+    lock: Lock = dataclass_field(default_factory=Lock)
 
 
 def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
@@ -437,12 +467,12 @@ def _traceable_directional_inner_objective(
 
 def _traceable_non_dense_adjoint_selected() -> bool:
     """Return whether the explicit adjoint route is matrix-free."""
-    return _optimizer_jax._ADJOINT_LINEAR_SOLVER in ("cg", "lsmr_j")
+    return _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER in ("cg", "lsmr_j")
 
 
 def _traceable_residual_jacobian_adjoint_selected() -> bool:
     """Return whether the adjoint route acts on the residual Jacobian."""
-    return _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j"
+    return _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "lsmr_j"
 
 
 def _traceable_solve_hessian_linearization(
@@ -470,7 +500,7 @@ def _traceable_solve_hessian_linearization(
     if linear_solve_factors is not None and not explicit_adjoint:
         live_x = _as_jax_float64(solved_x)
         live_rhs = _as_jax_float64(rhs)
-        hessian_operator = _optimizer_jax._hessian_linear_operator(
+        hessian_operator = _adjoint_linear_solve._hessian_linear_operator(
             objective_fn,
             live_x,
             stab=float(linear_solve_stab),
@@ -504,7 +534,9 @@ def _traceable_solve_hessian_linearization(
             decision_split_mode="jvp",
             **_traceable_inner_objective_kwargs(objective_kwargs),
         )
-    linear_solver = _optimizer_jax._ADJOINT_LINEAR_SOLVER if transpose else "dense"
+    linear_solver = (
+        _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER if transpose else "dense"
+    )
     policy = get_backend_policy()
     mixed_dense_ir = (
         certificate_probe_key is not None
@@ -514,11 +546,11 @@ def _traceable_solve_hessian_linearization(
     )
     if mixed_dense_ir:
         proposal_dtype = np.dtype(policy.compute_dtype)
-        proposal_coil_set_spec = _optimizer_jax._cast_floating_tree(
+        proposal_coil_set_spec = cast_floating_tree(
             coil_set_spec,
             proposal_dtype,
         )
-        proposal_objective_kwargs = _optimizer_jax._cast_floating_tree(
+        proposal_objective_kwargs = cast_floating_tree(
             _traceable_inner_objective_kwargs(objective_kwargs),
             proposal_dtype,
         )
@@ -531,7 +563,7 @@ def _traceable_solve_hessian_linearization(
             )
         )
         residual_kwargs["certificate_probe_key"] = certificate_probe_key
-    return _optimizer_jax._solve_hessian_least_squares_system_with_status(
+    return _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
         objective_fn,
         solved_x,
         rhs,
@@ -587,7 +619,7 @@ class _TraceablePLURefinement(NamedTuple):
 
     solution: jax.Array
     residual: jax.Array
-    status: _optimizer_jax._LinearSolveStatus
+    status: _linear_solve._LinearSolveStatus
     residual_relative_trace: jax.Array
     contraction_ratio_trace: jax.Array
     residual_relative_trace_length: jax.Array
@@ -662,7 +694,7 @@ def _traceable_refine_plu_linearization(
         transpose=transpose,
     )
     residual = rhs - _as_jax_float64(live_matvec(solution))
-    status = _optimizer_jax._linear_solve_status(
+    status = _linear_solve._linear_solve_status(
         solution,
         residual,
         rhs,
@@ -684,7 +716,7 @@ def _traceable_refine_plu_linearization(
         jnp.asarray(jnp.nan, dtype=trace_dtype),
         dtype=trace_dtype,
     )
-    initial_finite = _optimizer_jax._linear_solve_finite(
+    initial_finite = _linear_solve._linear_solve_finite(
         solution,
         residual,
     ) & jnp.isfinite(status.residual_relative)
@@ -722,7 +754,7 @@ def _traceable_refine_plu_linearization(
         )
         candidate_solution = state.solution + correction
         candidate_residual = rhs - _as_jax_float64(live_matvec(candidate_solution))
-        candidate_status = _optimizer_jax._linear_solve_status(
+        candidate_status = _linear_solve._linear_solve_status(
             candidate_solution,
             candidate_residual,
             rhs,
@@ -733,7 +765,7 @@ def _traceable_refine_plu_linearization(
         candidate_relative = candidate_status.residual_relative
         ratio = candidate_relative / jnp.maximum(previous_relative, unit_roundoff)
         candidate_finite = (
-            _optimizer_jax._linear_solve_finite(
+            _linear_solve._linear_solve_finite(
                 candidate_solution,
                 candidate_residual,
             )
@@ -798,14 +830,14 @@ def _traceable_solve_plu_linearization(
     )
 
     def rebuild_live_fp64(_):
-        live_matrix = _optimizer_jax._dense_square_operator_matrix(
+        live_matrix = _linear_solve._dense_square_operator_matrix(
             live_matvec,
             rhs,
             matrix_dtype=np.float64,
             sweep_dtype=np.float64,
         )
         live_lu_piv = jsp_linalg.lu_factor(live_matrix)
-        live_plu = _optimizer_jax._plu_from_lu_piv(live_lu_piv)
+        live_plu = _linear_solve._plu_from_lu_piv(live_lu_piv)
         rebuilt_factors = (
             live_plu[0],
             live_plu[1],
@@ -820,7 +852,7 @@ def _traceable_solve_plu_linearization(
             linear_solve_tol=linear_solve_tol,
             transpose=False,
         )
-        solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+        solve_safe = _linear_solve._dense_matrix_solve_numerically_safe(
             live_matrix,
             rebuilt.solution,
             rhs,
@@ -829,7 +861,7 @@ def _traceable_solve_plu_linearization(
             solve_dtype=rhs.dtype,
         )
         small_solution_success = (
-            _optimizer_jax._dense_matrix_solve_small_solution_success(
+            _linear_solve._dense_matrix_solve_small_solution_success(
                 rebuilt.solution,
                 rhs,
                 tol=linear_solve_tol,
@@ -917,14 +949,14 @@ def _traceable_solve_exact_linearization(
             **_traceable_exact_residual_kwargs(objective_kwargs),
         )
 
-    return _optimizer_jax._solve_jacobian_system_with_status(
+    return _linear_solve._solve_jacobian_system_with_status(
         residual_fn,
         solved_x,
         rhs,
         transpose=transpose,
         tol=linear_solve_tol,
         max_refinement_steps=(
-            _optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+            _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
         ),
     )
 
@@ -1782,8 +1814,8 @@ def _traceable_objective_gradient_parts(
 
     coil_dofs = _as_jax_float64(coil_dofs)
     solved_x = _as_jax_float64(solved_x)
-    inactive_mixed_dense_ir_trust = (
-        _optimizer_jax._inactive_mixed_dense_ir_trust_telemetry(solved_x)
+    inactive_mixed_dense_ir_trust = _dense_ir._inactive_mixed_dense_ir_trust_telemetry(
+        solved_x
     )
 
     def _evaluate_objective(x_inner, current_coil_dofs, coil_set_spec):
@@ -1885,13 +1917,13 @@ def _traceable_objective_gradient_parts(
                 linear_solve_status.trust
                 if isinstance(
                     linear_solve_status,
-                    _optimizer_jax._MixedDenseIrSolveStatus,
+                    _dense_ir._MixedDenseIrSolveStatus,
                 )
                 else inactive_mixed_dense_ir_trust
             )
             return (
                 adjoint_value,
-                _optimizer_jax._linear_solve_status_success(linear_solve_status),
+                _linear_solve._linear_solve_status_success(linear_solve_status),
                 trust,
             )
 
@@ -2031,7 +2063,7 @@ def _traceable_predict_warmstart_result_from_anchor(
         linear_solve_stab=linear_solve_stab,
         transpose=False,
     )
-    linear_solve_success = _optimizer_jax._linear_solve_status_success(
+    linear_solve_success = _linear_solve._linear_solve_status_success(
         linear_solve_status
     )
     dx = jnp.asarray(dx, dtype=anchor_x.dtype)
@@ -2506,7 +2538,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             _build_value_and_grad_for(compiled_total_gradient_for),
             **jit_kwargs,
         )
-        return _optimizer_jax._mark_cacheable_jit_value_and_grad(
+        return mark_cacheable_jit_value_and_grad(
             _make_traceable_runtime_jax_array_boundary(
                 jitted_value_and_grad_for,
                 "compiled_value_and_grad_for",
@@ -2518,59 +2550,48 @@ def _build_traceable_objective_compiled_bundle_from_state(
         "compiled_forward_result_for",
     )
     if general_only_forward:
-        compiled_total_gradient_impl = None
-        compiled_total_gradient_with_key_impl = None
-        compiled_value_and_grad_impl = None
-        gradient_lock = Lock()
-        keyed_gradient_lock = Lock()
-        value_and_grad_lock = Lock()
+        lazy_state = _LazyCompiledGradientState()
 
         def _lazy_compiled_total_gradient_for(*args):
-            nonlocal compiled_total_gradient_impl
-            if compiled_total_gradient_impl is None:
-                with gradient_lock:
-                    if compiled_total_gradient_impl is None:
-                        compiled_total_gradient_impl = (
-                            _build_compiled_total_gradient_for()
-                        )
-            return compiled_total_gradient_impl(*args)
+            if lazy_state.total_gradient is None:
+                with lazy_state.gradient_lock:
+                    if lazy_state.total_gradient is None:
+                        lazy_state.total_gradient = _build_compiled_total_gradient_for()
+            return lazy_state.total_gradient(*args)
 
         def _lazy_compiled_total_gradient_for_with_certificate_key(*args):
-            nonlocal compiled_total_gradient_with_key_impl
-            if compiled_total_gradient_with_key_impl is None:
-                with keyed_gradient_lock:
-                    if compiled_total_gradient_with_key_impl is None:
-                        compiled_total_gradient_with_key_impl = (
+            if lazy_state.total_gradient_with_key is None:
+                with lazy_state.keyed_gradient_lock:
+                    if lazy_state.total_gradient_with_key is None:
+                        lazy_state.total_gradient_with_key = (
                             _build_compiled_total_gradient_for_with_certificate_key()
                         )
-            return compiled_total_gradient_with_key_impl(*args)
+            return lazy_state.total_gradient_with_key(*args)
 
         def _lazy_compiled_value_and_grad_for(coil_dofs):
-            nonlocal compiled_total_gradient_impl, compiled_value_and_grad_impl
-            if compiled_value_and_grad_impl is None:
-                with value_and_grad_lock:
-                    if compiled_value_and_grad_impl is None:
-                        if compiled_total_gradient_impl is None:
-                            with gradient_lock:
-                                if compiled_total_gradient_impl is None:
-                                    compiled_total_gradient_impl = (
+            if lazy_state.value_and_grad is None:
+                with lazy_state.value_and_grad_lock:
+                    if lazy_state.value_and_grad is None:
+                        if lazy_state.total_gradient is None:
+                            with lazy_state.gradient_lock:
+                                if lazy_state.total_gradient is None:
+                                    lazy_state.total_gradient = (
                                         _build_compiled_total_gradient_for()
                                     )
-                        compiled_value_and_grad_impl = (
-                            _build_compiled_value_and_grad_for(
-                                compiled_total_gradient_impl
-                            )
+                        lazy_state.value_and_grad = _build_compiled_value_and_grad_for(
+                            lazy_state.total_gradient
                         )
-            return compiled_value_and_grad_impl(coil_dofs)
+            return lazy_state.value_and_grad(coil_dofs)
 
         compiled_total_gradient_for = _lazy_compiled_total_gradient_for
         compiled_total_gradient_for_with_certificate_key = (
             _lazy_compiled_total_gradient_for_with_certificate_key
         )
-        compiled_value_and_grad_for = _optimizer_jax._mark_cacheable_jit_value_and_grad(
+        compiled_value_and_grad_for = mark_cacheable_jit_value_and_grad(
             _lazy_compiled_value_and_grad_for
         )
     else:
+        lazy_state = None
         compiled_total_gradient_for = _build_compiled_total_gradient_for()
         compiled_total_gradient_for_with_certificate_key = (
             _build_compiled_total_gradient_for_with_certificate_key()
@@ -2587,6 +2608,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             compiled_total_gradient_for_with_certificate_key
         ),
         "compiled_value_and_grad_for": compiled_value_and_grad_for,
+        "lazy_gradient_state": lazy_state,
     }
 
 
@@ -2786,7 +2808,7 @@ def _traceable_runtime_cache_key(booz_jax, state, *, success_filter=None):
     )
 
 
-def _get_cached_traceable_runtime_entry(
+def _build_traceable_runtime_entry(
     booz_jax,
     bs_jax,
     iota_target,
@@ -2794,7 +2816,7 @@ def _get_cached_traceable_runtime_entry(
     outer_objective_config=None,
     success_filter=None,
 ):
-    """Reuse compiled traceable runtime callables while the solved state is unchanged."""
+    """Build one isolated traceable runtime entry for an owning session."""
     cache_state = _build_traceable_objective_cache_state(
         booz_jax,
         bs_jax,
@@ -2806,10 +2828,6 @@ def _get_cached_traceable_runtime_entry(
         cache_state,
         success_filter=success_filter,
     )
-    cached_entry = getattr(booz_jax, "_traceable_runtime_entry_cache", None)
-    if cached_entry is not None and cached_entry["cache_key"] == cache_key:
-        return cached_entry
-
     state = _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
     compiled_bundle = _build_traceable_objective_compiled_bundle_from_state(
         booz_jax,
@@ -2817,38 +2835,19 @@ def _get_cached_traceable_runtime_entry(
         success_filter=success_filter,
     )
     objective = _make_traceable_objective_from_compiled_bundle(compiled_bundle)
-    cached_entry = {
-        "cache_key": cache_key,
-        "success_filter": success_filter,
-        "compiled_bundle": compiled_bundle,
-        "objective": objective,
-        "batched_value_and_grad": _make_traceable_batched_value_and_grad_pipeline(
+    return TraceableObjectiveSession(
+        cache_key=cache_key,
+        success_filter=success_filter,
+        compiled_bundle=compiled_bundle,
+        booz_jax=booz_jax,
+        objective=objective,
+        batched_value_and_grad=_make_traceable_batched_value_and_grad_pipeline(
             compiled_bundle["compiled_value_and_grad_for"]
         ),
-        "reporting_metrics": None,
-        "reporting_metrics_from_solution": None,
-        "public_objective": None,
-        "public_value_and_grad": None,
-        "public_batched_value_and_grad": None,
-        "public_forward_result": None,
-        "public_reporting_metrics": None,
-        "public_reporting_metrics_from_solution": None,
-        "host_objective": None,
-        "host_value_and_grad": None,
-        "host_reporting_metrics": None,
-        "profile_suite": None,
-        "optimizer_compiled_bundle": None,
-        "optimizer_value_and_grad": None,
-        "optimizer_solved_pair": None,
-        "seeded_compiled_bundle": None,
-        "seeded_value_and_grad": None,
-        "alm_runtime_bundles": {},
-    }
-    booz_jax._traceable_runtime_entry_cache = cached_entry
-    return cached_entry
+    )
 
 
-def _get_cached_traceable_solved_state_value_and_grad_entry(
+def _build_traceable_solved_state_value_and_grad_entry(
     booz_jax,
     bs_jax,
     iota_target,
@@ -2856,7 +2855,7 @@ def _get_cached_traceable_solved_state_value_and_grad_entry(
     outer_objective_config=None,
     success_filter=None,
 ):
-    """Cache the host-solve/compiled-gradient bridge without a forward graph."""
+    """Build an isolated host-solve/compiled-gradient bridge."""
     cache_state = _build_traceable_objective_cache_state(
         booz_jax,
         bs_jax,
@@ -2869,26 +2868,17 @@ def _get_cached_traceable_solved_state_value_and_grad_entry(
         cache_state,
         success_filter=success_filter,
     )
-    cached_entry = getattr(
-        booz_jax,
-        "_traceable_solved_state_value_and_grad_entry_cache",
-        None,
-    )
-    if cached_entry is not None and cached_entry["cache_key"] == cache_key:
-        return cached_entry
-
     state = _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
-    cached_entry = {
-        "cache_key": cache_key,
-        "success_filter": success_filter,
-        "state": state,
-        "value_and_grad": _build_traceable_solved_state_value_and_grad_from_state(
-            booz_jax,
-            state,
-        ),
-    }
-    booz_jax._traceable_solved_state_value_and_grad_entry_cache = cached_entry
-    return cached_entry
+    session = TraceableObjectiveSession(
+        cache_key=cache_key,
+        success_filter=success_filter,
+        compiled_bundle={"state": state},
+        booz_jax=booz_jax,
+    )
+    session.solved_state_value_and_grad = (
+        _build_traceable_solved_state_value_and_grad_from_state(booz_jax, state)
+    )
+    return session
 
 
 def _ensure_traceable_runtime_reporting_metrics(runtime_entry):
@@ -3165,7 +3155,7 @@ def _ensure_traceable_runtime_seeded_value_and_grad(
         baseline_x,
         baseline_linear_solve_factors,
     )
-    mixed_dense_ir_trust = _optimizer_jax._inactive_mixed_dense_ir_trust_telemetry(
+    mixed_dense_ir_trust = _dense_ir._inactive_mixed_dense_ir_trust_telemetry(
         baseline_x
     )
     baseline_gradient = _traceable_adjoint_gradient_or_nan(
@@ -3194,7 +3184,7 @@ def _ensure_traceable_runtime_seeded_value_and_grad(
 
 def _mixed_certificate_probe_evidence(
     authority: CertificateProbeAuthority,
-    trust: _optimizer_jax._MixedDenseIrTrustTelemetry,
+    trust: _dense_ir._MixedDenseIrTrustTelemetry,
 ) -> CertificateProbeEvidence | None:
     """Bind active device trust to its exact host challenge and fallback decision."""
     if not _host_bool(trust.active):
@@ -3282,12 +3272,12 @@ def _make_traceable_lazy_host_reporting_metrics(runtime_entry):
         state["baseline_coil_dofs"]
     )
     baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
-    baseline_host_metrics = {}
-    resolved_host_reporting_metrics = None
+    reporting_state = _HostReportingState()
+    runtime_entry["host_reporting_state"] = reporting_state
 
     def _baseline_reporting_metrics(*, include_distance_metrics):
         include_distances = bool(include_distance_metrics)
-        cached_metrics = baseline_host_metrics.get(include_distances)
+        cached_metrics = reporting_state.baseline_metrics.get(include_distances)
         if cached_metrics is None:
             metrics = _traceable_reporting_metrics_from_solution(
                 state["objective_kwargs"],
@@ -3303,23 +3293,22 @@ def _make_traceable_lazy_host_reporting_metrics(runtime_entry):
                     metrics,
                     include_distance_metrics=include_distances,
                 )
-            baseline_host_metrics[include_distances] = cached_metrics
+            reporting_state.baseline_metrics[include_distances] = cached_metrics
         return dict(cached_metrics)
 
     def host_reporting_metrics(coil_dofs, *, include_distance_metrics=True):
-        nonlocal resolved_host_reporting_metrics
         if _host_input_matches_baseline(coil_dofs, baseline_coil_dofs):
             return _baseline_reporting_metrics(
                 include_distance_metrics=include_distance_metrics
             )
-        if resolved_host_reporting_metrics is None:
+        if reporting_state.resolved_reporting_metrics is None:
             reporting_metrics = _ensure_traceable_runtime_reporting_metrics(
                 runtime_entry
             )["reporting_metrics"]
-            resolved_host_reporting_metrics = _make_traceable_host_reporting_metrics(
-                reporting_metrics
+            reporting_state.resolved_reporting_metrics = (
+                _make_traceable_host_reporting_metrics(reporting_metrics)
             )
-        return resolved_host_reporting_metrics(
+        return reporting_state.resolved_reporting_metrics(
             coil_dofs,
             include_distance_metrics=include_distance_metrics,
         )
@@ -3343,8 +3332,8 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
             baseline_coil_dofs=baseline_coil_dofs,
             baseline_return=baseline_value,
         )
-        baseline_value_and_grad = None
-        baseline_value_and_grad_lock = Lock()
+        baseline_state = _BaselineValueAndGradState()
+        runtime_entry["baseline_value_and_grad_state"] = baseline_state
 
         def compute_baseline_value_and_grad():
             baseline_coil_dofs_jax = _traceable_runtime_deviceify_tree(
@@ -3376,13 +3365,14 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
                 )
 
         def baseline_value_and_grad_return():
-            nonlocal baseline_value_and_grad
-            if baseline_value_and_grad is None:
-                with baseline_value_and_grad_lock:
-                    if baseline_value_and_grad is None:
-                        baseline_value_and_grad = compute_baseline_value_and_grad()
+            if baseline_state.value_and_grad is None:
+                with baseline_state.lock:
+                    if baseline_state.value_and_grad is None:
+                        baseline_state.value_and_grad = (
+                            compute_baseline_value_and_grad()
+                        )
             baseline_value_for_value_and_grad, baseline_gradient = (
-                baseline_value_and_grad
+                baseline_state.value_and_grad
             )
             return baseline_value_for_value_and_grad, baseline_gradient.copy()
 
@@ -3622,7 +3612,7 @@ def _make_traceable_value_and_grad_boundary(compiled_value_and_grad_for):
     def value_and_grad(coil_dofs):
         return compiled_value_and_grad_for(_as_jax_float64(coil_dofs).copy())
 
-    return _optimizer_jax._mark_cacheable_jit_value_and_grad(value_and_grad)
+    return mark_cacheable_jit_value_and_grad(value_and_grad)
 
 
 def _traceable_reporting_metrics_from_solution(
@@ -3956,9 +3946,9 @@ def _hostify_traceable_reporting_metrics(metrics, *, include_distance_metrics):
         "curve_surface_min_dist",
         "surface_vessel_min_dist",
     )
-    has_G = bool(np.asarray(jax.device_get(metrics["has_G"])))
+    has_G = _host_bool(metrics["has_G"])
     host_metrics = {
-        "solver_success": bool(np.asarray(jax.device_get(metrics["solver_success"]))),
+        "solver_success": _host_bool(metrics["solver_success"]),
         "final_G": None
         if not has_G
         else float(_host_scalar(metrics["final_G"], dtype=np.float64)),
@@ -4018,9 +4008,7 @@ def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for)
 
         return lax.map(compiled_value_and_grad_for, coil_dofs_batch)
 
-    return _optimizer_jax._mark_cacheable_jit_value_and_grad(
-        jax.jit(_batched_value_and_grad_for)
-    )
+    return mark_cacheable_jit_value_and_grad(jax.jit(_batched_value_and_grad_for))
 
 
 def _make_traceable_batched_value_and_grad_boundary(batched_value_and_grad):
@@ -4056,7 +4044,7 @@ def _summarize_traceable_scalar(value):
 
 def _summarize_traceable_gradient(gradient):
     """Return a compact host summary for one gradient vector."""
-    host_gradient = np.asarray(jax.device_get(gradient), dtype=np.float64).reshape(-1)
+    host_gradient = _host_array(gradient, dtype=np.float64).reshape(-1)
     finite_mask = np.isfinite(host_gradient)
     all_finite = bool(np.all(finite_mask))
     first_nonfinite_index = None
@@ -4075,7 +4063,7 @@ def _summarize_traceable_linear_solve_status(status):
     return {
         "residual": _summarize_traceable_scalar(status.residual),
         "residual_relative": _summarize_traceable_scalar(status.residual_relative),
-        "iterations": _optimizer_jax._linear_solve_iterations_host_value(
+        "iterations": _linear_solve._linear_solve_iterations_host_value(
             status.iterations
         ),
     }
@@ -4125,9 +4113,9 @@ def _traceable_term_adjoint_solve_report(
         linear_solve_stab=linear_solve_stab,
         transpose=True,
     )
-    success = _optimizer_jax._linear_solve_status_success(status)
+    success = _linear_solve._linear_solve_status_success(status)
     report = {
-        "success": bool(np.asarray(jax.device_get(success))),
+        "success": _host_bool(success),
         **_summarize_traceable_linear_solve_status(status),
         "rhs_norm": _summarize_traceable_scalar(jnp.linalg.norm(rhs)),
         "solution_norm": _summarize_traceable_scalar(jnp.linalg.norm(adjoint)),
@@ -4140,7 +4128,7 @@ def _traceable_term_adjoint_solve_report(
             transpose=True,
         )
         residual_norm = jnp.linalg.norm(residual)
-        residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+        residual_tol = _linear_solve._linear_solve_residual_tolerance(
             rhs,
             linear_solve_tol,
         )
@@ -4150,7 +4138,7 @@ def _traceable_term_adjoint_solve_report(
             "residual_tolerance": _summarize_traceable_scalar(residual_tol),
             "residual_norm": _summarize_traceable_scalar(residual_norm),
             "relative_residual": _summarize_traceable_scalar(
-                _optimizer_jax._relative_residual_norm(residual, rhs)
+                _linear_solve._relative_residual_norm(residual, rhs)
             ),
         }
     elif linearization_kind == "hessian":
@@ -4159,17 +4147,17 @@ def _traceable_term_adjoint_solve_report(
             decision_split_mode="jvp",
             **_traceable_inner_objective_kwargs(objective_kwargs),
         )
-        hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
+        hvp_fn = _linear_solve._hessian_vector_product_fn(objective_fn)
         candidate_stab = float(linear_solve_stab)
         residual_kwargs = {}
-        if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+        if _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "lsmr_j":
             residual_kwargs["residual_fn"] = _make_boozer_penalty_residual_closure(
                 coil_set_spec=coil_set_spec,
                 decision_split_mode="jvp",
                 **_traceable_inner_objective_kwargs(objective_kwargs),
             )
         solution, attempt_status = (
-            _optimizer_jax._solve_hessian_least_squares_system_with_status(
+            _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
                 objective_fn,
                 solved_x,
                 rhs,
@@ -4178,13 +4166,13 @@ def _traceable_term_adjoint_solve_report(
                 **residual_kwargs,
             )
         )
-        attempt_success = _optimizer_jax._linear_solve_status_success(attempt_status)
-        hessian_operator = _optimizer_jax._hessian_linear_operator(
+        attempt_success = _linear_solve._linear_solve_status_success(attempt_status)
+        hessian_operator = _adjoint_linear_solve._hessian_linear_operator(
             objective_fn,
             solved_x,
             stab=candidate_stab,
         )
-        residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+        residual_tol = _linear_solve._linear_solve_residual_tolerance(
             rhs,
             linear_solve_tol,
         )
@@ -4194,7 +4182,7 @@ def _traceable_term_adjoint_solve_report(
             "attempts": [
                 {
                     "stab": candidate_stab,
-                    "success": bool(np.asarray(jax.device_get(attempt_success))),
+                    "success": _host_bool(attempt_success),
                     **_summarize_traceable_linear_solve_status(attempt_status),
                     "solution": _summarize_traceable_gradient(solution),
                     "solution_norm": _summarize_traceable_scalar(
@@ -4205,19 +4193,21 @@ def _traceable_term_adjoint_solve_report(
                     ),
                     "primal_residual_norm": _summarize_traceable_scalar(residual_norm),
                     "primal_relative_residual": _summarize_traceable_scalar(
-                        _optimizer_jax._relative_residual_norm(residual, rhs)
+                        _linear_solve._relative_residual_norm(residual, rhs)
                     ),
                 }
             ]
         }
-        solution, attempt_status = _optimizer_jax._solve_hessian_system_with_status(
-            objective_fn,
-            solved_x,
-            rhs,
-            stab=candidate_stab,
-            tol=linear_solve_tol,
+        solution, attempt_status = (
+            _adjoint_linear_solve._solve_hessian_system_with_status(
+                objective_fn,
+                solved_x,
+                rhs,
+                stab=candidate_stab,
+                tol=linear_solve_tol,
+            )
         )
-        attempt_success = _optimizer_jax._linear_solve_status_success(attempt_status)
+        attempt_success = _linear_solve._linear_solve_status_success(attempt_status)
         residual = rhs - (
             hvp_fn(solved_x, solution)
             + _runtime_float64_scalar(candidate_stab, reference=solution) * solution
@@ -4227,7 +4217,7 @@ def _traceable_term_adjoint_solve_report(
             "attempts": [
                 {
                     "stab": candidate_stab,
-                    "success": bool(np.asarray(jax.device_get(attempt_success))),
+                    "success": _host_bool(attempt_success),
                     **_summarize_traceable_linear_solve_status(attempt_status),
                     "solution": _summarize_traceable_gradient(solution),
                     "solution_norm": _summarize_traceable_scalar(
@@ -4236,7 +4226,7 @@ def _traceable_term_adjoint_solve_report(
                     "residual_tolerance": _summarize_traceable_scalar(residual_tol),
                     "residual_norm": _summarize_traceable_scalar(residual_norm),
                     "relative_residual": _summarize_traceable_scalar(
-                        _optimizer_jax._relative_residual_norm(residual, rhs)
+                        _linear_solve._relative_residual_norm(residual, rhs)
                     ),
                 }
             ]
@@ -4326,7 +4316,7 @@ def diagnose_traceable_objective_runtime(
         outer_objective_config=objective_kwargs["outer_objective_config"],
     )
     report = {
-        "baseline_success": bool(np.asarray(jax.device_get(forward_result["success"]))),
+        "baseline_success": _host_bool(forward_result["success"]),
         "total": {
             "value": _summarize_traceable_scalar(total_value),
             "grad": _summarize_traceable_gradient(total_gradient),
@@ -4365,9 +4355,7 @@ def diagnose_traceable_objective_runtime(
             "direct_grad": _summarize_traceable_gradient(direct_grad),
             "implicit_grad": _summarize_traceable_gradient(implicit_grad),
             "total_grad": _summarize_traceable_gradient(term_total_grad),
-            "linear_solve_success": bool(
-                np.asarray(jax.device_get(linear_solve_success))
-            ),
+            "linear_solve_success": _host_bool(linear_solve_success),
         }
         issues = []
         if not term_report["raw_value"]["finite"]:
@@ -4415,6 +4403,7 @@ def make_traceable_objective(
     *,
     outer_objective_config=None,
     success_filter=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build a pure function ``f(coil_dofs) -> scalar`` for single-stage optimization.
 
@@ -4457,6 +4446,7 @@ def make_traceable_objective(
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
+        session=session,
     )["objective"]
 
 
@@ -4473,7 +4463,7 @@ class TraceableObjectiveCertifiedSeededValueAndGrad(NamedTuple):
     seeded_value_and_grad: TraceableObjectiveSeededValueAndGrad
     certificate_probe_authority: CertificateProbeAuthority | None
     certificate_probe_evidence: CertificateProbeEvidence | None
-    mixed_dense_ir_trust: _optimizer_jax._MixedDenseIrTrustTelemetry
+    mixed_dense_ir_trust: _dense_ir._MixedDenseIrTrustTelemetry
 
 
 def make_traceable_objective_seeded_value_and_grad(
@@ -4483,6 +4473,7 @@ def make_traceable_objective_seeded_value_and_grad(
     *,
     outer_objective_config=None,
     success_filter=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build the explicit cached baseline value/gradient contract.
 
@@ -4497,6 +4488,7 @@ def make_traceable_objective_seeded_value_and_grad(
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
+        session=session,
     )
     certified_seed = _ensure_traceable_runtime_seeded_value_and_grad(
         runtime_entry,
@@ -4513,6 +4505,7 @@ def make_traceable_objective_certified_seeded_value_and_grad(
     outer_objective_config=None,
     success_filter=None,
     certificate_probe_key_data: CertificateProbeKeyData | None = None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build a seeded value/gradient with explicit fresh-or-replay authority."""
     runtime_entry = _get_cached_traceable_runtime_entry(
@@ -4521,6 +4514,7 @@ def make_traceable_objective_certified_seeded_value_and_grad(
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
+        session=session,
     )
     return _make_traceable_runtime_certified_seeded_value_and_grad(
         runtime_entry,
@@ -4536,6 +4530,7 @@ def make_traceable_objective_value_and_grad(
     *,
     outer_objective_config=None,
     success_filter=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build a pure-JAX function ``f(coil_dofs) -> (value, grad)`` for ondevice L-BFGS.
 
@@ -4554,6 +4549,7 @@ def make_traceable_objective_value_and_grad(
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
+        session=session,
     )
     return _ensure_traceable_runtime_optimizer_value_and_grad(runtime_entry, booz_jax)
 
@@ -4572,7 +4568,7 @@ def make_traceable_solved_state_value_and_grad(
     and passes the solved state into a bounded compiled value/adjoint kernel.
     It intentionally does not build or call the traceable forward-solve graph.
     """
-    runtime_entry = _get_cached_traceable_solved_state_value_and_grad_entry(
+    runtime_entry = _build_traceable_solved_state_value_and_grad_entry(
         booz_jax,
         bs_jax,
         iota_target,
@@ -4630,7 +4626,7 @@ class TraceableObjectiveSolvedPair(NamedTuple):
 
 
 class TraceableObjectiveSession:
-    """Owned session for the decomposed traceable objective path (R08 first slice).
+    """Owned session for traceable objective runners and mutable runtime state.
 
     Owns compiled/traceable runners and the mutable per-session caches that used
     to live as ambient attributes on ``booz_jax`` or as closed-over nonlocal
@@ -4641,9 +4637,9 @@ class TraceableObjectiveSession:
     ``compiled_bundle["state"]`` at construction. Lazy fields are explicit
     instance attributes (not dynamic ``setattr`` bags).
 
-    Residual: fused ``make_traceable_objective*`` / runtime-bundle entrypoints
-    still use the booz-attached ``_traceable_runtime_entry_cache`` dict until a
-    later R08 slice migrates them onto sessions.
+    Fused, decomposed, reporting, host-wrapper, profile, and ALM entrypoints all
+    derive from the session-owned ``runtime_entry``. No cache state is attached
+    to ``booz_jax``.
     """
 
     __slots__ = (
@@ -4651,6 +4647,27 @@ class TraceableObjectiveSession:
         "success_filter",
         "compiled_bundle",
         "booz_jax",
+        "objective",
+        "batched_value_and_grad",
+        "reporting_metrics",
+        "reporting_metrics_from_solution",
+        "public_objective",
+        "public_value_and_grad",
+        "public_batched_value_and_grad",
+        "public_forward_result",
+        "public_reporting_metrics",
+        "public_reporting_metrics_from_solution",
+        "host_objective",
+        "host_value_and_grad",
+        "host_reporting_metrics",
+        "profile_suite",
+        "optimizer_value_and_grad",
+        "seeded_compiled_bundle",
+        "seeded_value_and_grad",
+        "alm_runtime_bundles",
+        "host_reporting_state",
+        "baseline_value_and_grad_state",
+        "solved_state_value_and_grad",
         "_optimizer_compiled_bundle",
         "_optimizer_solved_pair",
         "_materialize_lock",
@@ -4664,14 +4681,78 @@ class TraceableObjectiveSession:
         compiled_bundle,
         booz_jax,
         optimizer_compiled_bundle=None,
+        objective=None,
+        batched_value_and_grad=None,
     ):
         self.cache_key = cache_key
         self.success_filter = success_filter
         self.compiled_bundle = compiled_bundle
         self.booz_jax = booz_jax
+        self.objective = objective
+        self.batched_value_and_grad = batched_value_and_grad
+        self.reporting_metrics = None
+        self.reporting_metrics_from_solution = None
+        self.public_objective = None
+        self.public_value_and_grad = None
+        self.public_batched_value_and_grad = None
+        self.public_forward_result = None
+        self.public_reporting_metrics = None
+        self.public_reporting_metrics_from_solution = None
+        self.host_objective = None
+        self.host_value_and_grad = None
+        self.host_reporting_metrics = None
+        self.profile_suite = None
+        self.optimizer_value_and_grad = None
+        self.seeded_compiled_bundle = None
+        self.seeded_value_and_grad = None
+        self.alm_runtime_bundles = {}
+        self.host_reporting_state = None
+        self.baseline_value_and_grad_state = None
+        self.solved_state_value_and_grad = None
         self._optimizer_compiled_bundle = optimizer_compiled_bundle
         self._optimizer_solved_pair = None
         self._materialize_lock = Lock()
+
+    @property
+    def runtime_entry(self):
+        """Compatibility view: the session itself is the sole runtime entry."""
+        return self
+
+    def __getitem__(self, key):
+        if key == "state":
+            return self.compiled_bundle["state"]
+        if key == "value_and_grad":
+            return self.solved_state_value_and_grad
+        if key == "optimizer_compiled_bundle":
+            return self._optimizer_compiled_bundle
+        if key == "optimizer_solved_pair":
+            return self._optimizer_solved_pair
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        if key == "optimizer_compiled_bundle":
+            self._optimizer_compiled_bundle = value
+            return
+        if key == "optimizer_solved_pair":
+            self._optimizer_solved_pair = value
+            return
+        setattr(self, key, value)
+
+    def get(self, key, default=None):
+        if key == "optimizer_compiled_bundle":
+            value = self._optimizer_compiled_bundle
+        elif key == "optimizer_solved_pair":
+            value = self._optimizer_solved_pair
+        elif key == "state":
+            value = self.compiled_bundle["state"]
+        elif key == "value_and_grad":
+            value = self.solved_state_value_and_grad
+        else:
+            value = getattr(self, key, default)
+        return default if value is None else value
+
+    def __contains__(self, key):
+        return self.get(key) is not None
 
     @classmethod
     def from_optimizer_compiled_bundle(
@@ -4778,28 +4859,52 @@ def make_traceable_objective_session(
     per optimizer run. Public solved-pair entrypoints construct a session
     internally and return its pair.
     """
-    cache_state = _build_traceable_objective_cache_state(
+    runtime_entry = _build_traceable_runtime_entry(
         booz_jax,
         bs_jax,
         iota_target,
         outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
     )
-    cache_key = _traceable_runtime_cache_key(
+    return runtime_entry
+
+
+def _traceable_runtime_entry_from_session(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+):
+    """Return the runtime entry retained by a fresh explicit owner session."""
+    return make_traceable_objective_session(
         booz_jax,
-        cache_state,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
         success_filter=success_filter,
-    )
-    state = _materialize_traceable_objective_state(booz_jax, bs_jax, cache_state)
-    compiled_bundle = _build_traceable_objective_compiled_bundle_from_state(
+    ).runtime_entry
+
+
+def _get_cached_traceable_runtime_entry(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+    session: TraceableObjectiveSession | None = None,
+):
+    """Resolve an explicitly retained session or build an isolated one-shot entry."""
+    if session is not None:
+        return session.runtime_entry
+    return _traceable_runtime_entry_from_session(
         booz_jax,
-        state,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
         success_filter=success_filter,
-    )
-    return TraceableObjectiveSession(
-        cache_key=cache_key,
-        success_filter=success_filter,
-        compiled_bundle=compiled_bundle,
-        booz_jax=booz_jax,
     )
 
 
@@ -4810,6 +4915,7 @@ def make_traceable_objective_solved_pair(
     *,
     outer_objective_config=None,
     success_filter=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build the decomposed ``(solve_fn, value_grad_from_solved)`` outer objective.
 
@@ -4827,13 +4933,14 @@ def make_traceable_objective_solved_pair(
     See :class:`TraceableObjectiveSolvedPair` for the contract and the failure-mode
     parity note the host driver must honor.
     """
-    session = make_traceable_objective_session(
-        booz_jax,
-        bs_jax,
-        iota_target,
-        outer_objective_config=outer_objective_config,
-        success_filter=success_filter,
-    )
+    if session is None:
+        session = make_traceable_objective_session(
+            booz_jax,
+            bs_jax,
+            iota_target,
+            outer_objective_config=outer_objective_config,
+            success_filter=success_filter,
+        )
     return session.solved_pair()
 
 
@@ -5113,13 +5220,14 @@ def make_traceable_objective_runtime_bundle(
     include_host_wrappers=False,
     outer_objective_config=None,
     success_filter=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build the shared runtime bundle for the target single-stage objective path.
 
-    The returned entrypoints are cached against deterministic signatures of the
-    solved baseline state, objective kwargs, and coil extraction/runtime specs.
-    Rebuild the bundle after changing those inputs; do not mutate captured
-    objects and expect an existing runtime bundle to retarget itself.
+    Pass an explicit ``session`` to retain compiled runners and lazily built
+    profile/host boundaries across calls. Without one, this factory builds an
+    isolated one-shot session. Rebuild the session after changing captured
+    inputs; an existing session does not retarget itself.
 
     Returned keys:
 
@@ -5162,6 +5270,7 @@ def make_traceable_objective_runtime_bundle(
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
+        session=session,
     )
     _ensure_traceable_runtime_public_boundaries(runtime_entry)
     runtime_bundle = {
@@ -5210,6 +5319,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
     outer_objective_config,
     alm_config,
     success_filter=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build the pure-JAX single-stage ALM runtime bundle for the inner solve.
 
@@ -5233,6 +5343,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
         iota_target,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
+        session=session,
     )
     alm_cache_key = _traceable_contract_tree_signature(normalized_alm_config)
     cached_bundle = runtime_entry["alm_runtime_bundles"].get(alm_cache_key)
@@ -5476,7 +5587,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
             penalty,
         )
 
-    @_optimizer_jax._mark_cacheable_jit_value_and_grad
+    @mark_cacheable_jit_value_and_grad
     @jax.jit
     def value_and_grad(coil_dofs, multipliers, penalty):
         return jax.value_and_grad(_objective, argnums=0)(
@@ -5513,6 +5624,7 @@ def make_traceable_objective_profile_suite(
     iota_target,
     *,
     outer_objective_config=None,
+    session: TraceableObjectiveSession | None = None,
 ):
     """Build profiled pure-JAX closures for the target single-stage objective path."""
     return make_traceable_objective_runtime_bundle(
@@ -5521,6 +5633,7 @@ def make_traceable_objective_profile_suite(
         iota_target,
         include_profile_suite=True,
         outer_objective_config=outer_objective_config,
+        session=session,
     )["profile_suite"]
 
 

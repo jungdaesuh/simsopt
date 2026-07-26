@@ -1,121 +1,172 @@
-"""Ratchet: forbid redefining thin host-materialization wrappers outside SSOT."""
+"""Full-census ratchet for the JAX host/device boundary owners."""
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
+import jax.numpy as jnp
+import numpy as np
 
-# Function bodies that still call device_get by design. Prefer host_boundary
-# imports; only extend this set when a helper has distinct semantics that
-# cannot share the SSOT implementation.
-_ALLOWED_LOCAL_HOST_HELPER_DEFS = frozenset(
-    {
-        # SSOT D2H materializer.
-        "src/simsopt_jax/runtime/host_boundary.py::host_array",
-        # Tracer-aware validation (returns None under tracing; not pure host_array).
-        "src/simsopt_jax/core/pm_optimization.py::_host_scalar_for_validation",
-    }
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
+from simsopt_jax.runtime.host_boundary import block_until_ready, host_tree_after_ready
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOTS = (
+    REPO_ROOT / "src/simsopt_jax",
+    REPO_ROOT / "src/simsopt_jax_adapters",
 )
 
-_HOST_HELPER_NAMES = frozenset(
+# Direct JAX boundary calls belong only in these implementation functions.
+_ALLOWED_OWNER_CALLS = frozenset(
     {
-        "host_array",
-        "host_scalar",
-        "host_float",
-        "host_float64",
-        "host_int",
-        "host_bool",
-        "host_tree",
-        "_host_array",
-        "_host_scalar",
-        "_host_float",
-        "_host_float64",
-        "_host_int",
-        "_host_pytree",
-        "_jax_trace_host_array",
-        "_host_scalar_for_validation",
+        # H2D placement and D2H/readiness SSOT implementations.
+        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put",
+        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put",
+        "src/simsopt_jax/runtime/host_boundary.py::block_until_ready::block_until_ready",
+        "src/simsopt_jax/runtime/host_boundary.py::host_value::device_get",
+        "src/simsopt_jax/runtime/host_boundary.py::host_value::transfer_guard_device_to_host",
+        # Sharding owns explicit H2D/D2D placement scopes for mesh collectives.
+        "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_device_to_device",
+        "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_host_to_device",
+        "src/simsopt_jax/core/sharding.py::replicate_tree_on_mesh::transfer_guard_device_to_device",
+        "src/simsopt_jax/core/sharding.py::replicate_tree_on_mesh::transfer_guard_host_to_device",
+        # JAX library calls that internally stage scalar loop/GMRES constants.
+        "src/simsopt_jax/geo/optimizers/linear_solve.py::_hager_higham_inverse_1_norm_estimate::transfer_guard_host_to_device",
+        "src/simsopt_jax/geo/optimizers/linear_solve.py::_run_operator_gmres::transfer_guard_host_to_device",
+        "src/simsopt_jax/geo/optimizers/optimizer.py::_gmres_solve_least_squares_system::transfer_guard_host_to_device",
+        "src/simsopt_jax/solve/dispatch.py::_run_optimistix_lm::transfer_guard_host_to_device",
+        "src/simsopt_jax/solve/minimize_runtime.py::run_optimistix_minimize::transfer_guard_host_to_device",
+        # Explicit host-extension and reporting bridge scopes.
+        "src/simsopt_jax/geo/optimizers/reference.py::_scipy_host_array::transfer_guard_device_to_host",
+        "src/simsopt_jax/geo/optimizers/reference.py::_target_array_from_scipy_host::transfer_guard_host_to_device",
+        "src/simsopt_jax/geo/optimizers/reference.py::_target_scipy_host_extension_scope::transfer_guard_device_to_host",
+        "src/simsopt_jax/geo/optimizers/reference.py::_target_scipy_host_extension_scope::transfer_guard_host_to_device",
+        "src/simsopt_jax_adapters/geo/boozer_surface.py::wrapped::transfer_guard_device_to_host",
+        "src/simsopt_jax_adapters/geo/boozer_surface.py::wrapped::transfer_guard_host_to_device",
+        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::_baseline_reporting_metrics::transfer_guard_device_to_host",
+        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::compute_baseline_value_and_grad::transfer_guard_device_to_host",
+        "src/simsopt_jax_adapters/geo/surface_objectives_traceable.py::compute_baseline_value_and_grad::transfer_guard_host_to_device",
+    }
+)
+_BOUNDARY_CALL_NAMES = frozenset(
+    {
+        "block_until_ready",
+        "device_get",
+        "device_put",
+        "transfer_guard",
+        "transfer_guard_device_to_device",
+        "transfer_guard_device_to_host",
+        "transfer_guard_host_to_device",
     }
 )
 
 
 def _iter_python_files():
-    for path in SRC_ROOT.rglob("*.py"):
-        relative = path.relative_to(REPO_ROOT).as_posix()
-        if "/__pycache__/" in f"/{relative}/":
-            continue
-        yield path, relative
+    for source_root in SOURCE_ROOTS:
+        for path in source_root.rglob("*.py"):
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            yield path, relative
 
 
-def _function_uses_device_get(node: ast.AST) -> bool:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Attribute) and child.attr == "device_get":
-            return True
-        if isinstance(child, ast.Name) and child.id == "device_get":
-            return True
-    return False
+class _BoundaryCallCensus(ast.NodeVisitor):
+    def __init__(self, relative_path: str, tree: ast.Module) -> None:
+        self.relative_path = relative_path
+        self.function_names: list[str] = []
+        self.calls: list[str] = []
+        self.jax_module_aliases = {
+            alias.asname or alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "jax"
+        }
+        self.jax_symbol_aliases = {
+            alias.asname or alias.name: alias.name
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module == "jax"
+            for alias in node.names
+            if alias.name in _BOUNDARY_CALL_NAMES
+        }
+
+    def _boundary_call_name(self, node: ast.Call) -> str | None:
+        if isinstance(node.func, ast.Name):
+            return self.jax_symbol_aliases.get(node.func.id)
+        if not isinstance(node.func, ast.Attribute):
+            return None
+        if node.func.attr not in _BOUNDARY_CALL_NAMES:
+            return None
+        if node.func.attr == "block_until_ready":
+            return node.func.attr
+        if isinstance(node.func.value, ast.Name):
+            if node.func.value.id in self.jax_module_aliases:
+                return node.func.attr
+        return None
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.function_names.append(node.name)
+        self.generic_visit(node)
+        self.function_names.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.function_names.append(node.name)
+        self.generic_visit(node)
+        self.function_names.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = self._boundary_call_name(node)
+        if call_name is not None:
+            function_name = (
+                self.function_names[-1] if self.function_names else "<module>"
+            )
+            self.calls.append(f"{self.relative_path}::{function_name}::{call_name}")
+        self.generic_visit(node)
 
 
-def _local_host_helpers_reimplementing_device_get():
-    found: list[str] = []
+def _direct_boundary_calls() -> set[str]:
+    calls: set[str] = set()
     for path, relative in _iter_python_files():
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        except SyntaxError:
-            continue
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name not in _HOST_HELPER_NAMES:
-                continue
-            if not _function_uses_device_get(node):
-                continue
-            key = f"{relative}::{node.name}"
-            found.append(key)
-    return sorted(found)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        census = _BoundaryCallCensus(relative, tree)
+        census.visit(tree)
+        calls.update(census.calls)
+    return calls
 
 
-def test_no_unapproved_local_host_array_device_get_wrappers():
-    actual = set(_local_host_helpers_reimplementing_device_get())
-    unexpected = sorted(actual - _ALLOWED_LOCAL_HOST_HELPER_DEFS)
-    stale = sorted(_ALLOWED_LOCAL_HOST_HELPER_DEFS - actual)
-    message_parts = []
-    if unexpected:
-        message_parts.append(
-            "Unexpected local host materialization helpers that reimplement "
-            "device_get (import host_boundary instead):\n  " + "\n  ".join(unexpected)
-        )
-    if stale:
-        message_parts.append(
-            "Stale allowlist entries (remove from test allowlist):\n  "
-            + "\n  ".join(stale)
-        )
-    assert not message_parts, "\n\n".join(message_parts)
+def test_only_boundary_owners_call_jax_transfer_and_readiness_primitives() -> None:
+    actual = _direct_boundary_calls()
+    unexpected = sorted(actual - _ALLOWED_OWNER_CALLS)
+    stale = sorted(_ALLOWED_OWNER_CALLS - actual)
 
-
-def test_host_boundary_exports_ready_variants():
-    from simsopt_jax.runtime import host_boundary
-
-    assert callable(host_boundary.host_array)
-    assert callable(host_boundary.host_array_after_ready)
-    assert callable(host_boundary.host_float_after_ready)
-    assert callable(host_boundary.host_tree)
-
-
-def test_minimize_runtime_reexports_ready_host_helpers():
-    """Solver packaging keeps ready semantics via host_boundary aliases."""
-    source = (REPO_ROOT / "src/simsopt_jax/solve/minimize_runtime.py").read_text(
-        encoding="utf-8"
+    assert not unexpected, (
+        "Direct JAX boundary calls outside owners:\n  " + "\n  ".join(unexpected)
     )
-    tree = ast.parse(source)
-    aliases = {
-        alias.name: alias.asname or alias.name
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "simsopt_jax.runtime.host_boundary"
-        for alias in node.names
+    assert not stale, "Stale owner-call allowlist entries:\n  " + "\n  ".join(stale)
+
+
+def test_runtime_device_put_tree_preserves_structure_and_exact_leaf_dtypes() -> None:
+    value = {
+        "float": np.asarray([1.0, 2.0], dtype=np.float32),
+        "integer": (np.asarray(3, dtype=np.int16),),
     }
-    assert aliases.get("host_array_after_ready") == "host_array"
-    assert aliases.get("host_float_after_ready") == "host_float"
+
+    placed = runtime_device_put_tree(value)
+
+    assert placed.keys() == value.keys()
+    assert placed["float"].dtype == jnp.float32
+    assert placed["integer"][0].dtype == jnp.int16
+
+
+def test_readiness_and_host_tree_preserve_pytree_structure() -> None:
+    value = {
+        "vector": jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        "scalar": (jnp.asarray(3, dtype=jnp.int32),),
+    }
+
+    ready = block_until_ready(value)
+    host = host_tree_after_ready(ready)
+
+    assert host.keys() == value.keys()
+    np.testing.assert_array_equal(host["vector"], np.asarray([1.0, 2.0]))
+    assert host["scalar"][0].item() == 3
+    assert host["vector"].flags.writeable

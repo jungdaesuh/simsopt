@@ -116,13 +116,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache, partial, wraps
+from functools import lru_cache, wraps
 from itertools import count
 from threading import Lock
 from typing import (
     Callable,
     Generic,
-    Literal,
     NamedTuple,
     Protocol,
     TypeVar,
@@ -133,10 +132,8 @@ from weakref import ref
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
-import lineax
 import numpy as np
 import optimistix as optx
-import scipy.linalg
 from jax import lax
 from jax.extend import core as jax_core
 from jax.flatten_util import ravel_pytree
@@ -152,7 +149,6 @@ from simsopt_jax.backend import (
     target_lane_purity_requested,
 )
 from simsopt_jax.core._device_scalars import staged_like as _staged_like
-from simsopt_jax.core._math_utils import _explicit_device_array, runtime_device_put
 from simsopt_jax.geo._optimizer_backend_choices import (
     CONCRETE_OPTIMIZER_BACKENDS,
     HOST_JAX_OUTER_OPTIMIZER_BACKEND,
@@ -176,6 +172,140 @@ from simsopt_jax.geo.optimizers._shared import (
     _prepare_optimizer_pytree_adapter,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
+)
+from simsopt_jax.geo.optimizers._shared import (
+    cast_floating_tree as _cast_floating_tree,
+)
+from simsopt_jax.geo.optimizers.linear_solve import (
+    _CACHEABLE_LINEAR_OPERATOR_ATTR as _CACHEABLE_LINEAR_OPERATOR_ATTR,
+    _CACHED_HVP_ATTR as _CACHED_HVP_ATTR,
+    _CACHED_JVP_ATTR as _CACHED_JVP_ATTR,
+    _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR as _DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR,
+    _DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR as _DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR,
+    _DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN as _DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN,
+    _DENSE_OPERATOR_CHUNK_BATCH_SIZE as _DENSE_OPERATOR_CHUNK_BATCH_SIZE,
+    _DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV as _DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV,
+    _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK as _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
+    _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX as _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX,
+    _DENSE_OPERATOR_DEFAULT_BUDGET_BYTES as _DENSE_OPERATOR_DEFAULT_BUDGET_BYTES,
+    _DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN as _DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN,
+    _EXACT_ADJOINT_DENSE_LU as _EXACT_ADJOINT_DENSE_LU,
+    _FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE as _FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE,
+    _HAGER_HIGHAM_CONDITION_ITERATIONS as _HAGER_HIGHAM_CONDITION_ITERATIONS,
+    _JIT_LINEAR_OPERATOR_CACHE_LOCK as _JIT_LINEAR_OPERATOR_CACHE_LOCK,
+    _LINEAR_SOLVE_ITERATIONS_UNKNOWN as _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
+    _LinearSolveStatus as _LinearSolveStatus,
+    _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS as _SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
+    _apply_column_batched_operator as _apply_column_batched_operator,
+    _cached_jit_linear_operator as _cached_jit_linear_operator,
+    _combine_linear_solve_iteration_counts as _combine_linear_solve_iteration_counts,
+    _complete_linear_solve_status as _complete_linear_solve_status,
+    _dense_linear_solve_status as _dense_linear_solve_status,
+    _dense_matrix_backward_error_success as _dense_matrix_backward_error_success,
+    _dense_matrix_condition_estimate as _dense_matrix_condition_estimate,
+    _dense_matrix_condition_estimate_numerically_safe as _dense_matrix_condition_estimate_numerically_safe,
+    _dense_matrix_nonsingular_threshold as _dense_matrix_nonsingular_threshold,
+    _dense_matrix_solve_forward_error_success as _dense_matrix_solve_forward_error_success,
+    _dense_matrix_solve_numerically_safe as _dense_matrix_solve_numerically_safe,
+    _dense_matrix_solve_small_solution_success as _dense_matrix_solve_small_solution_success,
+    _dense_operator_chunk_batch_size_from_budget as _dense_operator_chunk_batch_size_from_budget,
+    _dense_square_operator_lu_materialization_allowed as _dense_square_operator_lu_materialization_allowed,
+    _dense_square_operator_materialization_allowed as _dense_square_operator_materialization_allowed,
+    _dense_square_operator_matrix as _dense_square_operator_matrix,
+    _dense_square_operator_matrix_bytes_allowed as _dense_square_operator_matrix_bytes_allowed,
+    _dense_square_operator_matrix_dtype as _dense_square_operator_matrix_dtype,
+    _device_int32 as _device_int32,
+    _device_scalar as _device_scalar,
+    _effective_dense_backward_error_tolerance as _effective_dense_backward_error_tolerance,
+    _effective_linear_solve_tolerance as _effective_linear_solve_tolerance,
+    _factor_dense_hessian as _factor_dense_hessian,
+    _forward_error_bound as _forward_error_bound,
+    _forward_error_success as _forward_error_success,
+    _forward_error_tolerance as _forward_error_tolerance,
+    _gmres_iteration_limits as _gmres_iteration_limits,
+    _gmres_solve_array_system as _gmres_solve_array_system,
+    _hager_higham_inverse_1_norm_estimate as _hager_higham_inverse_1_norm_estimate,
+    _hessian_vector_product_fn as _hessian_vector_product_fn,
+    _jacobian_linear_operator as _jacobian_linear_operator,
+    _jacobian_vector_product_fn as _jacobian_vector_product_fn,
+    _linear_solve_effective_tolerance_reached as _linear_solve_effective_tolerance_reached,
+    _linear_solve_finite as _linear_solve_finite,
+    _linear_solve_iteration_count as _linear_solve_iteration_count,
+    _linear_solve_iterations_host_value as _linear_solve_iterations_host_value,
+    _linear_solve_residual_scale as _linear_solve_residual_scale,
+    _linear_solve_residual_tolerance as _linear_solve_residual_tolerance,
+    _linear_solve_solution_or_nan as _linear_solve_solution_or_nan,
+    _linear_solve_status as _linear_solve_status,
+    _linear_solve_status_iterations as _linear_solve_status_iterations,
+    _linear_solve_status_success as _linear_solve_status_success,
+    _lu_solve_dense_hessian as _lu_solve_dense_hessian,
+    _materialize_dense_hessian as _materialize_dense_hessian,
+    _materialize_dense_hessian_host as _materialize_dense_hessian_host,
+    _materialize_dense_jacobian as _materialize_dense_jacobian,
+    _materialize_dense_linear_operator as _materialize_dense_linear_operator,
+    _matrix_one_norm as _matrix_one_norm,
+    _place_like_concrete_array as _place_like_concrete_array,
+    _place_like_concrete_scalar as _place_like_concrete_scalar,
+    _plu_from_lu_piv as _plu_from_lu_piv,
+    _relative_residual_1_norm as _relative_residual_1_norm,
+    _relative_residual_norm as _relative_residual_norm,
+    _resolve_dense_operator_chunk_batch_size as _resolve_dense_operator_chunk_batch_size,
+    _run_operator_gmres as _run_operator_gmres,
+    _solve_dense_square_operator_least_squares_system_with_status as _solve_dense_square_operator_least_squares_system_with_status,
+    _solve_dense_square_operator_lu_system_with_status as _solve_dense_square_operator_lu_system_with_status,
+    _solve_jacobian_operator as _solve_jacobian_operator,
+    _solve_jacobian_operator_with_status as _solve_jacobian_operator_with_status,
+    _solve_jacobian_system_with_status as _solve_jacobian_system_with_status,
+    _solve_square_array_system_operator_only as _solve_square_array_system_operator_only,
+    _solve_square_vector_system_operator_only as _solve_square_vector_system_operator_only,
+    _solve_square_vector_system_operator_only_nonzero_rhs as _solve_square_vector_system_operator_only_nonzero_rhs,
+    _symmetrize_dense_hessian as _symmetrize_dense_hessian,
+    _terminal_linear_solve_status as _terminal_linear_solve_status,
+)
+from simsopt_jax.geo.optimizers.dense_ir import (
+    DENSE_IR_HISTORY_MAX_CORRECTIONS as DENSE_IR_HISTORY_MAX_CORRECTIONS,
+    _DENSE_IR_NEWTON_MATVEC_BUDGET as _DENSE_IR_NEWTON_MATVEC_BUDGET,
+    _DENSE_IR_NEWTON_REFINEMENT_STEPS as _DENSE_IR_NEWTON_REFINEMENT_STEPS,
+    _DenseIrContractionTelemetry as _DenseIrContractionTelemetry,
+    _DenseIrHistory as _DenseIrHistory,
+    _DenseIrRefinementState as _DenseIrRefinementState,
+    _MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND as _MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND,
+    _MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT as _MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT,
+    _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA as _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA,
+    _MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT as _MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT,
+    _MixedDenseIrFallbackTelemetry as _MixedDenseIrFallbackTelemetry,
+    _MixedDenseIrResolvedPolicy as _MixedDenseIrResolvedPolicy,
+    _MixedDenseIrSolveStatus as _MixedDenseIrSolveStatus,
+    _MixedDenseIrTrustTelemetry as _MixedDenseIrTrustTelemetry,
+    _certify_mixed_dense_ir_factors_with_telemetry as _certify_mixed_dense_ir_factors_with_telemetry,
+    _fixed_dense_ir_history as _fixed_dense_ir_history,
+    _inactive_dense_ir_history as _inactive_dense_ir_history,
+    _inactive_mixed_dense_ir_fallback_telemetry as _inactive_mixed_dense_ir_fallback_telemetry,
+    _inactive_mixed_dense_ir_trust_telemetry as _inactive_mixed_dense_ir_trust_telemetry,
+    _materialize_dense_ir_proposal_matrix as _materialize_dense_ir_proposal_matrix,
+    _mixed_dense_ir_contraction_operator_norm_upper as _mixed_dense_ir_contraction_operator_norm_upper,
+    _mixed_dense_ir_correction_tail_relative_bound as _mixed_dense_ir_correction_tail_relative_bound,
+    _run_dense_ir_refinement as _run_dense_ir_refinement,
+    _solve_dense_ir_system_with_contraction_telemetry as _solve_dense_ir_system_with_contraction_telemetry,
+    _solve_dense_ir_system_with_status as _solve_dense_ir_system_with_status,
+    _solve_fp64_dense_ir_rebuild_with_telemetry as _solve_fp64_dense_ir_rebuild_with_telemetry,
+    _solve_mixed_dense_ir_operator_with_status as _solve_mixed_dense_ir_operator_with_status,
+    _solve_mixed_dense_ir_operator_with_telemetry as _solve_mixed_dense_ir_operator_with_telemetry,
+    resolve_mixed_dense_ir_policy as resolve_mixed_dense_ir_policy,
+)
+from simsopt_jax.geo.optimizers.adjoint_linear_solve import (
+    _ADJOINT_LINEAR_SOLVER as _ADJOINT_LINEAR_SOLVER,
+    _AdjointHessianLinearSolver as _AdjointHessianLinearSolver,
+    _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS as _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS,
+    _hessian_linear_operator as _hessian_linear_operator,
+    _lineax_lsmr_solver as _lineax_lsmr_solver,
+    _require_tree_first_leaf as _require_tree_first_leaf,
+    _solve_hessian_least_squares_system_with_status as _solve_hessian_least_squares_system_with_status,
+    _solve_hessian_system as _solve_hessian_system,
+    _solve_hessian_system_with_status as _solve_hessian_system_with_status,
+    _solve_regularized_normal_system_lsmr_j_with_status as _solve_regularized_normal_system_lsmr_j_with_status,
+    _solve_symmetric_operator_cg_with_status as _solve_symmetric_operator_cg_with_status,
+    adjoint_hessian_stabilization as adjoint_hessian_stabilization,
 )
 from simsopt_jax.geo.optimizers._evaluation_provider import (
     TargetScipyDeviceEvaluation,
@@ -204,8 +334,12 @@ from simsopt_jax.numerical_policy import (
     PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE,
     DenseIrHistorySource,
 )
-from simsopt_jax.runtime.host_boundary import host_bool as _host_bool
-from simsopt_jax.runtime.host_boundary import host_scalar as _host_scalar
+from simsopt_jax.runtime.host_boundary import (
+    host_array as _host_array,
+    host_bool as _host_bool,
+    host_int as _host_int,
+    host_scalar as _host_scalar,
+)
 from simsopt_jax.solve.driver import (
     Driver,
     legacy_reference_least_squares_method,
@@ -407,14 +541,8 @@ _EISENSTAT_WALKER_MIN_ETA = 1.0e-12
 _EISENSTAT_WALKER_MAX_ETA = 0.5
 _EISENSTAT_WALKER_STRICT_CAP_NEAR_TARGET_FACTOR = 100.0
 _NEWTON_BACKTRACKING_MAX_STEPS = 8
-_HAGER_HIGHAM_CONDITION_ITERATIONS = 5
-_LINEAR_SOLVE_ITERATIONS_UNKNOWN = -1
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
-_JIT_LINEAR_OPERATOR_CACHE_LOCK = Lock()
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
-_CACHEABLE_LINEAR_OPERATOR_ATTR = "_simsopt_cache_jit_linear_operator"
-_CACHED_HVP_ATTR = "_simsopt_cached_jit_hvp"
-_CACHED_JVP_ATTR = "_simsopt_cached_jit_jvp"
 _TARGET_OPTIMIZER_DIAGNOSTIC_EVENT_CALLBACK = ContextVar(
     "simsopt_target_optimizer_diagnostic_event_callback",
     default=None,
@@ -524,22 +652,6 @@ class _DeprecationCallSite:
 
 class _ArrayObjectiveWithArgs(Protocol):
     def __call__(self, x: jax.Array, *args: object) -> jax.Array: ...
-
-
-class _LinearSolveStatus(NamedTuple):
-    success: jax.Array
-    residual: jax.Array
-    residual_relative: jax.Array
-    iterations: jax.Array
-    residual_scale: jax.Array | None = None
-    requested_tolerance: jax.Array | None = None
-    effective_tolerance: jax.Array | None = None
-
-    def __array__(self, dtype=None):
-        return np.asarray(jax.device_get(self.success), dtype=dtype)
-
-    def __bool__(self):
-        return bool(np.asarray(self))
 
 
 class _TraceableNewtonLinearTelemetry(NamedTuple):
@@ -1142,42 +1254,20 @@ def _require_native_cpu_reference_backend_for_trace_adapter(
     )
 
 
-def _device_scalar(value, *, dtype=jnp.float64):
-    if isinstance(value, jax.Array) or hasattr(value, "aval"):
-        return jnp.asarray(value, dtype=dtype)
-    return jnp.asarray(np.asarray(value, dtype=np.dtype(dtype)))
-
-
-def _device_int32(value, *, like=None):
-    if like is not None:
-        return _staged_like(like, value, dtype=jnp.int32)
-    return runtime_device_put(value, dtype=jnp.int32)
-
-
-def _mark_cacheable_jit_value_and_grad(fun):
-    # ``fun`` must be a Python callable that accepts ``setattr`` (def, lambda,
-    # closure). Production call sites pass only such callables; if a future
-    # caller passes a builtin or ``__slots__`` instance the ``AttributeError``
-    # surfaces the contract violation rather than silently no-op'ing.
-    setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
-    setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
-    return fun
-
-
 def _mark_cacheable_jit_linear_operator(fun):
-    # Same callable mutability contract as ``_mark_cacheable_jit_value_and_grad``.
+    # Same callable mutability contract as ``mark_cacheable_jit_value_and_grad``.
     setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
     return fun
 
 
 def _mark_traceable_runner_cacheable(fun, *, cache_token):
-    # Same contract as ``_mark_cacheable_jit_value_and_grad``.
+    # Same contract as ``mark_cacheable_jit_value_and_grad``.
     setattr(fun, _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR, cache_token)
     return fun
 
 
 def _mark_structured_private_solver_cacheable(fun, *, cache_token):
-    # Same contract as ``_mark_cacheable_jit_value_and_grad``.
+    # Same contract as ``mark_cacheable_jit_value_and_grad``.
     setattr(fun, _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR, cache_token)
     return _mark_traceable_runner_cacheable(fun, cache_token=cache_token)
 
@@ -1262,28 +1352,13 @@ def _cached_jit_value_and_grad(fun):
         return cached
     compiled = jax.jit(jax.value_and_grad(fun, argnums=0))
     # Double-checked install under the cache lock. ``fun`` has already
-    # been marked via ``_mark_cacheable_jit_value_and_grad`` (the marker
+    # been marked via ``mark_cacheable_jit_value_and_grad`` (the marker
     # check above gated this branch), so ``setattr`` cannot raise.
     with _SCALAR_VALUE_AND_GRAD_CACHE_LOCK:
         cached = getattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, None)
         if cached is not None:
             return cached
         setattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, compiled)
-        return compiled
-
-
-def _cached_jit_linear_operator(fun, cache_attr, build_compiled):
-    if not getattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, False):
-        return build_compiled(fun)
-    cached = getattr(fun, cache_attr, None)
-    if cached is not None:
-        return cached
-    compiled = build_compiled(fun)
-    with _JIT_LINEAR_OPERATOR_CACHE_LOCK:
-        cached = getattr(fun, cache_attr, None)
-        if cached is not None:
-            return cached
-        setattr(fun, cache_attr, compiled)
         return compiled
 
 
@@ -1788,13 +1863,6 @@ def _tree_adam_step(mean, variance, *, step_size, eps):
     )
 
 
-def _require_tree_first_leaf(tree, *, detail):
-    leaves = jax.tree.leaves(tree)
-    if not leaves:
-        raise ValueError(detail)
-    return jnp.asarray(leaves[0])
-
-
 def _tree_vdot_real(lhs, rhs):
     lhs_leaves, lhs_tree = jax.tree.flatten(lhs)
     rhs_leaves, rhs_tree = jax.tree.flatten(rhs)
@@ -1862,19 +1930,6 @@ def _normalize_solver_args(args):
     if isinstance(args, tuple):
         return args
     return (args,)
-
-
-def _cast_floating_tree(tree, dtype):
-    """Cast every floating array leaf while preserving discrete metadata."""
-    resolved_dtype = np.dtype(dtype)
-
-    def cast_leaf(leaf):
-        leaf_dtype = getattr(leaf, "dtype", None)
-        if leaf_dtype is not None and np.issubdtype(np.dtype(leaf_dtype), np.floating):
-            return jnp.asarray(leaf, dtype=resolved_dtype)
-        return leaf
-
-    return jax.tree.map(cast_leaf, tree)
 
 
 def _wrap_value_and_grad_fun(fun, x0, *, host_inputs):
@@ -3869,46 +3924,6 @@ def jax_least_squares_optimistix(
 # Static column batch for dense Jacobian/Hessian materialization. An explicit
 # override wins; otherwise CUDA derives a conservative value from the backend
 # dense-operator budget while non-CUDA lanes retain the historical batch of 8.
-_DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV = "SIMSOPT_DENSE_OPERATOR_CHUNK_BATCH_SIZE"
-_DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK = 8
-_DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX = 64
-_DENSE_OPERATOR_DEFAULT_BUDGET_BYTES = 256 * 1024 * 1024
-_DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN = 32 * 1024 * 1024
-_DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN = 3072 * 1024 * 1024
-
-
-def _dense_operator_chunk_batch_size_from_budget(max_dense_operator_bytes):
-    if max_dense_operator_bytes is None:
-        return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
-    byte_budget = int(max_dense_operator_bytes)
-    if byte_budget <= _DENSE_OPERATOR_DEFAULT_BUDGET_BYTES:
-        return max(
-            1,
-            min(
-                _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
-                byte_budget // _DENSE_OPERATOR_LEGACY_BYTES_PER_PARALLEL_COLUMN,
-            ),
-        )
-    return max(
-        _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK,
-        min(
-            _DENSE_OPERATOR_CHUNK_BATCH_SIZE_MAX,
-            byte_budget // _DENSE_OPERATOR_ACTIVATION_BYTES_PER_PARALLEL_COLUMN,
-        ),
-    )
-
-
-def _resolve_dense_operator_chunk_batch_size():
-    env_value = os.environ.get(_DENSE_OPERATOR_CHUNK_BATCH_SIZE_ENV)
-    if env_value is not None:
-        return max(1, int(env_value))
-    policy = get_backend_policy()
-    if policy.jax_platform not in {"cuda", "gpu"}:
-        return _DENSE_OPERATOR_CHUNK_BATCH_SIZE_FALLBACK
-    return _dense_operator_chunk_batch_size_from_budget(policy.max_dense_jacobian_bytes)
-
-
-_DENSE_OPERATOR_CHUNK_BATCH_SIZE = _resolve_dense_operator_chunk_batch_size()
 
 
 def dense_operator_chunk_batch_size():
@@ -3927,35 +3942,12 @@ def dense_operator_chunk_batch_size():
 # residual Jacobian ``[J; sqrt(stab) I]``.  The unstabilized production
 # ``stab=0`` case needs a KKT/two-solve formulation, not a disguised normal-
 # equation solve.  Read once at import (selects a static trace-time branch).
-_AdjointHessianLinearSolver = Literal["dense", "cg", "lsmr_j"]
-_ADJOINT_LINEAR_SOLVER = (
-    os.environ.get("SIMSOPT_ADJOINT_LINEAR_SOLVER", "dense").strip().lower()
-)
-
-
-def adjoint_hessian_stabilization(
-    newton_stabilization: float | jax.Array,
-    *,
-    solver: _AdjointHessianLinearSolver | None = None,
-) -> float | jax.Array:
-    """Return the stabilization owned by the final/adjoint linearization.
-
-    Newton damping changes iteration directions, not the accepted-state
-    Hessian. The residual-J LSMR formulation is the sole exception because its
-    augmented operator explicitly includes the positive regularization.
-    """
-    selected_solver = _ADJOINT_LINEAR_SOLVER if solver is None else solver
-    if selected_solver == "lsmr_j":
-        return newton_stabilization
-    return 0.0
 
 
 # Operator-only square solves historically performed one residual-correction
 # solve. Keep that default for LS/Hessian fallback callers; exact-jacobian
 # adjoints opt into the smallest Track-A extension that clears one additional
 # residual floor without exposing a public algorithm knob.
-_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS = 1
-_EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 
 # Opt-in dense direct factorization for the EXACT-Jacobian adjoint transpose
 # solve ``J^T λ = g``.  At high mode counts (m18: ``J`` is 2055x2055) the
@@ -3971,101 +3963,6 @@ _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS = 2
 # m18, but the materialization stays guarded by that policy.  Read once at
 # import (selects a static trace-time branch); default OFF so the operator-GMRES
 # path remains the baseline for A/B comparison.
-_EXACT_ADJOINT_DENSE_LU = os.environ.get(
-    "SIMSOPT_EXACT_ADJOINT_DENSE_LU", "0"
-).strip().lower() not in ("", "0", "false", "off", "no")
-
-
-def _lineax_lsmr_solver(*, rtol, atol, max_steps=None):
-    """Return the Lineax LSMR solver required by residual-J comparator paths."""
-    solver_type = getattr(lineax, "LSMR", None)
-    if solver_type is None:
-        raise RuntimeError(
-            "Lineax LSMR is required for this solver path. Install the JAX "
-            "extra from pyproject.toml so lineax>=0.1.1 is available."
-        )
-    return solver_type(rtol=rtol, atol=atol, max_steps=max_steps)
-
-
-def _materialize_dense_linear_operator(linear_operator_fn, x):
-    eye = jnp.eye(x.shape[0], dtype=x.dtype)
-    # Assemble the dense operator in column batches rather than mapping all N basis
-    # columns in parallel: numerically identical up to floating-point reduction
-    # order (bit-exact for a linear Jacobian column; the Hessian's reducing HVP can
-    # differ by ~1e-16 because batching reorders the reduction), with peak memory
-    # bounded to batch_size parallel JVP/HVPs instead of N (each column is a full
-    # BiotSavart JVP). Mirrors the chunked dense Boozer-Jacobian fix in
-    # simsopt_jax_adapters/geo/boozer_surface.py (commit dcd70a2ae); without it the
-    # dense linearization OOMs under XLA preallocation.
-    cols = lax.map(
-        lambda basis: linear_operator_fn(x, basis),
-        eye,
-        batch_size=_DENSE_OPERATOR_CHUNK_BATCH_SIZE,
-    )
-    return jnp.swapaxes(cols, 0, 1)
-
-
-def _hessian_vector_product_fn(objective_fn):
-    def build_compiled(fn):
-        grad_fn = jax.grad(fn, argnums=0)
-
-        def hvp(x, v, *fn_args):
-            def grad_for_x(x_inner):
-                return grad_fn(x_inner, *fn_args)
-
-            return jax.jvp(grad_for_x, (x,), (v,))[1]
-
-        # Dense assembly stages this HVP inside an outer scan. Inlining exposes
-        # objective closure arrays to that trace so they can remain operands,
-        # rather than becoming device-backed constants in a nested call.
-        return jax.jit(hvp, inline=True)
-
-    return _cached_jit_linear_operator(objective_fn, _CACHED_HVP_ATTR, build_compiled)
-
-
-def _jacobian_vector_product_fn(residual_fn):
-    def build_compiled(fn):
-        return jax.jit(lambda x, v: jax.jvp(fn, (x,), (v,))[1])
-
-    return _cached_jit_linear_operator(residual_fn, _CACHED_JVP_ATTR, build_compiled)
-
-
-def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
-    dense = _materialize_dense_linear_operator(hvp_fn, x)
-    if not bool(symmetrize):
-        return dense
-    upper = jnp.triu(dense)
-    return upper + jnp.triu(dense, 1).T
-
-
-def _symmetrize_dense_hessian(dense: jax.Array) -> jax.Array:
-    upper = jnp.triu(dense)
-    return upper + jnp.triu(dense, 1).T
-
-
-def _materialize_dense_hessian_host(hvp_fn, x, *, symmetrize=True):
-    x_array = jnp.asarray(x)
-    dtype = np.dtype(x_array.dtype)
-    dimension = int(x_array.shape[0])
-    dense_host = np.empty((dimension, dimension), dtype=dtype)
-    basis = np.zeros(dimension, dtype=dtype)
-    for column_index in range(dimension):
-        basis[column_index] = 1
-        basis_vector = jnp.asarray(basis, dtype=x_array.dtype)
-        column = np.asarray(
-            jax.device_get(hvp_fn(x_array, basis_vector)),
-            dtype=dtype,
-        )
-        dense_host[:, column_index] = column
-        basis[column_index] = 0
-    if not bool(symmetrize):
-        return jnp.asarray(dense_host, dtype=x_array.dtype)
-    upper = np.triu(dense_host)
-    return jnp.asarray(upper + np.triu(dense_host, 1).T, dtype=x_array.dtype)
-
-
-def _materialize_dense_jacobian(jvp_fn, x):
-    return _materialize_dense_linear_operator(jvp_fn, x)
 
 
 def _dense_operator_nbytes(rows, cols, dtype):
@@ -4165,84 +4062,6 @@ def _solve_dense_newton_step(H, grad, *, refine):
     if refine:
         dx = dx + np.linalg.solve(H_host, grad_host - H_host @ dx)
     return jnp.asarray(dx, dtype=jnp.asarray(grad).dtype)
-
-
-def _factor_dense_hessian(H, *, optimizer_backend):
-    """Factor a dense LS Hessian once and return packed ``(lu, piv)``.
-
-    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §5.3
-    (Phase 2 adjoint factor-once hybrid). The resulting factors are reused
-    for both forward and adjoint solves so the bytes are bit-identical by
-    construction.
-
-    The ``optimizer_backend == "scipy"`` branch routes through host LAPACK
-    ``dgetrf`` via ``scipy.linalg.lu_factor`` so the LS reference lane keeps
-    matching CPU pivot tie-breaks. All other backends call
-    ``jax.scipy.linalg.lu_factor`` on ``H``'s device, which dispatches to
-    LAPACK on CPU and cuSOLVER ``getrf`` on CUDA. Both APIs use the same
-    0-indexed packed pivot semantics, so the returned ``(lu, piv)`` is a
-    drop-in to ``jax.scipy.linalg.lu_solve``.
-    """
-    if H is None:
-        return None
-    if optimizer_backend == "scipy":
-        H_host = np.asarray(H, dtype=np.float64)
-        lu_host, piv_host = scipy.linalg.lu_factor(H_host)
-        lu = jnp.asarray(lu_host, dtype=H.dtype)
-        piv = jnp.asarray(piv_host, dtype=jnp.int32)
-        return lu, piv
-    return jsp_linalg.lu_factor(H)
-
-
-def _lu_solve_dense_hessian(lu_piv, rhs, *, transpose):
-    """Solve a dense LS Hessian system from packed ``(lu, piv)`` factors.
-
-    Routes through ``jax.scipy.linalg.lu_solve`` with ``trans=1`` for the
-    transpose path so adjoint and forward solves consume the same packed
-    factor bytes. Pivot reconstruction stays inside the LAPACK/cuSOLVER
-    contract; no manual ``_piv_from(P)`` rebuilding happens at the call
-    site.
-    """
-    lu, piv = lu_piv
-    trans = 1 if transpose else 0
-    return jsp_linalg.lu_solve((lu, piv), rhs, trans=trans)
-
-
-@jax.jit
-def _plu_from_lu_piv(lu_piv):
-    """Derive ``(P, L, U)`` matrices from packed ``(lu, piv)`` factors.
-
-    Used for backward-compatible reporting under the
-    ``"dense-plu-shared"`` factorization backend: the ``res["PLU"]`` slot
-    keeps surfacing the public triple while the runtime forward and
-    adjoint solves consume the same ``(lu, piv)`` factor bytes. The
-    permutation array is built with ``lax.fori_loop`` so the helper is
-    JIT-traceable; the ``jax.jit`` wrapper hoists the static-shape
-    ``jnp.eye`` / ``jnp.zeros`` constructors inside the trace so callers
-    in strict transfer-guard contexts do not pay a host roundtrip per
-    invocation.
-    """
-    lu, piv = lu_piv
-    n = lu.shape[0]
-    eye = jnp.eye(n, dtype=lu.dtype)
-    L = jnp.tril(lu, k=-1) + eye
-    U = jnp.triu(lu)
-
-    def body(i, perm):
-        a = perm[i]
-        b = perm[piv[i]]
-        perm = perm.at[i].set(b)
-        perm = perm.at[piv[i]].set(a)
-        return perm
-
-    perm = lax.fori_loop(0, n, body, jnp.arange(n, dtype=jnp.int32))
-    columns = jnp.arange(n, dtype=jnp.int32)
-    P = (
-        jnp.zeros((n, n), dtype=lu.dtype)
-        .at[perm, columns]
-        .set(jnp.asarray(1.0, dtype=lu.dtype))
-    )
-    return P, L, U
 
 
 def _least_squares_dense_hessian_report(size, dtype, max_dense_bytes):
@@ -4571,39 +4390,11 @@ def _backtracking_residual_step(residual_eval, x, dx, residual, current_norm):
     return lax.while_loop(_newton_backtracking_continue, body_fun, state0)
 
 
-def _gmres_iteration_limits(n):
-    restart = max(5, min(n, 64))
-    maxiter = 10
-    return restart, maxiter
-
-
 def _operator_gmres_matvec_budget(n, *, max_refinement_steps):
     """Return the worst-case operator matvec budget for the current GMRES path."""
     restart, maxiter = _gmres_iteration_limits(n)
     per_solve_budget = 1 + maxiter * (restart + 1)
     return int(per_solve_budget * (1 + int(max_refinement_steps)))
-
-
-def _run_operator_gmres(matvec, rhs, *, tol):
-    n = rhs.shape[0]
-    restart, maxiter = _gmres_iteration_limits(n)
-    # JAX's gmres implementation currently lowers a few scalar literals through
-    # host-to-device conversions even when the caller provides fully device-
-    # resident operands. Keep the allowance scoped to the library call so the
-    # surrounding operator path remains strict-transfer clean.
-    with jax.transfer_guard_host_to_device("allow"):
-        return gmres(
-            matvec,
-            rhs,
-            tol=tol,
-            atol=0.0,
-            restart=restart,
-            maxiter=maxiter,
-            # JAX documents the incremental method as numerically stabler than the
-            # default batched variant, which matters more than lower GPU overhead
-            # on the checked operator-only runtime path.
-            solve_method="incremental",
-        )
 
 
 def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
@@ -4626,83 +4417,16 @@ def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
     return dx, residual, matvec
 
 
-def _gmres_solve_array_system(matvec, rhs, *, tol):
-    solution, info = _run_operator_gmres(matvec, rhs, tol=tol)
-    residual = rhs - matvec(solution)
-    return solution, residual, info
-
-
-def _linear_solve_finite(solution, residual):
-    return jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
-
-
 # Growth-factor margin on the ``n * eps`` LU backward-error bound used by
 # ``_effective_dense_backward_error_tolerance``. Keeps the acceptance gate a tiny
 # multiple of attainable backward-stability (so degenerate solves with
 # eta ~ O(1) still fail closed by ~10 orders) while admitting backward-stable
 # solves of large, moderately ill-conditioned systems.
-_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR = 64.0
-_DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR = 100.0
 # Float64 dense solves still need a condition cap below the theoretical
 # ``1 / (n * eps)`` rank threshold at small n: a consistent near-singular
 # system can have machine-small residual but a 1e-4-scale wrong solution at
 # condition estimates around 2e13. Production Boozer adjoint estimates are
 # documented at least two orders below this cap.
-_FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE = 1.0e12
-
-
-def _effective_linear_solve_tolerance(rhs, tol):
-    dtype = rhs.dtype
-    policy = get_backend_policy()
-    tol_value = _optimizer_scalar(tol, dtype=dtype)
-    tolerance_floor = _device_scalar(
-        policy.linear_solve_tolerance_floor,
-        dtype=dtype,
-    )
-    tolerance_cap = (
-        _device_scalar(jnp.inf, dtype=dtype)
-        if policy.linear_solve_tolerance_cap is None
-        else _device_scalar(policy.linear_solve_tolerance_cap, dtype=dtype)
-    )
-    return jnp.minimum(tolerance_cap, jnp.maximum(tolerance_floor, tol_value))
-
-
-def _effective_dense_backward_error_tolerance(rhs, tol):
-    """Return the dense-LU backward-error tolerance, including its ``n * eps`` floor."""
-    dtype = rhs.dtype
-    policy = get_backend_policy()
-    effective_tolerance = _effective_linear_solve_tolerance(rhs, tol)
-    dimension_floor = (
-        _device_scalar(_DENSE_LINEAR_SOLVE_RESIDUAL_DIMENSION_FACTOR, dtype=dtype)
-        * _device_scalar(rhs.shape[0], dtype=dtype)
-        * _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    )
-    tolerance_cap = (
-        _device_scalar(jnp.inf, dtype=dtype)
-        if policy.linear_solve_tolerance_cap is None
-        else _device_scalar(policy.linear_solve_tolerance_cap, dtype=dtype)
-    )
-    return jnp.minimum(
-        tolerance_cap,
-        jnp.maximum(effective_tolerance, dimension_floor),
-    )
-
-
-def _linear_solve_residual_scale(rhs):
-    dtype = rhs.dtype
-    rhs_norm = jnp.linalg.norm(rhs)
-    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    return jnp.maximum(rhs_norm, eps)
-
-
-def _linear_solve_residual_tolerance(rhs, tol):
-    return _effective_linear_solve_tolerance(rhs, tol) * _linear_solve_residual_scale(
-        rhs
-    )
-
-
-def _linear_solve_status_success(status):
-    return status.success
 
 
 def _linear_solve_requested_tolerance_reached(status):
@@ -4712,114 +4436,6 @@ def _linear_solve_requested_tolerance_reached(status):
         & jnp.isfinite(status.residual_relative)
         & jnp.isfinite(status.requested_tolerance)
         & (status.residual_relative <= status.requested_tolerance)
-    )
-
-
-def _linear_solve_effective_tolerance_reached(status):
-    """Return whether a complete status meets the attainable policy gate."""
-    return (
-        status.success
-        & jnp.isfinite(status.residual_relative)
-        & jnp.isfinite(status.effective_tolerance)
-        & (status.residual_relative <= status.effective_tolerance)
-    )
-
-
-def _linear_solve_solution_or_nan(solution, status):
-    return jax.lax.cond(
-        jnp.asarray(_linear_solve_status_success(status), dtype=jnp.bool_),
-        lambda value: value,
-        lambda value: jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), value),
-        solution,
-    )
-
-
-def _linear_solve_iteration_count(info):
-    if info is None:
-        return _device_int32(_LINEAR_SOLVE_ITERATIONS_UNKNOWN)
-    return _device_int32(info)
-
-
-def _linear_solve_status_iterations(iterations):
-    if isinstance(iterations, jax.Array) or hasattr(iterations, "aval"):
-        return jnp.asarray(iterations, dtype=jnp.int32)
-    return _device_int32(iterations)
-
-
-def _combine_linear_solve_iteration_counts(*counts):
-    counts = tuple(_linear_solve_status_iterations(count) for count in counts)
-    all_known = counts[0] >= _device_int32(0)
-    for iteration_count in counts[1:]:
-        all_known = all_known & (iteration_count >= _device_int32(0))
-    total = sum(counts, _device_int32(0))
-    return lax.cond(
-        all_known,
-        lambda _: total,
-        lambda _: _device_int32(_LINEAR_SOLVE_ITERATIONS_UNKNOWN),
-        operand=None,
-    )
-
-
-def _linear_solve_iterations_host_value(iterations):
-    value = int(np.asarray(jax.device_get(iterations)))
-    if value == _LINEAR_SOLVE_ITERATIONS_UNKNOWN:
-        return None
-    return value
-
-
-def _linear_solve_status(solution, residual, rhs, *, tol, iterations):
-    residual_norm = jnp.linalg.norm(residual)
-    residual_scale = _linear_solve_residual_scale(rhs)
-    residual_relative = residual_norm / residual_scale
-    requested_tolerance = _optimizer_scalar(tol, dtype=rhs.dtype)
-    effective_tolerance = _effective_linear_solve_tolerance(rhs, tol)
-    success = (
-        _linear_solve_finite(solution, residual)
-        & jnp.isfinite(residual_norm)
-        & jnp.isfinite(residual_relative)
-        & (residual_relative <= effective_tolerance)
-    )
-    return _LinearSolveStatus(
-        success=success,
-        residual=residual_norm,
-        residual_scale=residual_scale,
-        residual_relative=residual_relative,
-        requested_tolerance=requested_tolerance,
-        effective_tolerance=effective_tolerance,
-        iterations=_linear_solve_status_iterations(iterations),
-    )
-
-
-def _complete_linear_solve_status(status, rhs, *, tol):
-    """Complete legacy status metrics before entering a staged branch."""
-    rhs = jnp.asarray(rhs)
-    residual_scale = (
-        _linear_solve_residual_scale(rhs)
-        if status.residual_scale is None
-        else status.residual_scale
-    )
-    requested_tolerance = (
-        _optimizer_scalar(tol, dtype=rhs.dtype)
-        if status.requested_tolerance is None
-        else status.requested_tolerance
-    )
-    effective_tolerance = (
-        _effective_linear_solve_tolerance(rhs, tol)
-        if status.effective_tolerance is None
-        else status.effective_tolerance
-    )
-    return status._replace(
-        residual_scale=residual_scale,
-        requested_tolerance=requested_tolerance,
-        effective_tolerance=effective_tolerance,
-    )
-
-
-def _terminal_linear_solve_status(status, rhs, *, tol):
-    """Complete status and apply the attainable solver authority."""
-    completed = _complete_linear_solve_status(status, rhs, tol=tol)
-    return completed._replace(
-        success=_linear_solve_effective_tolerance_reached(completed)
     )
 
 
@@ -4850,83 +4466,6 @@ def _linear_solve_status_with_relative_tolerance(
         effective_tolerance=tolerance_value,
         iterations=_linear_solve_status_iterations(iterations),
     )
-
-
-def _dense_linear_solve_status(matvec, solution, rhs, *, tol):
-    residual = rhs - matvec(solution)
-    return _linear_solve_status(
-        solution,
-        residual,
-        rhs,
-        tol=tol,
-        iterations=_device_int32(0),
-    )
-
-
-def _dense_matrix_backward_error_success(matrix, solution, rhs, *, tol):
-    residual = rhs - matrix @ solution
-    dtype = rhs.dtype
-    residual_norm = jnp.linalg.norm(residual)
-    scale = jnp.linalg.norm(matrix) * jnp.linalg.norm(solution) + jnp.linalg.norm(rhs)
-    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    threshold = _effective_dense_backward_error_tolerance(rhs, tol) * jnp.maximum(
-        scale,
-        eps,
-    )
-    return (
-        _linear_solve_finite(solution, residual)
-        & jnp.isfinite(residual_norm)
-        & jnp.isfinite(scale)
-        & (residual_norm <= threshold)
-    )
-
-
-def _relative_residual_norm(residual, rhs, *, ord=None):
-    """Return ``||residual|| / max(||rhs||, eps_runtime)``."""
-    dtype = rhs.dtype
-    residual_norm = jnp.linalg.norm(residual, ord=ord)
-    rhs_norm = jnp.linalg.norm(rhs, ord=ord)
-    eps = _device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
-    return residual_norm / jnp.maximum(rhs_norm, eps)
-
-
-def _relative_residual_1_norm(residual, rhs):
-    return _relative_residual_norm(residual, rhs, ord=1)
-
-
-def _forward_error_bound(residual_rel, condition_estimate):
-    dtype = residual_rel.dtype
-    one = _device_scalar(1.0, dtype=dtype)
-    inf_value = _device_scalar(jnp.inf, dtype=dtype)
-    scaled = condition_estimate * residual_rel
-    denominator = one - scaled
-    return jnp.where(
-        denominator > _device_scalar(0.0, dtype=dtype),
-        scaled / denominator,
-        inf_value,
-    )
-
-
-def _forward_error_tolerance(*, tol, dtype):
-    """Return the shared relative forward-accuracy acceptance threshold."""
-    dtype = np.dtype(dtype)
-    tol_value = _optimizer_scalar(tol, dtype=dtype)
-    floor = jnp.sqrt(_device_scalar(jnp.finfo(dtype).eps, dtype=dtype))
-    return jnp.maximum(
-        floor,
-        _device_scalar(
-            MIXED_DENSE_IR_ACCURACY_POLICY.forward_error_tolerance_multiplier,
-            dtype=dtype,
-        )
-        * tol_value,
-    )
-
-
-def _forward_error_success(residual_rel, condition_estimate, *, tol):
-    dtype = residual_rel.dtype
-    gate = _forward_error_tolerance(tol=tol, dtype=dtype)
-    ferr = _forward_error_bound(residual_rel, condition_estimate)
-    return jnp.isfinite(ferr) & (ferr <= gate)
 
 
 def _eisenstat_walker_strict_cap(tol_value, *, dtype):
@@ -5013,164 +4552,6 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     )
 
 
-def _matrix_one_norm(matrix):
-    return jnp.max(jnp.sum(jnp.abs(matrix), axis=0))
-
-
-def _place_like_concrete_array(value, reference, *, dtype=None):
-    if isinstance(value, jax.core.Tracer) or isinstance(reference, jax.core.Tracer):
-        return jnp.asarray(value, dtype=dtype)
-    resolved_dtype = getattr(value, "dtype", None) if dtype is None else dtype
-    if resolved_dtype is None:
-        resolved_dtype = np.asarray(value).dtype
-    return _explicit_device_array(
-        value,
-        dtype=resolved_dtype,
-        reference=reference,
-    )
-
-
-def _place_like_concrete_scalar(value, reference):
-    return _place_like_concrete_array(value, reference, dtype=reference.dtype)
-
-
-def _hager_higham_inverse_1_norm_estimate(
-    solve,
-    transpose_solve,
-    *,
-    size,
-    dtype,
-    placement_reference,
-    iterations=_HAGER_HIGHAM_CONDITION_ITERATIONS,
-):
-    """Estimate ``||A^-1||_1`` with loop state colocated with solve factors."""
-    one = _staged_like(placement_reference, 1.0, dtype=dtype)
-    zero = _staged_like(placement_reference, 0.0, dtype=dtype)
-    inf_value = _staged_like(placement_reference, np.inf, dtype=dtype)
-    size_scalar = _staged_like(placement_reference, size, dtype=dtype)
-    indices = _staged_like(
-        placement_reference,
-        np.arange(size, dtype=np.int32),
-        dtype=np.int32,
-    )
-    x0 = _staged_like(
-        placement_reference,
-        np.ones((size,), dtype=np.dtype(dtype)),
-        dtype=dtype,
-    )
-    x0 = x0 / size_scalar
-
-    def unit_vector(index):
-        return jnp.where(indices == index, one, zero)
-
-    def body_fun(_iteration, state):
-        x, best_estimate = state
-        y = solve(x)
-        estimate = jnp.sum(jnp.abs(y))
-        signs = jnp.where(y >= zero, one, -one)
-        z = transpose_solve(signs)
-        next_index = jnp.argmax(jnp.abs(z))
-        next_x = unit_vector(next_index)
-        finite = jnp.all(jnp.isfinite(y)) & jnp.all(jnp.isfinite(z))
-        next_estimate = jnp.maximum(best_estimate, estimate)
-        return next_x, jnp.where(finite, next_estimate, inf_value)
-
-    # ``lax.fori_loop`` lowers the Python integer bounds through a weakly
-    # typed host-to-device conversion that strict transfer-guard contexts
-    # flag as a violation. Mirror the ``_run_operator_gmres`` allowance:
-    # scope the relaxation to the library call so the surrounding solve
-    # path stays strict-transfer clean.
-    with jax.transfer_guard_host_to_device("allow"):
-        _, estimate = lax.fori_loop(0, int(iterations), body_fun, (x0, zero))
-    return estimate
-
-
-def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
-    """Return a JAX-native Hager-Higham 1-norm condition estimate.
-
-    The Hager-Higham iteration evaluates ``A⁻¹`` and ``A⁻ᵀ`` repeatedly,
-    so the inner solves consume cached ``(lu, piv)`` factors via
-    ``jsp_linalg.lu_solve``. When ``lu_piv`` is supplied it must be exactly
-    the packed two-tuple returned by ``jsp_linalg.lu_factor``; callers holding
-    public ``(P, L, U, lu, piv)`` factors should pass ``factors[3:5]``. With
-    cached factors no factorization runs at all; otherwise the helper
-    factorizes ``matrix`` once and shares those bytes across every inner solve.
-    The naïve ``jnp.linalg.solve`` form re-factorized for every call, costing
-    10 × O(n³) per estimate instead of the present O(n³) + 10 × O(n²).
-    """
-    matrix = jnp.asarray(matrix)
-    size = int(matrix.shape[0])
-
-    if lu_piv is None:
-        lu_piv = jsp_linalg.lu_factor(matrix)
-    lu, piv = lu_piv
-
-    def solve(rhs):
-        return jsp_linalg.lu_solve((lu, piv), rhs, trans=0)
-
-    def transpose_solve(rhs):
-        return jsp_linalg.lu_solve((lu, piv), rhs, trans=1)
-
-    matrix_norm = _matrix_one_norm(matrix)
-    inverse_norm = _hager_higham_inverse_1_norm_estimate(
-        solve,
-        transpose_solve,
-        size=size,
-        dtype=matrix.dtype,
-        placement_reference=lu,
-    )
-    inverse_norm = _place_like_concrete_scalar(inverse_norm, matrix_norm)
-    return matrix_norm * inverse_norm
-
-
-def _dense_matrix_solve_forward_error_success(
-    matrix,
-    solution,
-    rhs,
-    *,
-    tol,
-    condition_estimate=None,
-):
-    residual = rhs - matrix @ solution
-    residual_rel = _relative_residual_1_norm(residual, rhs)
-    if condition_estimate is None:
-        condition_estimate = _dense_matrix_condition_estimate(matrix)
-    return _forward_error_success(residual_rel, condition_estimate, tol=tol)
-
-
-def _dense_matrix_solve_small_solution_success(solution, rhs, *, tol):
-    solution = jnp.asarray(solution)
-    rhs = jnp.asarray(rhs)
-    solution_inf_norm = jnp.linalg.norm(solution, ord=np.inf)
-    threshold = _device_scalar(
-        _DENSE_LINEAR_SOLVE_SMALL_SOLUTION_FACTOR,
-        dtype=rhs.dtype,
-    ) * _effective_linear_solve_tolerance(rhs, tol)
-    return jnp.all(jnp.isfinite(solution)) & (solution_inf_norm <= threshold)
-
-
-def _dense_matrix_nonsingular_threshold(size, dtype):
-    dtype = np.dtype(dtype)
-    eps = float(np.finfo(dtype).eps)
-    dimension_factor = np.sqrt(float(size)) if dtype == np.dtype(np.float32) else size
-    threshold = 1.0 / (dimension_factor * eps)
-    if dtype == np.dtype(np.float64):
-        threshold = min(threshold, _FLOAT64_DENSE_MATRIX_MAX_CONDITION_ESTIMATE)
-    return _device_scalar(threshold, dtype=dtype)
-
-
-@partial(jax.jit, static_argnames=("size", "dtype"))
-def _dense_matrix_condition_estimate_numerically_safe(
-    condition_estimate,
-    *,
-    size,
-    dtype,
-):
-    condition_estimate = jnp.asarray(condition_estimate, dtype=dtype)
-    threshold = _dense_matrix_nonsingular_threshold(size, dtype)
-    return jnp.isfinite(condition_estimate) & (condition_estimate < threshold)
-
-
 def _dense_matrix_condition_numerically_safe(
     condition_estimate,
     *,
@@ -5185,408 +4566,13 @@ def _dense_matrix_condition_numerically_safe(
     )
 
 
-def _dense_matrix_solve_numerically_safe(
-    matrix,
-    solution,
-    rhs,
-    *,
-    tol,
-    lu_piv=None,
-    solve_dtype=None,
-    condition_estimate=None,
-):
-    """Whether a dense adjoint solve is numerically trustworthy at ``solve_dtype``.
-
-    A backward-error gate cannot distinguish a well-conditioned solve from a
-    backward-stable-but-forward-garbage solve of a (near-)singular operator
-    (``lu_factor`` of a rank-deficient matrix yields a tiny-but-finite pivot, so
-    the solve returns a finite wrong answer with a small residual).  The
-    condition screen ``isfinite(cond) & (cond < threshold)`` lets a degenerate
-    operator fail closed: float64 production uses the smaller of the LAPACK
-    rank-tolerance reciprocal ``1 / (n * eps)`` and an explicit 1e12 cap,
-    cleanly separating the well-conditioned production ``J^T`` (cond ~ 1e3-1e6,
-    with 1-norm estimates still far below the cap) from numerically singular
-    systems where residual-only success hides a wrong forward solution.
-
-    The forward-error *bound* ``cond * residual_rel`` is deliberately applied to
-    float32 only.  At large ``n`` (the float64 production regime) the 1-norm
-    condition estimate inflates ~``n``-fold over the 2-norm conditioning,
-    tripping the bound's ``sqrt(eps)`` gate even on an accurate solve, so it
-    would false-reject production.  Float32 smoke solves instead clear the
-    broader ``1 / (sqrt(n) * eps)`` condition screen, which admits moderately
-    conditioned operators that float32 precision cannot resolve to smoke
-    tolerance; those must additionally satisfy the forward-error bound before the
-    solve is accepted.  ``solve_dtype`` (the caller's rhs dtype) selects the lane
-    so the gate keys on the intended working precision even when the operator is
-    materialized at the runtime float64 policy dtype.
-
-    ``condition_estimate`` reuses an existing certificate when the caller
-    already computed one from the same matrix or factors.
-    """
-    if solve_dtype is None:
-        solve_dtype = matrix.dtype
-    solve_dtype = np.dtype(solve_dtype)
-    size = int(matrix.shape[0])
-    if condition_estimate is None:
-        condition_estimate = _dense_matrix_condition_estimate(
-            jnp.asarray(matrix),
-            lu_piv=lu_piv,
-        )
-    nonsingular = _dense_matrix_condition_estimate_numerically_safe(
-        condition_estimate,
-        size=size,
-        dtype=solve_dtype,
-    )
-    if solve_dtype != np.dtype(np.float32):
-        return nonsingular
-    matrix = jnp.asarray(matrix, dtype=solve_dtype)
-    solution = jnp.asarray(solution, dtype=solve_dtype)
-    rhs = jnp.asarray(rhs, dtype=solve_dtype)
-    forward_error_safe = _dense_matrix_solve_forward_error_success(
-        matrix,
-        solution,
-        rhs,
-        tol=tol,
-        condition_estimate=condition_estimate,
-    )
-    return nonsingular & forward_error_safe
-
-
-def _solve_square_vector_system_operator_only(
-    matvec,
-    rhs,
-    *,
-    tol,
-    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
-):
-    """Solve one square linear system with bounded operator-GMRES refinement."""
-    rhs = jnp.asarray(rhs)
-
-    def zero_rhs_solution(_unused):
-        solution = jnp.zeros_like(rhs)
-        residual = jnp.zeros_like(rhs)
-        status = _linear_solve_status(
-            solution,
-            residual,
-            rhs,
-            tol=tol,
-            iterations=_device_int32(0),
-        )
-        return solution, status
-
-    def nonzero_rhs_solution(_unused):
-        return _solve_square_vector_system_operator_only_nonzero_rhs(
-            matvec,
-            rhs,
-            tol=tol,
-            max_refinement_steps=max_refinement_steps,
-        )
-
-    return lax.cond(
-        jnp.all(rhs == jnp.zeros((), dtype=rhs.dtype)),
-        zero_rhs_solution,
-        nonzero_rhs_solution,
-        operand=None,
-    )
-
-
-def _solve_square_vector_system_operator_only_nonzero_rhs(
-    matvec,
-    rhs,
-    *,
-    tol,
-    max_refinement_steps,
-):
-    effective_tol = _effective_linear_solve_tolerance(rhs, tol)
-    solution, residual, info = _gmres_solve_array_system(
-        matvec,
-        rhs,
-        tol=effective_tol,
-    )
-    status = _linear_solve_status(
-        solution,
-        residual,
-        rhs,
-        tol=tol,
-        iterations=_linear_solve_iteration_count(info),
-    )
-
-    def refinement_step(carry, _unused):
-        solution, residual, status, can_refine, accept_first_correction = carry
-
-        def refine(_):
-            correction, correction_residual, correction_info = (
-                _gmres_solve_array_system(
-                    matvec,
-                    residual,
-                    tol=effective_tol,
-                )
-            )
-            correction_finite = _linear_solve_finite(correction, correction_residual)
-            refined_solution = lax.cond(
-                correction_finite,
-                lambda _: solution + correction,
-                lambda _: solution,
-                operand=None,
-            )
-            refined_residual = rhs - matvec(refined_solution)
-            refined_iterations = _combine_linear_solve_iteration_counts(
-                status.iterations,
-                _linear_solve_iteration_count(correction_info),
-            )
-            refined_status = _linear_solve_status(
-                refined_solution,
-                refined_residual,
-                rhs,
-                tol=tol,
-                iterations=refined_iterations,
-            )
-            residual_improved = (
-                refined_status.residual_relative <= status.residual_relative
-            )
-            accept_correction = correction_finite & (
-                accept_first_correction | residual_improved | refined_status.success
-            )
-            accepted_can_refine = (
-                accept_correction
-                & _linear_solve_finite(refined_solution, refined_residual)
-                & (~refined_status.success)
-            )
-            rejected_status = status._replace(iterations=refined_iterations)
-            return lax.cond(
-                accept_correction,
-                lambda _: (
-                    refined_solution,
-                    refined_residual,
-                    refined_status,
-                    accepted_can_refine,
-                    jnp.asarray(False),
-                ),
-                lambda _: (
-                    solution,
-                    residual,
-                    rejected_status,
-                    jnp.asarray(False),
-                    jnp.asarray(False),
-                ),
-                operand=None,
-            )
-
-        return lax.cond(
-            can_refine,
-            refine,
-            lambda _: (
-                solution,
-                residual,
-                status,
-                can_refine,
-                accept_first_correction,
-            ),
-            operand=None,
-        ), None
-
-    initial_can_refine = _linear_solve_finite(solution, residual) & (~status.success)
-    (solution, residual, status, _can_refine, _accept_first_correction), _ = lax.scan(
-        refinement_step,
-        (
-            solution,
-            residual,
-            status,
-            initial_can_refine,
-            jnp.asarray(True),
-        ),
-        xs=None,
-        length=int(max_refinement_steps),
-    )
-    return solution, status
-
-
-def _apply_column_batched_operator(matvec, rhs):
-    rhs = jnp.asarray(rhs)
-    if rhs.ndim == 1:
-        return matvec(rhs)
-    return jax.vmap(matvec, in_axes=1, out_axes=1)(rhs)
-
-
-def _dense_square_operator_matrix_dtype(rhs):
-    rhs_dtype = np.dtype(jnp.asarray(rhs).dtype)
-    if rhs_dtype.kind == "f":
-        return np.dtype(get_backend_policy().runtime_dtype)
-    return rhs_dtype
-
-
-def _dense_square_operator_matrix_bytes_allowed(rhs):
-    """Whether the ``n x n`` dense materialization (``n = rhs.shape[0]``) fits the
-    dense-Jacobian byte cap.  The operator dimension is ``rhs.shape[0]`` whether
-    ``rhs`` is a single vector or a column-batched ``(n, k)`` right-hand side."""
-    rhs = jnp.asarray(rhs)
-    dimension = int(rhs.shape[0])
-    matrix_bytes = (
-        dimension * dimension * _dense_square_operator_matrix_dtype(rhs).itemsize
-    )
-    return matrix_bytes <= int(get_backend_policy().max_dense_jacobian_bytes)
-
-
-def _dense_square_operator_materialization_allowed(rhs):
-    rhs = jnp.asarray(rhs)
-    if rhs.ndim != 1:
-        return False
-    return _dense_square_operator_matrix_bytes_allowed(rhs)
-
-
-def _dense_square_operator_lu_materialization_allowed(rhs):
-    """Dense-LU exact-adjoint gate: accept a single vector OR a column-batched
-    ``(n, k)`` right-hand side.  The dense ``J^T`` is ``n x n`` regardless of the
-    number of columns, so one factorization serves all ``k`` columns and
-    ``lu_solve`` solves the batched RHS in a single call.  This is what lets the
-    dense-LU path reach the production single-stage adjoint, whose fused
-    residual+iota+non-QS gradient solves a 2-D batched RHS (the per-objective
-    ``dJ()`` solves a single vector)."""
-    rhs = jnp.asarray(rhs)
-    if rhs.ndim not in (1, 2):
-        return False
-    return _dense_square_operator_matrix_bytes_allowed(rhs)
-
-
-def _dense_square_operator_matrix(
-    matvec,
-    rhs,
-    *,
-    matrix_dtype=None,
-    sweep_dtype=None,
-):
-    rhs = jnp.asarray(rhs)
-    dimension = int(rhs.shape[0])
-    if sweep_dtype is None:
-        sweep_dtype = _dense_square_operator_matrix_dtype(rhs)
-    else:
-        sweep_dtype = np.dtype(sweep_dtype)
-    if matrix_dtype is None:
-        matrix_dtype = _dense_square_operator_matrix_dtype(rhs)
-    else:
-        matrix_dtype = np.dtype(matrix_dtype)
-
-    column_indices = _staged_like(
-        rhs,
-        np.arange(dimension, dtype=np.int32),
-        dtype=np.int32,
-    )
-    chunk_size = min(_DENSE_OPERATOR_CHUNK_BATCH_SIZE, dimension)
-    chunk_count = dimension // chunk_size
-    chunked_dimension = chunk_count * chunk_size
-    column_index_chunks = _staged_like(
-        rhs,
-        np.arange(chunked_dimension, dtype=np.int32).reshape(
-            chunk_count,
-            chunk_size,
-        ),
-        dtype=np.int32,
-    )
-    example_basis = _staged_like(
-        rhs,
-        np.zeros(dimension, dtype=sweep_dtype),
-        dtype=sweep_dtype,
-    )
-    matvec_closed_jaxpr = jax.make_jaxpr(matvec)(example_basis)
-    matvec_jaxpr = matvec_closed_jaxpr.jaxpr
-    matvec_closure_args = tuple(
-        _place_like_concrete_array(constant, rhs)
-        for constant in matvec_closed_jaxpr.consts
-    )
-    scan_carry = (column_indices, matvec_closure_args)
-
-    def converted_matvec(basis_vector, *closure_args):
-        closed_jaxpr = jax_core.ClosedJaxpr(matvec_jaxpr, closure_args)
-        return jax_core.jaxpr_as_fun(closed_jaxpr)(basis_vector)[0]
-
-    def materialize_column(column_index, basis_indices, closure_args):
-        basis_vector = jnp.asarray(
-            basis_indices == column_index,
-            dtype=sweep_dtype,
-        )
-        return converted_matvec(basis_vector, *closure_args)
-
-    def materialize_chunk(carry, chunk_column_indices):
-        basis_indices, closure_args = carry
-        columns = jax.vmap(materialize_column, in_axes=(0, None, None))(
-            chunk_column_indices,
-            basis_indices,
-            closure_args,
-        )
-        return carry, columns
-
-    def materialize_remainder_column(carry, column_index):
-        basis_indices, closure_args = carry
-        return carry, materialize_column(
-            column_index,
-            basis_indices,
-            closure_args,
-        )
-
-    _, chunked_columns = lax.scan(
-        materialize_chunk,
-        scan_carry,
-        column_index_chunks,
-    )
-    columns = jnp.reshape(
-        chunked_columns,
-        (chunked_dimension, dimension),
-    )
-    if chunked_dimension < dimension:
-        remainder_indices = _staged_like(
-            rhs,
-            np.arange(chunked_dimension, dimension, dtype=np.int32),
-            dtype=np.int32,
-        )
-        _, remainder_columns = lax.scan(
-            materialize_remainder_column,
-            scan_carry,
-            remainder_indices,
-        )
-        columns = jnp.concatenate((columns, remainder_columns), axis=0)
-    return jnp.asarray(jnp.swapaxes(columns, 0, 1), dtype=matrix_dtype)
-
-
 # ---------------------------------------------------------------------------
-# Dense-IR owner lives in private._dense_ir. Re-export private symbols so
-# existing ``_optimizer_jax._*`` adapter and test references keep working.
+# Linear-solve, dense-IR, and adjoint-solve implementations live in their
+# dedicated owner modules. The explicit aliases above are compatibility
+# reexports only; mutable selectors must be read and patched on their owner.
 # ---------------------------------------------------------------------------
-# Explicit ``import X as X`` re-exports: adapters/tests reach these via
-# ``_optimizer_jax._*`` / ``optimizer._*``. Ruff treats redundant aliases as
-# intentional re-exports (F401-safe).
-from simsopt_jax.geo.optimizers.private._dense_ir import (  # noqa: E402
-    DENSE_IR_HISTORY_MAX_CORRECTIONS as DENSE_IR_HISTORY_MAX_CORRECTIONS,
-    _DENSE_IR_NEWTON_MATVEC_BUDGET as _DENSE_IR_NEWTON_MATVEC_BUDGET,
-    _DENSE_IR_NEWTON_REFINEMENT_STEPS as _DENSE_IR_NEWTON_REFINEMENT_STEPS,
-    _DenseIrContractionTelemetry as _DenseIrContractionTelemetry,
-    _DenseIrHistory as _DenseIrHistory,
-    _DenseIrRefinementState as _DenseIrRefinementState,
-    _MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND as _MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND,
-    _MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT as _MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT,
-    _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA as _MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA,
-    _MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT as _MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT,
-    _MixedDenseIrFallbackTelemetry as _MixedDenseIrFallbackTelemetry,
-    _MixedDenseIrResolvedPolicy as _MixedDenseIrResolvedPolicy,
-    _MixedDenseIrSolveStatus as _MixedDenseIrSolveStatus,
-    _MixedDenseIrTrustTelemetry as _MixedDenseIrTrustTelemetry,
-    _certify_mixed_dense_ir_factors_with_telemetry as _certify_mixed_dense_ir_factors_with_telemetry,
-    _fixed_dense_ir_history as _fixed_dense_ir_history,
-    _inactive_dense_ir_history as _inactive_dense_ir_history,
-    _inactive_mixed_dense_ir_fallback_telemetry as _inactive_mixed_dense_ir_fallback_telemetry,
-    _inactive_mixed_dense_ir_trust_telemetry as _inactive_mixed_dense_ir_trust_telemetry,
-    _materialize_dense_ir_proposal_matrix as _materialize_dense_ir_proposal_matrix,
-    _mixed_dense_ir_contraction_operator_norm_upper as _mixed_dense_ir_contraction_operator_norm_upper,
-    _mixed_dense_ir_correction_tail_relative_bound as _mixed_dense_ir_correction_tail_relative_bound,
-    _run_dense_ir_refinement as _run_dense_ir_refinement,
-    _solve_dense_ir_system_with_contraction_telemetry as _solve_dense_ir_system_with_contraction_telemetry,
-    _solve_dense_ir_system_with_status as _solve_dense_ir_system_with_status,
-    _solve_dense_square_operator_least_squares_system_with_status as _solve_dense_square_operator_least_squares_system_with_status,
-    _solve_dense_square_operator_lu_system_with_status as _solve_dense_square_operator_lu_system_with_status,
-    _solve_fp64_dense_ir_rebuild_with_telemetry as _solve_fp64_dense_ir_rebuild_with_telemetry,
-    _solve_mixed_dense_ir_operator_with_status as _solve_mixed_dense_ir_operator_with_status,
-    _solve_mixed_dense_ir_operator_with_telemetry as _solve_mixed_dense_ir_operator_with_telemetry,
-    resolve_mixed_dense_ir_policy as resolve_mixed_dense_ir_policy,
-)
+# Explicit ``import X as X`` aliases keep the declared compatibility surface
+# visible and make the intentional reexports F401-safe for Ruff.
 
 
 def _solve_traceable_newton_operator_gmres_with_status(matvec, rhs, *, tol):
@@ -5639,437 +4625,6 @@ def _refine_traceable_newton_operator_gmres_solution(
         lambda _: (refined_solution, refined_status),
         lambda _: (solution, status._replace(iterations=refined_iterations)),
         operand=None,
-    )
-
-
-def _solve_square_array_system_operator_only(
-    matvec,
-    rhs,
-    *,
-    tol,
-    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
-):
-    """Solve vector or column-batched square systems with operator-only GMRES."""
-    rhs = jnp.asarray(rhs)
-    if rhs.ndim == 1:
-        return _solve_square_vector_system_operator_only(
-            matvec,
-            rhs,
-            tol=tol,
-            max_refinement_steps=max_refinement_steps,
-        )
-
-    def solve_column(column):
-        return _solve_square_vector_system_operator_only(
-            matvec,
-            column,
-            tol=tol,
-            max_refinement_steps=max_refinement_steps,
-        )
-
-    solutions, column_statuses = jax.vmap(
-        solve_column,
-        in_axes=1,
-        out_axes=(1, 0),
-    )(rhs)
-    return solutions, _LinearSolveStatus(
-        success=jnp.all(column_statuses.success),
-        residual=jnp.max(column_statuses.residual),
-        residual_relative=jnp.max(column_statuses.residual_relative),
-        iterations=jnp.max(column_statuses.iterations),
-    )
-
-
-def _hessian_linear_operator(objective_fn, x, *, stab=0.0):
-    hvp_fn = _hessian_vector_product_fn(objective_fn)
-    first_leaf = _require_tree_first_leaf(
-        x,
-        detail="Hessian linear operator state must contain at least one leaf.",
-    )
-    dtype = first_leaf.dtype
-    decision_size = int(np.asarray(jnp.asarray(x).size))
-    stab_value = _staged_like(x, stab, dtype=dtype)
-
-    def matvec_column(v):
-        return hvp_fn(x, v) + stab_value * v
-
-    def matvec(v):
-        return _apply_column_batched_operator(matvec_column, v)
-
-    return {
-        "kind": "hessian",
-        "shape": (decision_size, decision_size),
-        "dtype": dtype,
-        "matvec": matvec,
-        "transpose_matvec": matvec,
-    }
-
-
-def _solve_hessian_system(
-    objective_fn,
-    x,
-    rhs,
-    *,
-    stab,
-    tol,
-):
-    rhs = jnp.asarray(rhs)
-    x = _place_like_concrete_array(x, rhs)
-    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    solution, _ = _solve_square_array_system_operator_only(
-        operator["matvec"],
-        rhs,
-        tol=tol,
-    )
-    return solution
-
-
-def _solve_hessian_system_with_status(
-    objective_fn,
-    x,
-    rhs,
-    *,
-    stab,
-    tol,
-):
-    rhs = jnp.asarray(rhs)
-    x = _place_like_concrete_array(x, rhs)
-    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    return _solve_square_array_system_operator_only(
-        operator["matvec"],
-        rhs,
-        tol=tol,
-    )
-
-
-def _solve_symmetric_operator_cg_with_status(matvec, rhs, *, tol):
-    """Solve a symmetric PSD operator system matrix-free via ``lineax`` CG.
-
-    For the inner-Boozer Gauss-Newton adjoint (``J^T J + stab I``), which is
-    symmetric positive-(semi)definite.  Bounded memory (no dense N x N); see
-    ``_ADJOINT_LINEAR_SOLVER`` for the speed/conditioning caveats.  Handles a
-    1-D rhs directly and a column-batched 2-D rhs by mapping over columns,
-    mirroring ``_solve_square_array_system_operator_only``.
-    """
-    rhs = jnp.asarray(rhs)
-    if rhs.ndim != 1:
-
-        def solve_column(column):
-            return _solve_symmetric_operator_cg_with_status(matvec, column, tol=tol)
-
-        solutions, column_statuses = jax.vmap(
-            solve_column,
-            in_axes=1,
-            out_axes=(1, 0),
-        )(rhs)
-        return solutions, _LinearSolveStatus(
-            success=jnp.all(column_statuses.success),
-            residual=jnp.max(column_statuses.residual),
-            residual_relative=jnp.max(column_statuses.residual_relative),
-            iterations=jnp.max(column_statuses.iterations),
-        )
-
-    effective_tol = _effective_linear_solve_tolerance(rhs, tol)
-    operator = lineax.FunctionLinearOperator(
-        matvec,
-        jax.ShapeDtypeStruct(rhs.shape, rhs.dtype),
-        tags=(lineax.positive_semidefinite_tag, lineax.symmetric_tag),
-    )
-    solution = lineax.linear_solve(
-        operator,
-        rhs,
-        solver=lineax.CG(rtol=effective_tol, atol=effective_tol),
-        throw=False,
-    )
-    residual = rhs - matvec(solution.value)
-    iterations = _device_int32(solution.stats["num_steps"])
-    return solution.value, _linear_solve_status(
-        solution.value,
-        residual,
-        rhs,
-        tol=tol,
-        iterations=iterations,
-    )
-
-
-def _solve_regularized_normal_system_lsmr_j_with_status(
-    jacobian_operator,
-    rhs,
-    *,
-    stab,
-    tol,
-):
-    """Solve ``(J.T @ J + stab I) x = rhs`` through augmented residuals.
-
-    ``stab`` must be positive so the equivalent least-squares problem
-    ``min_x ||[J; sqrt(stab) I] x - [0; rhs/sqrt(stab)]||`` is well-defined.
-    The helper returns a decision-space vector and the established normal-system
-    residual status, making it comparable to the dense and CG adjoint helpers.
-    """
-    rhs = jnp.asarray(rhs)
-    if rhs.ndim != 1:
-
-        def solve_column(column):
-            return _solve_regularized_normal_system_lsmr_j_with_status(
-                jacobian_operator,
-                column,
-                stab=stab,
-                tol=tol,
-            )
-
-        solutions, column_statuses = jax.vmap(
-            solve_column,
-            in_axes=1,
-            out_axes=(1, 0),
-        )(rhs)
-        return solutions, _LinearSolveStatus(
-            success=jnp.all(column_statuses.success),
-            residual=jnp.max(column_statuses.residual),
-            residual_relative=jnp.max(column_statuses.residual_relative),
-            iterations=jnp.max(column_statuses.iterations),
-        )
-
-    stab_host = float(stab)
-    if stab_host <= 0.0:
-        raise ValueError(
-            "SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j requires positive "
-            "newton_stab. The unstabilized stab=0 normal system needs a "
-            "separate KKT/two-solve formulation."
-        )
-
-    dtype = rhs.dtype
-    residual_size, decision_size = jacobian_operator["shape"]
-    sqrt_stab = jnp.sqrt(_optimizer_scalar(stab_host, dtype=dtype))
-    residual_target = jnp.zeros((residual_size,), dtype=dtype)
-    target = jnp.concatenate((residual_target, rhs / sqrt_stab), axis=0)
-
-    def augmented_matvec(vector):
-        residual_part = jnp.ravel(
-            jnp.asarray(jacobian_operator["matvec"](vector), dtype=dtype)
-        )
-        return jnp.concatenate((residual_part, sqrt_stab * vector), axis=0)
-
-    operator = lineax.FunctionLinearOperator(
-        augmented_matvec,
-        jax.ShapeDtypeStruct((decision_size,), dtype),
-    )
-    effective_tol = _effective_linear_solve_tolerance(rhs, tol)
-    # LSMR stops on the augmented least-squares criterion, while callers gate the
-    # induced normal-system residual below.  Ask the inner solve for a modestly
-    # tighter LS tolerance so the returned solution is judged by the same status
-    # contract as the dense/CG helpers.
-    solver_tol = _optimizer_scalar(1.0e-4, dtype=dtype) * effective_tol
-    max_steps = max(20, 10 * int(decision_size))
-    solution = lineax.linear_solve(
-        operator,
-        target,
-        solver=_lineax_lsmr_solver(
-            rtol=solver_tol,
-            atol=solver_tol,
-            max_steps=max_steps,
-        ),
-        throw=False,
-    )
-    j_solution = jacobian_operator["matvec"](solution.value)
-    normal_residual = rhs - (
-        jacobian_operator["transpose_matvec"](j_solution)
-        + _optimizer_scalar(stab_host, dtype=dtype) * solution.value
-    )
-    return solution.value, _linear_solve_status(
-        solution.value,
-        normal_residual,
-        rhs,
-        tol=tol,
-        iterations=_device_int32(solution.stats["num_steps"]),
-    )
-
-
-def _solve_hessian_least_squares_system_with_status(
-    objective_fn,
-    x,
-    rhs,
-    *,
-    stab,
-    tol,
-    residual_fn=None,
-    proposal_objective_fn=None,
-    certificate_probe_key=None,
-    solver: _AdjointHessianLinearSolver | None = None,
-):
-    """Solve a Hessian adjoint system without forming normal equations."""
-    rhs = jnp.asarray(rhs)
-    x = _place_like_concrete_array(x, rhs)
-    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    selected_solver = _ADJOINT_LINEAR_SOLVER if solver is None else solver
-    if selected_solver == "cg":
-        return _solve_symmetric_operator_cg_with_status(
-            operator["matvec"],
-            rhs,
-            tol=tol,
-        )
-    if selected_solver == "lsmr_j":
-        if residual_fn is None:
-            raise ValueError(
-                "SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j requires a residual_fn "
-                "so it can operate on the residual Jacobian J instead of the "
-                "squared Hessian operator."
-            )
-        return _solve_regularized_normal_system_lsmr_j_with_status(
-            _jacobian_linear_operator(residual_fn, x),
-            rhs,
-            stab=stab,
-            tol=tol,
-        )
-    if _dense_square_operator_materialization_allowed(rhs):
-        if proposal_objective_fn is not None:
-            if certificate_probe_key is None:
-                raise ValueError(
-                    "Mixed dense IR requires a fresh or replay-authorized "
-                    "runtime certificate key."
-                )
-            policy = get_backend_policy()
-            dense_ir_policy = resolve_mixed_dense_ir_policy()
-            proposal_dtype = np.dtype(policy.compute_dtype)
-            certificate_dtype = np.dtype(policy.runtime_dtype)
-            if (
-                proposal_dtype != np.dtype(np.float32)
-                or certificate_dtype != dense_ir_policy.certificate_dtype
-            ):
-                raise ValueError(
-                    "A proposal objective requires the FP32-factor/"
-                    f"{dense_ir_policy.certificate_dtype_name}-certificate "
-                    "mixed-precision policy."
-                )
-            proposal_operator = _hessian_linear_operator(
-                proposal_objective_fn,
-                jnp.asarray(x, dtype=proposal_dtype),
-                stab=stab,
-            )
-            return _solve_mixed_dense_ir_operator_with_status(
-                proposal_operator["matvec"],
-                operator["matvec"],
-                rhs,
-                tol=tol,
-                proposal_dtype=proposal_dtype,
-                certificate_sweep_dtype=operator["dtype"],
-                certificate_probe_key=certificate_probe_key,
-            )
-        return _solve_dense_square_operator_least_squares_system_with_status(
-            operator["matvec"],
-            rhs,
-            tol=tol,
-        )
-    solution, status = _solve_square_array_system_operator_only(
-        operator["matvec"],
-        rhs,
-        tol=tol,
-    )
-    primal_residual = rhs - operator["matvec"](solution)
-    return solution, _linear_solve_status(
-        solution,
-        primal_residual,
-        rhs,
-        tol=tol,
-        iterations=status.iterations,
-    )
-
-
-def _jacobian_linear_operator(residual_fn, x):
-    jvp_fn = _jacobian_vector_product_fn(residual_fn)
-    residual_x, pullback = jax.vjp(residual_fn, x)
-    residual_size = int(np.asarray(jnp.asarray(residual_x).size))
-    decision_size = int(np.asarray(jnp.asarray(x).size))
-    dtype = jnp.asarray(x).dtype
-
-    def matvec_column(v):
-        return jvp_fn(x, v)
-
-    def transpose_matvec_column(v):
-        return pullback(v)[0]
-
-    def matvec(v):
-        return _apply_column_batched_operator(matvec_column, v)
-
-    def transpose_matvec(v):
-        return _apply_column_batched_operator(transpose_matvec_column, v)
-
-    return {
-        "kind": "jacobian",
-        "shape": (residual_size, decision_size),
-        "dtype": dtype,
-        "matvec": matvec,
-        "transpose_matvec": transpose_matvec,
-    }
-
-
-def _solve_jacobian_operator(
-    operator,
-    rhs,
-    *,
-    transpose,
-    tol,
-    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
-):
-    solution, status = _solve_jacobian_operator_with_status(
-        operator,
-        rhs,
-        transpose=transpose,
-        tol=tol,
-        max_refinement_steps=max_refinement_steps,
-    )
-    return _linear_solve_solution_or_nan(solution, status)
-
-
-def _solve_jacobian_system_with_status(
-    residual_fn,
-    x,
-    rhs,
-    *,
-    transpose,
-    tol,
-    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
-):
-    operator = _jacobian_linear_operator(residual_fn, x)
-    return _solve_jacobian_operator_with_status(
-        operator,
-        rhs,
-        transpose=transpose,
-        tol=tol,
-        max_refinement_steps=max_refinement_steps,
-    )
-
-
-def _solve_jacobian_operator_with_status(
-    operator,
-    rhs,
-    *,
-    transpose,
-    tol,
-    max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
-):
-    matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    # Exact-Jacobian adjoint (``transpose``) opt-in: replace the stagnating
-    # operator-GMRES solve of the well-conditioned ``J^T λ = g`` system with a
-    # direct dense LU factorization plus one iterative-refinement step.  Scoped to
-    # the transpose (adjoint) solve and to single-vector or column-batched RHS
-    # inputs whose materialized dense matrix fits the ``max_dense_jacobian_bytes``
-    # policy; everything else keeps the operator-GMRES baseline so the flag
-    # A/B-compares cleanly.
-    if (
-        _EXACT_ADJOINT_DENSE_LU
-        and transpose
-        and _dense_square_operator_lu_materialization_allowed(rhs)
-    ):
-        return _solve_dense_square_operator_lu_system_with_status(
-            matvec,
-            rhs,
-            tol=tol,
-        )
-    return _solve_square_array_system_operator_only(
-        matvec,
-        rhs,
-        tol=tol,
-        max_refinement_steps=max_refinement_steps,
     )
 
 
@@ -8210,19 +6765,14 @@ def newton_polish_traceable(
             matvec_counter_token = 0
             if matvec_counts is not None:
                 result = dict(result)
-                active = np.asarray(
-                    jax.device_get(result["newton_trace_active"]),
-                    dtype=bool,
-                )
+                active = _host_array(result["newton_trace_active"], dtype=bool)
                 actual = np.full(
                     (int(maxiter),),
                     _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
                     dtype=np.int32,
                 )
                 actual[active] = np.asarray(matvec_counts, dtype=np.int32)[active]
-                attempted = int(
-                    np.asarray(jax.device_get(result["newton_attempted_iterations"]))
-                )
+                attempted = _host_int(result["newton_attempted_iterations"])
                 last_actual = (
                     _LINEAR_SOLVE_ITERATIONS_UNKNOWN
                     if attempted <= 0

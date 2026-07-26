@@ -18,6 +18,12 @@ from scipy.optimize import least_squares as scipy_least_squares
 from scipy.optimize import minimize as scipy_minimize
 
 from simsopt_jax.geo.optimizers import optimizer as legacy
+from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put_tree
+from simsopt_jax.runtime.host_boundary import (
+    block_until_ready,
+    host_array_after_ready,
+    host_int,
+)
 
 from .contracts import (
     Callback,
@@ -131,7 +137,7 @@ def _host_optional_array(value) -> np.ndarray | None:
 
 
 def _device_scalar(value: float, dtype) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+    return explicit_device_array(value, dtype=dtype)
 
 
 def _legacy_minimize_options(options: OptionsBase) -> dict[str, object]:
@@ -372,7 +378,7 @@ def _legacy_callback_pair(
         )
 
     def legacy_callback(x):
-        x_host = np.asarray(jax.device_get(jax.block_until_ready(x)), dtype=float)
+        x_host = host_array_after_ready(x, dtype=float)
         with pending_lock:
             pending_x.append(x_host)
             event = ready_event()
@@ -508,7 +514,7 @@ def _run_optimistix_lm(
     *,
     options: OptimistixLMOptions,
 ) -> OptimizeResult:
-    params = jnp.asarray(jax.device_put(x0))
+    params = jnp.asarray(runtime_device_put_tree(x0))
     solver_tol = float(options.tol)
 
     def residual_value(current, _args):
@@ -532,7 +538,7 @@ def _run_optimistix_lm(
             max_steps=options.maxiter,
             throw=False,
         )
-    solution.value.block_until_ready()
+    block_until_ready(solution.value)
     residual = jnp.ravel(jnp.asarray(residual_fn(solution.value)))
     half = _device_scalar(0.5, residual.dtype)
     cost = half * jnp.vdot(residual, residual)
@@ -593,7 +599,7 @@ def _run_optimistix_lm(
     ) = _optimistix_result_metadata(solution.result)
     success = optimistix_success and bool(finite)
     status = 0 if success else 1 if finite else 2
-    num_steps = int(np.asarray(jax.device_get(solution.stats["num_steps"])))
+    num_steps = host_int(solution.stats["num_steps"])
     return OptimizeResult(
         x=x_host,
         fun=fun_host,
