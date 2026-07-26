@@ -135,7 +135,7 @@ def _tile_value_sum(points, source_positions, source_vectors):
     return _pairwise_sum_axis(contributions, axis=1)
 
 
-def _tile_tangent_sum(
+def _tile_value_and_tangent_sum(
     points,
     source_positions,
     source_vectors,
@@ -160,11 +160,15 @@ def _tile_tangent_sum(
         diff,
         source_vectors_dot[None, :, :],
     )
+    contributions = cross * radius_inverse_cubed[..., None]
     contributions_dot = (
         cross_dot * radius_inverse_cubed[..., None]
         + cross * radius_inverse_cubed_dot[..., None]
     )
-    return _pairwise_sum_axis(contributions_dot, axis=1)
+    return (
+        _pairwise_sum_axis(contributions, axis=1),
+        _pairwise_sum_axis(contributions_dot, axis=1),
+    )
 
 
 def _zero_accumulator(points):
@@ -309,12 +313,7 @@ def _accumulate_primal_and_tangent_tiles(
                 position_dot_tile,
                 vector_dot_tile,
             ) = tiles
-            tile_sum = jax.checkpoint(_tile_value_sum)(
-                points,
-                position_tile,
-                vector_tile,
-            )
-            tile_sum_dot = jax.checkpoint(_tile_tangent_sum)(
+            tile_sum, tile_sum_dot = jax.checkpoint(_tile_value_and_tangent_sum)(
                 points,
                 position_tile,
                 vector_tile,
@@ -336,12 +335,7 @@ def _accumulate_primal_and_tangent_tiles(
         )
 
     if tail_start < source_count:
-        tail_sum = jax.checkpoint(_tile_value_sum)(
-            points,
-            source_positions[tail_start:],
-            source_vectors[tail_start:],
-        )
-        tail_sum_dot = jax.checkpoint(_tile_tangent_sum)(
+        tail_sum, tail_sum_dot = jax.checkpoint(_tile_value_and_tangent_sum)(
             points,
             source_positions[tail_start:],
             source_vectors[tail_start:],

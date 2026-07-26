@@ -370,6 +370,11 @@ MIXED_DENSE_IR_CERTIFICATE_PROBABILITY_MODEL: Final[CertificateProbabilityModel]
 )
 
 
+def mixed_dense_ir_accuracy_policy() -> MixedDenseIrAccuracyPolicy:
+    """Return the immutable mixed dense-IR accuracy policy owner."""
+    return MIXED_DENSE_IR_ACCURACY_POLICY
+
+
 def mixed_dense_ir_certificate_dtype_name() -> CertificateDType:
     """Return the policy certificate dtype name (numpy/JAX-compatible string)."""
-    return MIXED_DENSE_IR_ACCURACY_POLICY.certificate_dtype
+    return mixed_dense_ir_accuracy_policy().certificate_dtype

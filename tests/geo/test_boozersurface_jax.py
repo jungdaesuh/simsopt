@@ -1355,6 +1355,14 @@ class TestStellsymScatterIndices:
                 0,
             )
 
+    def test_generic_runtime_state_uses_compact_stellsym_indices(self):
+        """Explicit generic surfaces must not restore the dense scatter fallback."""
+        booz = _make_mock_boozer_surface(stellsym=True, mpol=2, ntor=2)
+
+        assert booz.scatter_indices is not None
+        assert booz.scatter_indices.ndim == 1
+        assert booz.scatter_indices.dtype == jnp.int32
+
     def test_round_trip(self):
         """Scatter then gather recovers original DOFs."""
         mpol, ntor = 1, 1

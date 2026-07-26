@@ -1204,30 +1204,10 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor, *, use_compute_dtype=False)
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
     scatter_ndim = getattr(scatter_indices, "ndim", np.ndim(scatter_indices))
-    if scatter_ndim == 2:
-        sdofs_jax = (
-            _as_compute_array(sdofs) if use_compute_dtype else _as_jax_float64(sdofs)
-        )
-        scatter_matrix = (
-            _compute_array_like_reference(
-                scatter_indices,
-                dtype=sdofs_jax.dtype,
-                reference=sdofs_jax,
-            )
-            if use_compute_dtype
-            else _as_jax_float64(scatter_indices)
-        )
-        flat = scatter_matrix @ sdofs_jax
-        return _split_flat_to_xyzc(
-            flat,
-            mpol,
-            ntor,
-            use_compute_dtype=use_compute_dtype,
-        )
     if scatter_ndim != 1:
         raise ValueError(
-            "scatter_indices must be a one-dimensional integer index vector or "
-            f"a two-dimensional scatter matrix; got rank {scatter_ndim}"
+            "scatter_indices must be a one-dimensional integer index vector; "
+            f"got rank {scatter_ndim}"
         )
     return _dofs_to_xyzc_index_scatter_with_jvp(
         sdofs,

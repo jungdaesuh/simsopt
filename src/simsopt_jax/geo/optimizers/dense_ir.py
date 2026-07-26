@@ -28,14 +28,13 @@ from simsopt_jax.core._device_scalars import staged_like as _staged_like
 from simsopt_jax.numerical_policy import (
     DENSE_IR_HISTORY_CONTRACTION_RATIO_CAPACITY,
     DENSE_IR_HISTORY_RESIDUAL_RELATIVE_CAPACITY,
-    MIXED_DENSE_IR_ACCURACY_POLICY,
     MIXED_DENSE_IR_CONTRACTION_IDEAL_GAUSSIAN_FAILURE_PROBABILITY_BOUND,
     MIXED_DENSE_IR_CONTRACTION_NORM_UPPER_LIMIT,
     MIXED_DENSE_IR_CONTRACTION_PROBE_ALPHA,
     MIXED_DENSE_IR_CONTRACTION_PROBE_COUNT,
     MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
     DenseIrHistorySource,
-    mixed_dense_ir_certificate_dtype_name,
+    mixed_dense_ir_accuracy_policy,
 )
 from simsopt_jax.runtime.host_boundary import host_array
 
@@ -99,8 +98,8 @@ class _MixedDenseIrResolvedPolicy(NamedTuple):
 
 def resolve_mixed_dense_ir_policy() -> _MixedDenseIrResolvedPolicy:
     """Resolve certificate dtype and dense-IR constants from the immutable policy."""
-    accuracy = MIXED_DENSE_IR_ACCURACY_POLICY
-    certificate_dtype_name = mixed_dense_ir_certificate_dtype_name()
+    accuracy = mixed_dense_ir_accuracy_policy()
+    certificate_dtype_name = accuracy.certificate_dtype
     return _MixedDenseIrResolvedPolicy(
         certificate_dtype=np.dtype(certificate_dtype_name),
         certificate_dtype_name=certificate_dtype_name,

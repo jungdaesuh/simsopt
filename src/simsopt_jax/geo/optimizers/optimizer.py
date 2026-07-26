@@ -328,11 +328,11 @@ from simsopt_jax.geo.optimizers.private import (
     _private_lbfgs_result_to_optimize_result as _private_lbfgs_result_to_optimize_result_impl,
 )
 from simsopt_jax.numerical_policy import (
-    MIXED_DENSE_IR_ACCURACY_POLICY,
     MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS,
     NEWTON_ARMIJO_C1,
     PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE,
     DenseIrHistorySource,
+    mixed_dense_ir_accuracy_policy,
 )
 from simsopt_jax.runtime.host_boundary import (
     host_array as _host_array,
@@ -4471,15 +4471,16 @@ def _linear_solve_status_with_relative_tolerance(
 def _eisenstat_walker_strict_cap(tol_value, *, dtype):
     # Floor/cap match the mixed dense-IR accuracy policy SSOT so Newton forcing
     # terms and certified dense-IR tolerances share one production band.
+    accuracy_policy = mixed_dense_ir_accuracy_policy()
     return jnp.minimum(
         _device_scalar(
-            MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_cap,
+            accuracy_policy.linear_solve_tolerance_cap,
             dtype=dtype,
         ),
         jnp.maximum(
             tol_value * _device_scalar(0.1, dtype=dtype),
             _device_scalar(
-                MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_floor,
+                accuracy_policy.linear_solve_tolerance_floor,
                 dtype=dtype,
             ),
         ),
@@ -4521,6 +4522,7 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     earlier iterations retain the looser E-W forcing term.
     """
     dtype = norm.dtype
+    accuracy_policy = mixed_dense_ir_accuracy_policy()
     tol_value = _optimizer_scalar(tol, dtype=dtype)
     strict_cap = _eisenstat_walker_strict_cap(tol_value, dtype=dtype)
     gamma = _device_scalar(_EISENSTAT_WALKER_GAMMA, dtype=dtype)
@@ -4545,7 +4547,7 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
     )
     return jnp.maximum(
         _device_scalar(
-            MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_floor,
+            accuracy_policy.linear_solve_tolerance_floor,
             dtype=dtype,
         ),
         capped_eta,
@@ -4693,12 +4695,13 @@ def newton_polish(
     final_step_iterative_refinement_ran = False
     dense_refinement_ran = False
     final_step_dense_refinement_ran = False
+    accuracy_policy = mixed_dense_ir_accuracy_policy()
     while nit < maxiter and float(norm) > tol:
         linear_tol = min(
-            MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_cap,
+            accuracy_policy.linear_solve_tolerance_cap,
             max(
                 float(tol) * 0.1,
-                MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_floor,
+                accuracy_policy.linear_solve_tolerance_floor,
             ),
         )
         dense_refine_step = False
@@ -6816,11 +6819,12 @@ def newton_exact(
     x = x0
     r = res_fn(x)
     norm = jnp.linalg.norm(r)
+    accuracy_policy = mixed_dense_ir_accuracy_policy()
     linear_tol = min(
-        MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_cap,
+        accuracy_policy.linear_solve_tolerance_cap,
         max(
             float(tol) * 0.1,
-            MIXED_DENSE_IR_ACCURACY_POLICY.linear_solve_tolerance_floor,
+            accuracy_policy.linear_solve_tolerance_floor,
         ),
     )
 
