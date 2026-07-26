@@ -281,7 +281,7 @@ def main():
     bench_integral_BdotN(nphi=15, ntheta=15)
 
     # --- Representative Columbia grid sizes ---
-    # Stage 2 default:  nphi=255, ntheta=64 (banana_coil_solver.py)
+    # Representative Stage 2 resolution: nphi=255, ntheta=64.
     # Single-stage default: nphi=255, ntheta=64
     # Boozer inner:     nphi=15, ntheta=15 (typical BoozerLS grid)
     bench_biot_savart(ncoils=12, nquad=200, nphi=64, ntheta=64)

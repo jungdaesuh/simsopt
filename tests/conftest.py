@@ -561,7 +561,6 @@ _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
 
 _NATIVE_CPU_REFERENCE_TEST_FILES = frozenset(
     {
-        "integration/test_non_banana_example_cpp_jax_cpu_parity.py",
         "jax/solve/test_compat_shim_translation.py",
     }
 )
