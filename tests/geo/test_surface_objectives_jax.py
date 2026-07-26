@@ -1645,17 +1645,18 @@ def test_solved_pair_matches_fused_value_and_grad():
     np.testing.assert_allclose(v1_host, v2_host, rtol=1e-10, atol=1e-12)
 
     # Adjoint fail-closed contract: when the dense Hessian adjoint solve does not
-    # certify, both paths surface NaN gradients. Pair fidelity still requires
-    # identical nonfinite patterns. When both succeed, require machine match.
+    # certify, both paths surface NaN gradients (not ±inf). When both succeed,
+    # require machine match.
     g1_finite = np.isfinite(g1)
     g2_finite = np.isfinite(g2)
     if np.all(g1_finite) and np.all(g2_finite):
         np.testing.assert_allclose(g1, g2, rtol=1e-10, atol=1e-12)
     else:
-        np.testing.assert_array_equal(g1_finite, g2_finite)
-        assert not np.any(g1_finite), (
-            "Fused/pair adjoint paths disagree on certification: one path returned "
-            "finite gradients while the other fail-closed to NaN."
+        assert np.isnan(g1).all(), (
+            "Fused path fail-closed gradients must be all-NaN, not ±inf or mixed."
+        )
+        assert np.isnan(g2).all(), (
+            "Pair path fail-closed gradients must be all-NaN, not ±inf or mixed."
         )
 
 
