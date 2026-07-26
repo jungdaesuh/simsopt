@@ -31,7 +31,7 @@ from simsopt_jax.geo.optimizers._shared import (
     _CACHEABLE_LINEAR_OPERATOR_ATTR,
     _optimizer_scalar,
 )
-from simsopt_jax.numerical_policy import MIXED_DENSE_IR_ACCURACY_POLICY
+from simsopt_jax.numerical_policy import mixed_dense_ir_accuracy_policy
 from simsopt_jax.runtime.host_boundary import host_array, host_int
 
 _HAGER_HIGHAM_CONDITION_ITERATIONS = 5
@@ -562,12 +562,13 @@ def _forward_error_bound(residual_rel, condition_estimate):
 def _forward_error_tolerance(*, tol, dtype):
     """Return the shared relative forward-accuracy acceptance threshold."""
     dtype = np.dtype(dtype)
+    accuracy_policy = mixed_dense_ir_accuracy_policy()
     tol_value = _optimizer_scalar(tol, dtype=dtype)
     floor = jnp.sqrt(_device_scalar(jnp.finfo(dtype).eps, dtype=dtype))
     return jnp.maximum(
         floor,
         _device_scalar(
-            MIXED_DENSE_IR_ACCURACY_POLICY.forward_error_tolerance_multiplier,
+            accuracy_policy.forward_error_tolerance_multiplier,
             dtype=dtype,
         )
         * tol_value,

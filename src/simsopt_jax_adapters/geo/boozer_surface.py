@@ -1189,14 +1189,6 @@ def _surface_stellsym_scatter_indices_host(mpol: int, ntor: int) -> np.ndarray:
     return indices
 
 
-def _generic_surface_scatter_operator_host(mpol: int, ntor: int) -> np.ndarray:
-    indices = _surface_stellsym_scatter_indices_host(mpol, ntor)
-    coefficient_count = int(3 * (2 * mpol + 1) * (2 * ntor + 1))
-    operator = np.zeros((coefficient_count, indices.size), dtype=np.float64)
-    operator[indices, np.arange(indices.size)] = 1.0
-    return operator
-
-
 def _surface_clamped_dims(
     surface,
     *,
@@ -1222,18 +1214,11 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     scatter_indices = None
     scatter_indices_host = None
     if surface.stellsym:
-        if surface_kind == "generic":
-            scatter_indices_host = _generic_surface_scatter_operator_host(
-                surface.mpol,
-                surface.ntor,
-            )
-            scatter_indices = _as_jax_float64(scatter_indices_host)
-        else:
-            scatter_indices_host = _surface_stellsym_scatter_indices_host(
-                surface.mpol,
-                surface.ntor,
-            )
-            scatter_indices = _as_jax_int32(scatter_indices_host)
+        scatter_indices_host = _surface_stellsym_scatter_indices_host(
+            surface.mpol,
+            surface.ntor,
+        )
+        scatter_indices = _as_jax_int32(scatter_indices_host)
     return _BoozerSurfaceRuntimeState(
         quadpoints_phi=_as_jax_float64(quadpoints_phi),
         quadpoints_theta=_as_jax_float64(quadpoints_theta),

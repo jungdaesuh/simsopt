@@ -92,6 +92,23 @@ def test_online_custom_jvp_primal_matches_primal_entrypoint_bitwise():
     assert jvp_array.tobytes() == direct_array.tobytes()
 
 
+def test_online_custom_jvp_shares_tile_geometry_in_lowering():
+    """The fused JVP must lower one radius evaluation per source tile."""
+    primals = _fixture(source_count=8, seed=1738)
+    tangents = _directions(primals, seed=1739)
+
+    def value_and_tangent(*args):
+        return jax.jvp(_candidate, args[:3], args[3:])
+
+    stablehlo = str(
+        jax.jit(value_and_tangent)
+        .lower(*primals, *tangents)
+        .compiler_ir(dialect="stablehlo")
+    )
+
+    assert stablehlo.count("stablehlo.sqrt") == 1
+
+
 def test_online_custom_jvp_tangent_is_additive():
     primals = _fixture(source_count=10, seed=1733)
     left_directions = _directions(primals, seed=1734)
