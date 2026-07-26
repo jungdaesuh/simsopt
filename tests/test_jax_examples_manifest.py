@@ -145,7 +145,7 @@ def test_manifest_rejects_invalid_contracts(
         planned["correctness_tests"] = []
     elif mutation == "ready_without_file":
         planned["status"] = "ready"
-        planned["path"] = "1_Simple/not_present.py"
+        planned["path"] = f"{planned['tier']}/not_present.py"
     else:
         raise AssertionError(f"unhandled mutation: {mutation}")
 
@@ -167,3 +167,22 @@ def test_ready_examples_are_public_jax_workflows_not_forwarders() -> None:
         assert "examples.1_Simple" not in source
         assert "examples.2_Intermediate" not in source
         assert "examples.3_Advanced" not in source
+
+
+def test_jax_workflow_reaches_examples_from_both_events_and_existing_jobs() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "jax_smoke.yml").read_text(
+        encoding="utf-8"
+    )
+    push_section, pull_request_and_jobs = workflow.split("  pull_request:", maxsplit=1)
+    pull_request_section, jobs = pull_request_and_jobs.split("jobs:", maxsplit=1)
+    public_integration = jobs.split("  jax-public-integration:", maxsplit=1)[1].split(
+        "  jax-gpu-strict-purity:", maxsplit=1
+    )[0]
+    gpu_strict = jobs.split("  jax-gpu-strict-purity:", maxsplit=1)[1].split(
+        "  jax-private-optimizer:", maxsplit=1
+    )[0]
+
+    assert "'examples/jax/**'" in push_section
+    assert "'examples/jax/**'" in pull_request_section
+    assert "python examples/jax/run_examples.py --lane cpu-smoke" in public_integration
+    assert "python examples/jax/run_examples.py --lane gpu-strict" in gpu_strict

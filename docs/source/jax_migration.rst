@@ -6,6 +6,14 @@ CPU APIs remain the default and the correctness reference.  Applications can
 adopt JAX one boundary at a time instead of converting an entire optimization
 workflow at once.
 
+Runnable examples
+-----------------
+
+The `JAX-first examples <../../examples/jax/README.md>`_ collection provides
+pure and adapter lessons plus isolated CPU and strict-GPU runner commands. Its
+machine-readable manifest records native-example inspiration, remaining host
+boundaries, correctness owners, and deliberately deferred external workflows.
+
 Adapter APIs
 ------------
 
