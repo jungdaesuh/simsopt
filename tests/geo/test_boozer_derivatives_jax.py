@@ -18,6 +18,8 @@ from jax.test_util import check_grads
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
+from simsopt_jax.core import field as core_field
+import simsopt_jax.geo.boozer_residual as boozer_residual
 from simsopt_jax.geo.boozer_residual import (
     _boozer_residual_vector_composed,
     boozer_penalty_composed,
@@ -880,6 +882,26 @@ class TestBoozerPenaltyGradComposed:
             seed=100,
         )
 
+    def test_penalty_uses_canonical_grouped_field_dispatch(self, monkeypatch):
+        """The composed penalty routes field evaluation through core.field."""
+        canonical_dispatch = core_field.grouped_biot_savart_B_from_inputs
+        assert boozer_residual.grouped_biot_savart_B_from_inputs is canonical_dispatch
+        calls = []
+
+        def observed_dispatch(points, coil_arrays):
+            calls.append((points.shape, len(coil_arrays)))
+            return canonical_dispatch(points, coil_arrays)
+
+        monkeypatch.setattr(
+            boozer_residual,
+            "grouped_biot_savart_B_from_inputs",
+            observed_dispatch,
+        )
+
+        boozer_penalty_composed(self.x, **self.kwargs)
+
+        assert calls == [((self.nphi * self.ntheta, 3), len(self.coil_arrays))]
+
     def test_surface_dof_gradient_nonzero(self):
         """Unlike M1, composed gradient has nonzero surface DOF entries."""
         _, grad = boozer_penalty_grad_composed(self.x, **self.kwargs)
@@ -1194,6 +1216,36 @@ class TestBoozerResidualCoilVJP:
     def test_coil_vjp_currents_jax_ad(self):
         """VJP w.r.t. coil currents matches JAX-native scalarization."""
         self._assert_coil_vjp_scalar_contract(2, adjoint_seed=99, check_seed=1099)
+
+    def test_coil_vjp_uses_canonical_grouped_field_dispatch(self, monkeypatch):
+        """The outer coil VJP routes field evaluation through core.field."""
+        canonical_dispatch = core_field.grouped_biot_savart_B_from_inputs
+        assert boozer_residual.grouped_biot_savart_B_from_inputs is canonical_dispatch
+        calls = []
+
+        def observed_dispatch(points, coil_arrays):
+            calls.append((points.shape, len(coil_arrays)))
+            return canonical_dispatch(points, coil_arrays)
+
+        monkeypatch.setattr(
+            boozer_residual,
+            "grouped_biot_savart_B_from_inputs",
+            observed_dispatch,
+        )
+        adjoint = jnp.ones(3 * self.nphi * self.ntheta)
+
+        boozer_residual_coil_vjp(
+            adjoint,
+            gamma=self.gamma,
+            xphi=self.xphi,
+            xtheta=self.xtheta,
+            coil_arrays=self.coil_arrays,
+            iota=self.iota,
+            G=self.G,
+            weight_inv_modB=False,
+        )
+
+        assert calls == [((self.nphi * self.ntheta, 3), len(self.coil_arrays))]
 
     def test_coil_vjp_currents_central_fd(self):
         """VJP w.r.t. coil currents matches a central finite-difference ladder."""

@@ -41,8 +41,6 @@ _PACKAGE_EXPORTS_BY_MODULE = {
         "biot_savart_dA_by_dX",
         "biot_savart_dB_by_dX",
         "group_coil_data",
-        "grouped_biot_savart_A",
-        "grouped_biot_savart_B",
         "invalidate_kernel_cache",
     ),
     "interpolated_boozer_field": (

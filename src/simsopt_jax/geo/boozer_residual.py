@@ -76,7 +76,7 @@ from simsopt_jax.core.reductions import (
     scalar_square_sum,
     validate_reduction_mode,
 )
-from simsopt_jax.field.biotsavart import grouped_biot_savart_B
+from simsopt_jax.core.field import grouped_biot_savart_B_from_inputs
 from simsopt_jax.geo.surface_fourier import (
     surface_gamma_from_dofs,
     surface_gammadash1_from_dofs,
@@ -794,7 +794,7 @@ def _composed_pipeline(
         use_compute_dtype=True,
     )
 
-    B = grouped_biot_savart_B(gamma.reshape(-1, 3), coil_arrays)
+    B = grouped_biot_savart_B_from_inputs(gamma.reshape(-1, 3), coil_arrays)
     B = B.reshape(gamma.shape)
 
     return sdofs, iota, G, gamma, xphi, xtheta, B
@@ -1126,7 +1126,7 @@ def boozer_residual_coil_vjp(
 
     def residual_of_coils(ca):
         points = gamma.reshape(-1, 3)
-        B = grouped_biot_savart_B(points, ca)
+        B = grouped_biot_savart_B_from_inputs(points, ca)
         B = B.reshape(nphi, ntheta, 3)
         return boozer_residual_vector(
             G,

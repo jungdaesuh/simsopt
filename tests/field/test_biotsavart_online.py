@@ -11,10 +11,7 @@ import pytest
 
 from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core import field as core_field
-from simsopt_jax.core.biotsavart_online import (
-    flatten_grouped_biot_savart_sources,
-    mixed_biot_savart_B_online,
-)
+import simsopt_jax.core.biotsavart_online as _online
 from simsopt_jax.core.specs import (
     CoilGroupSpec,
     GroupedCoilSetSpec,
@@ -32,6 +29,21 @@ from simsopt_jax.core.surface_rzfourier import (
 jax.config.update("jax_enable_x64", True)
 
 _MU0_OVER_4PI = np.float64(1.0e-7)
+_flatten_grouped_biot_savart_sources = _online._flatten_grouped_biot_savart_sources
+_mixed_biot_savart_B_online_from_flat_sources = (
+    _online._mixed_biot_savart_B_online_from_flat_sources
+)
+
+
+def test_online_public_surface_hides_flat_source_representation():
+    """Only the grouped operation is part of the online module contract."""
+    assert _online.__all__ == ["mixed_grouped_biot_savart_B_online"]
+    for removed_name in (
+        "flatten_biot_savart_sources",
+        "flatten_grouped_biot_savart_sources",
+        "mixed_biot_savart_B_online",
+    ):
+        assert not hasattr(_online, removed_name)
 
 
 def _fixture(*, point_count: int = 3, source_count: int = 10, seed: int = 1701):
@@ -66,7 +78,10 @@ def _dense_float64_reference(points, source_positions, source_vectors):
 
 
 def _candidate(*args):
-    return mixed_biot_savart_B_online(*args, source_tile_size=4)
+    return _mixed_biot_savart_B_online_from_flat_sources(
+        *args,
+        source_tile_size=4,
+    )
 
 
 def _assert_close(actual, expected, *, rtol: float, atol: float) -> None:
@@ -517,12 +532,11 @@ def test_online_flattening_preserves_q15_and_q128_group_weights():
         [[0.20, 0.02, 0.01], [-0.14, 0.11, -0.04], [0.08, -0.16, 0.07]],
         dtype=jnp.float32,
     )
-    source_positions, source_vectors = flatten_grouped_biot_savart_sources(groups)
+    source_positions, source_vectors = _flatten_grouped_biot_savart_sources(groups)
 
-    actual = mixed_biot_savart_B_online(
+    actual = _online.mixed_grouped_biot_savart_B_online(
         points,
-        source_positions,
-        source_vectors,
+        groups,
         source_tile_size=64,
     )
     expected = _grouped_float64_reference(points, groups)
@@ -812,7 +826,7 @@ def test_production_grouped_dispatch_uses_tuning_tile_and_transfer_guard(
 ):
     points, coil_spec = _production_dispatch_fixture()
     observed_tile_sizes = []
-    original_online = core_field.mixed_biot_savart_B_online
+    original_online = core_field.mixed_grouped_biot_savart_B_online
     monkeypatch.setattr(core_field, "is_mixed_precision_enabled", lambda: True)
     monkeypatch.setattr(
         core_field,
@@ -827,22 +841,20 @@ def test_production_grouped_dispatch_uses_tuning_tile_and_transfer_guard(
 
     def observe_tile_size(
         kernel_points,
-        source_positions,
-        source_vectors,
+        groups,
         *,
         source_tile_size,
     ):
         observed_tile_sizes.append(source_tile_size)
         return original_online(
             kernel_points,
-            source_positions,
-            source_vectors,
+            groups,
             source_tile_size=source_tile_size,
         )
 
     monkeypatch.setattr(
         core_field,
-        "mixed_biot_savart_B_online",
+        "mixed_grouped_biot_savart_B_online",
         observe_tile_size,
     )
     compiled = jax.jit(_production_grouped_candidate).lower(points, coil_spec).compile()
@@ -921,7 +933,7 @@ def test_online_compensated_cross_tile_sum_recovers_cancellation_residual():
     )
     expected = np.asarray([[0.0, 0.0, 2.0e-7]], dtype=np.float64)
 
-    compensated = mixed_biot_savart_B_online(
+    compensated = _mixed_biot_savart_B_online_from_flat_sources(
         points,
         source_positions,
         source_vectors,
@@ -960,7 +972,10 @@ def _cancellation_jvp_fixture():
 
 
 def _cancellation_candidate(*args):
-    return mixed_biot_savart_B_online(*args, source_tile_size=1)
+    return _mixed_biot_savart_B_online_from_flat_sources(
+        *args,
+        source_tile_size=1,
+    )
 
 
 def test_online_jvp_preserves_compensated_cancellation_residual():
@@ -1034,8 +1049,14 @@ def test_online_stablehlo_casts_only_reduced_tile_partials_to_float64():
 def test_online_operator_is_mixed_only_and_does_not_replace_fp64_reference():
     primals = tuple(jnp.asarray(value, dtype=jnp.float64) for value in _fixture())
     with pytest.raises(TypeError, match="must have dtype float32"):
-        mixed_biot_savart_B_online(*primals, source_tile_size=4)
+        _mixed_biot_savart_B_online_from_flat_sources(
+            *primals,
+            source_tile_size=4,
+        )
 
     float32_primals = _fixture()
     with pytest.raises(ValueError, match="source_tile_size must be positive"):
-        mixed_biot_savart_B_online(*float32_primals, source_tile_size=0)
+        _mixed_biot_savart_B_online_from_flat_sources(
+            *float32_primals,
+            source_tile_size=0,
+        )

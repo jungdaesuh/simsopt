@@ -34,6 +34,7 @@ bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 from conftest import parity_acceptance_modes, parity_mode_case
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
+from simsopt_jax import core
 from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core.field import (
     grouped_biot_savart_B_from_spec,
@@ -41,12 +42,14 @@ from simsopt_jax.core.field import (
 )
 from simsopt_jax.core.specs import CoilGroupSpec, GroupedCoilSetSpec
 from simsopt_jax.core import sharding as sharding_core
+from simsopt_jax.core import field as core_field
+from simsopt_jax.core import biotsavart as core_biotsavart
 
 import simsopt_jax.field.biotsavart as _bs
 
 
 def _load_with_backend_mode(_mode: str):
-    return _bs
+    return core_biotsavart
 
 
 def _load_chunked_biotsavart():
@@ -94,6 +97,40 @@ biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 grouped_biot_savart_A = _bs.grouped_biot_savart_A
 grouped_biot_savart_B = _bs.grouped_biot_savart_B
+
+
+def test_compatibility_grouped_names_use_canonical_field_dispatch():
+    """Historical grouped names must not bypass precision-aware dispatch."""
+    assert _bs.grouped_biot_savart_A is core_field.grouped_biot_savart_A
+    assert _bs.grouped_biot_savart_B is core_field.grouped_biot_savart_B
+    assert core.grouped_biot_savart_A is core_field.grouped_biot_savart_A
+    assert core.grouped_biot_savart_B is core_field.grouped_biot_savart_B
+
+
+def test_compatibility_shim_exposes_only_supported_public_kernels():
+    """The historical shim must not expose core implementation details."""
+    assert _bs.__all__ == (
+        "biot_savart_A",
+        "biot_savart_B",
+        "biot_savart_B_and_dB",
+        "biot_savart_B_vjp",
+        "biot_savart_dA_by_dX",
+        "biot_savart_dB_by_dX",
+        "biot_savart_d2A_by_dXdX",
+        "biot_savart_d2B_by_dXdX",
+        "group_coil_data",
+        "grouped_biot_savart_A",
+        "grouped_biot_savart_B",
+        "invalidate_kernel_cache",
+    )
+    for private_name in (
+        "_biot_savart_A_integrand",
+        "_biot_savart_B_integrand",
+        "_one_point_dense",
+        "_read_tuning_config",
+    ):
+        assert not hasattr(_bs, private_name)
+
 
 MU0 = 4.0 * np.pi * 1e-7
 _DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct-kernel")
@@ -1886,18 +1923,17 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         point_dtype,
         expected_dtype,
     ):
-        from simsopt_jax.core import field as core_field
-
         if mixed_precision:
             monkeypatch.setenv("SIMSOPT_PRECISION", "mixed")
         else:
             monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
         invalidate_backend_cache()
 
-        seen = []
+        grouped_accumulation_seen = []
+        mixed_online_seen = []
 
         def kernel(kernel_points, gammas, gammadashs, currents):
-            seen.append(
+            grouped_accumulation_seen.append(
                 (
                     kernel_points.dtype,
                     gammas.dtype,
@@ -1907,7 +1943,25 @@ class TestBiotSavartJaxChunkedSelfConsistency:
             )
             return jnp.ones((kernel_points.shape[0], 3), dtype=jnp.float64)
 
+        def mixed_online_kernel(kernel_points, coil_arrays, *, source_tile_size):
+            del source_tile_size
+            mixed_online_seen.append(
+                (
+                    kernel_points.dtype,
+                    tuple(
+                        (gammas.dtype, gammadashs.dtype, currents.dtype)
+                        for gammas, gammadashs, currents in coil_arrays
+                    ),
+                )
+            )
+            return jnp.ones((kernel_points.shape[0], 3), dtype=jnp.float64)
+
         monkeypatch.setattr(core_field, "biot_savart_B", kernel)
+        monkeypatch.setattr(
+            core_field,
+            "mixed_grouped_biot_savart_B_online",
+            mixed_online_kernel,
+        )
 
         try:
             points = jnp.asarray(
@@ -1933,9 +1987,15 @@ class TestBiotSavartJaxChunkedSelfConsistency:
         finally:
             invalidate_backend_cache()
 
-        assert seen == [
-            (expected_dtype, expected_dtype, expected_dtype, expected_dtype)
-        ]
+        expected_leaf_dtypes = (expected_dtype, expected_dtype, expected_dtype)
+        if mixed_precision and point_dtype == jnp.float32:
+            assert grouped_accumulation_seen == []
+            assert mixed_online_seen == [(expected_dtype, (expected_leaf_dtypes,))]
+        else:
+            assert grouped_accumulation_seen == [
+                (expected_dtype, *expected_leaf_dtypes)
+            ]
+            assert mixed_online_seen == []
         assert result.dtype == jnp.float64
         assert result.shape == (2, 3)
 

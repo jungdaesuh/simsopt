@@ -25,11 +25,7 @@ from .biotsavart import (
 )
 from .reductions import pairwise_sum_axis as _pairwise_sum_axis
 
-__all__ = [
-    "flatten_biot_savart_sources",
-    "flatten_grouped_biot_savart_sources",
-    "mixed_biot_savart_B_online",
-]
+__all__ = ["mixed_grouped_biot_savart_B_online"]
 
 
 def _require_float32(name: str, value) -> None:
@@ -76,7 +72,7 @@ def _validate_group_sources(gammas, gammadashs, currents) -> None:
     _require_float32("currents", currents)
 
 
-def flatten_biot_savart_sources(
+def _flatten_biot_savart_sources(
     gammas,
     gammadashs,
     currents,
@@ -101,7 +97,7 @@ def flatten_biot_savart_sources(
     )
 
 
-def flatten_grouped_biot_savart_sources(
+def _flatten_grouped_biot_savart_sources(
     groups: Sequence[tuple[jax.Array, jax.Array, jax.Array]],
 ) -> tuple[jax.Array, jax.Array]:
     """Flatten and concatenate statically grouped coil arrays.
@@ -114,7 +110,7 @@ def flatten_grouped_biot_savart_sources(
     if not groups:
         raise ValueError("at least one coil group is required.")
     flattened = tuple(
-        flatten_biot_savart_sources(gammas, gammadashs, currents)
+        _flatten_biot_savart_sources(gammas, gammadashs, currents)
         for gammas, gammadashs, currents in groups
     )
     return (
@@ -394,7 +390,7 @@ def _mixed_biot_savart_B_online_jvp(
     return _scale_float64(primal_sum), _scale_float64(tangent_sum)
 
 
-def mixed_biot_savart_B_online(
+def _mixed_biot_savart_B_online_from_flat_sources(
     points,
     source_positions,
     source_vectors,
@@ -421,4 +417,20 @@ def mixed_biot_savart_B_online(
         source_positions,
         source_vectors,
         int(source_tile_size),
+    )
+
+
+def mixed_grouped_biot_savart_B_online(
+    points,
+    groups: Sequence[tuple[jax.Array, jax.Array, jax.Array]],
+    *,
+    source_tile_size: int,
+):
+    """Evaluate grouped float32 coil sources with bounded online reduction."""
+    source_positions, source_vectors = _flatten_grouped_biot_savart_sources(groups)
+    return _mixed_biot_savart_B_online_from_flat_sources(
+        points,
+        source_positions,
+        source_vectors,
+        source_tile_size=source_tile_size,
     )
