@@ -20,11 +20,15 @@ import numpy as np
 from simsopt._core.derivative import Derivative
 from simsopt.field.coil import Current
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt_jax.runtime.host_boundary import host_array, host_float
+from simsopt_jax.runtime.host_boundary import block_until_ready, host_array, host_float
 from simsopt._core.optimizable import Optimizable
 from simsopt_jax.backend import get_field_kernel_tuning
 from simsopt_jax.core.state_tokens import make_state_token_factory
-from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put
+from simsopt_jax.backend.dtypes import (
+    explicit_device_array,
+    runtime_device_put,
+    runtime_device_put_tree,
+)
 from simsopt_jax.core import (
     coil_set_spec_from_dof_extraction_spec,
     coil_specs_from_dof_extraction_spec,
@@ -134,13 +138,7 @@ def _spec_cache_key(value: object) -> object:
 
 def _place_array_tree_on_device(tree, device):
     """Place dynamic array leaves on one device while preserving static metadata."""
-
-    def place_array(leaf):
-        if isinstance(leaf, (jax.Array, np.ndarray, np.generic)):
-            return runtime_device_put(leaf, device=device)
-        return leaf
-
-    return jax.tree.map(place_array, tree)
+    return runtime_device_put_tree(tree, device=device)
 
 
 __all__ = [
@@ -162,23 +160,10 @@ def _time_call_result(callback):
 
 
 def _block_until_ready(value):
-    if hasattr(value, "block_until_ready"):
-        value.block_until_ready()
-        return
     if isinstance(value, Derivative):
-        _block_until_ready(value.data)
+        block_until_ready(value.data)
         return
-    if isinstance(value, dict):
-        for dict_value in value.values():
-            _block_until_ready(dict_value)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _block_until_ready(item)
-        return
-    for leaf in jax.tree.leaves(value):
-        if hasattr(leaf, "block_until_ready"):
-            leaf.block_until_ready()
+    block_until_ready(value)
 
 
 def _cyl_points_to_cart(points_cyl):

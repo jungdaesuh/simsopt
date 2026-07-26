@@ -142,8 +142,25 @@ from simsopt_jax.geo.label_constraints import (
     toroidal_flux_jax,
     compute_G_from_currents,
 )
-from simsopt_jax.geo.optimizers import optimizer as _optimizer_jax
+from simsopt_jax.geo.optimizers import (
+    adjoint_linear_solve as _adjoint_linear_solve,
+    linear_solve as _linear_solve,
+    optimizer as _optimizer_jax,
+)
+from simsopt_jax.geo.optimizers._shared import (
+    mark_cacheable_jit_value_and_grad as _mark_cacheable_jit_value_and_grad,
+)
 from simsopt_jax.geo.optimizers.optimizer import (
+    _BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
+    _OPTIMISTIX_LM_DEFAULT_FTOL,
+    _OPTIMISTIX_LM_DEFAULT_XTOL,
+    _TARGET_LEAST_SQUARES_METHODS,
+    _dense_lm_state_from_residual_jacobian,
+    _mark_cacheable_jit_linear_operator,
+    _mark_traceable_runner_cacheable,
+    _newton_candidate_status,
+    _optimistix_lm_nondefault_tuning_options,
+    _resolve_traceable_newton_linear_solver,
     VALID_LEAST_SQUARES_ALGORITHMS,
     jax_least_squares_optimistix,
     host_jax_least_squares,
@@ -162,6 +179,10 @@ from simsopt_jax.geo.optimizers.optimizer import (
     resolve_target_least_squares_optimizer_method,
     target_least_squares,
     target_minimize,
+)
+from simsopt_jax.geo.optimizers.private import (
+    _minimize_bfgs_private,
+    _minimize_lbfgs_private,
 )
 
 _new_traceable_solve_state_token = make_state_token_factory()
@@ -1244,7 +1265,7 @@ def _boozer_surface_runtime_signature(state: _BoozerSurfaceRuntimeState):
 
 
 def _surface_dofs_fingerprint_from_dofs(dofs) -> tuple[str, tuple[int, ...], str]:
-    array = np.ascontiguousarray(np.asarray(jax.device_get(dofs), dtype=np.float64))
+    array = np.ascontiguousarray(_host_numpy(dofs, dtype=np.float64))
     return (
         str(array.dtype),
         tuple(int(dim) for dim in array.shape),
@@ -1328,7 +1349,6 @@ def _advance_solver_generation(booz_surf) -> int:
     solve_generation = booz_surf._solver_generation + 1
     booz_surf._solver_generation = solve_generation
     booz_surf._traceable_solve_state_token = _new_traceable_solve_state_token()
-    booz_surf._traceable_runtime_entry_cache = None
     return solve_generation
 
 
@@ -1456,7 +1476,7 @@ def _as_boozer_penalty_optimizer_state(
 
 def _runtime_cache_leaf_signature(leaf):
     if isinstance(leaf, (jax.Array, np.ndarray)):
-        array = np.asarray(jax.device_get(leaf))
+        array = _host_numpy(leaf)
         return (
             "array",
             str(array.dtype),
@@ -3531,7 +3551,7 @@ def _traceable_plu_or_dummy(matrix, *, finite):
         and finite.shape == ()
         and not isinstance(finite, jax.core.Tracer)
     ):
-        finite_value = bool(np.asarray(jax.device_get(finite)))
+        finite_value = _host_bool(finite)
         return compute_plu(matrix) if finite_value else dummy_plu(matrix)
 
     return jax.lax.cond(
@@ -3545,14 +3565,14 @@ def _traceable_lu_piv_or_dummy(matrix, *, finite):
     Phase 2 traceable analog of :func:`_traceable_plu_or_dummy` for the
     Phase 2 factor-once contract. Returns ``(lu, piv)`` packed factors;
     the public ``(P, L, U)`` triple is derived FROM THE SAME factors via
-    :func:`_optimizer_jax._plu_from_lu_piv` so the bytes are
+    :func:`_linear_solve._plu_from_lu_piv` so the bytes are
     bit-identical by construction. Failed-solve states materialize NaN
     factors with a placeholder pivot vector so accidental downstream
     solves propagate NaN visibly.
     """
 
     def compute(mat):
-        return _optimizer_jax._factor_dense_hessian(mat, optimizer_backend="ondevice")
+        return _linear_solve._factor_dense_hessian(mat, optimizer_backend="ondevice")
 
     def dummy(mat):
         nan_fill = jnp.full_like(mat, jnp.nan)
@@ -3566,7 +3586,7 @@ def _traceable_lu_piv_or_dummy(matrix, *, finite):
         and finite.shape == ()
         and not isinstance(finite, jax.core.Tracer)
     ):
-        finite_value = bool(np.asarray(jax.device_get(finite)))
+        finite_value = _host_bool(finite)
         return compute(matrix) if finite_value else dummy(matrix)
 
     return jax.lax.cond(jnp.asarray(finite, dtype=jnp.bool_), compute, dummy, matrix)
@@ -3681,14 +3701,12 @@ def _ls_hessian_symmetry_rel(H) -> float | None:
     """
     if H is None:
         return None
-    norms = np.asarray(
-        jax.device_get(
-            jnp.stack(
-                [
-                    jnp.linalg.norm(H, ord="fro"),
-                    jnp.linalg.norm(H - H.T, ord="fro"),
-                ]
-            )
+    norms = _host_numpy(
+        jnp.stack(
+            [
+                jnp.linalg.norm(H, ord="fro"),
+                jnp.linalg.norm(H - H.T, ord="fro"),
+            ]
         )
     )
     H_norm = float(norms[0])
@@ -3711,7 +3729,7 @@ def _dense_condition_estimate_or_none(matrix, *, lu_piv=None):
         return None
     if len(matrix.shape) != 2 or matrix.shape[0] != matrix.shape[1]:
         return None
-    estimate = _optimizer_jax._dense_matrix_condition_estimate(
+    estimate = _linear_solve._dense_matrix_condition_estimate(
         matrix,
         lu_piv=lu_piv,
     )
@@ -3927,7 +3945,7 @@ _SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
 _LINEARIZATION_RESIDENCY_VALUES = frozenset({"device", "host"})
-_ONDEVICE_LEAST_SQUARES_METHODS = _optimizer_jax._TARGET_LEAST_SQUARES_METHODS
+_ONDEVICE_LEAST_SQUARES_METHODS = _TARGET_LEAST_SQUARES_METHODS
 _LEAST_SQUARES_METHODS = frozenset({"lm"}) | _ONDEVICE_LEAST_SQUARES_METHODS
 _ONDEVICE_OPTIMIZER_METHODS = (
     frozenset({"bfgs-ondevice", "lbfgs-ondevice"}) | _ONDEVICE_LEAST_SQUARES_METHODS
@@ -4084,14 +4102,14 @@ def _optimistix_callback_option_names(options):
 def _optimistix_tuning_option_names(options):
     if not _is_optimistix_lm_lane(options):
         return ()
-    return _optimizer_jax._optimistix_lm_nondefault_tuning_options(
+    return _optimistix_lm_nondefault_tuning_options(
         options.get(
             "ftol",
-            _optimizer_jax._OPTIMISTIX_LM_DEFAULT_FTOL,
+            _OPTIMISTIX_LM_DEFAULT_FTOL,
         ),
         options.get(
             "xtol",
-            _optimizer_jax._OPTIMISTIX_LM_DEFAULT_XTOL,
+            _OPTIMISTIX_LM_DEFAULT_XTOL,
         ),
         options.get("gtol"),
     )
@@ -4190,24 +4208,24 @@ def _reprobe_adjoint_availability_with_dense_lu(
     if not (
         not eager_success
         and nonlinear_success
-        and _optimizer_jax._EXACT_ADJOINT_DENSE_LU
+        and _linear_solve._EXACT_ADJOINT_DENSE_LU
     ):
         return eager_solution, eager_status, eager_success, "least-squares-hessian"
     jacobian_matrix = jnp.asarray(jacobian)
     if not (
         jacobian_matrix.ndim == 2
         and jacobian_matrix.shape[0] == jacobian_matrix.shape[1]
-        and _optimizer_jax._dense_square_operator_lu_materialization_allowed(grad)
+        and _linear_solve._dense_square_operator_lu_materialization_allowed(grad)
     ):
         return eager_solution, eager_status, eager_success, "least-squares-hessian"
     dense_lu_solution, dense_lu_status = (
-        _optimizer_jax._solve_dense_square_operator_lu_system_with_status(
+        _linear_solve._solve_dense_square_operator_lu_system_with_status(
             lambda v: jacobian_matrix.T @ v,
             grad,
             tol=tol,
         )
     )
-    if not _host_bool(_optimizer_jax._linear_solve_status_success(dense_lu_status)):
+    if not _host_bool(_linear_solve._linear_solve_status_success(dense_lu_status)):
         return eager_solution, eager_status, eager_success, "least-squares-hessian"
     return dense_lu_solution, dense_lu_status, True, "dense-lu-jacobian-transpose"
 
@@ -4240,7 +4258,7 @@ def _solve_boozer_state_with_kernel_bundle(
     final_x = result.x
     residual = bundle.residual(final_x, coil_set_spec)
     jacobian = bundle.jacobian(final_x, coil_set_spec)
-    least_squares_state = _optimizer_jax._dense_lm_state_from_residual_jacobian(
+    least_squares_state = _dense_lm_state_from_residual_jacobian(
         residual,
         jacobian,
     )
@@ -4256,7 +4274,7 @@ def _solve_boozer_state_with_kernel_bundle(
     )
     nonlinear_success = _host_bool(result.success)
     linear_solve_success = _host_bool(
-        _optimizer_jax._linear_solve_status_success(linear_solve_status)
+        _linear_solve._linear_solve_status_success(linear_solve_status)
     )
     (
         linear_solve_solution,
@@ -4377,7 +4395,7 @@ def _normalize_solver_options(raw_options, boozer_type):
             allowed = ", ".join(sorted(_NEWTON_POLISH_POLICIES))
             raise ValueError(f"newton_polish_policy must be one of: {allowed}.")
         normalized_options["newton_linear_solver"] = (
-            _optimizer_jax._resolve_traceable_newton_linear_solver(
+            _resolve_traceable_newton_linear_solver(
                 normalized_options.get("newton_linear_solver", "operator_gmres")
             )
         )
@@ -4502,7 +4520,6 @@ class BoozerSurfaceJAX(Optimizable):
         self.res = None
         self._solver_generation = 0
         self._traceable_solve_state_token = _new_traceable_solve_state_token()
-        self._traceable_runtime_entry_cache = None
 
         # Determine solver type
         self.boozer_type = "ls" if constraint_weight is not None else "exact"
@@ -4582,9 +4599,6 @@ class BoozerSurfaceJAX(Optimizable):
         # Toroidal flux phi index (first phi point by default)
         self.phi_idx = 0
 
-        self._traceable_penalty_objective_cache = {}
-        self._traceable_penalty_residual_cache = {}
-        self._traceable_exact_residual_cache = {}
         self._reference_penalty_objective_cache = {}
         self._reference_penalty_value_and_grad_cache = {}
         self._reference_penalty_residual_cache = {}
@@ -4779,7 +4793,7 @@ class BoozerSurfaceJAX(Optimizable):
             def _with_nan_status(solver):
                 def wrapped(rhs):
                     solution, status = solver(rhs)
-                    success = _optimizer_jax._linear_solve_status_success(status)
+                    success = _linear_solve._linear_solve_status_success(status)
                     return _solve_with_nan_on_failure(solution, success), status
 
                 return wrapped
@@ -4863,14 +4877,14 @@ class BoozerSurfaceJAX(Optimizable):
                 return H_dev.T @ jnp.asarray(rhs, dtype=x.dtype)
 
             def solve_forward(rhs):
-                return _optimizer_jax._lu_solve_dense_hessian(
+                return _linear_solve._lu_solve_dense_hessian(
                     (lu_device, piv_device),
                     jnp.asarray(rhs, dtype=x.dtype),
                     transpose=False,
                 )
 
             def solve_transpose(rhs):
-                return _optimizer_jax._lu_solve_dense_hessian(
+                return _linear_solve._lu_solve_dense_hessian(
                     (lu_device, piv_device),
                     jnp.asarray(rhs, dtype=x.dtype),
                     transpose=True,
@@ -4878,21 +4892,21 @@ class BoozerSurfaceJAX(Optimizable):
 
             def dense_status(matrix, matvec, solution, rhs):
                 rhs = jnp.asarray(rhs, dtype=x.dtype)
-                status = _optimizer_jax._dense_linear_solve_status(
+                status = _linear_solve._dense_linear_solve_status(
                     matvec,
                     solution,
                     rhs,
                     tol=tol_host,
                 )
                 backward_error_success = (
-                    _optimizer_jax._dense_matrix_backward_error_success(
+                    _linear_solve._dense_matrix_backward_error_success(
                         matrix,
                         solution,
                         rhs,
                         tol=tol_host,
                     )
                 )
-                solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+                solve_safe = _linear_solve._dense_matrix_solve_numerically_safe(
                     matrix,
                     solution,
                     rhs,
@@ -4982,21 +4996,21 @@ class BoozerSurfaceJAX(Optimizable):
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
                 rhs_device = jnp.asarray(rhs, dtype=x.dtype)
-                status = _optimizer_jax._dense_linear_solve_status(
+                status = _linear_solve._dense_linear_solve_status(
                     apply_forward,
                     solved,
                     rhs_device,
                     tol=tol_host,
                 )
                 backward_error_success = (
-                    _optimizer_jax._dense_matrix_backward_error_success(
+                    _linear_solve._dense_matrix_backward_error_success(
                         jnp.asarray(H_host, dtype=x.dtype),
                         solved,
                         rhs_device,
                         tol=tol_host,
                     )
                 )
-                solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+                solve_safe = _linear_solve._dense_matrix_solve_numerically_safe(
                     H_host,
                     solved,
                     rhs_device,
@@ -5012,21 +5026,21 @@ class BoozerSurfaceJAX(Optimizable):
             def solve_transpose_with_status(rhs):
                 solved = solve_transpose(rhs)
                 rhs_device = jnp.asarray(rhs, dtype=x.dtype)
-                status = _optimizer_jax._dense_linear_solve_status(
+                status = _linear_solve._dense_linear_solve_status(
                     apply_transpose,
                     solved,
                     rhs_device,
                     tol=tol_host,
                 )
                 backward_error_success = (
-                    _optimizer_jax._dense_matrix_backward_error_success(
+                    _linear_solve._dense_matrix_backward_error_success(
                         jnp.asarray(H_host.T, dtype=x.dtype),
                         solved,
                         rhs_device,
                         tol=tol_host,
                     )
                 )
-                solve_safe = _optimizer_jax._dense_matrix_solve_numerically_safe(
+                solve_safe = _linear_solve._dense_matrix_solve_numerically_safe(
                     H_host.T,
                     solved,
                     rhs_device,
@@ -5061,14 +5075,14 @@ class BoozerSurfaceJAX(Optimizable):
                 coil_set_spec=self.coil_set_spec,
                 hostify_inputs=False,
             )
-            hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
+            hvp_fn = _linear_solve._hessian_vector_product_fn(objective_fn)
             stab = float(
-                _optimizer_jax.adjoint_hessian_stabilization(
+                _adjoint_linear_solve.adjoint_hessian_stabilization(
                     self.options["newton_stab"]
                 )
             )
             residual_kwargs = {}
-            if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+            if _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "lsmr_j":
                 residual_kwargs["residual_fn"] = self._make_penalty_residual_with(
                     optimize_G,
                     solved_state.weight_inv_modB,
@@ -5084,13 +5098,13 @@ class BoozerSurfaceJAX(Optimizable):
                 def apply_column(column):
                     return hvp_fn(x, column) + stab_value * column
 
-                return _optimizer_jax._apply_column_batched_operator(
+                return _linear_solve._apply_column_batched_operator(
                     apply_column,
                     rhs,
                 )
 
             def solve_forward(rhs):
-                return _optimizer_jax._solve_hessian_system(
+                return _adjoint_linear_solve._solve_hessian_system(
                     objective_fn,
                     x,
                     rhs,
@@ -5099,7 +5113,7 @@ class BoozerSurfaceJAX(Optimizable):
                 )
 
             def solve_forward_with_status(rhs):
-                return _optimizer_jax._solve_hessian_system_with_status(
+                return _adjoint_linear_solve._solve_hessian_system_with_status(
                     objective_fn,
                     x,
                     rhs,
@@ -5108,7 +5122,7 @@ class BoozerSurfaceJAX(Optimizable):
                 )
 
             def solve_transpose_with_status(rhs):
-                return _optimizer_jax._solve_hessian_least_squares_system_with_status(
+                return _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
                     objective_fn,
                     x,
                     rhs,
@@ -5134,27 +5148,27 @@ class BoozerSurfaceJAX(Optimizable):
             residual_fn = self._make_exact_residual(
                 self._compute_stellsym_mask_indices()
             )
-            operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
+            operator = _linear_solve._jacobian_linear_operator(residual_fn, x)
 
             def solve_jacobian_system_with_status(rhs, *, transpose):
-                return _optimizer_jax._solve_jacobian_operator_with_status(
+                return _linear_solve._solve_jacobian_operator_with_status(
                     operator,
                     rhs,
                     transpose=transpose,
                     tol=tol_host,
                     max_refinement_steps=(
-                        _optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+                        _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
                     ),
                 )
 
             def solve_jacobian_system(rhs, *, transpose):
-                return _optimizer_jax._solve_jacobian_operator(
+                return _linear_solve._solve_jacobian_operator(
                     operator,
                     rhs,
                     transpose=transpose,
                     tol=tol_host,
                     max_refinement_steps=(
-                        _optimizer_jax._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
+                        _adjoint_linear_solve._EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS
                     ),
                 )
 
@@ -5245,7 +5259,6 @@ class BoozerSurfaceJAX(Optimizable):
         """Mark solver as needing re-execution (dirty flag)."""
         self.need_to_run_code = True
         self._traceable_solve_state_token = _new_traceable_solve_state_token()
-        self._traceable_runtime_entry_cache = None
 
     def _validate_none_G_precondition(self, G):
         if G is not None:
@@ -5480,10 +5493,8 @@ class BoozerSurfaceJAX(Optimizable):
                     infer_optimizer_state_dtype=True,
                     **self._traceable_surface_runtime_args(hostify=True),
                 )
-                objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
-                    objective_fn
-                )
-                objective_fn = _optimizer_jax._mark_traceable_runner_cacheable(
+                objective_fn = _mark_cacheable_jit_value_and_grad(objective_fn)
+                objective_fn = _mark_traceable_runner_cacheable(
                     objective_fn,
                     cache_token=("boozer-penalty-objective", key),
                 )
@@ -5716,9 +5727,7 @@ class BoozerSurfaceJAX(Optimizable):
                     infer_optimizer_state_dtype=True,
                     **self._traceable_surface_runtime_args(),
                 )
-                residual_fn = _optimizer_jax._mark_cacheable_jit_linear_operator(
-                    residual_fn
-                )
+                residual_fn = _mark_cacheable_jit_linear_operator(residual_fn)
                 self._reference_penalty_residual_cache[key] = residual_fn
             return residual_fn
         return _make_boozer_penalty_residual_closure(
@@ -6170,31 +6179,25 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
             resolved_constraint_weight,
         )
-        objective_fn = self._traceable_penalty_objective_cache.get(key)
-        if objective_fn is None:
-            surface_args = self._traceable_surface_runtime_args()
+        surface_args = self._traceable_surface_runtime_args()
 
-            def objective_fn(x, coil_set_spec):
-                return _boozer_penalty_objective(
-                    x,
-                    coil_set_spec=coil_set_spec,
-                    constraint_weight=resolved_constraint_weight,
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                    decision_split_mode="jvp",
-                    optimizer_state_dtype=jnp.asarray(x).dtype,
-                    **surface_args,
-                )
+        def objective_fn(x, coil_set_spec):
+            return _boozer_penalty_objective(
+                x,
+                coil_set_spec=coil_set_spec,
+                constraint_weight=resolved_constraint_weight,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                decision_split_mode="jvp",
+                optimizer_state_dtype=jnp.asarray(x).dtype,
+                **surface_args,
+            )
 
-            objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
-                objective_fn
-            )
-            objective_fn = _optimizer_jax._mark_traceable_runner_cacheable(
-                objective_fn,
-                cache_token=("boozer-traceable-penalty-objective", key),
-            )
-            self._traceable_penalty_objective_cache[key] = objective_fn
-        return self._traceable_penalty_objective_cache[key]
+        objective_fn = _mark_cacheable_jit_value_and_grad(objective_fn)
+        return _mark_traceable_runner_cacheable(
+            objective_fn,
+            cache_token=("boozer-traceable-penalty-objective", key),
+        )
 
     def _get_traceable_penalty_residual(
         self,
@@ -6208,28 +6211,24 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
             resolved_constraint_weight,
         )
-        residual_fn = self._traceable_penalty_residual_cache.get(key)
-        if residual_fn is None:
-            surface_args = self._traceable_surface_runtime_args()
+        surface_args = self._traceable_surface_runtime_args()
 
-            def residual_fn(x, coil_set_spec):
-                return _boozer_penalty_residual_vector(
-                    x,
-                    coil_set_spec=coil_set_spec,
-                    constraint_weight=resolved_constraint_weight,
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                    decision_split_mode="jvp",
-                    optimizer_state_dtype=jnp.asarray(x).dtype,
-                    **surface_args,
-                )
-
-            residual_fn = _optimizer_jax._mark_traceable_runner_cacheable(
-                residual_fn,
-                cache_token=("boozer-traceable-penalty-residual", key),
+        def residual_fn(x, coil_set_spec):
+            return _boozer_penalty_residual_vector(
+                x,
+                coil_set_spec=coil_set_spec,
+                constraint_weight=resolved_constraint_weight,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+                decision_split_mode="jvp",
+                optimizer_state_dtype=jnp.asarray(x).dtype,
+                **surface_args,
             )
-            self._traceable_penalty_residual_cache[key] = residual_fn
-        return self._traceable_penalty_residual_cache[key]
+
+        return _mark_traceable_runner_cacheable(
+            residual_fn,
+            cache_token=("boozer-traceable-penalty-residual", key),
+        )
 
     def _get_penalty_kernel_bundle(
         self,
@@ -6240,7 +6239,7 @@ class BoozerSurfaceJAX(Optimizable):
         resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
         linear_solve_tol = self._linear_solve_tolerance()
         linear_solve_stab = float(
-            _optimizer_jax.adjoint_hessian_stabilization(
+            _adjoint_linear_solve.adjoint_hessian_stabilization(
                 self.options.get("newton_stab", 0.0)
             )
         )
@@ -6284,7 +6283,7 @@ class BoozerSurfaceJAX(Optimizable):
                 return jnp.moveaxis(columns, 0, -1)
 
             def least_squares_state_fn(x, coil_set_spec):
-                return _optimizer_jax._dense_lm_state_from_residual_jacobian(
+                return _dense_lm_state_from_residual_jacobian(
                     residual_fn(x, coil_set_spec),
                     jacobian_fn(x, coil_set_spec),
                 )
@@ -6303,13 +6302,13 @@ class BoozerSurfaceJAX(Optimizable):
                     return objective_fn(x_inner, coil_set_spec)
 
                 residual_kwargs = {}
-                if _optimizer_jax._ADJOINT_LINEAR_SOLVER == "lsmr_j":
+                if _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "lsmr_j":
 
                     def residual_for_x(x_inner):
                         return residual_fn(x_inner, coil_set_spec)
 
                     residual_kwargs["residual_fn"] = residual_for_x
-                return _optimizer_jax._solve_hessian_least_squares_system_with_status(
+                return _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
                     objective_for_x,
                     x,
                     rhs,
@@ -6322,7 +6321,7 @@ class BoozerSurfaceJAX(Optimizable):
                 def objective_for_x(x_inner):
                     return objective_fn(x_inner, coil_set_spec)
 
-                operator = _optimizer_jax._hessian_linear_operator(
+                operator = _adjoint_linear_solve._hessian_linear_operator(
                     objective_for_x,
                     x,
                     stab=linear_solve_stab,
@@ -6345,27 +6344,23 @@ class BoozerSurfaceJAX(Optimizable):
     def _get_traceable_exact_residual(self, weight_inv_modB):
         mask_indices = self._compute_stellsym_mask_indices()
         key = self._traceable_exact_cache_key(weight_inv_modB, mask_indices)
-        residual_fn = self._traceable_exact_residual_cache.get(key)
-        if residual_fn is None:
-            exact_residual = _select_exact_residual_fn(self.stellsym)
-            surface_args = self._traceable_surface_runtime_args()
-            host_mask_indices = _hostify_tree(mask_indices)
+        exact_residual = _select_exact_residual_fn(self.stellsym)
+        surface_args = self._traceable_surface_runtime_args()
+        host_mask_indices = _hostify_tree(mask_indices)
 
-            def residual_fn(x, coil_set_spec):
-                return exact_residual(
-                    x,
-                    coil_set_spec=coil_set_spec,
-                    mask_indices=host_mask_indices,
-                    weight_inv_modB=weight_inv_modB,
-                    **surface_args,
-                )
-
-            residual_fn = _optimizer_jax._mark_traceable_runner_cacheable(
-                residual_fn,
-                cache_token=("boozer-traceable-exact-residual", key),
+        def residual_fn(x, coil_set_spec):
+            return exact_residual(
+                x,
+                coil_set_spec=coil_set_spec,
+                mask_indices=host_mask_indices,
+                weight_inv_modB=weight_inv_modB,
+                **surface_args,
             )
-            self._traceable_exact_residual_cache[key] = residual_fn
-        return self._traceable_exact_residual_cache[key]
+
+        return _mark_traceable_runner_cacheable(
+            residual_fn,
+            cache_token=("boozer-traceable-exact-residual", key),
+        )
 
     def _run_traceable_pre_newton_stage(
         self,
@@ -6435,7 +6430,7 @@ class BoozerSurfaceJAX(Optimizable):
             )
             optimizer_options = self._collect_optimizer_options(method=method)
             if method == "bfgs-ondevice":
-                state = _optimizer_jax._minimize_bfgs_private(
+                state = _minimize_bfgs_private(
                     objective,
                     x0,
                     maxiter=self.options["bfgs_maxiter"],
@@ -6446,7 +6441,7 @@ class BoozerSurfaceJAX(Optimizable):
                     x_dtype=optimizer_state_dtype,
                 )
             else:
-                state = _optimizer_jax._minimize_lbfgs_private(
+                state = _minimize_lbfgs_private(
                     objective,
                     x0,
                     maxiter=self.options["bfgs_maxiter"],
@@ -6557,7 +6552,7 @@ class BoozerSurfaceJAX(Optimizable):
         del method
         return max(
             int(self.options["newton_maxiter"]),
-            _optimizer_jax._BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
+            _BOUNDED_MIXED_NEWTON_ATTEMPT_LIMIT,
         )
 
     def _run_traceable_mixed_pipeline(
@@ -6601,17 +6596,15 @@ class BoozerSurfaceJAX(Optimizable):
         proposal_value, proposal_gradient = certificate_value_and_grad(proposal_seed)
         original_gradient_norm = jnp.linalg.norm(original_gradient)
         newton_trace_capacity = self.traceable_newton_trace_capacity(method)
-        seed_candidate_accepted, _proposal_gradient_norm = (
-            _optimizer_jax._newton_candidate_status(
-                proposal_seed,
-                proposal_value,
-                proposal_gradient,
-                alpha=jnp.asarray(1.0, dtype=runtime_dtype),
-                current_val=original_value,
-                current_grad=original_gradient,
-                current_norm=original_gradient_norm,
-                dx=original_seed - proposal_seed,
-            )
+        seed_candidate_accepted, _proposal_gradient_norm = _newton_candidate_status(
+            proposal_seed,
+            proposal_value,
+            proposal_gradient,
+            alpha=jnp.asarray(1.0, dtype=runtime_dtype),
+            current_val=original_value,
+            current_grad=original_gradient,
+            current_norm=original_gradient_norm,
+            dx=original_seed - proposal_seed,
         )
         # SSOT: merit gate + proposal pre-Newton success (see pre_newton_seed_policy).
         seed_gate_accepted = combine_mixed_seed_gate(
@@ -7005,7 +6998,7 @@ class BoozerSurfaceJAX(Optimizable):
             nan_factor = jnp.full_like(hessian, jnp.nan)
 
             def shared_plu(_):
-                return _optimizer_jax._plu_from_lu_piv(lu_piv)
+                return _linear_solve._plu_from_lu_piv(lu_piv)
 
             def dummy_plu(_):
                 return nan_factor, nan_factor, nan_factor
@@ -7640,11 +7633,11 @@ class BoozerSurfaceJAX(Optimizable):
             max_dense_jacobian_bytes=self.options["max_dense_jacobian_bytes"],
         )
         if H is not None and shared_dispatch_eligible:
-            lu_piv = _optimizer_jax._factor_dense_hessian(
+            lu_piv = _linear_solve._factor_dense_hessian(
                 H,
                 optimizer_backend=self.options["optimizer_backend"],
             )
-            P, L, U = _optimizer_jax._plu_from_lu_piv(lu_piv)
+            P, L, U = _linear_solve._plu_from_lu_piv(lu_piv)
             plu = (P, L, U)
         elif H is not None:
             lu_piv = None
@@ -7986,9 +7979,7 @@ class BoozerSurfaceJAX(Optimizable):
                 mask_indices,
                 coil_set_spec=resolved_coil_set_spec,
             )
-            residual_fn = _optimizer_jax._mark_cacheable_jit_linear_operator(
-                residual_fn
-            )
+            residual_fn = _mark_cacheable_jit_linear_operator(residual_fn)
             self._reference_exact_residual_cache[key] = residual_fn
         return residual_fn
 

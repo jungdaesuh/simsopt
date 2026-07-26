@@ -36,6 +36,9 @@ jax = pytest.importorskip("jax")
 lineax = pytest.importorskip("lineax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
+from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
+from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
 
 _LINEAX_LSMR_AVAILABLE = hasattr(lineax, "LSMR")
@@ -75,7 +78,7 @@ def _spd_problem(n=12, seed=0):
 
 def test_cg_matches_direct_solve():
     matrix, matvec, rhs = _spd_problem(seed=0)
-    solution, status = _optimizer._solve_symmetric_operator_cg_with_status(
+    solution, status = _adjoint_linear_solve._solve_symmetric_operator_cg_with_status(
         matvec, rhs, tol=1e-12
     )
     expected = jnp.linalg.solve(matrix, rhs)
@@ -88,11 +91,11 @@ def test_cg_matches_direct_solve():
 
 def test_cg_matches_dense_lstsq_path():
     _, matvec, rhs = _spd_problem(seed=1)
-    cg_solution, _ = _optimizer._solve_symmetric_operator_cg_with_status(
+    cg_solution, _ = _adjoint_linear_solve._solve_symmetric_operator_cg_with_status(
         matvec, rhs, tol=1e-12
     )
     dense_solution, _ = (
-        _optimizer._solve_dense_square_operator_least_squares_system_with_status(
+        _linear_solve._solve_dense_square_operator_least_squares_system_with_status(
             matvec, rhs, tol=1e-12
         )
     )
@@ -105,7 +108,7 @@ def test_cg_handles_column_batched_rhs():
     matrix, matvec, _ = _spd_problem(seed=3)
     rng = np.random.default_rng(7)
     rhs = jnp.asarray(rng.standard_normal((matrix.shape[0], 3)))
-    solutions, status = _optimizer._solve_symmetric_operator_cg_with_status(
+    solutions, status = _adjoint_linear_solve._solve_symmetric_operator_cg_with_status(
         matvec, rhs, tol=1e-12
     )
     expected = jnp.linalg.solve(matrix, rhs)
@@ -126,9 +129,11 @@ def test_hessian_least_squares_dispatches_to_cg(monkeypatch):
     x = jnp.zeros(matrix.shape[0])
     expected = jnp.linalg.solve(matrix, rhs)
 
-    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "cg")
-    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
-        objective_fn, x, rhs, stab=0.0, tol=1e-12
+    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "cg")
+    solution, status = (
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+            objective_fn, x, rhs, stab=0.0, tol=1e-12
+        )
     )
     assert bool(status.success)
     np.testing.assert_allclose(
@@ -146,19 +151,21 @@ def test_explicit_dense_solver_overrides_global_adjoint_selector(monkeypatch):
     def fail_cg(*_args, **_kwargs):
         raise AssertionError("explicit dense route must not dispatch to global CG")
 
-    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "cg")
+    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "cg")
     monkeypatch.setattr(
-        _optimizer,
+        _adjoint_linear_solve,
         "_solve_symmetric_operator_cg_with_status",
         fail_cg,
     )
-    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
-        objective_fn,
-        jnp.zeros(matrix.shape[0]),
-        rhs,
-        stab=0.0,
-        tol=1e-12,
-        solver="dense",
+    solution, status = (
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+            objective_fn,
+            jnp.zeros(matrix.shape[0]),
+            rhs,
+            stab=0.0,
+            tol=1e-12,
+            solver="dense",
+        )
     )
 
     assert bool(status.success)
@@ -172,8 +179,8 @@ def test_explicit_dense_solver_overrides_global_adjoint_selector(monkeypatch):
 
 def test_default_selector_does_not_use_cg():
     """The default selector keeps the established (non-CG) path."""
-    assert _optimizer._ADJOINT_LINEAR_SOLVER != "cg"
-    assert _optimizer._ADJOINT_LINEAR_SOLVER != "lsmr_j"
+    assert _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER != "cg"
+    assert _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER != "lsmr_j"
 
 
 def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():
@@ -187,14 +194,14 @@ def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():
     matrix = jnp.asarray(matrix_np, dtype=jnp.float64)
     rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
 
-    _solution, status = _optimizer._solve_square_vector_system_operator_only(
+    _solution, status = _linear_solve._solve_square_vector_system_operator_only(
         lambda vector: matrix @ vector,
         rhs,
         tol=1.0e-14,
         max_refinement_steps=2,
     )
 
-    effective_tolerance = _optimizer._effective_linear_solve_tolerance(
+    effective_tolerance = _linear_solve._effective_linear_solve_tolerance(
         rhs,
         1.0e-14,
     )
@@ -208,7 +215,7 @@ def test_square_operator_zero_rhs_returns_successful_zero_solution():
     rhs = jnp.zeros(2, dtype=jnp.float64)
     matrix = jnp.asarray([[2.0, 0.25], [-0.5, 3.0]], dtype=jnp.float64)
 
-    solution, status = _optimizer._solve_square_vector_system_operator_only(
+    solution, status = _linear_solve._solve_square_vector_system_operator_only(
         lambda vector: matrix @ vector,
         rhs,
         tol=1e-12,
@@ -224,16 +231,18 @@ def test_square_operator_zero_rhs_returns_successful_zero_solution():
 def test_dense_operator_chunk_batch_size_tracks_byte_budget():
     mib = 1024 * 1024
 
-    assert _optimizer._dense_operator_chunk_batch_size_from_budget(None) == 8
-    assert _optimizer._dense_operator_chunk_batch_size_from_budget(16 * mib) == 1
-    assert _optimizer._dense_operator_chunk_batch_size_from_budget(255 * mib) == 7
-    assert _optimizer._dense_operator_chunk_batch_size_from_budget(256 * mib) == 8
-    assert _optimizer._dense_operator_chunk_batch_size_from_budget(4096 * mib) == 8
+    assert _linear_solve._dense_operator_chunk_batch_size_from_budget(None) == 8
+    assert _linear_solve._dense_operator_chunk_batch_size_from_budget(16 * mib) == 1
+    assert _linear_solve._dense_operator_chunk_batch_size_from_budget(255 * mib) == 7
+    assert _linear_solve._dense_operator_chunk_batch_size_from_budget(256 * mib) == 8
+    assert _linear_solve._dense_operator_chunk_batch_size_from_budget(4096 * mib) == 8
     assert (
-        _optimizer._dense_operator_chunk_batch_size_from_budget(48 * 1024 * mib) == 16
+        _linear_solve._dense_operator_chunk_batch_size_from_budget(48 * 1024 * mib)
+        == 16
     )
     assert (
-        _optimizer._dense_operator_chunk_batch_size_from_budget(192 * 1024 * mib) == 64
+        _linear_solve._dense_operator_chunk_batch_size_from_budget(192 * 1024 * mib)
+        == 64
     )
 
 
@@ -267,12 +276,16 @@ def _rectangular_j_problem(m=18, n=9, seed=0, stab=0.25):
 def test_lsmr_j_regularized_normal_system_matches_dense_oracle():
     """LSMR-on-J solves the same regularized normal system as a dense oracle."""
     _, residual_fn, _, rhs, expected = _rectangular_j_problem(seed=10)
-    operator = _optimizer._jacobian_linear_operator(residual_fn, jnp.zeros(rhs.shape))
-    solution, status = _optimizer._solve_regularized_normal_system_lsmr_j_with_status(
-        operator,
-        rhs,
-        stab=0.25,
-        tol=1e-11,
+    operator = _linear_solve._jacobian_linear_operator(
+        residual_fn, jnp.zeros(rhs.shape)
+    )
+    solution, status = (
+        _adjoint_linear_solve._solve_regularized_normal_system_lsmr_j_with_status(
+            operator,
+            rhs,
+            stab=0.25,
+            tol=1e-11,
+        )
     )
     assert bool(status.success)
     assert int(np.asarray(status.iterations)) > 0
@@ -293,12 +306,16 @@ def test_lsmr_j_regularized_normal_system_handles_column_batched_rhs():
         [np.asarray(rhs), rng.standard_normal(rhs.shape[0])]
     )
     rhs_batched = jnp.asarray(rhs_batched_np)
-    operator = _optimizer._jacobian_linear_operator(residual_fn, jnp.zeros(rhs.shape))
-    solution, status = _optimizer._solve_regularized_normal_system_lsmr_j_with_status(
-        operator,
-        rhs_batched,
-        stab=0.25,
-        tol=1e-11,
+    operator = _linear_solve._jacobian_linear_operator(
+        residual_fn, jnp.zeros(rhs.shape)
+    )
+    solution, status = (
+        _adjoint_linear_solve._solve_regularized_normal_system_lsmr_j_with_status(
+            operator,
+            rhs_batched,
+            stab=0.25,
+            tol=1e-11,
+        )
     )
     expected = np.linalg.solve(
         np.asarray(jacobian).T @ np.asarray(jacobian) + 0.25 * np.eye(rhs.shape[0]),
@@ -318,14 +335,16 @@ def test_hessian_least_squares_dispatches_to_lsmr_j(monkeypatch):
     """The explicit selector routes through residual-J LSMR, not the Hessian helper."""
     _, residual_fn, objective_fn, rhs, expected = _rectangular_j_problem(seed=13)
     x = jnp.zeros(rhs.shape)
-    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
-    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
-        objective_fn,
-        x,
-        rhs,
-        stab=0.25,
-        tol=1e-11,
-        residual_fn=residual_fn,
+    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+    solution, status = (
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+            objective_fn,
+            x,
+            rhs,
+            stab=0.25,
+            tol=1e-11,
+            residual_fn=residual_fn,
+        )
     )
     assert bool(status.success)
     np.testing.assert_allclose(
@@ -348,7 +367,7 @@ def test_hessian_dense_dispatch_uses_mixed_proposal_with_runtime_key(monkeypatch
         impl="threefry2x32",
     )
     monkeypatch.setattr(
-        _optimizer,
+        _adjoint_linear_solve,
         "get_backend_policy",
         lambda: SimpleNamespace(
             compute_dtype=np.dtype(np.float32),
@@ -365,18 +384,20 @@ def test_hessian_dense_dispatch_uses_mixed_proposal_with_runtime_key(monkeypatch
     def proposal_objective(state):
         return 0.5 * jnp.vdot(state, proposal_matrix @ state).real
 
-    solution, status = _optimizer._solve_hessian_least_squares_system_with_status(
-        certificate_objective,
-        jnp.zeros_like(rhs),
-        rhs,
-        stab=0.0,
-        tol=1.0e-12,
-        proposal_objective_fn=proposal_objective,
-        certificate_probe_key=certificate_probe_key,
-        solver="dense",
+    solution, status = (
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
+            certificate_objective,
+            jnp.zeros_like(rhs),
+            rhs,
+            stab=0.0,
+            tol=1.0e-12,
+            proposal_objective_fn=proposal_objective,
+            certificate_probe_key=certificate_probe_key,
+            solver="dense",
+        )
     )
 
-    assert isinstance(status, _optimizer._MixedDenseIrSolveStatus)
+    assert isinstance(status, _dense_ir._MixedDenseIrSolveStatus)
     assert bool(status.success)
     np.testing.assert_array_equal(
         np.asarray(status.trust.certificate_probe_key_data),
@@ -392,7 +413,7 @@ def test_hessian_dense_dispatch_uses_mixed_proposal_with_runtime_key(monkeypatch
 
 def test_hessian_dense_mixed_proposal_requires_runtime_key(monkeypatch):
     monkeypatch.setattr(
-        _optimizer,
+        _adjoint_linear_solve,
         "get_backend_policy",
         lambda: SimpleNamespace(
             compute_dtype=np.dtype(np.float32),
@@ -403,7 +424,7 @@ def test_hessian_dense_mixed_proposal_requires_runtime_key(monkeypatch):
     objective = lambda state: 0.5 * jnp.vdot(state, state).real
 
     with pytest.raises(ValueError, match="runtime certificate key"):
-        _optimizer._solve_hessian_least_squares_system_with_status(
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
             objective,
             jnp.zeros((2,), dtype=jnp.float64),
             jnp.ones((2,), dtype=jnp.float64),
@@ -418,10 +439,10 @@ def test_lsmr_j_dispatch_requires_residual_fn_and_positive_stab(monkeypatch):
     """The selector fails closed instead of disguising a Hessian solve as LSMR-on-J."""
     _, residual_fn, objective_fn, rhs, _ = _rectangular_j_problem(seed=14)
     x = jnp.zeros(rhs.shape)
-    monkeypatch.setattr(_optimizer, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
+    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "lsmr_j")
 
     with pytest.raises(ValueError, match="requires a residual_fn"):
-        _optimizer._solve_hessian_least_squares_system_with_status(
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
             objective_fn,
             x,
             rhs,
@@ -430,7 +451,7 @@ def test_lsmr_j_dispatch_requires_residual_fn_and_positive_stab(monkeypatch):
         )
 
     with pytest.raises(ValueError, match="requires positive newton_stab"):
-        _optimizer._solve_hessian_least_squares_system_with_status(
+        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
             objective_fn,
             x,
             rhs,
@@ -442,9 +463,9 @@ def test_lsmr_j_dispatch_requires_residual_fn_and_positive_stab(monkeypatch):
 
 def test_lsmr_j_reports_lineax_dependency_contract(monkeypatch):
     """A stale Lineax install fails closed with the repo dependency contract."""
-    monkeypatch.delattr(_optimizer.lineax, "LSMR", raising=False)
+    monkeypatch.delattr(_adjoint_linear_solve.lineax, "LSMR", raising=False)
     with pytest.raises(RuntimeError, match="lineax>=0.1.1"):
-        _optimizer._lineax_lsmr_solver(rtol=1e-11, atol=1e-11)
+        _adjoint_linear_solve._lineax_lsmr_solver(rtol=1e-11, atol=1e-11)
 
 
 # --- Opt-in dense-LU exact-Boozer adjoint solver (SIMSOPT_EXACT_ADJOINT_DENSE_LU) ---
@@ -515,7 +536,7 @@ def test_dense_lu_solver_matches_numpy_solve_nonsymmetric():
     """The committed LU+IR solver matches an independent dense oracle on a
     non-symmetric operator (the regime where the GMRES baseline stagnates)."""
     matrix, matvec, rhs = _nonsymmetric_problem(seed=0)
-    solution, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+    solution, status = _linear_solve._solve_dense_square_operator_lu_system_with_status(
         matvec, rhs, tol=1e-12
     )
     expected = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
@@ -534,7 +555,7 @@ def test_dense_lu_solver_batched_rhs_column_parity():
     n = matrix.shape[0]
     rng = np.random.default_rng(11)
     rhs_batched = jnp.asarray(rng.standard_normal((n, 3)))
-    batched, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+    batched, status = _linear_solve._solve_dense_square_operator_lu_system_with_status(
         matvec, rhs_batched, tol=1e-12
     )
     assert bool(status.success)
@@ -543,7 +564,7 @@ def test_dense_lu_solver_batched_rhs_column_parity():
         np.asarray(batched), np.asarray(expected), rtol=1e-10, atol=1e-12
     )
     for j in range(3):
-        column, _ = _optimizer._solve_dense_square_operator_lu_system_with_status(
+        column, _ = _linear_solve._solve_dense_square_operator_lu_system_with_status(
             matvec, rhs_batched[:, j], tol=1e-12
         )
         np.testing.assert_allclose(
@@ -554,7 +575,7 @@ def test_dense_lu_solver_batched_rhs_column_parity():
 def test_dense_lu_materialization_gate_shape_and_byte_contract():
     """The LU materialization gate accepts 1-D and 2-D RHS, rejects 3-D, and
     rejects a RHS whose ``n x n`` materialization exceeds the byte cap."""
-    allowed = _optimizer._dense_square_operator_lu_materialization_allowed
+    allowed = _linear_solve._dense_square_operator_lu_materialization_allowed
     assert allowed(jnp.zeros(8))
     assert allowed(jnp.zeros((8, 3)))
     assert not allowed(jnp.zeros((8, 3, 2)))
@@ -571,19 +592,19 @@ def test_solve_jacobian_operator_gate_routes_lu_iff_flag_and_transpose(monkeypat
         "transpose_matvec": lambda v: matrix.T @ v,
     }
     calls = {"n": 0}
-    real_lu = _optimizer._solve_dense_square_operator_lu_system_with_status
+    real_lu = _linear_solve._solve_dense_square_operator_lu_system_with_status
 
     def spy(*args, **kwargs):
         calls["n"] += 1
         return real_lu(*args, **kwargs)
 
     monkeypatch.setattr(
-        _optimizer, "_solve_dense_square_operator_lu_system_with_status", spy
+        _linear_solve, "_solve_dense_square_operator_lu_system_with_status", spy
     )
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
 
     # flag ON + transpose=True -> dense-LU solving the transpose operator.
-    solution, status = _optimizer._solve_jacobian_operator_with_status(
+    solution, status = _linear_solve._solve_jacobian_operator_with_status(
         operator, rhs, transpose=True, tol=1e-12
     )
     assert calls["n"] == 1
@@ -595,7 +616,7 @@ def test_solve_jacobian_operator_gate_routes_lu_iff_flag_and_transpose(monkeypat
 
     # The no-status adapter path is what AdjointSolveState.solve_transpose calls;
     # it must share the same dispatch gate as the status-returning helper.
-    direct_solution = _optimizer._solve_jacobian_operator(
+    direct_solution = _linear_solve._solve_jacobian_operator(
         operator, rhs, transpose=True, tol=1e-12
     )
     assert calls["n"] == 2
@@ -605,38 +626,38 @@ def test_solve_jacobian_operator_gate_routes_lu_iff_flag_and_transpose(monkeypat
 
     # flag ON + transpose=False -> transpose-only gate must not take the LU branch.
     calls["n"] = 0
-    _optimizer._solve_jacobian_operator_with_status(
+    _linear_solve._solve_jacobian_operator_with_status(
         operator, rhs, transpose=False, tol=1e-12
     )
     assert calls["n"] == 0
-    _optimizer._solve_jacobian_operator(operator, rhs, transpose=False, tol=1e-12)
+    _linear_solve._solve_jacobian_operator(operator, rhs, transpose=False, tol=1e-12)
     assert calls["n"] == 0
 
 
 def test_solve_jacobian_operator_default_flag_does_not_use_dense_lu(monkeypatch):
     """The dense-LU branch is opt-in: at the default (flag off) the transpose
     solve does not route to the dense-LU helper."""
-    assert _optimizer._EXACT_ADJOINT_DENSE_LU is False
+    assert _linear_solve._EXACT_ADJOINT_DENSE_LU is False
     matrix, _, rhs = _nonsymmetric_problem(seed=4)
     operator = {
         "matvec": lambda v: matrix @ v,
         "transpose_matvec": lambda v: matrix.T @ v,
     }
     calls = {"n": 0}
-    real_lu = _optimizer._solve_dense_square_operator_lu_system_with_status
+    real_lu = _linear_solve._solve_dense_square_operator_lu_system_with_status
 
     def spy(*args, **kwargs):
         calls["n"] += 1
         return real_lu(*args, **kwargs)
 
     monkeypatch.setattr(
-        _optimizer, "_solve_dense_square_operator_lu_system_with_status", spy
+        _linear_solve, "_solve_dense_square_operator_lu_system_with_status", spy
     )
-    _optimizer._solve_jacobian_operator_with_status(
+    _linear_solve._solve_jacobian_operator_with_status(
         operator, rhs, transpose=True, tol=1e-12
     )
     assert calls["n"] == 0
-    _optimizer._solve_jacobian_operator(operator, rhs, transpose=True, tol=1e-12)
+    _linear_solve._solve_jacobian_operator(operator, rhs, transpose=True, tol=1e-12)
     assert calls["n"] == 0
 
 
@@ -644,7 +665,7 @@ def test_dense_lu_status_reports_machine_precision_residual():
     """On a well-conditioned operator the LU+IR status reports a
     machine-precision relative residual and success."""
     _, matvec, rhs = _nonsymmetric_problem(seed=5)
-    _, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+    _, status = _linear_solve._solve_dense_square_operator_lu_system_with_status(
         matvec, rhs, tol=1e-12
     )
     assert bool(status.success)
@@ -656,7 +677,7 @@ def test_dense_condition_estimate_preserves_float32_under_transfer_guard():
     matrix = jnp.diag(jnp.asarray(np.geomspace(1.0, 1.0e-5, 32), dtype=jnp.float32))
 
     with jax.transfer_guard("disallow"):
-        estimate = _optimizer._dense_matrix_condition_estimate(matrix)
+        estimate = _linear_solve._dense_matrix_condition_estimate(matrix)
 
     assert estimate.dtype == jnp.float32
     assert float(np.asarray(estimate)) == pytest.approx(1.0e5, rel=1.0e-5)
@@ -690,9 +711,9 @@ def test_float32_dense_lu_status_accepts_smoke_tolerance_operator():
         return matrix @ v
 
     with jax.transfer_guard("disallow"):
-        estimate = _optimizer._dense_matrix_condition_estimate(matrix)
+        estimate = _linear_solve._dense_matrix_condition_estimate(matrix)
         solution, status = (
-            _optimizer._solve_dense_square_operator_lu_system_with_status(
+            _linear_solve._solve_dense_square_operator_lu_system_with_status(
                 matvec,
                 rhs,
                 tol=1.0e-4,
@@ -714,9 +735,9 @@ def test_float32_dense_lu_rejects_nonnormal_forward_error_through_dispatch(
     """The exact-adjoint dispatch must reject fp32 solves with wrong forward error."""
     matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
     operator = {"matvec": matvec, "transpose_matvec": matvec}
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
 
-    solution, status = _optimizer._solve_jacobian_operator_with_status(
+    solution, status = _linear_solve._solve_jacobian_operator_with_status(
         operator,
         rhs,
         transpose=True,
@@ -736,15 +757,15 @@ def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
     """The solution-only exact-adjoint helper must not leak a failed LU vector."""
     matrix, matvec, rhs, true_solution = _float32_forward_error_problem()
     operator = {"matvec": matvec, "transpose_matvec": matvec}
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
 
-    status_solution, status = _optimizer._solve_jacobian_operator_with_status(
+    status_solution, status = _linear_solve._solve_jacobian_operator_with_status(
         operator,
         rhs,
         transpose=True,
         tol=1.0e-4,
     )
-    direct_solution = _optimizer._solve_jacobian_operator(
+    direct_solution = _linear_solve._solve_jacobian_operator(
         operator,
         rhs,
         transpose=True,
@@ -762,8 +783,8 @@ def test_solve_jacobian_operator_returns_nan_when_dense_lu_status_fails(
 @pytest.mark.parametrize(
     "solver",
     (
-        _optimizer._solve_dense_square_operator_lu_system_with_status,
-        _optimizer._solve_dense_square_operator_least_squares_system_with_status,
+        _linear_solve._solve_dense_square_operator_lu_system_with_status,
+        _linear_solve._solve_dense_square_operator_least_squares_system_with_status,
     ),
     ids=("lu", "lstsq"),
 )
@@ -774,18 +795,18 @@ def test_float64_dense_status_fails_closed_beyond_condition_safety_limit(solver)
     solution, status = solver(matvec, rhs, tol=1.0e-12)
 
     condition_estimate = float(
-        np.asarray(_optimizer._dense_matrix_condition_estimate(matrix))
+        np.asarray(_linear_solve._dense_matrix_condition_estimate(matrix))
     )
     condition_safety_limit = float(
         np.asarray(
-            _optimizer._dense_matrix_nonsingular_threshold(
+            _linear_solve._dense_matrix_nonsingular_threshold(
                 matrix.shape[0], matrix.dtype
             )
         )
     )
     backward_error_accepted = bool(
         np.asarray(
-            _optimizer._dense_matrix_backward_error_success(
+            _linear_solve._dense_matrix_backward_error_success(
                 matrix,
                 solution,
                 rhs,
@@ -819,7 +840,7 @@ def test_dense_lu_status_fails_closed_on_singular_operator():
     def matvec(v):
         return matrix @ v
 
-    _, status = _optimizer._solve_dense_square_operator_lu_system_with_status(
+    _, status = _linear_solve._solve_dense_square_operator_lu_system_with_status(
         matvec, rhs, tol=1e-12
     )
     assert not bool(status.success)
@@ -842,7 +863,7 @@ def test_dense_lstsq_status_fails_closed_on_singular_operator():
         return matrix @ v
 
     _, status = (
-        _optimizer._solve_dense_square_operator_least_squares_system_with_status(
+        _linear_solve._solve_dense_square_operator_least_squares_system_with_status(
             matvec, rhs, tol=1e-12
         )
     )
@@ -859,7 +880,7 @@ def test_dense_lstsq_uses_operator_sweep_dtype_with_float64_rhs():
         return matrix32 @ vector
 
     solution, status = (
-        _optimizer._solve_dense_square_operator_least_squares_system_with_status(
+        _linear_solve._solve_dense_square_operator_least_squares_system_with_status(
             matvec,
             rhs64,
             tol=1.0e-10,
@@ -886,7 +907,7 @@ def test_dense_square_operator_matrix_preserves_nonsymmetric_columns(dtype):
     )
     rhs = jnp.ones(3, dtype=dtype)
 
-    materialized = _optimizer._dense_square_operator_matrix(
+    materialized = _linear_solve._dense_square_operator_matrix(
         lambda vector: matrix @ vector,
         rhs,
         matrix_dtype=dtype,
@@ -902,7 +923,7 @@ def test_dense_square_operator_chunking_respects_strict_transfer_guard():
     diagonal = jax.device_put(np.arange(1.0, dimension + 1.0, dtype=np.float64))
 
     with jax.transfer_guard("disallow"):
-        materialized = _optimizer._dense_square_operator_matrix(
+        materialized = _linear_solve._dense_square_operator_matrix(
             lambda vector: diagonal * vector,
             rhs,
             matrix_dtype=jnp.float64,
@@ -925,10 +946,10 @@ def test_dense_square_operator_hoists_hvp_device_closure():
     def objective(candidate):
         return jnp.sum(diagonal * candidate * candidate)
 
-    hvp_fn = _optimizer._hessian_vector_product_fn(objective)
+    hvp_fn = _linear_solve._hessian_vector_product_fn(objective)
 
     with jax.transfer_guard("disallow"):
-        materialized = _optimizer._dense_square_operator_matrix(
+        materialized = _linear_solve._dense_square_operator_matrix(
             lambda vector: hvp_fn(state, vector),
             rhs,
             matrix_dtype=jnp.float64,
@@ -946,7 +967,7 @@ def test_dense_square_operator_lowering_has_no_quadratic_identity_constant():
     dimension = _optimizer.dense_operator_chunk_batch_size() + 1
 
     def materialize(diagonal):
-        return _optimizer._dense_square_operator_matrix(
+        return _linear_solve._dense_square_operator_matrix(
             lambda vector: diagonal * vector,
             diagonal,
             matrix_dtype=jnp.float64,

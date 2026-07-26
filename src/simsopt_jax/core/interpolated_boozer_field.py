@@ -60,6 +60,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+
 from ._device_scalars import device_one as _device_one
 from ._device_scalars import two_pi as _device_two_pi
 from .regular_grid_interp import (
@@ -240,11 +242,11 @@ class InterpolatedBoozerFieldFrozenState:
 
 
 def _device_float64(value: float) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.float64))
+    return explicit_device_array(value, dtype=np.float64)
 
 
 def _device_scalar(value: float, dtype) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+    return explicit_device_array(value, dtype=dtype)
 
 
 def fold_points_for_symmetry(

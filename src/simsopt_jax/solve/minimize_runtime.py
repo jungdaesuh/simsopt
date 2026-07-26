@@ -12,10 +12,13 @@ import optimistix as optx
 from jax.extend import core as jax_core
 from scipy.optimize import OptimizeResult
 
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.runtime.host_boundary import (
+    block_until_ready,
     host_array_after_ready as host_array,
     host_float_after_ready as host_float,
     host_int,
+    host_value,
 )
 from .contracts import (
     Callback,
@@ -30,13 +33,11 @@ from .optimistix.contracts import OptimistixLBFGSOptions
 
 
 def block_jax_leaves(value) -> None:
-    for leaf in jax.tree.leaves(value):
-        if isinstance(leaf, jax.Array):
-            leaf.block_until_ready()
+    block_until_ready(value)
 
 
 def optimistix_result_metadata(result) -> tuple[bool, str, str]:
-    host_result = jax.device_get(result)
+    host_result = host_value(result)
     result_text = str(host_result)
     result_message = str(optx.RESULTS[host_result])
     successful = result_text == str(optx.RESULTS.successful)
@@ -81,7 +82,7 @@ def run_optax_minimize(
     callback: Callback | None,
 ) -> OptimizeResult:
     start = time.perf_counter()
-    params = jnp.asarray(jax.device_put(x0))
+    params = jnp.asarray(runtime_device_put_tree(x0))
     params_sharding = params.sharding
     maxiter = options.maxiter
     gtol = options.gtol
@@ -90,7 +91,9 @@ def run_optax_minimize(
             value_and_grad_fn,
             params,
         )
-        scalar_value_consts = jax.device_put(scalar_value_consts, params_sharding)
+        scalar_value_consts = runtime_device_put_tree(
+            scalar_value_consts, target=params_sharding
+        )
 
         def value_fn(current_params, *, scalar_value_consts):
             return scalar_value(current_params, scalar_value_consts)
@@ -163,7 +166,9 @@ def run_optax_minimize(
 
         optax_step_args = ()
 
-    state = jax.device_put(jax.jit(transform.init)(params), params_sharding)
+    state = runtime_device_put_tree(
+        jax.jit(transform.init)(params), target=params_sharding
+    )
 
     nfev = 0
     njev = 0
@@ -278,7 +283,7 @@ def run_optimistix_minimize(
     callback: Callback | None,
 ) -> OptimizeResult:
     start = time.perf_counter()
-    params = jnp.asarray(jax.device_put(x0))
+    params = jnp.asarray(runtime_device_put_tree(x0))
     solver_tol = float(options.tol)
     scalar_value_fn, scalar_value_consts = _closure_converted_scalar_value(
         value_and_grad_fn,
@@ -302,7 +307,7 @@ def run_optimistix_minimize(
             max_steps=options.maxiter,
             throw=False,
         )
-    solution.value.block_until_ready()
+    block_until_ready(solution.value)
     value, grad = value_and_grad_fn(solution.value)
     value = jnp.asarray(value)
     grad = jnp.asarray(grad)

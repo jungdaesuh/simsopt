@@ -122,7 +122,7 @@ from .boozer_surface import (
     _BoozerPenaltyGeometry,
     _compute_label,
 )
-from simsopt_jax.geo.optimizers import optimizer as _optimizer_jax
+from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.label_constraints import compute_G_from_currents
 from simsopt_jax.geo._surface_stellsym import (
     compute_stellsym_mask_indices_for_grid as _compute_stellsym_mask_indices_for_grid,
@@ -180,6 +180,7 @@ def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
 
 __all__ = [
     "TraceableObjectiveCertifiedSeededValueAndGrad",
+    "TraceableObjectiveSession",
     "AreaJAX",
     "AspectRatioJAX",
     "BoozerAdjointLinearSolveError",
@@ -198,6 +199,7 @@ __all__ = [
     "make_traceable_objective",
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
+    "make_traceable_objective_session",
     "make_traceable_objective_solved_pair",
     "make_traceable_objective_value_and_grad",
     "make_traceable_solved_state_value_and_grad",
@@ -2040,7 +2042,7 @@ def _checked_boozer_linear_solve(adjoint_state, rhs, *, transpose):
             "cannot solve the inner linearization."
         )
     solution, status = solve_with_status(rhs)
-    if not _host_bool(_optimizer_jax._linear_solve_status_success(status)):
+    if not _host_bool(_linear_solve._linear_solve_status_success(status)):
         status_detail = _linear_solve_status_failure_detail(status)
         raise BoozerAdjointLinearSolveError(
             "Boozer adjoint linear solve failed on the JAX runtime-state path "
@@ -3232,6 +3234,7 @@ def compute_standard_surface_objective_gradients(
 from .surface_objectives_traceable import (
     TraceableObjectiveCertifiedSeededValueAndGrad as TraceableObjectiveCertifiedSeededValueAndGrad,
     TraceableObjectiveSeededValueAndGrad as TraceableObjectiveSeededValueAndGrad,
+    TraceableObjectiveSession as TraceableObjectiveSession,
     TraceableObjectiveSolvedPair as TraceableObjectiveSolvedPair,
     _TRACEABLE_EXACT_RESIDUAL_KEYS as _TRACEABLE_EXACT_RESIDUAL_KEYS,
     _TRACEABLE_INNER_OBJECTIVE_KEYS as _TRACEABLE_INNER_OBJECTIVE_KEYS,
@@ -3320,6 +3323,7 @@ from .surface_objectives_traceable import (
     make_traceable_objective_profile_suite as make_traceable_objective_profile_suite,
     make_traceable_objective_runtime_bundle as make_traceable_objective_runtime_bundle,
     make_traceable_objective_seeded_value_and_grad as make_traceable_objective_seeded_value_and_grad,
+    make_traceable_objective_session as make_traceable_objective_session,
     make_traceable_objective_solved_pair as make_traceable_objective_solved_pair,
     make_traceable_objective_value_and_grad as make_traceable_objective_value_and_grad,
     make_traceable_solved_state_value_and_grad as make_traceable_solved_state_value_and_grad,

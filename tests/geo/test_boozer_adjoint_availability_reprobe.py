@@ -17,7 +17,10 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-from simsopt_jax.geo.optimizers import optimizer as _optimizer
+from simsopt_jax.geo.optimizers import (
+    linear_solve as _linear_solve,
+    optimizer as _optimizer,
+)
 from simsopt_jax_adapters.geo import boozer_surface as _bsj
 
 
@@ -44,7 +47,7 @@ def test_reprobe_recovers_availability_when_flag_on(monkeypatch):
     """Flag on + eager failed + nonlinear converged + square J: the re-probe
     solves J^T x = grad via dense-LU, flips success to True, and returns the
     un-squared solution (verified against the dense oracle)."""
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
     jac = _wellconditioned_square(seed=1)
     n = jac.shape[0]
     grad = jnp.asarray(np.random.default_rng(2).standard_normal(n))
@@ -70,7 +73,7 @@ def test_reprobe_recovers_availability_when_flag_on(monkeypatch):
 def test_reprobe_inert_when_flag_off():
     """At the default (flag off) the re-probe is inert: it returns the eager
     result unchanged and does not run the dense-LU solver."""
-    assert _optimizer._EXACT_ADJOINT_DENSE_LU is False
+    assert _linear_solve._EXACT_ADJOINT_DENSE_LU is False
     jac = _wellconditioned_square(seed=3)
     n = jac.shape[0]
     grad = jnp.ones(n)
@@ -94,7 +97,7 @@ def test_reprobe_inert_when_flag_off():
 def test_reprobe_does_not_mask_nonlinear_failure(monkeypatch):
     """Even with the flag on and a recoverable Jacobian, the re-probe must NOT
     run when the nonlinear solve failed -- it never masks non-convergence."""
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
     jac = _wellconditioned_square(seed=4)
     n = jac.shape[0]
     grad = jnp.ones(n)
@@ -117,7 +120,7 @@ def test_reprobe_does_not_mask_nonlinear_failure(monkeypatch):
 def test_reprobe_skips_nonsquare_jacobian(monkeypatch):
     """A non-square Jacobian has no square J^T to factor; the re-probe skips it
     and leaves the eager (failed) result in place."""
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
     jac = jnp.asarray(np.random.default_rng(5).standard_normal((10, 12)))
     grad = jnp.ones(10)
     _solution, _status, success, backend = (
@@ -138,7 +141,7 @@ def test_reprobe_skips_nonsquare_jacobian(monkeypatch):
 def test_reprobe_inert_when_eager_already_succeeded(monkeypatch):
     """When the eager probe already succeeded the re-probe does nothing -- it is
     only a recovery path for the false-failure case."""
-    monkeypatch.setattr(_optimizer, "_EXACT_ADJOINT_DENSE_LU", True)
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", True)
     jac = _wellconditioned_square(seed=6)
     n = jac.shape[0]
     eager_solution = jnp.full(n, 3.0)

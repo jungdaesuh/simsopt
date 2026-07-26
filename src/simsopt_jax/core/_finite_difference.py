@@ -10,6 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import PartitionSpec as P
 
+from simsopt_jax.runtime.host_boundary import host_bool
+
 from ._math_utils import runtime_device_put as _runtime_device_put
 from ._math_utils import runtime_init_array as _runtime_init_array
 from ._math_utils import runtime_init_scalar as _runtime_init_scalar
@@ -60,10 +62,8 @@ def _step_vector(x_flat: jax.Array, abs_step: float, rel_step: float) -> jax.Arr
     rel_step_device = _runtime_init_scalar(rel_step, x_flat.dtype)
     abs_step_device = _runtime_init_scalar(abs_step, x_flat.dtype)
     steps = jnp.maximum(jnp.abs(x_flat) * rel_step_device, abs_step_device)
-    if not isinstance(x_flat, jax.core.Tracer) and bool(
-        np.any(
-            np.asarray(jax.device_get(steps == _runtime_init_scalar(0, steps.dtype)))
-        )
+    if not isinstance(x_flat, jax.core.Tracer) and host_bool(
+        jnp.any(steps == _runtime_init_scalar(0, steps.dtype))
     ):
         raise ValueError("Finite difference step size cannot be 0. Increase abs_step.")
     return steps

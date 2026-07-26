@@ -11,6 +11,7 @@ from scipy.optimize import least_squares
 from simsopt_jax.core._finite_difference import forward_jacobian_shard_map_columns
 from simsopt_jax.core._math_utils import runtime_device_put as _runtime_device_put
 from simsopt_jax.solve.serial import TraceableLeastSquaresProblem
+from simsopt_jax.runtime.host_boundary import host_array
 from simsopt.util.mpi import MPI, MpiPartition
 
 __all__ = [
@@ -68,8 +69,7 @@ def traceable_least_squares_mpi_jacobian(
                 diff_method,
                 mesh=mesh,
             )
-            with jax.transfer_guard_device_to_host("allow"):
-                local_columns_host = np.asarray(jax.device_get(local_columns))
+            local_columns_host = host_array(local_columns)
             local_columns_packet = (columns, local_columns_host)
         else:
             local_columns_packet = (
@@ -134,8 +134,7 @@ def least_squares_mpi_solve_jax(
         return
 
     def residuals(x):
-        with jax.transfer_guard_device_to_host("allow"):
-            return np.asarray(jax.device_get(prob.residuals(_runtime_device_put(x))))
+        return host_array(prob.residuals(_runtime_device_put(x)))
 
     def jacobian(x):
         mpi.comm_world.bcast(CALCULATE_JAX_JAC, root=0)
@@ -148,8 +147,7 @@ def least_squares_mpi_solve_jax(
             rel_step=rel_step,
             diff_method=diff_method,
         )
-        with jax.transfer_guard_device_to_host("allow"):
-            return np.asarray(jax.device_get(jac))
+        return host_array(jac)
 
     result = least_squares(
         residuals,

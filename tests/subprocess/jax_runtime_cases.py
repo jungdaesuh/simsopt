@@ -79,8 +79,10 @@ from simsopt_jax_adapters.geo.curve_objectives import (  # type: ignore[import-u
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier  # type: ignore[import-untyped]
 from simsopt_jax.geo.optimizers import optimizer as _optimizer_module  # type: ignore[import-untyped]
+from simsopt_jax.geo.optimizers._shared import (  # type: ignore[import-untyped]
+    mark_cacheable_jit_value_and_grad as _mark_cacheable_jit_value_and_grad,
+)
 from simsopt_jax.geo.optimizers.optimizer import (  # type: ignore[import-untyped]
-    _mark_cacheable_jit_value_and_grad,
     private_optimizer_runtime_is_supported,
     target_minimize,
 )

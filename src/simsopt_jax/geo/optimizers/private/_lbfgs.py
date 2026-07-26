@@ -10,6 +10,7 @@ import numpy as np
 from jax.extend import core as jax_core
 from jax.sharding import NamedSharding, PartitionSpec as P
 
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.runtime.host_boundary import (
     host_array,
     host_bool,
@@ -122,9 +123,9 @@ def _lbfgs_const_leaf_placement(reference_placement, leaf):
 def _device_put_lbfgs_consts(value_and_grad_consts, example_x):
     reference_placement = _lbfgs_const_placement(example_x)
     return jax.tree.map(
-        lambda leaf: jax.device_put(
+        lambda leaf: runtime_device_put_tree(
             leaf,
-            _lbfgs_const_leaf_placement(reference_placement, leaf),
+            target=_lbfgs_const_leaf_placement(reference_placement, leaf),
         ),
         value_and_grad_consts,
     )

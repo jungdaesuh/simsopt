@@ -8,6 +8,8 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.runtime.host_boundary import host_int
+
 from ._bounded_scan import bounded_scan_until_done as _bounded_scan_until_done
 from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import has_tracer_leaf as _has_tracer_leaf
@@ -455,7 +457,7 @@ def _concrete_steps_taken(value: jax.Array, function_name: str) -> int:
             f"state.steps_taken must be concrete when tracing {function_name} "
             "so restart capacity is checked before scan."
         )
-    return int(jax.device_get(value))
+    return host_int(value)
 
 
 def _validate_steps_taken_bounds(

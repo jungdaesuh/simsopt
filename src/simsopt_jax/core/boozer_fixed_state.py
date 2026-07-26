@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.runtime.host_boundary import host_tree
+
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from .boozer_radial_interp import (
     inverse_fourier_transform_even,
@@ -300,7 +302,7 @@ def boozer_radial_fixed_state_to_host(
     """Return a host-array restart payload for the private fixed-state spec."""
 
     leaves, treedef = jax.tree.flatten(spec)
-    host_leaves = [jax.device_get(leaf) for leaf in leaves]
+    host_leaves = host_tree(leaves)
     return {"treedef": treedef, "leaves": host_leaves}
 
 

@@ -17,6 +17,7 @@ from simsopt_jax.core._finite_difference import (
     forward_jacobian_shard_map,
     forward_jacobian_vmap,
 )
+from simsopt_jax.runtime.host_boundary import block_until_ready, host_array, host_float
 
 __all__ = [
     "TraceableEqualityConstrainedProblem",
@@ -143,9 +144,8 @@ def _write_log_row(
     objective_value: jax.Array,
 ) -> None:
     objective_file.write(f"{eval_index:6d},{elapsed_seconds:12.4e}")
-    with jax.transfer_guard_device_to_host("allow"):
-        x_host = np.ravel(np.asarray(jax.device_get(x)))
-        objective_host = float(jax.device_get(objective_value))
+    x_host = np.ravel(host_array(x))
+    objective_host = host_float(objective_value, dtype=objective_value.dtype)
     for value in x_host:
         objective_file.write(f",{value:24.16e}")
     objective_file.write(f",{objective_host:24.16e}\n")
@@ -193,9 +193,8 @@ def _write_constraint_row(
     constraint_value: jax.Array,
 ) -> None:
     constraint_file.write(f"{eval_index:6d},{elapsed_seconds:12.4e}")
-    with jax.transfer_guard_device_to_host("allow"):
-        x_host = np.ravel(np.asarray(jax.device_get(x)))
-        constraint_host = np.ravel(np.asarray(jax.device_get(constraint_value)))
+    x_host = np.ravel(host_array(x))
+    constraint_host = np.ravel(host_array(constraint_value))
     for value in x_host:
         constraint_file.write(f",{value:24.16e}")
     for value in constraint_host:
@@ -267,7 +266,7 @@ def least_squares_serial_solve_jax(
             throw=True,
         )
         final_x = solution.value
-        jax.block_until_ready(final_x)
+        block_until_ready(final_x)
         jax.effects_barrier()
 
     prob.x = final_x
@@ -315,7 +314,7 @@ def serial_solve_jax(
             throw=True,
         )
         final_x = solution.value
-        jax.block_until_ready(final_x)
+        block_until_ready(final_x)
         jax.effects_barrier()
 
     prob.x = final_x
@@ -422,7 +421,7 @@ def constrained_serial_solve_jax(
                     ),
                 )
 
-            jax.block_until_ready(current_x)
+            block_until_ready(current_x)
             jax.effects_barrier()
 
     prob.x = current_x

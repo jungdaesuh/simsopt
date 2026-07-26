@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 
-from simsopt_jax.core._math_utils import _explicit_device_array, runtime_device_put
+from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put
 from simsopt_jax.geo.optimizers._evaluation_provider import (
     TargetScipyDeviceEvaluation,
     TargetScipyDevicePacketLayout,
@@ -20,11 +20,13 @@ from simsopt_jax.geo.optimizers._evaluation_provider import (
     TargetScipyHostFinalizer,
     _require_host_numeric_leaf,
 )
+from simsopt_jax.runtime.host_boundary import host_array
 
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.10.0"
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
+_CACHEABLE_LINEAR_OPERATOR_ATTR = "_simsopt_cache_jit_linear_operator"
 
 
 _DecisionTreeT = TypeVar("_DecisionTreeT")
@@ -51,6 +53,26 @@ def _x64_enabled():
     return bool(jax.config.jax_enable_x64)
 
 
+def cast_floating_tree(tree, dtype):
+    """Cast floating array leaves while preserving discrete metadata."""
+    resolved_dtype = np.dtype(dtype)
+
+    def cast_leaf(leaf):
+        leaf_dtype = getattr(leaf, "dtype", None)
+        if leaf_dtype is not None and np.issubdtype(np.dtype(leaf_dtype), np.floating):
+            return jnp.asarray(leaf, dtype=resolved_dtype)
+        return leaf
+
+    return jax.tree.map(cast_leaf, tree)
+
+
+def mark_cacheable_jit_value_and_grad(fun):
+    """Mark a mutable callable for shared value/gradient and operator JIT caches."""
+    setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
+    setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
+    return fun
+
+
 def _optimizer_flat_vector(value, *, dtype=None) -> jax.Array:
     if isinstance(value, jax.Array):
         if dtype is None or value.dtype == dtype:
@@ -60,7 +82,7 @@ def _optimizer_flat_vector(value, *, dtype=None) -> jax.Array:
         return jnp.asarray(value, dtype=dtype)
     if dtype is None:
         dtype = np.asarray(value).dtype
-    return _explicit_device_array(value, dtype=dtype)
+    return explicit_device_array(value, dtype=dtype)
 
 
 def _optimizer_scalar(value, *, dtype) -> jax.Array:
@@ -85,7 +107,7 @@ def _optimizer_shape(value):
 
 def _hostify_optimizer_leaf(leaf):
     if isinstance(leaf, jax.Array):
-        array = np.asarray(jax.device_get(leaf))
+        array = host_array(leaf)
     elif isinstance(leaf, (np.ndarray, np.generic)) or np.isscalar(leaf):
         array = np.asarray(leaf)
     else:

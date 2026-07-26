@@ -130,6 +130,12 @@ def _make_qfm_inputs():
     return biotsavart, surface, dofs, _coil_set_spec(biotsavart)
 
 
+def test_qfm_limited_memory_optimizer_remains_fail_closed_without_crossover() -> None:
+    """R16: do not expose L-BFGS before a qualifying device-resident crossover."""
+    with pytest.raises(NotImplementedError, match="support optimizer='bfgs' only"):
+        qfm_solver_module._require_bfgs_optimizer("lbfgs")
+
+
 def _make_test_qfm_xyz_volume_case():
     _base_curves, _base_currents, magnetic_axis, nfp, biotsavart = get_data("ncsx")
     phis = np.linspace(0.0, 1.0 / nfp, 20, endpoint=False)

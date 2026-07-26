@@ -27,6 +27,7 @@ from simsopt_jax.geo.optimizer_host_lbfgs import (
     lbfgs_status_message,
     minimize_lbfgs_host_core,
 )
+from simsopt_jax.runtime.host_boundary import host_value
 from ._shared import (
     _optimizer_dtype,
     _optimizer_flat_vector,
@@ -520,8 +521,7 @@ def _materialize_target_scipy_evaluation(
             raise ValueError(
                 "Target SciPy device packet must share the decision vector device."
             )
-        with jax.transfer_guard_device_to_host("allow"):
-            host_packet = jax.device_get(evaluation.device_packet)
+        host_packet = host_value(evaluation.device_packet)
         with _target_scipy_host_extension_scope():
             host_evaluation = evaluation.finalize_host(
                 host_decision_vector,
@@ -529,11 +529,10 @@ def _materialize_target_scipy_evaluation(
                 device_layout,
             )
         return _require_host_resident_target_scipy_evaluation(host_evaluation)
-    with jax.transfer_guard_device_to_host("allow"):
-        host_value, host_gradient = jax.device_get(evaluation)
+    host_value_result, host_gradient = host_value(evaluation)
     return _require_host_resident_target_scipy_evaluation(
         _TargetScipyHostEvaluation(
-            value=host_value,
+            value=host_value_result,
             gradient=host_gradient,
         )
     )

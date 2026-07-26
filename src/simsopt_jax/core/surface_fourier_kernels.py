@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core._device_scalars import (
     staged_like as _staged_like,
     two_pi as _device_two_pi,
@@ -149,7 +150,7 @@ def _half(reference):
 
 def _mode_range(start, stop, *, dtype=jnp.float64):
     # Explicit unplaced put: guard-safe eagerly, constant-folded under jit.
-    return jax.device_put(np.arange(start, stop, dtype=np.float64).astype(dtype))
+    return explicit_device_array(np.arange(start, stop), dtype=dtype)
 
 
 def _selector_matrix(size, positions):

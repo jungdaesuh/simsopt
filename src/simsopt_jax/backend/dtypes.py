@@ -12,11 +12,14 @@ Ownership split:
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.sharding import Sharding
 
 from simsopt_jax.backend.runtime import (
     get_backend_policy,
@@ -41,6 +44,7 @@ __all__ = [
     "require_float64_dtype",
     "require_runtime_dtype",
     "runtime_device_put",
+    "runtime_device_put_tree",
     "runtime_dtype",
     "runtime_eye",
     "runtime_host_dtype",
@@ -48,6 +52,8 @@ __all__ = [
     "runtime_np_dtype",
     "runtime_zeros",
 ]
+
+_TreeT = TypeVar("_TreeT")
 
 _DTYPE_BY_NAME = {
     "float64": jnp.float64,
@@ -293,6 +299,22 @@ def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Ar
     )
 
 
+def runtime_device_put_tree(
+    value: _TreeT,
+    *,
+    target: jax.Device | Sharding | None = None,
+    device: jax.Device | Sharding | None = None,
+) -> _TreeT:
+    """Place every dynamic pytree leaf without changing leaf dtypes or structure."""
+    placement = _device_put_target(target, device)
+    maybe_initialize_distributed_jax()
+    if placement is None:
+        placement = get_runtime_jax_device()
+    if placement is None:
+        return jax.device_put(value)
+    return jax.device_put(value, placement)
+
+
 def _device_put_preserving_dtype(
     value,
     *,
@@ -409,11 +431,23 @@ def runtime_eye(n: int) -> jax.Array:
     return runtime_device_put(np.eye(int(n), dtype=runtime_np_dtype()))
 
 
-def explicit_device_array(value, *, dtype, reference=None) -> jax.Array:
-    """Place an explicitly typed value, optionally matching reference sharding."""
+def explicit_device_array(
+    value,
+    *,
+    dtype,
+    reference=None,
+    target=None,
+    device=None,
+) -> jax.Array:
+    """Place an exact-dtype array using one explicit or reference placement."""
+    if reference is not None and (target is not None or device is not None):
+        raise TypeError(
+            "explicit_device_array accepts reference or explicit target/device, not both."
+        )
     reference_placement = _reference_placement(reference, ndim=_value_ndim(value))
     return _device_put_preserving_dtype(
         value,
         dtype=dtype,
-        target=reference_placement,
+        target=reference_placement if reference is not None else target,
+        device=device,
     )
