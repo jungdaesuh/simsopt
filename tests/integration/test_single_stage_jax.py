@@ -1,9 +1,7 @@
 """JAX-only helper-path coverage for the single-stage objective stack.
 
 These tests deliberately avoid ``simsoptpp`` so they still collect in a
-JAX-only environment while the heavier CPU-reference integration suite in
-``test_single_stage_jax_cpu_reference.py`` stays gated on the compiled
-extension.
+JAX-only environment.
 """
 
 from __future__ import annotations
@@ -146,9 +144,7 @@ def test_split_x_inner_runtime_preserves_surface_iota_and_G(
     calls = {"count": 0}
     original_device_put = soj.jax.device_put
 
-    def _counting_device_put(
-        value: object, *args: object, **kwargs: object
-    ) -> object:
+    def _counting_device_put(value: object, *args: object, **kwargs: object) -> object:
         calls["count"] += 1
         return original_device_put(value, *args, **kwargs)
 

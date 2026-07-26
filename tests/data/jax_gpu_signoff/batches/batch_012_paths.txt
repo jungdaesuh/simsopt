@@ -1,8 +1,0 @@
-tests/integration/test_single_stage_jax_cpu_reference.py
-tests/integration/test_single_stage_physics_parity.py
-tests/integration/test_stage2_jax.py
-tests/integration/test_stage2_target_lane_purity.py
-tests/jax/core/test_analytic_fields_item11.py
-tests/jax/core/test_analytic_pure_fields_item12.py
-tests/jax/core/test_boozer_fixed_state_jax_item33.py
-tests/jax/core/test_boozer_interp_device_cache_and_regular_grid_fused.py

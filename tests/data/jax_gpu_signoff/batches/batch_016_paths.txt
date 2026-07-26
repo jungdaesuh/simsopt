@@ -1,8 +1,0 @@
-tests/jax/core/test_wireframe_item29.py
-tests/jax/core/test_wireframe_jax_item29.py
-tests/jax/solve/test_algorithm_change_gates.py
-tests/jax/solve/test_compat_shim_translation.py
-tests/jax/solve/test_deprecation_warnings.py
-tests/jax/solve/test_driver_dispatch.py
-tests/jax/solve/test_import_boundaries.py
-tests/jax/solve/test_optimizer_result_schema.py

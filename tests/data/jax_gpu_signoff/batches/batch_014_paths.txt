@@ -1,8 +1,0 @@
-tests/jax/core/test_pm_optimization_jax_item25.py
-tests/jax/core/test_points_coils_sharding.py
-tests/jax/core/test_regular_grid_interp_item13.py
-tests/jax/core/test_root.py
-tests/jax/core/test_sharding_helpers.py
-tests/jax/core/test_surface_seed_sharding.py
-tests/jax/core/test_tracing_jax_boozer_zeta_events.py
-tests/jax/core/test_tracing_jax_conservation.py

@@ -615,9 +615,9 @@ def surface_spec_kind(spec: SurfaceSpec) -> SurfaceSpecKind:
         "self_intersection_mode",
         "schema_version",
         "num_tf_coils",
-        "banana_curve_index",
+        "optimized_coil_index",
         "tf_current_A",
-        "banana_current_A",
+        "optimized_coil_current_A",
     ),
 )
 class SingleStageSeedSpec:
@@ -634,9 +634,9 @@ class SingleStageSeedSpec:
     self_intersection_mode: str
     schema_version: int
     num_tf_coils: int
-    banana_curve_index: int
+    optimized_coil_index: int
     tf_current_A: float
-    banana_current_A: float
+    optimized_coil_current_A: float
 
 
 @_register_jax_spec(
@@ -1385,9 +1385,9 @@ def make_single_stage_seed_spec(
     self_intersection_mode: str,
     schema_version: int,
     num_tf_coils: int,
-    banana_curve_index: int,
+    optimized_coil_index: int,
     tf_current_A: float,
-    banana_current_A: float,
+    optimized_coil_current_A: float,
 ) -> SingleStageSeedSpec:
     return SingleStageSeedSpec(
         surface=surface,
@@ -1403,9 +1403,9 @@ def make_single_stage_seed_spec(
         self_intersection_mode=str(self_intersection_mode),
         schema_version=int(schema_version),
         num_tf_coils=int(num_tf_coils),
-        banana_curve_index=int(banana_curve_index),
+        optimized_coil_index=int(optimized_coil_index),
         tf_current_A=float(tf_current_A),
-        banana_current_A=float(banana_current_A),
+        optimized_coil_current_A=float(optimized_coil_current_A),
     )
 
 

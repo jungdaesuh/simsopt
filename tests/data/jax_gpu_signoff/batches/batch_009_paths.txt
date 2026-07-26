@@ -1,4 +1,0 @@
-tests/geo/test_orientedcurve_jax_spec.py
-tests/geo/test_permanent_magnet_grid_jax_item27.py
-tests/geo/test_qfmsurface_jax.py
-tests/geo/test_surface_fourier_jax.py

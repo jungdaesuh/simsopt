@@ -1,6 +1,0 @@
-tests/core/test_derivative.py
-tests/core/test_jax_core_specs.py
-tests/core/test_load_specs.py
-tests/core/test_reductions.py
-tests/core/test_state_tokens.py
-tests/field/test_biotsavart_jax.py

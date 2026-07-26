@@ -1,5 +1,0 @@
-tests/geo/test_curve.py
-tests/geo/test_curve_objectives.py
-tests/geo/test_curve_objectives_jax.py
-tests/geo/test_curvexyzfouriersymmetries_spec_jax.py
-tests/geo/test_distance_jax.py
