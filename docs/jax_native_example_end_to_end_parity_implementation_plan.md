@@ -30,8 +30,9 @@ any parity claim is authoritative.
   convergence category, raw status, and work counters without requiring
   different algorithms to have identical trajectories.
 - Run the identical JAX case through `jax_cpu_parity` and `jax_gpu_parity`; the
-  GPU lane must use FP64, `SIMSOPT_JAX_TRANSFER_GUARD=disallow`, and no CPU
-  fallback.
+  GPU lane must use FP64, set both the SIMSOPT policy
+  `SIMSOPT_JAX_TRANSFER_GUARD=disallow` and JAX's effective
+  `JAX_TRANSFER_GUARD=disallow`, and permit no CPU fallback.
 - Preserve authentic RED -> GREEN -> REFACTOR receipts for each parity case and
   publish source/input/environment-bound JSON plus array sidecars.
 - Classify every ready JAX example-to-native-source relationship as `full`,
@@ -103,6 +104,13 @@ any parity claim is authoritative.
   those modules, fixture IDs, manifests, or artifacts exist.
 - The worktree contains unrelated modified and untracked files. Execution must
   preserve them and review only the parity-plan slice.
+- The expanded non-GPU parity suite was run during this documentation review:
+  51 tests passed and the surface-geometry final-parameter comparison failed
+  (`max_abs_diff=2.45719087e-06` versus the current whole-solve route). This is
+  implementation evidence, not a reason to weaken the central tolerance.
+  Surface geometry remains reduced and non-authoritative until its matched
+  workflow or equivalence contract passes through the normal RED -> GREEN
+  cycle.
 
 The lane semantics in this plan follow the official JAX configuration
 contracts: [`JAX_PLATFORMS`](https://docs.jax.dev/en/latest/config_options.html#platforms)
@@ -113,23 +121,27 @@ while explicit transfers remain available for result publication; and disabling
 [GPU preallocation](https://docs.jax.dev/en/latest/gpu_memory_allocation.html)
 changes allocation behavior and can increase fragmentation.
 
-### Initial parity classification target
+### Provisional parity classification
 
-The classification below is a planning hypothesis. Phase 1 tests the
-hypothesis against live public APIs before any row can be marked implemented.
+The classification below reflects the current uncommitted predecessor slice,
+not shipped behavior. Phase 0 must first land a clean prerequisite revision;
+Phase 1 then validates every relationship before any row or artifact becomes
+authoritative. The table shows one primary relationship per JAX lesson only;
+`parity_manifest.json` must still classify all 28 ready `inspired_by`
+relationships individually.
 
-| Ready JAX example | First matched native workflow | Intended level | Required initial/final evidence |
+| Ready JAX example | First matched native workflow | Provisional level | Required initial/final evidence |
 |---|---|---:|---|
 | `traceable-least-squares` | `1_Simple/just_a_quadratic.py` | full, bounded | residual, Jacobian, objective, gradient, parameters, status, counts |
 | `curve-length-optimization` | `1_Simple/minimize_curve_length.py` | full, bounded | length, gradient, parameters, objective, status, counts |
-| `surface-geometry-optimization` | `1_Simple/surf_vol_area.py` | full, bounded | area/volume residuals and Jacobian, parameters, status, counts |
-| `coil-flux-optimization` | `1_Simple/stage_two_optimization_minimal.py` | full, bounded subproblem | flux/penalties, gradient, current/curve parameters, status, counts |
-| `qfm-surface-optimization` | `1_Simple/qfm.py` | full if branch-stable | penalty/constraints, gradient/Jacobian, surface parameters, feasibility |
-| `permanent-magnet-optimization` | `1_Simple/permanent_magnet_simple.py` | full, deterministic reduced size | initial residual, selected moments, final residual, step/count metadata |
-| `fieldline-and-particle-tracing` | simple native tracing workflows | full physical trajectory case | initial field/RHS, event/status, final state, invariants; optimizer fields N/A |
-| `boozer-surface-optimization` | `2_Intermediate/boozer.py` | full if branch-stable | residual/Jacobian, iota/G/surface state, feasibility, status, counts |
-| `wireframe-optimization` | native RCLS and GSCO workflows | full, deterministic reduced size | matrices/constraints, solution, objective, feasibility, step/count metadata |
-| `coil-force-and-finite-build` | `3_Advanced/coil_forces.py` plus finite-build source | full fixed-state workflow | force objective/gradient/frame; optimizer outcome fields N/A |
+| `surface-geometry-optimization` | `1_Simple/surf_vol_area.py` | reduced, bounded | area/volume residuals and Jacobian, parameters, status, counts |
+| `coil-flux-optimization` | `1_Simple/stage_two_optimization_minimal.py` | reduced, bounded | flux/penalties, gradient, current/curve parameters, status, counts |
+| `qfm-surface-optimization` | `1_Simple/qfm.py` | reduced, bounded | penalty/constraints, gradient/Jacobian, surface parameters, feasibility |
+| `permanent-magnet-optimization` | `1_Simple/permanent_magnet_simple.py` | reduced, bounded | initial residual, selected moments, final residual, step/count metadata |
+| `fieldline-and-particle-tracing` | `1_Simple/tracing_fieldlines_NCSX.py` | reduced, bounded | initial field/RHS, event/status, final state, invariants; optimizer fields N/A |
+| `boozer-surface-optimization` | `2_Intermediate/QH_fixed_resolution_boozer.py` | reduced, bounded | residual/Jacobian, iota/G/surface state, feasibility, status, counts |
+| `wireframe-optimization` | `2_Intermediate/wireframe_gsco_modular.py` | reduced, bounded | matrices/constraints, solution, objective, feasibility, step/count metadata |
+| `coil-force-and-finite-build` | `2_Intermediate/strain_optimization.py` | reduced, bounded | force objective/gradient/frame; optimizer outcome fields N/A |
 
 Every additional native source named by a combined JAX lesson must receive a
 separate `full`, `reduced`, or `unsupported` relationship row. One successful
@@ -190,9 +202,13 @@ output (rejected).**
 - `parity_manifest.json` owns relationship classification, scale tier, cost
   tier, and the exact comparison routing keyed by phase, observable, and lane
   pair. Each route names applicability, comparator, and central tolerance
-  bucket. Native paths must already be present in the referenced example's
-  `inspired_by` list. Case implementations emit values for those declared
-  names but do not redefine policy.
+  bucket. It also owns the ordered scientific workflow stages covered by the
+  relationship and any scientific stages omitted by a reduced case; teaching
+  I/O and plotting exclusions are recorded separately. A `full` row may not
+  omit a scientific stage. Native paths must already be present in the
+  referenced example's `inspired_by` list. Case implementations emit values
+  and completed-stage receipts for those declared names but do not redefine
+  policy.
 - The case registry owns construction and execution of matched scientific
   problems.
 - The runner owns process isolation and artifact provenance.
@@ -248,15 +264,35 @@ schema that CI and reviewers may consume.
 
 ## Implementation Plan
 
+### TDD execution contract
+
+Every implementation slice below is executed in strict **RED -> GREEN ->
+REFACTOR** order. Acceptance criteria and test design may be written before a
+RED, but no production implementation for that slice may be added first.
+
+- An authentic RED is run against the immediate pre-GREEN revision and fails
+  for the intended missing behavior or injected defect, not for test
+  collection, an unavailable optional environment, or an unrelated failure.
+- The receipt records the pre-GREEN commit/tree identity, exact command,
+  expected failure, actual diagnostic, and exit status before implementation.
+- GREEN makes the smallest production change that passes that RED and the
+  affected regression suite. REFACTOR follows only while all GREEN tests stay
+  passing.
+- A test written after its production behavior already exists is regression
+  coverage, not an authentic RED, and cannot satisfy the TDD receipt gate.
+- Each case is promoted independently. A wave label controls dependency order;
+  it never authorizes one representative RED or GREEN for the whole wave.
+
 0. Establish the clean committed prerequisite baseline.
-   - [ ] Land or identify the predecessor revision that owns the intended ten
-     ready CPU/GPU examples, backend-neutral serial solver, lane manifest, and
-     focused tests. Do not include unrelated dirty-tree changes.
    - [ ] **RED:** On the committed baseline, require manifest tests to reject a
      ready example missing either required lane and solver tests to reject a
-     strict-GPU path that imports Optimistix, SciPy, or uses a host callback in
-     the numerical solve region.
-   - [ ] **GREEN:** Pass the existing manifest, example-runner, serial-solver,
+     strict-GPU default path that selects or executes Optimistix, Optax, SciPy,
+     or a host callback in the numerical solve region. Optional solver contract
+     imports and explicit opt-in drivers are not themselves failures.
+   - [ ] **GREEN:** Land or identify the predecessor revision that owns the
+     intended ten ready CPU/GPU examples, backend-neutral default serial
+     solver, lane manifest, and focused tests. Do not include unrelated
+     dirty-tree changes. Pass the manifest, example-runner, serial-solver,
      CPU-smoke, and real strict-GPU tests from a clean checkout; record the
      commit, resolved module paths, device, commands, and zero-skip results.
    - [ ] **REFACTOR:** Make the committed revision the sole baseline named by
@@ -264,34 +300,36 @@ schema that CI and reviewers may consume.
      non-authoritative.
 
 1. Define and RED-test the parity scope and classifications.
-   - [ ] Add `examples/jax/parity_manifest.json` with one row per ready JAX
-     example/native `inspired_by` relationship and fields:
-     `case_id`, `jax_example_id`, `native_source`, `classification`,
-     `classification_reason`, `scale_tier`, `oracle_kind`, `cost_tier`,
-     `comparison_routes`, and `correctness_tests`. Each comparison route is an
-     exact `(phase, observable, lane_pair) -> (applicability, comparator,
-     tolerance_bucket)` mapping.
-   - [ ] Use only `full`, `reduced`, and `unsupported` classifications.
-     `full`/`reduced` require a case ID; `unsupported` requires a concrete
-     blocker and must not name executable lanes.
    - [ ] **RED:** Extend `tests/test_jax_examples_manifest.py` or add
      `tests/test_jax_example_parity_manifest.py` to require every relationship
      implied by ready `manifest.json` records to have exactly one parity row.
    - [ ] **RED:** Reject unknown example IDs, native paths absent from the
      referenced `inspired_by`, duplicate relationships/case IDs, hard-coded
      numeric tolerances, missing test owners, invalid scale tiers, or `full`
-     rows with incomplete required observables.
-   - [ ] **GREEN:** Implement an immutable typed parser in
-     `examples/jax/parity/_manifest.py`; do not expand the public `src/` API.
-   - [ ] Review the initial classification table against live public native and
-     JAX APIs. Downgrade infeasible rows rather than creating a fake full case.
+     rows with incomplete required observables or scientific workflow stages.
+   - [ ] **GREEN:** Add `examples/jax/parity_manifest.json` with one row per
+     ready JAX example/native `inspired_by` relationship and fields:
+     `case_id`, `jax_example_id`, `native_source`, `classification`,
+     `classification_reason`, `scale_tier`, `oracle_kind`, `cost_tier`,
+     `workflow_stages`, `omitted_scientific_stages`,
+     `excluded_teaching_stages`, `comparison_routes`, and
+     `correctness_tests`. Each comparison route is an exact `(phase,
+     observable, lane_pair) -> (applicability, comparator, tolerance_bucket)`
+     mapping. Use only `full`, `reduced`, and `unsupported` classifications.
+     `full`/`reduced` require a case ID; `unsupported` requires a concrete
+     blocker and must not name executable lanes. Implement the immutable typed
+     parser in `examples/jax/parity/_manifest.py`; do not expand the public
+     `src/` API. Review the provisional table against live public native and
+     JAX APIs and downgrade infeasible rows rather than creating a fake full
+     case.
    - [ ] **REFACTOR:** Keep cross-manifest relationship validation in one
      function and preserve deterministic manifest order.
 
 2. Specify the canonical input bundle and result schema test-first.
-   - [ ] Add frozen typed contracts in `examples/jax/parity/contracts.py` for
-     `ParityInputMetadata`, `LaneResult`, `InitialStateResult`,
-     `FinalStateResult`, `ComparisonResult`, and `RunManifest`.
+   - [ ] **RED:** Add schema tests for missing fields, non-finite arrays, dtype
+     drift, inconsistent shapes, unknown schema versions, invalid normalized
+     status, sidecar hash mismatch, traversal/symlink escape, and a dirty source
+     mislabeled authoritative.
    - [ ] Define artifact schema v1 with required provenance: clean repository
      commit, Python/JAX/SIMSOPT versions, resolved source paths, device metadata,
      lane environment policy, case ID, native source, JAX example ID, random
@@ -301,8 +339,12 @@ schema that CI and reviewers may consume.
    - [ ] Bind every result to a sorted executed-source manifest containing the
      canonical path and Git blob ID or SHA-256 for the runner, case module,
      manifests/configuration, and transitive native/JAX project modules used by
-     the case. Validate the content hashes before comparison; a revision plus
-     resolved paths alone is insufficient.
+     the case. Each child snapshots the in-repository Python modules present in
+     `sys.modules` after its lane completes, resolves and contains their source
+     paths beneath the checkout, and hashes their executed bytes; the runner
+     and declarative manifests are added explicitly because they need not be
+     imported by every child. Validate the content hashes before comparison; a
+     revision plus resolved paths alone is insufficient.
    - [ ] When `simsoptpp` is loaded, record the resolved extension path,
      SHA-256 of the loaded shared object, package/build version metadata, and a
      compatibility receipt tying that binary to the committed checkout. Reject
@@ -321,19 +363,24 @@ schema that CI and reviewers may consume.
    - [ ] Normalize status to `converged`, `budget_exhausted`, `failed`, or
      `not_applicable` while preserving driver name, raw success/status/message,
      `nit`, `nfev`, and `njev`.
-   - [ ] **RED:** Add schema tests for missing fields, non-finite arrays, dtype
-     drift, inconsistent shapes, unknown schema versions, invalid normalized
-     status, sidecar hash mismatch, traversal/symlink escape, and a dirty source
-     mislabeled authoritative.
-   - [ ] **GREEN:** Implement serialization and validation without a new direct
+   - [ ] Each `LaneResult` records its ordered completed scientific stages; the
+     arbiter requires exact agreement with the relationship's declared stage
+     contract before comparing numerical observables.
+   - [ ] **GREEN:** Add frozen typed contracts in
+     `examples/jax/parity/contracts.py` for `ParityInputMetadata`, `LaneResult`,
+     `InitialStateResult`, `FinalStateResult`, `ComparisonResult`, and
+     `RunManifest`. Implement serialization and validation without a new direct
      dependency; use the standard library, NumPy, and existing project types.
    - [ ] **REFACTOR:** Centralize canonical JSON encoding, array fingerprinting,
      and source/environment provenance; no case may implement its own writer.
 
 3. Build byte-identical input generation and lane isolation.
-   - [ ] Add `examples/jax/parity/input_bundle.py` to create each canonical
-     bundle once from NumPy arrays/scalars and record dtype, shape, memory order,
-     and SHA-256 per leaf.
+   - [ ] **RED:** Mutate one parameter, quadrature point, seed, weight,
+     constraint, dtype, or stopping option and require the runner to fail before
+     scientific comparison with a field-specific fingerprint diagnostic.
+     Route each mutation through the real native and JAX case builders and
+     prove that the corresponding effective-construction receipt changes; this
+     catches ignored fields and default-option leakage.
    - [ ] Require all stochastic cases to use an explicit NumPy generator and
      named seed. Persist generated samples; native and JAX children must load
      them rather than regenerate them independently.
@@ -345,16 +392,12 @@ schema that CI and reviewers may consume.
      grids, weights, bounds, constraints, and effective stopping options. The
      arbiter compares this receipt with the canonical bundle; hashing the
      parent input alone is not proof that a lane consumed it.
-   - [ ] **RED:** Mutate one parameter, quadrature point, seed, weight,
-     constraint, dtype, or stopping option and require the runner to fail before
-     scientific comparison with a field-specific fingerprint diagnostic.
-     Route each mutation through the real native and JAX case builders and
-     prove that the corresponding effective-construction receipt changes; this
-     catches ignored fields and default-option leakage.
-   - [ ] **GREEN:** Add `native-cpu`, `jax-cpu`, and `jax-gpu` subprocess
-     environments in `examples/jax/parity/runtime.py`. Reuse the established
-     runtime-policy values from `run_examples.py` through one shared owner
-     rather than copying environment dictionaries.
+   - [ ] **GREEN:** Add `examples/jax/parity/input_bundle.py` to create each
+     canonical bundle once from NumPy arrays/scalars and record dtype, shape,
+     memory order, and SHA-256 per leaf. Add `native-cpu`, `jax-cpu`, and
+     `jax-gpu` subprocess environments in `examples/jax/parity/runtime.py`.
+     Reuse the established runtime-policy values from `run_examples.py` through
+     one shared owner rather than copying environment dictionaries.
    - [ ] Native CPU must resolve the current checkout and native SIMSOPT stack;
      JAX CPU/GPU must report `jax_cpu_parity`/`jax_gpu_parity`, FP64, and the
      expected platform. Strict GPU must disallow transfers and CPU fallback.
@@ -363,34 +406,34 @@ schema that CI and reviewers may consume.
      behavior remain unchanged.
 
 4. Implement the paired runner and fail-closed arbiter.
-   - [ ] Add `examples/jax/run_parity.py` with bounded options:
-     `--case`, `--lanes`, `--artifact-root`, and `--smoke`. Do not add arbitrary
-     command passthrough or per-case tolerance flags.
-   - [ ] Add a static typed case registry in
-     `examples/jax/parity/cases/__init__.py`. Do not use dynamic imports.
-   - [ ] Execute every lane in a fresh child process after its environment is
-     fixed and before JAX-heavy imports. Capture exact argv, stdout, stderr,
-     return code, elapsed time, and result paths.
-   - [ ] The arbiter must fail on missing lanes, nonzero children, malformed
-     results, input/config fingerprint mismatch, wrong source checkout, wrong
-     platform/precision/backend, non-finite required observables, unsupported
-     masquerading as pass, or any tolerance failure.
-   - [ ] Require direct `native-cpu` versus `jax-cpu` and direct `native-cpu`
-     versus `jax-gpu` comparisons for every applicable initial and final
-     observable. Also require `jax-cpu` versus `jax-gpu` as the device-parity
-     comparison. Passing two adjacent comparisons must never substitute for
-     the direct native/GPU gate.
-   - [ ] **RED:** Add injected-child tests covering every failure above plus
-     stable manifest ordering and exact bounded argv.
+   - [ ] **RED:** Add injected-child tests for missing lanes, nonzero children,
+     malformed results, input/config/effective-construction fingerprint drift,
+     wrong source checkout, wrong platform/precision/backend, non-finite
+     required observables, unsupported masquerading as pass, direct pairwise
+     tolerance failure, stable manifest ordering, and exact bounded argv.
+   - [ ] **RED:** Add concurrent-writer, interrupted-publication, existing-run,
+     and partial-artifact rejection tests.
    - [ ] **GREEN:** Implement deterministic aggregation and one summary JSON
      whose verdict is `pass` only when all required pairwise comparisons pass.
+     Add `examples/jax/run_parity.py` with only `--case`, `--lanes`,
+     `--artifact-root`, and `--smoke`; do not add arbitrary command passthrough
+     or per-case tolerance flags. Add a static typed registry in
+     `examples/jax/parity/cases/__init__.py`; do not use dynamic imports.
+     Execute every lane in a fresh child process after its environment is fixed
+     and before JAX-heavy imports, capturing exact argv, stdout, stderr, return
+     code, elapsed time, and result paths. The arbiter must fail on missing
+     lanes, nonzero children, malformed results, input/config fingerprint
+     mismatch, wrong source checkout, wrong platform/precision/backend,
+     non-finite required observables, unsupported masquerading as pass, or any
+     tolerance failure. Require direct `native-cpu` versus `jax-cpu`, direct
+     `native-cpu` versus `jax-gpu`, and `jax-cpu` versus `jax-gpu` comparisons
+     for every applicable initial and final observable; adjacent comparisons
+     never substitute for the direct native/GPU gate.
      Create each run with exclusive ownership beneath a unique
      `<UTC>-<nonce>.partial` directory, fsync required files, and atomically
      rename it to the final run ID only after validation, then fsync the parent
      directory. Never overwrite an existing run; retain a failed partial
      directory with an explicit failure marker for diagnosis.
-   - [ ] **RED:** Add concurrent-writer, interrupted-publication, existing-run,
-     and partial-artifact rejection tests.
    - [ ] **REFACTOR:** Keep subprocess mechanics independent from scientific
      comparison; the runner collects lane results and the arbiter compares them.
 
@@ -431,6 +474,10 @@ schema that CI and reviewers may consume.
      completed cases use the same objective convention; keep tests DAMP.
 
 6. Add final-outcome parity in dependency order.
+   - [ ] For each case, first add and execute a case-owned RED that fails on the
+     missing real native/JAX comparison or a scientifically meaningful injected
+     perturbation. Then implement that case's smallest GREEN, run its affected
+     regressions, and REFACTOR while green before starting the next case.
    - [ ] Wave A: traceable least-squares, curve length, and surface geometry.
      These establish scalar/least-squares result contracts and work-counter
      reporting with inexpensive deterministic fixtures.
@@ -459,10 +506,14 @@ schema that CI and reviewers may consume.
      implementation contract. Otherwise require finite nonnegative counts and
      report absolute/relative deltas as diagnostics with an explicitly approved
      bound if one is scientifically necessary.
-   - [ ] **RED -> GREEN -> REFACTOR:** Complete each case independently; do not
-     batch-promote a wave based on one representative example.
+   - [ ] Record each case's RED -> GREEN -> REFACTOR evidence independently; do
+     not batch-promote a wave based on one representative example.
 
 7. Add real CPU/GPU evidence and memory/transfer gates.
+   - [ ] **RED:** Prove strict GPU rejects a fabricated CPU result, a hidden
+     host optimizer, an optional optimizer selected as the parity default, and
+     a receipt that sets only the SIMSOPT policy without JAX's effective
+     transfer guard before accepting a CUDA receipt.
    - [ ] Run every full/reduced JAX case on CPU and a real CUDA device with the
      identical input bundle and configuration fingerprint.
    - [ ] Require FP64 arrays for parameters, residuals, objectives, gradients,
@@ -470,22 +521,29 @@ schema that CI and reviewers may consume.
    - [ ] Require strict transfer guarding during the numerical region and fail
      on host callbacks, hidden SciPy/native solvers, CPU fallback, skipped GPU
      execution, or wrong device metadata.
-   - [ ] Record peak host RSS and device memory as producer-observed diagnostics
-     for cases whose compiled solver state may scale quadratically. Synchronize
-     JAX work with `jax.block_until_ready` at declared measurement boundaries,
-     distinguish compile/warmup from steady-state execution, and add
-     shape-scaling tests for any case that materializes dense Jacobian/Hessian
-     state. These diagnostics do not support speed claims.
+   - [ ] Record peak host RSS and device memory as diagnostics for cases whose
+     compiled solver state may scale quadratically. Name the measurement owner
+     and method in the receipt: parent-observed child RSS and, only where the
+     CUDA backend exposes a validated per-process counter, device allocation.
+     Record device memory as `unavailable` rather than inventing a value when no
+     supported counter exists. Synchronize JAX work with
+     `jax.block_until_ready` at declared measurement boundaries, distinguish
+     compile/warmup from steady-state execution, and add shape-scaling tests for
+     any case that materializes dense Jacobian/Hessian state. These diagnostics
+     do not support speed claims.
    - [ ] Keep `XLA_PYTHON_CLIENT_PREALLOCATE=false` for measurement receipts;
      document production preallocation policy separately so memory diagnostics
      are not confused with the supported runtime default.
-   - [ ] **RED:** Prove strict GPU rejects a fabricated CPU result and a hidden
-     host optimizer before accepting a CUDA receipt.
    - [ ] **GREEN:** Publish real device metadata and zero-fallback receipts for
      all applicable cases.
 
 8. Integrate artifacts, documentation, and CI.
-   - [ ] Write local artifacts beneath
+   - [ ] **RED:** Add static workflow tests proving changes under parity
+     manifests/cases reach the named CPU and strict-GPU jobs and that CI invokes
+     the parity CLI rather than duplicating a case list. Add a narrow ignore
+     test that initially fails for a probe below
+     `.artifacts/jax-example-parity/`.
+   - [ ] **GREEN:** Write local artifacts beneath
      `.artifacts/jax-example-parity/<UTC-run-id>/` and keep generated data out of
      Git. Upload selected JSON/NPY artifacts through CI with a retention policy.
    - [ ] Add only `.artifacts/jax-example-parity/` to `.gitignore`; do not
@@ -497,12 +555,17 @@ schema that CI and reviewers may consume.
    - [ ] Extend `examples/jax/README.md` with the parity command, classification
      semantics, artifact layout, and the distinction between native
      Python/SciPy, `simsoptpp`, analytic, and external oracles.
-   - [ ] Add CPU Wave A to `.github/workflows/jax_smoke.yml`. Add strict-GPU
-     Wave A to its existing GPU job only after bounded runtime is measured.
-     Route expensive later waves to scheduled/manual CI when required.
-   - [ ] Add static workflow tests proving changes under parity manifests/cases
-     reach the intended CPU/GPU jobs and that CI contains commands rather than a
-     duplicate case list.
+   - [ ] Add CPU Wave A to the `jax-public-integration` job in
+     `.github/workflows/jax_smoke.yml`. Add strict-GPU Wave A to that workflow's
+     `jax-gpu-strict-purity` job only after bounded runtime is measured. Ensure
+     the workflow is exercised by its pull-request targets or an explicit
+     manual trigger before treating it as evidence.
+   - [ ] Route expensive later waves only to a named scheduled/manual CUDA job
+     that uses FP64, both effective transfer-guard settings at `disallow`,
+     zero-skip/no-fallback checks, and artifact upload. The current
+     `.github/workflows/jax_gpu_parity.yml` log-guard job is diagnostic and may
+     not produce authoritative strict-parity evidence unless upgraded to this
+     contract.
    - [ ] Preserve RED/GREEN/REFACTOR commands, source hashes, artifact hashes,
      device identity, and exact pass/fail counts in
      `docs/jax_examples_tdd_receipts.md` or a dedicated parity receipt file.
@@ -529,7 +592,11 @@ schema that CI and reviewers may consume.
   ```console
   MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
     tests/test_jax_example_parity_manifest.py \
-    tests/integration/test_jax_example_parity_runner.py
+    tests/integration/test_jax_example_parity_artifacts.py \
+    tests/integration/test_jax_example_parity_inputs.py \
+    tests/integration/test_jax_example_parity_publication.py \
+    tests/integration/test_jax_example_parity_runner.py \
+    tests/integration/test_jax_example_parity_runtime.py
   ```
 
 - [ ] Existing manifest/runner compatibility:
@@ -577,9 +644,12 @@ schema that CI and reviewers may consume.
   ```
 
 - [ ] Artifact audit verifies every required lane, exact input/config
-  fingerprint agreement, source path/revision, FP64/device metadata, sidecar
-  SHA-256, path containment, authoritative-source status, observable
-  applicability, tolerance result, and final verdict.
+  and effective-construction fingerprint agreement, completed scientific
+  stages, source path/revision and executed-source hashes, any loaded
+  `simsoptpp` binary hash/compatibility receipt, FP64/device and effective
+  transfer-guard metadata, sidecar SHA-256, path containment,
+  authoritative-source status, observable applicability, tolerance result, and
+  final verdict.
 - [ ] Run focused native/JAX subsystem tests named by each case, including
   curve/surface objectives, Biot-Savart/flux, QFM, permanent magnets, tracing,
   Boozer, wireframe, force, and finite-build coverage.
@@ -590,10 +660,10 @@ schema that CI and reviewers may consume.
   ```console
   python -m ruff check examples/jax/parity examples/jax/run_parity.py \
     tests/test_jax_example_parity_manifest.py \
-    tests/integration/test_jax_example_parity_runner.py
+    tests/integration/test_jax_example_parity_*.py
   python -m ruff format --check examples/jax/parity examples/jax/run_parity.py \
     tests/test_jax_example_parity_manifest.py \
-    tests/integration/test_jax_example_parity_runner.py
+    tests/integration/test_jax_example_parity_*.py
   python -m compileall -q examples/jax/parity examples/jax/run_parity.py
   ```
 
@@ -607,8 +677,14 @@ schema that CI and reviewers may consume.
   ```console
   ! rg -n 'examples\.jax\.parity|from examples|import examples' \
     src/simsopt src/simsopt_jax src/simsopt_jax_adapters
-  ! rg -n 'scipy\.optimize' examples/jax/parity/cases --glob '*.py'
+  git check-ignore -q --no-index \
+    .artifacts/jax-example-parity/probe/summary.json
   ```
+
+  Native case functions may import SciPy. A lane-aware behavioral test must
+  instead prove that `jax-cpu` and `jax-gpu` cannot select or execute SciPy,
+  native callbacks, Optimistix, or Optax as the parity-default numerical path;
+  a blanket source search over mixed native/JAX case modules is invalid.
 
 - [ ] Stage only the reviewed approved-path set, then run both
   `git diff --check` and `git diff --cached --check`; inspect
@@ -685,6 +761,9 @@ schema that CI and reviewers may consume.
   validated `full`, `reduced`, or `unsupported` parity classification.
 - [ ] Every `full` case proves byte-identical inputs and configuration across
   native CPU, JAX CPU, and applicable JAX GPU lanes.
+- [ ] Every `full` relationship has a complete declared scientific-stage list,
+  no omitted scientific stage, and matching completed-stage receipts from all
+  required lanes; reduced and teaching-only exclusions remain explicit.
 - [ ] Every applicable case passes required initial objective/residual,
   gradient/Jacobian, and constraint comparisons through centrally owned
   tolerances.
@@ -695,7 +774,8 @@ schema that CI and reviewers may consume.
   endpoint/invariant or objective/gradient contract with optimizer fields
   explicitly marked not applicable.
 - [ ] All ready applicable JAX cases pass on a real CUDA device in FP64 with
-  strict transfer guarding and no CPU fallback or hidden host solver.
+  both effective transfer-guard settings at `disallow` and no CPU fallback or
+  hidden host solver.
 - [ ] Aggregate JSON and NPY sidecars are source/input/environment hash-bound,
   schema-valid, and sufficient for an independent reviewer to reproduce every
   verdict.
