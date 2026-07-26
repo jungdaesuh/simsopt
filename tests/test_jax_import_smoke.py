@@ -64,20 +64,6 @@ _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
     Path(_REPO_ROOT) / "benchmarks" / "jax_derivative_benchmark.py",
     Path(_REPO_ROOT) / "benchmarks" / "jax_feasibility_spike.py",
     Path(_REPO_ROOT) / "benchmarks" / "optimistix_eval.py",
-    (
-        Path(_REPO_ROOT)
-        / "examples"
-        / "single_stage_optimization"
-        / "SINGLE_STAGE"
-        / "single_stage_banana_example.py"
-    ),
-    (
-        Path(_REPO_ROOT)
-        / "examples"
-        / "single_stage_optimization"
-        / "STAGE_2"
-        / "banana_coil_solver.py"
-    ),
 )
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",

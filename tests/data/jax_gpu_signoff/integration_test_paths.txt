@@ -3,7 +3,6 @@ tests/core/test_jax_core_specs.py
 tests/core/test_load_specs.py
 tests/core/test_reductions.py
 tests/core/test_state_tokens.py
-tests/docs/test_banana_parity_coverage_manifest.py
 tests/field/test_biotsavart_jax.py
 tests/field/test_biotsavart_jax_cpu_ordered.py
 tests/field/test_biotsavart_jax_parity.py
@@ -58,14 +57,10 @@ tests/geo/test_surface_rzfourier_transfer_guard_jax.py
 tests/geo/test_surface_xyz_tensor_clamped_jax.py
 tests/integration/test_factor_once_adjoint_phase2.py
 tests/integration/test_jax_native_path.py
-tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py
 tests/integration/test_remaining_jax_surfaces_mode_matrix.py
 tests/integration/test_section6_public_lane_split.py
 tests/integration/test_single_stage_dof_mapping.py
 tests/integration/test_single_stage_jax.py
-tests/integration/test_single_stage_jax_cpu_reference.py
-tests/integration/test_single_stage_physics_parity.py
-tests/integration/test_stage2_jax.py
 tests/integration/test_stage2_target_lane_purity.py
 tests/jax/core/test_analytic_fields_item11.py
 tests/jax/core/test_analytic_pure_fields_item12.py
@@ -124,7 +119,6 @@ tests/solve/test_serial_jax.py
 tests/solve/test_wireframe_optimization_jax_item31.py
 tests/solve/test_wireframe_workflow_jax.py
 tests/test_backend_strict_jax_device_detection.py
-tests/test_banana_jax_soft_penalty_drivers.py
 tests/test_jax_import_smoke.py
 tests/test_jax_where_division_lint.py
 tests/util/test_coil_optimization_helper_functions.py

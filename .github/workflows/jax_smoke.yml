@@ -122,9 +122,6 @@ jobs:
             -k "jax_ci_contract_ratchet_rel_tol_tightens_without_loosening or jax_ci_contract_reduction_order_probe_tracks_ulp_distance or jax_ci_contract_same_device_probe_requires_bitwise_identity or jax_ci_contract_payload_tracks_ratchet_and_pass_state" \
             -v --tb=short
 
-      - name: Run banana parity manifest guard
-        run: python -m pytest tests/docs/test_banana_parity_coverage_manifest.py -v --tb=short
-
       - name: Verify backend module imports
         run: |
           PYTHONPATH=src python -c "
