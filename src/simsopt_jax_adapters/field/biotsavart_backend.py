@@ -2,7 +2,8 @@
 
 ``BiotSavartJAX`` participates in the ``Optimizable`` dependency graph
 through its coil list while computing the magnetic field via the pure
-JAX kernels in :mod:`simsopt_jax.field.biotsavart`.
+JAX elemental kernels in :mod:`simsopt_jax.core.biotsavart` and the
+grouped dispatchers in :mod:`simsopt_jax.core.field`.
 
 This module does **not** inherit from ``sopp.BiotSavart`` or
 ``sopp.MagneticField`` — it is a parallel JAX-native class per the
@@ -39,7 +40,6 @@ from simsopt_jax.core import (
     curve_spec_kind,
     curve_spec_with_dofs,
     make_coil_dof_extraction_spec,
-    make_biot_savart_spec,
     make_coil_set_dof_extraction_spec,
     make_optimizable_dof_map_spec,
 )
@@ -82,7 +82,6 @@ from simsopt_jax.core.specs import (
     CurveSpec,
     FieldEvalSpec,
     GroupedCoilSetSpec,
-    SingleStageRuntimeSpec,
     make_field_eval_spec,
     make_grouped_coil_set_spec,
 )
@@ -144,7 +143,6 @@ def _place_array_tree_on_device(tree, device):
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartFieldPullback",
-    "SingleStageRuntimeSpecBiotSavartJAX",
     "SpecBackedBiotSavartJAX",
     "SpecBackedCoil",
     "SpecBackedCurve",
@@ -1033,19 +1031,6 @@ class SpecBackedBiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     def save(self, _path: object) -> None:
         raise RuntimeError("JAX runtime seed specs split runtime from host export.")
-
-
-class SingleStageRuntimeSpecBiotSavartJAX(SpecBackedBiotSavartJAX):
-    """Biot-Savart adapter whose source of truth is a runtime seed spec."""
-
-    def __init__(self, runtime_spec: SingleStageRuntimeSpec) -> None:
-        self.runtime_spec = runtime_spec
-        super().__init__(
-            make_biot_savart_spec(
-                coil_dof_extraction=runtime_spec.seed.coil_dof_extraction,
-                coil_dofs=runtime_spec.seed.coil_dofs,
-            )
-        )
 
 
 def _supports_native_curve_geometry(curve):

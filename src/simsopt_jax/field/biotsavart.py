@@ -1,14 +1,11 @@
 """Compatibility shim for the pure JAX Biot-Savart kernels.
 
-The implementation lives in ``simsopt_jax.core.biotsavart``.
-This file preserves the historical import contract.
+Elemental kernels live in ``simsopt_jax.core.biotsavart`` and grouped dispatch
+lives in ``simsopt_jax.core.field``. This file preserves the historical import
+contract.
 """
 
 from simsopt_jax.core.biotsavart import (
-    _biot_savart_A_integrand,
-    _biot_savart_B_integrand,
-    _one_point_dense,
-    _read_tuning_config,
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
@@ -18,16 +15,11 @@ from simsopt_jax.core.biotsavart import (
     biot_savart_d2A_by_dXdX,
     biot_savart_d2B_by_dXdX,
     group_coil_data,
-    grouped_biot_savart_A,
-    grouped_biot_savart_B,
     invalidate_kernel_cache,
 )
+from simsopt_jax.core.field import grouped_biot_savart_A, grouped_biot_savart_B
 
 __all__ = (
-    "_biot_savart_A_integrand",
-    "_biot_savart_B_integrand",
-    "_one_point_dense",
-    "_read_tuning_config",
     "biot_savart_A",
     "biot_savart_B",
     "biot_savart_B_and_dB",

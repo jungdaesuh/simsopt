@@ -31,8 +31,7 @@ from .biotsavart import (
     group_coil_data,
 )
 from .biotsavart_online import (
-    flatten_grouped_biot_savart_sources,
-    mixed_biot_savart_B_online,
+    mixed_grouped_biot_savart_B_online,
 )
 from .sharding import (
     _should_shard_points,
@@ -69,8 +68,10 @@ __all__ = [
     "coil_set_spec_from_dof_extraction_spec",
     "coil_specs_from_dof_extraction_spec",
     "grouped_coil_set_spec_from_coil_specs",
+    "grouped_biot_savart_A",
     "grouped_biot_savart_A_from_inputs",
     "grouped_biot_savart_A_from_spec",
+    "grouped_biot_savart_B",
     "grouped_biot_savart_B_and_dB_from_spec",
     "grouped_biot_savart_B_from_inputs",
     "grouped_biot_savart_B_from_spec",
@@ -437,11 +438,9 @@ def _mixed_online_grouped_biot_savart_B(
     points: object,
     coil_arrays: tuple[tuple[object, object, object], ...],
 ):
-    source_positions, source_vectors = flatten_grouped_biot_savart_sources(coil_arrays)
-    return mixed_biot_savart_B_online(
+    return mixed_grouped_biot_savart_B_online(
         points,
-        source_positions,
-        source_vectors,
+        coil_arrays,
         source_tile_size=(get_field_kernel_tuning().mixed_biot_savart_source_tile_size),
     )
 
@@ -745,6 +744,11 @@ def grouped_biot_savart_B_from_inputs(points: object, coil_arrays: object):
     )
 
 
+def grouped_biot_savart_B(points: object, coil_arrays: object):
+    """Compatibility name for the canonical grouped ``B`` dispatcher."""
+    return grouped_biot_savart_B_from_inputs(points, coil_arrays)
+
+
 def grouped_biot_savart_A_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_A)
 
@@ -754,6 +758,11 @@ def grouped_biot_savart_A_from_inputs(points: object, coil_arrays: object):
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
     )
+
+
+def grouped_biot_savart_A(points: object, coil_arrays: object):
+    """Compatibility name for the canonical grouped ``A`` dispatcher."""
+    return grouped_biot_savart_A_from_inputs(points, coil_arrays)
 
 
 def grouped_biot_savart_dA_by_dX_from_spec(
