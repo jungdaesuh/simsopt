@@ -42,6 +42,7 @@ from simsopt_jax.solve.serial import (
 )
 from simsopt_jax.solve.simsopt.contracts import (
     SimsoptBFGSOptions,
+    SimsoptLBFGSBOptions,
     SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
 )
@@ -281,6 +282,25 @@ def test_serial_solve_jax_matches_host_general_quadratic_problem():
         objectives = [float(row["objective_function"]) for row in rows]
         assert objectives[0] > objectives[-1]
         assert min(objectives) <= 1e-16
+
+
+def test_serial_solve_jax_supports_simsopt_owned_limited_memory_driver():
+    """Fast scalar lanes can opt into the SIMSOPT-owned O(n) history solver."""
+    with ScratchDir("."):
+        problem = TraceableScalarProblem(
+            objective_fn=lambda x: jnp.sum((x - jnp.array([1.5, -0.5])) ** 2),
+            x=jnp.array([0.0, 0.0], dtype=jnp.float64),
+        )
+        result = serial_solve_jax(
+            problem,
+            driver=Driver.SIMSOPT_LBFGSB,
+            max_steps=64,
+        )
+
+        np.testing.assert_allclose(problem.x, np.array([1.5, -0.5]), atol=1.0e-10)
+        assert result.driver == Driver.SIMSOPT_LBFGSB
+        assert isinstance(result.options_used, SimsoptLBFGSBOptions)
+        assert result.success is True
 
 
 def test_serial_solve_jax_forwards_relative_step_tolerance():
