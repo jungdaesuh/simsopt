@@ -697,7 +697,7 @@ RED, but no production implementation for that slice may be added first.
 5. Establish initial-state parity before any solve comparison.
    - [x] For each case, evaluate native CPU and JAX at the exact serialized
      initial parameters before invoking a solver or integrator.
-   - [ ] Least-squares cases must record residual vector `r`, public objective
+   - [x] Least-squares cases must record residual vector `r`, public objective
      `objective_sum_squares = r.T @ r`, residual Jacobian `J`, and public
      objective gradient `objective_gradient = 2 * J.T @ r`. Record a solver's
      half-squared `solver_cost = 0.5 * r.T @ r` separately when available; never
@@ -762,7 +762,7 @@ RED, but no production implementation for that slice may be added first.
      normalized and raw status, driver, and work counters. Candidate QFM omits
      `nfev` and `njev`; least-squares cases also omit the separately promised
      half-squared `solver_cost` where available.
-   - [ ] Apply the manifest's typed final comparison routes to every applicable
+   - [x] Apply the manifest's typed final comparison routes to every applicable
      lane pair. Each route specifies vector/scalar/constraint comparator and
      central tolerance bucket. For a case with non-unique minimizers, compare a
      declared equivalence invariant or quotient representation rather than raw
@@ -1061,27 +1061,27 @@ RED, but no production implementation for that slice may be added first.
     - [x] **REFACTOR:** Keep feasibility/status semantics, route completeness,
       and input-bundle validation in their existing single owners. Do not add
       case-local thresholds or a second audit-only comparison policy.
-    - [ ] **RED:** Add a deterministic publish-time interleaving test that
+    - [x] **RED:** Add a deterministic publish-time interleaving test that
       creates an empty final directory or symlink after the initial destination
       check but before publication. It must demonstrate that the candidate's
       check-then-`Path.rename()` can replace an existing empty destination.
-    - [ ] **GREEN:** Replace check-then-rename with a logical-publication
+    - [x] **GREEN:** Replace check-then-rename with a logical-publication
       protocol that reserves the final run directory exclusively, never
       replaces it, and exposes the run to readers only after an atomically
       created completion marker. Fsync the completed tree, marker, final
       directory, and parent in durability order. A colliding writer must fail
       without modifying either writer's bytes.
-    - [ ] **RED:** Add deterministic read and write tests that replace a checked
+    - [x] **RED:** Add deterministic read and write tests that replace a checked
       path component or leaf with a symlink between validation and open. Prove
       the candidate pathname-based `_contained_path()` followed by `open()` or
       `np.load()` can access a substituted external file.
-    - [ ] **GREEN:** Traverse artifact directories relative to trusted directory
+    - [x] **GREEN:** Traverse artifact directories relative to trusted directory
       descriptors with no-follow semantics. Open each leaf once with the
       appropriate no-follow and exclusive-create flags, and hash, serialize, or
       load through that same descriptor. Do not validate one pathname and later
       reopen it by name. Fail explicitly on platforms that cannot enforce the
       contract rather than silently weakening it.
-    - [ ] **REFACTOR:** Centralize the descriptor-safe filesystem operations and
+    - [x] **REFACTOR:** Centralize the descriptor-safe filesystem operations and
       logical-publication protocol; keep artifact serialization, publication,
       and audit readers on the same primitive. Run concurrent stress tests only
       as supplementary evidence after the deterministic interleavings pass.

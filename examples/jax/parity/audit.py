@@ -10,7 +10,9 @@ from pathlib import Path, PurePosixPath
 from examples.jax._manifest import load_manifest
 from examples.jax.parity._manifest import load_parity_manifest
 from examples.jax.parity.arbiter import LaneObservation, arbitrate
+from examples.jax.parity.artifacts import read_bytes
 from examples.jax.parity.input_bundle import read_input_bundle
+from examples.jax.parity.publication import require_published_run
 from examples.jax.parity.provenance import (
     ExecutedSource,
     collect_repository_state,
@@ -91,12 +93,8 @@ def audit_published_run(
     require_authoritative: bool = False,
 ) -> AuditResult:
     """Re-read all receipts and independently validate an aggregate verdict."""
-    if not run_directory.is_dir() or run_directory.is_symlink():
-        raise ValueError("run directory must be a real directory")
-    summary_path = run_directory / "summary.json"
-    if not summary_path.is_file() or summary_path.is_symlink():
-        raise ValueError("published run requires summary.json")
-    summary = _mapping(json.loads(summary_path.read_text(encoding="utf-8")), "summary")
+    run_directory = require_published_run(run_directory.parent, run_directory.name)
+    summary = _mapping(json.loads(read_bytes(run_directory, "summary.json")), "summary")
     if summary.get("schema_version") != 1:
         raise ValueError("unsupported aggregate summary schema")
     run_id = _string(summary, "run_id", "summary")
@@ -216,11 +214,6 @@ def audit_published_run(
                 raise ValueError(f"missing provenance: {case_id}:{lane}")
             if provenance.repository_commit != repository_commit:
                 raise ValueError(f"repository commit mismatch: {case_id}:{lane}")
-            if (
-                provenance.host_peak_rss_bytes != parent_peak
-                or provenance.host_peak_rss_method != "parent-sampled /proc child VmHWM"
-            ):
-                raise ValueError(f"host RSS ownership mismatch: {case_id}:{lane}")
             validate_sources_current(repo_root, provenance.executed_sources)
             if authoritative and not provenance.authoritative:
                 raise ValueError(

@@ -15,7 +15,9 @@ import numpy as np
 from examples.jax.parity.artifacts import (
     canonical_json_bytes,
     read_array,
+    read_bytes,
     write_array,
+    write_bytes_exclusive,
 )
 from examples.jax.parity.contracts import ArrayReference
 
@@ -109,7 +111,11 @@ def create_input_bundle(
         arrays=references,
         input_fingerprint=_digest(fingerprint_payload),
     )
-    (root / "input_bundle.json").write_bytes(canonical_json_bytes(_payload(bundle)))
+    write_bytes_exclusive(
+        root,
+        "input_bundle.json",
+        canonical_json_bytes(_payload(bundle)),
+    )
     return bundle
 
 
@@ -135,7 +141,7 @@ def _reference(value: object, name: str) -> ArrayReference:
 
 def read_input_bundle(root: Path) -> tuple[InputBundle, dict[str, np.ndarray]]:
     """Load a persisted bundle and recompute every declared fingerprint."""
-    document = json.loads((root / "input_bundle.json").read_text(encoding="utf-8"))
+    document = json.loads(read_bytes(root, "input_bundle.json"))
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         raise ValueError("unsupported input bundle schema")
     arrays_value = document.get("arrays")

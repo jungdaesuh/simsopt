@@ -8,7 +8,13 @@ import json
 from pathlib import Path
 
 from examples.jax.parity.arbiter import LaneObservation
-from examples.jax.parity.artifacts import canonical_json_bytes, read_array, write_array
+from examples.jax.parity.artifacts import (
+    canonical_json_bytes,
+    read_array,
+    read_bytes,
+    write_array,
+    write_bytes_exclusive,
+)
 from examples.jax.parity.contracts import ArrayReference
 from examples.jax.parity.provenance import (
     lane_provenance_from_payload,
@@ -80,7 +86,7 @@ def write_lane_observation(root: Path, observation: LaneObservation) -> Path:
         },
     }
     receipt = root / "lane_result.json"
-    receipt.write_bytes(canonical_json_bytes(payload))
+    write_bytes_exclusive(root, receipt.name, canonical_json_bytes(payload))
     return receipt
 
 
@@ -159,7 +165,7 @@ def _applicability(document: dict[str, object]) -> dict[str, bool]:
 
 def load_lane_observation(root: Path) -> LaneObservation:
     """Load a lane receipt after validating schema and every sidecar."""
-    raw_document = json.loads((root / "lane_result.json").read_text(encoding="utf-8"))
+    raw_document = json.loads(read_bytes(root, "lane_result.json"))
     if not isinstance(raw_document, dict) or not all(
         isinstance(key, str) for key in raw_document
     ):

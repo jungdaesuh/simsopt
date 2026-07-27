@@ -19,7 +19,7 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
 from examples.jax._manifest import load_manifest
 from examples.jax.parity._manifest import load_parity_manifest
 from examples.jax.parity.arbiter import arbitrate
-from examples.jax.parity.artifacts import canonical_json_bytes
+from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
 from examples.jax.parity.cases import get_case, implemented_case_ids
 from examples.jax.parity.provenance import (
     REQUIRED_PROVENANCE_SOURCE_PATHS,
@@ -251,7 +251,9 @@ def main(argv: list[str] | None = None) -> int:
             case_summary["authoritative"] for case_summary in summaries
         )
         summary_path = paths.partial / "summary.json"
-        summary_path.write_bytes(
+        write_bytes_exclusive(
+            paths.partial,
+            summary_path.name,
             canonical_json_bytes(
                 {
                     "schema_version": 1,
@@ -270,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                     "verdict": verdict,
                     "cases": summaries,
                 }
-            )
+            ),
         )
         if verdict != "pass":
             mark_run_failed(paths, "one or more parity comparisons failed")
