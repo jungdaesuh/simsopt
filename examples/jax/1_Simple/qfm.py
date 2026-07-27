@@ -17,7 +17,7 @@ import numpy as np
 from simsopt.configs.zoo import get_data
 from simsopt.geo import SurfaceRZFourier
 from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
-from simsopt_jax.examples import MirrorResult, run_mirror
+from simsopt_jax.examples import ExampleResult, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.qfm_surface import QfmSurfaceJAX
 
@@ -87,7 +87,7 @@ def _solve_stage(
     )
 
 
-def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
+def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     surface, field = _build_surface()
     initial_parameters = np.asarray(surface.get_dofs(), dtype=np.float64)
     volume = Volume(surface)
@@ -127,7 +127,7 @@ def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
         and final_qfm < initial_qfm
         and final_constraint <= 1.0e-10
     )
-    return MirrorResult(
+    return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
             "initial_parameters": tuple(float(value) for value in initial_parameters),
@@ -158,7 +158,7 @@ def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    return run_mirror(
+    return run_example(
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-qfm-",

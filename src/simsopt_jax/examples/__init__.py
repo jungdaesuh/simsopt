@@ -1,5 +1,5 @@
-"""Public support types for executable SIMSOPT JAX examples."""
+"""Public execution types for SIMSOPT JAX examples."""
 
-from .mirror_cli import MirrorResult, MirrorSolve, run_mirror
+from .execution import ExampleResult, ExampleSolve, run_example
 
-__all__ = ("MirrorResult", "MirrorSolve", "run_mirror")
+__all__ = ("ExampleResult", "ExampleSolve", "run_example")
