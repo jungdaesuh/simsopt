@@ -1,9 +1,10 @@
-# Native SIMSOPT vs JAX Example End-to-End Parity Implementation Plan
+# JAX Fast Execution and Native Example End-to-End Parity Implementation Plan
 
 **Status:** Blocked
 **Last updated:** 2026-07-26
 
-**Outcome:** Candidate declared routes pass; scientific, safety, TDD, and delivery repair pending
+**Outcome:** Fast-default and explicit-parity support planned; candidate
+certification still has scientific, safety, TDD, and delivery blockers
 
 ## Implementation outcome
 
@@ -42,8 +43,10 @@ for the requested end-to-end contract. The plan cannot be `Done` until Phase
 
 ### Delivery blockers
 
+- [ ] Implement and RED-test the fast-default/explicit-parity contract in Phase
+  10 without weakening parity certification.
 - [ ] Repair and RED-test the scientific completeness, no-replace publication,
-  and descriptor-relative no-follow sidecar requirements in Phase 10.
+  and descriptor-relative no-follow sidecar requirements in Phase 11.
 - [ ] Create a new clean authority run and independent audit after those
   repairs; the retained `799c656e1` artifact may not close the repaired safety
   contract.
@@ -59,11 +62,12 @@ the current branch has delivered the item.
 
 ## Purpose
 
-Establish reproducible, fail-closed evidence that matched native SIMSOPT CPU
-workflows and JAX workflows evaluate the same FP64 problem and reach
-scientifically equivalent outcomes. The plan covers initial-state value and
-derivative parity, final solve parity, strict JAX CPU/GPU execution, and
-hash-bound structured artifacts.
+Make performance-oriented JAX execution the normal CPU/GPU user path while
+preserving an explicit, reproducible, fail-closed parity path proving that
+matched native SIMSOPT CPU and JAX workflows evaluate the same FP64 problem and
+reach scientifically equivalent outcomes. The plan covers fast-mode defaults,
+initial-state value and derivative parity, final solve parity, strict JAX
+CPU/GPU certification, and hash-bound structured artifacts.
 
 This closes a gap in the JAX-first example suite: the candidate worktree has
 ten ready JAX examples intended for CPU-smoke and strict-GPU execution, but
@@ -87,6 +91,14 @@ any parity claim is authoritative.
   GPU lane must use FP64, set both the SIMSOPT policy
   `SIMSOPT_JAX_TRANSFER_GUARD=disallow` and JAX's effective
   `JAX_TRANSFER_GUARD=disallow`, and permit no CPU fallback.
+- Support JAX CPU and GPU in both `fast` and `parity` execution intents. `fast`
+  is the default whenever a caller selects JAX without an explicit intent;
+  `parity` is an explicit opt-in and is the only intent that may produce
+  certification evidence.
+- Keep device selection orthogonal to execution intent: CPU/GPU chooses
+  placement, while fast/parity chooses numerical and verification policy. Both
+  intents use the same public objective, solver family, accepted-state
+  publication, and scientific-success contract.
 - Preserve authentic RED -> GREEN -> REFACTOR receipts for each parity case and
   publish source/input/environment-bound JSON plus array sidecars.
 - Classify every ready JAX example-to-native-source relationship as `full`,
@@ -114,6 +126,56 @@ The mandatory direct comparison graph for each applicable observable is:
 versus `jax-gpu`. Passing two adjacent comparisons never substitutes for the
 direct native/GPU comparison.
 
+## Fast and Parity Execution Contract
+
+The public decision is two-dimensional: `device = cpu | gpu` and
+`intent = fast | parity`. `intent` defaults to `fast`; the device remains an
+explicit caller or environment choice. The existing internal mode names remain
+the runtime SSOT:
+
+| Device | Default fast mode | Explicit parity mode |
+|---|---|---|
+| CPU | `jax_cpu_fast` | `jax_cpu_parity` |
+| GPU | `jax_gpu_fast` | `jax_gpu_parity` |
+
+No selector continues to mean the existing `native_cpu` default. The changed
+default applies when JAX has been selected through the public API or compatible
+legacy backend/platform environment without an explicit
+`SIMSOPT_BACKEND_MODE`. An explicit full mode always wins. Parity must never be
+selected implicitly, and an unavailable requested device must fail rather than
+fall back to another device.
+
+Fast and parity are both supported production paths, not correctness versus
+incorrectness:
+
+- **Fast** retains FP64 scientific arrays and the same terminal correctness
+  gates, but may use performance-tuned chunking/sharding, default matmul
+  precision, normal transfer logging, compilation caches, and backend reduction
+  order. Fast receipts are diagnostic and must be labeled non-certifying.
+- **Parity** uses the stable comparison policy, highest matmul precision,
+  strict effective transfer guards where required, deterministic GPU settings,
+  source/input binding, direct native/JAX lane comparisons, and authoritative
+  artifacts. It is slower by design and must be requested explicitly.
+- A fast result may be numerically compared for diagnostics, but it cannot be
+  relabeled, promoted, or accepted as parity evidence. Conversely, parity mode
+  must not silently select fast tuning to recover performance.
+
+The dedicated `examples/jax/run_parity.py` command remains parity-only and does
+not accept a fast-mode option. The ordinary example runner exposes the
+orthogonal interface:
+
+```console
+python examples/jax/run_examples.py --device cpu
+python examples/jax/run_examples.py --device gpu
+python examples/jax/run_examples.py --device cpu --intent parity
+python examples/jax/run_examples.py --device gpu --intent parity
+```
+
+The first two commands use fast mode by default. Existing `--lane cpu-smoke`
+and `--lane gpu-strict` commands retain their current parity semantics during a
+documented deprecation interval; they must never be silently reinterpreted as
+fast aliases.
+
 ## Non-Goals
 
 - Require identical optimizer iterates, line-search decisions, iteration
@@ -128,6 +190,9 @@ direct native/GPU comparison.
   SIMSOPT and JAX APIs.
 - Add benchmark or speedup claims. Runtime and memory may be recorded as
   diagnostics but are not correctness gates in this plan.
+- Make fast-mode output eligible for native/JAX certification, weaken FP64 or
+  scientific-success requirements in fast mode, or make parity the implicit
+  default for JAX users.
 - Promote the currently planned single-stage vacuum example while its required
   outer derivative and accepted-state certificate remain unavailable.
 
@@ -182,6 +247,15 @@ state and classifications, subject to the unresolved delivery and safety gates.
   those modules, fixture IDs, manifests, or artifacts exist.
 - The worktree contains unrelated modified and untracked files. Execution must
   preserve them and review only the parity-plan slice.
+- The live runtime already declares `jax_cpu_fast`, `jax_cpu_parity`,
+  `jax_gpu_fast`, and `jax_gpu_parity` in
+  `src/simsopt_jax/backend/_runtime_policy.py`. However, its legacy JAX resolver
+  currently maps CPU/CUDA to parity when no explicit full mode is set, so fast
+  is not yet the JAX default requested by this plan.
+- The live example runner exposes only `cpu-smoke` and `gpu-strict`; the shared
+  lane environment maps both to parity modes. Fast is therefore implemented at
+  the low-level runtime policy but is not yet a first-class ordinary-example
+  runner path.
 - The expanded non-GPU parity suite was run during the original 2026-07-26
   plan review:
   51 tests passed and the surface-geometry final-parameter comparison failed
@@ -205,8 +279,8 @@ changes allocation behavior and can increase fragmentation.
 The classification below reflects the uncommitted predecessor slice that was
 available when the plan was reviewed, not the final implementation. It is
 retained to show which rows were downgraded after live API validation. The
-  candidate source of truth is `examples/jax/parity_manifest.json`, which
-  classifies all 28 ready `inspired_by` relationships individually.
+candidate source of truth is `examples/jax/parity_manifest.json`, which
+classifies all 28 ready `inspired_by` relationships individually.
 
 | Ready JAX example | First matched native workflow | Provisional level | Required initial/final evidence |
 |---|---|---:|---|
@@ -242,6 +316,35 @@ scientific comparison as three distinct responsibilities.
 
 ### Design-it-twice
 
+For the user-facing fast/parity choice:
+
+**Mode Option A - orthogonal device and execution intent with one resolver
+(selected).**
+
+- `device = cpu | gpu` selects placement and `intent = fast | parity` selects
+  policy. The shared profile owner maps the pair to one existing internal mode.
+- The intent defaults to fast. Explicit `SIMSOPT_BACKEND_MODE` remains the
+  low-level escape hatch and provenance identity; the parity runner requests
+  parity directly and cannot be downgraded by defaults.
+- Advantages: one obvious default, no four-way user-facing cross product, and
+  one policy owner for the runtime, runner, validation, documentation, and CI.
+
+**Mode Option B - expose four independent lane names everywhere (rejected).**
+
+- Requiring callers to choose among `jax_cpu_fast`, `jax_cpu_parity`,
+  `jax_gpu_fast`, and `jax_gpu_parity` leaks the runtime representation and
+  duplicates device/mode branching across CLIs and workflows.
+
+**Mode Option C - infer parity from strictness, CI, or the command name
+(rejected).**
+
+- Hidden context would make identical commands change numerical policy and
+  could silently turn fast results into certification evidence. Parity is an
+  explicit intent, not an inference from transfer guards, process location, or
+  CI environment.
+
+For native/JAX matched comparison:
+
 **Option A - parity-specific typed manifest, case registry, isolated runner,
 and arbiter (selected).**
 
@@ -276,7 +379,10 @@ output (rejected).**
 ### Information-hiding test
 
 - `manifest.json` continues to own example readiness, lineage, and runtime
-  lanes.
+  device support. One shared execution-profile owner maps device and intent to
+  backend mode, process environment, expected result metadata, and certification
+  eligibility; manifests and runners consume that policy rather than copying
+  four dictionaries.
 - `parity_manifest.json` owns relationship classification, scale tier, cost
   tier, and the exact comparison routing keyed by phase, observable, and lane
   pair. Each route names applicability, comparator, and central tolerance
@@ -293,29 +399,39 @@ output (rejected).**
 - The arbiter owns comparison and verdict semantics.
 - `benchmarks/validation_ladder_contract.py` remains the sole tolerance owner.
 
-Changing a tolerance, lane environment, or source relationship must therefore
-require one owner change rather than edits across every parity case.
+Changing a tolerance, execution profile, or source relationship must therefore
+require one owner change rather than edits across every example or parity case.
 
 ### Design tier and API evolution
 
 This is Tier 3 because it introduces a repository CLI and versioned artifact
 schema that CI and reviewers may consume.
 
-- Observable behavior delta: a new opt-in parity runner and artifacts are
-  added. Existing native/JAX example commands and `run_examples.py` behavior do
-  not change.
+- Observable behavior delta: JAX selected without an explicit full mode resolves
+  to fast instead of parity; `run_examples.py --device <cpu|gpu>` defaults to
+  fast, while `--intent parity` is explicit. Existing `--lane cpu-smoke` and
+  `--lane gpu-strict` commands keep their current parity behavior during
+  deprecation. The dedicated parity runner and its artifacts remain parity-only.
 - Caller inventory: developers running local parity checks, CPU CI, strict-GPU
   CI, integration tests, and reviewers reading published artifacts.
-- Migration: none for existing commands. Artifact consumers must require an
-  exact `schema_version`; incompatible future changes create a new version.
-- Compatibility tests: exact CLI argv, schema fields, deterministic ordering,
-  lane identity, input fingerprints, normalized statuses, and fail-closed
-  malformed/mismatched artifact cases.
-- Deprecation: not applicable to the additive v1 interface. A future v2 must
-  retain a documented v1 reader or provide a conversion command before v1 is
+- Migration: ordinary callers may omit intent and receive fast mode. Callers
+  requiring certification must set `intent="parity"`, pass `--intent parity`,
+  set an explicit `jax_*_parity` mode, or use `run_parity.py`. Artifact consumers
+  continue to require an exact `schema_version`.
+- Compatibility tests: default resolution, explicit-mode precedence, all four
+  device/intent profiles, legacy lane aliases, exact CLI argv, schema fields,
+  deterministic ordering, lane identity, input fingerprints, normalized
+  statuses, and fail-closed malformed/mismatched artifact cases.
+- Deprecation: retain legacy `--lane cpu-smoke` and `--lane gpu-strict` parity
+  semantics with a warning for at least one documented release; remove them
+  only after CI, docs, and downstream callers use `--device/--intent`. A future
+  artifact schema v2 must retain a v1 reader or conversion command before v1 is
   removed.
-- Rollback: remove the parity manifest/package/runner, CI steps, tests, and docs
-  together. Existing examples and public solver APIs remain independent.
+- Rollback: restore the previous JAX selection resolver and example-runner CLI
+  while leaving explicit low-level modes intact; remove parity
+  manifest/package/runner, CI steps, tests, and docs together only if the whole
+  parity feature is rolled back. Existing examples and public solver APIs remain
+  independent.
 
 ## Assumptions
 
@@ -339,6 +455,10 @@ schema that CI and reviewers may consume.
 - GPU evidence is authoritative only from a real CUDA device and a clean
   current-checkout import path. CPU fallback, skips, wrong precision, or stale
   editable-source resolution fail the run.
+- Fast means performance-oriented FP64 JAX policy, not reduced scientific
+  correctness, FP32 smoke, CPU fallback, or permission to publish parity claims.
+- Device choice remains explicit. This plan does not add automatic GPU
+  discovery that changes placement across machines.
 
 ## Implementation Plan
 
@@ -492,7 +612,7 @@ RED, but no production implementation for that slice may be added first.
    - [x] **RED:** Add concurrent-writer, interrupted-publication, existing-run,
      and partial-artifact rejection tests. These candidate tests did not cover
      the publish-time destination race or path-component replacement race
-     reopened in Phase 10.
+     reopened in Phase 11.
    - [x] **GREEN:** Implement deterministic aggregation and one summary JSON
      whose verdict is `pass` only when all required pairwise comparisons pass.
      Add `examples/jax/run_parity.py` with only `--case`, `--lanes`,
@@ -513,7 +633,7 @@ RED, but no production implementation for that slice may be added first.
      `<UTC>-<nonce>.partial` directory, fsync required files, and atomically
      rename it to the final run ID only after validation, then fsync the parent
      directory. The candidate does not yet prove the required no-overwrite
-     behavior under the publish-time race; Phase 10 owns that correction.
+     behavior under the publish-time race; Phase 11 owns that correction.
      Retain a failed partial directory with an explicit failure marker for
      diagnosis.
    - [x] **REFACTOR:** Keep subprocess mechanics independent from scientific
@@ -574,7 +694,7 @@ RED, but no production implementation for that slice may be added first.
      publication, and original-residual checks; matching augmented or
      preconditioned residuals alone is invalid. The candidate QFM artifact
      violates the central constraint tolerance and conflates raw solver failure
-     with normalized convergence; Phase 10 reopens it. Classify every Boozer
+     with normalized convergence; Phase 11 reopens it. Classify every Boozer
      relationship as `unsupported` with its concrete blocker; no Boozer solve
      parity was executed.
    - [x] Wave D disposition: classify every field-line and particle-tracing
@@ -605,7 +725,7 @@ RED, but no production implementation for that slice may be added first.
      bound if one is scientifically necessary. QFM does not yet satisfy this
      reporting contract.
    - [ ] Record each case's RED -> GREEN -> REFACTOR evidence independently; do
-     not batch-promote a wave based on one representative example. Phase 10
+     not batch-promote a wave based on one representative example. Phase 11
      owns the unresolved evidence-recovery gate.
 
 7. Add real CPU/GPU evidence and memory/transfer gates.
@@ -690,7 +810,86 @@ RED, but no production implementation for that slice may be added first.
      The 2026-07-26 adversarial review failed this gate on two artifact-safety
      races and the delivery/evidence gaps below.
 
-10. Repair the scientific, artifact-safety, and TDD-evidence blockers.
+10. Make fast the default while supporting explicit parity on CPU and GPU.
+    - [ ] **RED:** In `tests/test_backend_precision_policy.py` and subprocess
+      import-smoke coverage, prove the current legacy JAX CPU/CUDA resolver
+      selects `jax_cpu_parity`/`jax_gpu_parity` when no full mode is set. Add
+      expectations that JAX CPU/CUDA instead select `jax_cpu_fast`/
+      `jax_gpu_fast`, that no selector still resolves to `native_cpu`, and that
+      explicit full modes always win.
+    - [ ] **GREEN:** Change the single mode resolver in
+      `src/simsopt_jax/backend/_runtime_policy.py` so a selected JAX platform
+      defaults to its fast mode. Preserve all four existing low-level modes and
+      their current policy tables; do not implement the default with duplicated
+      environment conditionals in callers.
+    - [ ] **RED:** Add public-API tests for `set_backend("jax", device="cpu")`
+      and `set_backend("jax", device="gpu", intent="parity")`, parameterized
+      across both devices and intents. Require `device`, default `intent` to
+      `fast`, preserve explicit
+      `set_backend("jax_*_*")`, and reject a full mode combined with conflicting
+      device/intent keywords before JAX initialization.
+    - [ ] **GREEN:** Extend the existing `set_backend` facade with the typed JAX
+      convenience selector and resolve it through the same owner as environment
+      selection. Keep `BackendConfig.mode` and provenance as one of the four
+      explicit low-level modes so downstream code never receives an ambiguous
+      `jax` value.
+    - [ ] **RED:** Add `run_examples.py` parser and child-result tests proving
+      `--device cpu|gpu` without `--intent` selects the matching fast mode,
+      `--intent parity` selects the matching parity mode, an unavailable GPU
+      cannot fall back to CPU, and mixed legacy/new selectors fail with a clear
+      migration diagnostic. Prove legacy `--lane cpu-smoke` and
+      `--lane gpu-strict` retain their current parity modes and emit a
+      deprecation warning.
+    - [ ] **GREEN:** Evolve `examples/jax/run_examples.py`,
+      `examples/jax/_lane_environment.py`, and `examples/jax/manifest.json` to
+      represent device support and execution intent independently as typed
+      `devices` and `intents` fields. Ready examples declare `cpu`/`gpu` and
+      `fast`/`parity`; legacy `lanes` remain only for the compatibility window
+      and must cross-validate against those fields. The manifest declares
+      capability; the shared profile owner alone maps `(device, intent)` to
+      backend mode, environment, expected result metadata, and certification
+      eligibility.
+    - [ ] **RED:** For every ready example, run CPU fast versus CPU parity and
+      real-GPU fast versus GPU parity behavioral tests. Require the same public
+      solver family, objective convention, accepted-state publication, FP64
+      scientific dtype, and independent terminal-success checks. Compare
+      scientific observables through centrally owned fast-versus-parity
+      diagnostic tolerances without requiring bitwise equality or identical
+      work counters.
+    - [ ] **GREEN:** Remove any example-local assumption that parity is the only
+      valid backend metadata. Fast-mode success remains fail-closed on wrong
+      device, non-finite output, failed scientific gates, or hidden host solver;
+      only performance/reduction policy and certification eligibility differ.
+    - [ ] **RED:** Inject `jax_cpu_fast` and `jax_gpu_fast` into parity-runner
+      children and receipts and require arbitration/audit rejection. Also inject
+      parent fast-mode environment values and prove `run_parity.py` overrides
+      them with explicit parity child profiles rather than inheriting them.
+    - [ ] **GREEN:** Keep `examples/jax/run_parity.py` parity-only. It accepts
+      neither `--intent fast` nor fast receipts, and it continues to require
+      `native-cpu`, `jax-cpu`, and `jax-gpu` certification lanes as selected.
+    - [ ] **REFACTOR:** Use one immutable execution-profile table for runtime
+      resolution, example subprocess environment, result validation, and CI
+      expectations. Keep parity comparison/tolerance routes out of the fast
+      runner and keep performance tuning out of the parity arbiter.
+    - [ ] Run matched CPU and GPU fast-versus-parity measurements on identical
+      inputs after correctness is green. Record cold compile time, synchronized
+      repeated execution time, host peak RSS, available device-memory metrics,
+      parameters, objective/residual, and terminal status. Predeclare the
+      performance non-regression/promotion rule in the benchmark contract before
+      measuring; if fast is not measurably preferable on a representative lane,
+      repair its tuning rather than weakening correctness or relabeling parity.
+    - [ ] Update `examples/jax/README.md`, `docs/source/jax_gpu_setup.rst`, and
+      `docs/source/jax_migration.rst` with the default, four explicit modes,
+      public API/CLI examples, legacy-lane deprecation, evidence eligibility,
+      and rollback instructions. Record the behavior delta and caller inventory
+      required by the Tier-3 API gate.
+    - [ ] Route default fast CPU/GPU example runs through normal presubmit jobs.
+      Keep explicit parity CPU checks in presubmit where bounded, and run the
+      complete strict-GPU parity matrix in the named scheduled/manual authority
+      job. CI commands must spell `--intent parity` or use `run_parity.py`; job
+      location alone never implies parity.
+
+11. Repair the scientific, artifact-safety, and TDD-evidence blockers.
     - [ ] **RED:** Add a QFM authority regression using the retained terminal
       state: `abs(constraint_value)` is about `1.23158e-8` and must fail the
       centrally owned `terminal_constraint_norm_atol=1e-10` gate. Add separate
@@ -756,7 +955,7 @@ RED, but no production implementation for that slice may be added first.
       regression coverage and leave this TDD plan blocked; never fabricate,
       retroactively relabel, or waive a RED within this plan.
 
-11. Publish the repaired authority slice.
+12. Publish the repaired authority slice.
     - [ ] Integrate the repaired candidate into a reachable branch commit and
       confirm its parentage from the intended baseline. Do not cite detached
       `799c656e1` as shipped state.
@@ -809,6 +1008,59 @@ RED, but no production implementation for that slice may be added first.
     changing this plan to `Done`.
 
 ## Validation Plan
+
+- [ ] Fast-default and explicit-parity resolver/API matrix:
+
+  ```console
+  MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
+    tests/test_backend_precision_policy.py \
+    tests/test_jax_import_smoke.py \
+    tests/integration/test_jax_execution_modes.py
+  ```
+
+  The test module must cover unset/default selectors, explicit full-mode
+  precedence, `set_backend("jax", device=..., intent=...)`, conflict rejection,
+  cached configuration/provenance, and absence of JAX-import-order leakage.
+
+- [ ] All ready examples on CPU fast and CPU parity:
+
+  ```console
+  python examples/jax/run_examples.py --device cpu
+  python examples/jax/run_examples.py --device cpu --intent parity
+  ```
+
+- [ ] All ready examples on a real GPU in fast and parity modes, with zero
+  skips and no CPU fallback:
+
+  ```console
+  python examples/jax/run_examples.py --device gpu
+  python examples/jax/run_examples.py --device gpu --intent parity
+  ```
+
+  Fast must report `jax_gpu_fast`; parity must report `jax_gpu_parity` and the
+  strict transfer/determinism contract. Both must report FP64 and pass the same
+  independent scientific checks.
+
+- [ ] Legacy runner compatibility and migration diagnostics:
+
+  ```console
+  python examples/jax/run_examples.py --lane cpu-smoke
+  python examples/jax/run_examples.py --lane gpu-strict
+  ```
+
+  Both aliases retain their historical parity behavior during deprecation and
+  emit the documented warning. Combining `--lane` with `--device` or
+  `--intent` must fail before child execution.
+
+- [ ] Parity isolation tests prove fast modes cannot enter authoritative
+  artifacts:
+
+  ```console
+  MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
+    tests/integration/test_jax_example_parity_runtime.py \
+    tests/integration/test_jax_example_parity_runner.py \
+    tests/integration/test_jax_execution_modes.py
+  ```
 
 - [x] Manifest and schema RED/GREEN tests:
 
@@ -907,7 +1159,7 @@ RED, but no production implementation for that slice may be added first.
   ```
 
   This recipe is intentionally local and historical: the interpreter and
-  artifact paths are host-specific. Phase 11 must replace it with a durable
+  artifact paths are host-specific. Phase 12 must replace it with a durable
   environment and artifact reference for shipped evidence.
 - [x] Run focused native/JAX subsystem tests named by each case, including
   curve/surface objectives, Biot-Savart/flux, QFM, permanent magnets, tracing,
@@ -955,6 +1207,28 @@ RED, but no production implementation for that slice may be added first.
 
 ## Risks and Mitigations
 
+- Risk: Making fast the default accidentally weakens scientific correctness.
+  Mitigation: Both intents retain FP64, the same solver/objective family,
+  fail-closed accepted-state publication, and terminal scientific gates. Only
+  tuning, reproducibility policy, transfer enforcement, and evidence eligibility
+  differ.
+
+- Risk: A fast run is mislabeled or promoted as parity evidence.
+  Mitigation: Persist the explicit low-level mode and certification-eligibility
+  field, reject fast modes in the parity runner/arbiter/auditor, and require
+  parity commands to opt in before child creation.
+
+- Risk: Device and intent policy is duplicated across runtime, examples, tests,
+  and CI, causing drift.
+  Mitigation: One immutable execution-profile owner maps `(device, intent)` to
+  mode, environment, expected metadata, and eligibility; every consumer has a
+  ratchet test against that owner.
+
+- Risk: Presubmit runs only the fast default and parity silently regresses.
+  Mitigation: Keep bounded explicit CPU parity and strict-GPU parity jobs in
+  presubmit, plus the complete scheduled/manual authority run. CI names and
+  environment location are never substitutes for an explicit parity selector.
+
 - Risk: A redesigned JAX lesson is compared with a native script that solves a
   different problem.
   Mitigation: One serialized input/config fingerprint is consumed by both lane
@@ -977,7 +1251,7 @@ RED, but no production implementation for that slice may be added first.
   the artifact root.
   Target mitigation: canonical JSON plus one hash-bound `.npy` file per array,
   descriptor-relative no-follow I/O, exclusive logical publication, and an
-  atomic completion marker. Phase 10 must make readers reject replacement
+  atomic completion marker. Phase 11 must make readers reject replacement
   races as well as pre-existing symlinks, traversal, containment escapes, and
   incomplete runs.
 
@@ -1020,6 +1294,24 @@ RED, but no production implementation for that slice may be added first.
 
 ## Completion Criteria
 
+- [ ] Selecting JAX CPU or GPU without an explicit intent resolves to
+  `jax_cpu_fast` or `jax_gpu_fast`; no selector remains `native_cpu`, and an
+  explicit full mode has precedence.
+- [ ] The public API and example CLI support CPU/GPU crossed with fast/parity,
+  default intent to fast, reject ambiguous selectors, and retain documented
+  legacy lane behavior for the deprecation interval.
+- [ ] Every ready example passes CPU fast, CPU parity, real-GPU fast, and
+  real-GPU parity with FP64 and the same scientific-success contract; fast and
+  parity may use their centrally owned tuning and diagnostic tolerances.
+- [ ] Fast receipts are explicitly non-certifying, and injected fast modes are
+  rejected by the parity runner, arbiter, auditor, report generator, and CI
+  authority gates.
+- [ ] Matched CPU and GPU artifacts demonstrate that the selected fast policy
+  meets its predeclared performance/memory promotion rule without changing
+  scientific outcomes; no speed claim relies on a single cold run.
+- [ ] Runtime, example runner, manifest validation, result validation, and CI
+  consume one execution-profile SSOT; no duplicated four-mode environment table
+  remains.
 - [x] Every ready JAX example/native `inspired_by` relationship has exactly one
   validated `full`, `reduced`, or `unsupported` parity classification.
 - [ ] Every `full` case proves byte-identical inputs and configuration across
