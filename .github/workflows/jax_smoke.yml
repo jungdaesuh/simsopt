@@ -224,8 +224,11 @@ jobs:
             tests/geo/test_surface_objective_precision_authority.py \
             -v --tb=short
 
-      - name: Run JAX examples CPU smoke lane
-        run: python examples/jax/run_examples.py --lane cpu-smoke
+      - name: Run JAX examples on CPU in fast-default mode
+        run: python examples/jax/run_examples.py --device cpu
+
+      - name: Run JAX examples on CPU in explicit parity mode
+        run: python examples/jax/run_examples.py --device cpu --intent parity
 
       - name: Run native/JAX CPU example parity
         run: |
@@ -287,10 +290,15 @@ jobs:
             -k "gpu_ondevice_loops_with_host_constants or grouped_biot_savart_gpu_spec_eval or grouped_biot_savart_gpu_current_arrays" \
             -v --tb=short
 
-      - name: Run JAX examples strict GPU lane
+      - name: Run JAX examples on GPU in fast-default mode
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python examples/jax/run_examples.py --lane gpu-strict
+            python examples/jax/run_examples.py --device gpu
+
+      - name: Run JAX examples on GPU in explicit parity mode
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_examples.py --device gpu --intent parity
 
       - name: Run native/JAX strict GPU example parity
         run: |

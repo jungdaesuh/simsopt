@@ -8,19 +8,28 @@ import os
 import shlex
 import subprocess
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, TextIO
+from typing import Mapping, Sequence, TextIO
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SOURCE_ROOT = _REPO_ROOT / "src"
+for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
+    if import_root not in sys.path:
+        sys.path.insert(0, import_root)
+
+from simsopt_jax.config import ExecutionIntent, JaxDevice, JaxExecutionProfile
 
 if __package__:
     from ._lane_environment import (
-        LANE_ENVIRONMENT as _LANE_ENVIRONMENT,
+        LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
     )
     from ._lane_environment import (
         JaxLane as Lane,
     )
     from ._lane_environment import (
-        build_lane_environment,
+        build_execution_environment,
     )
     from ._manifest import (
         JaxExampleRecord,
@@ -30,13 +39,13 @@ if __package__:
     )
 else:
     from _lane_environment import (  # type: ignore[no-redef]
-        LANE_ENVIRONMENT as _LANE_ENVIRONMENT,
+        LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
     )
     from _lane_environment import (
         JaxLane as Lane,
     )
     from _lane_environment import (
-        build_lane_environment,
+        build_execution_environment,
     )
     from _manifest import (  # type: ignore[no-redef]
         JaxExampleRecord,
@@ -48,6 +57,20 @@ else:
 
 class ChildResultValidationError(ValueError):
     """A child result cannot certify the runtime lane that selected it."""
+
+
+class _RunnerArgumentParser(argparse.ArgumentParser):
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if parsed.lane is not None and parsed.intent is not None:
+            self.error("--lane cannot be combined with --intent; use --device")
+        if parsed.intent is None:
+            parsed.intent = "fast"
+        return parsed
 
 
 @dataclass(frozen=True)
@@ -123,13 +146,13 @@ def _parse_child_result(stdout: str, example_id: str) -> ChildResult:
 
 
 def _validate_child_result(
-    result: ChildResult, example: JaxExampleRecord, lane: Lane
+    result: ChildResult,
+    example: JaxExampleRecord,
+    profile: JaxExecutionProfile,
 ) -> None:
-    expected_runtime = {
-        "cpu-smoke": ("jax_cpu_parity", "cpu", "fp64"),
-        "gpu-strict": ("jax_gpu_parity", "gpu", "fp64"),
-    }[lane]
-    expected_backend, expected_platform, expected_precision = expected_runtime
+    expected_backend = profile.mode
+    expected_platform = profile.device
+    expected_precision = "fp64"
     if result.example_id != example.id:
         raise ChildResultValidationError(
             f"{example.id}: example_id must be {example.id}, got {result.example_id}"
@@ -181,18 +204,52 @@ def run_lane(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
-    """Run every ready record in manifest order and aggregate lane failures."""
+    """Run one retained legacy parity lane."""
+    warnings.warn(
+        "--lane is deprecated; use --device with --intent parity",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    device: JaxDevice = "cpu" if lane == "cpu-smoke" else "gpu"
+    return run_profile(
+        manifest,
+        device,
+        "parity",
+        repo_root=repo_root,
+        base_environment=base_environment,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def run_profile(
+    manifest: JaxExamplesManifest,
+    device: JaxDevice,
+    intent: ExecutionIntent,
+    *,
+    repo_root: Path,
+    base_environment: Mapping[str, str],
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """Run every ready record for one explicit device and intent."""
+    capability_lane: Lane = "cpu-smoke" if device == "cpu" else "gpu-strict"
 
     selected = tuple(
         example
         for example in manifest.jax_examples
-        if example.status == "ready" and lane in example.lanes
+        if example.status == "ready" and capability_lane in example.lanes
     )
     if not selected:
-        print(f"FAIL {lane}: no ready examples selected", file=stderr)
+        print(f"FAIL {device}/{intent}: no ready examples selected", file=stderr)
         return 1
 
-    environment = build_lane_environment(lane, base_environment, repo_root=repo_root)
+    profile, environment = build_execution_environment(
+        device,
+        intent,
+        base_environment,
+        repo_root=repo_root,
+    )
     failed = False
     for example in selected:
         command = build_child_command(example, repo_root=repo_root)
@@ -217,7 +274,7 @@ def run_lane(
             continue
         try:
             child_result = _parse_child_result(completed.stdout, example.id)
-            _validate_child_result(child_result, example, lane)
+            _validate_child_result(child_result, example, profile)
         except ChildResultValidationError as error:
             _write_child_failure(
                 example=example,
@@ -234,8 +291,11 @@ def run_lane(
 
 
 def _argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lane", choices=tuple(_LANE_ENVIRONMENT), required=True)
+    parser = _RunnerArgumentParser(description=__doc__)
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--lane", choices=_LEGACY_JAX_LANES)
+    selector.add_argument("--device", choices=("cpu", "gpu"))
+    parser.add_argument("--intent", choices=("fast", "parity"))
     parser.add_argument(
         "--manifest",
         type=Path,
@@ -245,17 +305,34 @@ def _argument_parser() -> argparse.ArgumentParser:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    parsed = _argument_parser().parse_args(arguments)
-    repo_root = Path(__file__).resolve().parents[2]
+    parser = _argument_parser()
+    parsed = parser.parse_args(arguments)
+    repo_root = _REPO_ROOT
     try:
         manifest = load_manifest(parsed.manifest, repo_root=repo_root)
     except ManifestValidationError as error:
         print(f"manifest validation failed: {error}", file=sys.stderr)
         return 2
-    lane: Lane = parsed.lane
-    return run_lane(
+    if parsed.lane is not None:
+        lane: Lane = parsed.lane
+        print(
+            "warning: --lane is deprecated; use --device with --intent parity",
+            file=sys.stderr,
+        )
+        return run_lane(
+            manifest,
+            lane,
+            repo_root=repo_root,
+            base_environment=os.environ,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    device: JaxDevice = parsed.device
+    intent: ExecutionIntent = parsed.intent
+    return run_profile(
         manifest,
-        lane,
+        device,
+        intent,
         repo_root=repo_root,
         base_environment=os.environ,
         stdout=sys.stdout,

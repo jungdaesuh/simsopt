@@ -76,6 +76,26 @@ Applications can configure it programmatically instead::
 
     simsopt_config.set_backend("jax_gpu_parity", strict=True)
 
+For the ordinary typed JAX selector, device and execution intent are
+orthogonal::
+
+    simsopt_config.set_backend("jax", device="cpu")
+    simsopt_config.set_backend("jax", device="gpu")
+    simsopt_config.set_backend("jax", device="cpu", intent="parity")
+    simsopt_config.set_backend("jax", device="gpu", intent="parity")
+
+The ``intent`` defaults to ``"fast"`` after JAX is selected.  With no backend
+selector at all, ``native_cpu`` remains the default.  Fast and parity both use
+FP64 scientific arrays, strict device-fallback rejection, and the same custom
+SIMSOPT JAX solver family and scientific-success checks.  Parity is explicit
+and is the only intent eligible for certification; an ordinary example-runner
+result is diagnostic even when its intent is parity.
+
+The full canonical modes remain available for low-level configuration,
+including ``jax_cpu_float32_smoke``.  A canonical mode cannot be combined with
+``device`` or ``intent``, and ``set_backend("jax")`` requires an explicit
+device.
+
 Select the mode before importing JAX-heavy SIMSOPT modules.  Backend selection,
 precision, allocator configuration, and compilation-cache policy are process
 settings; changing them after JAX initializes a device is not supported.

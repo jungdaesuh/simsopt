@@ -15,17 +15,25 @@ process-wide and must happen before importing JAX-heavy modules, so use the
 isolated runner rather than executing several examples in one Python process:
 
 ```console
-python examples/jax/run_examples.py --lane cpu-smoke
-python examples/jax/run_examples.py --lane gpu-strict
+python examples/jax/run_examples.py --device cpu
+python examples/jax/run_examples.py --device gpu
+python examples/jax/run_examples.py --device cpu --intent parity
+python examples/jax/run_examples.py --device gpu --intent parity
 ```
 
-The CPU lane selects strict FP64 `jax_cpu_parity` and disables mpi4py
-auto-initialization because these are serial examples. The GPU lane selects
-strict FP64 `jax_gpu_parity`, disables preallocation, enables the transfer
-guard through both the SIMSOPT policy and JAX's process-wide
-`JAX_TRANSFER_GUARD=disallow`, and fails on a skip, unsupported result, CPU
-fallback, wrong precision, or malformed output. Lane membership and bounded
-smoke arguments live only in [`manifest.json`](manifest.json).
+Selecting JAX without an intent defaults to fast mode on the requested device;
+the fully unset repository default remains `native_cpu`. Both ordinary-runner
+intents use FP64, strict fallback rejection, the same public objective and
+custom SIMSOPT JAX solver family, and the same scientific-success checks.
+Parity additionally selects the stable numerical policy. Only
+[`run_parity.py`](run_parity.py) can publish certification evidence; ordinary
+fast and parity example runs are diagnostic.
+
+The retained `--lane cpu-smoke` and `--lane gpu-strict` aliases still select
+their historical parity profiles and emit a deprecation warning. New callers
+should use `--device` and `--intent`. Device capability and bounded smoke
+arguments remain in [`manifest.json`](manifest.json); execution intent is a
+suite-wide runtime policy and is not copied into every example record.
 
 `gpu-strict` means the process-wide JAX guard remains `disallow` across example
 setup, SIMSOPT orchestration, result publication, and all device-to-host
@@ -47,6 +55,20 @@ unchanged. The deprecated least-squares `optimizer="lm"` alias still selects
 explicit Optimistix LM; legacy `gauss_newton` and scalar `bfgs` spellings are
 rejected because the typed API does not expose behavior-equivalent Optimistix
 drivers for those algorithms.
+
+Applications can use the same typed selection before importing JAX-heavy
+modules:
+
+```python
+import simsopt_jax.config as simsopt_config
+
+simsopt_config.set_backend("jax", device="cpu")
+simsopt_config.set_backend("jax", device="gpu", intent="parity")
+```
+
+Passing a canonical mode such as `jax_cpu_float32_smoke` remains supported and
+cannot be combined with `device` or `intent`. An unavailable requested GPU
+fails; it never falls back to CPU.
 
 ## Native/JAX parity evidence
 

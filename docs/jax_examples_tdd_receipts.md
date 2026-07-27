@@ -819,3 +819,76 @@ steady-state-memory claim. The `simsoptpp` SHA-256 remains
 `73fafa71cf28c6c0212ee8037676bdcedb09baa462747317d148bd64226b2e6a`.
 The final aggregate SHA-256 is
 `1f21ea8851bedfe5f7830ee340e0a1718c4d87d17492dfd0db279b97433edf0b`.
+
+## Fast-default and explicit-parity runtime RED -> GREEN
+
+The backend/API/environment/workflow contract tests were committed alone as
+immutable pre-GREEN revision `dd37ea93c`. A detached clean worktree of that
+revision ran:
+
+```console
+PYTHONPATH=/tmp/simsopt-fast-red-dd37ea93c/src:/tmp/simsopt-fast-red-dd37ea93c \
+  MPI4PY_RC_INITIALIZE=false \
+  /home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python \
+  -m pytest -q \
+  tests/test_backend_precision_policy.py \
+  tests/test_jax_import_smoke.py::test_legacy_jax_environment_defaults_to_fast \
+  tests/test_jax_examples_manifest.py::test_jax_workflow_reaches_examples_from_both_events_and_existing_jobs \
+  tests/test_jax_example_parity_manifest.py::test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication
+```
+
+The authentic RED was `19 failed, 27 passed in 4.27s`. It exposed the old
+legacy JAX CPU/GPU parity defaults, absent typed `device`/`intent` API and
+`use_runtime` export, and CI's retained deprecated-lane commands. Failures
+were behavioral assertions and unsupported public keywords, not collection or
+environment failures.
+
+GREEN uses one typed profile resolver for `(device, intent)`, keeps fully
+unset selection at `native_cpu`, defaults explicitly selected JAX to fast,
+retains every canonical mode, scrubs inherited child selectors, and validates
+the child's exact mode/device/FP64 result. Both ordinary GPU profiles reject a
+CPU fallback result. Legacy lane aliases remain parity selectors and warn.
+`run_parity.py` remains the only certification publisher.
+
+The exact RED command above, rerun against the GREEN worktree, passed
+`46 passed in 3.57s`.
+
+Focused GREEN evidence:
+
+```text
+tests/test_backend_precision_policy.py: 42 passed in 2.40s
+tests/test_jax_import_smoke.py: 96 passed, 8 skipped in 150.05s
+tests/integration/test_jax_examples.py: 38 passed in 131.71s
+manifest/runtime/workflow contract: 81 passed in 5.06s
+Ruff check and format: passed for all changed runtime/runner/test modules
+```
+
+All ten ready examples passed the ordinary runner on CPU in both profiles:
+
+```console
+python examples/jax/run_examples.py --device cpu
+python examples/jax/run_examples.py --device cpu --intent parity
+```
+
+All ten also passed both profiles on the real NVIDIA GeForce RTX 5090. The
+current checkout was forced ahead of environment site packages with explicit
+source paths; CUDA JAX came from the pinned 0.10.0 GPU environment and
+`simsoptpp` from the Linux project environment:
+
+```console
+CHECKOUT=/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed
+GPU_ENV=/home/jungdaesuh/simsopt_mixed_artifacts/b5a0_external_toolchain_20260717_r1/pixi-default
+PROJECT_ENV=/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86
+PYTHONPATH="$CHECKOUT/src:$CHECKOUT:$GPU_ENV/lib/python3.11/site-packages:$PROJECT_ENV/lib/python3.11/site-packages" \
+  MPI4PY_RC_INITIALIZE=false "$GPU_ENV/bin/python" -S \
+  examples/jax/run_examples.py --device gpu
+PYTHONPATH="$CHECKOUT/src:$CHECKOUT:$GPU_ENV/lib/python3.11/site-packages:$PROJECT_ENV/lib/python3.11/site-packages" \
+  MPI4PY_RC_INITIALIZE=false "$GPU_ENV/bin/python" -S \
+  examples/jax/run_examples.py --device gpu --intent parity
+```
+
+These runs prove profile placement, fallback rejection, and the existing
+per-example scientific gates. They are not certification or performance
+evidence. The manifest-v2 sign-off, matched fast/parity benchmark, Phase 11
+scientific/artifact repairs, and new clean authority run remain separate open
+gates.

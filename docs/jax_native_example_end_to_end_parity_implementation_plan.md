@@ -866,20 +866,20 @@ RED, but no production implementation for that slice may be added first.
      races and the delivery/evidence gaps below.
 
 10. Make fast the default while supporting explicit parity on CPU and GPU.
-    - [ ] **RED:** In `tests/test_backend_precision_policy.py` and subprocess
+    - [x] **RED:** In `tests/test_backend_precision_policy.py` and subprocess
       import-smoke coverage, prove the current explicitly selected legacy JAX
       CPU/CUDA resolver selects `jax_cpu_parity`/`jax_gpu_parity` when no full
       mode is set. Add expectations that an explicitly selected JAX CPU/CUDA
       backend instead selects `jax_cpu_fast`/`jax_gpu_fast`, while a fully unset
       selector remains `native_cpu` and an explicit full mode wins over legacy
       environment values.
-    - [ ] **GREEN:** Change the single mode resolver in
+    - [x] **GREEN:** Change the single mode resolver in
       `src/simsopt_jax/backend/_runtime_policy.py` so a selected JAX platform
       defaults to its fast mode. Preserve the four fast/parity modes, plus
       `native_cpu` and `jax_cpu_float32_smoke`, and their current policy tables;
       do not implement the default with duplicated environment conditionals in
       callers.
-    - [ ] **RED:** Add public-API tests for `set_backend("jax", device="cpu")`
+    - [x] **RED:** Add public-API tests for `set_backend("jax", device="cpu")`
       and `set_backend("jax", device="gpu", intent="parity")`, parameterized
       across both devices and intents. Require `device`, default `intent` to
       `fast`, reject `set_backend("jax")`, invalid device/intent values, and a
@@ -887,7 +887,7 @@ RED, but no production implementation for that slice may be added first.
       initialization. Preserve every canonical explicit mode including
       `jax_cpu_float32_smoke`. Mirror the typed convenience selector through
       `use_runtime` without duplicating its resolution logic.
-    - [ ] **GREEN:** Extend the existing `set_backend` facade with the typed JAX
+    - [x] **GREEN:** Extend the existing `set_backend` facade with the typed JAX
       convenience selector and resolve it through the same owner as environment
       selection. Define and publicly re-export `BackendMode`, `JaxDevice`, and
       `ExecutionIntent` `Literal` aliases. Use overloads that require `device`
@@ -897,7 +897,7 @@ RED, but no production implementation for that slice may be added first.
       pure resolver with `BackendMode`. The runtime implementation still rejects
       invalid dynamically typed calls. Provenance always records one of all six
       canonical modes, never the ambiguous convenience token `jax`.
-    - [ ] **RED:** Add `run_examples.py` parser and child-result tests proving
+    - [x] **RED:** Add `run_examples.py` parser and child-result tests proving
       `--device cpu|gpu` without `--intent` selects the matching fast mode,
       `--intent parity` selects the matching parity mode, an unavailable GPU
       cannot fall back to CPU, and mixed legacy/new selectors fail with a clear
@@ -1003,13 +1003,13 @@ RED, but no production implementation for that slice may be added first.
       fast tuning; never weaken scientific gates, discard repeats, or relabel
       parity. These measurements support only the scoped default decision, not
       a general speedup claim.
-    - [ ] Update `examples/jax/README.md`, `docs/source/jax_gpu_setup.rst`, and
+    - [x] Update `examples/jax/README.md`, `docs/source/jax_gpu_setup.rst`, and
       `docs/source/jax_migration.rst` with the default, the four fast/parity
       profiles, retained float32-smoke mode, public API/CLI examples,
       legacy-lane deprecation, evidence eligibility, and rollback instructions.
       Record the behavior delta, caller inventory, dry-run, observability,
       explicit sign-off, and rollback evidence required by the Tier-4 gate.
-    - [ ] Update `.github/workflows/jax_smoke.yml` and its static reachability
+    - [x] Update `.github/workflows/jax_smoke.yml` and its static reachability
       assertions so `jax-public-integration` runs
       `run_examples.py --device cpu` and the bounded explicit
       `--device cpu --intent parity` matrix, while `jax-gpu-strict-purity` runs

@@ -33,17 +33,10 @@ import sys
 import threading
 import warnings
 from contextvars import ContextVar
-from typing import Callable, Literal
-
-from simsopt_jax.numerical_policy import CertificateDType
+from typing import Callable, Literal, overload
 
 # Public + private re-exports: callers and tests keep importing from this facade.
 from simsopt_jax.backend._runtime_policy import (  # noqa: F401
-    VALID_BACKEND_MODES,
-    BackendConfig,
-    BackendPolicy,
-    PrecisionSelection,
-    ResolvedPrecision,
     _BACKEND_ENV,
     _BACKEND_LEGACY_ENV,
     _COMPILATION_CACHE_DIR_ENV,
@@ -83,10 +76,19 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _XLA_PYTHON_CLIENT_ALLOCATOR_ENV,
     _XLA_PYTHON_CLIENT_MEM_FRACTION_ENV,
     _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
+    VALID_BACKEND_MODES,
+    BackendConfig,
+    BackendMode,
+    BackendPolicy,
+    ExecutionIntent,
+    JaxDevice,
+    JaxExecutionProfile,
+    PrecisionSelection,
+    ResolvedPrecision,
     _config_from_mode,
+    _debug_overlay_enabled,
     _default_compilation_cache_dir,
     _default_transfer_guard,
-    _debug_overlay_enabled,
     _env_bool,
     _get_mode_policy_defaults,
     _mode_from_legacy_env,
@@ -122,12 +124,9 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _validate_tf_gpu_allocator,
     _validate_transfer_guard,
     is_float32_smoke_policy,
+    resolve_jax_execution_profile,
 )
 from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
-    ChunkTuning,
-    DistributedRuntimeConfig,
-    FieldKernelTuning,
-    ShardingTuning,
     _AUTOTUNED_CHUNK_SIZES_BY_POLICY,
     _COIL_AXIS_SHARDING_STRATEGIES,
     _DEFAULT_COIL_SHARDING_AXIS_NAME,
@@ -145,6 +144,10 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _POINT_CHUNK_SIZE_BY_POLICY,
     _POINT_OWNED_SHARDING_STRATEGIES,
     _VALID_SHARDING_STRATEGIES,
+    ChunkTuning,
+    DistributedRuntimeConfig,
+    FieldKernelTuning,
+    ShardingTuning,
     _apply_chunk_env_overrides,
     _build_chunk_tuning,
     _build_distributed_runtime_config,
@@ -155,10 +158,10 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _detect_imported_jax_cuda_device_index,
     _detect_local_jax_device_count,
     _factor_device_count_2d,
+    _pairwise_penalty_chunk_size_default,
     _parse_local_device_ids,
     _parse_nvidia_smi_indexed_value_row,
     _parse_visible_cuda_device_index,
-    _pairwise_penalty_chunk_size_default,
     _point_chunk_size_default,
     _query_gpu_metric_mb_from_nvidia_smi,
     _query_gpu_total_memory_mb_from_nvidia_smi,
@@ -179,16 +182,21 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _visible_cuda_device_selector,
     _with_distributed_initialized,
 )
+from simsopt_jax.numerical_policy import CertificateDType
 
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "VALID_BACKEND_MODES",
     "BackendConfig",
+    "BackendMode",
     "BackendPolicy",
     "ChunkTuning",
     "DistributedRuntimeConfig",
+    "ExecutionIntent",
     "FieldKernelTuning",
+    "JaxDevice",
+    "JaxExecutionProfile",
     "PrecisionSelection",
     "ResolvedPrecision",
     "ShardingTuning",
@@ -233,6 +241,7 @@ __all__ = [
     "raise_if_target_lane_bypass",
     "register_backend_cache_clear",
     "requires_x64",
+    "resolve_jax_execution_profile",
     "set_backend",
     "should_eagerly_configure_jax",
     "should_shard_coil_groups",
@@ -1102,9 +1111,51 @@ def with_cpu_device_for_construction():
     return _CpuDeviceConstructionContext()
 
 
+@overload
 def set_backend(
-    mode: str,
+    mode: Literal["jax"],
     *,
+    device: JaxDevice,
+    intent: ExecutionIntent = "fast",
+    precision: PrecisionSelection | None = None,
+    strict: bool = False,
+    debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
+    configure_runtime: bool = True,
+) -> BackendConfig: ...
+
+
+@overload
+def set_backend(
+    mode: BackendMode,
+    *,
+    device: None = None,
+    intent: None = None,
+    precision: PrecisionSelection | None = None,
+    strict: bool = False,
+    debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
+    configure_runtime: bool = True,
+) -> BackendConfig: ...
+
+
+def set_backend(
+    mode: BackendMode | Literal["jax"],
+    *,
+    device: JaxDevice | None = None,
+    intent: ExecutionIntent | None = None,
     precision: PrecisionSelection | None = None,
     strict: bool = False,
     debug_nans: bool | None = None,
@@ -1126,8 +1177,21 @@ def set_backend(
     subsequent ``get_backend_config()`` calls are free.
     """
     global _cached_backend_config
+    if mode == "jax":
+        if device is None:
+            raise ValueError("set_backend('jax') requires device='cpu' or device='gpu'")
+        resolved_mode = resolve_jax_execution_profile(
+            device,
+            "fast" if intent is None else intent,
+        ).mode
+    else:
+        if device is not None or intent is not None:
+            raise ValueError(
+                "A canonical backend mode cannot be combined with device or intent"
+            )
+        resolved_mode = _validate_mode(mode)
     config = _config_from_mode(
-        mode,
+        resolved_mode,
         strict=bool(strict),
         precision=precision,
         debug_nans=debug_nans,
@@ -1155,9 +1219,53 @@ def set_backend(
     return config
 
 
+@overload
 def use_runtime(
-    mode: str,
+    mode: Literal["jax"],
     *,
+    device: JaxDevice,
+    intent: ExecutionIntent = "fast",
+    precision: PrecisionSelection | None = None,
+    debug: bool = False,
+    strict: bool = False,
+    debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
+    configure_runtime: bool = True,
+) -> BackendConfig: ...
+
+
+@overload
+def use_runtime(
+    mode: BackendMode,
+    *,
+    device: None = None,
+    intent: None = None,
+    precision: PrecisionSelection | None = None,
+    debug: bool = False,
+    strict: bool = False,
+    debug_nans: bool | None = None,
+    disable_jit: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
+    xla_gpu_preallocate: bool | None = None,
+    xla_gpu_mem_fraction: float | None = None,
+    xla_gpu_allocator: Literal["platform", "vmm"] | None = None,
+    tf_gpu_allocator: Literal["cuda_malloc_async"] | None = None,
+    configure_runtime: bool = True,
+) -> BackendConfig: ...
+
+
+def use_runtime(
+    mode: BackendMode | Literal["jax"],
+    *,
+    device: JaxDevice | None = None,
+    intent: ExecutionIntent | None = None,
     precision: PrecisionSelection | None = None,
     debug: bool = False,
     strict: bool = False,
@@ -1174,6 +1282,8 @@ def use_runtime(
     """Set runtime mode with the strict debug overlay when requested."""
     return set_backend(
         mode,
+        device=device,
+        intent=intent,
         precision=precision,
         strict=bool(strict) or bool(debug),
         debug_nans=True if debug else debug_nans,

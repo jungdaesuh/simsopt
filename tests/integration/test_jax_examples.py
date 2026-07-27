@@ -9,6 +9,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from examples.jax._lane_environment import (
+    build_execution_environment,
+    build_lane_environment,
+)
 from examples.jax._manifest import (
     JaxExampleRecord,
     JaxExamplesManifest,
@@ -16,10 +20,12 @@ from examples.jax._manifest import (
     load_manifest,
 )
 from examples.jax.run_examples import (
+    _argument_parser,
     build_child_command,
-    build_lane_environment,
     run_lane,
+    run_profile,
 )
+from simsopt_jax.config import ExecutionIntent, JaxDevice
 
 
 def _record(
@@ -189,6 +195,153 @@ def test_lane_environment_owns_runtime_selection_before_child_startup() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("device", "intent", "expected_mode", "expected_guard"),
+    (
+        ("cpu", "fast", "jax_cpu_fast", "log"),
+        ("cpu", "parity", "jax_cpu_parity", "allow"),
+        ("gpu", "fast", "jax_gpu_fast", "log"),
+        ("gpu", "parity", "jax_gpu_parity", "disallow"),
+    ),
+)
+def test_execution_environment_scrubs_inherited_runtime_selectors(
+    device: JaxDevice,
+    intent: ExecutionIntent,
+    expected_mode: str,
+    expected_guard: str,
+) -> None:
+    inherited = {
+        "PRESERVED": "yes",
+        "SIMSOPT_BACKEND": "cpu",
+        "STAGE2_BACKEND": "cpu",
+        "SIMSOPT_BACKEND_MODE": "native_cpu",
+        "SIMSOPT_JAX_PLATFORM": "cpu",
+        "SIMSOPT_JAX_BACKEND": "cpu",
+        "SIMSOPT_BACKEND_STRICT": "0",
+        "SIMSOPT_PRECISION": "mixed",
+        "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_TRANSFER_GUARD": "disallow",
+        "JAX_PLATFORMS": "cpu",
+        "JAX_PLATFORM_NAME": "cpu",
+        "JAX_ENABLE_X64": "0",
+    }
+
+    profile, environment = build_execution_environment(
+        device,
+        intent,
+        inherited,
+    )
+
+    assert profile.mode == expected_mode
+    assert environment["PRESERVED"] == "yes"
+    assert environment["SIMSOPT_BACKEND_MODE"] == expected_mode
+    assert environment["SIMSOPT_BACKEND_STRICT"] == "1"
+    assert environment["SIMSOPT_PRECISION"] == "fp64"
+    assert environment["JAX_PLATFORMS"] == ("cpu" if device == "cpu" else "cuda")
+    assert environment["JAX_TRANSFER_GUARD"] == expected_guard
+    assert "SIMSOPT_BACKEND" not in environment
+    assert "STAGE2_BACKEND" not in environment
+    assert "SIMSOPT_JAX_PLATFORM" not in environment
+    assert "SIMSOPT_JAX_BACKEND" not in environment
+    assert "JAX_PLATFORM_NAME" not in environment
+
+
+@pytest.mark.parametrize(
+    ("device", "intent", "backend_mode", "platform"),
+    (
+        ("cpu", "fast", "jax_cpu_fast", "cpu"),
+        ("cpu", "parity", "jax_cpu_parity", "cpu"),
+        ("gpu", "fast", "jax_gpu_fast", "gpu"),
+        ("gpu", "parity", "jax_gpu_parity", "gpu"),
+    ),
+)
+def test_runner_accepts_only_the_selected_profile_result(
+    tmp_path: Path,
+    device: JaxDevice,
+    intent: ExecutionIntent,
+    backend_mode: str,
+    platform: str,
+) -> None:
+    payload = _result_payload(backend_mode=backend_mode, platform=platform)
+    child = _write_child(
+        tmp_path,
+        "selected_profile.py",
+        f"import json\nprint(json.dumps({payload!r}, sort_keys=True))\n",
+    )
+    stdout = io.StringIO()
+
+    exit_code = run_profile(
+        _manifest(_record(child, lanes=("cpu-smoke", "gpu-strict"))),
+        device,
+        intent,
+        repo_root=tmp_path,
+        base_environment={},
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert "PASS test-example" in stdout.getvalue()
+
+
+@pytest.mark.parametrize("intent", ("fast", "parity"))
+def test_gpu_profiles_reject_cpu_fallback_result(
+    tmp_path: Path,
+    intent: ExecutionIntent,
+) -> None:
+    payload = _result_payload(
+        backend_mode=f"jax_gpu_{intent}",
+        platform="cpu",
+    )
+    child = _write_child(
+        tmp_path,
+        "cpu_fallback.py",
+        f"import json\nprint(json.dumps({payload!r}, sort_keys=True))\n",
+    )
+    stderr = io.StringIO()
+
+    exit_code = run_profile(
+        _manifest(_record(child, lanes=("gpu-strict",))),
+        "gpu",
+        intent,
+        repo_root=tmp_path,
+        base_environment={},
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert "platform must be gpu" in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_device", "expected_intent"),
+    (
+        (("--device", "cpu"), "cpu", "fast"),
+        (("--device", "gpu"), "gpu", "fast"),
+        (("--device", "cpu", "--intent", "parity"), "cpu", "parity"),
+        (("--device", "gpu", "--intent", "parity"), "gpu", "parity"),
+    ),
+)
+def test_runner_parser_supports_device_and_execution_intent(
+    arguments: tuple[str, ...],
+    expected_device: str,
+    expected_intent: str,
+) -> None:
+    parsed = _argument_parser().parse_args(arguments)
+
+    assert parsed.device == expected_device
+    assert parsed.intent == expected_intent
+
+
+def test_runner_parser_rejects_mixed_legacy_and_new_selectors() -> None:
+    with pytest.raises(SystemExit):
+        _argument_parser().parse_args(("--lane", "cpu-smoke", "--device", "cpu"))
+
+    with pytest.raises(SystemExit):
+        _argument_parser().parse_args(("--lane", "cpu-smoke", "--intent", "fast"))
+
+
 def test_runner_executes_real_child_with_exact_smoke_arguments(tmp_path: Path) -> None:
     payload = _result_payload(
         backend_mode="jax_cpu_parity", platform="cpu", precision="fp64"
@@ -205,14 +358,15 @@ def test_runner_executes_real_child_with_exact_smoke_arguments(tmp_path: Path) -
     stdout = io.StringIO()
     stderr = io.StringIO()
 
-    exit_code = run_lane(
-        _manifest(_record(child, smoke_args=("--steps", "2"))),
-        "cpu-smoke",
-        repo_root=tmp_path,
-        base_environment={},
-        stdout=stdout,
-        stderr=stderr,
-    )
+    with pytest.warns(DeprecationWarning, match="--lane is deprecated"):
+        exit_code = run_lane(
+            _manifest(_record(child, smoke_args=("--steps", "2"))),
+            "cpu-smoke",
+            repo_root=tmp_path,
+            base_environment={},
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     assert exit_code == 0
     assert "PASS test-example" in stdout.getvalue()
