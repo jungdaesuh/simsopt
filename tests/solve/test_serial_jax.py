@@ -320,6 +320,25 @@ def test_serial_solve_jax_accepts_bounded_limited_memory_history() -> None:
     assert result.options_used.maxcor == 24
 
 
+def test_serial_solve_jax_can_publish_an_iteration_limited_state() -> None:
+    with ScratchDir("."):
+        problem = TraceableScalarProblem(
+            objective_fn=lambda x: jnp.sum(jnp.square(x - 1.0)),
+            x=jnp.zeros(4, dtype=jnp.float64),
+        )
+        initial_objective = float(problem.objective())
+        result = serial_solve_jax(
+            problem,
+            driver=Driver.SIMSOPT_LBFGSB,
+            max_steps=1,
+            require_success=False,
+        )
+
+    assert result.status == 1
+    assert result.success is False
+    assert float(problem.objective()) < initial_objective
+
+
 def test_serial_solve_jax_forwards_relative_step_tolerance():
     problem = TraceableScalarProblem(
         objective_fn=lambda x: jnp.sum(x * x),
