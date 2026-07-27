@@ -1337,3 +1337,11 @@ all three direct pairs, the focused surface plus manifest suite passed
 passed `2 passed`. The broader parity manifest, runner, artifact, input,
 publication, and runtime suite passed `91 passed in 97.83s` from an isolated
 runtime whose source path was pinned to the current checkout.
+
+The first post-repair authority launch then failed closed before arbitration
+with `applicable observables require a complete direct lane-pair matrix`: the
+shared state publisher emits the symmetric invariant at both initial and final
+states, while the first manifest patch routed only the final state. The fix
+declares the missing initial native/JAX CPU/GPU three-pair matrix and asserts
+both its value and applicability in the surface integration test. No observed
+value, comparator, or tolerance changed.

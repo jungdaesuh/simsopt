@@ -1116,6 +1116,8 @@ RED, but no production implementation for that slice may be added first.
       explicitly non-applicable diagnostics. Compare row-wise sum/product
       invariants of the interchangeable Jacobian columns through the unchanged
       whole-solve tolerance and complete three-pair route matrix.
+      Route the emitted initial invariant through the same complete three-pair
+      matrix so publication cannot fail schema completeness before arbitration.
     - [x] **REFACTOR:** Own the symmetric-column transformation once for NumPy
       and JAX arrays; do not add a surface-specific tolerance or endpoint
       polishing step.

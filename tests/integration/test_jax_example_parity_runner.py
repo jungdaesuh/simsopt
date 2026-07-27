@@ -832,6 +832,7 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
     for observable in (
         "residual",
         "residual_jacobian",
+        "residual_jacobian_invariants",
         "objective_sum_squares",
         "objective_gradient",
         "area",
@@ -867,6 +868,7 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
         assert np.all(np.isfinite(parameters))
         assert np.all(np.isfinite(residual_jacobian))
         assert observation.applicability["final:parameters"] is False
+        assert observation.applicability["initial:residual_jacobian_invariants"] is True
         assert observation.applicability["final:residual_jacobian"] is False
         assert observation.applicability["final:residual_jacobian_invariants"] is True
         for phase in ("initial", "final"):
