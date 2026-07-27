@@ -31,6 +31,20 @@ Base SIMSOPT remains installable on Python ``>=3.8``.  The pinned ``JAX`` and
 ``JAX_GPU`` extras require Python ``>=3.11``; use a Python 3.11 or newer
 environment before installing either extra.
 
+Static type checking
+--------------------
+
+The development extra pins Pyright.  From an environment installed with
+``.[JAX,dev]`` or ``.[JAX_GPU,dev]``, run the configured blocking check with::
+
+    pyright --warnings
+
+The checked paths are owned by ``[tool.pyright]`` in ``pyproject.toml``.  The
+initial gate covers the already-green JAX objectives and solver-contract slice;
+it does not claim that the complete historical JAX tree is type-clean.  Expand
+that include list as existing diagnostics are repaired.  Do not disable a
+diagnostic category or add blanket ignores to make a new path pass.
+
 Verify that JAX can see a GPU before running a GPU workload::
 
     python - <<'PY'

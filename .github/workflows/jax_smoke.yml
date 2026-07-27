@@ -376,7 +376,7 @@ jobs:
             -v --tb=short
 
   jax-lint:
-    name: Lint JAX modules
+    name: Static analysis for JAX modules
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -385,8 +385,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install static-analysis dependencies
+        run: |
+          pip install ruff "pyright==1.1.411" pytest \
+            "numpy>=2.0" "scipy>=1.13" \
+            "jax==0.10.0" "jaxlib==0.10.0" \
+            "optax>=0.2.8" "optimistix>=0.1" "lineax>=0.1.1" \
+            "equinox>=0.11.11"
+
+      - name: Pyright check green JAX slice
+        run: pyright --warnings
 
       - name: Ruff check JAX modules
         run: |
