@@ -1109,3 +1109,54 @@ Focused GREEN evidence:
 ```text
 parity artifact and report suite: 15 passed in 0.97s
 ```
+
+## Accepted optimizer device-state retention RED -> GREEN
+
+The BFGS regression was committed without production changes at immutable
+revision `c95120d68`. The focused RED raised `AttributeError: x_device` because
+the custom SIMSOPT BFGS result converter exposed only host-compatible NumPy
+copies. The same defect appeared end to end on the real RTX 5090: the strict
+GPU parity runner passed 9 of 10 ready examples, then rejected Boozer's
+implicit host-to-device conversion while unpacking the accepted optimizer
+state.
+
+GREEN at `b3ca878fe` keeps the existing host-compatible `x` and `jac` result
+fields and additively retains `x_device` and `jac_device` from the accepted JAX
+state. `BoozerSurfaceJAX` consumes those device fields for follow-up unpacking
+and gradient publication, with the legacy fields retained as a compatibility
+fallback. The focused BFGS scope passed 34 tests with 1 skip.
+
+The equivalent limited-memory regression was committed separately at
+`6df21f913`; its focused RED also raised `AttributeError: x_device`. GREEN at
+`eead0641e` adds the same device-resident fields to the custom SIMSOPT L-BFGS-B
+result without changing its public host fields. A clean CPU-pinned run passed
+the exact regression, and the complete private L-BFGS class passed:
+
+```text
+targeted L-BFGS device-state regression: 1 passed in 2.18s
+private L-BFGS class: 29 passed, 1 skipped in 86.88s
+```
+
+The local JAX 0.10.2 runtime's global XLA garbage-collection callback stalled
+when cyclic collection ran amid other concurrent JAX jobs. The clean focused
+runs disabled cyclic GC in the pytest harness; Python reference counting and
+the solver path were unchanged. The independent isolated example runners did
+not require that harness setting.
+
+At committed GREEN `eead0641e`, all four production profiles then passed every
+ready example through isolated children using JAX 0.10.2 and FP64:
+
+```text
+CPU fast:    10 passed, 0 failed
+CPU parity:  10 passed, 0 failed
+GPU fast:    10 passed, 0 failed
+GPU parity:  10 passed, 0 failed
+```
+
+The two GPU profiles ran on the real NVIDIA GeForce RTX 5090 with the required
+CUDA runtime libraries. The parity profile kept strict transfer guards and no
+CPU fallback; Boozer passed in that complete 10-example run. The canonical
+manifest was still v1, so every runner also emitted
+`manifest_schema_version=1` and `used_legacy_manifest_adapter=true`. This is
+current functional evidence, not manifest-v2 activation or fast-performance
+promotion evidence.
