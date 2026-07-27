@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -222,6 +223,23 @@ def test_arbiter_requires_direct_all_pairs_and_passes_matching_receipts() -> Non
     assert result.verdict == "pass"
     assert len(result.comparisons) == 3
     assert all(comparison.passed for comparison in result.comparisons)
+
+
+def test_arbiter_rejects_applicable_observable_without_routes() -> None:
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            values={
+                **observation.values,
+                "final:residual_jacobian": np.eye(1, dtype=np.float64),
+            },
+            applicability={},
+        )
+        for lane, observation in _observations().items()
+    }
+
+    with pytest.raises(ArbitrationError, match="complete direct lane-pair matrix"):
+        arbitrate(_routes(), observations)
 
 
 def test_lane_receipts_expose_explicit_observable_applicability() -> None:
@@ -628,6 +646,25 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
         assert provenance["executed_sources"]
         assert provenance["python_version"]
         assert provenance["lane_environment_policy"]["SIMSOPT_BACKEND_MODE"]
+
+    for mutation in ("input-json", "input-sidecar"):
+        copied_run = tmp_path / mutation / published[0].name
+        shutil.copytree(published[0], copied_run)
+        input_root = copied_run / "traceable-least-squares" / "inputs"
+        bundle_path = input_root / "input_bundle.json"
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        if mutation == "input-json":
+            bundle["configuration"]["rtol"] = 1.0e-4
+            bundle_path.write_bytes(canonical_json_bytes(bundle))
+        else:
+            targets = bundle["arrays"]["targets"]
+            write_array(
+                input_root,
+                targets["path"],
+                np.asarray([9.0, 8.0, 7.0], dtype=np.float64),
+            )
+        with pytest.raises(ValueError, match="input bundle"):
+            audit_published_run(copied_run, repo_root=repo_root)
 
     jax_receipt_path = (
         published[0] / "traceable-least-squares" / "jax-cpu" / "lane_result.json"
