@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -11,11 +12,21 @@ from benchmarks.jax_example_execution_mode_contract import (
     BENCHMARK_RULE,
     BENCHMARK_RULE_VERSION,
     BENCHMARK_SCHEMA_VERSION,
+    METRIC_OWNERS,
+    REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES,
     REPRESENTATIVE_WORKLOAD_IDS,
     WARM_PAIR_COUNT,
     BenchmarkContractError,
     deterministic_bootstrap_lower_bound,
     evaluate_benchmark_artifact,
+)
+from benchmarks.run_jax_example_execution_mode_benchmark import (
+    BenchmarkRunnerError,
+    build_measurement_schedule,
+    build_profile_environment,
+    classify_termination,
+    parse_nvidia_smi_compute_apps,
+    publish_artifact_exclusive,
 )
 
 _SHA = "a" * 64
@@ -65,12 +76,16 @@ def _outcome(
         "platform": device,
         "precision": "fp64",
         "timing_synchronized": True,
+        "synchronization_owner": METRIC_OWNERS["synchronization"],
         "elapsed_seconds": elapsed_seconds,
         "peak_host_rss_bytes": host_rss_bytes,
         "gpu_memory": _gpu_memory(device, gpu_memory_bytes),
-        "dense_materialized_bytes": 1024,
+        "dense_materialized_bytes": 0,
+        "environment_sha256": _OTHER_SHA if intent == "fast" else _SHA,
         "stdout_sha256": _SHA,
         "stderr_sha256": _SHA,
+        "stdout_path": f"logs/{intent}-{phase}-{pair_index}.stdout",
+        "stderr_path": f"logs/{intent}-{phase}-{pair_index}.stderr",
     }
 
 
@@ -111,6 +126,7 @@ def _profile_runs(
             "cold_initial_state": "empty",
             "cold_entry_count_before": 0,
         },
+        "environment_sha256": _OTHER_SHA if intent == "fast" else _SHA,
         "cold": _outcome(
             device=device,
             intent=intent,
@@ -151,6 +167,10 @@ def _workload(device: str, workload_id: str, workload_index: int) -> dict[str, o
         "source_sha256": _SHA,
         "command_sha256": _SHA,
         "max_dense_jacobian_bytes": 4096,
+        "dense_materialization_owner": METRIC_OWNERS["dense_materialized_bytes"],
+        "dense_materialized_bytes": REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES[
+            workload_id
+        ],
         "schedule": schedule,
         "profiles": {
             "fast": _profile_runs(
@@ -174,6 +194,7 @@ def _artifact(device: str = "cpu") -> dict[str, object]:
         "rule": dict(BENCHMARK_RULE),
         "evidence_kind": BENCHMARK_EVIDENCE_KIND,
         "certification_eligible": False,
+        "metric_owners": dict(METRIC_OWNERS),
         "device": device,
         "profiles": {
             "fast": f"jax_{device}_fast",
@@ -247,6 +268,9 @@ def test_checked_in_rule_is_versioned_and_exact() -> None:
     assert BENCHMARK_SCHEMA_VERSION == 1
     assert BENCHMARK_RULE_VERSION == 1
     assert WARM_PAIR_COUNT == 7
+    assert REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES == {
+        workload_id: 0 for workload_id in REPRESENTATIVE_WORKLOAD_IDS
+    }
     assert BENCHMARK_RULE == {
         "bootstrap_confidence": 0.95,
         "bootstrap_resamples": 10_000,
@@ -521,3 +545,120 @@ def test_artifact_evaluation_does_not_mutate_retained_evidence() -> None:
     evaluate_benchmark_artifact(artifact)
 
     assert artifact == before
+
+
+def test_measurement_schedule_has_cold_warmup_and_seven_alternating_pairs() -> None:
+    schedule = build_measurement_schedule(workload_index=0)
+
+    assert len(schedule) == 18
+    assert [(run.phase, run.intent, run.measured) for run in schedule[:4]] == [
+        ("cold", "fast", True),
+        ("cold", "parity", True),
+        ("warmup", "parity", False),
+        ("warmup", "fast", False),
+    ]
+    warm = schedule[4:]
+    assert len(warm) == 2 * WARM_PAIR_COUNT
+    for pair_index in range(WARM_PAIR_COUNT):
+        pair = warm[2 * pair_index : 2 * pair_index + 2]
+        expected = ("fast", "parity") if pair_index % 2 == 0 else ("parity", "fast")
+        assert tuple(run.intent for run in pair) == expected
+        assert tuple(run.order_position for run in pair) == (0, 1)
+        assert all(run.pair_index == pair_index for run in pair)
+
+
+def test_profile_environment_is_pinned_and_cache_specific(tmp_path) -> None:
+    cache_directory = tmp_path / "cache"
+    cache_directory.mkdir()
+    inherited = {
+        "PRESERVED": "yes",
+        "SIMSOPT_BACKEND_MODE": "jax_gpu_parity",
+        "JAX_COMPILATION_CACHE_DIR": "/stale/cache",
+        "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES": "999",
+        "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "999",
+        "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=true",
+    }
+
+    profile, environment, digest = build_profile_environment(
+        "cpu",
+        "fast",
+        cache_directory=cache_directory,
+        base_environment=inherited,
+        repo_root=tmp_path,
+    )
+
+    assert profile.mode == "jax_cpu_fast"
+    assert environment["PRESERVED"] == "yes"
+    assert environment["SIMSOPT_BACKEND_MODE"] == "jax_cpu_fast"
+    assert environment["JAX_COMPILATION_CACHE_DIR"] == str(cache_directory)
+    assert environment["JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES"] == "0"
+    assert environment["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] == "0"
+    assert "XLA_FLAGS" not in environment
+    assert len(digest) == 64
+
+
+def test_gpu_profile_environment_retains_only_selected_determinism_overlay(
+    tmp_path: Path,
+) -> None:
+    cache_directory = tmp_path / "cache"
+    cache_directory.mkdir()
+
+    _, fast, _ = build_profile_environment(
+        "gpu",
+        "fast",
+        cache_directory=cache_directory,
+        base_environment={"XLA_FLAGS": "--stale=true"},
+        repo_root=tmp_path,
+    )
+    _, parity, _ = build_profile_environment(
+        "gpu",
+        "parity",
+        cache_directory=cache_directory,
+        base_environment={"XLA_FLAGS": "--stale=true"},
+        repo_root=tmp_path,
+    )
+
+    assert "XLA_FLAGS" not in fast
+    assert parity["XLA_FLAGS"] == "--xla_gpu_exclude_nondeterministic_ops=true"
+
+
+def test_nvidia_smi_compute_process_parser_is_fail_closed() -> None:
+    assert parse_nvidia_smi_compute_apps("123, 512\n456, 1024 MiB\n") == {
+        123: 512 * 1024 * 1024,
+        456: 1024 * 1024 * 1024,
+    }
+    assert parse_nvidia_smi_compute_apps("No running processes found") == {}
+
+    with pytest.raises(BenchmarkRunnerError, match="nvidia-smi"):
+        parse_nvidia_smi_compute_apps("malformed row")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    (
+        (0, "normal"),
+        (2, "exit_2"),
+        (-9, "resource_limit_or_oom"),
+        (-15, "signal_15"),
+    ),
+)
+def test_termination_classification_is_explicit(returncode: int, expected: str) -> None:
+    assert classify_termination(returncode) == expected
+
+
+def test_artifact_publication_is_exclusive_and_durable(tmp_path) -> None:
+    document = {"run_id": "test", "status": "complete"}
+
+    artifact_path = publish_artifact_exclusive(
+        document,
+        artifact_root=tmp_path,
+        run_directory_name="run-test",
+    )
+
+    assert artifact_path.read_text(encoding="utf-8").endswith("\n")
+    with pytest.raises(FileExistsError):
+        publish_artifact_exclusive(
+            document,
+            artifact_root=tmp_path,
+            run_directory_name="run-test",
+        )
