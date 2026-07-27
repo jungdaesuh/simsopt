@@ -20,35 +20,42 @@ fixed; mutating the surface's free DOFs after construction raises a
 ``RuntimeError`` because the cached geometry would be stale.
 """
 
+from __future__ import annotations
+
 import hashlib
 from functools import lru_cache
+from typing import Callable
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-
-from simsopt_jax.runtime.host_boundary import (
-    host_array as _host_array,
-    host_scalar as _host_scalar,
-)
-from simsopt._core.util import ObjectiveFailure
+import numpy as np
+from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
-from simsopt._core.derivative import derivative_dec
+from simsopt._core.util import ObjectiveFailure
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
-from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+)
+from simsopt_jax.core._math_utils import (
     as_jax_int32 as _as_jax_int32,
 )
+from simsopt_jax.core.biotsavart import biot_savart_B
+from simsopt_jax.core.curve_geometry import optimizable_input_dofs_from_map_spec
+from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
 from simsopt_jax.core.objectives_flux import (
     build_fourier_basis,
     fixed_surface_flux_integral,
-    fixed_surface_flux_specs_from_surface,
     fixed_surface_flux_integral_from_B,
+    fixed_surface_flux_specs_from_surface,
 )
-from simsopt_jax.core.curve_geometry import optimizable_input_dofs_from_map_spec
-from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
+from simsopt_jax.runtime.host_boundary import (
+    host_array as _host_array,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_scalar as _host_scalar,
+)
+
 from simsopt_jax_adapters.geo.curve_specs import adapter_curve_dof_mode
 
 __all__ = [
@@ -414,13 +421,25 @@ class SquaredFluxJAX(Optimizable):
         """Read the current flat free-DOF vector from the field dependency."""
         return _as_jax_float64(self.field.x)
 
+    def traceable_objective(self) -> Callable[[jax.Array], jax.Array]:
+        """Return the immutable pure-JAX objective over the field free DOFs.
+
+        The returned callable is suitable for composition with other JAX
+        penalties and SIMSOPT's backend-neutral on-device solvers.  Its surface,
+        evaluation points, fixed coil values, and DOF layout are the immutable
+        snapshot validated when this method is requested.
+        """
+
+        self._raise_if_field_contract_drifted()
+        return self._jit_forward_dofs
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def _clear_cached_results(self):
-        self._cached_value = None
-        self._cached_partials = None
+        self._cached_value: float | None = None
+        self._cached_partials: Derivative | None = None
 
     def recompute_bell(self, parent=None):
         self._clear_cached_results()
@@ -491,12 +510,12 @@ class SquaredFluxJAX(Optimizable):
     @derivative_dec
     def dJ(self):
         self._raise_if_field_contract_drifted()
-        cache_valid = not self.new_x and self._cached_partials is not None
-        if cache_valid:
+        if not self.new_x and self._cached_partials is not None:
             return self._cached_partials
 
-        self._cached_value, self._cached_partials = self._value_and_dJ_native()
-        partials = self._cached_partials
+        value, partials = self._value_and_dJ_native()
+        self._cached_value = value
+        self._cached_partials = partials
         self.new_x = False
         return partials
 
@@ -519,7 +538,7 @@ class SquaredFluxJAX(Optimizable):
             return value, partials_derivative
         return value, partials_derivative(self)
 
-    def _value_and_dJ_native(self):
+    def _value_and_dJ_native(self) -> tuple[float, Derivative]:
         """Combined value and gradient via end-to-end JAX value_and_grad."""
         flat_dofs = self._gather_field_free_dofs()
         value, grad = self._jit_val_grad_dofs(flat_dofs)
