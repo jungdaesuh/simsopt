@@ -25,6 +25,7 @@ from benchmarks.run_jax_example_execution_mode_benchmark import (
     build_measurement_schedule,
     build_profile_environment,
     classify_termination,
+    evaluate_gpu_concurrent_load_preflight,
     parse_nvidia_smi_compute_apps,
     publish_artifact_exclusive,
 )
@@ -72,6 +73,7 @@ def _outcome(
         "returncode": 0,
         "termination": "normal",
         "scientific_success": True,
+        "cache_load_compatible": True,
         "backend_mode": f"jax_{device}_{intent}",
         "platform": device,
         "precision": "fp64",
@@ -370,6 +372,14 @@ def test_rejects_failed_or_wrong_profile_repetitions(
         evaluate_benchmark_artifact(artifact)
 
 
+def test_rejects_incompatible_persistent_cache_load() -> None:
+    artifact = _artifact()
+    _warm_at(artifact, "fast")["cache_load_compatible"] = False
+
+    with pytest.raises(BenchmarkContractError, match="cache_load_compatible"):
+        evaluate_benchmark_artifact(artifact)
+
+
 def test_rejects_incomplete_cold_warmup_and_balanced_pair_protocol() -> None:
     artifact = _artifact()
     _profile_at(artifact, "fast")["cold"] = None
@@ -634,6 +644,38 @@ def test_nvidia_smi_compute_process_parser_is_fail_closed() -> None:
 
     with pytest.raises(BenchmarkRunnerError, match="nvidia-smi"):
         parse_nvidia_smi_compute_apps("malformed row")
+
+
+def test_gpu_preflight_accepts_bounded_desktop_load_and_records_it() -> None:
+    preflight = evaluate_gpu_concurrent_load_preflight(
+        processes={101: 512 * 1024 * 1024, 202: 256 * 1024 * 1024},
+        utilization_samples=((3, 1), (2, 1), (4, 2), (1, 1), (2, 1)),
+        total_memory_bytes=32 * 1024 * 1024 * 1024,
+    )
+
+    assert preflight["status"] == "pass"
+    assert "background_processes=101:536870912,202:268435456" in preflight["detail"]
+    assert "max_gpu_utilization_percent=4" in preflight["detail"]
+
+
+@pytest.mark.parametrize(
+    ("processes", "samples", "match"),
+    (
+        ({}, ((6, 1),) * 5, "utilization"),
+        ({101: 2 * 1024**3}, ((1, 1),) * 5, "memory"),
+    ),
+)
+def test_gpu_preflight_rejects_material_concurrent_load(
+    processes: dict[int, int],
+    samples: tuple[tuple[int, int], ...],
+    match: str,
+) -> None:
+    with pytest.raises(BenchmarkRunnerError, match=match):
+        evaluate_gpu_concurrent_load_preflight(
+            processes=processes,
+            utilization_samples=samples,
+            total_memory_bytes=32 * 1024 * 1024 * 1024,
+        )
 
 
 @pytest.mark.parametrize(
