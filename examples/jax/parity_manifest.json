@@ -95,6 +95,30 @@
         },
         {
           "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
           "observable": "objective_gradient",
           "lane_pair": "native-cpu:jax-cpu",
           "applicable": true,
@@ -167,6 +191,30 @@
         },
         {
           "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
           "observable": "objective_sum_squares",
           "lane_pair": "native-cpu:jax-cpu",
           "applicable": true,
@@ -184,6 +232,30 @@
         {
           "phase": "final",
           "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
           "lane_pair": "jax-cpu:jax-gpu",
           "applicable": true,
           "comparator": "allclose",
@@ -464,6 +536,30 @@
         },
         {
           "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
           "observable": "objective_gradient",
           "lane_pair": "native-cpu:jax-cpu",
           "applicable": true,
@@ -584,6 +680,30 @@
         },
         {
           "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
           "observable": "objective_sum_squares",
           "lane_pair": "native-cpu:jax-cpu",
           "applicable": true,
@@ -601,6 +721,30 @@
         {
           "phase": "final",
           "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
           "lane_pair": "jax-cpu:jax-gpu",
           "applicable": true,
           "comparator": "allclose",
@@ -1380,6 +1524,30 @@
           "lane_pair": "jax-cpu:jax-gpu",
           "applicable": true,
           "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "selected_dipoles",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "selected_dipoles",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "selected_dipoles",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "exact",
           "tolerance_bucket": "gpu_runtime"
         },
         {

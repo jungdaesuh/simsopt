@@ -556,6 +556,7 @@ def test_traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end(
         "initial:residual",
         "initial:residual_jacobian",
         "initial:objective_sum_squares",
+        "initial:solver_cost",
         "initial:objective_gradient",
     ):
         np.testing.assert_allclose(
@@ -568,7 +569,9 @@ def test_traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end(
     for observable in (
         "final:parameters",
         "final:residual",
+        "final:residual_jacobian",
         "final:objective_sum_squares",
+        "final:solver_cost",
         "final:objective_gradient",
     ):
         np.testing.assert_allclose(
@@ -583,6 +586,12 @@ def test_traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end(
         * native.values["initial:residual_jacobian"].T
         @ native.values["initial:residual"],
     )
+    for observation in (native, jax_cpu):
+        for phase in ("initial", "final"):
+            np.testing.assert_allclose(
+                observation.values[f"{phase}:solver_cost"],
+                0.5 * observation.values[f"{phase}:objective_sum_squares"],
+            )
     assert native.success and jax_cpu.success
     assert native.input_fingerprint == jax_cpu.input_fingerprint
     assert native.effective_construction_fingerprint == (
@@ -631,7 +640,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert summary["cases"][0]["classification"] == "full"
     assert summary["cases"][0]["scale_tier"] == "bounded"
     assert summary["cases"][0]["oracle_kind"] == "native_python_scipy"
-    assert len(summary["cases"][0]["comparisons"]) == 8
+    assert len(summary["cases"][0]["comparisons"]) == 11
     for lane in ("native-cpu", "jax-cpu"):
         receipt = json.loads(
             (
@@ -663,7 +672,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
                 targets["path"],
                 np.asarray([9.0, 8.0, 7.0], dtype=np.float64),
             )
-        with pytest.raises(ValueError, match="input bundle"):
+        with pytest.raises(ValueError, match="fingerprint|SHA-256"):
             audit_published_run(copied_run, repo_root=repo_root)
 
     jax_receipt_path = (
@@ -812,6 +821,12 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
         assert residual_jacobian.shape == (2, 2)
         assert np.all(np.isfinite(parameters))
         assert np.all(np.isfinite(residual_jacobian))
+        assert observation.applicability["final:parameters"] is False
+        for phase in ("initial", "final"):
+            np.testing.assert_allclose(
+                observation.values[f"{phase}:solver_cost"],
+                0.5 * observation.values[f"{phase}:objective_sum_squares"],
+            )
     assert native.success and jax_cpu.success
 
 

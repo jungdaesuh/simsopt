@@ -1042,23 +1042,23 @@ RED, but no production implementation for that slice may be added first.
       `nit`, `nfev`, and `njev` for the optimizing case, or revise applicability
       through a separately reviewed schema contract rather than emitting
       unreviewed nulls.
-    - [ ] **RED:** Add manifest/arbiter/auditor tests requiring exactly the three
+    - [x] **RED:** Add manifest/arbiter/auditor tests requiring exactly the three
       direct lane routes for every observable marked applicable in a lane
       receipt. The retained traceable least-squares final
       `residual_jacobian` must expose the current three-route omission.
-    - [ ] **GREEN:** Add the missing final-Jacobian routes and make route
+    - [x] **GREEN:** Add the missing final-Jacobian routes and make route
       completeness schema-enforced before arbitration. Serialize the distinct
       half-squared `solver_cost` for least-squares lanes when the solver exposes
       it, without changing the public `r.T @ r` objective convention.
-    - [ ] **RED:** Mutate the retained `input_bundle.json` and one input NPY
+    - [x] **RED:** Mutate the retained `input_bundle.json` and one input NPY
       sidecar without changing lane-receipt fingerprint strings; require the
       independent auditor to fail. This must expose the candidate auditor's
       summary/receipt string agreement without input-bundle reload.
-    - [ ] **GREEN:** Make the auditor load the canonical bundle and every input
+    - [x] **GREEN:** Make the auditor load the canonical bundle and every input
       sidecar, validate their hashes and metadata, recompute input/configuration
       fingerprints, and bind those recomputed values to every lane and the
       aggregate before numerical arbitration.
-    - [ ] **REFACTOR:** Keep feasibility/status semantics, route completeness,
+    - [x] **REFACTOR:** Keep feasibility/status semantics, route completeness,
       and input-bundle validation in their existing single owners. Do not add
       case-local thresholds or a second audit-only comparison policy.
     - [ ] **RED:** Add a deterministic publish-time interleaving test that

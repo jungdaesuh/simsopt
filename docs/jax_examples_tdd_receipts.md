@@ -944,3 +944,37 @@ jax-gpu:    nit=95,  nfev=141, njev=141
 This run is explicitly non-authoritative because the repair was uncommitted;
 it proves the repaired CPU/GPU behavior but does not replace the final clean
 authority run required after all Phase 11 safety repairs.
+
+## Complete comparison routes and independent input audit RED -> GREEN
+
+The route-completeness and retained-input regressions were committed without
+production changes as immutable revision `c0f1b3372`. Against its immediate
+parent, the manifest/arbiter RED produced three focused failures: the manifest
+accepted a partial lane-pair matrix, the traceable least-squares final Jacobian
+had no declared routes, and arbitration accepted an applicable observable with
+no routes. The publication-audit RED separately failed with `DID NOT RAISE`
+after both `input_bundle.json` configuration and an input NPY sidecar were
+changed while the retained lane fingerprint strings were left untouched.
+
+GREEN makes a complete three-pair matrix mandatory for every applicable
+observable, both while parsing the parity manifest and while arbitrating the
+actual lane receipts. Non-unique raw surface parameters remain published as a
+diagnostic but are explicitly inapplicable; invariant surface quantities stay
+certified. Traceable and surface least-squares receipts now publish the
+solver's distinct half-squared cost alongside SIMSOPT's public residual
+sum-of-squares convention. The missing final-Jacobian routes and the permanent
+magnet initial discrete-selection routes are declared for all three pairs.
+
+The independent auditor now reloads the canonical input bundle and every
+sidecar through the existing input-bundle owner. That operation revalidates
+metadata and hashes, recomputes the input and configuration fingerprints, and
+binds those recomputed values to the aggregate before numerical arbitration.
+No case-local tolerance or audit-only comparison policy was introduced.
+
+Focused GREEN evidence:
+
+```text
+route, arbiter, case, and tamper regressions: 27 passed in 21.70s
+complete manifest plus integration suites: passed (exit 0)
+Ruff check and format, JSON validation, compileall, git diff --check: passed
+```

@@ -157,6 +157,20 @@ def _route(value: object, context: str) -> ComparisonRoute:
     )
 
 
+def _validate_complete_route_matrix(routes: tuple[ComparisonRoute, ...]) -> None:
+    grouped: dict[tuple[Phase, str], set[LanePair]] = {}
+    for route in routes:
+        if route.applicable:
+            grouped.setdefault((route.phase, route.observable), set()).add(
+                route.lane_pair
+            )
+    for key, lane_pairs in grouped.items():
+        if lane_pairs != LANE_PAIRS:
+            raise ParityManifestValidationError(
+                f"{key} requires a complete direct lane-pair matrix"
+            )
+
+
 def _relationship(value: object, index: int, repo_root: Path) -> ParityRelationship:
     context = f"relationships[{index}]"
     record = _mapping(value, context)
@@ -199,6 +213,7 @@ def _relationship(value: object, index: int, repo_root: Path) -> ParityRelations
     )
     if len(route_keys) != len(set(route_keys)):
         raise ParityManifestValidationError("duplicate comparison route")
+    _validate_complete_route_matrix(routes)
     if classification_value == "unsupported":
         if case_id is not None:
             raise ParityManifestValidationError(

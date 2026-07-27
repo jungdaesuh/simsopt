@@ -127,12 +127,12 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     def state(prefix: str, parameters: np.ndarray) -> dict[str, np.ndarray]:
         current_residual = residual(parameters)
         current_jacobian = jacobian(parameters)
+        objective = np.asarray(np.dot(current_residual, current_residual))
         return {
             f"{prefix}:residual": current_residual,
             f"{prefix}:residual_jacobian": current_jacobian,
-            f"{prefix}:objective_sum_squares": np.asarray(
-                np.dot(current_residual, current_residual)
-            ),
+            f"{prefix}:objective_sum_squares": objective,
+            f"{prefix}:solver_cost": 0.5 * objective,
             f"{prefix}:objective_gradient": (
                 2.0 * current_jacobian.T @ current_residual
             ),
@@ -174,6 +174,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             "final:parameter_invariants": _parameter_invariants(final),
             **state("final", final),
         },
+        applicability={"final:parameters": False},
     )
 
 
@@ -259,10 +260,12 @@ def _jax(
         def host(value):
             return np.asarray(jax.device_get(jax.block_until_ready(value)))
 
+        objective_value = host(objective)
         return {
             f"{prefix}:residual": host(current_residual),
             f"{prefix}:residual_jacobian": host(current_jacobian),
-            f"{prefix}:objective_sum_squares": host(objective),
+            f"{prefix}:objective_sum_squares": objective_value,
+            f"{prefix}:solver_cost": 0.5 * objective_value,
             f"{prefix}:objective_gradient": host(gradient),
             f"{prefix}:area": host(area),
             f"{prefix}:volume": host(volume),
@@ -304,6 +307,7 @@ def _jax(
             ),
             **state("final", final),
         },
+        applicability={"final:parameters": False},
     )
 
 
