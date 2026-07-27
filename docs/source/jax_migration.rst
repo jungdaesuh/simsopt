@@ -108,6 +108,35 @@ Choose an optimizer lane explicitly and verify that the objective supports its
 traceability contract.  Host callbacks, Python mutation, and implicit NumPy
 conversion cannot occur inside a compiled on-device loop.
 
+JAX device and execution intent
+-------------------------------
+
+New code can select JAX placement independently from its execution policy::
+
+    import simsopt_jax.config as simsopt_config
+
+    simsopt_config.set_backend("jax", device="cpu")
+    simsopt_config.set_backend("jax", device="gpu", intent="parity")
+
+After JAX is explicitly selected, omitted ``intent`` means ``"fast"``.  An
+entirely unset selector still means ``native_cpu``.  Explicit canonical modes
+such as ``jax_gpu_fast``, ``jax_gpu_parity``, and
+``jax_cpu_float32_smoke`` remain supported and take no ``device`` or ``intent``
+keywords.  Requested GPU execution fails if CUDA is unavailable rather than
+falling back to CPU.
+
+For the example suite, replace ``--lane cpu-smoke`` with ``--device cpu
+--intent parity`` and ``--lane gpu-strict`` with ``--device gpu --intent
+parity`` when the historical parity behavior is required.  Omit ``--intent``
+for the new fast default.  The legacy lane spellings remain parity aliases for
+one compatibility release and emit a deprecation warning.
+
+Fast and parity retain the same FP64 scientific contract, public objectives,
+custom SIMSOPT JAX solver family, accepted-state publication, and terminal
+scientific gates.  Fast output is never certification evidence.  Use the
+dedicated ``examples/jax/run_parity.py`` workflow for hash-bound native/JAX
+certification artifacts.
+
 Precision and certificate authority
 -----------------------------------
 

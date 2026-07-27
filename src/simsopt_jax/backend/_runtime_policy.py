@@ -22,6 +22,16 @@ _ResolvedT = TypeVar("_ResolvedT")
 
 PrecisionSelection = Literal["mode_default", "fp64", "mixed"]
 ResolvedPrecision = Literal["fp32_smoke", "fp64", "mixed"]
+BackendMode = Literal[
+    "native_cpu",
+    "jax_cpu_fast",
+    "jax_cpu_parity",
+    "jax_cpu_float32_smoke",
+    "jax_gpu_fast",
+    "jax_gpu_parity",
+]
+JaxDevice = Literal["cpu", "gpu"]
+ExecutionIntent = Literal["fast", "parity"]
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda")
@@ -126,7 +136,7 @@ _STALE_GPU_DETERMINISM_XLA_FLAGS = ("--xla_gpu_deterministic_ops",)
 _CPU_OPT_PRESET_FLAG_NAME = "--xla_cpu_opt_preset"
 _CPU_OPT_PRESET_FAST_COMPILE = f"{_CPU_OPT_PRESET_FLAG_NAME}=FAST_COMPILE"
 
-VALID_BACKEND_MODES = (
+VALID_BACKEND_MODES: tuple[BackendMode, ...] = (
     "native_cpu",
     "jax_cpu_fast",
     "jax_cpu_parity",
@@ -134,6 +144,13 @@ VALID_BACKEND_MODES = (
     "jax_gpu_fast",
     "jax_gpu_parity",
 )
+
+_JAX_EXECUTION_MODES: dict[tuple[JaxDevice, ExecutionIntent], BackendMode] = {
+    ("cpu", "fast"): "jax_cpu_fast",
+    ("cpu", "parity"): "jax_cpu_parity",
+    ("gpu", "fast"): "jax_gpu_fast",
+    ("gpu", "parity"): "jax_gpu_parity",
+}
 
 _MODE_TO_RUNTIME = {
     "native_cpu": ("cpu", "cpu"),
@@ -313,7 +330,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
 
 @dataclass(frozen=True)
 class BackendConfig:
-    mode: str
+    mode: BackendMode
     backend: str
     jax_platform: str
     precision: PrecisionSelection = "mode_default"
@@ -339,7 +356,7 @@ class BackendPolicy:
     fields themselves do not directly force kernel execution behavior.
     """
 
-    mode: str
+    mode: BackendMode
     backend: str
     jax_platform: str
     strict: bool
@@ -446,12 +463,43 @@ def _validate_platform(value: str, *, source: str) -> str:
     return value
 
 
-def _validate_mode(mode: str) -> str:
+def _validate_mode(mode: str) -> BackendMode:
     if mode not in VALID_BACKEND_MODES:
         raise ValueError(
             f"Backend mode {mode!r} is not valid. Accepted: {VALID_BACKEND_MODES}"
         )
-    return mode
+    return cast(BackendMode, mode)
+
+
+@dataclass(frozen=True)
+class JaxExecutionProfile:
+    """Resolved JAX placement, numerical intent, and evidence eligibility."""
+
+    device: JaxDevice
+    intent: ExecutionIntent
+    mode: BackendMode
+    certification_eligible: bool
+
+
+def resolve_jax_execution_profile(
+    device: JaxDevice | str,
+    intent: ExecutionIntent | str = "fast",
+) -> JaxExecutionProfile:
+    """Resolve the public orthogonal JAX selector to one canonical mode."""
+    if device not in ("cpu", "gpu"):
+        raise ValueError(f"device={device!r} is not valid. Accepted: ('cpu', 'gpu')")
+    if intent not in ("fast", "parity"):
+        raise ValueError(
+            f"intent={intent!r} is not valid. Accepted: ('fast', 'parity')"
+        )
+    resolved_device = cast(JaxDevice, device)
+    resolved_intent = cast(ExecutionIntent, intent)
+    return JaxExecutionProfile(
+        device=resolved_device,
+        intent=resolved_intent,
+        mode=_JAX_EXECUTION_MODES[(resolved_device, resolved_intent)],
+        certification_eligible=resolved_intent == "parity",
+    )
 
 
 def _validate_precision_selection(
@@ -950,12 +998,12 @@ def _resolve_legacy_platform(backend: str) -> str:
     return _validate_platform(raw_value, source=source)
 
 
-def _mode_from_legacy_env(backend: str, platform: str) -> str:
+def _mode_from_legacy_env(backend: str, platform: str) -> BackendMode:
     if backend == "cpu":
         return "native_cpu"
     if platform == "cpu":
-        return "jax_cpu_parity"
-    return "jax_gpu_parity"
+        return resolve_jax_execution_profile("cpu").mode
+    return resolve_jax_execution_profile("gpu").mode
 
 
 def is_float32_smoke_policy(policy: BackendPolicy) -> bool:
