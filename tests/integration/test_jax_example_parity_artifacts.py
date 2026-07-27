@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import examples.jax.parity.artifacts as artifact_io
 from examples.jax.parity.artifacts import (
     ArtifactValidationError,
     canonical_json_bytes,
@@ -90,6 +91,75 @@ def test_sidecar_rejects_symlink_and_hash_mismatch(tmp_path: Path) -> None:
     linked = dataclasses.replace(reference, path="arrays/link.npy")
     with pytest.raises(ArtifactValidationError, match="symlink"):
         read_array(tmp_path, linked)
+
+
+def test_sidecar_read_rejects_leaf_replaced_after_path_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = np.asarray([1.0, 2.0], dtype=np.float64)
+    reference = write_array(tmp_path / "run", "arrays/value.npy", values)
+    outside = tmp_path / "outside.npy"
+    outside.write_bytes((tmp_path / "run" / reference.path).read_bytes())
+    original_contained_path = artifact_io._contained_path
+
+    def replace_leaf(root: Path, relative_path: str) -> Path:
+        target = original_contained_path(root, relative_path)
+        target.unlink()
+        target.symlink_to(outside)
+        return target
+
+    monkeypatch.setattr(artifact_io, "_contained_path", replace_leaf)
+
+    with pytest.raises(ArtifactValidationError, match="symlink|no-follow"):
+        read_array(tmp_path / "run", reference)
+
+
+def test_sidecar_write_rejects_parent_replaced_after_path_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    arrays = root / "arrays"
+    arrays.mkdir(parents=True)
+    displaced = tmp_path / "displaced-arrays"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_contained_path = artifact_io._contained_path
+
+    def replace_parent(root_value: Path, relative_path: str) -> Path:
+        target = original_contained_path(root_value, relative_path)
+        arrays.rename(displaced)
+        arrays.symlink_to(outside, target_is_directory=True)
+        return target
+
+    monkeypatch.setattr(artifact_io, "_contained_path", replace_parent)
+
+    with pytest.raises(ArtifactValidationError, match="symlink|no-follow"):
+        write_array(root, "arrays/value.npy", np.asarray([3.0], dtype=np.float64))
+
+    assert not (outside / "value.npy").exists()
+
+
+def test_sidecar_write_is_exclusive_and_preserves_existing_bytes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    reference = write_array(
+        root,
+        "arrays/value.npy",
+        np.asarray([1.0], dtype=np.float64),
+    )
+    original = (root / reference.path).read_bytes()
+
+    with pytest.raises(ArtifactValidationError, match="already exists"):
+        write_array(
+            root,
+            "arrays/value.npy",
+            np.asarray([2.0], dtype=np.float64),
+        )
+
+    assert (root / reference.path).read_bytes() == original
 
 
 @pytest.mark.parametrize(
