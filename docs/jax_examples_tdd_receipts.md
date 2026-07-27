@@ -1345,3 +1345,10 @@ states, while the first manifest patch routed only the final state. The fix
 declares the missing initial native/JAX CPU/GPU three-pair matrix and asserts
 both its value and applicability in the surface integration test. No observed
 value, comparator, or tolerance changed.
+
+The next clean launch repeated the same schema failure at the first
+`traceable-least-squares` case. Inspection showed the structurally repeated
+JSON patch had placed the three initial routes on that case rather than on
+surface geometry. The routes were moved to the surface relationship and a
+manifest regression now proves that surface owns all six initial/final routes
+and traceable least squares owns none of them.

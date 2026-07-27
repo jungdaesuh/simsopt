@@ -260,3 +260,34 @@ def test_traceable_final_jacobian_has_all_direct_routes() -> None:
         "native-cpu:jax-gpu",
         "jax-cpu:jax-gpu",
     }
+
+
+def test_surface_owns_symmetric_jacobian_invariant_routes() -> None:
+    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    parity_manifest = load_parity_manifest(
+        PARITY_MANIFEST_PATH,
+        examples_manifest=examples_manifest,
+        repo_root=REPO_ROOT,
+    )
+    relationships = {
+        item.case_id: item for item in parity_manifest.relationships if item.case_id
+    }
+    invariant_routes = {
+        (route.phase, route.lane_pair)
+        for route in relationships["surface-geometry-optimization"].comparison_routes
+        if route.observable == "residual_jacobian_invariants"
+    }
+
+    assert invariant_routes == {
+        (phase, lane_pair)
+        for phase in ("initial", "final")
+        for lane_pair in (
+            "native-cpu:jax-cpu",
+            "native-cpu:jax-gpu",
+            "jax-cpu:jax-gpu",
+        )
+    }
+    assert all(
+        route.observable != "residual_jacobian_invariants"
+        for route in relationships["traceable-least-squares"].comparison_routes
+    )
