@@ -27,7 +27,7 @@ from ._types import _BFGSResults
 
 
 def _bfgs_curvature_terms(s_k, y_k, *, x_dtype):
-    """Return ``(sTy, rho, valid_curvature)`` for the dense BFGS update."""
+    """Return curvature terms for the dense BFGS inverse-Hessian update."""
     rho_k_inv = _dot(y_k, s_k)
     rho_k = jnp.reciprocal(rho_k_inv)
     machine_eps = _as_jax_dtype(jnp.finfo(x_dtype).eps, x_dtype)
@@ -43,8 +43,7 @@ def _bfgs_curvature_terms(s_k, y_k, *, x_dtype):
         & jnp.isfinite(curvature_scale)
         & (rho_k_inv > curvature_tol)
     )
-    step_eps = machine_eps if jnp.finfo(x_dtype).bits < 64 else curvature_eps
-    return rho_k_inv, rho_k, valid_curvature, step_eps
+    return rho_k_inv, rho_k, valid_curvature
 
 
 def _minimize_bfgs_private(
@@ -54,6 +53,7 @@ def _minimize_bfgs_private(
     maxiter=None,
     norm=np.inf,
     gtol=1e-5,
+    xrtol=0.0,
     line_search_maxiter=10,
     initial_state=None,
     callback=None,
@@ -78,6 +78,7 @@ def _minimize_bfgs_private(
     )
     line_search = _line_search_value_and_grad if value_and_grad else _line_search
     gtol_value = np.asarray(gtol, dtype=np.dtype(x0.dtype)).item()
+    xrtol_value = np.asarray(xrtol, dtype=np.dtype(x0.dtype)).item()
     half_value = np.asarray(0.5, dtype=np.dtype(x0.dtype)).item()
     wolfe_c1_value = np.asarray(1e-4, dtype=np.dtype(x0.dtype)).item()
     wolfe_c2_value = np.asarray(0.9, dtype=np.dtype(x0.dtype)).item()
@@ -146,7 +147,7 @@ def _minimize_bfgs_private(
         f_kp1 = line_search_results.f_k
         g_kp1 = line_search_results.g_k
         y_k = g_kp1 - state.g_k
-        rho_k_inv, rho_k, valid_curvature, step_eps = _bfgs_curvature_terms(
+        rho_k_inv, rho_k, valid_curvature = _bfgs_curvature_terms(
             s_k,
             y_k,
             x_dtype=state.x_k.dtype,
@@ -160,7 +161,11 @@ def _minimize_bfgs_private(
             + rho_k * s_k[:, np.newaxis] * s_k[np.newaxis, :]
         )
         H_kp1 = jnp.where(valid_curvature, H_kp1, state.H_k)
-        converged = _norm(g_kp1, ord=norm) < gtol_jax
+        xrtol_jax = _as_jax_dtype(xrtol_value, state.x_k.dtype)
+        relative_step_converged = (xrtol_jax > _as_jax_dtype(0.0, xrtol_jax.dtype)) & (
+            _norm(s_k) <= xrtol_jax * (xrtol_jax + _norm(x_kp1))
+        )
+        converged = (_norm(g_kp1, ord=norm) < gtol_jax) | relative_step_converged
         next_k = state.k + _int_scalar(1)
         dphi_0 = jnp.real(_dot(state.g_k, p_k))
         dphi_kp1 = jnp.real(_dot(g_kp1, p_k))
@@ -174,11 +179,6 @@ def _minimize_bfgs_private(
             allow_decreasing_fallback & jnp.isfinite(f_kp1) & (f_kp1 < state.f_k)
         )
         wolfe_failure = (~strong_wolfe) & (~decreasing_fallback)
-        step_tol = step_eps * jnp.maximum(
-            _as_jax_dtype(1.0, state.x_k.dtype),
-            _norm(state.x_k),
-        )
-        stalled_step = (~converged) & (_norm(s_k) <= step_tol)
         nonfinite_step = (~jnp.isfinite(f_kp1)) | (~jnp.all(jnp.isfinite(g_kp1)))
         nonfinite_line_search_status = _as_jax_dtype(
             -1,
@@ -188,7 +188,7 @@ def _minimize_bfgs_private(
             line_search_results.failed,
             line_search_status,
             jnp.where(
-                stalled_step | wolfe_failure,
+                wolfe_failure,
                 _as_jax_dtype(0, state.line_search_status.dtype),
                 line_search_status,
             ),
@@ -235,7 +235,7 @@ def _minimize_bfgs_private(
             nonfinite_step,
             nonfinite_step_result,
             lambda _: lax.cond(
-                line_search_results.failed | stalled_step | wolfe_failure,
+                line_search_results.failed | wolfe_failure,
                 failed_step,
                 accepted_step,
                 operand=None,
@@ -248,7 +248,9 @@ def _minimize_bfgs_private(
         maxiter_jax = _as_jax_dtype(maxiter_value, initial_state.k.dtype)
         state = lax.while_loop(cond_fun, body_fun, initial_state)
         f_final, g_final = scalar_value_and_grad(state.x_k)
-        converged_final = (~state.failed) & (_norm(g_final, ord=norm) < gtol_jax)
+        converged_final = (~state.failed) & (
+            state.converged | (_norm(g_final, ord=norm) < gtol_jax)
+        )
         state = state._replace(
             converged=converged_final,
             nfev=state.nfev + _int_scalar(1),
@@ -290,6 +292,7 @@ def _minimize_bfgs_private(
             norm,
             int(line_search_maxiter),
             float(gtol_value),
+            float(xrtol_value),
             int(maxiter_value),
         ),
         builder=lambda: jax.jit(run_solver),

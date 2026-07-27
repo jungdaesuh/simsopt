@@ -283,6 +283,24 @@ def test_serial_solve_jax_matches_host_general_quadratic_problem():
         assert min(objectives) <= 1e-16
 
 
+def test_serial_solve_jax_forwards_relative_step_tolerance():
+    problem = TraceableScalarProblem(
+        objective_fn=lambda x: jnp.sum(x * x),
+        x=jnp.asarray([1.0], dtype=jnp.float64),
+    )
+
+    with ScratchDir("."):
+        result = serial_solve_jax(
+            problem,
+            rtol=0.0,
+            atol=1.0e-8,
+            max_steps=16,
+        )
+
+    assert isinstance(result.options_used, SimsoptBFGSOptions)
+    assert result.options_used.xrtol == 0.0
+
+
 @pytest.mark.parametrize(
     ("driver", "options_type"),
     [
