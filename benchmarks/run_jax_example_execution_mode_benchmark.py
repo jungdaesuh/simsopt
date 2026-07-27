@@ -83,6 +83,10 @@ _CPU_AOT_INCOMPATIBILITY_MARKER = (
     b"Machine type used for XLA:CPU compilation doesn't match the machine type "
     b"for execution"
 )
+_NVIDIA_DRIVER_VERSION_INCOMPATIBILITY_MARKER = (
+    b"Could not get kernel mode driver version: "
+    b"(INVALID_ARGUMENT: Version does not match the format X.Y.Z)"
+)
 
 
 class BenchmarkRunnerError(RuntimeError):
@@ -588,6 +592,7 @@ def _outcome_document(
     monitored: _MonitoredProcess,
     scientific_success: bool,
     cache_load_compatible: bool,
+    runtime_environment_compatible: bool,
     backend_mode: str,
     platform_name: str,
     precision: str,
@@ -629,6 +634,7 @@ def _outcome_document(
         "termination": classify_termination(monitored.returncode),
         "scientific_success": scientific_success,
         "cache_load_compatible": cache_load_compatible,
+        "runtime_environment_compatible": runtime_environment_compatible,
         "backend_mode": backend_mode,
         "platform": platform_name,
         "precision": precision,
@@ -1022,6 +1028,7 @@ def _workload_document(
         )
         stdout_path = run_directory / stdout_relative
         stderr_path = run_directory / stderr_relative
+        stderr_bytes = stderr_path.read_bytes()
         scientific_success, backend_mode, platform_name, precision = (
             _child_result_fields(
                 stdout_path=stdout_path,
@@ -1042,8 +1049,9 @@ def _workload_document(
             ],
             monitored=monitored,
             scientific_success=scientific_success,
-            cache_load_compatible=(
-                _CPU_AOT_INCOMPATIBILITY_MARKER not in stderr_path.read_bytes()
+            cache_load_compatible=(_CPU_AOT_INCOMPATIBILITY_MARKER not in stderr_bytes),
+            runtime_environment_compatible=(
+                _NVIDIA_DRIVER_VERSION_INCOMPATIBILITY_MARKER not in stderr_bytes
             ),
             backend_mode=backend_mode,
             platform_name=platform_name,

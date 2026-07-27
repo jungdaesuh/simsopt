@@ -269,7 +269,7 @@ def _warm_at(
 
 
 def test_checked_in_rule_is_versioned_and_exact() -> None:
-    assert BENCHMARK_SCHEMA_VERSION == 2
+    assert BENCHMARK_SCHEMA_VERSION == 3
     assert BENCHMARK_RULE_VERSION == 2
     assert WARM_PAIR_COUNT == 7
     assert REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES == {
@@ -388,9 +388,7 @@ def test_rejects_incompatible_runtime_environment() -> None:
     artifact = _artifact("gpu")
     _warm_at(artifact, "fast")["runtime_environment_compatible"] = False
 
-    with pytest.raises(
-        BenchmarkContractError, match="runtime_environment_compatible"
-    ):
+    with pytest.raises(BenchmarkContractError, match="runtime_environment_compatible"):
         evaluate_benchmark_artifact(artifact)
 
 

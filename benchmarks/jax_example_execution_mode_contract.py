@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
 
-BENCHMARK_SCHEMA_VERSION = 2
+BENCHMARK_SCHEMA_VERSION = 3
 BENCHMARK_RULE_VERSION = 2
 BENCHMARK_EVIDENCE_KIND = "jax_example_execution_mode_benchmark_noncertifying"
 WARM_PAIR_COUNT = 7
@@ -412,6 +412,11 @@ def _validate_outcome(
         outcome.get("cache_load_compatible"),
         True,
         f"{context}.cache_load_compatible",
+    )
+    _require_equal(
+        outcome.get("runtime_environment_compatible"),
+        True,
+        f"{context}.runtime_environment_compatible",
     )
     _require_equal(
         outcome.get("backend_mode"), expected_profile, f"{context}.backend_mode"
