@@ -303,6 +303,23 @@ def test_serial_solve_jax_supports_simsopt_owned_limited_memory_driver():
         assert result.success is True
 
 
+def test_serial_solve_jax_accepts_bounded_limited_memory_history() -> None:
+    with ScratchDir("."):
+        problem = TraceableScalarProblem(
+            objective_fn=lambda x: jnp.sum((x - 1.0) ** 2),
+            x=jnp.zeros(4, dtype=jnp.float64),
+        )
+        result = serial_solve_jax(
+            problem,
+            driver=Driver.SIMSOPT_LBFGSB,
+            max_steps=32,
+            maxcor=24,
+        )
+
+    assert isinstance(result.options_used, SimsoptLBFGSBOptions)
+    assert result.options_used.maxcor == 24
+
+
 def test_serial_solve_jax_forwards_relative_step_tolerance():
     problem = TraceableScalarProblem(
         objective_fn=lambda x: jnp.sum(x * x),
