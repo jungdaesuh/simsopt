@@ -12,6 +12,7 @@ from typing import Callable, Literal, Mapping
 import jax
 
 from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
+from simsopt_jax.solve.driver import Driver
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,13 @@ class ExampleResult:
 
 
 ExampleSolve = Callable[[Path, int], ExampleResult]
+
+
+def scalar_example_driver() -> Driver:
+    """Select limited-memory fast solves and dense parity-compatible solves."""
+    if get_backend_mode().endswith("_fast"):
+        return Driver.SIMSOPT_LBFGSB
+    return Driver.SIMSOPT_BFGS
 
 
 def run_example(

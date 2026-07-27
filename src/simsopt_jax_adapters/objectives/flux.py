@@ -348,12 +348,16 @@ class SquaredFluxJAX(Optimizable):
     def _bind_native_forward(self, forward, *forward_args):
         jit_forward, jit_val_grad = _cached_squared_flux_native_program(forward)
 
+        def _traceable_forward_dofs(flat_dofs):
+            return forward(flat_dofs, self._flux_spec, *forward_args)
+
         def _jit_forward_dofs(flat_dofs):
             return jit_forward(flat_dofs, self._flux_spec, *forward_args)
 
         def _jit_val_grad_dofs(flat_dofs):
             return jit_val_grad(flat_dofs, self._flux_spec, *forward_args)
 
+        self._traceable_forward_dofs = _traceable_forward_dofs
         self._jit_forward_dofs = _jit_forward_dofs
         self._jit_val_grad_dofs = _jit_val_grad_dofs
 
@@ -431,7 +435,7 @@ class SquaredFluxJAX(Optimizable):
         """
 
         self._raise_if_field_contract_drifted()
-        return self._jit_forward_dofs
+        return self._traceable_forward_dofs
 
     # ------------------------------------------------------------------
     # Public API

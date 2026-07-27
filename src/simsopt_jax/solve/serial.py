@@ -17,6 +17,10 @@ from simsopt_jax.core._finite_difference import (
     forward_jacobian_vmap,
 )
 from simsopt_jax.runtime.host_boundary import host_array, host_float
+from simsopt_jax.runtime.jaxpr_closure import (
+    closure_converted_value_and_grad,
+    device_put_closure_consts,
+)
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve.driver import Driver
@@ -27,6 +31,7 @@ from simsopt_jax.solve.optimistix.contracts import (
 )
 from simsopt_jax.solve.simsopt.contracts import (
     SimsoptBFGSOptions,
+    SimsoptLBFGSBOptions,
     SimsoptLMGMRESOptions,
     SimsoptLMQROptions,
 )
@@ -87,12 +92,29 @@ class TraceableScalarProblem:
 
     def __post_init__(self) -> None:
         objective_fn = self.objective_fn
-        self._solver_objective_fn = jax.jit(
-            lambda x: jnp.asarray(objective_fn(jnp.asarray(x)))
+        x = jnp.asarray(self.x)
+
+        def normalized_objective(current_x):
+            return jnp.asarray(objective_fn(jnp.asarray(current_x)))
+
+        converted_value_and_grad, value_and_grad_consts = (
+            closure_converted_value_and_grad(
+                jax.value_and_grad(normalized_objective),
+                x,
+            )
         )
-        self._solver_value_and_grad_fn = jax.jit(
-            jax.value_and_grad(self._solver_objective_fn)
-        )
+        value_and_grad_consts = device_put_closure_consts(value_and_grad_consts, x)
+        compiled_value_and_grad = jax.jit(converted_value_and_grad)
+
+        def solver_value_and_grad(current_x):
+            return compiled_value_and_grad(current_x, value_and_grad_consts)
+
+        def solver_objective(current_x):
+            value, _gradient = solver_value_and_grad(current_x)
+            return value
+
+        self._solver_objective_fn = solver_objective
+        self._solver_value_and_grad_fn = solver_value_and_grad
 
     @property
     def dof_size(self) -> int:
@@ -100,6 +122,13 @@ class TraceableScalarProblem:
 
     def objective(self, x: jax.Array | None = None) -> jax.Array:
         return self._solver_objective_fn(self.x if x is None else x)
+
+    def value_and_grad(
+        self,
+        x: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Evaluate the compiled objective and gradient on the active device."""
+        return self._solver_value_and_grad_fn(self.x if x is None else x)
 
 
 @dataclass
@@ -212,16 +241,28 @@ def _scalar_options(
     rtol: float,
     atol: float,
     max_steps: int,
-) -> SimsoptBFGSOptions | OptaxLBFGSOptions | OptimistixLBFGSOptions:
+) -> (
+    SimsoptBFGSOptions
+    | SimsoptLBFGSBOptions
+    | OptaxLBFGSOptions
+    | OptimistixLBFGSOptions
+):
     if driver == Driver.SIMSOPT_BFGS:
         return SimsoptBFGSOptions(maxiter=max_steps, gtol=atol, xrtol=rtol)
+    if driver == Driver.SIMSOPT_LBFGSB:
+        return SimsoptLBFGSBOptions(
+            maxiter=max_steps,
+            maxfun=max_steps * 20,
+            gtol=atol,
+            ftol=rtol,
+        )
     if driver == Driver.OPTAX_LBFGS:
         return OptaxLBFGSOptions(maxiter=max_steps, gtol=atol)
     if driver == Driver.OPTIMISTIX_LBFGS:
         return OptimistixLBFGSOptions(maxiter=max_steps, tol=min(rtol, atol))
     raise ValueError(
-        "serial_solve_jax driver must be simsopt_bfgs or an explicitly selected "
-        "optional optax_lbfgs or optimistix_lbfgs driver."
+        "serial_solve_jax driver must be simsopt_bfgs, simsopt_lbfgsb, or an "
+        "explicitly selected optional optax_lbfgs or optimistix_lbfgs driver."
     )
 
 
