@@ -47,7 +47,7 @@ def surface_stellsym_mask_for_grid(
     )
 
 
-def compute_stellsym_mask_indices_for_grid(
+def stellsym_mask_indices_for_grid_host(
     *,
     mpol,
     ntor,
@@ -56,7 +56,7 @@ def compute_stellsym_mask_indices_for_grid(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    """Return flattened exact-residual mask indices for a quadrature grid."""
+    """Return host-owned exact-residual indices for immutable setup metadata."""
     mask = np.repeat(
         surface_stellsym_mask_for_grid(
             mpol=mpol,
@@ -71,4 +71,25 @@ def compute_stellsym_mask_indices_for_grid(
     )
     if stellsym:
         mask[0, 0, 0] = False
-    return _as_jax_int32(np.flatnonzero(mask))
+    return np.asarray(np.flatnonzero(mask), dtype=np.int32)
+
+
+def compute_stellsym_mask_indices_for_grid(
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    """Return device-owned exact-residual mask indices for a quadrature grid."""
+    host_indices = stellsym_mask_indices_for_grid_host(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    return _as_jax_int32(host_indices)

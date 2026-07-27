@@ -88,7 +88,7 @@ from simsopt_jax.geo.surface_fourier_cpu_ordered import (
     surface_gammadash2_from_dofs_cpu_ordered,
 )
 from simsopt_jax.geo._surface_stellsym import (
-    compute_stellsym_mask_indices_for_grid,
+    stellsym_mask_indices_for_grid_host,
 )
 from simsopt_jax_adapters.geo._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback as _guard_none_G_coil_gradient_callback,
@@ -918,9 +918,11 @@ class _BoozerSurfaceRuntimeState:
     quadpoints_phi: jax.Array
     quadpoints_theta: jax.Array
     scatter_indices: jax.Array | None
+    exact_mask_indices: jax.Array | None
     quadpoints_phi_signature: tuple = field(metadata={"static": True})
     quadpoints_theta_signature: tuple = field(metadata={"static": True})
     scatter_indices_signature: tuple | None = field(metadata={"static": True})
+    exact_mask_indices_signature: tuple | None = field(metadata={"static": True})
     mpol: int = field(metadata={"static": True})
     ntor: int = field(metadata={"static": True})
     nfp: int = field(metadata={"static": True})
@@ -1213,19 +1215,33 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     clamped_dims = _surface_clamped_dims(surface, surface_kind=surface_kind)
     scatter_indices = None
     scatter_indices_host = None
+    exact_mask_indices = None
+    exact_mask_indices_host = None
     if surface.stellsym:
         scatter_indices_host = _surface_stellsym_scatter_indices_host(
             surface.mpol,
             surface.ntor,
         )
         scatter_indices = _as_jax_int32(scatter_indices_host)
+    if surface_kind == "xyztensorfourier":
+        exact_mask_indices_host = stellsym_mask_indices_for_grid_host(
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        exact_mask_indices = _as_jax_int32(exact_mask_indices_host)
     return _BoozerSurfaceRuntimeState(
         quadpoints_phi=_as_jax_float64(quadpoints_phi),
         quadpoints_theta=_as_jax_float64(quadpoints_theta),
         scatter_indices=scatter_indices,
+        exact_mask_indices=exact_mask_indices,
         quadpoints_phi_signature=_host_array_signature(quadpoints_phi),
         quadpoints_theta_signature=_host_array_signature(quadpoints_theta),
         scatter_indices_signature=_host_array_signature(scatter_indices_host),
+        exact_mask_indices_signature=_host_array_signature(exact_mask_indices_host),
         mpol=int(surface.mpol),
         ntor=int(surface.ntor),
         nfp=int(surface.nfp),
@@ -1246,6 +1262,7 @@ def _boozer_surface_runtime_signature(state: _BoozerSurfaceRuntimeState):
         state.quadpoints_phi_signature,
         state.quadpoints_theta_signature,
         state.scatter_indices_signature,
+        state.exact_mask_indices_signature,
     )
 
 
@@ -4564,7 +4581,7 @@ class BoozerSurfaceJAX(Optimizable):
         # --- Extract immutable surface metadata once; keep DOFs cached locally ---
         self._surface_runtime_state = runtime_state
         self._store_surface_dofs(surface.get_dofs())
-        self._exact_mask_indices = None
+        self._exact_mask_indices = runtime_state.exact_mask_indices
         self.mpol = runtime_state.mpol
         self.ntor = runtime_state.ntor
         self.nfp = runtime_state.nfp
@@ -4679,6 +4696,36 @@ class BoozerSurfaceJAX(Optimizable):
             "solve_generation": solve_generation,
         }
         res_record = self._store_boozer_result("value_only", res)
+        self.need_to_run_code = False
+        return res_record
+
+    def install_traceable_solved_runtime_state(self, result):
+        """Publish one successful pure-array solve at the explicit host boundary.
+
+        ``run_code_traceable`` remains side-effect free inside JIT-compiled
+        numerical regions. Call this method after that solve completes to make
+        its accepted surface and linearization contract the adapter's state.
+        """
+        record_type = _maybe_boozer_result_record_type_for(result)
+        if record_type is None or record_type.mode not in {
+            "traceable_exact",
+            "traceable_ls",
+        }:
+            raise TypeError(
+                "install_traceable_solved_runtime_state requires a result from "
+                "BoozerSurfaceJAX.run_code_traceable()."
+            )
+        if result["type"] != self.boozer_type:
+            raise ValueError(
+                "Traceable solve type does not match this BoozerSurfaceJAX "
+                f"instance: {result['type']!r} != {self.boozer_type!r}."
+            )
+        if not _host_bool(result["primal_success"]):
+            raise RuntimeError("Cannot publish an unsuccessful traceable Boozer solve.")
+
+        self._set_surface_dofs(result["sdofs"])
+        _advance_solver_generation(self)
+        res_record = self._store_boozer_result(record_type.mode, result)
         self.need_to_run_code = False
         return res_record
 
@@ -7993,15 +8040,11 @@ class BoozerSurfaceJAX(Optimizable):
         return residual_fn
 
     def _compute_stellsym_mask_indices(self):
-        """Compute and cache the integer exact-residual mask indices."""
+        """Return exact-residual indices captured at the host setup boundary."""
         if self._exact_mask_indices is None:
-            self._exact_mask_indices = compute_stellsym_mask_indices_for_grid(
-                mpol=self.mpol,
-                ntor=self.ntor,
-                nfp=self.nfp,
-                stellsym=self.stellsym,
-                quadpoints_phi=self.quadpoints_phi,
-                quadpoints_theta=self.quadpoints_theta,
+            raise RuntimeError(
+                "Exact Boozer mask indices are unavailable for this surface runtime "
+                "state. Build it from a SurfaceXYZTensorFourier host surface."
             )
         return self._exact_mask_indices
 

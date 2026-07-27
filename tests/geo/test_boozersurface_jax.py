@@ -7911,21 +7911,26 @@ class TestBoozerSurfaceJAXExactPath:
         assert booz.boozer_type == "exact"
         assert booz.constraint_weight is None
 
-    def test_exact_mask_indices_use_cached_runtime_state(self):
-        """Exact-path mask construction should not call the live surface getter."""
+    def test_exact_mask_indices_use_cached_runtime_state(self, monkeypatch):
+        """Exact mask indices are captured before strict device execution."""
         booz = _make_mock_boozer_surface_exact(stellsym=True)
         expected = np.asarray(booz._compute_stellsym_mask_indices(), dtype=np.int32)
-        booz._exact_mask_indices = None
 
-        def _unexpected_get_mask():
+        def _unexpected_mask_rebuild(**_kwargs):
             raise AssertionError(
-                "live surface get_stellsym_mask() should not be queried"
+                "strict runtime must not rebuild exact mask indices from device arrays"
             )
 
-        booz.surface.get_stellsym_mask = _unexpected_get_mask
+        monkeypatch.setattr(
+            _bsj,
+            "stellsym_mask_indices_for_grid_host",
+            _unexpected_mask_rebuild,
+        )
+        with jax.transfer_guard("disallow"):
+            actual = booz._compute_stellsym_mask_indices()
 
         np.testing.assert_array_equal(
-            np.asarray(booz._compute_stellsym_mask_indices(), dtype=np.int32),
+            np.asarray(actual, dtype=np.int32),
             expected,
         )
 
@@ -12556,6 +12561,8 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert rs.scatter_indices is not None  # stellsym=True
         assert rs.scatter_indices.dtype == jnp.dtype(jnp.int32)
         assert rs.scatter_indices.ndim == 1
+        assert rs.exact_mask_indices is not None
+        assert rs.exact_mask_indices.dtype == jnp.dtype(jnp.int32)
 
     def test_target_mode_runtime_state_uses_compact_indices(self):
         """mpol=ntor=10 carries 661 int32 indices, not a 1323x661 matrix."""

@@ -7101,6 +7101,65 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     assert vjp_calls["count"] == 2
 
 
+def test_traceable_exact_objective_gradient_uses_exact_residual_equation(
+    monkeypatch,
+):
+    true_status = _mock_linear_solve_status(jnp.asarray(True, dtype=bool))
+    objective_kwargs = {
+        key: object()
+        for key in surfaceobjectives_traceable_jax_module._TRACEABLE_EXACT_RESIDUAL_KEYS
+    }
+
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        lambda **_kwargs: pytest.fail(
+            "exact implicit differentiation must not use the LS penalty objective"
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_evaluate_traceable_total_objective",
+        lambda x_inner, coil_dofs, _coil_set_spec, _objective_kwargs: jnp.dot(
+            x_inner, coil_dofs
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_boozer_exact_residual",
+        lambda x_inner, *, coil_set_spec, **_kwargs: x_inner + coil_set_spec,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_traceable_jax_module,
+        "_traceable_solve_linearization",
+        lambda _booz_jax, solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
+            rhs,
+            true_status,
+        ),
+    )
+
+    coil_dofs = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
+    solved_x = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+    direct_grad, implicit_grad, total_grad, success, _trust = (
+        surfaceobjectives_traceable_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda current_coil_dofs: current_coil_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_linear_solve_factors=None,
+            linearization_kind="exact_jacobian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            objective_kwargs=objective_kwargs,
+        )
+    )
+
+    np.testing.assert_allclose(direct_grad, solved_x)
+    np.testing.assert_allclose(implicit_grad, coil_dofs)
+    np.testing.assert_allclose(total_grad, solved_x - coil_dofs)
+    assert bool(np.asarray(success))
+
+
 def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
     monkeypatch,
 ):

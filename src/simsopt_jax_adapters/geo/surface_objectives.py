@@ -2620,6 +2620,8 @@ def _boozer_residual_J_of_x_inner(
         xtheta,
         weight_inv_modB=weight_inv_modB,
     )
+    if constraint_weight is None:
+        return J_boozer
 
     label_gamma, label_xphi, label_xtheta = _surface_geometry_from_dofs(
         sdofs,
