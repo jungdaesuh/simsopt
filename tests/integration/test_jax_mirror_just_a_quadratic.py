@@ -4,14 +4,14 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
-
 from examples.jax._lane_environment import build_execution_environment
 from simsopt_jax.config import ExecutionIntent
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "examples" / "jax" / "1_Simple" / "just_a_quadratic.py"
@@ -22,9 +22,21 @@ def test_just_a_quadratic_matches_native_scientific_contract(
     intent: ExecutionIntent,
 ) -> None:
     assert EXAMPLE.is_file(), "the exact-name JAX mirror must exist"
-    _, environment = build_execution_environment("cpu", intent, os.environ)
+    _, environment = build_execution_environment(
+        "cpu",
+        intent,
+        os.environ,
+        repo_root=REPO_ROOT,
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(REPO_ROOT / "src"),
+            str(sysconfig.get_paths()["purelib"]),
+            str(Path(jax.__file__).resolve().parents[1]),
+        )
+    )
     completed = subprocess.run(
-        (sys.executable, str(EXAMPLE), "--smoke", "--json"),
+        (sys.executable, "-S", str(EXAMPLE), "--smoke", "--json"),
         cwd=REPO_ROOT,
         env=environment,
         check=False,
