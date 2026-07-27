@@ -257,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
             canonical_json_bytes(
                 {
                     "schema_version": 1,
+                    "manifest_schema_version": examples_manifest.schema_version,
+                    "used_legacy_manifest_adapter": (
+                        examples_manifest.used_legacy_manifest_adapter
+                    ),
                     "run_id": paths.run_id,
                     "lanes": list(args.lanes),
                     "smoke": args.smoke,

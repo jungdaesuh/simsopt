@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
+import warnings
 
 SourceDisposition = Literal["candidate", "deferred"]
 ExampleStatus = Literal["planned", "ready"]
@@ -20,8 +21,11 @@ DISPOSITIONS = frozenset({"candidate", "deferred"})
 EXAMPLE_STATUSES = frozenset({"planned", "ready"})
 EXECUTION_KINDS = frozenset({"pure", "adapter", "hybrid"})
 LANES = frozenset({"cpu-smoke", "gpu-strict"})
+DEVICES = frozenset({"cpu", "gpu"})
+_LANE_TO_DEVICE = {"cpu-smoke": "cpu", "gpu-strict": "gpu"}
+_DEVICE_TO_LANE = {device: lane for lane, device in _LANE_TO_DEVICE.items()}
 SOURCE_FIELDS = frozenset({"source", "disposition", "deferred_reason"})
-EXAMPLE_FIELDS = frozenset(
+EXAMPLE_COMMON_FIELDS = frozenset(
     {
         "id",
         "path",
@@ -34,9 +38,10 @@ EXAMPLE_FIELDS = frozenset(
         "extras",
         "smoke_args",
         "correctness_tests",
-        "lanes",
     }
 )
+EXAMPLE_V1_FIELDS = EXAMPLE_COMMON_FIELDS | {"lanes"}
+EXAMPLE_V2_FIELDS = EXAMPLE_COMMON_FIELDS | {"devices"}
 
 
 class ManifestValidationError(ValueError):
@@ -65,11 +70,18 @@ class JaxExampleRecord:
     correctness_tests: tuple[str, ...]
     lanes: tuple[str, ...]
 
+    @property
+    def devices(self) -> tuple[str, ...]:
+        """Return normalized CPU/GPU capability independent of source schema."""
+        return tuple(_LANE_TO_DEVICE[lane] for lane in self.lanes)
+
 
 @dataclass(frozen=True)
 class JaxExamplesManifest:
     source_catalog: tuple[SourceRecord, ...]
     jax_examples: tuple[JaxExampleRecord, ...]
+    schema_version: Literal[1, 2] = 2
+    used_legacy_manifest_adapter: bool = False
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -130,11 +142,21 @@ def _source_record(value: object, index: int) -> SourceRecord:
     )
 
 
-def _example_record(value: object, index: int) -> JaxExampleRecord:
+def _example_record(
+    value: object,
+    index: int,
+    *,
+    schema_version: Literal[1, 2],
+) -> JaxExampleRecord:
     context = f"jax_examples[{index}]"
     record = _mapping(value, context)
-    unexpected = set(record) - EXAMPLE_FIELDS
-    missing = EXAMPLE_FIELDS - set(record)
+    if "intents" in record:
+        raise ManifestValidationError(f"per-example intents are forbidden in {context}")
+    if "lanes" in record and "devices" in record:
+        raise ManifestValidationError(f"{context} must not mix lanes and devices")
+    expected_fields = EXAMPLE_V1_FIELDS if schema_version == 1 else EXAMPLE_V2_FIELDS
+    unexpected = set(record) - expected_fields
+    missing = expected_fields - set(record)
     if unexpected or missing:
         raise ManifestValidationError(
             f"invalid example fields in {context}: "
@@ -165,12 +187,21 @@ def _example_record(value: object, index: int) -> JaxExampleRecord:
             f"example path tier does not match {tier}: {path}"
         )
 
-    lanes = _strings(record["lanes"], f"{context}.lanes")
-    invalid_lanes = set(lanes) - LANES
-    if invalid_lanes:
-        raise ManifestValidationError(
-            f"invalid lanes for {example_id}: {sorted(invalid_lanes)}"
-        )
+    if schema_version == 1:
+        lanes = _strings(record["lanes"], f"{context}.lanes")
+        invalid_lanes = set(lanes) - LANES
+        if invalid_lanes:
+            raise ManifestValidationError(
+                f"invalid lanes for {example_id}: {sorted(invalid_lanes)}"
+            )
+    else:
+        devices = _strings(record["devices"], f"{context}.devices")
+        invalid_devices = set(devices) - DEVICES
+        if invalid_devices:
+            raise ManifestValidationError(
+                f"invalid devices for {example_id}: {sorted(invalid_devices)}"
+            )
+        lanes = tuple(_DEVICE_TO_LANE[device] for device in devices)
 
     return JaxExampleRecord(
         id=example_id,
@@ -326,14 +357,44 @@ def _validate_manifest(manifest: JaxExamplesManifest, repo_root: Path) -> None:
             )
 
 
-def load_manifest(path: Path, *, repo_root: Path) -> JaxExamplesManifest:
-    """Parse and validate one immutable JAX examples manifest."""
-
-    root = _mapping(json.loads(path.read_text(encoding="utf-8")), "manifest")
-    expected_root_fields = {"source_catalog", "jax_examples"}
-    if set(root) != expected_root_fields:
+def _schema_version(root: dict[str, object]) -> Literal[1, 2]:
+    if "schema_version" not in root:
+        expected_fields = {"source_catalog", "jax_examples"}
+        if set(root) != expected_fields:
+            raise ManifestValidationError(
+                "legacy manifest fields must be exactly source_catalog and jax_examples"
+            )
+        return 1
+    value = root["schema_version"]
+    if value == 1:
         raise ManifestValidationError(
-            "manifest fields must be exactly source_catalog and jax_examples"
+            "schema_version 1 must be absent for the legacy v1 contract"
+        )
+    if isinstance(value, bool) or value != 2:
+        raise ManifestValidationError(f"unsupported manifest schema: {value!r}")
+    expected_fields = {"schema_version", "source_catalog", "jax_examples"}
+    if set(root) != expected_fields:
+        raise ManifestValidationError(
+            "v2 manifest fields must be exactly schema_version, source_catalog, "
+            "and jax_examples"
+        )
+    return 2
+
+
+def _parse_manifest_document(
+    document: object,
+    *,
+    repo_root: Path,
+    warn_legacy: bool,
+) -> JaxExamplesManifest:
+    root = _mapping(document, "manifest")
+    schema_version = _schema_version(root)
+    if schema_version == 1 and warn_legacy:
+        warnings.warn(
+            "manifest schema v1 is deprecated; migrate to explicit v2 devices "
+            "with examples/jax/migrate_manifest.py --dry-run",
+            FutureWarning,
+            stacklevel=3,
         )
     manifest = JaxExamplesManifest(
         source_catalog=tuple(
@@ -343,14 +404,130 @@ def load_manifest(path: Path, *, repo_root: Path) -> JaxExamplesManifest:
             )
         ),
         jax_examples=tuple(
-            _example_record(record, index)
+            _example_record(record, index, schema_version=schema_version)
             for index, record in enumerate(
                 _sequence(root["jax_examples"], "jax_examples")
             )
         ),
+        schema_version=schema_version,
+        used_legacy_manifest_adapter=schema_version == 1,
     )
     _validate_manifest(manifest, repo_root)
     return manifest
+
+
+def load_manifest(path: Path, *, repo_root: Path) -> JaxExamplesManifest:
+    """Parse and validate one immutable JAX examples manifest."""
+
+    return _parse_manifest_document(
+        json.loads(path.read_text(encoding="utf-8")),
+        repo_root=repo_root,
+        warn_legacy=True,
+    )
+
+
+def manifest_semantic_diff(
+    before: JaxExamplesManifest,
+    after: JaxExamplesManifest,
+) -> dict[str, bool]:
+    """Compare migration-relevant semantics without comparing storage fields."""
+    source_catalog_equal = before.source_catalog == after.source_catalog
+    before_ids = tuple(example.id for example in before.jax_examples)
+    after_ids = tuple(example.id for example in after.jax_examples)
+    example_ids_equal = set(before_ids) == set(after_ids)
+    example_order_equal = before_ids == after_ids
+    before_by_id = {example.id: example for example in before.jax_examples}
+    after_by_id = {example.id: example for example in after.jax_examples}
+
+    def field_equal(field: str) -> bool:
+        return example_ids_equal and all(
+            getattr(before_by_id[example_id], field)
+            == getattr(after_by_id[example_id], field)
+            for example_id in before_ids
+        )
+
+    readiness_equal = field_equal("status")
+    lineage_equal = field_equal("inspired_by")
+    paths_equal = field_equal("path")
+    device_capabilities_equal = example_ids_equal and all(
+        before_by_id[example_id].devices == after_by_id[example_id].devices
+        for example_id in before_ids
+    )
+    semantic_equal = all(
+        (
+            source_catalog_equal,
+            example_ids_equal,
+            example_order_equal,
+            readiness_equal,
+            lineage_equal,
+            paths_equal,
+            device_capabilities_equal,
+            before.jax_examples == after.jax_examples,
+        )
+    )
+    return {
+        "device_capabilities_equal": device_capabilities_equal,
+        "example_ids_equal": example_ids_equal,
+        "example_order_equal": example_order_equal,
+        "lineage_equal": lineage_equal,
+        "paths_equal": paths_equal,
+        "readiness_equal": readiness_equal,
+        "source_catalog_equal": source_catalog_equal,
+        "semantic_equal": semantic_equal,
+    }
+
+
+def _canonical_json_bytes(payload: object) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def convert_v1_document_to_v2(
+    document: object,
+    *,
+    repo_root: Path,
+) -> tuple[bytes, dict[str, bool]]:
+    """Return deterministic v2 bytes after proving semantic equivalence."""
+    before = _parse_manifest_document(
+        document,
+        repo_root=repo_root,
+        warn_legacy=False,
+    )
+    if before.schema_version != 1:
+        raise ManifestValidationError("migration input must use absent-schema v1")
+    source_document = _mapping(document, "manifest")
+    candidate_examples: list[dict[str, object]] = []
+    for index, value in enumerate(
+        _sequence(source_document["jax_examples"], "jax_examples")
+    ):
+        record = _mapping(value, f"jax_examples[{index}]")
+        lanes = _strings(record.pop("lanes"), f"jax_examples[{index}].lanes")
+        record["devices"] = [_LANE_TO_DEVICE[lane] for lane in lanes]
+        candidate_examples.append(record)
+    candidate: dict[str, object] = {
+        "schema_version": 2,
+        "source_catalog": source_document["source_catalog"],
+        "jax_examples": candidate_examples,
+    }
+    after = _parse_manifest_document(
+        candidate,
+        repo_root=repo_root,
+        warn_legacy=False,
+    )
+    semantic_diff = manifest_semantic_diff(before, after)
+    if not semantic_diff["semantic_equal"]:
+        raise ManifestValidationError(
+            f"manifest migration changed semantics: {semantic_diff}"
+        )
+    return _canonical_json_bytes(candidate), semantic_diff
 
 
 def derive_source_coverage(

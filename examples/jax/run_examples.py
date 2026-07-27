@@ -59,6 +59,16 @@ class ChildResultValidationError(ValueError):
     """A child result cannot certify the runtime lane that selected it."""
 
 
+def manifest_observability_payload(
+    manifest: JaxExamplesManifest,
+) -> dict[str, int | bool]:
+    """Return the schema/adapter fields emitted by every runner invocation."""
+    return {
+        "manifest_schema_version": manifest.schema_version,
+        "used_legacy_manifest_adapter": manifest.used_legacy_manifest_adapter,
+    }
+
+
 class _RunnerArgumentParser(argparse.ArgumentParser):
     def parse_args(
         self,
@@ -313,6 +323,14 @@ def main(arguments: list[str] | None = None) -> int:
     except ManifestValidationError as error:
         print(f"manifest validation failed: {error}", file=sys.stderr)
         return 2
+    print(
+        json.dumps(
+            manifest_observability_payload(manifest),
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
     if parsed.lane is not None:
         lane: Lane = parsed.lane
         print(

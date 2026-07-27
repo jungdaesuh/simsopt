@@ -906,11 +906,11 @@ RED, but no production implementation for that slice may be added first.
       scrubbed and pinned to the CLI-selected profile. Prove legacy
       `--lane cpu-smoke` and `--lane gpu-strict` retain their current parity
       modes and emit a deprecation warning.
-    - [ ] **RED:** Add manifest migration tests for absent/v1 and explicit-v2
+    - [x] **RED:** Add manifest migration tests for absent/v1 and explicit-v2
       versions, unknown versions, mixed `lanes`/`devices`, per-example
       `intents`, semantic drift, deterministic candidate bytes, and a dry run
       that must not modify its input or repository.
-    - [ ] **GREEN:** Implement the dual reader and
+    - [x] **GREEN:** Implement the dual reader and
       `examples/jax/migrate_manifest.py --dry-run` without changing the
       canonical manifest. The dry run prints candidate v2 bytes, SHA-256,
       normalized semantic diff, and observed schema/adapter metadata. Run it

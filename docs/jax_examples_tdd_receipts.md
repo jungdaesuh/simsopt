@@ -1036,3 +1036,47 @@ complete parity runner integration suite: 38 passed in 64.40s
 focused mypy: Success: no issues found in 8 source files
 Ruff check and format, compileall, git diff --check: passed
 ```
+
+## Manifest-v2 dual reader and read-only migration RED -> GREEN
+
+The schema-migration and observability tests were committed without production
+changes at immutable revision `3feaf521a`. Replaying that revision in a
+detached worktree produced two independent authentic RED groups:
+
+```text
+manifest dual-reader/converter/dry-run contract: 8 failed, 19 deselected in 0.50s
+runner schema/adapter observability contract: 2 failed in 0.19s
+```
+
+GREEN accepts absent-schema v1 through an explicitly observable read-only
+adapter and accepts explicit schema v2 with `devices`. It rejects explicit
+version 1, unknown versions, mixed `lanes`/`devices`, and per-example
+`intents`. Both schemas normalize to the same typed example records; the
+semantic comparator independently covers source catalog, IDs and order,
+readiness, lineage, paths, device capability, and the complete normalized
+record.
+
+`examples/jax/migrate_manifest.py --dry-run` is the only candidate writer. It
+prints canonical candidate bytes, their SHA-256, normalized semantic diff,
+observed reader metadata, the one-release compatibility interval, and rollback
+command. It has no mutating mode. The ordinary example runner emits schema and
+legacy-adapter metadata to CI logs, and parity aggregates retain and audit the
+same fields.
+
+The committed canonical v1 input and complete worktree diff hashes were
+identical before and after the live dry run. The retained review artifact is
+`docs/jax_manifest_v2_dry_run_report.md`; its candidate digest is
+`2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`.
+The canonical manifest was deliberately not changed because activation still
+requires explicit user sign-off.
+
+GREEN evidence:
+
+```text
+focused migration contract: 8 passed, 19 deselected in 0.59s
+focused runner observability: 2 passed in 0.17s
+manifest plus complete example integration suites: 67 passed in 104.84s
+focused mypy for new migration owners: Success: no issues found in 2 source files
+focused mypy with pre-existing runner codes excluded: Success in 3 source files
+canonical input and repository diff hashes unchanged by dry run: passed
+```
