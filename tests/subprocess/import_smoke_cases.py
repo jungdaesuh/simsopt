@@ -1315,6 +1315,51 @@ def case_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
     assert int(lbfgs.nit) >= 2
 
 
+def case_transfer_guard_disallow_allows_gpu_bfgs_with_device_closure_constants() -> (
+    None
+):
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    import simsopt_jax.config as simsopt_config
+    from simsopt_jax.geo.optimizers.optimizer import (
+        PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
+        private_optimizer_runtime_is_supported,
+        target_minimize,
+    )
+
+    gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+    if gpu is None:
+        _skip_case("GPU device is required")
+    if not private_optimizer_runtime_is_supported(jax.__version__):
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
+
+    simsopt_config.set_backend(
+        "jax_gpu_fast",
+        strict=True,
+        transfer_guard="disallow",
+    )
+    target = jax.device_put(np.asarray([1.0, -1.0], dtype=np.float64), device=gpu)
+    half = jax.device_put(np.asarray(0.5, dtype=np.float64), device=gpu)
+    x0 = jax.device_put(np.asarray([-1.2, 1.0], dtype=np.float64), device=gpu)
+
+    def value_and_gradient(x):
+        difference = jnp.asarray(x, dtype=jnp.float64) - target
+        return half * jnp.dot(difference, difference), difference
+
+    baseline = float(jax.device_get(value_and_gradient(x0)[0]))
+    result = target_minimize(
+        value_and_gradient,
+        x0,
+        method="bfgs-ondevice",
+        maxiter=5,
+        value_and_grad=True,
+    )
+
+    assert result.success is True
+    assert float(result.fun) < baseline
+
+
 def case_transfer_guard_disallow_allows_traceable_newton_with_host_closure_constants() -> (
     None
 ):
