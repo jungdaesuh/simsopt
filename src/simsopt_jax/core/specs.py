@@ -417,8 +417,15 @@ class CoilSpec:
 
 
 @_register_jax_spec(
-    data_fields=("curve", "curve_map", "current_map", "symmetry", "surface_map"),
-    meta_fields=("surface_output_index",),
+    data_fields=(
+        "curve",
+        "curve_map",
+        "current_map",
+        "symmetry",
+        "surface_map",
+        "current_term_maps",
+    ),
+    meta_fields=("surface_output_index", "current_term_scales"),
 )
 class CoilDofExtractionSpec:
     """Immutable owner-DOF -> coil-spec reconstruction payload."""
@@ -429,6 +436,8 @@ class CoilDofExtractionSpec:
     symmetry: CoilSymmetrySpec
     surface_map: OptimizableDofMapSpec | None = None
     surface_output_index: int | None = None
+    current_term_maps: tuple[OptimizableDofMapSpec, ...] = ()
+    current_term_scales: tuple[float, ...] = ()
 
 
 @_register_jax_spec(data_fields=("coils",), meta_fields=())
@@ -1302,9 +1311,13 @@ def make_coil_dof_extraction_spec(
     current_map: OptimizableDofMapSpec,
     surface_map: OptimizableDofMapSpec | None = None,
     surface_output_index: int | None = None,
+    current_term_maps: tuple[OptimizableDofMapSpec, ...] = (),
+    current_term_scales: tuple[float, ...] = (),
     rotmat: object | None = None,
     scale: float = 1.0,
 ) -> CoilDofExtractionSpec:
+    if len(current_term_maps) != len(current_term_scales):
+        raise ValueError("current term maps and scales must have equal length")
     return CoilDofExtractionSpec(
         curve=curve,
         curve_map=curve_map,
@@ -1312,6 +1325,8 @@ def make_coil_dof_extraction_spec(
         symmetry=make_coil_symmetry_spec(rotmat=rotmat, scale=scale),
         surface_map=surface_map,
         surface_output_index=surface_output_index,
+        current_term_maps=current_term_maps,
+        current_term_scales=tuple(float(value) for value in current_term_scales),
     )
 
 
