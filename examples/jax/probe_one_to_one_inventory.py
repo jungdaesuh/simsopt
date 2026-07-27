@@ -144,20 +144,27 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    """Run a selected or complete inventory probe and emit canonical JSON."""
-    arguments = _parser().parse_args()
-    inventory_path: Path = arguments.inventory
-    selected_source: str | None = arguments.source
+def probe_inventory(
+    inventory_path: Path, selected_source: str | None
+) -> tuple[ProbeResult, ...]:
+    """Probe every row, or the uniquely named row requested by the caller."""
     rows = _inventory_rows(inventory_path)
     selected = (
         rows
-        if arguments.all
+        if selected_source is None
         else tuple(row for row in rows if row.get("source") == selected_source)
     )
     if not selected:
         raise InventoryProbeError(f"source is not inventoried: {selected_source}")
-    results = tuple(probe_row(row) for row in selected)
+    return tuple(probe_row(row) for row in selected)
+
+
+def main() -> int:
+    """Run a selected or complete inventory probe and emit canonical JSON."""
+    arguments = _parser().parse_args()
+    inventory_path: Path = arguments.inventory
+    selected_source: str | None = None if arguments.all else arguments.source
+    results = probe_inventory(inventory_path, selected_source)
     payload = {
         "source_count": len(results),
         "validated": True,
