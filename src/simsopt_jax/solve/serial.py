@@ -235,27 +235,28 @@ def _write_bounded_objective_log(
     final_objective: jax.Array,
     start_time: float,
 ) -> None:
-    datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
-    with open(f"simsopt_{datestr}.dat", "w") as objective_file:
-        _write_log_header(
-            objective_file,
-            problem_type=problem_type,
-            ndofs=ndofs,
-        )
-        _write_log_row(
-            objective_file,
-            eval_index=0,
-            elapsed_seconds=0.0,
-            x=initial_x,
-            objective_value=initial_objective,
-        )
-        _write_log_row(
-            objective_file,
-            eval_index=1,
-            elapsed_seconds=time() - start_time,
-            x=final_x,
-            objective_value=final_objective,
-        )
+    with jax.transfer_guard("allow"):
+        datestr = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
+        with open(f"simsopt_{datestr}.dat", "w") as objective_file:
+            _write_log_header(
+                objective_file,
+                problem_type=problem_type,
+                ndofs=ndofs,
+            )
+            _write_log_row(
+                objective_file,
+                eval_index=0,
+                elapsed_seconds=0.0,
+                x=initial_x,
+                objective_value=initial_objective,
+            )
+            _write_log_row(
+                objective_file,
+                eval_index=1,
+                elapsed_seconds=time() - start_time,
+                x=final_x,
+                objective_value=final_objective,
+            )
 
 
 def _require_success(result: OptimizerResult, *, operation: str) -> None:

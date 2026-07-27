@@ -66,6 +66,21 @@ OPTIMIZER_DRIFT_TOLERANCES: dict[str, dict[str, float | None]] = {
 }
 
 PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
+    "native_workflow": {
+        "same_state_value_rtol": 1e-10,
+        "same_state_value_atol": 1e-12,
+        "same_state_derivative_rtol": 1e-8,
+        "same_state_derivative_atol": 1e-10,
+        "whole_solve_value_rtol": 1e-6,
+        "whole_solve_value_atol": 1e-7,
+        "terminal_relative_reduction": 1e-12,
+        "terminal_constraint_norm_atol": 1e-10,
+        "terminal_orthonormality_atol": 1e-12,
+        "terminal_stationarity_atol": 1e-7,
+        "requires_same_input": True,
+        "requires_native_workflow_oracle": True,
+        "requires_direct_cpp_oracle": False,
+    },
     "direct_kernel": {
         "rtol": 1e-10,
         "atol": 1e-12,

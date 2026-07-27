@@ -164,6 +164,8 @@ jobs:
   jax-public-integration:
     name: JAX public lane (with simsoptpp)
     runs-on: ubuntu-latest
+    env:
+      SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -225,6 +227,22 @@ jobs:
       - name: Run JAX examples CPU smoke lane
         run: python examples/jax/run_examples.py --lane cpu-smoke
 
+      - name: Run native/JAX CPU example parity
+        run: |
+          python examples/jax/run_parity.py \
+            --case all-applicable \
+            --lanes native-cpu,jax-cpu \
+            --smoke \
+            --artifact-root .artifacts/jax-example-parity
+
+      - name: Upload native/JAX CPU parity receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-native-example-parity-cpu
+          path: .artifacts/jax-example-parity/
+          retention-days: 14
+
   jax-gpu-strict-purity:
     name: JAX GPU strict purity (CUDA, transfer_guard=disallow)
     runs-on: [self-hosted, gpu]
@@ -235,6 +253,8 @@ jobs:
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      JAX_TRANSFER_GUARD: disallow
+      SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT: ${{ github.sha }}
       XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
@@ -271,6 +291,23 @@ jobs:
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python examples/jax/run_examples.py --lane gpu-strict
+
+      - name: Run native/JAX strict GPU example parity
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_parity.py \
+              --case all-applicable \
+              --lanes native-cpu,jax-cpu,jax-gpu \
+              --smoke \
+              --artifact-root .artifacts/jax-example-parity
+
+      - name: Upload native/JAX strict GPU parity receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-native-example-parity-gpu-strict
+          path: .artifacts/jax-example-parity/
+          retention-days: 14
 
       - name: Run remaining JAX surface CUDA import mode matrix
         run: |

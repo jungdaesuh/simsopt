@@ -180,6 +180,58 @@ jobs:
             benchmark_artifacts/jax_ci_contract.json
             benchmark_artifacts/jax_ci_contract.md
 
+  native-jax-example-parity:
+    name: Native/JAX example parity (CUDA strict)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    env:
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_FILE: envs/jax.yml
+      SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      JAX_TRANSFER_GUARD: disallow
+      SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT: ${{ github.sha }}
+      JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision strict parity environment from recipe
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+          else
+            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      - name: Verify strict CUDA runtime
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -c "import jax; devices=jax.devices(); print(devices); assert jax.config.jax_enable_x64; assert all(device.platform in {'cuda', 'gpu'} for device in devices)"
+
+      - name: Run every applicable native/JAX parity case
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_parity.py \
+              --case all-applicable \
+              --lanes native-cpu,jax-cpu,jax-gpu \
+              --artifact-root .artifacts/jax-example-parity
+
+      - name: Upload native/JAX parity receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-native-example-parity-scheduled
+          path: .artifacts/jax-example-parity/
+          retention-days: 30
+
   gpu-full-suite-log:
     name: GPU full suite (CUDA, transfer_guard=log)
     runs-on: [self-hosted, gpu]
