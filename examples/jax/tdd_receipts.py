@@ -407,6 +407,17 @@ def _replay_receipt(repo_root: Path, receipt: _Receipt) -> None:
         )
 
 
+def _receipts_from_document(value: object) -> tuple[_Receipt, ...]:
+    document = _mapping(value, "receipt document")
+    _exact_keys(document, frozenset({"schema_version", "receipts"}), "receipt document")
+    if document["schema_version"] != 1:
+        raise ReceiptValidationError("unsupported receipt schema version")
+    return tuple(
+        _receipt(item, f"receipts[{index}]")
+        for index, item in enumerate(_sequence(document["receipts"], "receipts"))
+    )
+
+
 def validate_receipt_document(
     value: object,
     *,
@@ -414,14 +425,7 @@ def validate_receipt_document(
     replay: bool,
 ) -> ReceiptAudit:
     """Validate trusted receipt JSON and optionally replay every bound phase."""
-    document = _mapping(value, "receipt document")
-    _exact_keys(document, frozenset({"schema_version", "receipts"}), "receipt document")
-    if document["schema_version"] != 1:
-        raise ReceiptValidationError("unsupported receipt schema version")
-    receipts = tuple(
-        _receipt(item, f"receipts[{index}]")
-        for index, item in enumerate(_sequence(document["receipts"], "receipts"))
-    )
+    receipts = _receipts_from_document(value)
     behavior_ids = tuple(receipt.behavior_id for receipt in receipts)
     if len(set(behavior_ids)) != len(behavior_ids):
         raise ReceiptValidationError("duplicate behavior_id")
@@ -438,14 +442,7 @@ def validate_receipt_document(
 
 def render_receipt_markdown(value: object) -> str:
     """Render validated-shape receipt data as a deterministic review table."""
-    document = _mapping(value, "receipt document")
-    _exact_keys(document, frozenset({"schema_version", "receipts"}), "receipt document")
-    if document["schema_version"] != 1:
-        raise ReceiptValidationError("unsupported receipt schema version")
-    receipts = tuple(
-        _receipt(item, f"receipts[{index}]")
-        for index, item in enumerate(_sequence(document["receipts"], "receipts"))
-    )
+    receipts = _receipts_from_document(value)
     lines = [
         "# One-to-One JAX Example TDD Receipts",
         "",
