@@ -269,8 +269,14 @@ def test_complete_matched_artifact_promotes(device: str) -> None:
     assert tuple(summary.workload_id for summary in decision.workloads) == (
         REPRESENTATIVE_WORKLOAD_IDS
     )
-    assert all(summary.warm_median_speedup == pytest.approx(1.2) for summary in decision.workloads)
-    assert all(summary.warm_speedup_lower_bound == pytest.approx(1.2) for summary in decision.workloads)
+    assert all(
+        summary.warm_median_speedup == pytest.approx(1.2)
+        for summary in decision.workloads
+    )
+    assert all(
+        summary.warm_speedup_lower_bound == pytest.approx(1.2)
+        for summary in decision.workloads
+    )
 
 
 @pytest.mark.parametrize(
