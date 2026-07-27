@@ -575,6 +575,26 @@ def _coil_current_value_from_dofs(
     *,
     use_compute_dtype: bool = False,
 ) -> CurrentValueSpec:
+    if extraction_spec.current_term_maps:
+        current_value = jnp.sum(jnp.asarray(owner_dofs)[:0])
+        for term_map, scale in zip(
+            extraction_spec.current_term_maps,
+            extraction_spec.current_term_scales,
+            strict=True,
+        ):
+            term_dofs = optimizable_input_dofs_from_map_spec(
+                term_map,
+                owner_dofs,
+                use_compute_dtype=use_compute_dtype,
+            )
+            if term_dofs.shape[0] != 1:
+                raise RuntimeError(
+                    "affine coil current terms must resolve to scalar Current "
+                    "degrees of freedom."
+                )
+            current_value = current_value + scale * term_dofs[0]
+        return CurrentValueSpec(value=jnp.reshape(current_value, (1,)))
+
     current_dofs = optimizable_input_dofs_from_map_spec(
         extraction_spec.current_map,
         owner_dofs,

@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt._core.derivative import Derivative
-from simsopt.field.coil import Current
+from simsopt.field.coil import Current, CurrentSum, ScaledCurrent
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.runtime.host_boundary import block_until_ready, host_array, host_float
 from simsopt._core.optimizable import Optimizable
@@ -1715,8 +1715,32 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         external_surface_ids = {}
         external_surfaces = []
 
+        def affine_current_terms(current, coefficient=1.0):
+            if isinstance(current, Current):
+                return ((current, coefficient),)
+            if isinstance(current, ScaledCurrent):
+                return affine_current_terms(
+                    current.current_to_scale,
+                    coefficient * float(current.scale),
+                )
+            if isinstance(current, CurrentSum):
+                return affine_current_terms(
+                    current.current_a,
+                    coefficient,
+                ) + affine_current_terms(
+                    current.current_b,
+                    coefficient,
+                )
+            raise NotImplementedError(
+                "BiotSavartJAX only supports affine expressions of scalar "
+                f"Current objects; got {type(current).__name__}."
+            )
+
         def coil_extraction_spec(coil):
             curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+            current_terms = (
+                () if isinstance(current, Current) else affine_current_terms(current)
+            )
             curve_spec = curve_spec_from_adapter_curve(curve)
             surface = getattr(curve, "surf", None)
             is_cws_curve = curve_spec_kind(curve_spec) == "cws_fourier_rz"
@@ -1742,6 +1766,13 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 current_map=self._free_vector_dof_map_spec(
                     current,
                     full_graph=False,
+                ),
+                current_term_maps=tuple(
+                    self._free_vector_dof_map_spec(term, full_graph=False)
+                    for term, _coefficient in current_terms
+                ),
+                current_term_scales=tuple(
+                    coefficient for _term, coefficient in current_terms
                 ),
                 surface_map=surface_map,
                 surface_output_index=surface_output_index,
