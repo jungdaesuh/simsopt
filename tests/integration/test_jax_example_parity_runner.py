@@ -1000,6 +1000,8 @@ def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
 
     native = observations["native-cpu"]
     jax_cpu = observations["jax-cpu"]
+    assert native.driver == "scipy_lbfgsb_qfm_penalty"
+    assert jax_cpu.driver == "simsopt_jax_bfgs_qfm_penalty"
     for phase in ("initial", "final"):
         for observable in (
             "parameters",
