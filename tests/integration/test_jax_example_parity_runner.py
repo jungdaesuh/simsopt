@@ -628,8 +628,8 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert not published[0].name.endswith(".partial")
     summary = json.loads((published[0] / "summary.json").read_text(encoding="utf-8"))
     assert summary["verdict"] == "pass"
-    assert summary["manifest_schema_version"] == 1
-    assert summary["used_legacy_manifest_adapter"] is True
+    assert summary["manifest_schema_version"] == 2
+    assert summary["used_legacy_manifest_adapter"] is False
     assert summary["lanes"] == ["native-cpu", "jax-cpu"]
     assert summary["authoritative"] is False
     assert len(summary["repository_commit"]) == 40

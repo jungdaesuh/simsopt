@@ -4,8 +4,9 @@
 **Last updated:** 2026-07-27
 
 **Outcome:** Fast-default and explicit-parity runtime support is implemented;
-functional CPU/GPU coverage is GREEN, while manifest-v2 activation,
-performance promotion, final authority evidence, and delivery remain open
+functional CPU/GPU coverage is GREEN, manifest v2 is activated, and fast is
+explicitly not performance-qualified; fresh local-only authority evidence and
+delivery remain open
 
 ## Implementation outcome
 
@@ -34,17 +35,19 @@ memory ratios unchanged. Disabling GPU autotuning repaired the memory ratios
 but not the speed gates, while minimal enabled autotuning restored the same
 memory excess. Removing CPU `FAST_COMPILE` both slowed four of five median
 workloads and produced incompatible persistent-cache AOT reloads on this host.
-Fast remains the implemented JAX selection default, but this plan cannot claim
-that the default is performance-qualified until the tuning meets the unchanged
-promotion contract or the default decision is explicitly revised.
+Fast remains the implemented JAX selection default. The user explicitly chose
+to retain that default without treating performance promotion as a completion
+gate. The measured failures remain visible, the thresholds remain unchanged,
+and no speed or performance-qualification claim is permitted.
 
-The canonical manifest remains v1 and visibly uses the read-only legacy
-adapter. Candidate manifest-v2 bytes and semantic comparison are retained in
-`docs/jax_manifest_v2_dry_run_report.md`; activation remains stopped at the
-required explicit user sign-off gate. The historical detached authority
-artifact remains useful background only. A new clean, post-repair authority
-run, generated results table, durable-retention decision, and final reviewed
-delivery are still required.
+The canonical manifest is the exact approved v2 candidate with SHA-256
+`2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`.
+The read-only v1 adapter remains fixture-tested for one release. The historical
+detached authority artifact remains useful background only. A new clean,
+post-repair authority run, generated results table, and final reviewed delivery
+are still required. The user selected local-only evidence, so the final claim
+must disclose that its ignored `.artifacts/` authority bundle is host-local and
+has no durable shared retention guarantee.
 
 ### Delivery blockers
 
@@ -55,19 +58,19 @@ delivery are still required.
 - [x] Run all ten ready examples on CPU/GPU crossed with fast/parity at the
   current repaired revision, including strict RTX 5090 parity with zero skips
   and no CPU fallback.
-- [ ] Meet the checked-in matched fast-performance promotion rule on CPU and
-  GPU, or explicitly revise the default decision without weakening or
-  relabeling the measured evidence.
-- [ ] Obtain explicit user sign-off on the exact manifest-v2 dry-run bytes
-  before activating the canonical schema.
+- [x] Record the explicit decision to keep fast as the default without a
+  performance-qualification or speed claim; retain the unchanged failed
+  promotion measurements as diagnostic evidence.
+- [x] Obtain explicit user sign-off on the exact manifest-v2 dry-run bytes and
+  activate that byte-identical candidate.
 - [ ] Create a new clean authority run and independent audit after those
   repairs; historical or dirty-tree artifacts may not close the repaired
   safety contract.
 - [ ] Deliver the repaired implementation, generated results table, parity TDD
   receipt, and this status document in a reachable reviewed branch history.
-- [ ] Put the authority artifact in a durable shared store with retention and
-  an immutable identifier, or explicitly scope the final claim to local-only
-  evidence. The current ignored `.artifacts/` path exists only on this host.
+- [x] Select local-only authority evidence and scope the final claim
+  accordingly. The ignored `.artifacts/` path exists only on this host and is
+  not a durable shared archive.
 
 ## Purpose
 
@@ -925,11 +928,11 @@ RED, but no production implementation for that slice may be added first.
       normalized semantic diff, and observed schema/adapter metadata. Run it
       against the committed v1 manifest and every compatibility fixture, retain
       the report, and prove the repository hash is unchanged.
-    - [ ] **USER SIGN-OFF:** Present the dry-run report, exact candidate digest,
+    - [x] **USER SIGN-OFF:** Present the dry-run report, exact candidate digest,
       one-release compatibility interval, observability fields, and rollback
       command. Stop before writing or activating v2 until the user explicitly
       approves the schema migration.
-    - [ ] **GREEN after sign-off:** Evolve `examples/jax/run_examples.py`,
+    - [x] **GREEN after sign-off:** Evolve `examples/jax/run_examples.py`,
       `examples/jax/_lane_environment.py`, and the canonical
       `examples/jax/manifest.json` to the versioned `devices` capability field.
       The v2 production writer contains no `lanes` or per-example `intents`
@@ -939,6 +942,8 @@ RED, but no production implementation for that slice may be added first.
       alone maps `(device, intent)` to backend mode and certification
       eligibility; the lane-environment owner derives process guards from that
       profile. Record v1-adapter use and v2 activation in runner/CI receipts.
+      Activation used the approved digest above; the focused suite moved from
+      `10 failed, 17 passed` to `28 passed`.
     - [x] **RED:** Through the new runner interface, parameterize every ready
       example over CPU/GPU crossed with fast/parity. The immediate pre-GREEN
       revision must fail because the public selector/result-validation path is
@@ -1066,7 +1071,7 @@ RED, but no production implementation for that slice may be added first.
     feasibility/status repair and the accepted-device-state repair discovered
     by strict GPU Boozer execution. All ten examples pass all four profiles at
     committed revision `eead0641e`; this functional gate is independent of the
-    still-failed fast-performance promotion gate.
+    still-failed fast-performance characterization.
 
 11. Repair the scientific, artifact-safety, and TDD-evidence blockers.
     - [x] **RED:** Add a QFM authority regression using the retained terminal
@@ -1145,11 +1150,11 @@ RED, but no production implementation for that slice may be added first.
     - [ ] Commit the implementation, manifests, workflows, tests, generated
       results, authentic receipt, and final status update as one reviewed
       delivery unit. Upload the immutable authority artifact to the selected
-      durable store and record its retention and digest.
+      local evidence root and record its digest and host-local limitation.
 
     Run the repaired authority from its clean delivered checkout with the
     project-pinned CUDA-capable interpreter. `PARITY_ARTIFACT_ROOT` must be the
-    absolute staging path for the selected durable artifact store. The runner
+    absolute staging path for the selected local artifact root. The runner
     prints only the published run directory on success, so command substitution
     binds the subsequent audit and report to that exact run:
 
@@ -1183,8 +1188,8 @@ RED, but no production implementation for that slice may be added first.
     ```
 
     Record the two printed digests, exact interpreter/environment identity,
-    durable artifact URI, and retention policy in the final receipt before
-    changing this plan to `Done`.
+    absolute local artifact path and the absence of a durable retention
+    guarantee in the final receipt before changing this plan to `Done`.
 
 ## Validation Plan
 
@@ -1249,19 +1254,20 @@ RED, but no production implementation for that slice may be added first.
   10 ready examples; parser conflict and inherited-environment tests pass in
   the ordinary-runner integration suite.
 
-- [ ] Tier-4 manifest migration dry-run and sign-off gate:
+- [x] Tier-4 manifest migration dry-run, sign-off, and activation gate:
 
   ```console
-  python examples/jax/migrate_manifest.py \
-    --input examples/jax/manifest.json --dry-run
+  sha256sum examples/jax/manifest.json
+  MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
+    tests/test_jax_examples_manifest.py
   ```
 
-  Before and after hashes of the committed v1 input and repository diff must be
-  identical. Retain the printed v2 candidate digest, semantic diff, schema
-  version, legacy-adapter signal, compatibility duration, and rollback command.
-  The canonical manifest remains v1 until the user explicitly signs off on
-  those exact bytes; after activation, CI replays both v1 fixtures and canonical
-  v2 and records reader-version observability.
+  The pre-activation dry run preserved the committed v1 input and repository
+  diff and emitted the retained candidate evidence. The user approved those
+  exact bytes on 2026-07-27. Canonical v2 now hashes to
+  `2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`;
+  the suite replays legacy v1 fixtures and canonical v2 and checks exact
+  byte-identical migration output.
 
 - [x] Parity isolation tests prove fast modes cannot enter authoritative
   artifacts:
@@ -1277,7 +1283,7 @@ RED, but no production implementation for that slice may be added first.
   runtime, and manifest suite passed `90 passed`; audit-gated report coverage
   is included.
 
-- [ ] Matched fast-mode promotion contract:
+- [x] Matched fast-mode characterization contract:
 
   ```console
   MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
@@ -1291,14 +1297,16 @@ RED, but no production implementation for that slice may be added first.
   The contract test owns the checked-in workload IDs, balanced seven-pair
   schedule, scientific admission checks, timing statistic, memory metric
   availability, provenance schema, and device-specific promotion thresholds.
-  Both benchmark runs must retain every repeat and pass the checked-in rule
-  before that device changes its default. Benchmark artifacts are explicitly
-  non-certifying.
+  Both benchmark runs retain every repeat. Promotion still requires the
+  unchanged checked-in rule, but the user explicitly chose fast as the default
+  independently of promotion. Benchmark artifacts are non-certifying and
+  cannot support a speed claim.
 
   Current evidence: the contract suite passes `41 passed`, and both full
   benchmark artifacts are structurally valid, but the promotion rule fails on
   CPU for all five cases and on GPU for four of five cases. This validation
-  item therefore remains open.
+  item therefore closes as a negative characterization result, not as
+  performance qualification.
 
 - [x] Static workflow routing proves the PR-required CPU/GPU fast and bounded
   parity commands plus the scheduled/manual full parity authority command:
@@ -1309,7 +1317,7 @@ RED, but no production implementation for that slice may be added first.
     tests/test_jax_example_parity_manifest.py
   ```
 
-  Current evidence: `49 passed`.
+  Current evidence after manifest-v2 activation: `50 passed`.
 
 - [x] Manifest and schema RED/GREEN tests:
 
@@ -1408,8 +1416,8 @@ RED, but no production implementation for that slice may be added first.
   ```
 
   This recipe is intentionally local and historical: the interpreter and
-  artifact paths are host-specific. Phase 12 must replace it with a durable
-  environment and artifact reference for shipped evidence.
+  artifact paths are host-specific. Phase 12 must replace it with a fresh clean
+  local authority run and must preserve that limitation in shipped wording.
 - [x] Run focused native/JAX subsystem tests named by each case, including
   curve/surface objectives, Biot-Savart/flux, QFM, permanent magnets, tracing,
   Boozer, wireframe, force, and finite-build coverage.
@@ -1553,7 +1561,7 @@ RED, but no production implementation for that slice may be added first.
   legacy lane behavior for the deprecation interval. The existing explicit
   `jax_cpu_float32_smoke` mode remains supported outside this convenience
   cross-product.
-- [ ] Manifest v1/v2 readers, no-write dry-run, semantic replay, observability,
+- [x] Manifest v1/v2 readers, no-write dry-run, semantic replay, observability,
   rollback, and explicit user sign-off satisfy the Tier-4 migration gate before
   canonical v2 activation; absence of `schema_version` has only the documented
   v1 meaning.
@@ -1563,10 +1571,10 @@ RED, but no production implementation for that slice may be added first.
 - [ ] Fast receipts are explicitly non-certifying, and injected fast modes are
   rejected by the parity runner, arbiter, auditor, report generator, and CI
   authority gates.
-- [ ] Matched CPU and GPU artifacts demonstrate that the selected fast policy
-  meets the checked-in paired timing and memory promotion rule without changing
-  scientific outcomes; every repeat is retained, and no speed claim relies on
-  a single cold run.
+- [x] Matched CPU and GPU artifacts retain every repeat and truthfully show
+  that the selected fast policy does not meet the checked-in paired timing and
+  memory promotion rule. Fast remains the default by explicit policy choice,
+  without a speed or performance-qualification claim.
 - [ ] Runtime, example runner, manifest validation, result validation, and CI
   consume the pure runtime profile resolver; process isolation remains owned by
   one example-environment module, and no duplicated four-mode mapping remains.
@@ -1595,9 +1603,10 @@ RED, but no production implementation for that slice may be added first.
   hidden host solver. All candidate lanes executed with the required GPU
   policy, but QFM did not satisfy feasibility/status requirements.
 - [ ] Aggregate JSON and NPY sidecars are source/input/environment hash-bound,
-  schema-valid, race-safe, durably retained, and sufficient for an independent
-  reviewer to recompute every retained verdict. Candidate recomputation passes;
-  race safety and durable retention remain open.
+  schema-valid, race-safe, and sufficient for an independent reviewer to
+  recompute every retained verdict. Candidate recomputation passes; a fresh
+  authority run remains open. Final wording must state that the selected
+  evidence is local-only and has no durable shared retention guarantee.
 - [ ] Authentic RED -> GREEN -> REFACTOR receipts exist for every promoted
   case; focused tests, existing example regressions, Ruff, format, compileall,
   import boundaries, and `git diff --check` pass. Current case receipts do not

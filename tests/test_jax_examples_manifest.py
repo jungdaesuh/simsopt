@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import json
-from copy import deepcopy
 import hashlib
-from pathlib import Path
+import json
 import subprocess
 import sys
+from copy import deepcopy
+from pathlib import Path
 
-import pytest
 import examples.jax._manifest as manifest_contract
+import pytest
 from examples.jax._manifest import (
     ManifestValidationError,
     derive_source_coverage,
@@ -17,6 +17,9 @@ from examples.jax._manifest import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
+APPROVED_MANIFEST_V2_SHA256 = (
+    "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05"
+)
 NATIVE_TIERS = {
     "1_Simple",
     "2_Intermediate",
@@ -46,14 +49,14 @@ def _write_manifest(tmp_path: Path, document: dict[str, object]) -> Path:
     return path
 
 
-def _v2_document(document: dict[str, object]) -> dict[str, object]:
+def _v1_document(document: dict[str, object]) -> dict[str, object]:
     candidate = deepcopy(document)
-    candidate["schema_version"] = 2
+    assert candidate.pop("schema_version") == 2
     for record in _jax_records(candidate):
-        lanes = record.pop("lanes")
-        assert isinstance(lanes, list)
-        record["devices"] = [
-            {"cpu-smoke": "cpu", "gpu-strict": "gpu"}[str(lane)] for lane in lanes
+        devices = record.pop("devices")
+        assert isinstance(devices, list)
+        record["lanes"] = [
+            {"cpu": "cpu-smoke", "gpu": "gpu-strict"}[str(device)] for device in devices
         ]
     return candidate
 
@@ -81,14 +84,26 @@ def test_source_catalog_exactly_matches_native_python_examples() -> None:
     assert len(manifest.source_catalog) == 51
 
 
+def test_canonical_manifest_is_exactly_the_approved_v2_candidate() -> None:
+    manifest_bytes = MANIFEST_PATH.read_bytes()
+    document = _manifest_document()
+
+    assert hashlib.sha256(manifest_bytes).hexdigest() == APPROVED_MANIFEST_V2_SHA256
+    assert document["schema_version"] == 2
+    assert all("devices" in record for record in _jax_records(document))
+    assert all("lanes" not in record for record in _jax_records(document))
+    assert all("intents" not in record for record in _jax_records(document))
+
+
 def test_dual_reader_normalizes_absent_v1_and_explicit_v2(
     tmp_path: Path,
 ) -> None:
-    v1_document = _manifest_document()
+    v2_document = _manifest_document()
+    v1_document = _v1_document(v2_document)
     with pytest.warns(FutureWarning, match="manifest schema v1"):
         v1 = load_manifest(_write_manifest(tmp_path, v1_document), repo_root=REPO_ROOT)
     v2 = load_manifest(
-        _write_manifest(tmp_path, _v2_document(v1_document)),
+        _write_manifest(tmp_path, v2_document),
         repo_root=REPO_ROOT,
     )
 
@@ -119,7 +134,7 @@ def test_versioned_manifest_rejects_ambiguous_contracts(
     mutation: str,
     expected_message: str,
 ) -> None:
-    document = _v2_document(_manifest_document())
+    document = deepcopy(_manifest_document())
     first = _jax_records(document)[0]
     if mutation == "explicit_v1":
         document["schema_version"] = 1
@@ -137,7 +152,8 @@ def test_versioned_manifest_rejects_ambiguous_contracts(
 
 
 def test_v2_candidate_bytes_are_deterministic_and_semantically_identical() -> None:
-    document = _manifest_document()
+    canonical_bytes = MANIFEST_PATH.read_bytes()
+    document = _v1_document(_manifest_document())
 
     first_bytes, first_diff = manifest_contract.convert_v1_document_to_v2(
         document,
@@ -149,6 +165,7 @@ def test_v2_candidate_bytes_are_deterministic_and_semantically_identical() -> No
     )
 
     assert first_bytes == second_bytes
+    assert first_bytes == canonical_bytes
     assert first_diff == second_diff
     assert first_diff["semantic_equal"] is True
     candidate = json.loads(first_bytes)
@@ -161,8 +178,8 @@ def test_v2_candidate_bytes_are_deterministic_and_semantically_identical() -> No
 def test_manifest_semantic_diff_detects_device_capability_drift(
     tmp_path: Path,
 ) -> None:
-    v1_document = _manifest_document()
-    v2_document = _v2_document(v1_document)
+    v2_document = _manifest_document()
+    v1_document = _v1_document(v2_document)
     planned = next(
         record for record in _jax_records(v2_document) if record["status"] == "planned"
     )
@@ -180,7 +197,7 @@ def test_manifest_semantic_diff_detects_device_capability_drift(
 def test_manifest_migration_dry_run_does_not_modify_input(
     tmp_path: Path,
 ) -> None:
-    input_path = _write_manifest(tmp_path, _manifest_document())
+    input_path = _write_manifest(tmp_path, _v1_document(_manifest_document()))
     before = input_path.read_bytes()
 
     completed = subprocess.run(
@@ -298,10 +315,10 @@ def test_manifest_rejects_invalid_contracts(
         planned["host_boundaries"] = []
     elif mutation == "ready_without_cpu_lane":
         planned["status"] = "ready"
-        planned["lanes"] = ["gpu-strict"]
+        planned["devices"] = ["gpu"]
     elif mutation == "ready_without_gpu_lane":
         planned["status"] = "ready"
-        planned["lanes"] = ["cpu-smoke"]
+        planned["devices"] = ["cpu"]
     elif mutation == "ready_without_test":
         planned["status"] = "ready"
         planned["correctness_tests"] = []

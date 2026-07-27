@@ -43,7 +43,7 @@ upstream routine lowers internal scalar literals through host-to-device
 conversion. It does not permit device-to-host materialization, and the
 surrounding numerical path remains guarded.
 
-Every ready example runs in both lanes through the same JAX implementation.
+Every ready example runs on both devices through the same JAX implementation.
 Device selection changes placement, not the algorithm or public result
 contract. Native SciPy solves may be used only by correctness tests as CPU
 reference oracles; a ready example must not use `scipy.optimize` as its JAX
@@ -124,6 +124,9 @@ python -m examples.jax.parity.audit \
 
 The generated results table lives in
 [`docs/jax_native_example_parity_results.md`](../../docs/jax_native_example_parity_results.md).
+Current authority bundles are local-only: `.artifacts/` is ignored, is not a
+durable shared archive, and cannot by itself support a remotely reproducible
+retention claim.
 
 ## Choosing an example
 
@@ -136,7 +139,7 @@ The generated results table lives in
   demonstrated workflow.
 
 The manifest records each example's kind, public JAX surfaces, remaining host
-boundaries, source inspiration, dependencies, correctness owners, and lanes.
+boundaries, source inspiration, dependencies, correctness owners, and devices.
 It also catalogs every native Python example as either a candidate or a
 deliberately deferred concept. Deferred entries are not placeholders: each
 states the missing public boundary or external limitation required for
@@ -155,12 +158,12 @@ Every runnable script must:
 6. accept `--output-dir` or use a temporary directory if it writes artifacts;
 7. reuse canonical repository inputs read-only and never forward to a native
    example module;
-8. declare both `cpu-smoke` and `gpu-strict` while it is `ready`, and use the
-   same public JAX solver and algorithm in both lanes.
+8. declare both `cpu` and `gpu` while it is `ready`, and use the same public JAX
+   solver and algorithm on both devices.
 
 Add the behavioral correctness test first and preserve its authentic
 RED → GREEN → REFACTOR commands in
 [`docs/jax_examples_tdd_receipts.md`](../../docs/jax_examples_tdd_receipts.md).
 Then mark the manifest record `ready`; the validator rejects a ready record
-without an executable script, CPU lane, correctness owner, or public JAX
+without an executable script, CPU device, correctness owner, or public JAX
 import.
