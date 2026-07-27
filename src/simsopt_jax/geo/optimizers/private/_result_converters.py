@@ -179,8 +179,10 @@ def _private_lbfgs_result_to_optimize_result(state):
     optimizer_state_trace = tuple(state.optimizer_state_trace)
     result_fields = {
         "x": _as_host_numpy(state.x_k),
+        "x_device": state.x_k,
         "fun": _host_float(state.f_k),
         "jac": _as_host_numpy(state.g_k),
+        "jac_device": state.g_k,
         "nit": _host_int(state.k),
         "nfev": _host_int(state.nfev),
         "njev": _host_int(state.ngev),
