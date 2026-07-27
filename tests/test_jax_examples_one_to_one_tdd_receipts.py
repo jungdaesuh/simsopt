@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -184,3 +185,60 @@ def test_receipt_audit_rejects_wrong_red_failure_discriminator(
 
     with pytest.raises(ReceiptValidationError, match="intended RED failure"):
         validate_receipt_document(document, repo_root=repo_root, replay=True)
+
+
+def test_receipt_cli_validates_and_generates_markdown(tmp_path: Path) -> None:
+    repo_root, document = _receipt_document(tmp_path)
+    receipt_path = tmp_path / "receipts.json"
+    receipt_path.write_text(json.dumps(document), encoding="utf-8")
+    markdown_path = tmp_path / "receipts.md"
+    cli_path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "jax"
+        / ("validate_tdd_receipts.py")
+    )
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            str(cli_path),
+            "--repo-root",
+            str(repo_root),
+            "--write-markdown",
+            str(markdown_path),
+            str(receipt_path),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "behavior_ids": ["demo-mirror-contract"],
+        "receipt_count": 1,
+        "replayed": False,
+    }
+    receipts = document["receipts"]
+    assert isinstance(receipts, list)
+    receipt = receipts[0]
+    assert isinstance(receipt, dict)
+    phases = receipt["phases"]
+    assert isinstance(phases, dict)
+    red = phases["red"]
+    green = phases["green"]
+    refactor = phases["refactor"]
+    assert isinstance(red, dict)
+    assert isinstance(green, dict)
+    assert isinstance(refactor, dict)
+    assert markdown_path.read_text(encoding="utf-8") == (
+        "# One-to-One JAX Example TDD Receipts\n\n"
+        "Generated from schema v1 machine-readable evidence.\n\n"
+        "| Behavior | Native source | Mirror | RED | GREEN | REFACTOR |\n"
+        "|---|---|---|---|---|---|\n"
+        f"| `demo-mirror-contract` | `1_Simple/demo.py` | `demo-mirror` | "
+        f"`{red['revision']}` | "
+        f"`{green['revision']}` | "
+        f"`{refactor['revision']}` |\n"
+    )
