@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import jax
 import jax.numpy as jnp
@@ -36,6 +36,7 @@ class StageTwoObjectiveConfig:
     num_base_curves: int
     length_weight: float = 0.0
     length_target: float | None = None
+    length_target_mode: Literal["max", "identity"] = "max"
     curve_curve_minimum_distance: float = 0.1
     curve_curve_weight: float = 0.0
     curve_surface_minimum_distance: float = 0.3
@@ -54,7 +55,9 @@ def _zero(reference: jax.Array) -> jax.Array:
 def _length_penalty(total_length: jax.Array, config: StageTwoObjectiveConfig):
     if config.length_target is None:
         return config.length_weight * total_length
-    excess = jnp.maximum(total_length - config.length_target, 0.0)
+    excess = total_length - config.length_target
+    if config.length_target_mode == "max":
+        excess = jnp.maximum(excess, 0.0)
     return 0.5 * config.length_weight * excess * excess
 
 
