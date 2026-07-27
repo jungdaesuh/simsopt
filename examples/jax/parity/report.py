@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from examples.jax.parity.artifacts import read_bytes
+from examples.jax.parity.audit import audit_published_run
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -118,7 +119,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
+    audit_published_run(
+        args.summary.parent,
+        repo_root=args.repo_root,
+    )
     summary = json.loads(read_bytes(args.summary.parent, args.summary.name))
     rendered = render_results_document(
         summary,
