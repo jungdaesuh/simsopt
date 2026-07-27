@@ -300,14 +300,14 @@ def _relationship(value: object, index: int, repo_root: Path) -> ParityRelations
     )
 
 
-def load_parity_manifest(
-    path: Path,
+def parse_parity_relationships_document(
+    value: object,
     *,
-    examples_manifest: JaxExamplesManifest,
     repo_root: Path,
-) -> ParityManifest:
-    """Load parity policy and validate it against ready example lineage."""
-    document = _mapping(json.loads(path.read_text(encoding="utf-8")), "root")
+    schema_version: Literal[1, 2],
+) -> tuple[ParityRelationship, ...]:
+    """Parse versioned relationship records before ownership validation."""
+    document = _mapping(value, "root")
     unexpected = set(document) - ROOT_FIELDS
     missing = ROOT_FIELDS - set(document)
     if unexpected or missing:
@@ -315,10 +315,10 @@ def load_parity_manifest(
             f"invalid parity manifest root fields: "
             f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
         )
-    schema_version = document["schema_version"]
-    if schema_version != 1:
+    observed_schema = document["schema_version"]
+    if observed_schema != schema_version:
         raise ParityManifestValidationError(
-            f"unsupported parity schema version: {schema_version!r}"
+            f"unsupported parity schema version: {observed_schema!r}"
         )
     relationships = tuple(
         _relationship(value, index, repo_root)
@@ -339,6 +339,21 @@ def load_parity_manifest(
     )
     if len(case_ids) != len(set(case_ids)):
         raise ParityManifestValidationError("duplicate parity case_id")
+    return relationships
+
+
+def parse_parity_manifest_document(
+    document: object,
+    *,
+    examples_manifest: JaxExamplesManifest,
+    repo_root: Path,
+) -> ParityManifest:
+    """Parse legacy parity v1 and validate ready-example lineage."""
+    relationships = parse_parity_relationships_document(
+        document,
+        repo_root=repo_root,
+        schema_version=1,
+    )
     ready_examples = {
         example.id: example
         for example in examples_manifest.jax_examples
@@ -348,6 +363,10 @@ def load_parity_manifest(
         (example_id, native_source)
         for example_id, example in ready_examples.items()
         for native_source in example.inspired_by
+    )
+    relationship_keys = tuple(
+        (relationship.jax_example_id, relationship.native_source)
+        for relationship in relationships
     )
     expected_keys = set(expected_order)
     for relationship in relationships:
@@ -373,3 +392,17 @@ def load_parity_manifest(
             "parity relationships must follow deterministic ready-lineage order"
         )
     return ParityManifest(schema_version=1, relationships=relationships)
+
+
+def load_parity_manifest(
+    path: Path,
+    *,
+    examples_manifest: JaxExamplesManifest,
+    repo_root: Path,
+) -> ParityManifest:
+    """Load parity policy and validate it against ready example lineage."""
+    return parse_parity_manifest_document(
+        json.loads(path.read_text(encoding="utf-8")),
+        examples_manifest=examples_manifest,
+        repo_root=repo_root,
+    )
