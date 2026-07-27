@@ -88,9 +88,10 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "stellsym": True,
             "label": "area",
             "target": 0.98 * float(label.J()),
-            "constraint_weight": 1.0,
-            "tol": 1.0e-15,
-            "max_steps": 100 if smoke else 200,
+            "constraint_weight": 12.0,
+            "relative_objective_tol": 0.0,
+            "gradient_tol": 5.0e-8,
+            "max_steps": 200 if smoke else 300,
         },
     )
 
@@ -131,7 +132,8 @@ def _problem_components(bundle: InputBundle, arrays: dict[str, np.ndarray]):
         "stellsym": surface.stellsym,
         "target": bundle.configuration["target"],
         "constraint_weight": bundle.configuration["constraint_weight"],
-        "tol": bundle.configuration["tol"],
+        "relative_objective_tol": bundle.configuration["relative_objective_tol"],
+        "gradient_tol": bundle.configuration["gradient_tol"],
         "max_steps": bundle.configuration["max_steps"],
     }
     fingerprint = effective_construction_fingerprint(bundle, payload)
@@ -174,6 +176,8 @@ def _terminal_success(
     return bool(
         final_state["final:penalty_objective"]
         < initial_state["initial:penalty_objective"]
+        and np.max(np.abs(final_state["final:constraint_value"]))
+        <= float(tolerance["terminal_constraint_norm_atol"])
         and np.linalg.norm(final_state["final:penalty_gradient"], ord=np.inf)
         <= float(tolerance["terminal_stationarity_atol"])
         and np.isfinite(final_state["final:qfm_objective"]).all()
@@ -181,9 +185,15 @@ def _terminal_success(
     )
 
 
+def _normalized_driver_status(*, driver_success: bool) -> str:
+    """Normalize the optimizer termination without rewriting scientific status."""
+    return "converged" if driver_success else "failed"
+
+
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
     from simsopt.field import BiotSavart
     from simsopt.geo import QfmSurface
+    from scipy.optimize import minimize
 
     biotsavart, surface, label, fingerprint = _problem_components(bundle, arrays)
     qfm = QfmSurface(
@@ -195,15 +205,31 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     initial = arrays["initial_parameters"]
     constraint_weight = float(bundle.configuration["constraint_weight"])
     initial_state = _state(qfm, "initial", initial, constraint_weight)
-    result = qfm.minimize_qfm_penalty_constraints_LBFGS(
-        tol=float(bundle.configuration["tol"]),
-        maxiter=int(bundle.configuration["max_steps"]),
-        constraint_weight=constraint_weight,
+
+    def objective(parameters: np.ndarray):
+        return qfm.qfm_penalty_constraints(
+            parameters,
+            derivatives=1,
+            constraint_weight=constraint_weight,
+        )
+
+    result = minimize(
+        objective,
+        initial,
+        jac=True,
+        method="L-BFGS-B",
+        options={
+            "maxiter": int(bundle.configuration["max_steps"]),
+            "ftol": float(bundle.configuration["relative_objective_tol"]),
+            "gtol": float(bundle.configuration["gradient_tol"]),
+            "maxcor": 200,
+        },
     )
+    surface.x = result.x
     final = np.asarray(surface.x, dtype=np.float64)
     final_state = _state(qfm, "final", final, constraint_weight)
     success = _terminal_success(initial_state, final_state)
-    info = result["info"]
+    driver_success = bool(result.success)
     return LaneObservation(
         lane="native-cpu",
         backend_mode="native_cpu",
@@ -213,12 +239,12 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
         driver="scipy_lbfgsb_qfm_penalty",
-        normalized_status="converged" if success else "failed",
-        raw_status=str(info.message),
+        normalized_status=_normalized_driver_status(driver_success=driver_success),
+        raw_status=str(result.message),
         success=success,
-        nit=int(result["iter"]),
-        nfev=int(info.nfev),
-        njev=int(info.njev),
+        nit=int(result.nit),
+        nfev=int(result.nfev),
+        njev=int(result.njev),
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values={**initial_state, **final_state},
@@ -246,13 +272,14 @@ def _jax(
     constraint_weight = float(bundle.configuration["constraint_weight"])
     initial_state = _state(qfm, "initial", initial, constraint_weight)
     result = qfm.minimize_qfm_penalty_jax(
-        tol=float(bundle.configuration["tol"]),
+        tol=float(bundle.configuration["gradient_tol"]),
         maxiter=int(bundle.configuration["max_steps"]),
         constraint_weight=constraint_weight,
     )
     final = np.asarray(surface.x, dtype=np.float64)
     final_state = _state(qfm, "final", final, constraint_weight)
     success = _terminal_success(initial_state, final_state)
+    driver_success = bool(result["success"])
     platform = jax.devices()[0].platform
     return LaneObservation(
         lane=lane,
@@ -263,12 +290,12 @@ def _jax(
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
         driver="simsopt_jax_lbfgs_qfm_penalty",
-        normalized_status="converged" if success else "failed",
-        raw_status=("solver_success" if bool(result["success"]) else "solver_failed"),
+        normalized_status=_normalized_driver_status(driver_success=driver_success),
+        raw_status=str(result["status"]),
         success=success,
         nit=int(result["iter"]),
-        nfev=None,
-        njev=None,
+        nfev=int(result["nfev"]),
+        njev=int(result["njev"]),
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values={**initial_state, **final_state},

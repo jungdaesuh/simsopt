@@ -968,13 +968,11 @@ def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
         native.values["initial:penalty_objective"].item()
     )
     terminal_constraint_atol = float(
-        parity_ladder_tolerances("native_workflow")[
-            "terminal_constraint_norm_atol"
-        ]
+        parity_ladder_tolerances("native_workflow")["terminal_constraint_norm_atol"]
     )
     for observation in (native, jax_cpu):
         assert (
-            np.linalg.norm(observation.values["final:constraint_value"], ord=np.inf)
+            np.max(np.abs(observation.values["final:constraint_value"]))
             <= terminal_constraint_atol
         )
         assert observation.normalized_status == "converged"

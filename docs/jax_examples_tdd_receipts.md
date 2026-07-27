@@ -892,3 +892,55 @@ per-example scientific gates. They are not certification or performance
 evidence. The manifest-v2 sign-off, matched fast/parity benchmark, Phase 11
 scientific/artifact repairs, and new clean authority run remain separate open
 gates.
+
+## QFM feasibility, status, and counter repair RED -> GREEN
+
+The QFM authority regressions were committed without implementation changes as
+immutable revision `9d43398df`. Against the old behavior, the focused RED was:
+
+```text
+2 failed in 0.21s
+retained final constraint_value=1.2315874794985946e-8 was accepted
+_normalized_driver_status was absent
+```
+
+The public end-to-end regression also exposed the same defects through the
+serialized lane contract: the JAX receipt reported `raw_status=solver_failed`
+as normalized `converged`, and emitted null `nfev`/`njev`.
+
+Two solver designs were measured before implementation. Switching to the exact
+SciPy-SLSQP/custom augmented-Lagrangian pair satisfied feasibility, but reached
+materially different surface coefficients and gradients. Retaining the matched
+penalty formulation with weight `12` instead preserved the common minimizer,
+while a shared `5e-8` gradient stop and zero relative-objective stop gave both
+drivers a genuine termination margin. This keeps the native and JAX algorithms
+comparable without weakening a central comparison tolerance.
+
+GREEN now applies the centrally owned `1e-10` constraint and `1e-7`
+stationarity gates, keeps driver termination in `normalized_status` and
+scientific acceptance in `success`, and publishes finite host-materialized
+`nit`, `nfev`, and `njev`. The QFM adapter's result dictionary additively
+exposes `status`, `nfev`, and `njev`; existing keys and behavior are unchanged,
+so callers can ignore the new diagnostics and rollback is a one-commit revert.
+
+Focused CPU evidence:
+
+```text
+3 passed in 30.48s
+```
+
+A dirty-tree diagnostic run exercised native CPU, JAX CPU, and strict JAX GPU
+on the real NVIDIA GeForce RTX 5090. All three lanes reported scientific
+success and normalized convergence, all 42 declared comparisons passed, and
+the GPU receipt recorded FP64 with all effective transfer guards at `disallow`:
+
+```text
+/tmp/simsopt-qfm-phase11-gpu/20260727T051313Z-a8a0cced
+native-cpu: nit=135, nfev=153, njev=153
+jax-cpu:    nit=95,  nfev=140, njev=140
+jax-gpu:    nit=95,  nfev=141, njev=141
+```
+
+This run is explicitly non-authoritative because the repair was uncommitted;
+it proves the repaired CPU/GPU behavior but does not replace the final clean
+authority run required after all Phase 11 safety repairs.
