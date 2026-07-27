@@ -622,7 +622,7 @@ def test_gsco_multistep_loop_matches_cpp_host_orchestration_with_final_adjustmen
     assert int(np.asarray(actual.stage_count)) == expected_stage_count
     assert actual.stage_objectives.shape == (4,)
     expected_final_objective = 0.5 * np.sum(
-        (A @ np.asarray(actual.x).ravel() - b) ** 2
+        (A @ np.asarray(actual.x).ravel() - np.asarray(b).reshape((-1,))) ** 2
     )
     np.testing.assert_allclose(
         np.asarray(actual.stage_objectives)[expected_stage_count - 1],
