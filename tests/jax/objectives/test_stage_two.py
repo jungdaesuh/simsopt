@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -30,11 +32,16 @@ def _geometry() -> tuple[jax.Array, jax.Array, jax.Array]:
     return gamma, gammadash, -gamma
 
 
-def _length_only_config(*, target: float | None) -> StageTwoObjectiveConfig:
+def _length_only_config(
+    *,
+    target: float | None,
+    target_mode: Literal["max", "identity"] = "max",
+) -> StageTwoObjectiveConfig:
     return StageTwoObjectiveConfig(
         num_base_curves=1,
         length_weight=2.0,
         length_target=target,
+        length_target_mode=target_mode,
         curve_curve_weight=0.0,
         curve_surface_weight=0.0,
         curvature_weight=0.0,
@@ -66,6 +73,16 @@ def test_stage_two_geometric_penalty_supports_linear_and_target_length_terms() -
 
     np.testing.assert_allclose(linear, 4.0)
     np.testing.assert_allclose(targeted, 0.25)
+
+    identity = stage_two_geometric_penalty(
+        gamma,
+        gammadash,
+        gammadashdash,
+        surface_gamma,
+        surface_normal,
+        _length_only_config(target=3.0, target_mode="identity"),
+    )
+    np.testing.assert_allclose(identity, 1.0)
 
 
 def test_stage_two_geometric_penalty_is_jittable_and_differentiable() -> None:
