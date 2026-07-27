@@ -1036,8 +1036,13 @@ RED, but no production implementation for that slice may be added first.
       removed `FAST_COMPILE`, but its persistent-cache reloads were rejected
       for incompatible `prefer-no-gather`/`prefer-no-scatter` target features
       and four of five raw median timings were slower. None is promotion
-      evidence. The run requirement is complete; promotion remains failed and
-      the thresholds are unchanged.
+      evidence. Fixed CPU affinity subsequently invalidated persistent-cache
+      target compatibility and still failed four raw medians. Limiting GPU
+      GEMM autotuning to one solution left the surface memory ratio at
+      `1.467153` and its median/lower-bound speedups at `0.959943`/`0.883137`;
+      the runtime already limits non-GEMM fusion autotuning to one candidate.
+      The run requirement is complete; promotion remains failed and the
+      thresholds are unchanged.
     - [x] Update `examples/jax/README.md`, `docs/source/jax_gpu_setup.rst`, and
       `docs/source/jax_migration.rst` with the default, the four fast/parity
       profiles, retained float32-smoke mode, public API/CLI examples,
