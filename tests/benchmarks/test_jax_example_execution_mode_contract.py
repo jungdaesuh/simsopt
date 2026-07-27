@@ -268,8 +268,8 @@ def _warm_at(
 
 
 def test_checked_in_rule_is_versioned_and_exact() -> None:
-    assert BENCHMARK_SCHEMA_VERSION == 1
-    assert BENCHMARK_RULE_VERSION == 1
+    assert BENCHMARK_SCHEMA_VERSION == 2
+    assert BENCHMARK_RULE_VERSION == 2
     assert WARM_PAIR_COUNT == 7
     assert REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES == {
         workload_id: 0 for workload_id in REPRESENTATIVE_WORKLOAD_IDS
@@ -280,6 +280,9 @@ def test_checked_in_rule_is_versioned_and_exact() -> None:
         "bootstrap_seed": 1729,
         "cold_time_ratio_max": 1.25,
         "gpu_memory_ratio_max": 1.25,
+        "gpu_concurrent_memory_fraction_max": 0.05,
+        "gpu_concurrent_sample_count": 5,
+        "gpu_concurrent_utilization_percent_max": 5,
         "host_rss_ratio_max": 1.25,
         "warm_median_speedup_min": 1.05,
         "warm_speedup_lower_bound_min": 1.0,

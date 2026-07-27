@@ -78,6 +78,11 @@ _ENVIRONMENT_FINGERPRINT_NAMES = frozenset(
 _NVIDIA_MEMORY_MULTIPLIER = 1024 * 1024
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.05
 _DEFAULT_CHILD_TIMEOUT_SECONDS = 900.0
+_GPU_PREFLIGHT_SAMPLE_INTERVAL_SECONDS = 0.2
+_CPU_AOT_INCOMPATIBILITY_MARKER = (
+    b"Machine type used for XLA:CPU compilation doesn't match the machine type "
+    b"for execution"
+)
 
 
 class BenchmarkRunnerError(RuntimeError):
@@ -280,6 +285,61 @@ def parse_nvidia_smi_compute_apps(output: str) -> dict[int, int]:
             raise BenchmarkRunnerError(f"malformed nvidia-smi process row: {line!r}")
         result[pid] = memory_mib * _NVIDIA_MEMORY_MULTIPLIER
     return result
+
+
+def evaluate_gpu_concurrent_load_preflight(
+    *,
+    processes: Mapping[int, int],
+    utilization_samples: Sequence[tuple[int, int]],
+    total_memory_bytes: int,
+) -> dict[str, str]:
+    """Admit only bounded background GPU load and retain its exact snapshot."""
+    sample_count = int(BENCHMARK_RULE["gpu_concurrent_sample_count"])
+    if len(utilization_samples) != sample_count:
+        raise BenchmarkRunnerError(
+            f"GPU concurrent-load preflight requires {sample_count} samples"
+        )
+    if total_memory_bytes <= 0:
+        raise BenchmarkRunnerError("GPU total memory must be positive")
+    if any(
+        gpu_percent < 0
+        or gpu_percent > 100
+        or memory_percent < 0
+        or memory_percent > 100
+        for gpu_percent, memory_percent in utilization_samples
+    ):
+        raise BenchmarkRunnerError("GPU utilization samples must be percentages")
+    max_gpu_percent = max(sample[0] for sample in utilization_samples)
+    max_memory_percent = max(sample[1] for sample in utilization_samples)
+    utilization_limit = int(BENCHMARK_RULE["gpu_concurrent_utilization_percent_max"])
+    if max_gpu_percent > utilization_limit:
+        raise BenchmarkRunnerError(
+            "GPU concurrent utilization exceeds the checked-in limit: "
+            f"{max_gpu_percent}% > {utilization_limit}%"
+        )
+    process_memory_bytes = sum(processes.values())
+    memory_fraction = process_memory_bytes / total_memory_bytes
+    memory_fraction_limit = float(BENCHMARK_RULE["gpu_concurrent_memory_fraction_max"])
+    if memory_fraction > memory_fraction_limit:
+        raise BenchmarkRunnerError(
+            "GPU concurrent process memory exceeds the checked-in limit: "
+            f"{memory_fraction:.6g} > {memory_fraction_limit:.6g}"
+        )
+    process_detail = (
+        ",".join(f"{pid}:{processes[pid]}" for pid in sorted(processes))
+        if processes
+        else "none"
+    )
+    return {
+        "status": "pass",
+        "detail": (
+            f"background_processes={process_detail};"
+            f"background_memory_fraction={memory_fraction:.9g};"
+            f"max_gpu_utilization_percent={max_gpu_percent};"
+            f"max_memory_utilization_percent={max_memory_percent};"
+            f"samples={sample_count}"
+        ),
+    }
 
 
 def _nvidia_compute_apps(gpu_index: int) -> dict[int, int]:
@@ -527,6 +587,7 @@ def _outcome_document(
     dense_materialized_bytes: int,
     monitored: _MonitoredProcess,
     scientific_success: bool,
+    cache_load_compatible: bool,
     backend_mode: str,
     platform_name: str,
     precision: str,
@@ -567,6 +628,7 @@ def _outcome_document(
         "returncode": monitored.returncode,
         "termination": classify_termination(monitored.returncode),
         "scientific_success": scientific_success,
+        "cache_load_compatible": cache_load_compatible,
         "backend_mode": backend_mode,
         "platform": platform_name,
         "precision": precision,
@@ -662,15 +724,64 @@ def _gpu_identity(gpu_index: int) -> dict[str, object]:
     }
 
 
+def _gpu_load_sample(gpu_index: int) -> tuple[int, int, int]:
+    completed = subprocess.run(
+        (
+            "nvidia-smi",
+            f"--id={gpu_index}",
+            "--query-gpu=utilization.gpu,utilization.memory,memory.total",
+            "--format=csv,noheader,nounits",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise BenchmarkRunnerError(
+            "nvidia-smi utilization query failed: " + completed.stderr.strip()
+        )
+    rows = tuple(line for line in completed.stdout.splitlines() if line.strip())
+    if len(rows) != 1:
+        raise BenchmarkRunnerError("nvidia-smi did not return one utilization row")
+    fields = tuple(field.strip() for field in rows[0].split(","))
+    if len(fields) != 3:
+        raise BenchmarkRunnerError("nvidia-smi returned malformed utilization data")
+    try:
+        gpu_percent, memory_percent, total_memory_mib = (
+            int(float(field)) for field in fields
+        )
+    except ValueError as error:
+        raise BenchmarkRunnerError(
+            "nvidia-smi returned malformed utilization data"
+        ) from error
+    return (
+        gpu_percent,
+        memory_percent,
+        total_memory_mib * _NVIDIA_MEMORY_MULTIPLIER,
+    )
+
+
 def _preflight(device: JaxDevice, gpu_index: int) -> dict[str, str]:
     if device == "gpu":
         processes = _nvidia_compute_apps(gpu_index)
-        if processes:
-            raise BenchmarkRunnerError(
-                "concurrent GPU compute processes are active: "
-                + ",".join(str(pid) for pid in sorted(processes))
+        samples: list[tuple[int, int]] = []
+        total_memory_values: list[int] = []
+        sample_count = int(BENCHMARK_RULE["gpu_concurrent_sample_count"])
+        for sample_index in range(sample_count):
+            gpu_percent, memory_percent, total_memory_bytes = _gpu_load_sample(
+                gpu_index
             )
-        return {"status": "pass", "detail": "no concurrent GPU compute process"}
+            samples.append((gpu_percent, memory_percent))
+            total_memory_values.append(total_memory_bytes)
+            if sample_index + 1 < sample_count:
+                time.sleep(_GPU_PREFLIGHT_SAMPLE_INTERVAL_SECONDS)
+        if len(set(total_memory_values)) != 1:
+            raise BenchmarkRunnerError("GPU total memory changed during preflight")
+        return evaluate_gpu_concurrent_load_preflight(
+            processes=processes,
+            utilization_samples=tuple(samples),
+            total_memory_bytes=total_memory_values[0],
+        )
     cpu_count = os.cpu_count()
     if cpu_count is None or cpu_count <= 0:
         raise BenchmarkRunnerError("logical CPU count is unavailable")
@@ -910,6 +1021,7 @@ def _workload_document(
             )
         )
         stdout_path = run_directory / stdout_relative
+        stderr_path = run_directory / stderr_relative
         scientific_success, backend_mode, platform_name, precision = (
             _child_result_fields(
                 stdout_path=stdout_path,
@@ -930,6 +1042,9 @@ def _workload_document(
             ],
             monitored=monitored,
             scientific_success=scientific_success,
+            cache_load_compatible=(
+                _CPU_AOT_INCOMPATIBILITY_MARKER not in stderr_path.read_bytes()
+            ),
             backend_mode=backend_mode,
             platform_name=platform_name,
             precision=precision,
