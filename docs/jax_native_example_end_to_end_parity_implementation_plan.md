@@ -43,7 +43,7 @@ for the requested end-to-end contract. The plan cannot be `Done` until Phase
 
 ### Delivery blockers
 
-- [ ] Implement and RED-test the fast-default/explicit-parity contract in Phase
+- [x] Implement and RED-test the fast-default/explicit-parity contract in Phase
   10 without weakening parity certification.
 - [ ] Repair and RED-test the scientific completeness, no-replace publication,
   and descriptor-relative no-follow sidecar requirements in Phase 11.
@@ -744,7 +744,7 @@ RED, but no production implementation for that slice may be added first.
    - [x] Wave B: coil flux, permanent magnets, wireframe, and fixed-state
      coil-force/finite-build. These establish adapter publication, discrete
      decisions, constraints, and explicit N/A optimizer fields.
-   - [ ] Wave C executable scope: implement bounded reduced QFM with
+   - [x] Wave C executable scope: implement bounded reduced QFM with
      branch-stable initial state, feasibility/KKT gates, accepted-state
      publication, and original-residual checks; matching augmented or
      preconditioned residuals alone is invalid. The candidate QFM artifact
@@ -1028,13 +1028,13 @@ RED, but no production implementation for that slice may be added first.
     four-profile example gate complete or weaken QFM to do so.
 
 11. Repair the scientific, artifact-safety, and TDD-evidence blockers.
-    - [ ] **RED:** Add a QFM authority regression using the retained terminal
+    - [x] **RED:** Add a QFM authority regression using the retained terminal
       state: `abs(constraint_value)` is about `1.23158e-8` and must fail the
       centrally owned `terminal_constraint_norm_atol=1e-10` gate. Add separate
       tests proving a raw failed/budget-exhausted driver status cannot be
       serialized as normalized `converged`, even if another scientific
       acceptance predicate passes.
-    - [ ] **GREEN:** Make QFM terminal success apply every central feasibility,
+    - [x] **GREEN:** Make QFM terminal success apply every central feasibility,
       residual, and gradient threshold. Preserve driver termination and
       scientific acceptance as separate typed fields; either make every
       required lane satisfy the reviewed convergence contract or downgrade the

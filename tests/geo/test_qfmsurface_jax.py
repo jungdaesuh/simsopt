@@ -1200,6 +1200,9 @@ def test_qfm_surface_jax_penalty_writeback_happens_after_solver(
     np.testing.assert_allclose(surface.get_dofs(), initial_dofs + 1.0e-4)
     assert result["success"] is True
     assert result["iter"] == 2
+    assert result["status"] == 0
+    assert result["nfev"] == 3
+    assert result["njev"] == 4
 
 
 def test_qfm_surface_jax_augmented_lagrangian_dispatches_without_slsqp_fallback(
