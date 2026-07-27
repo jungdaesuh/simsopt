@@ -1352,3 +1352,49 @@ JSON patch had placed the three initial routes on that case rather than on
 surface geometry. The routes were moved to the surface relationship and a
 manifest regression now proves that surface owns all six initial/final routes
 and traceable least squares owns none of them.
+
+## Clean manifest-v2 authority GREEN (2026-07-27)
+
+Revision `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c` was checked out detached and
+clean at `/tmp/simsopt-parity-v2-fix.SLPdTa/checkout`. A Python 3.11.15
+environment built `simsopt==1.10.7.dev580+g3e7ecb58e` and its native extension
+from that exact checkout. The extension SHA-256 was
+`43205604c01308c147f9d9e7f771d3efa0b5d9533e3a315cc7828bdfb87c3b0c`.
+
+The full `all-applicable` matrix ran `native-cpu,jax-cpu,jax-gpu` without
+`--smoke` and published the host-local bundle:
+
+```text
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/
+  .artifacts/jax-example-parity/20260727T133326Z-04db9b25
+```
+
+The independent required-authority audit returned:
+
+```json
+{"authoritative": true, "case_count": 8, "comparison_count": 252,
+ "lane_receipt_count": 24, "run_id": "20260727T133326Z-04db9b25",
+ "verdict": "pass"}
+```
+
+All eight cases passed on native CPU, JAX CPU, and strict JAX GPU in FP64. The
+GPU was an NVIDIA GeForce RTX 5090 with UUID
+`GPU-7951f78e-c05d-e01c-303f-d644f4341fe1` and driver `595.84`. The canonical
+manifest schema was v2 and the legacy adapter was not used. The summary
+SHA-256 is
+`21c89ec296c3b08b76131a8422ddf90efc7218d22a6162affc65e52a72c4feaf`;
+the freshly generated report SHA-256 is
+`4e233fdb20cb016015789a69069f0eaeabdb6ea40c0f2dac056525ec1183b160`.
+The ignored authority bundle is local-only and has no durable shared retention
+guarantee.
+
+The freshly generated report was written to the isolated temporary work area,
+not over the pre-existing untracked
+`docs/jax_native_example_parity_results.md`. That worktree file describes the
+older run `20260726T225943Z-09dfdc3e` and has SHA-256
+`0164eab54209aae1226bfab22025f74ed5b8cb9d278792f20ccb5534f144a8dc`;
+replacing user-owned untracked content requires explicit approval.
+
+After the case-ownership correction, the final broad parity manifest, runner,
+artifact, input, publication, and runtime regression suite passed
+`92 passed in 85.48s`.

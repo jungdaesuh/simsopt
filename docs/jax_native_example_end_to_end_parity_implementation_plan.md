@@ -1,12 +1,13 @@
 # JAX Fast Execution and Native Example End-to-End Parity Implementation Plan
 
-**Status:** In progress
+**Status:** Blocked on preserved historical TDD evidence and report-file ownership
 **Last updated:** 2026-07-27
 
 **Outcome:** Fast-default and explicit-parity runtime support is implemented;
-functional CPU/GPU coverage is GREEN, manifest v2 is activated, and fast is
-explicitly not performance-qualified; fresh local-only authority evidence and
-delivery remain open
+functional CPU/GPU coverage and the fresh manifest-v2 authority matrix are
+GREEN, and fast is explicitly not performance-qualified. Formal plan closure
+remains blocked by unavailable per-case pre-GREEN history and an existing
+untracked results file that has not been approved for replacement.
 
 ## Implementation outcome
 
@@ -43,11 +44,11 @@ and no speed or performance-qualification claim is permitted.
 The canonical manifest is the exact approved v2 candidate with SHA-256
 `2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`.
 The read-only v1 adapter remains fixture-tested for one release. The historical
-detached authority artifact remains useful background only. A new clean,
-post-repair authority run, generated results table, and final reviewed delivery
-are still required. The user selected local-only evidence, so the final claim
-must disclose that its ignored `.artifacts/` authority bundle is host-local and
-has no durable shared retention guarantee.
+detached authority artifact remains useful background only. The clean current
+authority run at `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c` passed all eight
+applicable cases, 24 lane receipts, and 252 comparisons. Its ignored
+`.artifacts/` bundle is host-local and has no durable shared retention
+guarantee, as explicitly selected by the user.
 
 The first clean post-activation authority run at `eb8385cbb` passed seven of
 eight cases and correctly remained unpublished because surface geometry
@@ -56,8 +57,9 @@ interchangeable-axis quotient. The failing bundle is retained locally at
 `.artifacts/jax-example-parity/20260727T130725Z-e7ab9ba2.partial`. A
 failing-first repair now retains those raw arrays as diagnostics and compares
 permutation-invariant Jacobian-column sum/product coordinates without changing
-any tolerance; a new clean authority run is required after that repair is
-committed.
+any tolerance. The final clean run published
+`.artifacts/jax-example-parity/20260727T133326Z-04db9b25` and the independent
+required-authority audit passed.
 
 ### Delivery blockers
 
@@ -73,11 +75,14 @@ committed.
   promotion measurements as diagnostic evidence.
 - [x] Obtain explicit user sign-off on the exact manifest-v2 dry-run bytes and
   activate that byte-identical candidate.
-- [ ] Create a new clean authority run and independent audit after those
+- [x] Create a new clean authority run and independent audit after those
   repairs; historical or dirty-tree artifacts may not close the repaired
   safety contract.
-- [ ] Deliver the repaired implementation, generated results table, parity TDD
-  receipt, and this status document in a reachable reviewed branch history.
+- [ ] Deliver the generated results table and final status update in reachable
+  branch history. The implementation and receipts are committed, but the
+  generated table differs from a pre-existing untracked user file and has not
+  been approved for replacement; historical per-case RED identity also remains
+  unavailable.
 - [x] Select local-only authority evidence and scope the final claim
   accordingly. The ignored `.artifacts/` path exists only on this host and is
   not a durable shared archive.
@@ -779,28 +784,27 @@ RED, but no production implementation for that slice may be added first.
      case was executed; a future promotion must match physical initial state,
      interval, event semantics, tolerances, endpoints, and final invariants
      without demanding adaptive-step identity.
-   - [ ] For every optimizing case, record final parameters, objective,
+   - [x] For every optimizing case, record final parameters, objective,
      residuals, gradient/Jacobian where defined, constraints/feasibility,
-     normalized and raw status, driver, and work counters. Candidate QFM omits
-     `nfev` and `njev`; least-squares cases also omit the separately promised
-     half-squared `solver_cost` where available.
+     normalized and raw status, driver, and work counters. Least-squares cases
+     record the separately defined half-squared `solver_cost` where available.
    - [x] Apply the manifest's typed final comparison routes to every applicable
      lane pair. Each route specifies vector/scalar/constraint comparator and
      central tolerance bucket. For a case with non-unique minimizers, compare a
      declared equivalence invariant or quotient representation rather than raw
      parameters, and justify that policy in the case contract; individual
      feasibility or objective gates do not replace pairwise final parity. The
-     candidate traceable least-squares case marks final `residual_jacobian`
-     applicable but defines no three-lane routes for it.
-   - [ ] Define common terminal scientific gates independently of driver status.
+     traceable least squares defines the complete final `residual_jacobian`
+     three-lane route matrix.
+   - [x] Define common terminal scientific gates independently of driver status.
      A solver-reported success with failed residual/gradient/feasibility is a
      parity failure. Scientific acceptance must not rewrite a failed raw driver
      status to normalized `converged`; both dimensions remain explicit.
-   - [ ] Compare `nit`/`nfev`/`njev` exactly only for the same algorithm and
+   - [x] Compare `nit`/`nfev`/`njev` exactly only for the same algorithm and
      implementation contract. Otherwise require finite nonnegative counts and
      report absolute/relative deltas as diagnostics with an explicitly approved
-     bound if one is scientifically necessary. QFM does not yet satisfy this
-     reporting contract.
+     bound if one is scientifically necessary. QFM satisfies this reporting
+     contract.
    - [ ] Record each case's RED -> GREEN -> REFACTOR evidence independently; do
      not batch-promote a wave based on one representative example. Phase 11
      owns the unresolved evidence-recovery gate.
@@ -881,11 +885,12 @@ RED, but no production implementation for that slice may be added first.
      final accepted state.
    - [x] Verify artifact paths are relative, source/input hashes resolve, array
      sidecars match, and secrets/environment-variable values are excluded.
-   - [ ] Review the final path-scoped diff for duplicated tolerances, duplicated
+   - [x] Review the final path-scoped diff for duplicated tolerances, duplicated
      lane policy, hidden host transfers/solvers, stale lineage, weakened
      scientific thresholds, artifact races, and unrelated dirty-tree changes.
-     The 2026-07-26 adversarial review failed this gate on two artifact-safety
-     races and the delivery/evidence gaps below.
+     The artifact-safety races are repaired, no tolerance was weakened, and the
+     final path-scoped review preserved unrelated work. The historical TDD and
+     generated-report delivery gaps remain explicit below.
 
 10. Make fast the default while supporting explicit parity on CPU and GPU.
     - [x] **RED:** In `tests/test_backend_precision_policy.py` and subprocess
@@ -1165,10 +1170,10 @@ RED, but no production implementation for that slice may be added first.
       retroactively relabel, or waive a RED within this plan.
 
 12. Publish the repaired authority slice.
-    - [ ] Integrate the repaired candidate into a reachable branch commit and
+    - [x] Integrate the repaired candidate into a reachable branch commit and
       confirm its parentage from the intended baseline. Do not cite detached
       `799c656e1` as shipped state.
-    - [ ] From a clean checkout of the delivered commit, run the complete CPU
+    - [x] From a clean checkout of the delivered commit, run the complete CPU
       suite, the real strict-GPU all-applicable run with zero skips/fallbacks,
       and the independent audit. Generate the results document from that new
       aggregate rather than copying the retained table.
@@ -1400,21 +1405,18 @@ RED, but no production implementation for that slice may be added first.
     --artifact-root .artifacts/jax-example-parity
   ```
 
-- [ ] Final artifact audit verifies every required lane, exact input/config
+- [x] Final artifact audit verifies every required lane, exact input/config
   and effective-construction fingerprint agreement, route completeness,
   completed scientific
   stages, source path/revision and executed-source hashes, any loaded
   `simsoptpp` binary hash/compatibility receipt, FP64/device and effective
   transfer-guard metadata, sidecar SHA-256, path containment,
   authoritative-source status, observable applicability, tolerance result, and
-  final verdict. The candidate auditor recomputes all declared comparison
-  routes and validates receipt fingerprint agreement, but it does not reload
-  and re-hash the retained input bundle or prove applicable-observable route
-  completeness. The local replay below therefore validates only that narrower
-  candidate contract; it does not rerun the scientific lanes. It requires the generated,
-  ignored `src/simsopt/_version.py` whose bytes were executed by the authority
-  run. The following command reproduced the 8-case/24-receipt/228-comparison
-  `pass` from this host's retained artifact:
+  final verdict. The fresh independent audit of
+  `20260727T133326Z-04db9b25` required authoritative evidence and returned
+  `8` cases, `24` lane receipts, `252` comparisons, and verdict `pass` at clean
+  revision `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c`. The older local replay
+  below is retained as historical context only:
 
   ```console
   (
@@ -1440,9 +1442,9 @@ RED, but no production implementation for that slice may be added first.
   )
   ```
 
-  This recipe is intentionally local and historical: the interpreter and
-  artifact paths are host-specific. Phase 12 must replace it with a fresh clean
-  local authority run and must preserve that limitation in shipped wording.
+  Both recipes are intentionally local: interpreter and artifact paths are
+  host-specific, and the current ignored authority bundle has no durable shared
+  retention guarantee.
 - [x] Run focused native/JAX subsystem tests named by each case, including
   curve/surface objectives, Biot-Savart/flux, QFM, permanent magnets, tracing,
   Boozer, wireframe, force, and finite-build coverage.
@@ -1577,11 +1579,11 @@ RED, but no production implementation for that slice may be added first.
 
 ## Completion Criteria
 
-- [ ] Explicitly selecting JAX CPU or GPU without an intent resolves to
+- [x] Explicitly selecting JAX CPU or GPU without an intent resolves to
   `jax_cpu_fast` or `jax_gpu_fast`; a fully unset selector remains
   `native_cpu`, and explicit full modes retain their documented precedence
   within the API and environment surfaces.
-- [ ] The public API and example CLI support CPU/GPU crossed with fast/parity,
+- [x] The public API and example CLI support CPU/GPU crossed with fast/parity,
   default intent to fast, reject ambiguous selectors, and retain documented
   legacy lane behavior for the deprecation interval. The existing explicit
   `jax_cpu_float32_smoke` mode remains supported outside this convenience
@@ -1590,56 +1592,54 @@ RED, but no production implementation for that slice may be added first.
   rollback, and explicit user sign-off satisfy the Tier-4 migration gate before
   canonical v2 activation; absence of `schema_version` has only the documented
   v1 meaning.
-- [ ] Every ready example passes CPU fast, CPU parity, real-GPU fast, and
+- [x] Every ready example passes CPU fast, CPU parity, real-GPU fast, and
   real-GPU parity with FP64 and the same scientific-success contract; fast and
   parity may use their centrally owned tuning and diagnostic tolerances.
-- [ ] Fast receipts are explicitly non-certifying, and injected fast modes are
+- [x] Fast receipts are explicitly non-certifying, and injected fast modes are
   rejected by the parity runner, arbiter, auditor, report generator, and CI
   authority gates.
 - [x] Matched CPU and GPU artifacts retain every repeat and truthfully show
   that the selected fast policy does not meet the checked-in paired timing and
   memory promotion rule. Fast remains the default by explicit policy choice,
   without a speed or performance-qualification claim.
-- [ ] Runtime, example runner, manifest validation, result validation, and CI
+- [x] Runtime, example runner, manifest validation, result validation, and CI
   consume the pure runtime profile resolver; process isolation remains owned by
   one example-environment module, and no duplicated four-mode mapping remains.
 - [x] Every ready JAX example/native `inspired_by` relationship has exactly one
   validated `full`, `reduced`, or `unsupported` parity classification.
-- [ ] Every `full` case proves byte-identical inputs and configuration across
-  native CPU, JAX CPU, and applicable JAX GPU lanes. Candidate inputs were
-  independently checked, but the authority auditor does not yet derive this
-  proof from the retained bundle.
+- [x] Every `full` case proves byte-identical inputs and configuration across
+  native CPU, JAX CPU, and applicable JAX GPU lanes. The fresh authority audit
+  independently revalidates the retained input bundle and lane fingerprints.
 - [x] Every `full` relationship has a complete declared scientific-stage list,
   no omitted scientific stage, and matching completed-stage receipts from all
   required lanes; reduced and teaching-only exclusions remain explicit.
 - [x] Every applicable case passes required initial objective/residual,
   gradient/Jacobian, and constraint comparisons through centrally owned
   tolerances.
-- [ ] Every optimizing full case passes final parameters, objective/residual,
+- [x] Every optimizing full case passes final parameters, objective/residual,
   feasibility, normalized convergence, raw-status recording, and work-counter
-  reporting gates. The traceable least-squares full case lacks final-Jacobian
-  route completeness and the promised solver-cost field.
+  reporting gates. Traceable least squares includes the complete final
+  Jacobian route matrix and distinct solver-cost field.
 - [x] Every tracing or fixed-state full case passes its explicitly applicable
   endpoint/invariant or objective/gradient contract with optimizer fields
   explicitly marked not applicable.
-- [ ] All ready applicable JAX cases pass the scientific contract on a real
+- [x] All ready applicable JAX cases pass the scientific contract on a real
   CUDA device in FP64 with
   both effective transfer-guard settings at `disallow` and no CPU fallback or
-  hidden host solver. All candidate lanes executed with the required GPU
-  policy, but QFM did not satisfy feasibility/status requirements.
-- [ ] Aggregate JSON and NPY sidecars are source/input/environment hash-bound,
+  hidden host solver. QFM passes the repaired feasibility and status contract.
+- [x] Aggregate JSON and NPY sidecars are source/input/environment hash-bound,
   schema-valid, race-safe, and sufficient for an independent reviewer to
-  recompute every retained verdict. Candidate recomputation passes; a fresh
-  authority run remains open. Final wording must state that the selected
-  evidence is local-only and has no durable shared retention guarantee.
+  recompute every retained verdict. The fresh authority run and independent
+  recomputation pass. The selected evidence is local-only and has no durable
+  shared retention guarantee.
 - [ ] Authentic RED -> GREEN -> REFACTOR receipts exist for every promoted
   case; focused tests, existing example regressions, Ruff, format, compileall,
   import boundaries, and `git diff --check` pass. Current case receipts do not
   prove failing-first order at the required per-case granularity.
 - [ ] Delivered documentation reports full, reduced, unsupported, CPU-only, and
   strict-GPU evidence separately; no analytic-only or reduced result is called
-  native/C++ end-to-end parity. Candidate wording is corrected here, but the
-  generated results and receipt updates remain outside current branch history.
+  native/C++ end-to-end parity. The generated current report is awaiting
+  approval to replace a pre-existing untracked report file.
 - [x] Unrelated dirty/untracked work remains unchanged.
 
 ## Open Questions
