@@ -89,6 +89,17 @@ def _validate_candidate_policy(pair: ManifestContractPair) -> None:
         raise ManifestActivationError("schema activation must retain all 51 sources")
 
 
+def _require_version_pair(
+    pair: ManifestContractPair,
+    expected: tuple[int, int],
+    context: str,
+) -> None:
+    if pair.version_pair != expected:
+        raise ManifestActivationError(
+            f"{context} requires version pair {expected}, got {pair.version_pair}"
+        )
+
+
 def validate_activation_bundle(
     *,
     active_examples_bytes: bytes,
@@ -121,14 +132,8 @@ def validate_activation_bundle(
         repo_root=repo_root,
         context="candidate",
     )
-    if before_pair.version_pair != (2, 1):
-        raise ManifestActivationError(
-            f"activation requires legacy v2/v1 input, got {before_pair.version_pair}"
-        )
-    if after_pair.version_pair != (3, 2):
-        raise ManifestActivationError(
-            f"activation requires canonical v3/v2 output, got {after_pair.version_pair}"
-        )
+    _require_version_pair(before_pair, (2, 1), "activation input")
+    _require_version_pair(after_pair, (3, 2), "activation output")
     _validate_candidate_policy(after_pair)
     return ActivationContract(
         before_version_pair=before_pair.version_pair,
@@ -172,11 +177,16 @@ def validate_rollback_bundle(
         repo_root=repo_root,
         context="rollback",
     )
-    if (
-        activated_pair.version_pair != activation.after_version_pair
-        or rollback_pair.version_pair != activation.before_version_pair
-    ):
-        raise ManifestActivationError("rollback version pair mismatch")
+    _require_version_pair(
+        activated_pair,
+        activation.after_version_pair,
+        "rollback source",
+    )
+    _require_version_pair(
+        rollback_pair,
+        activation.before_version_pair,
+        "rollback destination",
+    )
     return RollbackContract(
         restored_version_pair=rollback_pair.version_pair,
         restored_sha256=rollback_hashes,
