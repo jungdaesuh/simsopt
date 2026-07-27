@@ -89,3 +89,53 @@ def test_stage_two_geometric_penalty_is_jittable_and_differentiable() -> None:
     np.testing.assert_allclose(value, 4.0)
     assert gradient.shape == gammadash.shape
     assert bool(jnp.all(jnp.isfinite(gradient)))
+
+
+def test_stage_two_geometric_penalty_includes_linking_number() -> None:
+    angles = jnp.linspace(0.0, 2.0 * jnp.pi, 128, endpoint=False)
+    gamma = jnp.stack(
+        (
+            jnp.stack(
+                (jnp.cos(angles), jnp.sin(angles), jnp.zeros_like(angles)), axis=1
+            ),
+            jnp.stack(
+                (1.0 + jnp.cos(angles), jnp.zeros_like(angles), jnp.sin(angles)),
+                axis=1,
+            ),
+        )
+    )
+    gammadash = jnp.stack(
+        (
+            jnp.stack(
+                (
+                    -2.0 * jnp.pi * jnp.sin(angles),
+                    2.0 * jnp.pi * jnp.cos(angles),
+                    jnp.zeros_like(angles),
+                ),
+                axis=1,
+            ),
+            jnp.stack(
+                (
+                    -2.0 * jnp.pi * jnp.sin(angles),
+                    jnp.zeros_like(angles),
+                    2.0 * jnp.pi * jnp.cos(angles),
+                ),
+                axis=1,
+            ),
+        )
+    )
+    config = StageTwoObjectiveConfig(
+        num_base_curves=1,
+        linking_number_weight=3.0,
+    )
+
+    value = stage_two_geometric_penalty(
+        gamma,
+        gammadash,
+        jnp.zeros_like(gammadash),
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        config,
+    )
+
+    np.testing.assert_allclose(value, 3.0)
