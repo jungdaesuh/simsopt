@@ -669,6 +669,24 @@ class LevelsetStoppingCriterion:
     classifier_fn: object
 
 
+for _criterion_class, _data_fields, _meta_fields in (
+    (MinRStoppingCriterion, ["crit_r"], []),
+    (MaxRStoppingCriterion, ["crit_r"], []),
+    (MinZStoppingCriterion, ["crit_z"], []),
+    (MaxZStoppingCriterion, ["crit_z"], []),
+    (ToroidalTransitStoppingCriterion, ["max_transits"], []),
+    (IterStoppingCriterion, [], ["max_iter"]),
+    (MinToroidalFluxStoppingCriterion, ["min_s"], ["field_fn"]),
+    (MaxToroidalFluxStoppingCriterion, ["max_s"], ["field_fn"]),
+    (LevelsetStoppingCriterion, ["classifier_fn"], []),
+):
+    jax.tree_util.register_dataclass(
+        _criterion_class,
+        data_fields=_data_fields,
+        meta_fields=_meta_fields,
+    )
+
+
 def _stopping_criterion_should_stop(
     criterion: object,
     x: jax.Array,
@@ -1706,7 +1724,7 @@ def _make_fieldline_trace_one(spec, magnetic_field_fn, phis, stopping_criteria):
     return trace_one
 
 
-@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+@partial(jax.jit, static_argnames=("magnetic_field_fn",))
 def _trace_fieldlines_batched_unsharded(
     spec: FieldlineTracingSpec,
     y0s: jax.Array,
@@ -2362,7 +2380,7 @@ def _make_guiding_center_trace_one(
     return trace_one
 
 
-@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+@partial(jax.jit, static_argnames=("magnetic_field_fn",))
 def _trace_guiding_centers_batched_unsharded(
     spec: GuidingCenterTracingSpec,
     y0s: jax.Array,
@@ -3602,7 +3620,7 @@ def _trace_guiding_centers_boozer_batched_lax_map(
     return jax.lax.map(trace_one, (y0s, dtmaxs, mus))
 
 
-@partial(jax.jit, static_argnames=("mode", "stopping_criteria"))
+@partial(jax.jit, static_argnames=("mode",))
 def _trace_guiding_centers_boozer_batched_unsharded(
     spec: GuidingCenterTracingSpec,
     y0s: jax.Array,
@@ -3629,7 +3647,7 @@ def _trace_guiding_centers_boozer_batched_unsharded(
     )
 
 
-@partial(jax.jit, static_argnames=("boozer_field", "mode", "stopping_criteria"))
+@partial(jax.jit, static_argnames=("boozer_field", "mode"))
 def _trace_guiding_centers_boozer_batched_static_field_unsharded(
     spec: GuidingCenterTracingSpec,
     y0s: jax.Array,
@@ -4324,7 +4342,7 @@ def trace_fullorbit(
     )
 
 
-@partial(jax.jit, static_argnames=("magnetic_field_fn", "stopping_criteria"))
+@partial(jax.jit, static_argnames=("magnetic_field_fn",))
 def _trace_fullorbits_batched_unsharded(
     spec: FullorbitTracingSpec,
     y0s: jax.Array,

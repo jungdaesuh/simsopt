@@ -21,26 +21,80 @@ fallback established at ``surface.py:973``.
 
 from __future__ import annotations
 
-from typing import Callable
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 
 from .regular_grid_interp import (
     RegularGridInterpolant3DSpec,
+    RegularGridInterpolant3DDeviceSpec,
     build_regular_grid_interpolant_3d_device_spec,
     evaluate_batch_device,
 )
 
 __all__ = [
+    "LevelsetClassifier",
     "make_levelset_classifier",
     "signed_distance_to_cartesian_classifier",
 ]
 
 
+@dataclass(frozen=True)
+class LevelsetClassifier:
+    """Pytree callable carrying a device-resident signed-distance grid."""
+
+    device_spec: RegularGridInterpolant3DDeviceSpec
+
+    def __call__(self, xyz: jax.Array) -> jax.Array:
+        xyz_arr = jnp.asarray(xyz, dtype=jnp.float64)
+        was_single = xyz_arr.ndim == 1
+        if was_single:
+            xyz_arr = xyz_arr.reshape((1, 3))
+        if xyz_arr.ndim != 2 or xyz_arr.shape[-1] != 3:
+            raise ValueError(
+                f"classifier input must have shape [3] or [N, 3]; got {xyz_arr.shape}"
+            )
+        two_pi = self.device_spec.ymax - self.device_spec.ymin
+        width = self.device_spec.xmax - self.device_spec.xmin
+        outside = (self.device_spec.xmin - self.device_spec.xmin) - width / width
+        r = jnp.linalg.norm(xyz_arr[:, :2], axis=1)
+        phi = jnp.mod(
+            jnp.arctan2(xyz_arr[:, 1], xyz_arr[:, 0]),
+            two_pi,
+        )
+        z = xyz_arr[:, 2]
+        rphiz = jnp.stack([r, phi, z], axis=-1)
+        dist = evaluate_batch_device(
+            self.device_spec,
+            rphiz,
+            strict_cell_order=False,
+        )
+        dist_flat = dist.reshape((-1,))
+        in_bounds = (
+            (r >= self.device_spec.xmin)
+            & (r <= self.device_spec.xmax)
+            & (phi >= self.device_spec.ymin)
+            & (phi <= self.device_spec.ymax)
+            & (z >= self.device_spec.zmin)
+            & (z <= self.device_spec.zmax)
+        )
+        result = jnp.sign(jnp.where(in_bounds, dist_flat, outside))
+        if was_single:
+            return result[0]
+        return result
+
+
+jax.tree_util.register_dataclass(
+    LevelsetClassifier,
+    data_fields=["device_spec"],
+    meta_fields=[],
+)
+
+
 def signed_distance_to_cartesian_classifier(
     interpolant_spec: RegularGridInterpolant3DSpec,
-) -> Callable[[jax.Array], jax.Array]:
+) -> LevelsetClassifier:
     """Return a callable mapping Cartesian points to ``+1`` (inside) / ``-1`` (outside).
 
     Parameters
@@ -70,48 +124,14 @@ def signed_distance_to_cartesian_classifier(
             f"got value_size = {int(interpolant_spec.value_size)}"
         )
 
-    device_spec = build_regular_grid_interpolant_3d_device_spec(interpolant_spec)
-    two_pi = device_spec.ymax - device_spec.ymin
-    width = device_spec.xmax - device_spec.xmin
-    outside = (device_spec.xmin - device_spec.xmin) - width / width
-
-    def classify(xyz: jax.Array) -> jax.Array:
-        xyz_arr = jnp.asarray(xyz, dtype=jnp.float64)
-        was_single = xyz_arr.ndim == 1
-        if was_single:
-            xyz_arr = xyz_arr.reshape((1, 3))
-        if xyz_arr.ndim != 2 or xyz_arr.shape[-1] != 3:
-            raise ValueError(
-                f"classifier input must have shape [3] or [N, 3]; got {xyz_arr.shape}"
-            )
-        r = jnp.linalg.norm(xyz_arr[:, :2], axis=1)
-        phi = jnp.mod(
-            jnp.arctan2(xyz_arr[:, 1], xyz_arr[:, 0]),
-            two_pi,
-        )
-        z = xyz_arr[:, 2]
-        rphiz = jnp.stack([r, phi, z], axis=-1)
-        dist = evaluate_batch_device(device_spec, rphiz, strict_cell_order=False)
-        dist_flat = dist.reshape((-1,))
-        in_bounds = (
-            (r >= device_spec.xmin)
-            & (r <= device_spec.xmax)
-            & (phi >= device_spec.ymin)
-            & (phi <= device_spec.ymax)
-            & (z >= device_spec.zmin)
-            & (z <= device_spec.zmax)
-        )
-        result = jnp.sign(jnp.where(in_bounds, dist_flat, outside))
-        if was_single:
-            return result[0]
-        return result
-
-    return classify
+    return LevelsetClassifier(
+        build_regular_grid_interpolant_3d_device_spec(interpolant_spec)
+    )
 
 
 def make_levelset_classifier(
     interpolant_spec: RegularGridInterpolant3DSpec,
-) -> Callable[[jax.Array], jax.Array]:
+) -> LevelsetClassifier:
     """Return a JAX-traceable surface classifier built on the item-13 interpolant.
 
     The returned callable replicates the public surface of the

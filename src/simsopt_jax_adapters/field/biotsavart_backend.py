@@ -73,6 +73,7 @@ from simsopt_jax.core._math_utils import (
     as_compute_array as _as_compute_array,
     as_jax_float64 as _as_jax_float64,
 )
+from simsopt_jax.core._device_scalars import two_pi as _two_pi
 from simsopt_jax.core.specs import (
     BiotSavartSpec,
     CoilSetDofExtractionSpec,
@@ -164,6 +165,7 @@ def _block_until_ready(value):
     block_until_ready(value)
 
 
+@jax.jit
 def _cyl_points_to_cart(points_cyl):
     points = _as_jax_float64(points_cyl)
     r = points[:, 0]
@@ -172,17 +174,20 @@ def _cyl_points_to_cart(points_cyl):
     return jnp.stack((r * jnp.cos(phi), r * jnp.sin(phi), z), axis=1)
 
 
+@jax.jit
 def _canonical_set_points_cyl(points_cyl):
     points = _as_jax_float64(points_cyl)
-    return points.at[:, 1].set(jnp.fmod(points[:, 1], 2.0 * jnp.pi))
+    return points.at[:, 1].set(jnp.fmod(points[:, 1], _two_pi(points)))
 
 
+@jax.jit
 def _cart_points_to_cyl(points_cart):
     points = _as_jax_float64(points_cart)
     x = points[:, 0]
     y = points[:, 1]
     phi = jnp.arctan2(y, x)
-    phi = jnp.where(phi < 0.0, phi + 2.0 * jnp.pi, phi)
+    zero = jnp.sum(points - points)
+    phi = jnp.where(phi < zero, phi + _two_pi(points), phi)
     return jnp.stack(
         (
             jnp.sqrt(x * x + y * y),
@@ -199,6 +204,7 @@ def _points_cyl_for_basis(points_cart, points_cyl):
     return _cart_points_to_cyl(points_cart)
 
 
+@jax.jit
 def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     vectors = _as_jax_float64(vectors_cart)
     points = _as_jax_float64(points_cyl)
@@ -215,6 +221,7 @@ def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     )
 
 
+@jax.jit
 def _grad_absB_from_B_and_dB(B, dB_by_dX):
     B_jax = _as_jax_float64(B)
     dB_jax = _as_jax_float64(dB_by_dX)
@@ -668,7 +675,7 @@ def _set_biot_savart_points(field, points):
 
 
 def _set_biot_savart_points_cyl(field, points_cyl):
-    field._points_cyl_jax = _canonical_set_points_cyl(points_cyl)
+    field._points_cyl_jax = _canonical_set_points_cyl(_as_jax_float64(points_cyl))
     field._points_jax = _cyl_points_to_cart(field._points_cyl_jax)
     field._points_version += 1
     return field
