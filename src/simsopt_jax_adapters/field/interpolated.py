@@ -108,9 +108,12 @@ def _build_sampler(source_field, value_kind: str):
         old_points = source_field.get_points_cart()
         source_field.set_points_cyl(cyl_points)
         if value_kind == "B":
-            field_cyl = np.asarray(source_field.B_cyl(), dtype=np.float64)
+            field_cyl = _host_cache_array(source_field.B_cyl(), dtype=np.float64)
         else:
-            field_cyl = np.asarray(source_field.GradAbsB_cyl(), dtype=np.float64)
+            field_cyl = _host_cache_array(
+                source_field.GradAbsB_cyl(),
+                dtype=np.float64,
+            )
         # Restore the source field's points so this construction step
         # does not leak state into the caller's cache.
         source_field.set_points_cart(np.ascontiguousarray(old_points))
