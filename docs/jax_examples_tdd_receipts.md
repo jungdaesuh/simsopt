@@ -1434,3 +1434,45 @@ replacing user-owned untracked content requires explicit approval.
 After the case-ownership correction, the final broad parity manifest, runner,
 artifact, input, publication, and runtime regression suite passed
 `92 passed in 85.48s`.
+
+## Corrected global-orbit authority GREEN (2026-07-27)
+
+The corrected executable revision
+`3b401b54bf4b12d1a35b70dd9621080ca9620ff6` was checked out detached and
+clean at `/tmp/simsopt-parity-v2-fix.SLPdTa/checkout`. Python 3.11.15 rebuilt
+`simsopt==1.10.7.dev583+g3b401b54b` from that checkout. The native extension
+SHA-256 remained
+`43205604c01308c147f9d9e7f771d3efa0b5d9533e3a315cc7828bdfb87c3b0c`.
+
+The full `all-applicable` matrix ran `native-cpu,jax-cpu,jax-gpu` without
+`--smoke` and published the host-local bundle:
+
+```text
+/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/
+  .artifacts/jax-example-parity/20260727T141144Z-cb97f4d1
+```
+
+The independent required-authority audit returned:
+
+```json
+{"authoritative": true, "case_count": 8, "comparison_count": 252,
+ "lane_receipt_count": 24, "run_id": "20260727T141144Z-cb97f4d1",
+ "verdict": "pass"}
+```
+
+All eight cases passed on native CPU, JAX CPU, and strict NVIDIA GeForce RTX
+5090 JAX GPU in FP64. The aggregate binds the clean executable revision,
+reports no repository change during execution, records an empty tracked diff
+and untracked inventory, uses canonical manifest v2 without the legacy
+adapter, and contains 24 authoritative lane receipts and 252 comparisons. The
+summary SHA-256 is
+`f317f5c69fcb52a83ebb598df897273160537ecae421f6a15c1db1c2574b0819`.
+The fresh report was generated only in the isolated temporary work area and
+has SHA-256
+`297d13deaa6f1500c966aed2795bca8725d76c1fa8235378189e5d885875d43f`;
+the pre-existing untracked worktree report was not replaced.
+
+After the repair, all 120 manifest, runner, artifact, input, publication, and
+runtime tests passed. Ruff, formatting, JSON parsing, compileall, and Git diff
+checks passed. The isolated runtime did not contain mypy, so no fresh mypy
+result is claimed for this repair.

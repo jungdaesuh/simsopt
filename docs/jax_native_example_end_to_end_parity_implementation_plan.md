@@ -4,12 +4,12 @@
 **Last updated:** 2026-07-27
 
 **Outcome:** Fast-default and explicit-parity runtime support is implemented,
-and fast is explicitly not performance-qualified. The prior manifest-v2
-authority matrix is historical only after review exposed an over-broad surface
-Jacobian invariant; fresh CPU/GPU authority is required for the corrected
-executable revision. Formal plan closure also remains blocked by unavailable
-per-case pre-GREEN history and an existing untracked results file that has not
-been approved for replacement.
+and fast is explicitly not performance-qualified. Review exposed and repaired
+an over-broad surface Jacobian invariant, and fresh native CPU, JAX CPU, and
+strict RTX 5090 GPU authority is GREEN for the corrected executable revision.
+Formal plan closure remains blocked by unavailable per-case pre-GREEN history
+and an existing untracked results file that has not been approved for
+replacement.
 
 ## Implementation outcome
 
@@ -70,6 +70,13 @@ association across all rows, admitting one global column exchange only. The
 former clean run at `.artifacts/jax-example-parity/20260727T133326Z-04db9b25`
 and its passing audit are historical evidence, not certification of this
 corrected contract.
+
+The corrected executable revision
+`3b401b54bf4b12d1a35b70dd9621080ca9620ff6` was rebuilt and run from a clean
+detached checkout. The fresh local-only authority bundle
+`.artifacts/jax-example-parity/20260727T141144Z-cb97f4d1` passed all eight
+cases, 24 lane receipts, and 252 comparisons on native CPU, JAX CPU, and strict
+RTX 5090 JAX GPU in FP64. The independent required-authority audit passed.
 
 ### Delivery blockers
 
@@ -1188,7 +1195,7 @@ RED, but no production implementation for that slice may be added first.
     - [x] Integrate the repaired candidate into a reachable branch commit and
       confirm its parentage from the intended baseline. Do not cite detached
       `799c656e1` as shipped state.
-    - [ ] From a clean checkout of the corrected executable revision, run the
+    - [x] From a clean checkout of the corrected executable revision, run the
       complete CPU suite, the real strict-GPU all-applicable run with zero
       skips/fallbacks, and the independent audit. An evidence-only descendant
       may record that run only when its diff from the executable revision is
