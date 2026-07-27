@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from examples.jax.parity.artifacts import read_bytes
+
 
 def _mapping(value: object, context: str) -> dict[str, object]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
@@ -117,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    summary = json.loads(args.summary.read_text(encoding="utf-8"))
+    summary = json.loads(read_bytes(args.summary.parent, args.summary.name))
     rendered = render_results_document(
         summary,
         artifact_reference=str(args.summary.parent),

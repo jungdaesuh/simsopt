@@ -40,6 +40,7 @@ def test_publish_time_collision_never_replaces_final_entry(
     outside.mkdir()
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("collision-owned\n", encoding="utf-8")
+
     def create_collision(target: Path) -> None:
         if collision == "empty-directory":
             target.mkdir()

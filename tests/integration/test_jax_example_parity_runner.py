@@ -641,7 +641,11 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert summary["cases"][0]["scale_tier"] == "bounded"
     assert summary["cases"][0]["oracle_kind"] == "native_python_scipy"
     assert len(summary["cases"][0]["comparisons"]) == 11
+    executions = {
+        execution["lane"]: execution for execution in summary["cases"][0]["executions"]
+    }
     for lane in ("native-cpu", "jax-cpu"):
+        assert executions[lane]["parent_peak_rss_bytes"] > 0
         receipt = json.loads(
             (
                 published[0] / "traceable-least-squares" / lane / "lane_result.json"
@@ -655,6 +659,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
         assert provenance["executed_sources"]
         assert provenance["python_version"]
         assert provenance["lane_environment_policy"]["SIMSOPT_BACKEND_MODE"]
+        assert provenance["host_peak_rss_method"].startswith("child getrusage")
 
     for mutation in ("input-json", "input-sidecar"):
         copied_run = tmp_path / mutation / published[0].name
@@ -667,6 +672,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
             bundle_path.write_bytes(canonical_json_bytes(bundle))
         else:
             targets = bundle["arrays"]["targets"]
+            (input_root / targets["path"]).unlink()
             write_array(
                 input_root,
                 targets["path"],
@@ -679,6 +685,11 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
         published[0] / "traceable-least-squares" / "jax-cpu" / "lane_result.json"
     )
     jax_receipt = json.loads(jax_receipt_path.read_text(encoding="utf-8"))
+    changed_value_path = (
+        jax_receipt_path.parent
+        / jax_receipt["values"]["initial:objective_sum_squares"]["path"]
+    )
+    changed_value_path.unlink()
     changed_reference = write_array(
         jax_receipt_path.parent,
         jax_receipt["values"]["initial:objective_sum_squares"]["path"],

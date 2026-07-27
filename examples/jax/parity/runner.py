@@ -13,7 +13,7 @@ from time import perf_counter
 from typing import Mapping
 
 from examples.jax.parity.arbiter import LaneObservation
-from examples.jax.parity.receipts import load_lane_observation, write_lane_observation
+from examples.jax.parity.receipts import load_lane_observation
 from examples.jax.parity.runtime import ParityLane, build_parity_lane_environment
 
 
@@ -201,7 +201,6 @@ def execute_case_lanes(
                     host_peak_rss_method="parent-sampled /proc child VmHWM",
                 ),
             )
-            write_lane_observation(result_directory, observation)
         observations[lane] = observation
     if failures:
         raise RunnerError("; ".join(failures))

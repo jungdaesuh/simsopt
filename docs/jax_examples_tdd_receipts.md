@@ -984,3 +984,55 @@ route, arbiter, case, and tamper regressions: 27 passed in 21.70s
 complete manifest plus integration suites: passed (exit 0)
 Ruff check and format, JSON validation, compileall, git diff --check: passed
 ```
+
+## No-replace publication and descriptor-safe artifact I/O RED -> GREEN
+
+The deterministic publication and sidecar race tests were committed without
+production changes at immutable revision `fc718aee9`. Replaying that revision
+from a detached worktree produced the authentic focused RED:
+
+```text
+6 failed, 18 deselected in 0.33s
+```
+
+The failures proved all reopened defects directly: an empty destination was
+silently replaced; a publish-time symlink produced an unnormalized OS error;
+no completion marker existed; a hash-matching external NPY leaf substituted
+after validation was loaded successfully; a substituted parent directory
+received a write; and a second sidecar write replaced existing bytes.
+
+GREEN centralizes artifact leaves behind descriptor-relative Linux I/O. Every
+path component is opened relative to its already-open parent with
+`O_NOFOLLOW`; leaves are opened once, reads hash and load through that same
+descriptor, and writes use `O_EXCL`, fsync the file, then fsync the parent.
+Unsupported platforms or missing descriptor flags fail explicitly rather than
+falling back to pathname reopening. Input bundles, lane receipts, aggregate
+summaries, the independent auditor, and the report reader use the same byte
+primitive.
+
+Directory publication now uses Linux `renameat2(RENAME_NOREPLACE)`, so neither
+an empty directory nor a symlink can be replaced. The complete partial tree is
+descriptor-walked and fsynced first. After the no-replace rename, publication
+creates `COMPLETED.json` exclusively; that marker binds the run ID and SHA-256
+of `summary.json`. The marker, final directory, and artifact parent are fsynced
+in durability order. Readers require the valid marker/summary pair and reject
+an incomplete final directory.
+
+Making leaves immutable exposed one pre-existing parent rewrite: after a lane
+child published its receipt, the parent rewrote all arrays merely to replace
+the child RSS provenance. GREEN removes that rewrite. Scientific lane receipts
+remain append-only; the completion-hash-bound aggregate is the sole owner of
+parent-sampled peak RSS, while each child receipt retains its independently
+measured fallback. The auditor requires positive parent RSS from the aggregate
+without pretending the child measured the parent's value.
+
+Focused GREEN evidence:
+
+```text
+publication suite: 10 passed in 0.63s
+artifact suite: 14 passed in 0.98s
+publication + artifact + manifest suites: 46 passed in 3.31s
+complete parity runner integration suite: 38 passed in 64.40s
+focused mypy: Success: no issues found in 8 source files
+Ruff check and format, compileall, git diff --check: passed
+```
