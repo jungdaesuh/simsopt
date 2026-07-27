@@ -118,6 +118,65 @@
           "timestamp_utc": "2026-07-27T17:56:52Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-one-to-one-native-inventory",
+      "native_source_id": "examples/jax/manifest.json",
+      "mirror_id": "one-to-one-native-inventory",
+      "intended_red_failure": "missing exact one-to-one inventory fixture",
+      "test_sha256": {
+        "tests/test_jax_examples_one_to_one_inventory.py": "abaac400fab08377ec7e27bcfa520f4cdeecbbe64d63ab75d9854c6f5034dc76"
+      },
+      "phases": {
+        "red": {
+          "revision": "8fdf6fc36f2a04f51c3a8e1ac23251a02e17788e",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_examples_one_to_one_inventory.py\"])\noutput = captured.getvalue()\nif code == 1 and \"one-to-one inventory fixture is missing\" in output:\n    print(\"missing exact one-to-one inventory fixture\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected one-to-one inventory test outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact one-to-one inventory fixture",
+          "combined_output_sha256": "c290336aeffbb6086053fa38bb533467ad711ba19392dcb5326f5fb758e9f539",
+          "source_sha256": {
+            "examples/jax/manifest.json": "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05"
+          },
+          "timestamp_utc": "2026-07-27T18:06:16Z"
+        },
+        "green": {
+          "revision": "e31b135059b3833a5b5a69da677750864a4213ad",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_examples_one_to_one_inventory.py\"])\noutput = captured.getvalue()\nif code == 1 and \"one-to-one inventory fixture is missing\" in output:\n    print(\"missing exact one-to-one inventory fixture\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected one-to-one inventory test outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/probe_one_to_one_inventory.py": "15f88a0975d3f731c0b42642738f265e4595f322094015c96e2babff4e18c54c"
+          },
+          "timestamp_utc": "2026-07-27T18:06:39Z"
+        },
+        "refactor": {
+          "revision": "498a5a1710980bf0bd523c802a41b5e0d5a4a350",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_examples_one_to_one_inventory.py\"])\noutput = captured.getvalue()\nif code == 1 and \"one-to-one inventory fixture is missing\" in output:\n    print(\"missing exact one-to-one inventory fixture\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected one-to-one inventory test outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/probe_one_to_one_inventory.py": "669b49e3b2557e24243ebde499e572f17a86e526da1c884ddb226df396c5fa6a"
+          },
+          "timestamp_utc": "2026-07-27T18:07:03Z"
+        }
+      }
     }
   ]
 }
