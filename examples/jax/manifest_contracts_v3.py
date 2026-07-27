@@ -67,6 +67,7 @@ _EXAMPLE_FIELDS = frozenset(
         "smoke_args",
         "correctness_tests",
         "supported_device_scopes",
+        "compatibility",
     }
 )
 
@@ -83,6 +84,13 @@ class ContractVersionError(ValueError):
 class RuntimeDependencies:
     python_import_roots: tuple[str, ...]
     external_runtimes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CompatibilityAlias:
+    successor_example_id: str
+    warning: str
+    removal_after: str
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,7 @@ class JaxExampleRecordV3:
     smoke_args: tuple[str, ...]
     correctness_tests: tuple[str, ...]
     supported_device_scopes: tuple[tuple[str, DeviceScope], ...]
+    compatibility: CompatibilityAlias | None
 
     @property
     def device_scopes(self) -> Mapping[str, DeviceScope]:
@@ -323,6 +332,24 @@ def _device_scopes(value: object, context: str) -> tuple[tuple[str, DeviceScope]
     return tuple(entries)
 
 
+def _compatibility_alias(value: object, context: str) -> CompatibilityAlias | None:
+    if value is None:
+        return None
+    record = _mapping(value, context)
+    _exact_fields(
+        record,
+        frozenset({"successor_example_id", "warning", "removal_after"}),
+        "compatibility metadata",
+    )
+    return CompatibilityAlias(
+        successor_example_id=_string(
+            record["successor_example_id"], f"{context}.successor_example_id"
+        ),
+        warning=_string(record["warning"], f"{context}.warning"),
+        removal_after=_string(record["removal_after"], f"{context}.removal_after"),
+    )
+
+
 def _example_record(value: object, index: int) -> JaxExampleRecordV3:
     context = f"jax_examples[{index}]"
     record = _mapping(value, context)
@@ -345,6 +372,17 @@ def _example_record(value: object, index: int) -> JaxExampleRecordV3:
     teaching_value = _enum(
         record["teaching_kind"], _TEACHING_KINDS, f"{context}.teaching_kind"
     )
+    compatibility = _compatibility_alias(
+        record["compatibility"], f"{context}.compatibility"
+    )
+    if teaching_value == "compatibility" and compatibility is None:
+        raise ManifestV3ValidationError(
+            f"compatibility metadata is required for {record['id']}"
+        )
+    if teaching_value != "compatibility" and compatibility is not None:
+        raise ManifestV3ValidationError(
+            f"compatibility metadata is forbidden for {record['id']}"
+        )
     host_boundaries = _strings(record["host_boundaries"], f"{context}.host_boundaries")
     scopes = _device_scopes(
         record["supported_device_scopes"], f"{context}.supported_device_scopes"
@@ -392,6 +430,7 @@ def _example_record(value: object, index: int) -> JaxExampleRecordV3:
             record["correctness_tests"], f"{context}.correctness_tests"
         ),
         supported_device_scopes=scopes,
+        compatibility=compatibility,
     )
 
 
@@ -419,6 +458,27 @@ def _validate_v3_ownership(manifest: JaxExamplesManifestV3, repo_root: Path) -> 
     if len(example_paths) != len(set(example_paths)):
         raise ManifestV3ValidationError("duplicate executable path")
     by_id = {record.id: record for record in manifest.jax_examples}
+    for alias in manifest.jax_examples:
+        metadata = alias.compatibility
+        if metadata is None:
+            continue
+        successor = by_id.get(metadata.successor_example_id)
+        if successor is None:
+            raise ManifestV3ValidationError(
+                f"compatibility alias has unknown successor: {alias.id}"
+            )
+        if successor.teaching_kind != "one_to_one":
+            raise ManifestV3ValidationError(
+                f"compatibility successor is not one_to_one: {alias.id}"
+            )
+        if alias.id not in metadata.warning or successor.id not in metadata.warning:
+            raise ManifestV3ValidationError(
+                f"compatibility warning must name alias and successor: {alias.id}"
+            )
+        if metadata.removal_after != "one documented deprecation interval":
+            raise ManifestV3ValidationError(
+                f"compatibility removal interval is invalid: {alias.id}"
+            )
     owners: dict[str, str] = {}
     for source in manifest.source_catalog:
         mirror_id = source.mirror_example_id
@@ -627,22 +687,39 @@ def _ordered_union(groups: tuple[tuple[str, ...], ...]) -> list[str]:
 
 
 def _tutorial_payload(example: JaxExampleRecord) -> dict[str, object]:
+    if not example.inspired_by:
+        raise ManifestV3ValidationError(
+            f"legacy tutorial has no source lineage: {example.id}"
+        )
+    first_source = next(iter(example.inspired_by))
     scope = "full_workflow" if example.execution_kind == "pure" else "jax_region"
+    teaching_kind = "combined" if len(example.inspired_by) > 1 else "compatibility"
+    successor_id = _stable_mirror_id(first_source)
     return {
         "id": example.id,
         "path": example.path,
         "status": example.status,
         "tier": example.tier,
         "classification": "tutorial",
-        "teaching_kind": (
-            "combined" if len(example.inspired_by) > 1 else "compatibility"
-        ),
+        "teaching_kind": teaching_kind,
         "jax_surfaces": list(example.jax_surfaces),
         "host_boundaries": list(example.host_boundaries),
         "extras": list(example.extras),
         "smoke_args": list(example.smoke_args),
         "correctness_tests": list(example.correctness_tests),
         "supported_device_scopes": {device: scope for device in example.devices},
+        "compatibility": (
+            {
+                "successor_example_id": successor_id,
+                "warning": (
+                    f"{example.id} is a non-covering compatibility lesson; "
+                    f"use {successor_id} once it is ready."
+                ),
+                "removal_after": "one documented deprecation interval",
+            }
+            if teaching_kind == "compatibility"
+            else None
+        ),
     }
 
 
@@ -688,6 +765,7 @@ def _one_to_one_payload(
         "smoke_args": [],
         "correctness_tests": [],
         "supported_device_scopes": scopes,
+        "compatibility": None,
     }
 
 
