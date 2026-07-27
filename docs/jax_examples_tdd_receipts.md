@@ -1110,6 +1110,44 @@ Focused GREEN evidence:
 parity artifact and report suite: 15 passed in 0.97s
 ```
 
+## Matched fast/parity execution-mode benchmark RED -> GREEN
+
+The benchmark was built in four failing-first slices. Immutable RED revision
+`25e384017` defined the evidence contract before the validator existed; GREEN
+`3f167cbaa` implemented the dependency-light schema and promotion arbiter. RED
+`838ed2d62` required real isolated cold, warmup, and seven balanced warmed-pair
+measurements; GREEN `970965a6f` added the runner. RED `727f96037` added invalid
+cache, synchronization, resource, and GPU-load cases; GREEN `dd44d371b` made
+those contexts fail closed. RED `9374b3d83` rejected incompatible runtime
+provenance; GREEN `cadeb7e2b` bound supported JAX/JAXLIB versions before
+admission. The complete contract suite currently passes 41 tests.
+
+Valid JAX 0.10.2 full artifacts were collected without discarding repetitions:
+
+```text
+CPU: .artifacts/jax-example-execution-modes/20260727T065241Z-cpu-dacecfd63ed8
+GPU: .artifacts/jax-example-execution-modes/20260727T064728Z-gpu-829eb1cbf037
+```
+
+Both artifacts pass scientific, cache, scheduling, synchronization, runtime,
+and memory-evidence validation. Neither promotes the fast policy. All five CPU
+workloads miss the warm-speed threshold or its one-sided lower bound. On the
+RTX 5090, fieldline/tracing is the only workload that passes every gate;
+traceable least squares, curve, and surface miss the warm-speed rule, while
+surface and coil also record GPU-memory ratios of about `1.467` and `1.469`,
+above the unchanged `1.25` ceiling.
+
+A separately labeled diagnostic disabled the single-GPU sharding policy:
+
+```text
+.artifacts/jax-example-execution-modes/20260727T070236Z-gpu-8aa146a1699c
+```
+
+That run still failed all five warm-speed gates and left the surface/coil GPU
+memory ratios unchanged. The sharding hypothesis is therefore rejected; no
+default, threshold, repetition, or artifact label was changed to manufacture a
+promotion. These artifacts are local non-certifying performance evidence.
+
 ## Accepted optimizer device-state retention RED -> GREEN
 
 The BFGS regression was committed without production changes at immutable
