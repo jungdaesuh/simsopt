@@ -74,6 +74,7 @@ def _outcome(
         "termination": "normal",
         "scientific_success": True,
         "cache_load_compatible": True,
+        "runtime_environment_compatible": True,
         "backend_mode": f"jax_{device}_{intent}",
         "platform": device,
         "precision": "fp64",
@@ -380,6 +381,16 @@ def test_rejects_incompatible_persistent_cache_load() -> None:
     _warm_at(artifact, "fast")["cache_load_compatible"] = False
 
     with pytest.raises(BenchmarkContractError, match="cache_load_compatible"):
+        evaluate_benchmark_artifact(artifact)
+
+
+def test_rejects_incompatible_runtime_environment() -> None:
+    artifact = _artifact("gpu")
+    _warm_at(artifact, "fast")["runtime_environment_compatible"] = False
+
+    with pytest.raises(
+        BenchmarkContractError, match="runtime_environment_compatible"
+    ):
         evaluate_benchmark_artifact(artifact)
 
 
