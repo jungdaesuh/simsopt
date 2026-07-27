@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import examples.jax.run_examples as example_runner
 from examples.jax._lane_environment import (
     build_execution_environment,
     build_lane_environment,
@@ -340,6 +341,46 @@ def test_runner_parser_rejects_mixed_legacy_and_new_selectors() -> None:
 
     with pytest.raises(SystemExit):
         _argument_parser().parse_args(("--lane", "cpu-smoke", "--intent", "fast"))
+
+
+def test_runner_manifest_observability_distinguishes_v1_adapter() -> None:
+    manifest = JaxExamplesManifest(
+        source_catalog=(),
+        jax_examples=(),
+        schema_version=1,
+        used_legacy_manifest_adapter=True,
+    )
+
+    assert example_runner.manifest_observability_payload(manifest) == {
+        "manifest_schema_version": 1,
+        "used_legacy_manifest_adapter": True,
+    }
+
+
+def test_runner_emits_manifest_observability_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = JaxExamplesManifest(
+        source_catalog=(),
+        jax_examples=(),
+        schema_version=2,
+        used_legacy_manifest_adapter=False,
+    )
+    monkeypatch.setattr(
+        example_runner, "load_manifest", lambda *_args, **_kwargs: manifest
+    )
+    monkeypatch.setattr(example_runner, "run_profile", lambda *_args, **_kwargs: 0)
+
+    exit_code = example_runner.main(
+        ["--device", "cpu", "--manifest", str(tmp_path / "manifest.json")]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().err == (
+        '{"manifest_schema_version":2,"used_legacy_manifest_adapter":false}\n'
+    )
 
 
 def test_runner_executes_real_child_with_exact_smoke_arguments(tmp_path: Path) -> None:
