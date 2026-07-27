@@ -1,0 +1,2139 @@
+{
+  "baseline": {
+    "candidate_count": 29,
+    "cpu_devices": [
+      {
+        "id": 0,
+        "kind": "cpu",
+        "platform": "cpu"
+      }
+    ],
+    "cuda_driver_version": "595.84",
+    "deferred_count": 22,
+    "full_parity_count": 2,
+    "gpu_devices": [
+      {
+        "id": 0,
+        "kind": "NVIDIA GeForce RTX 5090",
+        "platform": "gpu"
+      }
+    ],
+    "gpu_memory_mib": 32607,
+    "head": "03d8da68b053815db537cd44e66887225c751c0e",
+    "jax_version": "0.10.0",
+    "jaxlib_version": "0.10.0",
+    "manifest_schema_version": 2,
+    "manifest_sha256": "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05",
+    "native_source_count": 51,
+    "parity_manifest_schema_version": 1,
+    "parity_manifest_sha256": "060e55339194c203263da9d5690c2ff31bd6681f5713dc2ead0ce3313e313137",
+    "planned_jax_example_count": 1,
+    "python_version": "3.11.15",
+    "ready_jax_example_count": 10,
+    "recorded_at_utc": "2026-07-27T17:42:00Z",
+    "reduced_parity_count": 6,
+    "simsopt_version": "1.10.7.dev587+g03d8da68b.d20260727",
+    "simsoptpp_sha256": "4d131f5037ca4004f47b042ad1acf03f0329e8a8e9160cc7abdbf8b95b2e9faf",
+    "unsupported_parity_count": 20,
+    "worktree_status": [
+      " M docs/jax_upstream_final_upgrades_implementation_plan.md",
+      "?? .Codex/",
+      "?? docs/jax_native_example_parity_results.md",
+      "?? docs/jax_native_example_parity_results.pre_20260727_run20260726T225943Z.md"
+    ]
+  },
+  "native_sources": [
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/just_a_quadratic.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "traceable-least-squares",
+          "jax_surfaces": [
+            "simsopt_jax.solve.serial.least_squares_serial_solve_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/just_a_quadratic.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/just_a_quadratic.py",
+      "source_sha256": "9a157cb2c203cbda3be54165e0e7a8798b7f0061ce9e508003252ce09ca36810"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/logger_example.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/1_Simple/logger_example.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "Logging alone has no JAX-specific numerical teaching objective; reconsider when a public runtime-diagnostics lesson needs an executable example.",
+      "recommended_target_classification": "not_applicable",
+      "reconsideration_condition": "reconsider when a public runtime-diagnostics lesson needs an executable example.",
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "logging",
+          "mpi4py",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/logger_example.py",
+      "source_sha256": "e28de476f504b4ae164110ef89332b4788b5a6c4c6b5228105fb963434a60ba8"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/minimize_curve_length.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "curve-length-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.solve.serial.serial_solve_jax",
+            "simsopt_jax.core.curve_geometry.curve_incremental_arclength_from_spec",
+            "simsopt_jax_adapters.geo.curve_objectives.CurveLengthJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/minimize_curve_length.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/minimize_curve_length.py",
+      "source_sha256": "f7f182e209cbce1035b02a1b8bece376dbcb8ae3a2b541e38f73703ace7f1b07"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/permanent_magnet_simple.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "permanent-magnet-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.geo.permanent_magnet_grid.PermanentMagnetGridJAX",
+            "simsopt_jax.solve.permanent_magnet.GPMO_baseline_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/permanent_magnet_simple.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "pathlib",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/permanent_magnet_simple.py",
+      "source_sha256": "116a4a18493023a52b573441be387ba9f64bc4692af03e5e4240840d44d8e685"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/qfm.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "qfm-surface-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.geo.qfm_surface.QfmSurfaceJAX",
+            "simsopt_jax.core.qfm_solver.qfm_penalty_solve_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/qfm.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/qfm.py",
+      "source_sha256": "5c80abbd47a038ea367e70441d76d4789ba4ed198ea210e54a601e1d2c9edb92"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/stage_two_optimization_minimal.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-flux-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX",
+            "simsopt_jax_adapters.objectives.flux.SquaredFluxJAX",
+            "simsopt_jax_adapters.geo.curve_objectives.CurveLengthJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/stage_two_optimization_minimal.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/stage_two_optimization_minimal.py",
+      "source_sha256": "2b909a201841e627e0ef89f542d68b16d7a7e6a114e58f16e34340b227fa7b9d"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/surf_vol_area.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "surface-geometry-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.solve.serial.least_squares_serial_solve_jax",
+            "simsopt_jax_adapters.geo.surface_objectives.AreaJAX",
+            "simsopt_jax_adapters.geo.surface_objectives.VolumeJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/surf_vol_area.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "simsopt"
+        ]
+      },
+      "source": "1_Simple/surf_vol_area.py",
+      "source_sha256": "9b04967f1dbd69efee17f755bdfe1a5e81042751c48472d3d9c88ec9cdea2518"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/tracing_fieldlines_NCSX.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "fieldline-and-particle-tracing",
+          "jax_surfaces": [
+            "simsopt_jax.core.tracing.FieldlineTracingSpec",
+            "simsopt_jax.core.tracing.FullorbitTracingSpec",
+            "simsopt_jax.core.tracing.trace_fieldline",
+            "simsopt_jax.core.tracing.trace_fullorbit",
+            "simsopt_jax_adapters.field.reiman.ReimanJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/tracing_fieldlines_NCSX.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "simsopt",
+          "sys",
+          "time"
+        ]
+      },
+      "source": "1_Simple/tracing_fieldlines_NCSX.py",
+      "source_sha256": "498d6670a7fdb7651196d2a7150133f9019ca39a187d50cef991fab141696ae6"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/tracing_fieldlines_QA.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "fieldline-and-particle-tracing",
+          "jax_surfaces": [
+            "simsopt_jax.core.tracing.FieldlineTracingSpec",
+            "simsopt_jax.core.tracing.FullorbitTracingSpec",
+            "simsopt_jax.core.tracing.trace_fieldline",
+            "simsopt_jax.core.tracing.trace_fullorbit",
+            "simsopt_jax_adapters.field.reiman.ReimanJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/tracing_fieldlines_QA.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "1_Simple/tracing_fieldlines_QA.py",
+      "source_sha256": "b14eb146e2fc600eb6f5f75eeb60303b071ccfdf9d3830aa41abeec1f1dc106a"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "1_Simple/tracing_particle.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "fieldline-and-particle-tracing",
+          "jax_surfaces": [
+            "simsopt_jax.core.tracing.FieldlineTracingSpec",
+            "simsopt_jax.core.tracing.FullorbitTracingSpec",
+            "simsopt_jax.core.tracing.trace_fieldline",
+            "simsopt_jax.core.tracing.trace_fullorbit",
+            "simsopt_jax_adapters.field.reiman.ReimanJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/1_Simple/tracing_particle.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "simsopt",
+          "sys",
+          "time"
+        ]
+      },
+      "source": "1_Simple/tracing_particle.py",
+      "source_sha256": "99385bc7bafb87e401226d5c3924214f9ef39ce65920d5cf4ced7e75570807ad"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/B_external_normal.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/B_external_normal.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The workflow is owned by mutable VMEC and external-normal state; reconsider after a public immutable boundary snapshot and independent oracle are available.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a public immutable boundary snapshot and independent oracle are available.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/B_external_normal.py",
+      "source_sha256": "4395d3b7a7250454aea32d088f68227f8cefb15ed6d66feaa5e14d21a662a73a"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/QH_fixed_resolution.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/QH_fixed_resolution.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The end-to-end optimization requires VMEC execution; reconsider when a meaningful JAX-owned region can be exercised without presenting VMEC as device-native.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider when a meaningful JAX-owned region can be exercised without presenting VMEC as device-native.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/QH_fixed_resolution.py",
+      "source_sha256": "e3a1f3ee0770f081016a9bbc0948d1cf2150e2d9d4de3c1efb916db02f0ae5dc"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/QH_fixed_resolution_boozer.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "boozer-surface-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.geo.boozer_surface.BoozerSurfaceJAX",
+            "simsopt_jax_adapters.geo.surface_objectives.BoozerResidualJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/QH_fixed_resolution_boozer.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The current native workflow executes VMEC, so it cannot truthfully be promoted as a full CPU/GPU JAX mirror.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "Reconsider when a bounded immutable VMEC boundary with an independent oracle defines a meaningful JAX-owned workflow.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/QH_fixed_resolution_boozer.py",
+      "source_sha256": "6240007cfc3037c031241a654d2b07a053671038bc71c19016b88a86b27429f3"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/QSC.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/QSC.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The workflow is primarily the external qsc package rather than a public simsopt_jax surface; reconsider when a distinct JAX-owned lesson exists.",
+      "recommended_target_classification": "not_applicable",
+      "reconsideration_condition": "reconsider when a distinct JAX-owned lesson exists.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "QSC"
+        ],
+        "python_import_roots": [
+          "qsc",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/QSC.py",
+      "source_sha256": "a0e949b32f6e701ba0dd67e4514aabb2124ba2a63dfd0f388c189e0e9e1f9823"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/boozer.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "boozer-surface-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.geo.boozer_surface.BoozerSurfaceJAX",
+            "simsopt_jax_adapters.geo.surface_objectives.BoozerResidualJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/boozer.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/boozer.py",
+      "source_sha256": "5d4e8c2c06c11d078ebfaea0dc8924d93d4b63b9d6ec5f9db1736298b9fe0c01"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/boozerQA.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "boozer-surface-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.geo.boozer_surface.BoozerSurfaceJAX",
+            "simsopt_jax_adapters.geo.surface_objectives.BoozerResidualJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/boozerQA.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/boozerQA.py",
+      "source_sha256": "6dc68a55b31765f9c0bd54445bc2ed9c6c0cc76f1938992bacc1be28c1c89f93"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/boozerQA_ls_mpi.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/boozerQA_ls_mpi.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The defining control path is MPI plus host-object orchestration; reconsider after a bounded MPI fixture and public JAX-owned result contract are available.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a bounded MPI fixture and public JAX-owned result contract are available.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "MPI"
+        ],
+        "python_import_roots": [
+          "mpi4py",
+          "numpy",
+          "os",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/boozerQA_ls_mpi.py",
+      "source_sha256": "8d6fa7110fb262946b4e886a671e631e8b185cc9b45e03a10aa6ac6c1d6d5faa"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/constrained_optimization.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/constrained_optimization.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The JAX serial API intentionally has no SIMSOPT-owned backend-neutral constrained solver; reconsider after that public CPU/GPU contract and independent feasibility oracle exist.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after that public CPU/GPU contract and independent feasibility oracle exist.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/constrained_optimization.py",
+      "source_sha256": "0bb2518ea793088e1411a7e137473f7b389c798918989b67cda9210edb9e3b33"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/eliminate_magnetic_islands.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/eliminate_magnetic_islands.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The workflow requires external equilibrium and island-analysis codes; reconsider after a bounded frozen-state JAX objective has an independent oracle.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a bounded frozen-state JAX objective has an independent oracle.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "SPEC"
+        ],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/eliminate_magnetic_islands.py",
+      "source_sha256": "365bbfc6c207866922dbee0f47e46efe934cecd586f5800f3d54464c45b63733"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/free_boundary_vmec.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/free_boundary_vmec.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "Free-boundary VMEC execution is an external host solve; reconsider only when a meaningful public JAX region and freshness boundary are defined.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider only when a meaningful public JAX region and freshness boundary are defined.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "pathlib",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/free_boundary_vmec.py",
+      "source_sha256": "ec2dc860eb3c96f84c998fb3f518421aa0f39a0eb6c78e84290578837e095ce1"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/permanent_magnet_MUSE.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "permanent-magnet-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.geo.permanent_magnet_grid.PermanentMagnetGridJAX",
+            "simsopt_jax.solve.permanent_magnet.GPMO_baseline_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/permanent_magnet_MUSE.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC (optional post-check, disabled by default)"
+        ],
+        "python_import_roots": [
+          "matplotlib",
+          "numpy",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/permanent_magnet_MUSE.py",
+      "source_sha256": "8a00c70f6f79faf411f563ab1f713ae12ec1f2b95ee6c934a7c9f6ae3d64da6a"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/permanent_magnet_PM4Stell.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "permanent-magnet-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.geo.permanent_magnet_grid.PermanentMagnetGridJAX",
+            "simsopt_jax.solve.permanent_magnet.GPMO_baseline_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/permanent_magnet_PM4Stell.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "matplotlib",
+          "numpy",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/permanent_magnet_PM4Stell.py",
+      "source_sha256": "cd82e1f207c73665da9ff09c635f5e26f800feda1e470a507c28a961102075d8"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/permanent_magnet_QA.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "permanent-magnet-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.geo.permanent_magnet_grid.PermanentMagnetGridJAX",
+            "simsopt_jax.solve.permanent_magnet.GPMO_baseline_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/permanent_magnet_QA.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC (optional post-check, disabled by default)"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/permanent_magnet_QA.py",
+      "source_sha256": "f438dd9f2635d91965a50d8ff6074c7f250e68d9bcdb2625d8c52cf15d4d9bba"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/resolution_increase.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/resolution_increase.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The lesson is VMEC resolution continuation, not a JAX-owned numerical surface; reconsider after an immutable continuation contract exists.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after an immutable continuation contract exists.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/resolution_increase.py",
+      "source_sha256": "dd8ced26efbb44347a1cb8472f57c205ccb5c5b1a64cdcbfa1cb94f9e72fff10"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/resolution_increase_boozer.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "boozer-surface-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.geo.boozer_surface.BoozerSurfaceJAX",
+            "simsopt_jax_adapters.geo.surface_objectives.BoozerResidualJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/resolution_increase_boozer.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The current native workflow executes VMEC, so it cannot truthfully be promoted as a full CPU/GPU JAX mirror.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "Reconsider when a bounded immutable VMEC boundary with an independent oracle defines a meaningful JAX-owned workflow.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/resolution_increase_boozer.py",
+      "source_sha256": "0249d7812f16239d4a0a012c3dac89999819482f41eb8befb4aaa5bf735c9fce"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/stage_two_optimization.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-flux-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX",
+            "simsopt_jax_adapters.objectives.flux.SquaredFluxJAX",
+            "simsopt_jax_adapters.geo.curve_objectives.CurveLengthJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/stage_two_optimization.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/stage_two_optimization.py",
+      "source_sha256": "df7fde4474d9983849faa7bd4a2543298d885fe9cc9e66a9f30e2c8224e11bd3"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/stage_two_optimization_finite_beta.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/stage_two_optimization_finite_beta.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "Finite-beta equilibrium is supplied by host VMEC; reconsider after a frozen equilibrium payload and freshness tests cover the JAX-owned objective.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a frozen equilibrium payload and freshness tests cover the JAX-owned objective.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/stage_two_optimization_finite_beta.py",
+      "source_sha256": "7e9d9513633a506394239375ef2537dfa9005ede8ddc23297ee19166720e9091"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/stage_two_optimization_planar_coils.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-flux-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX",
+            "simsopt_jax_adapters.objectives.flux.SquaredFluxJAX",
+            "simsopt_jax_adapters.geo.curve_objectives.CurveLengthJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/stage_two_optimization_planar_coils.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/stage_two_optimization_planar_coils.py",
+      "source_sha256": "d117f6ae01a932e664add32e4626161d72f25e9375c3ea01eeeb4b33731c61d6"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/stage_two_optimization_stochastic.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-flux-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX",
+            "simsopt_jax_adapters.objectives.flux.SquaredFluxJAX",
+            "simsopt_jax_adapters.geo.curve_objectives.CurveLengthJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/stage_two_optimization_stochastic.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/stage_two_optimization_stochastic.py",
+      "source_sha256": "6140547bfc9dc500c40e32ff1e493a43252e12dff96c5ae6676ac5fcffc9595e"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/strain_optimization.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-force-and-finite-build",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.force.LpCurveForce",
+            "simsopt_jax_adapters.geo.framed_curve.FramedCurveFrenetJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/strain_optimization.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/strain_optimization.py",
+      "source_sha256": "f65676388e2743ab49d64eddb0420cc8159564daa2369a1898890f35d2fc2b9d"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/tracing_boozer.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "fieldline-and-particle-tracing",
+          "jax_surfaces": [
+            "simsopt_jax.core.tracing.FieldlineTracingSpec",
+            "simsopt_jax.core.tracing.FullorbitTracingSpec",
+            "simsopt_jax.core.tracing.trace_fieldline",
+            "simsopt_jax.core.tracing.trace_fullorbit",
+            "simsopt_jax_adapters.field.reiman.ReimanJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/tracing_boozer.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The current native workflow executes VMEC, so it cannot truthfully be promoted as a full CPU/GPU JAX mirror.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "Reconsider when a bounded immutable VMEC boundary with an independent oracle defines a meaningful JAX-owned workflow.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "logging",
+          "matplotlib",
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/tracing_boozer.py",
+      "source_sha256": "e037c083ed71015d5f13395942fb7def38a57508ae26591fef8044bb22c6f09b"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/vmec_adjoint.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/2_Intermediate/vmec_adjoint.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The defining solve and adjoint state are VMEC-owned; reconsider after a public frozen-state derivative interface has parity coverage.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a public frozen-state derivative interface has parity coverage.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "matplotlib",
+          "numpy",
+          "os",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "2_Intermediate/vmec_adjoint.py",
+      "source_sha256": "37768dafaceb5cdc4a9a37d466880256191258eaeef0cfb0daf73c002334751f"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/wireframe_gsco_modular.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "wireframe-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.solve.wireframe.rcls_wireframe_jax",
+            "simsopt_jax.core.wireframe_workflow.wireframe_gsco_multistep_loop_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/wireframe_gsco_modular.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "matplotlib",
+          "mayavi",
+          "numpy",
+          "os",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/wireframe_gsco_modular.py",
+      "source_sha256": "a5e6b91478823c50e173355204e6441521f04d01aa16522c0e59acfdf2346d9d"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/wireframe_gsco_sector_saddle.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "wireframe-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.solve.wireframe.rcls_wireframe_jax",
+            "simsopt_jax.core.wireframe_workflow.wireframe_gsco_multistep_loop_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/wireframe_gsco_sector_saddle.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "matplotlib",
+          "mayavi",
+          "numpy",
+          "os",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/wireframe_gsco_sector_saddle.py",
+      "source_sha256": "3823580e4a0dc358f3309443e1c05f6d97680349a71385ea594c084fa607fd22"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/wireframe_rcls_basic.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "wireframe-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.solve.wireframe.rcls_wireframe_jax",
+            "simsopt_jax.core.wireframe_workflow.wireframe_gsco_multistep_loop_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/wireframe_rcls_basic.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "matplotlib",
+          "numpy",
+          "os",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/wireframe_rcls_basic.py",
+      "source_sha256": "47c07e1594481f5a3e4b583437e0f0ac077cbe39005534fa87993af07728cdcb"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "2_Intermediate/wireframe_rcls_with_ports.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "wireframe-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.solve.wireframe.rcls_wireframe_jax",
+            "simsopt_jax.core.wireframe_workflow.wireframe_gsco_multistep_loop_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/2_Intermediate/wireframe_rcls_with_ports.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "matplotlib",
+          "mayavi",
+          "numpy",
+          "os",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "2_Intermediate/wireframe_rcls_with_ports.py",
+      "source_sha256": "636cbf4dd99a107a5d5b0567cb3aa483954d4395d717fffd8d31089e2c9f273a"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/coil_forces.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-force-and-finite-build",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.force.LpCurveForce",
+            "simsopt_jax_adapters.geo.framed_curve.FramedCurveFrenetJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/3_Advanced/coil_forces.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "shutil",
+          "simsopt"
+        ]
+      },
+      "source": "3_Advanced/coil_forces.py",
+      "source_sha256": "bc486d35780216fbc11fae2bdd8371db07f7585ce060b53a439d520f399feda0"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/optimize_qs_and_islands_simultaneously.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/3_Advanced/optimize_qs_and_islands_simultaneously.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The workflow couples VMEC and SPEC external solves; reconsider after an independently testable JAX-owned subproblem is public.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after an independently testable JAX-owned subproblem is public.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "SPEC",
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "3_Advanced/optimize_qs_and_islands_simultaneously.py",
+      "source_sha256": "b7f186dd9abd40b8a14458d1f72ab0218437e1df2835dd135bb441b1127ddf08"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/single_stage_optimization.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "single-stage-vacuum-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.geo.surface_objectives_traceable.make_traceable_objective_session",
+            "simsopt_jax.geo.optimizers.optimizer.jax_minimize"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/3_Advanced/single_stage_optimization.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "VMEC remains an explicit CPU/MPI host solve while the coil objective and derivative slice is owned by public JAX surfaces.",
+      "recommended_target_classification": "hybrid",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "3_Advanced/single_stage_optimization.py",
+      "source_sha256": "04f78cfe1e4bf0508e25920a92196ea369683251b4785b97572ae5a7ce79e12c"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/single_stage_optimization_finite_beta.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/3_Advanced/single_stage_optimization_finite_beta.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "Finite-beta single-stage execution remains coupled to host VMEC; reconsider after immutable equilibrium freshness and bounded solver contracts exist.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after immutable equilibrium freshness and bounded solver contracts exist.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "math",
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "3_Advanced/single_stage_optimization_finite_beta.py",
+      "source_sha256": "d51e94d2bde3d6eb0d131e3448045fbdc9812d5714e617dcb63c46800f249b43"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/stage_two_optimization_finitebuild.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "coil-force-and-finite-build",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.field.force.LpCurveForce",
+            "simsopt_jax_adapters.geo.framed_curve.FramedCurveFrenetJAX"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/3_Advanced/stage_two_optimization_finitebuild.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "pathlib",
+          "scipy",
+          "simsopt"
+        ]
+      },
+      "source": "3_Advanced/stage_two_optimization_finitebuild.py",
+      "source_sha256": "a3faf4d5b6af2292495525a9ab3acf01fd89d7a3ec4ec12f3610e92373a9c822"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "3_Advanced/wireframe_gsco_multistep.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "wireframe-optimization",
+          "jax_surfaces": [
+            "simsopt_jax_adapters.solve.wireframe.rcls_wireframe_jax",
+            "simsopt_jax.core.wireframe_workflow.wireframe_gsco_multistep_loop_jax"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/3_Advanced/wireframe_gsco_multistep.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The planned exact-name mirror can exercise the same scientific stages through existing public JAX surfaces without a required external scientific solver.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "matplotlib",
+          "mayavi",
+          "numpy",
+          "os",
+          "pathlib",
+          "simsopt",
+          "time"
+        ]
+      },
+      "source": "3_Advanced/wireframe_gsco_multistep.py",
+      "source_sha256": "6a0bf19a4cda2b1db3344c428324f0ef95d65f438689be2e904147b1835a7336"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/1DOF_circularCrossSection_varyAxis_targetIota.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/1DOF_circularCrossSection_varyAxis_targetIota.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark is VMEC-owned and no bounded JAX-owned lesson is isolated; reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/1DOF_circularCrossSection_varyAxis_targetIota.py",
+      "source_sha256": "14c8fd787b8832c69130360712bb83e2eeb009cfa743f653962dcc5a86f26594"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/1DOF_circularCrossSection_varyAxis_targetIota_spec.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/1DOF_circularCrossSection_varyAxis_targetIota_spec.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark requires SPEC; reconsider after an external-solver boundary and bounded JAX-owned observable are defined.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after an external-solver boundary and bounded JAX-owned observable are defined.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "SPEC"
+        ],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/1DOF_circularCrossSection_varyAxis_targetIota_spec.py",
+      "source_sha256": "a1951038290dc3a3dc7523c940d2acc7a013d3c7f9e14c9fe9b11f8d58134cce"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/1DOF_circularCrossSection_varyR0_targetVolume.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/1DOF_circularCrossSection_varyR0_targetVolume.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark is VMEC-owned and no bounded JAX-owned lesson is isolated; reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/1DOF_circularCrossSection_varyR0_targetVolume.py",
+      "source_sha256": "8100b054d1ae808f46e77d9f673acb6dcd6dca7880feede9c7d6cd3fc9ba8001"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/1DOF_circularCrossSection_varyR0_targetVolume_spec.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/1DOF_circularCrossSection_varyR0_targetVolume_spec.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark requires SPEC; reconsider after an external-solver boundary and bounded JAX-owned observable are defined.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after an external-solver boundary and bounded JAX-owned observable are defined.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "SPEC"
+        ],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/1DOF_circularCrossSection_varyR0_targetVolume_spec.py",
+      "source_sha256": "89e99139ed4a69242faf526b8c146c8c58382a8635a403825ee39660f1b144cb"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/2DOF_circularCrossSection_varyAxis_targetIotaAndQuasisymmetry.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/2DOF_circularCrossSection_varyAxis_targetIotaAndQuasisymmetry.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark is VMEC-owned and no bounded JAX-owned lesson is isolated; reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/2DOF_circularCrossSection_varyAxis_targetIotaAndQuasisymmetry.py",
+      "source_sha256": "f9e9b5afcc4fae704fdae779403494834065bea1659fabec83c64c846c51dc64"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/2DOF_specOnly_targetIotaAndVolume.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/2DOF_specOnly_targetIotaAndVolume.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark requires SPEC; reconsider after an external-solver boundary and bounded JAX-owned observable are defined.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after an external-solver boundary and bounded JAX-owned observable are defined.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "SPEC"
+        ],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/2DOF_specOnly_targetIotaAndVolume.py",
+      "source_sha256": "1aad665fc778995b219d30b466f1508b773f7905f7f7534d96c3443f297d0c3c"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/2DOF_vmecAndSpec.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/2DOF_vmecAndSpec.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark couples VMEC and SPEC; reconsider after both host boundaries expose immutable, freshness-tested payloads.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after both host boundaries expose immutable, freshness-tested payloads.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "SPEC",
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "logging",
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/2DOF_vmecAndSpec.py",
+      "source_sha256": "0c52aae899aa161d0b0a9e775d9e03c68aee2933119665803fbd643b3ced1ec3"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/2DOF_vmecOnly_targetIotaAndVolume.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/2DOF_vmecOnly_targetIotaAndVolume.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "This benchmark is VMEC-owned and no bounded JAX-owned lesson is isolated; reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a frozen diagnostic contract is pedagogically meaningful.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "numpy",
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/2DOF_vmecOnly_targetIotaAndVolume.py",
+      "source_sha256": "f2d0f685e67312a275ea6a1715695b55c3685c47ceef17ce93d897acb3e35110"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
+          "stellarator_benchmarks/7dof.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "deferred",
+      "current_public_jax_surface_coverage": [],
+      "evidence": [
+        "examples/stellarator_benchmarks/7dof.py",
+        "examples/jax/manifest.json@schema-v2",
+        "docs/jax_examples_one_to_one_mirror_implementation_plan.md#initial-one-to-one-candidate-inventory"
+      ],
+      "reason": "The full benchmark is an external equilibrium campaign rather than a bounded example; reconsider after a small public JAX-owned contract is identified.",
+      "recommended_target_classification": "blocked",
+      "reconsideration_condition": "reconsider after a small public JAX-owned contract is identified.",
+      "runtime_dependencies": {
+        "external_runtimes": [
+          "VMEC"
+        ],
+        "python_import_roots": [
+          "os",
+          "simsopt"
+        ]
+      },
+      "source": "stellarator_benchmarks/7dof.py",
+      "source_sha256": "81c18cb290351a5a1fe01112b2e47a520c0ab7ad0b2ed8865ac572c4de96c083"
+    }
+  ],
+  "schema_version": 1
+}
