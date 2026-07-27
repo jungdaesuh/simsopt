@@ -20,6 +20,7 @@ from simsopt_jax.core.curve_kernels import (
     curve_surface_distance_penalty_pure,
     kappa_pure,
 )
+from simsopt_jax.core.curve_geometry import pair_linking_number_pure
 
 
 class CoilDofExtractionProvider(Protocol):
@@ -43,6 +44,7 @@ class StageTwoObjectiveConfig:
     curvature_weight: float = 0.0
     mean_squared_curvature_threshold: float = 5.0
     mean_squared_curvature_weight: float = 0.0
+    linking_number_weight: float = 0.0
 
 
 def _zero(reference: jax.Array) -> jax.Array:
@@ -141,6 +143,32 @@ def stage_two_geometric_penalty(
             )
         )(gamma, gammadash)
         result = result + config.curve_surface_weight * jnp.sum(curve_surface)
+
+    if config.linking_number_weight != 0.0:
+        linking_pairs = tuple(
+            (first, second)
+            for first in range(int(gamma.shape[0]))
+            for second in range(first)
+        )
+        first = jnp.asarray(tuple(pair[0] for pair in linking_pairs), dtype=jnp.int32)
+        second = jnp.asarray(tuple(pair[1] for pair in linking_pairs), dtype=jnp.int32)
+        dphi = jnp.reciprocal(jnp.asarray(gamma.shape[1], dtype=gamma.dtype))
+        linking_numbers = jax.vmap(
+            lambda gamma_1, gammadash_1, gamma_2, gammadash_2: pair_linking_number_pure(
+                gamma_1,
+                gammadash_1,
+                gamma_2,
+                gammadash_2,
+                dphi,
+                dphi,
+            )
+        )(
+            gamma[first],
+            gammadash[first],
+            gamma[second],
+            gammadash[second],
+        )
+        result = result + config.linking_number_weight * jnp.sum(linking_numbers)
 
     return result
 
