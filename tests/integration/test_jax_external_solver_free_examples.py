@@ -22,7 +22,7 @@ class ExampleContract:
     observables: frozenset[str]
 
 
-WAVE_B_CONTRACTS = (
+EXTERNAL_SOLVER_FREE_CONTRACTS = (
     ExampleContract(
         "1_Simple/tracing_fieldlines_NCSX.py",
         "native-tracing-fieldlines-ncsx",
@@ -271,10 +271,10 @@ def _source_checkout_environment() -> dict[str, str]:
 
 @pytest.mark.parametrize(
     "contract",
-    WAVE_B_CONTRACTS,
+    EXTERNAL_SOLVER_FREE_CONTRACTS,
     ids=lambda contract: contract.example_id,
 )
-def test_wave_b_exact_example_executes_its_scientific_contract(
+def test_external_solver_free_example_executes_its_scientific_contract(
     contract: ExampleContract,
 ) -> None:
     example = REPO_ROOT / "examples" / "jax" / contract.path
