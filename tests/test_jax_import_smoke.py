@@ -1022,6 +1022,22 @@ def test_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
     )
 
 
+def test_transfer_guard_disallow_allows_gpu_bfgs_with_device_closure_constants():
+    """GPU BFGS must pass captured device arrays as explicit compiled operands."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=(
+            "case_transfer_guard_disallow_allows_gpu_bfgs_with_device_closure_constants",
+        ),
+        failure_message="GPU BFGS device-closure transfer-guard smoke failed",
+        timeout=_ONDEVICE_COLD_SMOKE_TIMEOUT,
+        extra_env={
+            "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=true",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        },
+    )
+
+
 def test_transfer_guard_disallow_allows_traceable_newton_with_host_closure_constants():
     """Traceable Newton helpers must not eagerly cross host/device boundaries."""
     _assert_python_script_passes(
