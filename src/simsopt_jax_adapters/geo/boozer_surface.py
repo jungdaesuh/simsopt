@@ -5924,94 +5924,123 @@ class BoozerSurfaceJAX(Optimizable):
         *,
         tol,
         maxiter,
+        args=(),
     ):
         """Compatibility damped Gauss-Newton loop for ``method='manual'``."""
-        residual_and_jacobian = jax.jit(
-            lambda x: (residual_fn(x), jax.jacobian(residual_fn)(x))
-        )
-
         x_initial = _as_jax_float64(x0)
-        always_true = jnp.all(jnp.equal(x_initial, x_initial))
-        scalar_one = always_true.astype(x_initial.dtype)
-        half = scalar_one / (scalar_one + scalar_one)
-        damping_factor = scalar_one + scalar_one + scalar_one
-        lam_initial = scalar_one
-        residual, jacobian = residual_and_jacobian(x_initial)
-        gradient = jacobian.T @ residual
-        normal_matrix = jacobian.T @ jacobian
-        norm = jnp.linalg.norm(gradient)
-        cost = half * jnp.sum(jnp.square(residual))
-        int_one = always_true.astype(jnp.int32)
-        nit = int_one - int_one
-        all_finite = (
-            jnp.all(jnp.isfinite(x_initial))
-            & jnp.all(jnp.isfinite(residual))
-            & jnp.all(jnp.isfinite(gradient))
-            & jnp.all(jnp.isfinite(normal_matrix))
-        )
-        tol_value = scalar_one * tol
-        maxiter_value = nit + maxiter
+        runtime_args = tuple(args)
 
-        def cond_fn(state):
-            (
-                _x,
-                _residual,
-                _jacobian,
-                _gradient,
-                _normal_matrix,
-                state_norm,
-                _cost,
-                _lam,
-                state_nit,
-                _all_finite,
-            ) = state
-            return (state_nit < maxiter_value) & (state_norm > tol_value)
+        @jax.jit
+        def solve(initial_x, *dynamic_args):
+            def residual_and_jacobian(x):
+                return (
+                    residual_fn(x, *dynamic_args),
+                    jax.jacobian(residual_fn, argnums=0)(x, *dynamic_args),
+                )
 
-        def body_fn(state):
-            (
-                x,
-                residual,
-                jacobian,
-                gradient,
-                normal_matrix,
-                norm,
-                cost,
-                lam,
-                nit,
-                all_finite,
-            ) = state
-            damping = lam * jnp.diag(jnp.diag(normal_matrix))
-            dx = jnp.linalg.solve(normal_matrix + damping, gradient)
-            candidate_x = x - dx
-            candidate_residual, candidate_jacobian = residual_and_jacobian(candidate_x)
-            candidate_gradient = candidate_jacobian.T @ candidate_residual
-            candidate_normal_matrix = candidate_jacobian.T @ candidate_jacobian
-            candidate_norm = jnp.linalg.norm(candidate_gradient)
-            candidate_cost = half * jnp.sum(jnp.square(candidate_residual))
-            candidate_is_finite = (
-                jnp.all(jnp.isfinite(candidate_x))
-                & jnp.all(jnp.isfinite(candidate_residual))
-                & jnp.all(jnp.isfinite(candidate_gradient))
-                & jnp.all(jnp.isfinite(candidate_normal_matrix))
+            always_true = jnp.all(jnp.equal(initial_x, initial_x))
+            scalar_one = always_true.astype(initial_x.dtype)
+            half = scalar_one / (scalar_one + scalar_one)
+            damping_factor = scalar_one + scalar_one + scalar_one
+            lam_initial = scalar_one
+            residual, jacobian = residual_and_jacobian(initial_x)
+            gradient = jacobian.T @ residual
+            normal_matrix = jacobian.T @ jacobian
+            norm = jnp.linalg.norm(gradient)
+            cost = half * jnp.sum(jnp.square(residual))
+            int_one = always_true.astype(jnp.int32)
+            nit = int_one - int_one
+            all_finite = (
+                jnp.all(jnp.isfinite(initial_x))
+                & jnp.all(jnp.isfinite(residual))
+                & jnp.all(jnp.isfinite(gradient))
+                & jnp.all(jnp.isfinite(normal_matrix))
             )
-            accepted = candidate_is_finite & (candidate_cost < cost)
+            tol_value = scalar_one * tol
+            maxiter_value = nit + maxiter
+
+            def cond_fn(state):
+                (
+                    _x,
+                    _residual,
+                    _jacobian,
+                    _gradient,
+                    _normal_matrix,
+                    state_norm,
+                    _cost,
+                    _lam,
+                    state_nit,
+                    _all_finite,
+                ) = state
+                return (state_nit < maxiter_value) & (state_norm > tol_value)
+
+            def body_fn(state):
+                (
+                    x,
+                    residual,
+                    jacobian,
+                    gradient,
+                    normal_matrix,
+                    norm,
+                    cost,
+                    lam,
+                    nit,
+                    all_finite,
+                ) = state
+                damping = lam * jnp.diag(jnp.diag(normal_matrix))
+                dx = jnp.linalg.solve(normal_matrix + damping, gradient)
+                candidate_x = x - dx
+                candidate_residual, candidate_jacobian = residual_and_jacobian(
+                    candidate_x
+                )
+                candidate_gradient = candidate_jacobian.T @ candidate_residual
+                candidate_normal_matrix = candidate_jacobian.T @ candidate_jacobian
+                candidate_norm = jnp.linalg.norm(candidate_gradient)
+                candidate_cost = half * jnp.sum(jnp.square(candidate_residual))
+                candidate_is_finite = (
+                    jnp.all(jnp.isfinite(candidate_x))
+                    & jnp.all(jnp.isfinite(candidate_residual))
+                    & jnp.all(jnp.isfinite(candidate_gradient))
+                    & jnp.all(jnp.isfinite(candidate_normal_matrix))
+                )
+                accepted = candidate_is_finite & (candidate_cost < cost)
+                return (
+                    jnp.where(accepted, candidate_x, x),
+                    jnp.where(accepted, candidate_residual, residual),
+                    jnp.where(accepted, candidate_jacobian, jacobian),
+                    jnp.where(accepted, candidate_gradient, gradient),
+                    jnp.where(accepted, candidate_normal_matrix, normal_matrix),
+                    jnp.where(accepted, candidate_norm, norm),
+                    jnp.where(accepted, candidate_cost, cost),
+                    jnp.where(accepted, lam / damping_factor, lam * damping_factor),
+                    nit + int_one,
+                    all_finite & candidate_is_finite,
+                )
+
             return (
-                jnp.where(accepted, candidate_x, x),
-                jnp.where(accepted, candidate_residual, residual),
-                jnp.where(accepted, candidate_jacobian, jacobian),
-                jnp.where(accepted, candidate_gradient, gradient),
-                jnp.where(accepted, candidate_normal_matrix, normal_matrix),
-                jnp.where(accepted, candidate_norm, norm),
-                jnp.where(accepted, candidate_cost, cost),
-                jnp.where(accepted, lam / damping_factor, lam * damping_factor),
-                nit + int_one,
-                all_finite & candidate_is_finite,
+                *jax.lax.while_loop(
+                    cond_fn,
+                    body_fn,
+                    (
+                        initial_x,
+                        residual,
+                        jacobian,
+                        gradient,
+                        normal_matrix,
+                        norm,
+                        cost,
+                        lam_initial,
+                        nit,
+                        all_finite,
+                    ),
+                ),
+                tol_value,
             )
 
         (
             x,
             residual,
-            jacobian,
+            _jacobian,
             gradient,
             normal_matrix,
             norm,
@@ -6019,22 +6048,8 @@ class BoozerSurfaceJAX(Optimizable):
             _lam,
             nit,
             all_finite,
-        ) = jax.lax.while_loop(
-            cond_fn,
-            body_fn,
-            (
-                x_initial,
-                residual,
-                jacobian,
-                gradient,
-                normal_matrix,
-                norm,
-                cost,
-                lam_initial,
-                nit,
-                all_finite,
-            ),
-        )
+            tol_value,
+        ) = solve(x_initial, *runtime_args)
 
         return {
             "x": x,
@@ -7773,26 +7788,28 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         if method == "manual":
-            residual_fn = (
-                self._make_penalty_residual_host_jax_with(
-                    optimize_G,
-                    weight_inv_modB,
-                    constraint_weight,
+            if self.options["optimizer_backend"] in {"host-jax", "ondevice"}:
+                residual_fn, _state_fn, _jacobian_block_fn, residual_args = (
+                    self._make_penalty_least_squares_host_jax_inputs(
+                        optimize_G,
+                        weight_inv_modB,
+                        constraint_weight,
+                    )
                 )
-                if self.options["optimizer_backend"] == "host-jax"
-                else self._make_penalty_residual_with(
+            else:
+                residual_fn = self._make_penalty_residual_with(
                     optimize_G,
                     weight_inv_modB,
                     constraint_weight,
-                    hostify_inputs=self.options["optimizer_backend"] != "ondevice",
                     decision_split_mode=decision_split_mode,
                 )
-            )
+                residual_args = ()
             result = self._run_manual_penalty_least_squares(
                 residual_fn,
                 x0,
                 tol=tol,
                 maxiter=maxiter,
+                args=residual_args,
             )
             sdofs_final, iota_out, G_out = self._unpack_decision_vector(
                 result["x"],

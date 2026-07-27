@@ -4000,6 +4000,34 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-10,
         )
 
+    def test_public_manual_ls_loop_accepts_dynamic_device_residual_arguments(self):
+        booz = _make_mock_boozer_surface()
+        matrix = jnp.asarray([[2.0, -1.0], [0.5, 3.0]], dtype=jnp.float64)
+        rhs = jnp.asarray([0.25, -0.75], dtype=jnp.float64)
+        x0 = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
+        tol = jnp.asarray(1e-12, dtype=jnp.float64)
+        maxiter = jnp.asarray(40, dtype=jnp.int32)
+
+        def residual(x, dynamic_matrix, dynamic_rhs):
+            return dynamic_matrix @ x - dynamic_rhs
+
+        with jax.transfer_guard("disallow"):
+            result = booz._run_manual_penalty_least_squares(
+                residual,
+                x0,
+                tol=tol,
+                maxiter=maxiter,
+                args=(matrix, rhs),
+            )
+
+        assert result["success"] is True
+        np.testing.assert_allclose(
+            np.asarray(result["x"]),
+            np.linalg.solve(np.asarray(matrix), np.asarray(rhs)),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
     def test_public_manual_ls_api_matches_legacy_manual_linear_contract(self):
         """JAX manual LS must match the legacy damped Gauss-Newton linear contract."""
 
