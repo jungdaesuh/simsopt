@@ -384,9 +384,10 @@ def serial_solve_jax(
     atol: float = 1.0e-8,
     max_steps: int = 256,
     maxcor: int | None = None,
+    require_success: bool = True,
     **kwargs,
 ) -> OptimizerResult:
-    """Minimize on the active JAX device and publish the completed state."""
+    """Minimize on device and optionally publish a nonconverged bounded state."""
     if not isinstance(prob, TraceableScalarProblem):
         raise TypeError("serial_solve_jax requires TraceableScalarProblem.")
     if kwargs:
@@ -424,7 +425,8 @@ def serial_solve_jax(
             maxcor=maxcor,
         ),
     )
-    _require_success(result, operation="JAX scalar solve")
+    if require_success:
+        _require_success(result, operation="JAX scalar solve")
     final_x = jax.device_put(result.x, initial_x.sharding)
     final_objective = prob.objective(final_x)
     _write_bounded_objective_log(
