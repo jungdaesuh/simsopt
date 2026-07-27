@@ -142,6 +142,14 @@ class MigrationCandidate:
     semantic_diff: Mapping[str, int]
 
 
+@dataclass(frozen=True)
+class _CandidateDocuments:
+    examples: dict[str, object]
+    parity: dict[str, object]
+    planned_one_to_one_count: int
+    relationship_count: int
+
+
 def _mapping(value: object, context: str) -> dict[str, object]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ManifestV3ValidationError(f"{context} must be a JSON object")
@@ -782,34 +790,11 @@ def _pending_parity_payload(
     }
 
 
-def build_v3_candidates(
-    *,
-    examples_v2_document: object,
-    parity_v1_document: object,
-    inventory_document: object,
-    repo_root: Path,
-) -> MigrationCandidate:
-    """Build validated canonical bytes without mutating either active manifest."""
-    legacy_examples = parse_manifest_document(
-        examples_v2_document,
-        repo_root=repo_root,
-        warn_legacy=False,
-    )
-    if legacy_examples.schema_version != 2:
-        raise ManifestV3ValidationError("migration requires example schema v2")
-    legacy_parity = parse_parity_manifest_document(
-        parity_v1_document,
-        examples_manifest=legacy_examples,
-        repo_root=repo_root,
-    )
-    inventory_rows = _inventory_rows(inventory_document)
-    if tuple(row.source for row in legacy_examples.source_catalog) != tuple(
-        _string(row.get("source"), "inventory source") for row in inventory_rows
-    ):
-        raise ManifestV3ValidationError(
-            "inventory does not exactly map the current v2 source catalog"
-        )
-
+def _candidate_documents(
+    legacy_examples: JaxExamplesManifest,
+    legacy_parity: ParityManifest,
+    inventory_rows: tuple[dict[str, object], ...],
+) -> _CandidateDocuments:
     source_payloads: list[dict[str, object]] = []
     one_to_one_payloads: list[dict[str, object]] = []
     relationships: list[dict[str, object]] = []
@@ -841,32 +826,70 @@ def build_v3_candidates(
         else:
             mirror_id = None
         source_payloads.append(_source_payload(inventory, mirror_id))
+    return _CandidateDocuments(
+        examples={
+            "schema_version": 3,
+            "source_catalog": source_payloads,
+            "jax_examples": [
+                *(
+                    _tutorial_payload(example)
+                    for example in legacy_examples.jax_examples
+                ),
+                *one_to_one_payloads,
+            ],
+        },
+        parity={"schema_version": 2, "relationships": relationships},
+        planned_one_to_one_count=len(one_to_one_payloads),
+        relationship_count=len(relationships),
+    )
 
-    examples_candidate: dict[str, object] = {
-        "schema_version": 3,
-        "source_catalog": source_payloads,
-        "jax_examples": [
-            *(_tutorial_payload(example) for example in legacy_examples.jax_examples),
-            *one_to_one_payloads,
-        ],
-    }
-    parity_candidate: dict[str, object] = {
-        "schema_version": 2,
-        "relationships": relationships,
-    }
-    load_manifest_contract_pair_documents(
-        examples_candidate,
-        parity_candidate,
+
+def build_v3_candidates(
+    *,
+    examples_v2_document: object,
+    parity_v1_document: object,
+    inventory_document: object,
+    repo_root: Path,
+) -> MigrationCandidate:
+    """Build validated canonical bytes without mutating either active manifest."""
+    legacy_examples = parse_manifest_document(
+        examples_v2_document,
+        repo_root=repo_root,
+        warn_legacy=False,
+    )
+    if legacy_examples.schema_version != 2:
+        raise ManifestV3ValidationError("migration requires example schema v2")
+    legacy_parity = parse_parity_manifest_document(
+        parity_v1_document,
+        examples_manifest=legacy_examples,
         repo_root=repo_root,
     )
-    examples_bytes = _canonical_json_bytes(examples_candidate)
-    parity_bytes = _canonical_json_bytes(parity_candidate)
+    inventory_rows = _inventory_rows(inventory_document)
+    if tuple(row.source for row in legacy_examples.source_catalog) != tuple(
+        _string(row.get("source"), "inventory source") for row in inventory_rows
+    ):
+        raise ManifestV3ValidationError(
+            "inventory does not exactly map the current v2 source catalog"
+        )
+
+    documents = _candidate_documents(
+        legacy_examples,
+        legacy_parity,
+        inventory_rows,
+    )
+    load_manifest_contract_pair_documents(
+        documents.examples,
+        documents.parity,
+        repo_root=repo_root,
+    )
+    examples_bytes = _canonical_json_bytes(documents.examples)
+    parity_bytes = _canonical_json_bytes(documents.parity)
     metrics = MappingProxyType(
         {
             "legacy_tutorial_count": len(legacy_examples.jax_examples),
-            "planned_one_to_one_count": len(one_to_one_payloads),
+            "planned_one_to_one_count": documents.planned_one_to_one_count,
             "legacy_relationship_count": len(legacy_parity.relationships),
-            "canonical_relationship_count": len(relationships),
+            "canonical_relationship_count": documents.relationship_count,
             "promoted_parity_claim_count": 0,
         }
     )
