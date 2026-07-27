@@ -1437,10 +1437,10 @@ RED, but no production implementation for that slice may be added first.
   transfer-guard metadata, sidecar SHA-256, path containment,
   authoritative-source status, observable applicability, tolerance result, and
   final verdict. The fresh independent audit of
-  `20260727T133326Z-04db9b25` required authoritative evidence and returned
+  `20260727T141144Z-cb97f4d1` required authoritative evidence and returned
   `8` cases, `24` lane receipts, `252` comparisons, and verdict `pass` at clean
-  revision `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c`. The older local replay
-  below is retained as historical context only:
+  executable revision `3b401b54bf4b12d1a35b70dd9621080ca9620ff6`.
+  The older local replay below is retained as historical context only:
 
   ```console
   (
