@@ -7459,14 +7459,16 @@ class BoozerSurfaceJAX(Optimizable):
                     progress_callback=progress_callback,
                 )
 
+        accepted_x = getattr(result, "x_device", result.x)
+        accepted_jac = getattr(result, "jac_device", result.jac)
         sdofs_final, iota_out, G_out = self._unpack_penalty_optimizer_state(
-            result.x, optimize_G
+            accepted_x, optimize_G
         )
         self._set_surface_dofs(sdofs_final)
 
         gradient = _host_numpy(
             _boozer_penalty_optimizer_state_to_vector(
-                result.jac,
+                accepted_jac,
                 optimize_G=optimize_G,
             )
         )
