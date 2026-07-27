@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
 
-BENCHMARK_SCHEMA_VERSION = 1
-BENCHMARK_RULE_VERSION = 1
+BENCHMARK_SCHEMA_VERSION = 2
+BENCHMARK_RULE_VERSION = 2
 BENCHMARK_EVIDENCE_KIND = "jax_example_execution_mode_benchmark_noncertifying"
 WARM_PAIR_COUNT = 7
 
@@ -50,6 +50,9 @@ BENCHMARK_RULE: Mapping[str, int | float] = MappingProxyType(
         "bootstrap_seed": 1729,
         "cold_time_ratio_max": 1.25,
         "gpu_memory_ratio_max": 1.25,
+        "gpu_concurrent_memory_fraction_max": 0.05,
+        "gpu_concurrent_sample_count": 5,
+        "gpu_concurrent_utilization_percent_max": 5,
         "host_rss_ratio_max": 1.25,
         "warm_median_speedup_min": 1.05,
         "warm_speedup_lower_bound_min": 1.0,
@@ -404,6 +407,11 @@ def _validate_outcome(
     _require_equal(outcome.get("termination"), "normal", f"{context}.termination")
     _require_equal(
         outcome.get("scientific_success"), True, f"{context}.scientific_success"
+    )
+    _require_equal(
+        outcome.get("cache_load_compatible"),
+        True,
+        f"{context}.cache_load_compatible",
     )
     _require_equal(
         outcome.get("backend_mode"), expected_profile, f"{context}.backend_mode"
