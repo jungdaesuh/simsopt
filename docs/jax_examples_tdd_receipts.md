@@ -1291,3 +1291,49 @@ the selected `jax_gpu_fast` or `jax_gpu_parity` mode, FP64, and `status=ok`.
 The installed JAX runtime emitted a driver-version parsing diagnostic while
 still enumerating and executing on `CudaDevice(id=0)`; it did not trigger CPU
 fallback or alter the validated result contract.
+
+## Surface endpoint Jacobian quotient contract RED -> GREEN (2026-07-27)
+
+The first fresh clean authority attempt at committed manifest-v2 revision
+`eb8385cbb` was authoritative in all three lanes and passed seven of eight
+cases, but correctly retained a failing `.partial` bundle:
+
+```text
+.artifacts/jax-example-parity/20260727T130725Z-e7ab9ba2.partial
+verdict: fail
+surface-geometry-optimization:
+  final residual_jacobian native-cpu:jax-cpu: fail
+  final residual_jacobian native-cpu:jax-gpu: fail
+```
+
+The native and JAX final parameter pairs differed by about `2.46e-6` while
+their sum/product quotient coordinates agreed to about `1e-11`; area, volume,
+residual, objective, and terminal status all passed. At the circular optimum,
+the two ellipse semi-axes are interchangeable and the residual Jacobian is
+nearly rank deficient. Therefore, the raw terminal Jacobians were evaluated at
+different coordinate representatives and were not a valid same-state
+cross-lane observable.
+
+Two repairs were considered. Forcing a shared polished endpoint would change
+the native and JAX solve workflows and conceal a legitimate algorithmic
+difference. Relaxing the derivative tolerance would misclassify a coordinate
+artifact as numerical parity. The selected design retains raw terminal
+parameters and Jacobians as non-applicable diagnostics and compares the
+row-wise sum/product invariants of the interchangeable Jacobian columns. Those
+invariants preserve the quotient-space derivative information and remain
+sensitive to non-permutation perturbations; no tolerance changed.
+
+The failing-first surface integration test required the new final invariant
+and failed with:
+
+```text
+KeyError: 'final:residual_jacobian_invariants'
+1 failed in 11.39s
+```
+
+After both lanes published the same invariant contract and the manifest routed
+all three direct pairs, the focused surface plus manifest suite passed
+`23 passed`; the endpoint case and adversarial permutation/drift test then
+passed `2 passed`. The broader parity manifest, runner, artifact, input,
+publication, and runtime suite passed `91 passed in 97.83s` from an isolated
+runtime whose source path was pinned to the current checkout.

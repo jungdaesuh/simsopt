@@ -49,6 +49,16 @@ are still required. The user selected local-only evidence, so the final claim
 must disclose that its ignored `.artifacts/` authority bundle is host-local and
 has no durable shared retention guarantee.
 
+The first clean post-activation authority run at `eb8385cbb` passed seven of
+eight cases and correctly remained unpublished because surface geometry
+compared raw final Jacobians at different representatives of its
+interchangeable-axis quotient. The failing bundle is retained locally at
+`.artifacts/jax-example-parity/20260727T130725Z-e7ab9ba2.partial`. A
+failing-first repair now retains those raw arrays as diagnostics and compares
+permutation-invariant Jacobian-column sum/product coordinates without changing
+any tolerance; a new clean authority run is required after that repair is
+committed.
+
 ### Delivery blockers
 
 - [x] Implement and RED-test the fast-default/explicit-parity contract in Phase
@@ -1096,6 +1106,19 @@ RED, but no production implementation for that slice may be added first.
       completeness schema-enforced before arbitration. Serialize the distinct
       half-squared `solver_cost` for least-squares lanes when the solver exposes
       it, without changing the public `r.T @ r` objective convention.
+    - [x] **RED:** Run the clean manifest-v2 authority matrix and retain the
+      surface final-Jacobian failure caused by native/JAX termination at
+      different representatives of the interchangeable-axis quotient. Add a
+      focused test requiring a permutation-invariant endpoint derivative
+      observable and an adversarial test proving it still rejects non-exchange
+      perturbations.
+    - [x] **GREEN:** Keep raw surface endpoint parameters and Jacobians as
+      explicitly non-applicable diagnostics. Compare row-wise sum/product
+      invariants of the interchangeable Jacobian columns through the unchanged
+      whole-solve tolerance and complete three-pair route matrix.
+    - [x] **REFACTOR:** Own the symmetric-column transformation once for NumPy
+      and JAX arrays; do not add a surface-specific tolerance or endpoint
+      polishing step.
     - [x] **RED:** Mutate the retained `input_bundle.json` and one input NPY
       sidecar without changing lane-receipt fingerprint strings; require the
       independent auditor to fail. This must expose the candidate auditor's

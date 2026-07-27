@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -13,6 +14,9 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+
+if TYPE_CHECKING:
+    import jax
 
 WORKFLOW_STAGES = (
     "construct_area_volume_problem",
@@ -102,6 +106,14 @@ def _parameter_invariants(parameters: np.ndarray) -> np.ndarray:
     return np.asarray((np.sum(values), np.prod(values)), dtype=np.float64)
 
 
+def _symmetric_jacobian_column_invariants(
+    left: np.ndarray | jax.Array,
+    right: np.ndarray | jax.Array,
+) -> tuple[np.ndarray | jax.Array, np.ndarray | jax.Array]:
+    """Return sum/product invariants for interchangeable Jacobian columns."""
+    return left + right, left * right
+
+
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
     from scipy.optimize import least_squares
 
@@ -127,10 +139,18 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     def state(prefix: str, parameters: np.ndarray) -> dict[str, np.ndarray]:
         current_residual = residual(parameters)
         current_jacobian = jacobian(parameters)
+        current_jacobian_invariants = np.stack(
+            _symmetric_jacobian_column_invariants(
+                current_jacobian[:, 0],
+                current_jacobian[:, 1],
+            ),
+            axis=-1,
+        )
         objective = np.asarray(np.dot(current_residual, current_residual))
         return {
             f"{prefix}:residual": current_residual,
             f"{prefix}:residual_jacobian": current_jacobian,
+            f"{prefix}:residual_jacobian_invariants": current_jacobian_invariants,
             f"{prefix}:objective_sum_squares": objective,
             f"{prefix}:solver_cost": 0.5 * objective,
             f"{prefix}:objective_gradient": (
@@ -174,7 +194,10 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
             "final:parameter_invariants": _parameter_invariants(final),
             **state("final", final),
         },
-        applicability={"final:parameters": False},
+        applicability={
+            "final:parameters": False,
+            "final:residual_jacobian": False,
+        },
     )
 
 
@@ -234,6 +257,13 @@ def _jax(
         current_quantities = quantities(parameters)
         current_residual = residual(parameters)
         current_jacobian = jax.jacfwd(residual)(parameters)
+        current_jacobian_invariants = jnp.stack(
+            _symmetric_jacobian_column_invariants(
+                current_jacobian[:, 0],
+                current_jacobian[:, 1],
+            ),
+            axis=-1,
+        )
         objective = jnp.vdot(current_residual, current_residual)
         gradient = 2.0 * current_jacobian.T @ current_residual
         return (
@@ -241,6 +271,7 @@ def _jax(
             current_quantities[1],
             current_residual,
             current_jacobian,
+            current_jacobian_invariants,
             objective,
             gradient,
         )
@@ -253,6 +284,7 @@ def _jax(
             volume,
             current_residual,
             current_jacobian,
+            current_jacobian_invariants,
             objective,
             gradient,
         ) = compiled_state(parameters)
@@ -264,6 +296,7 @@ def _jax(
         return {
             f"{prefix}:residual": host(current_residual),
             f"{prefix}:residual_jacobian": host(current_jacobian),
+            f"{prefix}:residual_jacobian_invariants": host(current_jacobian_invariants),
             f"{prefix}:objective_sum_squares": objective_value,
             f"{prefix}:solver_cost": 0.5 * objective_value,
             f"{prefix}:objective_gradient": host(gradient),
@@ -307,7 +340,10 @@ def _jax(
             ),
             **state("final", final),
         },
-        applicability={"final:parameters": False},
+        applicability={
+            "final:parameters": False,
+            "final:residual_jacobian": False,
+        },
     )
 
 
