@@ -197,5 +197,15 @@ def test_jax_workflow_reaches_examples_from_both_events_and_existing_jobs() -> N
 
     assert "'examples/jax/**'" in push_section
     assert "'examples/jax/**'" in pull_request_section
-    assert "python examples/jax/run_examples.py --lane cpu-smoke" in public_integration
-    assert "python examples/jax/run_examples.py --lane gpu-strict" in gpu_strict
+    assert "python examples/jax/run_examples.py --device cpu" in public_integration
+    assert (
+        "python examples/jax/run_examples.py --device cpu --intent parity"
+        in public_integration
+    )
+    assert "python examples/jax/run_examples.py --device gpu" in gpu_strict
+    assert (
+        "python examples/jax/run_examples.py --device gpu --intent parity"
+        in gpu_strict
+    )
+    assert "run_examples.py --lane" not in public_integration
+    assert "run_examples.py --lane" not in gpu_strict
