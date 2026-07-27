@@ -71,6 +71,30 @@
         },
         {
           "phase": "initial",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
           "observable": "objective_sum_squares",
           "lane_pair": "native-cpu:jax-cpu",
           "applicable": true,
