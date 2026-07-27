@@ -422,6 +422,21 @@ def _traceable_directional_inner_stationarity(
     return jax.jvp(inner_objective, (x_inner,), (tangent,))[1]
 
 
+def _traceable_directional_exact_residual(
+    x_inner,
+    tangent,
+    coil_set_spec,
+    objective_kwargs,
+):
+    """Contract the exact inner equation with an adjoint tangent."""
+    residual = _boozer_exact_residual(
+        x_inner,
+        coil_set_spec=coil_set_spec,
+        **_traceable_exact_residual_kwargs(objective_kwargs),
+    )
+    return jnp.vdot(tangent, residual)
+
+
 def _traceable_inner_stationarity_coil_jvp(
     x_inner,
     coil_dofs,
@@ -1956,15 +1971,26 @@ def _traceable_objective_gradient_parts(
             mixed_dense_ir_trust,
         )
 
-    inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+    if linearization_kind == "exact_jacobian":
 
-    def directional_stationarity_of_coils(current_coil_dofs):
-        return _traceable_directional_inner_stationarity(
-            solved_x,
-            adjoint,
-            coil_set_spec_from_dofs(current_coil_dofs),
-            **inner_objective_kwargs,
-        )
+        def directional_stationarity_of_coils(current_coil_dofs):
+            return _traceable_directional_exact_residual(
+                solved_x,
+                adjoint,
+                coil_set_spec_from_dofs(current_coil_dofs),
+                objective_kwargs,
+            )
+
+    else:
+        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+
+        def directional_stationarity_of_coils(current_coil_dofs):
+            return _traceable_directional_inner_stationarity(
+                solved_x,
+                adjoint,
+                coil_set_spec_from_dofs(current_coil_dofs),
+                **inner_objective_kwargs,
+            )
 
     implicit_grad = _strict_scalar_grad(
         directional_stationarity_of_coils,
