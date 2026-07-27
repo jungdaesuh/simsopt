@@ -1481,13 +1481,13 @@ RED, but no production implementation for that slice may be added first.
   native callbacks, Optimistix, or Optax as the parity-default numerical path;
   a blanket source search over mixed native/JAX case modules is invalid.
 
-- [ ] Stage only the reviewed approved-path set, then run both
+- [x] Stage only the reviewed approved-path set, then run both
   `git diff --check` and `git diff --cached --check`; inspect
   `git diff --cached --name-status` plus final `git status --short`. This binds
   new files as well as tracked working-tree and index changes while proving
-  unrelated existing modifications remain intact. Repeat this for the repaired
-  delivered slice; the detached candidate and current worktree are not that
-  final delivery.
+  unrelated existing modifications remain intact. The repaired slice was
+  committed path-by-path while the unrelated upstream plan, `.Codex/`, and
+  pre-existing untracked results file remained untouched.
 
 ## Risks and Mitigations
 
