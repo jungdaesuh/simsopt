@@ -241,6 +241,7 @@ def _scalar_options(
     rtol: float,
     atol: float,
     max_steps: int,
+    maxcor: int | None,
 ) -> (
     SimsoptBFGSOptions
     | SimsoptLBFGSBOptions
@@ -255,6 +256,7 @@ def _scalar_options(
             maxfun=max_steps * 20,
             gtol=atol,
             ftol=rtol,
+            maxcor=10 if maxcor is None else maxcor,
         )
     if driver == Driver.OPTAX_LBFGS:
         return OptaxLBFGSOptions(maxiter=max_steps, gtol=atol)
@@ -381,6 +383,7 @@ def serial_solve_jax(
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,
+    maxcor: int | None = None,
     **kwargs,
 ) -> OptimizerResult:
     """Minimize on the active JAX device and publish the completed state."""
@@ -389,6 +392,11 @@ def serial_solve_jax(
     if kwargs:
         unsupported = ", ".join(sorted(kwargs))
         raise TypeError(f"Unsupported JAX scalar solve options: {unsupported}")
+    if maxcor is not None:
+        if driver != Driver.SIMSOPT_LBFGSB:
+            raise TypeError("maxcor is only supported by Driver.SIMSOPT_LBFGSB")
+        if maxcor < 1:
+            raise ValueError("maxcor must be positive")
     if optimizer is not None:
         if driver != Driver.SIMSOPT_BFGS:
             raise TypeError("Specify only driver or the deprecated optimizer keyword.")
@@ -413,6 +421,7 @@ def serial_solve_jax(
             rtol=rtol,
             atol=atol,
             max_steps=max_steps,
+            maxcor=maxcor,
         ),
     )
     _require_success(result, operation="JAX scalar solve")
