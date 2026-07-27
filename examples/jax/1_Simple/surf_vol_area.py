@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.geo import SurfaceRZFourier
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
-from simsopt_jax.examples import MirrorResult, run_mirror
+from simsopt_jax.examples import ExampleResult, run_example
 from simsopt_jax.solve.serial import (
     TraceableLeastSquaresProblem,
     least_squares_serial_solve_jax,
@@ -108,7 +108,7 @@ def _solve_stage(
     return initial_residuals, solution, final_residuals, solver_result.success
 
 
-def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
+def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     surface = _build_surface()
     first_initial, first_solution, first_final, first_success = _solve_stage(
         surface, FIRST_TARGETS, max_steps
@@ -125,7 +125,7 @@ def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
         and np.linalg.norm(first_final) <= 1.0e-8
         and np.linalg.norm(second_final) <= 1.0e-8
     )
-    return MirrorResult(
+    return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
             "first_initial_residuals": tuple(float(value) for value in first_initial),
@@ -142,7 +142,7 @@ def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    return run_mirror(
+    return run_example(
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-surf-vol-area-",

@@ -1,4 +1,4 @@
-"""Shared command and result envelope for exact-name JAX example mirrors."""
+"""Shared execution contract for SIMSOPT JAX examples."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
 
 
 @dataclass(frozen=True)
-class MirrorResult:
-    """Immutable result published by one exact-name example mirror."""
+class ExampleResult:
+    """Immutable scientific result published by an executable example."""
 
     example_id: str
     observables: Mapping[str, object]
@@ -33,19 +33,19 @@ class MirrorResult:
         }
 
 
-MirrorSolve = Callable[[Path, int], MirrorResult]
+ExampleSolve = Callable[[Path, int], ExampleResult]
 
 
-def run_mirror(
+def run_example(
     arguments: list[str] | None,
     *,
     description: str | None,
     temporary_prefix: str,
     bounded_steps: int,
     native_default_steps: int,
-    solve: MirrorSolve,
+    solve: ExampleSolve,
 ) -> int:
-    """Parse the common mirror CLI, execute one solve, and publish JSON."""
+    """Parse the common CLI, execute one example, and publish its result."""
 
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--smoke", action="store_true")

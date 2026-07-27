@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
-from simsopt_jax.examples import MirrorResult, run_mirror
+from simsopt_jax.examples import ExampleResult, run_example
 from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
@@ -56,7 +56,7 @@ def _build_problem() -> tuple[BiotSavartJAX, SquaredFluxJAX]:
     return field, SquaredFluxJAX(surface, field)
 
 
-def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
+def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     field, flux = _build_problem()
     flux_objective = flux.traceable_objective()
 
@@ -119,7 +119,7 @@ def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
         and final_objective < initial_objective
         and np.linalg.norm(final_gradient, ord=np.inf) <= 1.0e-5
     )
-    return MirrorResult(
+    return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
             "initial_parameters": tuple(float(value) for value in initial),
@@ -138,7 +138,7 @@ def solve(_output_directory: Path, max_steps: int) -> MirrorResult:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    return run_mirror(
+    return run_example(
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-stage-two-minimal-",
