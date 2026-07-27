@@ -77,4 +77,4 @@ GPD/
 a100_run_artifacts_*/
 runpod_artifacts_*/
 examples/single_stage_optimization/STAGE_2/outputs-*/
-
+.artifacts/jax-example-parity/

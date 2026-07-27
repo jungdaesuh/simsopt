@@ -616,3 +616,206 @@ PASS coil-force-and-finite-build
 Focused underlying public-surface regressions then passed: 4 Boozer
 solver/objective cases in 27.77 seconds, 4 wireframe RCLS/GSCO cases in 3.72
 seconds, and 5 force/Frenet-frame cases in 2.07 seconds.
+
+## Native/JAX end-to-end parity harness
+
+These receipts belong to the parity implementation plan. The first aggregate
+run was intentionally fail-closed as exploratory because its parity sources
+were still uncommitted in the shared dirty checkout at commit
+`b6775bf23030bafbd602ce3131dea948e7b8bb4b`. The final subsection records the
+subsequent authoritative rerun from a clean isolated revision.
+
+### Case RED -> GREEN receipts
+
+Each case test was introduced before its registry implementation and run with
+the project development Python:
+
+```console
+MPI4PY_RC_INITIALIZE=false python -m pytest -q \
+  tests/integration/test_jax_example_parity_runner.py \
+  -k '<case-owned test name>'
+```
+
+The case-owned tests and authentic initial RED diagnostics were:
+
+| Case | Test selector | Initial RED | GREEN contract |
+|---|---|---|---|
+| traceable least squares | `traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end` | missing matched case/runner behavior | residual, Jacobian, objective/gradient convention, solve outcome |
+| curve length | `curve_length_case_runs_native_and_jax_cpu_end_to_end` | missing matched case/runner behavior | scalar value/gradient and bounded final solve |
+| surface geometry | `surface_geometry_case_runs_native_and_jax_cpu_end_to_end` | missing matched case/runner behavior | area/volume residual and Jacobian plus final state |
+| coil flux | `coil_flux_case_runs_native_and_jax_cpu_end_to_end` | `unknown parity case: coil-flux-optimization` | flux, gradient, length, and accepted current |
+| permanent magnet | `permanent_magnet_case_matches_cpp_and_jax_cpu_end_to_end` | `unknown parity case: permanent-magnet-optimization` | native `simsoptpp`/JAX moments, residual, objective, selection |
+| wireframe RCLS | `wireframe_rcls_case_matches_native_and_jax_cpu_end_to_end` | `unknown parity case: wireframe-optimization` | constrained RCLS currents, residual, objective, feasibility |
+| coil force/frame | `coil_force_fixed_state_matches_native_and_jax_cpu_end_to_end` | `unknown parity case: coil-force-and-finite-build` | force value/gradient, Frenet frame, orthonormality, torsion |
+| QFM surface | `qfm_case_matches_native_and_jax_cpu_original_residuals` | `unknown parity case: qfm-surface-optimization` | original QFM residual/gradient, constraint, penalty, accepted surface |
+
+After the individual GREEN slices and refactors, the complete focused contract
+suite passed:
+
+```text
+65 passed in 86.49s
+```
+
+The CI/ignore slice separately produced an authentic two-test RED (missing the
+narrow `.artifacts/jax-example-parity/` ignore and parity CLI invocations),
+then passed `2 passed, 18 deselected`. The parent-memory slice failed because
+`parent_peak_rss_bytes` was `None`, then passed after the parent sampled each
+child's Linux `VmHWM`. The complete runner/arbiter suite subsequently passed
+`28 passed in 73.69s`.
+
+### Real strict-CUDA GREEN receipt
+
+Exact aggregate command:
+
+```console
+/home/jungdaesuh/simsopt_mixed_artifacts/v0c_62a262b09c_20260715T2142Z/runtime-env/bin/python \
+  examples/jax/run_parity.py \
+  --case all-applicable \
+  --lanes native-cpu,jax-cpu,jax-gpu \
+  --smoke \
+  --artifact-root .artifacts/jax-example-parity
+```
+
+Published run: `.artifacts/jax-example-parity/20260726T213545Z-549ea1a9`.
+Independent audit result:
+
+```json
+{"authoritative":false,"case_count":8,"comparison_count":228,"lane_receipt_count":24,"run_id":"20260726T213545Z-549ea1a9","verdict":"pass"}
+```
+
+All eight GPU receipts report `jax_gpu_parity`, FP64, both effective transfer
+guards at `disallow`, and `NVIDIA GeForce RTX 5090`. All 228 direct pairwise
+comparisons passed; two cases are `full, bounded` and six are
+`reduced, bounded`. Host peaks are parent-observed with method
+`parent-sampled /proc child VmHWM`; device peaks use JAX's validated
+`peak_bytes_in_use` counter. The repository did not change during the run.
+
+Hash bindings:
+
+```text
+summary.json sha256 435a83f752029a5bc6f9f382d47b174d3655aa8796281e1314a7f43d2a751010
+examples/jax/run_parity.py sha256 fcc34355704e567aa67cc99e904362190f6fd52246db61fa3a5c1a1888170d68
+examples/jax/parity_manifest.json sha256 0d26a114a61991f4492ec536988831c59f5d343a4db9a7712725c76cb795fd25
+```
+
+The generated human-readable table is
+[`jax_native_example_parity_results.md`](jax_native_example_parity_results.md).
+
+### Clean authoritative rerun
+
+The predecessor baseline was committed as `b6775bf23030bafbd602ce3131dea948e7b8bb4b`.
+Only the reviewed parity paths were then materialized through a temporary Git
+index as isolated commit `4e21d9d0151af8e5a6fa873c20750d408bc86bde`;
+the shared branch, index, and unrelated dirty files were not changed. The exact
+checkout was installed editably, including a freshly built `simsoptpp` binary,
+and the resolved package reported version `1.10.7.dev545+g4e21d9d01`.
+
+The first clean full-run RED exposed a relative-artifact-root defect used by
+the planned CI command. The children changed working directories and could not
+open `.artifacts/.../input_bundle.json`. The public CLI regression
+`test_run_parity_cli_resolves_relative_artifact_root` reproduced that failure,
+then passed after the parent resolved the artifact root before constructing
+child argv.
+
+Final exact command, without the smoke flag:
+
+```console
+SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT=4e21d9d0151af8e5a6fa873c20750d408bc86bde \
+  /home/jungdaesuh/simsopt_mixed_artifacts/v0c_62a262b09c_20260715T2142Z/runtime-env/bin/python \
+  examples/jax/run_parity.py \
+  --case all-applicable \
+  --lanes native-cpu,jax-cpu,jax-gpu \
+  --artifact-root .artifacts/jax-example-parity
+```
+
+Published run:
+`.artifacts/jax-example-parity/20260726T215531Z-c735bab0`.
+Independent fail-closed audit with `--require-authoritative` returned:
+
+```json
+{"authoritative":true,"case_count":8,"comparison_count":228,"lane_receipt_count":24,"run_id":"20260726T215531Z-c735bab0","verdict":"pass"}
+```
+
+All 24 lane receipts are authoritative. The checkout was clean and unchanged
+during the run; all eight CUDA lanes used the RTX 5090 in FP64 with both
+transfer guards at `disallow`; all 228 comparisons passed. The generated
+setuptools-SCM version source records compatible commit `g4e21d9d01`. Every
+loaded `simsoptpp` receipt records compatible build commit
+`4e21d9d0151af8e5a6fa873c20750d408bc86bde` and binary SHA-256
+`73fafa71cf28c6c0212ee8037676bdcedb09baa462747317d148bd64226b2e6a`.
+The authoritative aggregate SHA-256 is
+`9e73f85626be108fe14b33ecb430f963aeb5e9812642f004d9bf21cc23bb6994`.
+
+### Hardened audit/schema RED -> GREEN and final authority
+
+The final review found four receipt-level gaps not exposed by the first clean
+numeric run: no serialized observable applicability map, no explicit combined
+compile/run versus steady-state memory scope, no arbiter gate on scientific
+success, and an independent auditor that validated stored pass flags without
+recomputing the comparisons. Authentic focused REDs reported:
+
+```text
+3 failed in 0.34s
+AttributeError: 'LaneObservation' object has no attribute 'applicability'
+AttributeError: 'LaneProvenance' object has no attribute 'memory_measurement_scope'
+Failed: DID NOT RAISE ArbitrationError (scientific failure)
+
+1 failed in 3.42s
+Failed: DID NOT RAISE ValueError (tampered value with self-consistent sidecar hash)
+```
+
+Separate adversarial REDs proved that a float32 required observable, absent
+effective JAX transfer-guard receipt, and case-local terminal thresholds were
+not yet rejected or centrally owned. They failed respectively with `DID NOT
+RAISE ArbitrationError`, missing `jax_effective_transfer_guards`, and missing
+`terminal_relative_reduction`.
+
+GREEN added schema-validated applicability, explicit N/A optimizer counters,
+scientific-success and normalized-status gates, per-observable FP64 checks,
+runtime-effective JAX guard fields, synchronized combined memory scope, central
+terminal gates, and full comparison recomputation by the independent auditor.
+The real-case construction receipt regression also proves parameter, weight,
+dtype, seed, stopping-option, quadrature, and target/constraint mutations
+change the effective fingerprint. The complete focused suite then passed:
+
+```text
+120 passed in 207.50s
+```
+
+Only reviewed parity paths were materialized through an alternate Git index as
+detached source snapshot `799c656e186642bdb7e296e46ad1c6cd61277839`.
+The shared branch/index and unrelated `docs/jax_upstream_final_upgrades_implementation_plan.md`
+and `.Codex/` work were not changed. A fresh editable build reported
+`simsopt 1.10.7.dev542+g799c656e1`; the clean snapshot independently repeated
+the focused gate with `120 passed in 210.50s`.
+
+Final exact non-smoke command:
+
+```console
+SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT=799c656e186642bdb7e296e46ad1c6cd61277839 \
+  /home/jungdaesuh/simsopt_mixed_artifacts/v0c_62a262b09c_20260715T2142Z/runtime-env/bin/python \
+  examples/jax/run_parity.py \
+  --case all-applicable \
+  --lanes native-cpu,jax-cpu,jax-gpu \
+  --artifact-root .artifacts/jax-example-parity
+```
+
+Published run:
+`.artifacts/jax-example-parity/20260726T225943Z-09dfdc3e`.
+The strengthened auditor reloaded all 24 lane receipts and NPY sidecars,
+recomputed all routes through the live central tolerance owner, and returned:
+
+```json
+{"authoritative":true,"case_count":8,"comparison_count":228,"lane_receipt_count":24,"run_id":"20260726T225943Z-09dfdc3e","verdict":"pass"}
+```
+
+All lane receipts report scientific success. The three fixed-state lane
+receipts mark `optimizer_outcome=false` and publish null optimizer counters.
+All eight CUDA receipts identify `NVIDIA GeForce RTX 5090`, FP64, and effective
+JAX host-to-device, device-to-host, and device-to-device guards at `disallow`.
+Memory receipts are explicitly combined import/compile/warmup/bounded-execution
+peaks and set `steady_state_memory_measured=false`; they make no speed or
+steady-state-memory claim. The `simsoptpp` SHA-256 remains
+`73fafa71cf28c6c0212ee8037676bdcedb09baa462747317d148bd64226b2e6a`.
+The final aggregate SHA-256 is
+`1f21ea8851bedfe5f7830ee340e0a1718c4d87d17492dfd0db279b97433edf0b`.

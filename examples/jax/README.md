@@ -48,6 +48,61 @@ explicit Optimistix LM; legacy `gauss_newton` and scalar `bfgs` spellings are
 rejected because the typed API does not expose behavior-equivalent Optimistix
 drivers for those algorithms.
 
+## Native/JAX parity evidence
+
+The paired parity runner reconstructs matched native SIMSOPT CPU and JAX
+workflows from one serialized input bundle. Run every currently applicable
+bounded case on CPU with:
+
+```console
+python examples/jax/run_parity.py \
+  --case all-applicable \
+  --lanes native-cpu,jax-cpu \
+  --smoke \
+  --artifact-root .artifacts/jax-example-parity
+```
+
+In a CUDA environment, add `jax-gpu` to `--lanes`. The runner fixes FP64,
+strict CUDA selection, and both transfer guards before importing JAX; a missing
+GPU, CPU fallback, wrong precision, implicit transfer, or forbidden host solver
+fails the run. Each lane executes in a fresh process. The final directory
+contains canonical input JSON/NPY files, one hash-bound lane receipt per case,
+and an aggregate `summary.json`. Failed or interrupted runs retain a diagnostic
+`.partial` directory and are never published as passing evidence.
+
+Memory receipts use `XLA_PYTHON_CLIENT_PREALLOCATE=false`, synchronize the JAX
+publication boundary, and report one combined import/compile/warmup/bounded-run
+peak. They do not claim a separate steady-state peak or support a speed claim.
+This diagnostic policy is distinct from the supported production default,
+which leaves JAX GPU preallocation enabled unless the user explicitly changes
+it for their workload.
+
+[`parity_manifest.json`](parity_manifest.json) classifies every ready
+`inspired_by` relationship independently:
+
+- `full` covers every declared scientific stage, while `reduced` explicitly
+  omits at least one scientific stage and `unsupported` names a concrete
+  blocker.
+- `bounded` and `native_default` describe scale independently of workflow
+  coverage. A bounded full case is not native-default evidence.
+- `native_python_scipy` means normal native Python/SciPy orchestration;
+  `native_simsoptpp` additionally binds the loaded extension path and binary
+  hash. Analytic and external references remain distinct oracle kinds.
+
+Only a clean committed run whose lane receipts are all marked authoritative
+may promote a parity classification. Dirty-checkout runs remain useful
+exploratory evidence and record the tracked diff hash plus untracked-file
+inventory. Audit a published run independently with:
+
+```console
+python -m examples.jax.parity.audit \
+  --run .artifacts/jax-example-parity/<run-id> \
+  --repo-root "$PWD"
+```
+
+The generated results table lives in
+[`docs/jax_native_example_parity_results.md`](../../docs/jax_native_example_parity_results.md).
+
 ## Choosing an example
 
 - `pure` examples consume immutable JAX arrays or frozen PyTrees and have no
