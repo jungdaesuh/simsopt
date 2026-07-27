@@ -8,6 +8,11 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+from simsopt_jax.runtime.jaxpr_closure import (
+    closure_converted_value_and_grad,
+    device_put_closure_consts,
+)
+
 from .._shared import _prepare_optimizer_callable_inputs
 from ._common import (
     _as_jax_dtype,
@@ -73,9 +78,12 @@ def _minimize_bfgs_private(
     maxiter = int(maxiter)
 
     d = x0.shape[0]
-    scalar_value_and_grad = (
-        jax.jit(fun) if value_and_grad else _scalar_value_and_grad(fun)
+    value_and_grad_program = fun if value_and_grad else _scalar_value_and_grad(fun)
+    converted_value_and_grad, value_and_grad_consts = closure_converted_value_and_grad(
+        value_and_grad_program, x0
     )
+    value_and_grad_consts = device_put_closure_consts(value_and_grad_consts, x0)
+    scalar_value_and_grad = jax.jit(converted_value_and_grad)
     line_search = _line_search_value_and_grad if value_and_grad else _line_search
     gtol_value = np.asarray(gtol, dtype=np.dtype(x0.dtype)).item()
     xrtol_value = np.asarray(xrtol, dtype=np.dtype(x0.dtype)).item()
@@ -87,7 +95,7 @@ def _minimize_bfgs_private(
     base_identity_host = np.eye(d, dtype=np.dtype(x0.dtype))
     if initial_state is None:
         initial_H = _eye(d, x0.dtype)
-        f_0, g_0 = scalar_value_and_grad(x0)
+        f_0, g_0 = scalar_value_and_grad(x0, value_and_grad_consts)
         state = _BFGSResults(
             converged=_norm(g_0, ord=norm) < _as_jax_dtype(gtol_value, x0.dtype),
             failed=_bool_scalar(False),
@@ -112,7 +120,8 @@ def _minimize_bfgs_private(
             old_old_fval=_as_jax_dtype(initial_state.old_old_fval, x0.dtype),
         )
 
-    def cond_fun(state):
+    def cond_fun(carry):
+        state, _value_and_grad_consts = carry
         maxiter_jax = _as_jax_dtype(maxiter_value, state.k.dtype)
         return (
             jnp.logical_not(state.converged)
@@ -122,13 +131,22 @@ def _minimize_bfgs_private(
             & jnp.all(jnp.isfinite(state.g_k))
         )
 
-    def body_fun(state):
+    def body_fun(carry):
+        state, explicit_value_and_grad_consts = carry
         gtol_jax = _as_jax_dtype(gtol_value, state.g_k.dtype)
         wolfe_c1 = _as_jax_dtype(wolfe_c1_value, state.f_k.dtype)
         wolfe_c2 = _as_jax_dtype(wolfe_c2_value, state.f_k.dtype)
         p_k = -_dot(state.H_k, state.g_k)
+
+        def explicit_value_and_grad(x):
+            return converted_value_and_grad(x, explicit_value_and_grad_consts)
+
+        def explicit_objective(x):
+            value, _gradient = explicit_value_and_grad(x)
+            return value
+
         line_search_results = line_search(
-            fun,
+            explicit_value_and_grad if value_and_grad else explicit_objective,
             state.x_k,
             p_k,
             old_fval=state.f_k,
@@ -231,7 +249,7 @@ def _minimize_bfgs_private(
                 line_search_status=line_search_status,
             )
 
-        return lax.cond(
+        next_state = lax.cond(
             nonfinite_step,
             nonfinite_step_result,
             lambda _: lax.cond(
@@ -242,12 +260,20 @@ def _minimize_bfgs_private(
             ),
             operand=None,
         )
+        return next_state, explicit_value_and_grad_consts
 
-    def run_solver(initial_state):
+    def run_solver(initial_state, explicit_value_and_grad_consts):
         gtol_jax = _as_jax_dtype(gtol_value, initial_state.g_k.dtype)
         maxiter_jax = _as_jax_dtype(maxiter_value, initial_state.k.dtype)
-        state = lax.while_loop(cond_fun, body_fun, initial_state)
-        f_final, g_final = scalar_value_and_grad(state.x_k)
+        state, _ = lax.while_loop(
+            cond_fun,
+            body_fun,
+            (initial_state, explicit_value_and_grad_consts),
+        )
+        f_final, g_final = converted_value_and_grad(
+            state.x_k,
+            explicit_value_and_grad_consts,
+        )
         converged_final = (~state.failed) & (
             state.converged | (_norm(g_final, ord=norm) < gtol_jax)
         )
@@ -297,4 +323,4 @@ def _minimize_bfgs_private(
         ),
         builder=lambda: jax.jit(run_solver),
     )
-    return solver(state)
+    return solver(state, value_and_grad_consts)

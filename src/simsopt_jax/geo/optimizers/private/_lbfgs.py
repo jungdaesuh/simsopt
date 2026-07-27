@@ -7,15 +7,15 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.extend import core as jax_core
-from jax.sharding import NamedSharding, PartitionSpec as P
-
-from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.runtime.host_boundary import (
     host_array,
     host_bool,
     host_float,
     host_int,
+)
+from simsopt_jax.runtime.jaxpr_closure import (
+    closure_converted_value_and_grad,
+    device_put_closure_consts,
 )
 from .._shared import (
     _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
@@ -73,30 +73,8 @@ def _record_diagnostic_event(callback, label, **fields):
         callback(label, **fields)
 
 
-def _coerce_value_and_grad_result(fun, x):
-    value, grad = fun(x)
-    value = _as_jax_dtype(value, x.dtype)
-    grad = _as_jax_dtype(grad, x.dtype)
-    if grad.shape != x.shape:
-        raise ValueError(
-            "On-device explicit value-and-gradient objectives must return a "
-            f"gradient matching x.shape={x.shape}, got {grad.shape}."
-        )
-    return value, grad
-
-
 def _closure_converted_lbfgs_value_and_grad(value_and_grad_fun, example_x):
-    converted = jax.make_jaxpr(
-        lambda x: _coerce_value_and_grad_result(value_and_grad_fun, x)
-    )(example_x)
-    value_and_grad_jaxpr = converted.jaxpr
-    value_and_grad_consts = tuple(converted.consts)
-
-    def value_and_grad_from_jaxpr(x, consts):
-        closed_jaxpr = jax_core.ClosedJaxpr(value_and_grad_jaxpr, consts)
-        return jax_core.jaxpr_as_fun(closed_jaxpr)(x)
-
-    return value_and_grad_from_jaxpr, value_and_grad_consts
+    return closure_converted_value_and_grad(value_and_grad_fun, example_x)
 
 
 def _call_lbfgs_value_and_grad(value_and_grad, x, value_and_grad_consts):
@@ -105,30 +83,8 @@ def _call_lbfgs_value_and_grad(value_and_grad, x, value_and_grad_consts):
     return value_and_grad(x, value_and_grad_consts)
 
 
-def _lbfgs_const_placement(example_x):
-    if isinstance(example_x, jax.core.Tracer):
-        return jax.typeof(example_x).sharding
-    return example_x.sharding
-
-
-def _lbfgs_const_leaf_placement(reference_placement, leaf):
-    if not isinstance(reference_placement, NamedSharding):
-        return reference_placement
-    leaf_ndim = int(np.ndim(leaf))
-    if len(reference_placement.spec) <= leaf_ndim:
-        return reference_placement
-    return NamedSharding(reference_placement.mesh, P())
-
-
 def _device_put_lbfgs_consts(value_and_grad_consts, example_x):
-    reference_placement = _lbfgs_const_placement(example_x)
-    return jax.tree.map(
-        lambda leaf: runtime_device_put_tree(
-            leaf,
-            target=_lbfgs_const_leaf_placement(reference_placement, leaf),
-        ),
-        value_and_grad_consts,
-    )
+    return device_put_closure_consts(value_and_grad_consts, example_x)
 
 
 def _cached_lbfgs_value_and_grad_kernel(

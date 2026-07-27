@@ -829,7 +829,9 @@ def case_legacy_jax_cpu_environment_defaults_to_fast() -> None:
     assert config.jax_platform == "cpu"
 
 
-def case_legacy_jax_cuda_environment_defaults_to_fast_without_initializing_jax() -> None:
+def case_legacy_jax_cuda_environment_defaults_to_fast_without_initializing_jax() -> (
+    None
+):
     import os
 
     block_jax_imports(message="legacy CUDA resolution must not initialize JAX")
