@@ -1080,3 +1080,32 @@ focused mypy for new migration owners: Success: no issues found in 2 source file
 focused mypy with pre-existing runner codes excluded: Success in 3 source files
 canonical input and repository diff hashes unchanged by dry run: passed
 ```
+
+## Audit-gated parity report RED -> GREEN
+
+The report-gate regression was committed without production changes at
+immutable revision `037eca88d`. The focused RED command was:
+
+```console
+MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
+  tests/integration/test_jax_example_parity_artifacts.py::test_results_report_cli_audits_receipts_before_rendering
+```
+
+It failed with exit status 1 because the report CLI did not accept the required
+`--repo-root` audit context and therefore could not invoke the independent
+auditor before rendering. This exposed a real evidence-boundary defect: a
+caller could hand the report generator an aggregate JSON document directly,
+bypassing receipt validation such as rejection of a fast JAX backend in a
+parity lane.
+
+GREEN at immutable revision `682c8b979` makes the report CLI call
+`audit_published_run()` on the containing published run before it reads or
+writes report content. The auditor remains the single owner of lane backend,
+FP64, transfer-guard, source, input, sidecar, comparison, and publication
+validation. The report adds no second comparison policy.
+
+Focused GREEN evidence:
+
+```text
+parity artifact and report suite: 15 passed in 0.97s
+```
