@@ -2145,6 +2145,32 @@ class TestLBFGSMethodPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_result_retains_device_state_for_followup_stages(self):
+        """Accepted target state must not require a host-to-device round trip."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.target_minimize(
+            quad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=1,
+        )
+
+        assert isinstance(result.x_device, jax.Array)
+        assert isinstance(result.jac_device, jax.Array)
+        assert result.x_device.devices() == x0.devices()
+        assert result.jac_device.devices() == x0.devices()
+        np.testing.assert_allclose(np.asarray(result.x), np.asarray(result.x_device))
+        np.testing.assert_allclose(
+            np.asarray(result.jac),
+            np.asarray(result.jac_device),
+        )
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_does_not_call_custom_host_core(self, monkeypatch):
         """lbfgs-ondevice must run the SciPy-compatible JAX state machine."""
 
