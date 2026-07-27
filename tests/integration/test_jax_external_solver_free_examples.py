@@ -10,6 +10,7 @@ from pathlib import Path
 
 import jax
 import pytest
+import simsoptpp
 from examples.jax._lane_environment import build_execution_environment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -261,6 +262,7 @@ def _source_checkout_environment() -> dict[str, str]:
     )
     environment["PYTHONPATH"] = os.pathsep.join(
         (
+            str(Path(simsoptpp.__file__).resolve().parent),
             str(REPO_ROOT / "src"),
             str(sysconfig.get_paths()["purelib"]),
             str(Path(jax.__file__).resolve().parents[1]),
