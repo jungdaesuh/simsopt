@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import examples.jax.parity.artifacts as artifact_io
+import examples.jax.parity.report as parity_report
 from examples.jax.parity.artifacts import (
     ArtifactValidationError,
     canonical_json_bytes,
@@ -248,3 +249,46 @@ def test_results_report_is_generated_from_aggregate_fields() -> None:
     authoritative = render_results_document(summary, artifact_reference="artifact/run")
     assert "Evidence class: **authoritative** (clean checkout)" in authoritative
     assert "may promote only the classifications and bounded scale" in authoritative
+
+
+def test_results_report_cli_audits_receipts_before_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "20260727T000000Z-deadbeef"
+    run_directory.mkdir()
+    summary_path = run_directory / "summary.json"
+    summary_path.write_text("{}\n", encoding="utf-8")
+    output_path = tmp_path / "results.md"
+
+    def reject_fast_receipt(
+        candidate_run: Path,
+        *,
+        repo_root: Path,
+        require_authoritative: bool = False,
+    ) -> None:
+        assert candidate_run == run_directory
+        assert repo_root == tmp_path
+        assert not require_authoritative
+        raise ValueError("jax-gpu backend_mode must be jax_gpu_parity")
+
+    monkeypatch.setattr(
+        parity_report,
+        "audit_published_run",
+        reject_fast_receipt,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="jax_gpu_parity"):
+        parity_report.main(
+            [
+                "--summary",
+                str(summary_path),
+                "--output",
+                str(output_path),
+                "--repo-root",
+                str(tmp_path),
+            ]
+        )
+
+    assert not output_path.exists()
