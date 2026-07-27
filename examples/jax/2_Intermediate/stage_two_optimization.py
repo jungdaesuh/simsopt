@@ -9,7 +9,6 @@ accepted state and final diagnostics return to the host.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 
 import jax
@@ -17,17 +16,8 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
-from simsopt_jax.core import (
-    coil_specs_from_dof_extraction_spec,
-    curve_geometry_from_spec,
-)
-from simsopt_jax.core.curve_kernels import (
-    curvature_p_norm_from_kappa_pure,
-    curve_curve_distance_penalty_pure,
-    curve_surface_distance_penalty_pure,
-    kappa_pure,
-)
 from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.objectives import StageTwoObjectiveConfig, make_stage_two_objective
 from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
@@ -78,97 +68,37 @@ def _build_problem(
     return field, flux, surface_gamma, surface_normal
 
 
-def _stage_two_objective(
-    field: BiotSavartJAX,
-    flux_objective: Callable[[jax.Array], jax.Array],
-    surface_gamma: jax.Array,
-    surface_normal: jax.Array,
-    *,
-    length_weight: float,
-) -> Callable[[jax.Array], jax.Array]:
-    extraction = field.coil_dof_extraction_spec()
-
-    def objective(parameters: jax.Array) -> jax.Array:
-        coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
-        geometry: list[tuple[jax.Array, jax.Array, jax.Array]] = []
-        for coil_spec in coil_specs:
-            gamma, gammadash, gammadashdash = curve_geometry_from_spec(coil_spec.curve)
-            if coil_spec.symmetry.has_rotation:
-                rotation = coil_spec.symmetry.rotmat
-                gamma = gamma @ rotation
-                gammadash = gammadash @ rotation
-                gammadashdash = gammadashdash @ rotation
-            geometry.append((gamma, gammadash, gammadashdash))
-
-        total_length = jnp.asarray(0.0, dtype=parameters.dtype)
-        curvature = jnp.asarray(0.0, dtype=parameters.dtype)
-        mean_squared_curvature_penalty = jnp.asarray(0.0, dtype=parameters.dtype)
-        for _gamma, gammadash, gammadashdash in geometry[:4]:
-            speed = jnp.linalg.norm(gammadash, axis=1)
-            kappa = kappa_pure(gammadash, gammadashdash)
-            total_length = total_length + jnp.mean(speed)
-            curvature = curvature + curvature_p_norm_from_kappa_pure(
-                kappa,
-                gammadash,
-                2.0,
-                5.0,
-            )
-            mean_squared_curvature = jnp.mean(kappa * kappa * speed) / jnp.mean(speed)
-            mean_squared_curvature_penalty = (
-                mean_squared_curvature_penalty
-                + 0.5 * jnp.square(jnp.maximum(mean_squared_curvature - 5.0, 0.0))
-            )
-
-        curve_curve = jnp.asarray(0.0, dtype=parameters.dtype)
-        for index, (gamma, gammadash, _gammadashdash) in enumerate(geometry):
-            for base_index in range(min(index, 4)):
-                base_gamma, base_gammadash, _ = geometry[base_index]
-                curve_curve = curve_curve + curve_curve_distance_penalty_pure(
-                    gamma,
-                    gammadash,
-                    base_gamma,
-                    base_gammadash,
-                    0.1,
-                )
-
-        curve_surface = jnp.asarray(0.0, dtype=parameters.dtype)
-        for gamma, gammadash, _gammadashdash in geometry:
-            curve_surface = curve_surface + curve_surface_distance_penalty_pure(
-                gamma,
-                gammadash,
-                surface_gamma,
-                surface_normal,
-                0.3,
-            )
-
-        return (
-            flux_objective(parameters)
-            + length_weight * total_length
-            + 1000.0 * curve_curve
-            + 10.0 * curve_surface
-            + 1.0e-6 * curvature
-            + 1.0e-6 * mean_squared_curvature_penalty
-        )
-
-    return objective
+def _objective_config(length_weight: float) -> StageTwoObjectiveConfig:
+    return StageTwoObjectiveConfig(
+        num_base_curves=4,
+        length_weight=length_weight,
+        curve_curve_minimum_distance=0.1,
+        curve_curve_weight=1000.0,
+        curve_surface_minimum_distance=0.3,
+        curve_surface_weight=10.0,
+        curvature_threshold=5.0,
+        curvature_weight=1.0e-6,
+        mean_squared_curvature_threshold=5.0,
+        mean_squared_curvature_weight=1.0e-6,
+    )
 
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     field, flux, surface_gamma, surface_normal = _build_problem(max_steps)
     flux_objective = flux.traceable_objective()
-    first_objective = _stage_two_objective(
+    first_objective = make_stage_two_objective(
         field,
         flux_objective,
         surface_gamma,
         surface_normal,
-        length_weight=1.0e-6,
+        _objective_config(1.0e-6),
     )
-    second_objective = _stage_two_objective(
+    second_objective = make_stage_two_objective(
         field,
         flux_objective,
         surface_gamma,
         surface_normal,
-        length_weight=1.0e-7,
+        _objective_config(1.0e-7),
     )
     initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
     flux_problem = TraceableScalarProblem(
