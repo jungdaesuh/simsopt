@@ -264,7 +264,7 @@ def _blob(repo_root: Path, revision: str, relative_path: str) -> bytes:
     return _git(repo_root, "show", f"{revision}:{relative_path}")
 
 
-def _validate_revision_evidence(repo_root: Path, receipt: _Receipt) -> None:
+def _validate_phase_sequence(repo_root: Path, receipt: _Receipt) -> tuple[str, ...]:
     phases = (receipt.red, receipt.green, receipt.refactor)
     revisions = tuple(
         _full_revision(repo_root, phase.revision, f"{receipt.behavior_id} revision")
@@ -307,7 +307,14 @@ def _validate_revision_evidence(repo_root: Path, receipt: _Receipt) -> None:
         or receipt.refactor.failure_excerpt is not None
     ):
         raise ReceiptValidationError("GREEN and REFACTOR failure excerpts must be null")
+    return revisions
 
+
+def _validate_test_blobs(
+    repo_root: Path,
+    receipt: _Receipt,
+    revisions: tuple[str, ...],
+) -> None:
     for path, expected_digest in receipt.test_sha256:
         digests = tuple(
             hashlib.sha256(_blob(repo_root, revision, path)).hexdigest()
@@ -319,6 +326,10 @@ def _validate_revision_evidence(repo_root: Path, receipt: _Receipt) -> None:
             )
         if digests[0] != expected_digest:
             raise ReceiptValidationError(f"test SHA-256 mismatch: {path}")
+
+
+def _validate_source_blobs(repo_root: Path, receipt: _Receipt) -> None:
+    phases = (receipt.red, receipt.green, receipt.refactor)
     for phase in phases:
         for path, expected_digest in phase.source_sha256:
             actual_digest = hashlib.sha256(
@@ -328,6 +339,12 @@ def _validate_revision_evidence(repo_root: Path, receipt: _Receipt) -> None:
                 raise ReceiptValidationError(
                     f"source SHA-256 mismatch in {phase.revision}: {path}"
                 )
+
+
+def _validate_revision_evidence(repo_root: Path, receipt: _Receipt) -> None:
+    revisions = _validate_phase_sequence(repo_root, receipt)
+    _validate_test_blobs(repo_root, receipt, revisions)
+    _validate_source_blobs(repo_root, receipt)
 
 
 def _replay_phase(
