@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from examples.jax._manifest import load_manifest
 from examples.jax.parity._manifest import load_parity_manifest
 from examples.jax.parity.arbiter import LaneObservation, arbitrate
+from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.provenance import (
     ExecutedSource,
     collect_repository_state,
@@ -156,6 +157,15 @@ def audit_published_run(
             raise ValueError(f"case verdict is not pass: {case_id}")
         expected_input = _string(case, "input_fingerprint", case_id)
         expected_configuration = _string(case, "configuration_fingerprint", case_id)
+        input_bundle, _input_arrays = read_input_bundle(
+            run_directory / case_id / "inputs"
+        )
+        if input_bundle.case_id != case_id:
+            raise ValueError(f"input bundle case mismatch: {case_id}")
+        if input_bundle.input_fingerprint != expected_input:
+            raise ValueError(f"input bundle fingerprint mismatch: {case_id}")
+        if input_bundle.configuration_fingerprint != expected_configuration:
+            raise ValueError(f"input bundle configuration mismatch: {case_id}")
         stages_value = case.get("completed_workflow_stages")
         if not isinstance(stages_value, list) or not all(
             isinstance(stage, str) and stage for stage in stages_value

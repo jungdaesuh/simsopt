@@ -72,6 +72,7 @@ def _values(
             f"{prefix}:residual": residual,
             f"{prefix}:residual_jacobian": residual_jacobian,
             f"{prefix}:objective_sum_squares": objective,
+            f"{prefix}:solver_cost": 0.5 * objective,
             f"{prefix}:objective_gradient": gradient,
         }
 

@@ -49,10 +49,17 @@ class LaneObservation:
             **{key: True for key in values},
             "optimizer_outcome": self.normalized_status != "not_applicable",
         }
-        if self.applicability and dict(self.applicability) != applicability:
+        supplied_applicability = dict(self.applicability)
+        unexpected = set(supplied_applicability) - set(applicability)
+        if unexpected:
             raise ValueError(
-                "lane applicability must match values and optimizer status"
+                f"lane applicability has unknown keys: {sorted(unexpected)}"
             )
+        applicability.update(supplied_applicability)
+        if applicability["optimizer_outcome"] != (
+            self.normalized_status != "not_applicable"
+        ):
+            raise ValueError("optimizer applicability must match normalized status")
         object.__setattr__(self, "values", MappingProxyType(values))
         object.__setattr__(self, "applicability", MappingProxyType(applicability))
 
@@ -209,7 +216,9 @@ def _required_lane_pairs(required_lanes: frozenset[str]) -> frozenset[str]:
 
 
 def _validate_route_matrix(
-    routes: tuple[ComparisonRoute, ...], required_lanes: frozenset[str]
+    routes: tuple[ComparisonRoute, ...],
+    observations: Mapping[str, LaneObservation],
+    required_lanes: frozenset[str],
 ) -> None:
     grouped: dict[tuple[str, str], set[str]] = {}
     for route in routes:
@@ -218,6 +227,22 @@ def _validate_route_matrix(
                 route.lane_pair
             )
     required_pairs = _required_lane_pairs(required_lanes)
+    observable_keys = {
+        lane: {
+            key
+            for key, applicable in observations[lane].applicability.items()
+            if key != "optimizer_outcome" and applicable
+        }
+        for lane in required_lanes
+    }
+    if len({frozenset(keys) for keys in observable_keys.values()}) != 1:
+        raise ArbitrationError("lane observable applicability mismatch")
+    required_keys = next(iter(observable_keys.values()))
+    grouped_keys = {f"{phase}:{observable}" for phase, observable in grouped}
+    if grouped_keys != required_keys:
+        raise ArbitrationError(
+            "applicable observables require a complete direct lane-pair matrix"
+        )
     for key, lane_pairs in grouped.items():
         if lane_pairs != required_pairs:
             raise ArbitrationError(f"{key} requires a complete direct lane-pair matrix")
@@ -267,7 +292,7 @@ def arbitrate(
         for route in routes
         if set(route.lane_pair.split(":", maxsplit=1)) <= required_lanes
     )
-    _validate_route_matrix(selected_routes, required_lanes)
+    _validate_route_matrix(selected_routes, observations, required_lanes)
     comparisons: list[ComparisonResult] = []
     for route in selected_routes:
         if not route.applicable:
