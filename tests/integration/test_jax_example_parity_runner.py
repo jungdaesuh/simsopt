@@ -780,6 +780,37 @@ def test_curve_length_case_runs_native_and_jax_cpu_end_to_end(
     assert native.success and jax_cpu.success
 
 
+def test_surface_jacobian_invariants_ignore_only_axis_exchange() -> None:
+    from examples.jax.parity.cases.surface_geometry import (
+        _symmetric_jacobian_column_invariants,
+    )
+
+    jacobian = np.asarray(
+        (
+            (19.73908654, 19.73933106),
+            (3.94789066, 3.94779286),
+        ),
+        dtype=np.float64,
+    )
+    invariants = np.stack(
+        _symmetric_jacobian_column_invariants(jacobian[:, 0], jacobian[:, 1]),
+        axis=-1,
+    )
+    swapped = np.stack(
+        _symmetric_jacobian_column_invariants(jacobian[:, 1], jacobian[:, 0]),
+        axis=-1,
+    )
+    drifted = jacobian.copy()
+    drifted[0, 0] += 1.0e-3
+    drifted_invariants = np.stack(
+        _symmetric_jacobian_column_invariants(drifted[:, 0], drifted[:, 1]),
+        axis=-1,
+    )
+
+    np.testing.assert_array_equal(invariants, swapped)
+    assert not np.allclose(invariants, drifted_invariants, rtol=1.0e-6, atol=1.0e-7)
+
+
 def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
     tmp_path: Path,
 ) -> None:
@@ -816,6 +847,7 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
     for observable in (
         "parameter_invariants",
         "residual",
+        "residual_jacobian_invariants",
         "objective_sum_squares",
         "objective_gradient",
         "area",
@@ -835,6 +867,8 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
         assert np.all(np.isfinite(parameters))
         assert np.all(np.isfinite(residual_jacobian))
         assert observation.applicability["final:parameters"] is False
+        assert observation.applicability["final:residual_jacobian"] is False
+        assert observation.applicability["final:residual_jacobian_invariants"] is True
         for phase in ("initial", "final"):
             np.testing.assert_allclose(
                 observation.values[f"{phase}:solver_cost"],

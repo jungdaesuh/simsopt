@@ -444,7 +444,7 @@
       "jax_example_id": "surface-geometry-optimization",
       "native_source": "1_Simple/surf_vol_area.py",
       "classification": "reduced",
-      "classification_reason": "The bounded case reconstructs the first area-volume least-squares solve with identical inputs and records raw final parameters plus the sum/product quotient invariant for the interchangeable ellipse semi-axes. It omits the native script's save/load and second retargeted centered-difference solve.",
+      "classification_reason": "The bounded case reconstructs the first area-volume least-squares solve with identical inputs and records raw final parameters and Jacobians plus quotient invariants for the interchangeable ellipse semi-axes and Jacobian columns. Raw terminal coordinates remain diagnostic because distinct solvers can stop at different representatives of the nearly rank-deficient circular optimum. It omits the native script's save/load and second retargeted centered-difference solve.",
       "scale_tier": "bounded",
       "oracle_kind": "native_python_scipy",
       "cost_tier": "smoke",
@@ -682,7 +682,7 @@
           "phase": "final",
           "observable": "residual_jacobian",
           "lane_pair": "native-cpu:jax-cpu",
-          "applicable": true,
+          "applicable": false,
           "comparator": "allclose",
           "tolerance_bucket": "native_workflow"
         },
@@ -690,13 +690,37 @@
           "phase": "final",
           "observable": "residual_jacobian",
           "lane_pair": "native-cpu:jax-gpu",
-          "applicable": true,
+          "applicable": false,
           "comparator": "allclose",
           "tolerance_bucket": "native_workflow"
         },
         {
           "phase": "final",
           "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": false,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian_invariants",
           "lane_pair": "jax-cpu:jax-gpu",
           "applicable": true,
           "comparator": "allclose",
