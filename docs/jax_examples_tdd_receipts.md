@@ -1236,3 +1236,58 @@ manifest was still v1, so every runner also emitted
 `manifest_schema_version=1` and `used_legacy_manifest_adapter=true`. This is
 current functional evidence, not manifest-v2 activation or fast-performance
 promotion evidence.
+
+## Manifest-v2 activation RED -> GREEN (2026-07-27)
+
+The user explicitly approved candidate SHA-256
+`2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`,
+the one-release legacy-reader interval, observability fields, semantic replay,
+and rollback command. Applying those exact bytes made the pre-activation test
+fixtures fail because they still treated canonical v1 as their source:
+
+```text
+tests/test_jax_examples_manifest.py: 10 failed, 17 passed
+```
+
+GREEN reverses the fixture direction: canonical v2 is authoritative, while an
+absent-schema v1 document is derived only for compatibility and migration
+tests. It adds an exact canonical digest assertion and proves the v1 converter
+replays byte-identical canonical v2 output:
+
+```text
+tests/test_jax_examples_manifest.py: 28 passed in 2.61s
+```
+
+The broader manifest/runner/parity-safety suite then found one additional stale
+end-to-end assertion: a newly published Wave-A receipt correctly reported v2,
+while the test still required schema v1 and legacy-adapter use. The run was
+`1 failed, 157 passed`; after changing that assertion to require schema v2 and
+`used_legacy_manifest_adapter=false`, the focused activation slice passed
+`29 passed`.
+
+The complete manifest, ordinary-runner, parity-manifest, artifact, input,
+publication, runner, and runtime matrix then passed `158 passed` with seven
+expected legacy-lane deprecation warnings.
+
+The canonical file's live SHA-256 matched the approved digest. No production
+solver, numerical tolerance, example mapping, device capability, or execution
+intent changed in this migration.
+
+The user separately chose to retain fast as the CPU/GPU JAX default despite
+the negative performance characterization. This is a policy choice, not a
+promotion: the unchanged benchmark failures remain recorded above, and no
+speed or performance-qualification claim is allowed. Authority evidence is
+also explicitly local-only; its absolute host path and digest may be recorded,
+but no durable shared-retention claim may be made.
+
+Post-activation execution used canonical v2 without the legacy adapter. Both
+CPU profiles passed all ten ready examples through `run_examples.py`. Direct
+current-checkout validation on the NVIDIA GeForce RTX 5090 also passed all ten
+examples in fast and strict-parity FP64 modes. The GPU environment's editable
+finder still points at a different checkout, so these GPU children used
+`python -S` with this checkout and the environment's site-packages explicitly
+ordered on `PYTHONPATH`; every accepted JSON result reported `platform=gpu`,
+the selected `jax_gpu_fast` or `jax_gpu_parity` mode, FP64, and `status=ok`.
+The installed JAX runtime emitted a driver-version parsing diagnostic while
+still enumerating and executing on `CudaDevice(id=0)`; it did not trigger CPU
+fallback or alter the validated result contract.

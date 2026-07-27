@@ -1,9 +1,10 @@
 # JAX examples manifest-v2 migration dry-run report
 
-Status: **prepared, not activated; explicit user sign-off is pending**.
+Status: **approved and activated on 2026-07-27**.
 
-The canonical [`examples/jax/manifest.json`](../examples/jax/manifest.json)
-remains the absent-schema v1 document. No canonical field has been rewritten.
+The canonical [`examples/jax/manifest.json`](../examples/jax/manifest.json) is
+the exact approved v2 candidate. Its SHA-256 is
+`2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`.
 
 ## Candidate identity and semantic result
 
@@ -55,6 +56,17 @@ the `candidate_v2:` line; it has no write mode.
 - Loading v1 emits an actionable migration warning.
 - The read-only v1 adapter remains for one release after v2 activation.
 
-Activation must not occur until the user approves the candidate digest,
-semantic diff, compatibility interval, observability fields, and rollback
-command above.
+The user approved option `1A` on 2026-07-27, covering the candidate digest,
+semantic diff, one-release compatibility interval, observability fields, and
+rollback command above. The retained v1 fixtures continue to exercise the
+read-only compatibility adapter; the canonical v2 document does not use it.
+
+## Activation RED -> GREEN
+
+After the exact candidate bytes replaced canonical v1, the pre-activation
+manifest tests failed in 10 places because their fixtures still assumed that
+the canonical document was v1 (`10 failed, 17 passed`). The fixtures were then
+made directionally correct: canonical v2 is the authority, and legacy v1 is
+derived only for compatibility and migration tests. The focused suite passed
+`28 passed`, including an exact digest assertion and byte-identical replay of
+the approved v1-to-v2 conversion.
