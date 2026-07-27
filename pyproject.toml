@@ -105,6 +105,7 @@ test = [
 ]
 dev = [
     "simsopt[test]",
+    "pyright==1.1.411",
     "ruff>=0.14",
 ]
 deploy = [
@@ -150,6 +151,27 @@ extend-exclude = ["thirdparty"]
 "tests/geo/test_curve.py" = ["F401"]
 "tests/geo/test_surface.py" = ["F401"]
 "tests/mhd/test_virtual_casing.py" = ["F841"]
+
+[tool.pyright]
+include = [
+    "src/simsopt_jax/objectives",
+    "src/simsopt_jax/solve/dispatch.py",
+    "src/simsopt_jax/solve/minimize_runtime.py",
+    "src/simsopt_jax/solve/optax",
+    "src/simsopt_jax/solve/optimistix",
+    "src/simsopt_jax/solve/scipy",
+    "src/simsopt_jax/solve/shared",
+    "src/simsopt_jax/solve/simsopt",
+    "tests/jax/solve/test_algorithm_change_gates.py",
+    "tests/jax/solve/test_compat_shim_translation.py",
+    "tests/jax/solve/test_deprecation_warnings.py",
+    "tests/jax/solve/test_import_boundaries.py",
+    "tests/jax/solve/test_optimizer_result_schema.py",
+    "tests/jax/solve/test_options_typing.py",
+]
+extraPaths = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
 
 [tool.coverage.run]
 parallel = true
