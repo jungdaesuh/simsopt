@@ -146,6 +146,7 @@ def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() ->
         ("hard_coded_tolerance", "unexpected comparison route fields"),
         ("unknown_lane_pair", "invalid lane pair"),
         ("duplicate_route", "duplicate comparison route"),
+        ("incomplete_route_matrix", "complete direct lane-pair matrix"),
         ("missing_test_owner", "correctness test does not exist"),
         ("full_with_omitted_stage", "full relationship must not omit"),
         ("reduced_without_omitted_stage", "reduced relationship requires omitted"),
@@ -200,6 +201,19 @@ def test_parity_manifest_rejects_invalid_contracts(
         supported["comparison_routes"].append(
             deepcopy(supported["comparison_routes"][0])
         )
+    elif mutation == "incomplete_route_matrix":
+        first_route = supported["comparison_routes"][0]
+        assert isinstance(first_route, dict)
+        supported["comparison_routes"] = [
+            route
+            for route in supported["comparison_routes"]
+            if not (
+                isinstance(route, dict)
+                and route["phase"] == first_route["phase"]
+                and route["observable"] == first_route["observable"]
+                and route["lane_pair"] == "native-cpu:jax-gpu"
+            )
+        ]
     elif mutation == "missing_test_owner":
         supported["correctness_tests"] = ["tests/does_not_exist.py"]
     elif mutation == "full_with_omitted_stage":
@@ -222,3 +236,27 @@ def test_parity_manifest_rejects_invalid_contracts(
             examples_manifest=examples_manifest,
             repo_root=REPO_ROOT,
         )
+
+
+def test_traceable_final_jacobian_has_all_direct_routes() -> None:
+    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    parity_manifest = load_parity_manifest(
+        PARITY_MANIFEST_PATH,
+        examples_manifest=examples_manifest,
+        repo_root=REPO_ROOT,
+    )
+    relationship = next(
+        item
+        for item in parity_manifest.relationships
+        if item.case_id == "traceable-least-squares"
+    )
+
+    assert {
+        route.lane_pair
+        for route in relationship.comparison_routes
+        if route.phase == "final" and route.observable == "residual_jacobian"
+    } == {
+        "native-cpu:jax-cpu",
+        "native-cpu:jax-gpu",
+        "jax-cpu:jax-gpu",
+    }
