@@ -29,6 +29,9 @@ EXAMPLE_ID = "native-just-a-quadratic"
 INITIAL_PARAMETERS = (0.0, 0.0, 0.0)
 TARGETS = (1.0, 2.0, 3.0)
 WEIGHTS = (1.0, 2.0, 3.0)
+RESIDUAL_JACOBIAN_DEVICE = jax.device_put(
+    np.diag(np.sqrt(np.asarray(WEIGHTS, dtype=np.float64)))
+)
 
 
 @dataclass(frozen=True)
@@ -79,12 +82,20 @@ class ExampleResult:
         }
 
 
+@jax.jit
 def weighted_residuals(parameters: jax.Array) -> jax.Array:
     """Return native-compatible ``sqrt(weight) * (value - target)`` residuals."""
 
     targets = jnp.asarray(TARGETS, dtype=jnp.float64)
     weights = jnp.asarray(WEIGHTS, dtype=jnp.float64)
     return jnp.sqrt(weights) * (parameters - targets)
+
+
+@jax.jit
+def objective_gradient(jacobian: jax.Array, residuals: jax.Array) -> jax.Array:
+    """Return the gradient of the native sum-of-squares objective."""
+
+    return 2.0 * jacobian.T @ residuals
 
 
 def solve(output_directory: Path, max_steps: int) -> ExampleResult:
@@ -94,7 +105,7 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         np.asarray(INITIAL_PARAMETERS, dtype=np.float64)
     )
     initial_residuals_device = weighted_residuals(initial_parameters)
-    initial_jacobian_device = jax.jacfwd(weighted_residuals)(initial_parameters)
+    initial_jacobian_device = RESIDUAL_JACOBIAN_DEVICE
     initial_objective_device = jnp.vdot(
         initial_residuals_device,
         initial_residuals_device,
@@ -114,9 +125,9 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
 
     solution_device = problem.x
     residuals_device = problem.residuals()
-    jacobian_device = jax.jacfwd(weighted_residuals)(solution_device)
+    jacobian_device = RESIDUAL_JACOBIAN_DEVICE
     objective_device = problem.objective()
-    gradient_device = 2.0 * jacobian_device.T @ residuals_device
+    gradient_device = objective_gradient(jacobian_device, residuals_device)
 
     initial_residuals = np.asarray(
         jax.device_get(initial_residuals_device), dtype=np.float64
