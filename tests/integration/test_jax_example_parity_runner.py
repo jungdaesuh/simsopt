@@ -185,6 +185,29 @@ def test_native_workflow_tolerance_is_centrally_owned_and_adversarial() -> None:
     assert float(tolerance["terminal_orthonormality_atol"]) == 1.0e-12
 
 
+def test_qfm_terminal_success_rejects_retained_infeasible_state() -> None:
+    from examples.jax.parity.cases.qfm_surface import _terminal_success
+
+    initial_state = {
+        "initial:penalty_objective": np.asarray([4.41288576329861e-2]),
+    }
+    final_state = {
+        "final:penalty_objective": np.asarray([7.268155221443783e-4]),
+        "final:penalty_gradient": np.zeros(9, dtype=np.float64),
+        "final:qfm_objective": np.asarray([7.268032062695834e-4]),
+        "final:constraint_value": np.asarray([1.2315874794985946e-8]),
+    }
+
+    assert not _terminal_success(initial_state, final_state)
+
+
+def test_qfm_normalized_status_preserves_driver_failure() -> None:
+    from examples.jax.parity.cases.qfm_surface import _normalized_driver_status
+
+    assert _normalized_driver_status(driver_success=True) == "converged"
+    assert _normalized_driver_status(driver_success=False) == "failed"
+
+
 def test_generated_version_source_must_name_the_clean_checkout() -> None:
     repository_commit = "123456789abcdef" + "0" * 25
 
@@ -944,4 +967,19 @@ def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
     assert native.values["final:penalty_objective"].item() < (
         native.values["initial:penalty_objective"].item()
     )
+    terminal_constraint_atol = float(
+        parity_ladder_tolerances("native_workflow")[
+            "terminal_constraint_norm_atol"
+        ]
+    )
+    for observation in (native, jax_cpu):
+        assert (
+            np.linalg.norm(observation.values["final:constraint_value"], ord=np.inf)
+            <= terminal_constraint_atol
+        )
+        assert observation.normalized_status == "converged"
+        assert all(
+            isinstance(counter, int) and counter >= 0
+            for counter in (observation.nit, observation.nfev, observation.njev)
+        )
     assert native.success and jax_cpu.success
