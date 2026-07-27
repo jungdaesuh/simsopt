@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "receipts": [
+    {
+      "behavior_id": "replayable-tdd-receipt-contract",
+      "native_source_id": "examples/jax/manifest.json",
+      "mirror_id": "tdd-receipt-infrastructure",
+      "intended_red_failure": "missing replayable TDD receipt validator",
+      "test_sha256": {
+        "tests/test_jax_examples_one_to_one_tdd_receipts.py": "6e8b53d06e48d605b5908e5f9eadcc91b0098905b2b9128e01f45ced74ea2d7e"
+      },
+      "phases": {
+        "red": {
+          "revision": "58fc34c47e95b0b900ec508b65e19650eeb1df32",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_examples_one_to_one_tdd_receipts.py\"])\ntext = captured.getvalue()\nif code == 2 and \"No module named 'examples.jax.tdd_receipts'\" in text:\n    print(\"missing replayable TDD receipt validator\", file=sys.stderr)\n    raise SystemExit(2)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected TDD receipt contract outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 2,
+          "failure_excerpt": "missing replayable TDD receipt validator",
+          "combined_output_sha256": "20d04f6ad246c79c861011b700c3e36f43534dba1cc40e40d4f06e775ceca1e6",
+          "source_sha256": {
+            "examples/jax/__init__.py": "365d66f86d2646ae5a276e19106895ff033c44682be41b2c2a1761afa62c5b93"
+          },
+          "timestamp_utc": "2026-07-27T17:49:35Z"
+        },
+        "green": {
+          "revision": "be0f9f6dd2e6a0136cdcad9152b2757d2f0c2964",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_examples_one_to_one_tdd_receipts.py\"])\ntext = captured.getvalue()\nif code == 2 and \"No module named 'examples.jax.tdd_receipts'\" in text:\n    print(\"missing replayable TDD receipt validator\", file=sys.stderr)\n    raise SystemExit(2)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected TDD receipt contract outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/tdd_receipts.py": "360e8817c45fa21b601e74917cabd5fc3883d13693a2ef31f5e24c40666469d9"
+          },
+          "timestamp_utc": "2026-07-27T17:50:06Z"
+        },
+        "refactor": {
+          "revision": "0c6ed354a3baa0a48d95ab1167888062a87db7f9",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_examples_one_to_one_tdd_receipts.py\"])\ntext = captured.getvalue()\nif code == 2 and \"No module named 'examples.jax.tdd_receipts'\" in text:\n    print(\"missing replayable TDD receipt validator\", file=sys.stderr)\n    raise SystemExit(2)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected TDD receipt contract outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/tdd_receipts.py": "9608d98b85f155e14ab4d960edd0aac2a025c1175f40196a884b862366ee024d"
+          },
+          "timestamp_utc": "2026-07-27T17:50:54Z"
+        }
+      }
+    }
+  ]
+}
