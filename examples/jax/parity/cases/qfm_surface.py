@@ -289,7 +289,7 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
-        driver="simsopt_jax_lbfgs_qfm_penalty",
+        driver="simsopt_jax_bfgs_qfm_penalty",
         normalized_status=_normalized_driver_status(driver_success=driver_success),
         raw_status=str(result["status"]),
         success=success,

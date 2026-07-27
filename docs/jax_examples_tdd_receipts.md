@@ -945,6 +945,12 @@ This run is explicitly non-authoritative because the repair was uncommitted;
 it proves the repaired CPU/GPU behavior but does not replace the final clean
 authority run required after all Phase 11 safety repairs.
 
+The optimizer-provenance regression was committed separately at immutable
+revision `6dbda83de`. Its public QFM-case RED failed in `39.21s` because the
+receipt claimed `simsopt_jax_lbfgs_qfm_penalty`, while the implementation uses
+the full inverse-Hessian BFGS runner. Correcting only the receipt driver to
+`simsopt_jax_bfgs_qfm_penalty` made the same test GREEN (`1 passed in 36.79s`).
+
 ## Complete comparison routes and independent input audit RED -> GREEN
 
 The route-completeness and retained-input regressions were committed without
