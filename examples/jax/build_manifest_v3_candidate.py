@@ -50,12 +50,12 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def main(arguments: list[str] | None = None) -> int:
-    """Validate frozen inputs and print one canonical, no-write review envelope."""
-    parsed = _parser().parse_args(arguments)
-    examples_bytes = parsed.examples.read_bytes()
-    parity_bytes = parsed.parity.read_bytes()
-    inventory_bytes = parsed.inventory.read_bytes()
+def build_candidate_envelope(
+    examples_bytes: bytes,
+    parity_bytes: bytes,
+    inventory_bytes: bytes,
+) -> dict[str, object]:
+    """Build the immutable review envelope from caller-owned input bytes."""
     examples_document = _document(examples_bytes, "examples manifest")
     parity_document = _document(parity_bytes, "parity manifest")
     inventory_document = _document(inventory_bytes, "inventory")
@@ -81,7 +81,7 @@ def main(arguments: list[str] | None = None) -> int:
         inventory_document=inventory_document,
         repo_root=_REPO_ROOT,
     )
-    envelope = {
+    return {
         "mode": "no_write",
         "input_sha256": input_hashes,
         "candidate_sha256": {
@@ -103,6 +103,16 @@ def main(arguments: list[str] | None = None) -> int:
             "parity_manifest_v2": json.loads(candidate.parity_bytes),
         },
     }
+
+
+def main(arguments: list[str] | None = None) -> int:
+    """Validate frozen inputs and print one canonical, no-write review envelope."""
+    parsed = _parser().parse_args(arguments)
+    envelope = build_candidate_envelope(
+        parsed.examples.read_bytes(),
+        parsed.parity.read_bytes(),
+        parsed.inventory.read_bytes(),
+    )
     sys.stdout.write(
         json.dumps(
             envelope,
