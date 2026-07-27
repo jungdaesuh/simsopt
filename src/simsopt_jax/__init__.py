@@ -2,6 +2,7 @@
 
 __all__ = (
     "core",
+    "examples",
     "field",
     "geo",
     "mhd",
