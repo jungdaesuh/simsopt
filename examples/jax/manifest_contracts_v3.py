@@ -686,15 +686,33 @@ def _ordered_union(groups: tuple[tuple[str, ...], ...]) -> list[str]:
     return sorted({entry for group in groups for entry in group})
 
 
-def _tutorial_payload(example: JaxExampleRecord) -> dict[str, object]:
+def _tutorial_teaching_contract(
+    example: JaxExampleRecord,
+) -> tuple[str, dict[str, str] | None]:
     if not example.inspired_by:
         raise ManifestV3ValidationError(
             f"legacy tutorial has no source lineage: {example.id}"
         )
+    if len(example.inspired_by) > 1:
+        return "combined", None
     first_source = next(iter(example.inspired_by))
-    scope = "full_workflow" if example.execution_kind == "pure" else "jax_region"
-    teaching_kind = "combined" if len(example.inspired_by) > 1 else "compatibility"
     successor_id = _stable_mirror_id(first_source)
+    return (
+        "compatibility",
+        {
+            "successor_example_id": successor_id,
+            "warning": (
+                f"{example.id} is a non-covering compatibility lesson; "
+                f"use {successor_id} once it is ready."
+            ),
+            "removal_after": "one documented deprecation interval",
+        },
+    )
+
+
+def _tutorial_payload(example: JaxExampleRecord) -> dict[str, object]:
+    scope = "full_workflow" if example.execution_kind == "pure" else "jax_region"
+    teaching_kind, compatibility = _tutorial_teaching_contract(example)
     return {
         "id": example.id,
         "path": example.path,
@@ -708,18 +726,7 @@ def _tutorial_payload(example: JaxExampleRecord) -> dict[str, object]:
         "smoke_args": list(example.smoke_args),
         "correctness_tests": list(example.correctness_tests),
         "supported_device_scopes": {device: scope for device in example.devices},
-        "compatibility": (
-            {
-                "successor_example_id": successor_id,
-                "warning": (
-                    f"{example.id} is a non-covering compatibility lesson; "
-                    f"use {successor_id} once it is ready."
-                ),
-                "removal_after": "one documented deprecation interval",
-            }
-            if teaching_kind == "compatibility"
-            else None
-        ),
+        "compatibility": compatibility,
     }
 
 
