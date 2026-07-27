@@ -92,6 +92,7 @@ from simsopt_jax.core.surface_fourier import (
     surface_xyz_tensor_fourier_gammadash2_from_spec,
     surface_xyz_tensor_fourier_gammadash2dash2_from_spec,
 )
+from simsopt_jax.core.surface_integrals import surface_volume as _surface_volume
 from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_spec_from_dofs,
     surface_rz_fourier_gamma_from_dofs,
@@ -342,6 +343,7 @@ _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS = (
     ("non_qs", "non_qs_weight"),
     ("residual", "residual_weight"),
     ("iota", "iota_weight"),
+    ("major_radius", "major_radius_weight"),
     ("length", "length_weight"),
     ("curvature", "curvature_weight"),
     ("curve_curve", "curve_curve_weight"),
@@ -358,6 +360,7 @@ _TRACEABLE_SINGLE_STAGE_OUTER_TERM_DEPENDENCY_FLAGS = {
     "non_qs": (True, True),
     "residual": (True, True),
     "iota": (True, False),
+    "major_radius": (True, False),
     "length": (False, True),
     "curvature": (False, True),
     "curve_curve": (False, True),
@@ -599,13 +602,21 @@ def surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs):
         spec,
         dofs,
     )
+    return _surface_mean_cross_sectional_area_from_geometry(
+        gamma,
+        gammadash1,
+        gammadash2,
+    )
+
+
+def _surface_mean_cross_sectional_area_from_geometry(gamma, xphi, xtheta):
     x, y, _z = jnp.split(gamma, [1, 2], axis=2)
-    gammadash1_x, gammadash1_y, gammadash1_z = jnp.split(gammadash1, [1, 2], axis=2)
-    gammadash2_x, gammadash2_y, gammadash2_z = jnp.split(gammadash2, [1, 2], axis=2)
+    xphi_x, xphi_y, xphi_z = jnp.split(xphi, [1, 2], axis=2)
+    xtheta_x, xtheta_y, xtheta_z = jnp.split(xtheta, [1, 2], axis=2)
     radius_squared = x * x + y * y
-    jacobian_00 = (x * gammadash1_y - y * gammadash1_x) / radius_squared
-    jacobian_01 = (x * gammadash2_y - y * gammadash2_x) / radius_squared
-    dz_dtheta = gammadash2_z - (gammadash1_z * jacobian_01 / jacobian_00)
+    jacobian_00 = (x * xphi_y - y * xphi_x) / radius_squared
+    jacobian_01 = (x * xtheta_y - y * xtheta_x) / radius_squared
+    dz_dtheta = xtheta_z - (xphi_z * jacobian_01 / jacobian_00)
     signed_area = jnp.mean(
         jnp.sqrt(radius_squared) * dz_dtheta * jacobian_00
     ) / _two_pi(radius_squared)
@@ -620,12 +631,8 @@ def surface_minor_radius_jax_from_dofs(spec, dofs):
 
 
 def surface_major_radius_jax_from_dofs(spec, dofs):
-    volume = _surface_volume_from_dofs(spec, dofs)
-    minor_radius = surface_minor_radius_jax_from_dofs(spec, dofs)
-    one = _device_one(minor_radius)
-    two_pi = _two_pi(minor_radius)
-    pi = two_pi / (one + one)
-    return jnp.abs(volume) / (two_pi * pi * minor_radius * minor_radius)
+    gamma, xphi, xtheta = _surface_gamma_tangents_from_dofs(spec, dofs)
+    return _surface_major_radius_from_geometry(gamma, xphi, xtheta)
 
 
 def surface_aspect_ratio_jax_from_dofs(spec, dofs):
@@ -1324,6 +1331,47 @@ def _optimized_coil_penalties_from_coil_dofs(
     return length_penalty, curvature_penalty
 
 
+def _selected_coil_length_penalty_from_coil_dofs(
+    coil_dofs,
+    coil_dof_extraction_spec,
+    *,
+    coil_indices,
+    length_target,
+):
+    coil_specs = coil_specs_from_dof_extraction_spec(
+        coil_dof_extraction_spec,
+        coil_dofs,
+    )
+    selected_lengths = []
+    for coil_index in tuple(int(index) for index in coil_indices):
+        _gamma, gammadash, _gammadashdash = curve_geometry_from_spec(
+            coil_specs[coil_index].curve
+        )
+        selected_lengths.append(
+            curve_length_pure(incremental_arclength_pure(gammadash))
+        )
+    total_length = sum(selected_lengths[1:], start=selected_lengths[0])
+    zero = _runtime_float64_scalar(0.0, reference=total_length)
+    half = _runtime_float64_scalar(0.5, reference=total_length)
+    target = _runtime_float64_scalar(length_target, reference=total_length)
+    excess = jnp.maximum(total_length - target, zero)
+    return half * excess * excess
+
+
+def _surface_major_radius_from_geometry(gamma, xphi, xtheta):
+    normal = jnp.cross(xphi, xtheta)
+    volume = jnp.abs(_surface_volume(gamma, normal))
+    mean_area = _surface_mean_cross_sectional_area_from_geometry(
+        gamma,
+        xphi,
+        xtheta,
+    )
+    one = _device_one(mean_area)
+    pi = _two_pi(mean_area) / (one + one)
+    minor_radius = jnp.sqrt(mean_area / pi)
+    return volume / (_two_pi(volume) * pi * minor_radius * minor_radius)
+
+
 def _traceable_single_stage_outer_term_values(
     x_inner,
     coil_dofs,
@@ -1430,6 +1478,32 @@ def _traceable_single_stage_outer_term_values(
         curvature_threshold=outer_objective_config["curvature_threshold"],
         curvature_p_norm=outer_objective_config["curvature_p_norm"],
     )
+    if "length_coil_indices" in outer_objective_config:
+        length_penalty = _selected_coil_length_penalty_from_coil_dofs(
+            coil_dofs,
+            coil_dof_extraction_spec,
+            coil_indices=outer_objective_config["length_coil_indices"],
+            length_target=outer_objective_config["length_target"],
+        )
+
+    major_radius = _surface_major_radius_from_geometry(
+        surface_gamma,
+        xphi,
+        xtheta,
+    )
+    major_radius_target = outer_objective_config.get(
+        "major_radius_target",
+        major_radius,
+    )
+    major_radius_delta = major_radius - _runtime_float64_scalar(
+        major_radius_target,
+        reference=major_radius,
+    )
+    major_radius_penalty = (
+        _runtime_float64_scalar(0.5, reference=major_radius)
+        * major_radius_delta
+        * major_radius_delta
+    )
 
     curve_curve_penalty = _curve_curve_penalty_from_grouped_spec(
         coil_set_spec,
@@ -1465,6 +1539,7 @@ def _traceable_single_stage_outer_term_values(
         "non_qs": non_qs_penalty,
         "residual": J_boozer,
         "iota": iota_penalty,
+        "major_radius": major_radius_penalty,
         "length": length_penalty,
         "curvature": curvature_penalty,
         "curve_curve": curve_curve_penalty,
