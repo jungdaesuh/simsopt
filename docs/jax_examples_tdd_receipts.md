@@ -1148,6 +1148,32 @@ memory ratios unchanged. The sharding hypothesis is therefore rejected; no
 default, threshold, repetition, or artifact label was changed to manufacture a
 promotion. These artifacts are local non-certifying performance evidence.
 
+Three later diagnostics isolated the remaining policy hypotheses without
+changing the production branch. Stable chunks with chunk autotuning disabled
+in
+`.artifacts/jax-example-execution-modes/20260727T081128Z-gpu-bd2f10af1fe1`
+left the surface/coil memory ratios unchanged, rejecting chunk selection as the
+owner. XLA GPU autotuning level `0` in
+`.artifacts/jax-example-execution-modes/20260727T081718Z-gpu-2ec7998ca32f`
+reduced the fast cache from `58` files to the same `8` compiled-cache entries
+as parity and made every peak GPU-memory ratio exactly `1.0`; all five
+warm-speed gates nevertheless failed. Level `1` in
+`.artifacts/jax-example-execution-modes/20260727T082532Z-gpu-db5c2f94e870`
+restored `58` fast cache files, the approximately `1.467`/`1.469` surface/coil
+memory ratios, and four warm-speed failures. Enabled GPU autotuning therefore
+owns the measured memory excess, but disabling it does not supply the required
+speedup.
+
+The independent CPU diagnostic
+`.artifacts/jax-example-execution-modes/20260727T083038Z-cpu-f4881864e568`
+removed the fast-only `FAST_COMPILE` preset. It is not contract-valid evidence:
+persistent-cache warm reloads emitted XLA CPU AOT target mismatches for
+`prefer-no-gather` and `prefer-no-scatter`. Its raw paired medians were also
+slower than parity on four of five workloads (`0.9999`, `0.8591`, `0.9564`,
+`0.9083`, and `0.9782` in manifest order), with every lower bound below `1.0`.
+The candidate is rejected rather than repairing the validator or weakening the
+promotion rule.
+
 ## Accepted optimizer device-state retention RED -> GREEN
 
 The BFGS regression was committed without production changes at immutable
