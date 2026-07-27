@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ast
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
-import warnings
 
 SourceDisposition = Literal["candidate", "deferred"]
 ExampleStatus = Literal["planned", "ready"]
@@ -419,10 +419,24 @@ def _parse_manifest_document(
 def load_manifest(path: Path, *, repo_root: Path) -> JaxExamplesManifest:
     """Parse and validate one immutable JAX examples manifest."""
 
-    return _parse_manifest_document(
+    return parse_manifest_document(
         json.loads(path.read_text(encoding="utf-8")),
         repo_root=repo_root,
         warn_legacy=True,
+    )
+
+
+def parse_manifest_document(
+    document: object,
+    *,
+    repo_root: Path,
+    warn_legacy: bool = False,
+) -> JaxExamplesManifest:
+    """Parse manifest bytes already decoded by an atomic contract reader."""
+    return _parse_manifest_document(
+        document,
+        repo_root=repo_root,
+        warn_legacy=warn_legacy,
     )
 
 
