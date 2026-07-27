@@ -19,7 +19,7 @@ ACTIVE_PARITY = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
 CANDIDATE_EXAMPLES = REPO_ROOT / "docs" / "jax_examples_manifest_v3_candidate.json"
 CANDIDATE_PARITY = REPO_ROOT / "docs" / "jax_parity_manifest_v2_candidate.json"
 APPROVED_EXAMPLES_SHA = (
-    "50292cdf3eda34a60d6709387f6f5042ad89a15fd70aa75fcd39f3064648209d"
+    "a2b60dfe4cd97b4f8092f315d26db952181ba5ee1121011edaec9bd30349ea0d"
 )
 APPROVED_PARITY_SHA = "b51c69d7d4e08d2d08ba121f930133198f340684911565d1d3871fdaa15d78fa"
 

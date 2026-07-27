@@ -9,7 +9,7 @@ and 51-row inventory inputs. It did not modify either active manifest.
 
 | Contract | Active input SHA-256 | Review candidate SHA-256 |
 |---|---|---|
-| Example manifest | `2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05` | `50292cdf3eda34a60d6709387f6f5042ad89a15fd70aa75fcd39f3064648209d` |
+| Example manifest | `2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05` | `a2b60dfe4cd97b4f8092f315d26db952181ba5ee1121011edaec9bd30349ea0d` |
 | Parity manifest | `060e55339194c203263da9d5690c2ff31bd6681f5713dc2ead0ce3313e313137` | `b51c69d7d4e08d2d08ba121f930133198f340684911565d1d3871fdaa15d78fa` |
 
 The exact candidate bytes are checked in as
@@ -22,6 +22,9 @@ The exact candidate bytes are checked in as
   `hybrid`, 23 are `blocked`, and two are `not_applicable`.
 - The 11 existing JAX programs remain executable but become explicitly
   non-covering tutorials or compatibility lessons.
+- Five single-source compatibility lessons bind their exact successor ID,
+  runtime warning text, and one-interval removal contract. Combined tutorials
+  remain non-covering without pretending to be aliases.
 - Twenty-six planned one-to-one records are added. Every record uses the same
   tier and filename as its native source.
 - The VMEC single-stage record is a hybrid. Its CPU scope is

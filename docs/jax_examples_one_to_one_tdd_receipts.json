@@ -354,6 +354,65 @@
           "timestamp_utc": "2026-07-27T18:29:40Z"
         }
       }
+    },
+    {
+      "behavior_id": "legacy-jax-compatibility-alias-contract",
+      "native_source_id": "examples/jax/manifest.json",
+      "mirror_id": "manifest-v3-compatibility",
+      "intended_red_failure": "missing legacy JAX compatibility alias metadata",
+      "test_sha256": {
+        "tests/test_jax_manifest_v3_compatibility.py": "708380bcd410f7510c631cfd9013640178dbaecca514b99ad4301aae4c6e800e"
+      },
+      "phases": {
+        "red": {
+          "revision": "3c17630a798ecca9138c9774860ef2a5b4d1af04",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_manifest_v3_compatibility.py\"])\noutput = captured.getvalue()\nif code == 1 and \"compatibility alias metadata is missing\" in output:\n    print(\"missing legacy JAX compatibility alias metadata\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected compatibility alias contract outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing legacy JAX compatibility alias metadata",
+          "combined_output_sha256": "fb856b29d8d680ee241a22ba1bd2f50d120494f3565ee3f5dac8b4711e2c775d",
+          "source_sha256": {
+            "examples/jax/manifest_contracts_v3.py": "525df2ce9b46780baec94ee183461f8b04f76a03f2a6ccff8ae97cc739430d6f"
+          },
+          "timestamp_utc": "2026-07-27T18:32:08Z"
+        },
+        "green": {
+          "revision": "75b9454aa5fd6cddb956e3a8da84e2d9d2f6915b",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_manifest_v3_compatibility.py\"])\noutput = captured.getvalue()\nif code == 1 and \"compatibility alias metadata is missing\" in output:\n    print(\"missing legacy JAX compatibility alias metadata\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected compatibility alias contract outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/manifest_contracts_v3.py": "73a180fee35b3ae052243a982908e259ae660481e9c78029a807919d29e80b95"
+          },
+          "timestamp_utc": "2026-07-27T18:34:20Z"
+        },
+        "refactor": {
+          "revision": "98f9d49e07a77cdc473dfe4cc678fa9d8be7f074",
+          "command": [
+            "python",
+            "-c",
+            "import contextlib\nimport io\nimport pytest\nimport sys\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/test_jax_manifest_v3_compatibility.py\"])\noutput = captured.getvalue()\nif code == 1 and \"compatibility alias metadata is missing\" in output:\n    print(\"missing legacy JAX compatibility alias metadata\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected compatibility alias contract outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/manifest_contracts_v3.py": "0dece6820719c73429519d5e3ed59912a87d054198989b02683c739e455f7de2"
+          },
+          "timestamp_utc": "2026-07-27T18:34:44Z"
+        }
+      }
     }
   ]
 }
