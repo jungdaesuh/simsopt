@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_MANIFEST = REPO_ROOT / "examples" / "jax" / "manifest.json"
 PARITY_MANIFEST = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
 INVENTORY = REPO_ROOT / "examples" / "jax" / "one_to_one_inventory.json"
+CANDIDATE_CLI = REPO_ROOT / "examples" / "jax" / "build_manifest_v3_candidate.py"
 EXAMPLES_V2_SHA256 = "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05"
 PARITY_V1_SHA256 = "060e55339194c203263da9d5690c2ff31bd6681f5713dc2ead0ce3313e313137"
 
@@ -220,3 +223,70 @@ def test_partial_conversion_is_rejected_instead_of_guessed() -> None:
     first["inspired_by"] = ["1_Simple/just_a_quadratic.py"]
     with pytest.raises(ManifestV3ValidationError, match="unexpected executable fields"):
         parse_examples_v3_document(partial, repo_root=REPO_ROOT)
+
+
+def test_no_write_cli_publishes_exact_candidate_bytes_and_semantic_diff() -> None:
+    assert CANDIDATE_CLI.is_file(), "no-write manifest v3 candidate CLI is missing"
+    before_examples = EXAMPLES_MANIFEST.read_bytes()
+    before_parity = PARITY_MANIFEST.read_bytes()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CANDIDATE_CLI),
+            "--examples",
+            str(EXAMPLES_MANIFEST),
+            "--parity",
+            str(PARITY_MANIFEST),
+            "--inventory",
+            str(INVENTORY),
+            "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    envelope = json.loads(result.stdout)
+    assert envelope["mode"] == "no_write"
+    assert envelope["input_sha256"] == {
+        "examples_manifest_v2": EXAMPLES_V2_SHA256,
+        "parity_manifest_v1": PARITY_V1_SHA256,
+    }
+    examples_candidate = (
+        json.dumps(
+            envelope["candidates"]["examples_manifest_v3"],
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    parity_candidate = (
+        json.dumps(
+            envelope["candidates"]["parity_manifest_v2"],
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+    assert (
+        hashlib.sha256(examples_candidate).hexdigest()
+        == envelope["candidate_sha256"]["examples_manifest_v3"]
+    )
+    assert (
+        hashlib.sha256(parity_candidate).hexdigest()
+        == envelope["candidate_sha256"]["parity_manifest_v2"]
+    )
+    assert envelope["semantic_diff"] == {
+        "canonical_relationship_count": 26,
+        "legacy_relationship_count": 28,
+        "legacy_tutorial_count": 11,
+        "planned_one_to_one_count": 26,
+        "promoted_parity_claim_count": 0,
+    }
+    assert EXAMPLES_MANIFEST.read_bytes() == before_examples
+    assert PARITY_MANIFEST.read_bytes() == before_parity
