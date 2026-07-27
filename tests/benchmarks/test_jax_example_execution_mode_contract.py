@@ -78,6 +78,7 @@ def _outcome(
         "timing_synchronized": True,
         "synchronization_owner": METRIC_OWNERS["synchronization"],
         "elapsed_seconds": elapsed_seconds,
+        "diagnostic_wall_seconds": elapsed_seconds if elapsed_seconds else 0.5,
         "peak_host_rss_bytes": host_rss_bytes,
         "gpu_memory": _gpu_memory(device, gpu_memory_bytes),
         "dense_materialized_bytes": 0,
@@ -511,10 +512,12 @@ def test_device_promotion_fails_closed_on_each_checked_in_threshold() -> None:
             for outcome in warm:
                 assert isinstance(outcome, dict)
                 outcome["elapsed_seconds"] = 1.5
+                outcome["diagnostic_wall_seconds"] = 1.5
         elif mutation == "cold":
             cold = _profile_at(artifact, "fast")["cold"]
             assert isinstance(cold, dict)
             cold["elapsed_seconds"] = 1.26
+            cold["diagnostic_wall_seconds"] = 1.26
         elif mutation == "host_rss":
             _warm_at(artifact, "fast")["peak_host_rss_bytes"] = 126
         else:
@@ -662,3 +665,12 @@ def test_artifact_publication_is_exclusive_and_durable(tmp_path) -> None:
             artifact_root=tmp_path,
             run_directory_name="run-test",
         )
+
+
+def test_gitignore_is_narrow_for_execution_mode_artifacts() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    lines = (repo_root / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert lines.count(".artifacts/jax-example-execution-modes/") == 1
+    assert lines.count(".artifacts/jax-example-parity/") == 1
+    assert ".artifacts/" not in lines

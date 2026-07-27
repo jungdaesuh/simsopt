@@ -13,6 +13,7 @@ import random
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from types import MappingProxyType
 
 BENCHMARK_SCHEMA_VERSION = 1
@@ -26,6 +27,20 @@ REPRESENTATIVE_WORKLOAD_IDS = (
     "surface-geometry-optimization",
     "coil-flux-optimization",
     "fieldline-and-particle-tracing",
+)
+
+REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES: Mapping[str, int] = MappingProxyType(
+    {workload_id: 0 for workload_id in REPRESENTATIVE_WORKLOAD_IDS}
+)
+
+METRIC_OWNERS: Mapping[str, str] = MappingProxyType(
+    {
+        "dense_materialized_bytes": "checked_in_workload_contract",
+        "elapsed_seconds": "parent_monotonic_process_wall",
+        "gpu_memory": "nvidia_smi_process_poll_or_unavailable",
+        "peak_host_rss_bytes": "linux_proc_process_tree_poll",
+        "synchronization": "validated_json_after_process_exit",
+    }
 )
 
 BENCHMARK_RULE: Mapping[str, int | float] = MappingProxyType(
@@ -171,6 +186,25 @@ def _require_equal(value: object, expected: object, context: str) -> None:
 
 
 def _validate_top_level(document: Mapping[str, object]) -> str:
+    _exact_keys(
+        document,
+        frozenset(
+            (
+                "schema_version",
+                "rule_version",
+                "rule",
+                "evidence_kind",
+                "certification_eligible",
+                "metric_owners",
+                "device",
+                "profiles",
+                "workload_ids",
+                "provenance",
+                "workloads",
+            )
+        ),
+        "artifact",
+    )
     _require_equal(
         document.get("schema_version"),
         BENCHMARK_SCHEMA_VERSION,
@@ -193,6 +227,11 @@ def _validate_top_level(document: Mapping[str, object]) -> str:
     if document.get("certification_eligible") is not False:
         raise BenchmarkContractError(
             "execution-mode benchmark evidence must remain non-certifying"
+        )
+    metric_owners = _mapping(document.get("metric_owners"), "metric_owners")
+    if dict(metric_owners) != dict(METRIC_OWNERS):
+        raise BenchmarkContractError(
+            "metric_owners must match the checked-in measurement ownership contract"
         )
     device = _string(document.get("device"), "device")
     if device not in ("cpu", "gpu"):
@@ -336,7 +375,9 @@ def _validate_outcome(
     input_sha256: str,
     source_tree_sha256: str,
     cache_identity: str,
+    environment_sha256: str,
     max_dense_jacobian_bytes: int,
+    expected_dense_materialized_bytes: int,
     context: str,
 ) -> _OutcomeMetrics:
     outcome = _mapping(raw_outcome, context)
@@ -372,11 +413,24 @@ def _validate_outcome(
     _require_equal(
         outcome.get("timing_synchronized"), True, f"{context}.timing_synchronized"
     )
+    _require_equal(
+        outcome.get("synchronization_owner"),
+        METRIC_OWNERS["synchronization"],
+        f"{context}.synchronization_owner",
+    )
     elapsed_value = outcome.get("elapsed_seconds")
+    diagnostic_wall_seconds = _positive_number(
+        outcome.get("diagnostic_wall_seconds"),
+        f"{context}.diagnostic_wall_seconds",
+    )
     if measured:
         elapsed_seconds: float | None = _positive_number(
             elapsed_value, f"{context}.elapsed_seconds"
         )
+        if elapsed_seconds != diagnostic_wall_seconds:
+            raise BenchmarkContractError(
+                f"{context}.elapsed_seconds must equal diagnostic_wall_seconds"
+            )
     else:
         _require_equal(elapsed_value, None, f"{context}.warmup.elapsed_seconds")
         elapsed_seconds = None
@@ -397,8 +451,25 @@ def _validate_outcome(
         raise BenchmarkContractError(
             f"{context}.dense_materialized_bytes exceeds max_dense_jacobian_bytes"
         )
+    _require_equal(
+        dense_materialized_bytes,
+        expected_dense_materialized_bytes,
+        f"{context}.dense_materialized_bytes workload contract",
+    )
+    _require_equal(
+        outcome.get("environment_sha256"),
+        environment_sha256,
+        f"{context}.environment_sha256",
+    )
     _sha256(outcome.get("stdout_sha256"), f"{context}.stdout_sha256")
     _sha256(outcome.get("stderr_sha256"), f"{context}.stderr_sha256")
+    for field, suffix in (("stdout_path", ".stdout"), ("stderr_path", ".stderr")):
+        path_value = _string(outcome.get(field), f"{context}.{field}")
+        path = PurePosixPath(path_value)
+        if path.is_absolute() or ".." in path.parts or not path_value.endswith(suffix):
+            raise BenchmarkContractError(
+                f"{context}.{field} must be a safe relative {suffix} path"
+            )
     return _OutcomeMetrics(
         elapsed_seconds=elapsed_seconds,
         peak_host_rss_bytes=peak_host_rss_bytes,
@@ -461,10 +532,15 @@ def _validate_profile_runs(
     input_sha256: str,
     source_tree_sha256: str,
     max_dense_jacobian_bytes: int,
+    expected_dense_materialized_bytes: int,
     context: str,
 ) -> _ProfileMetrics:
     profile = _mapping(raw_profile, context)
-    _exact_keys(profile, frozenset(("cache", "cold", "warmup", "warm")), context)
+    _exact_keys(
+        profile,
+        frozenset(("cache", "environment_sha256", "cold", "warmup", "warm")),
+        context,
+    )
     cache = _mapping(profile.get("cache"), f"{context}.cache")
     _exact_keys(
         cache,
@@ -472,6 +548,9 @@ def _validate_profile_runs(
         f"{context}.cache",
     )
     cache_identity = _string(cache.get("identity"), f"{context}.cache.identity")
+    environment_sha256 = _sha256(
+        profile.get("environment_sha256"), f"{context}.environment_sha256"
+    )
     _require_equal(
         cache.get("cold_initial_state"), "empty", f"{context}.cache empty state"
     )
@@ -491,7 +570,9 @@ def _validate_profile_runs(
         input_sha256=input_sha256,
         source_tree_sha256=source_tree_sha256,
         cache_identity=cache_identity,
+        environment_sha256=environment_sha256,
         max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+        expected_dense_materialized_bytes=expected_dense_materialized_bytes,
         context=f"{context}.cold",
     )
     warmup = _validate_outcome(
@@ -504,7 +585,9 @@ def _validate_profile_runs(
         input_sha256=input_sha256,
         source_tree_sha256=source_tree_sha256,
         cache_identity=cache_identity,
+        environment_sha256=environment_sha256,
         max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+        expected_dense_materialized_bytes=expected_dense_materialized_bytes,
         context=f"{context}.warmup",
     )
     warm_values = _sequence(profile.get("warm"), f"{context}.warm")
@@ -523,7 +606,9 @@ def _validate_profile_runs(
             input_sha256=input_sha256,
             source_tree_sha256=source_tree_sha256,
             cache_identity=cache_identity,
+            environment_sha256=environment_sha256,
             max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+            expected_dense_materialized_bytes=expected_dense_materialized_bytes,
             context=f"{context}.warm[{pair_index}]",
         )
         for pair_index, raw_outcome in enumerate(warm_values)
@@ -573,6 +658,21 @@ def _validate_workload(
         f"{context}.max_dense_jacobian_bytes",
         minimum=1,
     )
+    _require_equal(
+        workload.get("dense_materialization_owner"),
+        METRIC_OWNERS["dense_materialized_bytes"],
+        f"{context}.dense_materialization_owner",
+    )
+    expected_dense_materialized_bytes = _integer(
+        workload.get("dense_materialized_bytes"),
+        f"{context}.dense_materialized_bytes",
+        minimum=0,
+    )
+    _require_equal(
+        expected_dense_materialized_bytes,
+        REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES[workload_id],
+        f"{context}.dense_materialized_bytes checked-in value",
+    )
     schedule = _validate_schedule(
         workload.get("schedule"), workload_index=workload_index, context=context
     )
@@ -587,6 +687,7 @@ def _validate_workload(
         input_sha256=input_sha256,
         source_tree_sha256=source_tree_sha256,
         max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+        expected_dense_materialized_bytes=expected_dense_materialized_bytes,
         context=f"{context}.profiles.fast",
     )
     parity = _validate_profile_runs(
@@ -598,6 +699,7 @@ def _validate_workload(
         input_sha256=input_sha256,
         source_tree_sha256=source_tree_sha256,
         max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+        expected_dense_materialized_bytes=expected_dense_materialized_bytes,
         context=f"{context}.profiles.parity",
     )
 
@@ -698,6 +800,8 @@ __all__ = [
     "BENCHMARK_RULE",
     "BENCHMARK_RULE_VERSION",
     "BENCHMARK_SCHEMA_VERSION",
+    "METRIC_OWNERS",
+    "REPRESENTATIVE_DENSE_MATERIALIZATION_BYTES",
     "REPRESENTATIVE_WORKLOAD_IDS",
     "WARM_PAIR_COUNT",
     "BenchmarkContractError",
