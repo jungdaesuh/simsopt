@@ -814,6 +814,37 @@ def case_programmatic_backend_selection_configures_jax_runtime() -> None:
     assert jax.config.jax_persistent_cache_min_entry_size_bytes == -1
 
 
+def case_legacy_jax_cpu_environment_defaults_to_fast() -> None:
+    import os
+
+    os.environ.pop("SIMSOPT_BACKEND_MODE", None)
+    os.environ["SIMSOPT_BACKEND"] = "jax"
+    os.environ["SIMSOPT_JAX_PLATFORM"] = "cpu"
+
+    import simsopt_jax.config as simsopt_config
+
+    config = simsopt_config.get_backend_config()
+    assert config.mode == "jax_cpu_fast"
+    assert config.backend == "jax"
+    assert config.jax_platform == "cpu"
+
+
+def case_legacy_jax_cuda_environment_defaults_to_fast_without_initializing_jax() -> None:
+    import os
+
+    block_jax_imports(message="legacy CUDA resolution must not initialize JAX")
+    os.environ.pop("SIMSOPT_BACKEND_MODE", None)
+    os.environ["SIMSOPT_BACKEND"] = "jax"
+    os.environ["SIMSOPT_JAX_PLATFORM"] = "cuda"
+
+    import simsopt_jax.config as simsopt_config
+
+    config = simsopt_config.get_backend_config()
+    assert config.mode == "jax_gpu_fast"
+    assert config.backend == "jax"
+    assert config.jax_platform == "cuda"
+
+
 def case_programmatic_backend_persistent_cache_writes_small_kernel() -> None:
     import tempfile
 

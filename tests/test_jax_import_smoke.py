@@ -720,6 +720,21 @@ def test_programmatic_backend_selection_configures_jax_runtime():
     )
 
 
+@pytest.mark.parametrize(
+    "case_name",
+    (
+        "case_legacy_jax_cpu_environment_defaults_to_fast",
+        "case_legacy_jax_cuda_environment_defaults_to_fast_without_initializing_jax",
+    ),
+)
+def test_legacy_jax_environment_defaults_to_fast(case_name: str) -> None:
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=(case_name,),
+        failure_message=f"{case_name} failed",
+    )
+
+
 def test_programmatic_backend_persistent_cache_writes_small_kernel():
     """Runtime cache thresholds should let even a tiny compiled kernel persist."""
     _assert_python_script_passes(

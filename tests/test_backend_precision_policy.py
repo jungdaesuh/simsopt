@@ -35,8 +35,16 @@ def _policy(mode: str, *, precision=None):
 
 @pytest.fixture(autouse=True)
 def _clear_precision_environment(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("SIMSOPT_PRECISION", raising=False)
-    monkeypatch.delenv("SIMSOPT_MIXED_PRECISION", raising=False)
+    for name in (
+        "SIMSOPT_BACKEND_MODE",
+        "SIMSOPT_BACKEND",
+        "STAGE2_BACKEND",
+        "SIMSOPT_JAX_PLATFORM",
+        "SIMSOPT_JAX_BACKEND",
+        "SIMSOPT_PRECISION",
+        "SIMSOPT_MIXED_PRECISION",
+    ):
+        monkeypatch.delenv(name, raising=False)
     runtime.invalidate_backend_cache()
     yield
     runtime.invalidate_backend_cache()
@@ -185,3 +193,103 @@ def test_use_runtime_threads_the_typed_precision_selection():
 
     assert config.precision == "mixed"
     assert runtime.get_resolved_precision() == "mixed"
+
+
+@pytest.mark.parametrize(
+    ("backend", "platform", "expected_mode"),
+    (
+        ("cpu", "cpu", "native_cpu"),
+        ("jax", "cpu", "jax_cpu_fast"),
+        ("jax", "cuda", "jax_gpu_fast"),
+    ),
+)
+def test_legacy_backend_selection_defaults_explicit_jax_to_fast(
+    backend: str,
+    platform: str,
+    expected_mode: str,
+) -> None:
+    assert runtime._mode_from_legacy_env(backend, platform) == expected_mode
+
+
+def test_fully_unset_selection_remains_native_cpu() -> None:
+    assert runtime.get_backend_config().mode == "native_cpu"
+
+
+def test_explicit_full_mode_wins_over_legacy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_BACKEND", "jax")
+    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "cuda")
+
+    assert runtime.get_backend_config().mode == "jax_cpu_parity"
+
+
+@pytest.mark.parametrize(
+    ("device", "intent", "expected_mode"),
+    (
+        ("cpu", None, "jax_cpu_fast"),
+        ("gpu", None, "jax_gpu_fast"),
+        ("cpu", "fast", "jax_cpu_fast"),
+        ("gpu", "fast", "jax_gpu_fast"),
+        ("cpu", "parity", "jax_cpu_parity"),
+        ("gpu", "parity", "jax_gpu_parity"),
+    ),
+)
+def test_typed_jax_selector_resolves_device_and_intent(
+    device: str,
+    intent: str | None,
+    expected_mode: str,
+) -> None:
+    keywords: dict[str, object] = {
+        "device": device,
+        "configure_runtime": False,
+    }
+    if intent is not None:
+        keywords["intent"] = intent
+
+    config = runtime.set_backend("jax", **keywords)
+
+    assert config.mode == expected_mode
+
+
+def test_use_runtime_forwards_typed_jax_selector() -> None:
+    config = runtime.use_runtime(
+        "jax",
+        device="gpu",
+        intent="parity",
+        configure_runtime=False,
+    )
+
+    assert config.mode == "jax_gpu_parity"
+
+
+def test_public_config_reexports_typed_use_runtime() -> None:
+    import simsopt_jax.config as simsopt_config
+
+    config = simsopt_config.use_runtime(
+        "jax",
+        device="cpu",
+        configure_runtime=False,
+    )
+
+    assert config.mode == "jax_cpu_fast"
+
+
+@pytest.mark.parametrize(
+    ("mode", "keywords", "message"),
+    (
+        ("jax", {}, "device"),
+        ("jax", {"device": "tpu"}, "device"),
+        ("jax", {"device": "cpu", "intent": "debug"}, "intent"),
+        ("jax_cpu_fast", {"device": "cpu"}, "cannot be combined"),
+        ("jax_gpu_parity", {"intent": "parity"}, "cannot be combined"),
+    ),
+)
+def test_typed_jax_selector_rejects_ambiguous_or_invalid_calls(
+    mode: str,
+    keywords: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        runtime.set_backend(mode, configure_runtime=False, **keywords)

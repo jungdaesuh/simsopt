@@ -119,6 +119,10 @@ def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() ->
         assert "retention-days:" in job
     assert "--lanes native-cpu,jax-cpu" in public_integration
     assert "--lanes native-cpu,jax-cpu,jax-gpu" in gpu_strict
+    assert "run_examples.py --device cpu" in public_integration
+    assert "run_examples.py --device cpu --intent parity" in public_integration
+    assert "run_examples.py --device gpu" in gpu_strict
+    assert "run_examples.py --device gpu --intent parity" in gpu_strict
 
     assert "workflow_dispatch:" in scheduled_workflow
     assert "schedule:" in scheduled_workflow
