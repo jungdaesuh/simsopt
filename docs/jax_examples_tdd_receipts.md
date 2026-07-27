@@ -1317,11 +1317,10 @@ cross-lane observable.
 Two repairs were considered. Forcing a shared polished endpoint would change
 the native and JAX solve workflows and conceal a legitimate algorithmic
 difference. Relaxing the derivative tolerance would misclassify a coordinate
-artifact as numerical parity. The selected design retains raw terminal
-parameters and Jacobians as non-applicable diagnostics and compares the
-row-wise sum/product invariants of the interchangeable Jacobian columns. Those
-invariants preserve the quotient-space derivative information and remain
-sensitive to non-permutation perturbations; no tolerance changed.
+artifact as numerical parity. The first selected design retained raw terminal
+parameters and Jacobians as non-applicable diagnostics and compared row-wise
+sum/product coordinates of the interchangeable Jacobian columns. No tolerance
+changed.
 
 The failing-first surface integration test required the new final invariant
 and failed with:
@@ -1353,7 +1352,38 @@ surface geometry. The routes were moved to the surface relationship and a
 manifest regression now proves that surface owns all six initial/final routes
 and traceable least squares owns none of them.
 
-## Clean manifest-v2 authority GREEN (2026-07-27)
+### Global column-exchange repair RED -> GREEN
+
+Review found that row-wise sum/product coordinates accept a broader symmetry
+than the physics permits: independently swapping the two columns in only one
+residual row leaves every row invariant even though the axis exchange must be
+one global parameter-column permutation. The new adversarial test first failed
+against the committed helper:
+
+```console
+/tmp/simsopt-parity-v2.3szEgy/runtime/bin/python -m pytest -q \
+  tests/integration/test_jax_example_parity_runner.py \
+  -k surface_jacobian_invariants_ignore_only_global_axis_exchange
+```
+
+```text
+1 failed, 38 deselected
+```
+
+An unnormalized outer product of the column-difference vector correctly
+encoded the global orbit, but its off-diagonal coupling was about `2.39e-8`
+near the circular optimum and therefore remained invisible under the unchanged
+absolute tolerance. Canonically orienting the raw difference rejected the
+adversarial swap but incorrectly compared the differing endpoint
+eccentricities, causing the real surface end-to-end test to fail. The GREEN
+representation keeps the row sums/products and adds the outer product of the
+max-norm-normalized column-difference vector. It is unchanged by one global
+column exchange, couples all residual rows, rejects an independent row swap at
+the central `native_workflow` tolerance, and remains finite when the columns
+are identical. The focused adversarial and native/JAX CPU end-to-end tests pass
+without changing a tolerance.
+
+## Historical manifest-v2 authority (superseded 2026-07-27)
 
 Revision `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c` was checked out detached and
 clean at `/tmp/simsopt-parity-v2-fix.SLPdTa/checkout`. A Python 3.11.15
@@ -1369,7 +1399,7 @@ The full `all-applicable` matrix ran `native-cpu,jax-cpu,jax-gpu` without
   .artifacts/jax-example-parity/20260727T133326Z-04db9b25
 ```
 
-The independent required-authority audit returned:
+The independent required-authority audit returned at that revision:
 
 ```json
 {"authoritative": true, "case_count": 8, "comparison_count": 252,
@@ -1387,6 +1417,12 @@ the freshly generated report SHA-256 is
 `4e233fdb20cb016015789a69069f0eaeabdb6ea40c0f2dac056525ec1183b160`.
 The ignored authority bundle is local-only and has no durable shared retention
 guarantee.
+
+This bundle no longer certifies the surface derivative contract: the later
+adversarial review proved that its row-wise invariant admitted independent
+row swaps. It remains historical execution evidence only. Fresh authority must
+be generated from the corrected executable revision before the publication
+gate can be checked again.
 
 The freshly generated report was written to the isolated temporary work area,
 not over the pre-existing untracked

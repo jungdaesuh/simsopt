@@ -122,8 +122,10 @@ python -m examples.jax.parity.audit \
   --repo-root "$PWD"
 ```
 
-The generated results table lives in
-[`docs/jax_native_example_parity_results.md`](../../docs/jax_native_example_parity_results.md).
+Generate a results table from an independently audited authority bundle with
+`python examples/jax/parity/report.py --summary <run>/summary.json --output
+<reviewed-output-path>`. The intended documentation path is not tracked yet;
+do not overwrite a pre-existing worktree file without reviewing it first.
 Current authority bundles are local-only: `.artifacts/` is ignored, is not a
 durable shared archive, and cannot by itself support a remotely reproducible
 retention claim.

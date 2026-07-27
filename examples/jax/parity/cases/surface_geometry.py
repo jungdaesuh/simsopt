@@ -106,12 +106,29 @@ def _parameter_invariants(parameters: np.ndarray) -> np.ndarray:
     return np.asarray((np.sum(values), np.prod(values)), dtype=np.float64)
 
 
-def _symmetric_jacobian_column_invariants(
+def _global_column_swap_jacobian_invariants(
     left: np.ndarray | jax.Array,
     right: np.ndarray | jax.Array,
-) -> tuple[np.ndarray | jax.Array, np.ndarray | jax.Array]:
-    """Return sum/product invariants for interchangeable Jacobian columns."""
-    return left + right, left * right
+) -> tuple[
+    np.ndarray | jax.Array,
+    np.ndarray | jax.Array,
+    np.ndarray | jax.Array,
+]:
+    """Identify two Jacobian columns up to one global column exchange.
+
+    The normalized difference association couples every residual row, so an
+    independent row-wise column swap cannot masquerade as a global exchange.
+    """
+    column_difference = left - right
+    difference_scale = abs(column_difference).max()
+    normalized_difference = column_difference / (
+        difference_scale + (difference_scale == 0)
+    )
+    return (
+        left + right,
+        left * right,
+        normalized_difference[:, None] * normalized_difference[None, :],
+    )
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
@@ -139,12 +156,13 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     def state(prefix: str, parameters: np.ndarray) -> dict[str, np.ndarray]:
         current_residual = residual(parameters)
         current_jacobian = jacobian(parameters)
-        current_jacobian_invariants = np.stack(
-            _symmetric_jacobian_column_invariants(
-                current_jacobian[:, 0],
-                current_jacobian[:, 1],
-            ),
-            axis=-1,
+        column_sum, column_product, column_association = (
+            _global_column_swap_jacobian_invariants(
+                current_jacobian[:, 0], current_jacobian[:, 1]
+            )
+        )
+        current_jacobian_invariants = np.concatenate(
+            (column_sum, column_product, column_association.reshape(-1))
         )
         objective = np.asarray(np.dot(current_residual, current_residual))
         return {
@@ -257,12 +275,13 @@ def _jax(
         current_quantities = quantities(parameters)
         current_residual = residual(parameters)
         current_jacobian = jax.jacfwd(residual)(parameters)
-        current_jacobian_invariants = jnp.stack(
-            _symmetric_jacobian_column_invariants(
-                current_jacobian[:, 0],
-                current_jacobian[:, 1],
-            ),
-            axis=-1,
+        column_sum, column_product, column_association = (
+            _global_column_swap_jacobian_invariants(
+                current_jacobian[:, 0], current_jacobian[:, 1]
+            )
+        )
+        current_jacobian_invariants = jnp.concatenate(
+            (column_sum, column_product, column_association.reshape(-1))
         )
         objective = jnp.vdot(current_residual, current_residual)
         gradient = 2.0 * current_jacobian.T @ current_residual
