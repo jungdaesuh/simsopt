@@ -33,8 +33,7 @@ def test_coil_specs_preserve_fixed_total_current_expression() -> None:
     def currents(owner_dofs: jax.Array) -> jax.Array:
         return jnp.stack(
             tuple(
-                coil.current.value[0]
-                for coil in field.coil_specs_from_dofs(owner_dofs)
+                coil.current.value[0] for coil in field.coil_specs_from_dofs(owner_dofs)
             )
         )
 
