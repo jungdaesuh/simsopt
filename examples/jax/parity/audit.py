@@ -117,6 +117,12 @@ def audit_published_run(
     examples_manifest = load_manifest(
         repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
     )
+    if summary.get("manifest_schema_version") != examples_manifest.schema_version:
+        raise ValueError("aggregate manifest schema version mismatch")
+    if summary.get("used_legacy_manifest_adapter") is not (
+        examples_manifest.used_legacy_manifest_adapter
+    ):
+        raise ValueError("aggregate legacy manifest adapter mismatch")
     parity_manifest = load_parity_manifest(
         repo_root / "examples" / "jax" / "parity_manifest.json",
         examples_manifest=examples_manifest,
