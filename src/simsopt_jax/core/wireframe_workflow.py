@@ -186,6 +186,8 @@ class WireframeGSCOMultistepResult:
     enclosed_segment_mask: jax.Array
     nonfinal_steps: jax.Array
     final_adjustment_run: jax.Array
+    stage_objectives: jax.Array
+    stage_count: jax.Array
 
 
 jax.tree_util.register_dataclass(
@@ -196,6 +198,8 @@ jax.tree_util.register_dataclass(
         "enclosed_segment_mask",
         "nonfinal_steps",
         "final_adjustment_run",
+        "stage_objectives",
+        "stage_count",
     ],
     meta_fields=[],
 )
@@ -1307,14 +1311,25 @@ def wireframe_gsco_multistep_loop_jax(
         return jax.lax.cond(final_step, _final_update, _nonfinal_update, state)
 
     def _outer_scan_body(state: WireframeGSCOMultistepState, _iteration: jax.Array):
-        return jax.lax.cond(
+        stage_is_active = ~state.done
+        next_state = jax.lax.cond(
             state.done,
             lambda done_state: done_state,
             _active_outer_step,
             state,
-        ), None
+        )
+        residual = base_params.A @ next_state.x - b_arr
+        objective = _runtime_init_scalar(0.5, residual.dtype) * jnp.sum(
+            residual * residual
+        )
+        stage_objective = jnp.where(
+            stage_is_active,
+            objective,
+            _runtime_init_scalar(jnp.nan, objective.dtype),
+        )
+        return next_state, (stage_objective, stage_is_active)
 
-    final_state, _ = jax.lax.scan(
+    final_state, (stage_objectives, stage_is_active) = jax.lax.scan(
         _outer_scan_body,
         state0,
         jnp.arange(outer_steps, dtype=jnp.int32),
@@ -1325,4 +1340,6 @@ def wireframe_gsco_multistep_loop_jax(
         enclosed_segment_mask=final_state.enclosed_segment_mask,
         nonfinal_steps=final_state.nonfinal_steps,
         final_adjustment_run=final_state.final_adjustment_run,
+        stage_objectives=stage_objectives,
+        stage_count=jnp.sum(stage_is_active.astype(jnp.int32)),
     )
