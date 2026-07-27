@@ -154,8 +154,10 @@ def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
     nit = _host_int(state.k if total_nit is None else total_nit)
     return OptimizeResult(
         x=_as_host_numpy(state.x_k),
+        x_device=state.x_k,
         fun=_host_float(state.f_k),
         jac=_as_host_numpy(state.g_k),
+        jac_device=state.g_k,
         nit=nit,
         nfev=_host_int(state.nfev),
         njev=_host_int(state.ngev),
