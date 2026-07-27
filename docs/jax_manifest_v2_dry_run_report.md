@@ -15,7 +15,10 @@ the exact approved v2 candidate. Its SHA-256 is
 - Observed input schema: `1`
 - Legacy adapter used: `true`
 - Compatibility interval after activation: one release
-- Rollback command: `git checkout -- examples/jax/manifest.json`
+- Pre-activation candidate rollback command:
+  `git checkout -- examples/jax/manifest.json`
+- Post-activation manifest rollback source:
+  `git restore --source=29d886c568fac88a471c80b5d045392e3992c2d7 -- examples/jax/manifest.json`
 
 Normalized semantic diff:
 
@@ -30,12 +33,20 @@ readiness, paths, lineage, and CPU/GPU capability.
 
 ## Read-only proof
 
-Command:
+Historical pre-activation command (run while the canonical input was v1):
 
 ```console
 python examples/jax/migrate_manifest.py \
   --input examples/jax/manifest.json --dry-run
 ```
+
+The command is intentionally not a post-activation replay command: canonical
+input is now v2 and the migrator correctly rejects it because migration input
+must be absent-schema v1. The historical input is Git blob
+`0814f6aac9578d7d2a25d0568f53c40730598f71` at revision
+`29d886c568fac88a471c80b5d045392e3992c2d7`; restoring that source to a
+temporary worktree makes the dry-run reproducible without changing the active
+checkout.
 
 The canonical input hash was
 `e0b8cd713efd474ca2c6d525b8fca6ba231a0f2e862cddf393372e7a60fe13e2`
@@ -58,8 +69,11 @@ the `candidate_v2:` line; it has no write mode.
 
 The user approved option `1A` on 2026-07-27, covering the candidate digest,
 semantic diff, one-release compatibility interval, observability fields, and
-rollback command above. The retained v1 fixtures continue to exercise the
-read-only compatibility adapter; the canonical v2 document does not use it.
+rollback. The original checkout command applied to the uncommitted candidate;
+after activation, rollback must restore the identified v1 source and update
+the activation-specific tests/docs in one reviewed change. The retained v1
+fixtures continue to exercise the read-only compatibility adapter; the
+canonical v2 document does not use it.
 
 ## Activation RED -> GREEN
 

@@ -3,11 +3,13 @@
 **Status:** Blocked on preserved historical TDD evidence and report-file ownership
 **Last updated:** 2026-07-27
 
-**Outcome:** Fast-default and explicit-parity runtime support is implemented;
-functional CPU/GPU coverage and the fresh manifest-v2 authority matrix are
-GREEN, and fast is explicitly not performance-qualified. Formal plan closure
-remains blocked by unavailable per-case pre-GREEN history and an existing
-untracked results file that has not been approved for replacement.
+**Outcome:** Fast-default and explicit-parity runtime support is implemented,
+and fast is explicitly not performance-qualified. The prior manifest-v2
+authority matrix is historical only after review exposed an over-broad surface
+Jacobian invariant; fresh CPU/GPU authority is required for the corrected
+executable revision. Formal plan closure also remains blocked by unavailable
+per-case pre-GREEN history and an existing untracked results file that has not
+been approved for replacement.
 
 ## Implementation outcome
 
@@ -17,8 +19,10 @@ publication audit, and the Phase 11 scientific and artifact-safety repairs.
 The QFM feasibility/status contract, complete comparison routes, independent
 input revalidation, no-replace directory publication, descriptor-relative
 sidecar I/O, completion-marker validation, and audit-gated report generation
-all have committed failing-first and GREEN evidence in
-`docs/jax_examples_tdd_receipts.md`.
+have scoped committed failing-first and GREEN evidence in
+`docs/jax_examples_tdd_receipts.md`. The older per-case parity tests remain
+post-hoc regression coverage where no immutable pre-GREEN revision survives;
+the plan does not relabel them as authentic TDD.
 
 At committed revision `eead0641e`, all ten ready examples passed CPU fast, CPU
 parity, RTX 5090 GPU fast, and strict RTX 5090 GPU parity using JAX 0.10.2 and
@@ -44,10 +48,13 @@ and no speed or performance-qualification claim is permitted.
 The canonical manifest is the exact approved v2 candidate with SHA-256
 `2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05`.
 The read-only v1 adapter remains fixture-tested for one release. The historical
-detached authority artifact remains useful background only. The clean current
-authority run at `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c` passed all eight
-applicable cases, 24 lane receipts, and 252 comparisons. Its ignored
-`.artifacts/` bundle is host-local and has no durable shared retention
+detached authority artifact remains useful background only. The clean
+historical authority run at `3e7ecb58eeb75e763f823deb631c9ee2b0ea0f9c`
+passed all eight applicable cases, 24 lane receipts, and 252 comparisons.
+Review later proved that its surface derivative representation admitted
+independent row-wise swaps rather than only the physical global column
+exchange, so it is not authority for the corrected contract. Its ignored
+`.artifacts/` bundle remains host-local and has no durable shared retention
 guarantee, as explicitly selected by the user.
 
 The first clean post-activation authority run at `eb8385cbb` passed seven of
@@ -55,11 +62,14 @@ eight cases and correctly remained unpublished because surface geometry
 compared raw final Jacobians at different representatives of its
 interchangeable-axis quotient. The failing bundle is retained locally at
 `.artifacts/jax-example-parity/20260727T130725Z-e7ab9ba2.partial`. A
-failing-first repair now retains those raw arrays as diagnostics and compares
-permutation-invariant Jacobian-column sum/product coordinates without changing
-any tolerance. The final clean run published
-`.artifacts/jax-example-parity/20260727T133326Z-04db9b25` and the independent
-required-authority audit passed.
+first repair retained those raw arrays as diagnostics and compared row-wise
+sum/product coordinates without changing any tolerance. Review then found
+that this representation was invariant under impossible independent row
+swaps. The corrected representation adds a scale-normalized difference
+association across all rows, admitting one global column exchange only. The
+former clean run at `.artifacts/jax-example-parity/20260727T133326Z-04db9b25`
+and its passing audit are historical evidence, not certification of this
+corrected contract.
 
 ### Delivery blockers
 
@@ -444,9 +454,12 @@ output (rejected).**
   relationship and any scientific stages omitted by a reduced case; teaching
   I/O and plotting exclusions are recorded separately. A `full` row may not
   omit a scientific stage. Native paths must already be present in the
-  referenced example's `inspired_by` list. Case implementations emit values
-  and completed-stage receipts for those declared names but do not redefine
-  policy.
+  referenced example's `inspired_by` list. Case implementations emit values,
+  factual per-lane availability, and completed-stage receipts for those
+  declared names; they do not select routes, comparators, tolerance buckets,
+  or certification applicability. Requiring receipt availability to agree with
+  the manifest is intentional fail-closed validation, not a second policy
+  owner.
 - The case registry owns construction and execution of matched scientific
   problems.
 - The runner owns process isolation and artifact provenance.
@@ -1118,9 +1131,11 @@ RED, but no production implementation for that slice may be added first.
       observable and an adversarial test proving it still rejects non-exchange
       perturbations.
     - [x] **GREEN:** Keep raw surface endpoint parameters and Jacobians as
-      explicitly non-applicable diagnostics. Compare row-wise sum/product
-      invariants of the interchangeable Jacobian columns through the unchanged
-      whole-solve tolerance and complete three-pair route matrix.
+      explicitly non-applicable diagnostics. Compare a global-column-swap
+      orbit representation: row sums/products retain each row's unordered
+      values, while the normalized difference association couples all rows and
+      rejects independent row swaps. Use the unchanged whole-solve tolerance
+      and complete three-pair route matrix.
       Route the emitted initial invariant through the same complete three-pair
       matrix so publication cannot fail schema completeness before arbitration.
     - [x] **REFACTOR:** Own the symmetric-column transformation once for NumPy
@@ -1173,10 +1188,12 @@ RED, but no production implementation for that slice may be added first.
     - [x] Integrate the repaired candidate into a reachable branch commit and
       confirm its parentage from the intended baseline. Do not cite detached
       `799c656e1` as shipped state.
-    - [x] From a clean checkout of the delivered commit, run the complete CPU
-      suite, the real strict-GPU all-applicable run with zero skips/fallbacks,
-      and the independent audit. Generate the results document from that new
-      aggregate rather than copying the retained table.
+    - [ ] From a clean checkout of the corrected executable revision, run the
+      complete CPU suite, the real strict-GPU all-applicable run with zero
+      skips/fallbacks, and the independent audit. An evidence-only descendant
+      may record that run only when its diff from the executable revision is
+      limited to receipts/status documentation. Generate the results document
+      from that new aggregate rather than copying the retained table.
     - [ ] Commit the implementation, manifests, workflows, tests, generated
       results, authentic receipt, and final status update as one reviewed
       delivery unit. Upload the immutable authority artifact to the selected

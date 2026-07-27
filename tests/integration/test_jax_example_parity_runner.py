@@ -780,9 +780,9 @@ def test_curve_length_case_runs_native_and_jax_cpu_end_to_end(
     assert native.success and jax_cpu.success
 
 
-def test_surface_jacobian_invariants_ignore_only_axis_exchange() -> None:
+def test_surface_jacobian_invariants_ignore_only_global_axis_exchange() -> None:
     from examples.jax.parity.cases.surface_geometry import (
-        _symmetric_jacobian_column_invariants,
+        _global_column_swap_jacobian_invariants,
     )
 
     jacobian = np.asarray(
@@ -792,23 +792,38 @@ def test_surface_jacobian_invariants_ignore_only_axis_exchange() -> None:
         ),
         dtype=np.float64,
     )
-    invariants = np.stack(
-        _symmetric_jacobian_column_invariants(jacobian[:, 0], jacobian[:, 1]),
-        axis=-1,
-    )
-    swapped = np.stack(
-        _symmetric_jacobian_column_invariants(jacobian[:, 1], jacobian[:, 0]),
-        axis=-1,
-    )
+
+    def invariants(candidate: np.ndarray) -> np.ndarray:
+        column_sum, column_product, column_association = (
+            _global_column_swap_jacobian_invariants(candidate[:, 0], candidate[:, 1])
+        )
+        return np.concatenate(
+            (column_sum, column_product, column_association.reshape(-1))
+        )
+
+    expected = invariants(jacobian)
+    swapped = invariants(jacobian[:, ::-1])
     drifted = jacobian.copy()
     drifted[0, 0] += 1.0e-3
-    drifted_invariants = np.stack(
-        _symmetric_jacobian_column_invariants(drifted[:, 0], drifted[:, 1]),
-        axis=-1,
-    )
+    drifted_invariants = invariants(drifted)
+    independently_swapped = jacobian.copy()
+    independently_swapped[1] = independently_swapped[1, ::-1]
+    independently_swapped_invariants = invariants(independently_swapped)
+    repeated_columns = np.column_stack((jacobian[:, 0], jacobian[:, 0]))
+    repeated_column_invariants = invariants(repeated_columns)
+    tolerance = parity_ladder_tolerances("native_workflow")
+    rtol = float(tolerance["whole_solve_value_rtol"])
+    atol = float(tolerance["whole_solve_value_atol"])
 
-    np.testing.assert_array_equal(invariants, swapped)
-    assert not np.allclose(invariants, drifted_invariants, rtol=1.0e-6, atol=1.0e-7)
+    np.testing.assert_array_equal(expected, swapped)
+    assert not np.allclose(expected, drifted_invariants, rtol=rtol, atol=atol)
+    assert not np.allclose(
+        expected,
+        independently_swapped_invariants,
+        rtol=rtol,
+        atol=atol,
+    )
+    assert np.all(np.isfinite(repeated_column_invariants))
 
 
 def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
