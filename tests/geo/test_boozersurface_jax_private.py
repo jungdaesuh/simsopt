@@ -1196,20 +1196,50 @@ class TestOptimizerAdapterPrivate:
         assert len(quad._simsopt_cached_private_solver) == 3
 
     @PRIVATE_OPTIMIZER_RUNTIME
-    def test_bfgs_fp32_stall_scale_uses_machine_epsilon(self):
-        _, _, _, fp32_step_eps = _private_bfgs._bfgs_curvature_terms(
-            jnp.asarray([1.0], dtype=jnp.float32),
-            jnp.asarray([1.0], dtype=jnp.float32),
-            x_dtype=jnp.float32,
-        )
-        _, _, _, fp64_step_eps = _private_bfgs._bfgs_curvature_terms(
-            jnp.asarray([1.0], dtype=jnp.float64),
-            jnp.asarray([1.0], dtype=jnp.float64),
-            x_dtype=jnp.float64,
+    @pytest.mark.parametrize(
+        ("xrtol", "expected_converged"),
+        ((0.0, False), (1.0e-8, True)),
+    )
+    def test_bfgs_step_termination_honors_explicit_xrtol(
+        self,
+        monkeypatch,
+        xrtol,
+        expected_converged,
+    ):
+        x0 = jnp.asarray([1.0e6], dtype=jnp.float64)
+        center = x0 - jnp.asarray([2.0e-3], dtype=jnp.float64)
+
+        def objective(x):
+            delta = x - center
+            return 0.5 * jnp.dot(delta, delta)
+
+        def strong_wolfe_step(*_args, **_kwargs):
+            x_next = x0 - jnp.asarray([1.0e-3], dtype=jnp.float64)
+            value_next, gradient_next = jax.value_and_grad(objective)(x_next)
+            return _LineSearchResults(
+                failed=jnp.asarray(False),
+                nit=jnp.asarray(1, dtype=jnp.int32),
+                nfev=jnp.asarray(1, dtype=jnp.int32),
+                ngev=jnp.asarray(1, dtype=jnp.int32),
+                k=jnp.asarray(1, dtype=jnp.int32),
+                a_k=jnp.asarray(0.5, dtype=jnp.float64),
+                f_k=value_next,
+                g_k=gradient_next,
+                status=jnp.asarray(0, dtype=jnp.int32),
+            )
+
+        monkeypatch.setattr(_private_bfgs, "_line_search", strong_wolfe_step)
+        state = _private_bfgs._minimize_bfgs_private(
+            objective,
+            x0,
+            maxiter=1,
+            gtol=0.0,
+            xrtol=xrtol,
         )
 
-        assert float(fp32_step_eps) == pytest.approx(np.finfo(np.float32).eps)
-        assert float(fp64_step_eps) == pytest.approx(np.sqrt(np.finfo(np.float64).eps))
+        assert bool(state.failed) is False
+        assert bool(state.converged) is expected_converged
+        np.testing.assert_allclose(state.x_k, x0 - 1.0e-3)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
