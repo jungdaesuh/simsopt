@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -270,6 +271,89 @@ def test_traceable_iota_target_penalty_uses_runtime_scalar_constants(
 
     assert calls["count"] >= 2
     _assert_allclose(penalty, 0.125)
+
+
+def test_surface_major_radius_from_geometry_recovers_circular_torus_radius() -> None:
+    """The BoozerQA radius penalty must use SIMSOPT's geometric definition."""
+    major_radius = 1.7
+    minor_radius = 0.23
+    phi = jnp.linspace(0.0, 1.0, 24, endpoint=False, dtype=jnp.float64)
+    theta = jnp.linspace(0.0, 1.0, 25, endpoint=False, dtype=jnp.float64)
+    phi_angle = 2.0 * jnp.pi * phi[:, None]
+    theta_angle = 2.0 * jnp.pi * theta[None, :]
+    cylindrical_radius = major_radius + minor_radius * jnp.cos(theta_angle)
+    gamma = jnp.stack(
+        jnp.broadcast_arrays(
+            cylindrical_radius * jnp.cos(phi_angle),
+            cylindrical_radius * jnp.sin(phi_angle),
+            minor_radius * jnp.sin(theta_angle),
+        ),
+        axis=-1,
+    )
+    xphi = jnp.stack(
+        (
+            -2.0 * jnp.pi * cylindrical_radius * jnp.sin(phi_angle),
+            2.0 * jnp.pi * cylindrical_radius * jnp.cos(phi_angle),
+            jnp.zeros_like(gamma[..., 2]),
+        ),
+        axis=-1,
+    )
+    xtheta = jnp.stack(
+        jnp.broadcast_arrays(
+            -2.0 * jnp.pi * minor_radius * jnp.sin(theta_angle) * jnp.cos(phi_angle),
+            -2.0 * jnp.pi * minor_radius * jnp.sin(theta_angle) * jnp.sin(phi_angle),
+            2.0 * jnp.pi * minor_radius * jnp.cos(theta_angle),
+        ),
+        axis=-1,
+    )
+
+    with jax.transfer_guard("disallow"):
+        actual = soj._surface_major_radius_from_geometry(gamma, xphi, xtheta)
+
+    _assert_allclose(actual, major_radius)
+
+
+def test_selected_coil_length_penalty_uses_total_selected_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BoozerQA regularizes the total base-coil length, not one expanded coil."""
+    curve_speeds = {
+        "base-0": 2.0,
+        "base-1": 3.0,
+        "expanded-copy": 7.0,
+    }
+    monkeypatch.setattr(
+        soj,
+        "coil_specs_from_dof_extraction_spec",
+        lambda _extraction_spec, _coil_dofs: tuple(
+            SimpleNamespace(curve=curve_name) for curve_name in curve_speeds
+        ),
+    )
+
+    curve_geometries: dict[str, tuple[jax.Array, jax.Array, jax.Array]] = {}
+    for curve_name, speed in curve_speeds.items():
+        gamma = jnp.zeros((8, 3), dtype=jnp.float64)
+        gammadash = jnp.broadcast_to(
+            jnp.asarray([speed, 0.0, 0.0], dtype=jnp.float64),
+            gamma.shape,
+        )
+        curve_geometries[curve_name] = (gamma, gammadash, jnp.zeros_like(gamma))
+
+    def curve_geometry(curve_name: str) -> tuple[jax.Array, jax.Array, jax.Array]:
+        return curve_geometries[curve_name]
+
+    monkeypatch.setattr(soj, "curve_geometry_from_spec", curve_geometry)
+    coil_dofs = jnp.zeros(1, dtype=jnp.float64)
+
+    with jax.transfer_guard("disallow"):
+        penalty = soj._selected_coil_length_penalty_from_coil_dofs(
+            coil_dofs,
+            object(),
+            coil_indices=(0, 1),
+            length_target=4.0,
+        )
+
+    _assert_allclose(penalty, 0.5)
 
 
 def test_value_and_direct_coil_gradient_keeps_objective_value_on_device(
