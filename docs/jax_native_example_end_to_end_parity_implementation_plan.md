@@ -1,64 +1,70 @@
 # JAX Fast Execution and Native Example End-to-End Parity Implementation Plan
 
-**Status:** Blocked
-**Last updated:** 2026-07-26
+**Status:** In progress
+**Last updated:** 2026-07-27
 
-**Outcome:** Fast-default and explicit-parity support planned; candidate
-certification still has scientific, safety, TDD, and delivery blockers
+**Outcome:** Fast-default and explicit-parity runtime support is implemented;
+functional CPU/GPU coverage is GREEN, while manifest-v2 activation,
+performance promotion, final authority evidence, and delivery remain open
 
 ## Implementation outcome
 
-Candidate commit `799c656e186642bdb7e296e46ad1c6cd61277839`, a detached direct
-child of reviewed branch baseline
-`b6775bf23030bafbd602ce3131dea948e7b8bb4b`, implements the planned harness.
-It is not contained by a local branch or tag and therefore is not delivered by
-the current branch history. Its clean, non-smoke authority run is
-`.artifacts/jax-example-parity/20260726T225943Z-09dfdc3e`, bound to detached
-source snapshot `799c656e186642bdb7e296e46ad1c6cd61277839`. A clean-checkout
-audit replay recomputed all 228 **declared** numerical comparisons and reported
-8 cases, 24 authoritative lane receipts, and an aggregate `pass`. The JAX GPU
-receipts identify an NVIDIA GeForce RTX 5090, FP64, and all three effective JAX
-transfer directions at `disallow`. This is historical, local candidate
-evidence, not a fresh GPU rerun or evidence that the implementation is
-scientifically complete or shipped.
+The current branch contains the fast/parity runtime contract, matched parity
+harness, manifest-v1/v2 dual reader and dry-run migration, independent
+publication audit, and the Phase 11 scientific and artifact-safety repairs.
+The QFM feasibility/status contract, complete comparison routes, independent
+input revalidation, no-replace directory publication, descriptor-relative
+sidecar I/O, completion-marker validation, and audit-gated report generation
+all have committed failing-first and GREEN evidence in
+`docs/jax_examples_tdd_receipts.md`.
 
-The candidate classified all 28 ready `inspired_by` relationships. Eight
-are executable bounded cases: two `full` and six `reduced`; the other 20 name
-concrete unsupported blockers. The candidate results table at
-`docs/jax_native_example_parity_results.md` is worktree-only, and the parity
-section of `docs/jax_examples_tdd_receipts.md` is not present on the current
-branch. Neither is shipped evidence until delivered with the implementation.
+At committed revision `eead0641e`, all ten ready examples passed CPU fast, CPU
+parity, RTX 5090 GPU fast, and strict RTX 5090 GPU parity using JAX 0.10.2 and
+FP64. A strict-GPU Boozer defect discovered by the all-ready run was repaired
+without a host callback: the custom SIMSOPT BFGS and L-BFGS-B converters retain
+the accepted device state for follow-up stages while preserving their public
+host-compatible result fields.
 
-Final review found scientific-contract gaps: QFM passes despite violating the
-central constraint threshold and reports failed JAX solver statuses as
-normalized `converged`; the full traceable least-squares case omits three
-final-Jacobian lane routes; and the auditor does not revalidate the retained
-input bundle. It also found two unresolved artifact-safety defects: the publish
-check plus POSIX rename does not provide no-replace semantics under a
-publish-time race, and sidecar path validation is vulnerable to a symlink
-time-of-check/time-of-use replacement. The retained numerical artifact is
-still useful evidence that the declared routes agree, but it is not authority
-for the requested end-to-end contract. The plan cannot be `Done` until Phase
-11 repairs these defects and the complete reviewed slice becomes reachable.
+The matched execution-mode benchmark is also implemented and has valid full
+CPU and RTX 5090 artifacts. Those measurements do **not** promote the current
+fast policy: all five representative CPU cases miss the checked-in warm-speed
+gate, and only fieldline/tracing passes every GPU promotion gate. Disabling
+single-GPU sharding did not repair the GPU failures and left the surface/coil
+memory ratios unchanged. Fast remains the implemented JAX selection default,
+but this plan cannot claim that the default is performance-qualified until the
+tuning meets the unchanged promotion contract or the default decision is
+explicitly revised.
+
+The canonical manifest remains v1 and visibly uses the read-only legacy
+adapter. Candidate manifest-v2 bytes and semantic comparison are retained in
+`docs/jax_manifest_v2_dry_run_report.md`; activation remains stopped at the
+required explicit user sign-off gate. The historical detached authority
+artifact remains useful background only. A new clean, post-repair authority
+run, generated results table, durable-retention decision, and final reviewed
+delivery are still required.
 
 ### Delivery blockers
 
 - [x] Implement and RED-test the fast-default/explicit-parity contract in Phase
   10 without weakening parity certification.
-- [ ] Repair and RED-test the scientific completeness, no-replace publication,
+- [x] Repair and RED-test the scientific completeness, no-replace publication,
   and descriptor-relative no-follow sidecar requirements in Phase 11.
+- [x] Run all ten ready examples on CPU/GPU crossed with fast/parity at the
+  current repaired revision, including strict RTX 5090 parity with zero skips
+  and no CPU fallback.
+- [ ] Meet the checked-in matched fast-performance promotion rule on CPU and
+  GPU, or explicitly revise the default decision without weakening or
+  relabeling the measured evidence.
+- [ ] Obtain explicit user sign-off on the exact manifest-v2 dry-run bytes
+  before activating the canonical schema.
 - [ ] Create a new clean authority run and independent audit after those
-  repairs; the retained `799c656e1` artifact may not close the repaired safety
-  contract.
+  repairs; historical or dirty-tree artifacts may not close the repaired
+  safety contract.
 - [ ] Deliver the repaired implementation, generated results table, parity TDD
   receipt, and this status document in a reachable reviewed branch history.
 - [ ] Put the authority artifact in a durable shared store with retention and
   an immutable identifier, or explicitly scope the final claim to local-only
   evidence. The current ignored `.artifacts/` path exists only on this host.
-
-Unless an item is explicitly reopened below, checked implementation items
-describe behavior and evidence in candidate `799c656e1`; they do not mean that
-the current branch has delivered the item.
 
 ## Purpose
 
@@ -930,7 +936,7 @@ RED, but no production implementation for that slice may be added first.
       alone maps `(device, intent)` to backend mode and certification
       eligibility; the lane-environment owner derives process guards from that
       profile. Record v1-adapter use and v2 activation in runner/CI receipts.
-    - [ ] **RED:** Through the new runner interface, parameterize every ready
+    - [x] **RED:** Through the new runner interface, parameterize every ready
       example over CPU/GPU crossed with fast/parity. The immediate pre-GREEN
       revision must fail because the public selector/result-validation path is
       absent or parity-only, not because a scientific threshold is weakened.
@@ -939,7 +945,7 @@ RED, but no production implementation for that slice may be added first.
       terminal-success checks. Compare scientific observables through centrally
       owned fast-versus-parity diagnostic tolerances without requiring bitwise
       equality or identical work counters.
-    - [ ] **GREEN:** Remove any example-local assumption that parity is the only
+    - [x] **GREEN:** Remove any example-local assumption that parity is the only
       valid backend metadata. Fast-mode success remains fail-closed on wrong
       device, non-finite output, failed scientific gates, or hidden host solver.
       Both ordinary-runner profiles set strict fallback rejection explicitly;
@@ -947,19 +953,19 @@ RED, but no production implementation for that slice may be added first.
       label. The generic low-level full-mode API retains its documented
       `strict` option for compatibility. Only performance/reduction policy and
       certification eligibility differ.
-    - [ ] **RED:** Inject `jax_cpu_fast` and `jax_gpu_fast` into parity-runner
+    - [x] **RED:** Inject `jax_cpu_fast` and `jax_gpu_fast` into parity-runner
       children and receipts and require arbitration/audit rejection. Also inject
       parent fast-mode environment values and prove `run_parity.py` overrides
       them with explicit parity child profiles rather than inheriting them.
-    - [ ] **GREEN:** Keep `examples/jax/run_parity.py` parity-only. It accepts
+    - [x] **GREEN:** Keep `examples/jax/run_parity.py` parity-only. It accepts
       neither `--intent fast` nor fast receipts, and it continues to require
       `native-cpu`, `jax-cpu`, and `jax-gpu` certification lanes as selected.
-    - [ ] **REFACTOR:** Use one immutable runtime profile resolver for mode and
+    - [x] **REFACTOR:** Use one immutable runtime profile resolver for mode and
       eligibility. Derive the separately owned subprocess guard overlay and
       result expectations from its output, and make CI exercise the public CLI
       rather than copy profile values. Keep parity comparison/tolerance routes
       out of the fast runner and performance tuning out of the parity arbiter.
-    - [ ] **RED:** Add
+    - [x] **RED:** Add
       `tests/benchmarks/test_jax_example_execution_mode_contract.py` for a new
       `benchmarks/jax_example_execution_mode_contract.py` owner. Reject missing
       profiles, unmatched inputs, failed scientific repetitions, fewer than one
@@ -967,7 +973,7 @@ RED, but no production implementation for that slice may be added first.
       warmed-cache child pairs, unsynchronized timings, missing host RSS,
       unavailable GPU-memory evidence for GPU promotion, threshold edits without
       a schema/version change, and fast receipts presented as parity evidence.
-    - [ ] **GREEN:** Add the dependency-light contract and
+    - [x] **GREEN:** Add the dependency-light contract and
       `benchmarks/run_jax_example_execution_mode_benchmark.py`. On the same host
       and device, use byte-identical inputs, alternate fast/parity order, retain
       every outcome, and measure the real isolated example-child path. Give each
@@ -989,7 +995,7 @@ RED, but no production implementation for that slice may be added first.
       metric owners. Add only `.artifacts/jax-example-execution-modes/` to
       `.gitignore`, with a narrow ignore regression; do not broaden the existing
       parity-artifact rule.
-    - [ ] Run the matched contract on the checked-in representative IDs
+    - [x] Run the matched contract on the checked-in representative IDs
       `traceable-least-squares`, `curve-length-optimization`,
       `surface-geometry-optimization`, `coil-flux-optimization`, and
       `fieldline-and-particle-tracing`, covering least-squares, scalar
@@ -1003,6 +1009,17 @@ RED, but no production implementation for that slice may be added first.
       fast tuning; never weaken scientific gates, discard repeats, or relabel
       parity. These measurements support only the scoped default decision, not
       a general speedup claim.
+
+      The valid JAX 0.10.2 CPU artifact is
+      `.artifacts/jax-example-execution-modes/20260727T065241Z-cpu-dacecfd63ed8`;
+      all five cases failed the warm-speed promotion rule. The valid RTX 5090
+      artifact is
+      `.artifacts/jax-example-execution-modes/20260727T064728Z-gpu-829eb1cbf037`;
+      only fieldline/tracing passed every promotion gate. The diagnostic
+      single-GPU no-sharding run
+      `.artifacts/jax-example-execution-modes/20260727T070236Z-gpu-8aa146a1699c`
+      did not repair the failures. The run requirement is complete; promotion
+      remains failed and the thresholds are unchanged.
     - [x] Update `examples/jax/README.md`, `docs/source/jax_gpu_setup.rst`, and
       `docs/source/jax_migration.rst` with the default, the four fast/parity
       profiles, retained float32-smoke mode, public API/CLI examples,
@@ -1022,10 +1039,11 @@ RED, but no production implementation for that slice may be added first.
       path triggers, exact commands, child modes, zero-skip GPU behavior, and
       that only parity jobs upload certification-eligible artifacts.
 
-    Phase 10's all-ready scientific matrix becomes GREEN only after the known
-    QFM feasibility/status repair in Phase 11. Resolver, API, CLI, schema, and
-    parity-isolation slices may turn GREEN first, but they may not mark the
-    four-profile example gate complete or weaken QFM to do so.
+    Phase 10's all-ready scientific matrix is GREEN after the Phase 11 QFM
+    feasibility/status repair and the accepted-device-state repair discovered
+    by strict GPU Boozer execution. All ten examples pass all four profiles at
+    committed revision `eead0641e`; this functional gate is independent of the
+    still-failed fast-performance promotion gate.
 
 11. Repair the scientific, artifact-safety, and TDD-evidence blockers.
     - [x] **RED:** Add a QFM authority regression using the retained terminal
@@ -1147,13 +1165,13 @@ RED, but no production implementation for that slice may be added first.
 
 ## Validation Plan
 
-- [ ] Fast-default and explicit-parity resolver/API matrix:
+- [x] Fast-default and explicit-parity resolver/API matrix:
 
   ```console
   MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
     tests/test_backend_precision_policy.py \
     tests/test_jax_import_smoke.py \
-    tests/integration/test_jax_execution_modes.py
+    tests/integration/test_jax_examples.py
   ```
 
   The test module must cover unset/default selectors, explicit full-mode
@@ -1164,14 +1182,19 @@ RED, but no production implementation for that slice may be added first.
   unset environment must remain native CPU; only an explicitly selected JAX
   backend takes the new fast default.
 
-- [ ] All ready examples on CPU fast and CPU parity:
+  Current evidence: this matrix plus the complete ordinary-runner integration
+  suite passed `178 passed, 8 skipped` at the repaired revision.
+
+- [x] All ready examples on CPU fast and CPU parity:
 
   ```console
   python examples/jax/run_examples.py --device cpu
   python examples/jax/run_examples.py --device cpu --intent parity
   ```
 
-- [ ] All ready examples on a real GPU in fast and parity modes, with zero
+  Current evidence: both commands passed all 10 ready examples.
+
+- [x] All ready examples on a real GPU in fast and parity modes, with zero
   skips and no CPU fallback:
 
   ```console
@@ -1183,7 +1206,10 @@ RED, but no production implementation for that slice may be added first.
   strict transfer/determinism contract. Both must report FP64 and pass the same
   independent scientific checks.
 
-- [ ] Legacy runner compatibility and migration diagnostics:
+  Current evidence: both commands passed all 10 ready examples on the NVIDIA
+  GeForce RTX 5090 with zero skips and no CPU fallback.
+
+- [x] Legacy runner compatibility and migration diagnostics:
 
   ```console
   python examples/jax/run_examples.py --lane cpu-smoke
@@ -1195,6 +1221,10 @@ RED, but no production implementation for that slice may be added first.
   `--intent` must fail before child execution. Parameterized tests seed every
   parent selector with conflicting values and prove the runner scrubs them
   before pinning the requested child profile.
+
+  Current evidence: both aliases emitted the deprecation warning and passed all
+  10 ready examples; parser conflict and inherited-environment tests pass in
+  the ordinary-runner integration suite.
 
 - [ ] Tier-4 manifest migration dry-run and sign-off gate:
 
@@ -1210,15 +1240,19 @@ RED, but no production implementation for that slice may be added first.
   those exact bytes; after activation, CI replays both v1 fixtures and canonical
   v2 and records reader-version observability.
 
-- [ ] Parity isolation tests prove fast modes cannot enter authoritative
+- [x] Parity isolation tests prove fast modes cannot enter authoritative
   artifacts:
 
   ```console
   MPI4PY_RC_INITIALIZE=false ../.venv-simsopt-linux-x86/bin/python -m pytest -q \
     tests/integration/test_jax_example_parity_runtime.py \
     tests/integration/test_jax_example_parity_runner.py \
-    tests/integration/test_jax_execution_modes.py
+    tests/integration/test_jax_examples.py
   ```
+
+  Current evidence: the complete parity artifact/input/publication/runner,
+  runtime, and manifest suite passed `90 passed`; audit-gated report coverage
+  is included.
 
 - [ ] Matched fast-mode promotion contract:
 
@@ -1238,7 +1272,12 @@ RED, but no production implementation for that slice may be added first.
   before that device changes its default. Benchmark artifacts are explicitly
   non-certifying.
 
-- [ ] Static workflow routing proves the PR-required CPU/GPU fast and bounded
+  Current evidence: the contract suite passes `41 passed`, and both full
+  benchmark artifacts are structurally valid, but the promotion rule fails on
+  CPU for all five cases and on GPU for four of five cases. This validation
+  item therefore remains open.
+
+- [x] Static workflow routing proves the PR-required CPU/GPU fast and bounded
   parity commands plus the scheduled/manual full parity authority command:
 
   ```console
@@ -1246,6 +1285,8 @@ RED, but no production implementation for that slice may be added first.
     tests/test_jax_examples_manifest.py \
     tests/test_jax_example_parity_manifest.py
   ```
+
+  Current evidence: `49 passed`.
 
 - [x] Manifest and schema RED/GREEN tests:
 
