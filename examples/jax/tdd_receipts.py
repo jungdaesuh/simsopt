@@ -434,3 +434,30 @@ def validate_receipt_document(
         behavior_ids=behavior_ids,
         replayed=replay,
     )
+
+
+def render_receipt_markdown(value: object) -> str:
+    """Render validated-shape receipt data as a deterministic review table."""
+    document = _mapping(value, "receipt document")
+    _exact_keys(document, frozenset({"schema_version", "receipts"}), "receipt document")
+    if document["schema_version"] != 1:
+        raise ReceiptValidationError("unsupported receipt schema version")
+    receipts = tuple(
+        _receipt(item, f"receipts[{index}]")
+        for index, item in enumerate(_sequence(document["receipts"], "receipts"))
+    )
+    lines = [
+        "# One-to-One JAX Example TDD Receipts",
+        "",
+        "Generated from schema v1 machine-readable evidence.",
+        "",
+        "| Behavior | Native source | Mirror | RED | GREEN | REFACTOR |",
+        "|---|---|---|---|---|---|",
+    ]
+    lines.extend(
+        f"| `{receipt.behavior_id}` | `{receipt.native_source_id}` | "
+        f"`{receipt.mirror_id}` | `{receipt.red.revision}` | "
+        f"`{receipt.green.revision}` | `{receipt.refactor.revision}` |"
+        for receipt in receipts
+    )
+    return "\n".join(lines) + "\n"
