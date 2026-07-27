@@ -1174,6 +1174,18 @@ slower than parity on four of five workloads (`0.9999`, `0.8591`, `0.9564`,
 The candidate is rejected rather than repairing the validator or weakening the
 promotion rule.
 
+Two final bounded diagnostics rejected measurement-control and search-width
+hypotheses. Running the CPU benchmark under a fixed physical-core affinity in
+`.artifacts/jax-example-execution-modes/20260727T084209Z-cpu-4c43607e1949`
+changed XLA's perceived target features and invalidated persistent-cache AOT
+reloads; four of five raw medians still failed. On the RTX 5090,
+`xla_gpu_autotune_max_solutions=1` in the surface-only diagnostic
+`.artifacts/jax-example-execution-modes/20260727T084814Z-gpu-74775db78ca4`
+left the peak GPU-memory ratio at `1.467153`, with median speedup `0.959943`
+and lower bound `0.883137`. That knob limits GEMM solutions, while the installed
+XLA runtime already reports a one-candidate limit for non-GEMM fusion
+autotuning. Neither diagnostic is promotion evidence.
+
 ## Accepted optimizer device-state retention RED -> GREEN
 
 The BFGS regression was committed without production changes at immutable
