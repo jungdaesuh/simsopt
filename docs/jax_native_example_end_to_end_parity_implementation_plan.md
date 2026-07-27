@@ -30,10 +30,13 @@ CPU and RTX 5090 artifacts. Those measurements do **not** promote the current
 fast policy: all five representative CPU cases miss the checked-in warm-speed
 gate, and only fieldline/tracing passes every GPU promotion gate. Disabling
 single-GPU sharding did not repair the GPU failures and left the surface/coil
-memory ratios unchanged. Fast remains the implemented JAX selection default,
-but this plan cannot claim that the default is performance-qualified until the
-tuning meets the unchanged promotion contract or the default decision is
-explicitly revised.
+memory ratios unchanged. Disabling GPU autotuning repaired the memory ratios
+but not the speed gates, while minimal enabled autotuning restored the same
+memory excess. Removing CPU `FAST_COMPILE` both slowed four of five median
+workloads and produced incompatible persistent-cache AOT reloads on this host.
+Fast remains the implemented JAX selection default, but this plan cannot claim
+that the default is performance-qualified until the tuning meets the unchanged
+promotion contract or the default decision is explicitly revised.
 
 The canonical manifest remains v1 and visibly uses the read-only legacy
 adapter. Candidate manifest-v2 bytes and semantic comparison are retained in
@@ -1018,8 +1021,23 @@ RED, but no production implementation for that slice may be added first.
       only fieldline/tracing passed every promotion gate. The diagnostic
       single-GPU no-sharding run
       `.artifacts/jax-example-execution-modes/20260727T070236Z-gpu-8aa146a1699c`
-      did not repair the failures. The run requirement is complete; promotion
-      remains failed and the thresholds are unchanged.
+      and stable-chunk run
+      `.artifacts/jax-example-execution-modes/20260727T081128Z-gpu-bd2f10af1fe1`
+      did not repair the failures. With GPU autotuning disabled, diagnostic
+      artifact
+      `.artifacts/jax-example-execution-modes/20260727T081718Z-gpu-2ec7998ca32f`
+      reduced every peak GPU-memory ratio to `1.0` but failed every warm-speed
+      gate. Minimal enabled autotuning in
+      `.artifacts/jax-example-execution-modes/20260727T082532Z-gpu-db5c2f94e870`
+      restored `58` fast cache entries and the approximately `1.467`/`1.469`
+      surface/coil memory ratios; four warm-speed gates also failed. CPU
+      diagnostic
+      `.artifacts/jax-example-execution-modes/20260727T083038Z-cpu-f4881864e568`
+      removed `FAST_COMPILE`, but its persistent-cache reloads were rejected
+      for incompatible `prefer-no-gather`/`prefer-no-scatter` target features
+      and four of five raw median timings were slower. None is promotion
+      evidence. The run requirement is complete; promotion remains failed and
+      the thresholds are unchanged.
     - [x] Update `examples/jax/README.md`, `docs/source/jax_gpu_setup.rst`, and
       `docs/source/jax_migration.rst` with the default, the four fast/parity
       profiles, retained float32-smoke mode, public API/CLI examples,
