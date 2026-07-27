@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import Final, Literal, TextIO
 
 from examples.jax._manifest import JaxExamplesManifest
 from examples.jax.manifest_contracts_v3 import (
@@ -19,6 +19,7 @@ from examples.jax.parity._manifest import ParityManifest
 RuntimeStatus = Literal["planned", "ready"]
 RuntimeClassification = Literal["pure", "mirror", "adapter", "hybrid", "tutorial"]
 RuntimeTeachingKind = Literal["legacy", "one_to_one", "combined", "compatibility"]
+_LANE_BY_DEVICE: Final = {"cpu": "cpu-smoke", "gpu": "gpu-strict"}
 
 
 class RuntimeManifestError(ValueError):
@@ -81,8 +82,7 @@ def _legacy_examples(manifest: JaxExamplesManifest) -> tuple[RuntimeExample, ...
 
 
 def _canonical_lanes(device_scopes: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
-    lane_by_device = {"cpu": "cpu-smoke", "gpu": "gpu-strict"}
-    return tuple(lane_by_device[device] for device, _scope in device_scopes)
+    return tuple(_LANE_BY_DEVICE[device] for device, _scope in device_scopes)
 
 
 def _canonical_examples(
