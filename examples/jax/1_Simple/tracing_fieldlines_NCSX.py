@@ -44,8 +44,9 @@ def _problem(max_steps: int):
         ntheta=ntheta,
     )
     surface.fit_to_curve(magnetic_axis, 0.70, flip_theta=False)
-    radii = np.linalg.norm(surface.gamma()[:, :, :2], axis=2)
-    heights = surface.gamma()[:, :, 2]
+    surface_points = surface.gamma()
+    radii = np.linalg.norm(surface_points[:, :, :2], axis=2)
+    heights = surface_points[:, :, 2]
     classifier = SurfaceClassifier(surface, h=0.08 if not native_scale else 0.03, p=2)
 
     def skip(
