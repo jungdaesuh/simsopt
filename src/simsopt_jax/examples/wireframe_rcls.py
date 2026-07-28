@@ -153,6 +153,52 @@ def _wireframe_rcls_diagnostics(
     )
 
 
+@jax.jit
+def _solve_wireframe_rcls_device(
+    response: jax.Array,
+    target: jax.Array,
+    regularization: jax.Array,
+    constraint_matrix: jax.Array,
+    constraint_target: jax.Array,
+    free_segments: jax.Array,
+    initial_currents: jax.Array,
+    plasma_points: jax.Array,
+    plasma_unit_normal: jax.Array,
+    plasma_area_weights: jax.Array,
+    wireframe_nodes: jax.Array,
+    wireframe_segments: jax.Array,
+    wireframe_segment_signs: jax.Array,
+) -> WireframeRCLSDeviceResult:
+    free_currents = regularized_constrained_least_squares_jax(
+        jnp.take(response, free_segments, axis=1),
+        target,
+        regularization,
+        constraint_matrix,
+        constraint_target,
+    )
+    final_currents = _expand_free_currents(
+        initial_currents,
+        free_segments,
+        free_currents,
+    )
+    return _wireframe_rcls_diagnostics(
+        response,
+        target,
+        regularization,
+        constraint_matrix,
+        constraint_target,
+        free_segments,
+        initial_currents,
+        final_currents,
+        plasma_points,
+        plasma_unit_normal,
+        plasma_area_weights,
+        wireframe_nodes,
+        wireframe_segments,
+        wireframe_segment_signs,
+    )
+
+
 def solve_wireframe_rcls(
     *,
     wireframe,
@@ -187,20 +233,7 @@ def solve_wireframe_rcls(
     free_segments = _as_jax_int32(
         np.asarray(wireframe.unconstrained_segments(), dtype=np.int64)
     )
-    free_response = jnp.take(response_array, free_segments, axis=1)
-    free_currents = regularized_constrained_least_squares_jax(
-        free_response,
-        target_array,
-        regularization,
-        constraint_array,
-        constraint_target_array,
-    )
-    final_currents = _expand_free_currents(
-        initial_array,
-        free_segments,
-        free_currents,
-    )
-    return _wireframe_rcls_diagnostics(
+    return _solve_wireframe_rcls_device(
         response_array,
         target_array,
         _as_runtime_value(
@@ -212,7 +245,6 @@ def solve_wireframe_rcls(
         constraint_target_array,
         free_segments,
         initial_array,
-        final_currents,
         _as_runtime_array(plasma_points),
         _as_runtime_array(plasma_unit_normal),
         _as_runtime_array(plasma_area_weights),
