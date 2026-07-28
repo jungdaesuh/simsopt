@@ -118,9 +118,12 @@ def test_dynamic_surface_contract_freezes_coil_spec_constants_on_host() -> None:
         for leaf in jax.tree.leaves(extraction)
         if isinstance(leaf, (jax.Array, np.ndarray))
     )
+    host_array_leaves = tuple(
+        leaf for leaf in array_leaves if isinstance(leaf, np.ndarray)
+    )
     assert array_leaves
-    assert all(isinstance(leaf, np.ndarray) for leaf in array_leaves)
-    assert all(not leaf.flags.writeable for leaf in array_leaves)
+    assert len(host_array_leaves) == len(array_leaves)
+    assert all(not leaf.flags.writeable for leaf in host_array_leaves)
 
 
 def test_dynamic_surface_stage_two_surface_gradient_matches_central_difference() -> (

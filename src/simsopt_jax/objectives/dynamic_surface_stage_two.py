@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,10 @@ import numpy as np
 
 from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral_from_B
-from simsopt_jax.core.specs import make_fixed_surface_flux_spec
+from simsopt_jax.core.specs import (
+    CoilSetDofExtractionSpec,
+    make_fixed_surface_flux_spec,
+)
 from simsopt_jax.core.surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_normal_from_spec,
@@ -39,14 +42,33 @@ class SurfaceRZFourierProvider(Protocol):
     stellsym: bool
 
 
+def _immutable_host_leaf(value: object) -> object:
+    if not isinstance(value, np.ndarray):
+        return value
+    frozen = np.array(value, copy=True, order="C")
+    frozen.flags.writeable = False
+    return frozen
+
+
+def freeze_coil_dof_extraction_spec(
+    field: CoilDofExtractionProvider,
+) -> CoilSetDofExtractionSpec:
+    """Freeze closed-over coil templates as immutable host constants."""
+    extraction = jax.device_get(field.coil_dof_extraction_spec())
+    return cast(
+        CoilSetDofExtractionSpec,
+        jax.tree.map(_immutable_host_leaf, extraction),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SurfaceRZFourierDofContract:
     """Immutable mapping from free host surface DOFs to a full JAX spec."""
 
-    full_dof_template: jax.Array
-    free_indices: jax.Array
-    quadpoints_phi: jax.Array
-    quadpoints_theta: jax.Array
+    full_dof_template: np.ndarray
+    free_indices: tuple[int, ...]
+    quadpoints_phi: np.ndarray
+    quadpoints_theta: np.ndarray
     mpol: int
     ntor: int
     nfp: int
@@ -60,15 +82,33 @@ class SurfaceRZFourierDofContract:
         """Freeze the complete surface layout once at the host boundary."""
         free_indices = np.flatnonzero(
             np.asarray(surface.local_dofs_free_status, dtype=np.bool_)
-        ).astype(np.int32, copy=False)
+        )
+        full_dof_template = np.array(
+            surface.local_full_x,
+            dtype=np.float64,
+            copy=True,
+            order="C",
+        )
+        quadpoints_phi = np.array(
+            surface.quadpoints_phi,
+            dtype=np.float64,
+            copy=True,
+            order="C",
+        )
+        quadpoints_theta = np.array(
+            surface.quadpoints_theta,
+            dtype=np.float64,
+            copy=True,
+            order="C",
+        )
+        full_dof_template.flags.writeable = False
+        quadpoints_phi.flags.writeable = False
+        quadpoints_theta.flags.writeable = False
         return cls(
-            full_dof_template=jnp.asarray(surface.local_full_x, dtype=jnp.float64),
-            free_indices=jnp.asarray(free_indices, dtype=jnp.int32),
-            quadpoints_phi=jnp.asarray(surface.quadpoints_phi, dtype=jnp.float64),
-            quadpoints_theta=jnp.asarray(
-                surface.quadpoints_theta,
-                dtype=jnp.float64,
-            ),
+            full_dof_template=full_dof_template,
+            free_indices=tuple(int(index) for index in free_indices),
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
             mpol=int(surface.mpol),
             ntor=int(surface.ntor),
             nfp=int(surface.nfp),
@@ -77,14 +117,22 @@ class SurfaceRZFourierDofContract:
 
     def full_dofs(self, free_dofs: jax.Array) -> jax.Array:
         """Scatter free values into the immutable full-DOF template."""
-        return self.full_dof_template.at[self.free_indices].set(free_dofs)
+        template = jnp.asarray(self.full_dof_template, dtype=free_dofs.dtype)
+        free_indices = jnp.asarray(self.free_indices, dtype=jnp.int32)
+        return template.at[free_indices].set(free_dofs)
 
     def surface_spec(self, free_dofs: jax.Array):
         """Build a traceable RZFourier spec from free surface parameters."""
         return surface_rz_fourier_spec_from_dofs(
             self.full_dofs(free_dofs),
-            quadpoints_phi=self.quadpoints_phi,
-            quadpoints_theta=self.quadpoints_theta,
+            quadpoints_phi=jnp.asarray(
+                self.quadpoints_phi,
+                dtype=free_dofs.dtype,
+            ),
+            quadpoints_theta=jnp.asarray(
+                self.quadpoints_theta,
+                dtype=free_dofs.dtype,
+            ),
             mpol=self.mpol,
             ntor=self.ntor,
             nfp=self.nfp,
@@ -101,7 +149,7 @@ def make_dynamic_surface_stage_two_objective(
     definition: str = "local",
 ):
     """Compose dynamic-surface flux and coil penalties without host callbacks."""
-    extraction = field.coil_dof_extraction_spec()
+    extraction = freeze_coil_dof_extraction_spec(field)
 
     def objective(
         coil_dofs: jax.Array,
@@ -143,5 +191,6 @@ def make_dynamic_surface_stage_two_objective(
 
 __all__ = (
     "SurfaceRZFourierDofContract",
+    "freeze_coil_dof_extraction_spec",
     "make_dynamic_surface_stage_two_objective",
 )
