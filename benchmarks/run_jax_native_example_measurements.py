@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from benchmarks.jax_native_example_measurement_contract import (
+    MEASUREMENT_EVIDENCE_KIND,
     MEASUREMENT_PROFILE_IDS,
+    MEASUREMENT_SCHEMA_VERSION,
     WARM_SAMPLE_COUNT,
     MeasurementProfileId,
+    MeasurementScale,
 )
 from examples.jax._lane_environment import build_execution_environment
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_NVIDIA_MEMORY_MULTIPLIER = 1024 * 1024
 _PROFILE_ENVIRONMENT_NAMES = frozenset(
     (
         "CUDA_VISIBLE_DEVICES",
@@ -26,6 +33,10 @@ _PROFILE_ENVIRONMENT_NAMES = frozenset(
 )
 
 
+class MeasurementRunnerError(RuntimeError):
+    """The runner cannot produce complete, trustworthy measurement evidence."""
+
+
 @dataclass(frozen=True)
 class MeasurementSchedule:
     """Cold, warmup, and seven balanced warm profile orders."""
@@ -33,6 +44,44 @@ class MeasurementSchedule:
     cold: tuple[MeasurementProfileId, ...]
     warmup: tuple[MeasurementProfileId, ...]
     warm: tuple[tuple[MeasurementProfileId, ...], ...]
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_json_exclusive(path: Path, document: object) -> None:
+    with path.open("xb") as stream:
+        stream.write(_canonical_json_bytes(document))
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_directory(path.parent)
+
+
+def publish_artifact_exclusive(
+    document: object,
+    *,
+    artifact_root: Path,
+    run_directory_name: str,
+) -> Path:
+    """Publish one immutable artifact without replacing retained evidence."""
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    run_directory = artifact_root / run_directory_name
+    run_directory.mkdir()
+    _fsync_directory(artifact_root)
+    artifact_path = run_directory / "artifact.json"
+    _write_json_exclusive(artifact_path, document)
+    return artifact_path
 
 
 def _rotate(
@@ -51,6 +100,75 @@ def build_measurement_schedule(mirror_index: int) -> MeasurementSchedule:
         cold=cold,
         warmup=tuple(reversed(cold)),
         warm=tuple(_rotate(cold, index) for index in range(WARM_SAMPLE_COUNT)),
+    )
+
+
+def classify_termination(returncode: int) -> str:
+    """Classify normal, explicit-exit, signal, and possible-OOM termination."""
+    if returncode == 0:
+        return "normal"
+    if returncode == -signal.SIGKILL:
+        return "resource_limit_or_oom"
+    if returncode < 0:
+        return f"signal_{-returncode}"
+    return f"exit_{returncode}"
+
+
+def parse_nvidia_smi_compute_apps(output: str) -> dict[int, int]:
+    """Parse process-attributed NVIDIA memory rows into bytes by PID."""
+    stripped = output.strip()
+    if not stripped or stripped == "No running processes found":
+        return {}
+    result: dict[int, int] = {}
+    for line in stripped.splitlines():
+        fields = tuple(field.strip() for field in line.split(","))
+        if len(fields) != 2:
+            raise MeasurementRunnerError(f"malformed nvidia-smi process row: {line!r}")
+        try:
+            process_id = int(fields[0])
+            memory_mib = int(fields[1].removesuffix(" MiB").strip())
+        except ValueError as error:
+            raise MeasurementRunnerError(
+                f"malformed nvidia-smi process row: {line!r}"
+            ) from error
+        if process_id <= 0 or memory_mib < 0:
+            raise MeasurementRunnerError(f"malformed nvidia-smi process row: {line!r}")
+        result[process_id] = memory_mib * _NVIDIA_MEMORY_MULTIPLIER
+    return result
+
+
+def build_profile_command(
+    *,
+    python_executable: str,
+    case_id: str,
+    profile_id: MeasurementProfileId,
+    input_bundle_path: Path,
+    result_directory: Path,
+    scale: MeasurementScale,
+) -> tuple[str, ...]:
+    """Build a profile command that consumes the one canonical input bundle."""
+    if not case_id:
+        raise ValueError("case_id must not be empty")
+    if profile_id == "native_cpu":
+        lane = "native-cpu"
+    elif profile_id in ("jax_cpu_fast", "jax_cpu_parity"):
+        lane = "jax-cpu"
+    else:
+        lane = "jax-gpu"
+    return (
+        python_executable,
+        "-m",
+        "examples.jax.parity.child",
+        "--case",
+        case_id,
+        "--lane",
+        lane,
+        "--input-bundle",
+        str(input_bundle_path),
+        "--result-directory",
+        str(result_directory),
+        "--scale",
+        scale,
     )
 
 
@@ -106,9 +224,16 @@ def build_measurement_environment(
 
 
 __all__ = [
+    "MEASUREMENT_EVIDENCE_KIND",
+    "MEASUREMENT_SCHEMA_VERSION",
     "MeasurementSchedule",
+    "MeasurementRunnerError",
     "build_measurement_environment",
     "build_measurement_schedule",
+    "build_profile_command",
+    "classify_termination",
+    "parse_nvidia_smi_compute_apps",
+    "publish_artifact_exclusive",
 ]
 
 
