@@ -3,10 +3,10 @@
 The host constructs the Landreman-Paul QA surface and native planar-Fourier
 coil graph.  Quadratic flux, equality-target length, clearance, curvature,
 mean-squared-curvature, and the native discrete linking-number term execute
-through the public pure-JAX Stage-II objective.  Both optimization stages run
-on the selected device, and independent endpoint topology checks fail closed
-if a solver crosses into a linked component.  Only the accepted state and
-final diagnostics return to the host.
+through one reusable parametric pure-JAX Stage-II objective.  Both optimization
+stages run on the selected device, and independent endpoint topology checks
+fail closed if a solver crosses into a linked component.  Initial and final
+state trees return through one batched host publication.
 """
 
 from __future__ import annotations
