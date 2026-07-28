@@ -31,6 +31,21 @@ class MinimalStageTwoState:
     total_curve_length: jax.Array
 
 
+jax.tree_util.register_dataclass(
+    MinimalStageTwoState,
+    data_fields=[
+        "parameters",
+        "objective",
+        "objective_gradient",
+        "squared_flux",
+        "length_penalty",
+        "maximum_normal_field",
+        "total_curve_length",
+    ],
+    meta_fields=[],
+)
+
+
 @dataclass(frozen=True)
 class MinimalStageTwoDeviceResult:
     """Initial/final states and Taylor-test evidence for one completed solve."""

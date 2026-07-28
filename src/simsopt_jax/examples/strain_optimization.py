@@ -158,6 +158,71 @@ def _strain_objective(
     )
 
 
+_strain_value_and_gradient_program = jax.jit(
+    jax.value_and_grad(_strain_objective, argnums=4),
+    static_argnames=(
+        "rotation_order",
+        "objective_width",
+        "torsional_threshold",
+        "curvature_threshold",
+    ),
+)
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "rotation_order",
+        "objective_width",
+        "reporting_width",
+        "torsional_threshold",
+        "curvature_threshold",
+    ),
+)
+def _strain_state_program(
+    quadpoints: jax.Array,
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    parameters: jax.Array,
+    *,
+    rotation_order: int,
+    objective_width: float,
+    reporting_width: float,
+    torsional_threshold: float,
+    curvature_threshold: float,
+) -> StrainState:
+    objective_value, gradient = _strain_value_and_gradient_program(
+        quadpoints,
+        gamma,
+        gammadash,
+        gammadashdash,
+        parameters,
+        rotation_order=rotation_order,
+        objective_width=objective_width,
+        torsional_threshold=torsional_threshold,
+        curvature_threshold=curvature_threshold,
+    )
+    torsional_strain, binormal_strain, _arc_length = _strain_values(
+        quadpoints,
+        gamma,
+        gammadash,
+        gammadashdash,
+        parameters,
+        rotation_order=rotation_order,
+        width=reporting_width,
+    )
+    return StrainState(
+        parameters=parameters,
+        objective=objective_value,
+        gradient=gradient,
+        torsional_strain=torsional_strain,
+        binormal_curvature_strain=binormal_strain,
+        maximum_torsional_strain=jnp.max(torsional_strain),
+        maximum_binormal_curvature_strain=jnp.max(binormal_strain),
+    )
+
+
 def solve_strain_rotation(
     *,
     quadpoints: object,
@@ -183,39 +248,31 @@ def solve_strain_rotation(
     gammadash_array = _as_runtime_array(gammadash)
     gammadashdash_array = _as_runtime_array(gammadashdash)
     initial_array = _as_runtime_array(initial_parameters)
-    objective = partial(
-        _strain_objective,
-        quadpoints_array,
-        gamma_array,
-        gammadash_array,
-        gammadashdash_array,
-        rotation_order=int(rotation_order),
-        objective_width=float(objective_width),
-        torsional_threshold=float(torsional_threshold),
-        curvature_threshold=float(curvature_threshold),
-    )
-    value_and_gradient = jax.jit(jax.value_and_grad(objective))
-
-    @jax.jit
-    def state(parameters: jax.Array) -> StrainState:
-        objective_value, gradient = value_and_gradient(parameters)
-        torsional_strain, binormal_strain, _arc_length = _strain_values(
+    def value_and_gradient(parameters: jax.Array) -> tuple[jax.Array, jax.Array]:
+        return _strain_value_and_gradient_program(
             quadpoints_array,
             gamma_array,
             gammadash_array,
             gammadashdash_array,
             parameters,
-            rotation_order=int(rotation_order),
-            width=float(reporting_width),
+            rotation_order=rotation_order,
+            objective_width=objective_width,
+            torsional_threshold=torsional_threshold,
+            curvature_threshold=curvature_threshold,
         )
-        return StrainState(
-            parameters=parameters,
-            objective=objective_value,
-            gradient=gradient,
-            torsional_strain=torsional_strain,
-            binormal_curvature_strain=binormal_strain,
-            maximum_torsional_strain=jnp.max(torsional_strain),
-            maximum_binormal_curvature_strain=jnp.max(binormal_strain),
+
+    def state(parameters: jax.Array) -> StrainState:
+        return _strain_state_program(
+            quadpoints_array,
+            gamma_array,
+            gammadash_array,
+            gammadashdash_array,
+            parameters,
+            rotation_order=rotation_order,
+            objective_width=objective_width,
+            reporting_width=reporting_width,
+            torsional_threshold=torsional_threshold,
+            curvature_threshold=curvature_threshold,
         )
 
     initial_state = state(initial_array)
