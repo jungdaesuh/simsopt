@@ -350,9 +350,11 @@ def _native(
         precision="fp64",
         driver="simsopt_scipy_bfgs_with_boozer_newton",
         workflow_stages=spec.workflow_stages,
-        nit=int(optimizer_result.nit),
-        nfev=int(optimizer_result.nfev),
-        njev=int(optimizer_result.njev),
+        solver_counts=(
+            int(optimizer_result.nit),
+            int(optimizer_result.nfev),
+            int(optimizer_result.njev),
+        ),
     )
 
 
@@ -580,9 +582,11 @@ def _jax(
         precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
         driver="simsopt_jax_host_bfgs_with_traceable_boozer_newton",
         workflow_stages=spec.workflow_stages,
-        nit=int(optimizer_result.k),
-        nfev=int(optimizer_result.nfev),
-        njev=int(optimizer_result.ngev),
+        solver_counts=(
+            int(optimizer_result.k),
+            int(optimizer_result.nfev),
+            int(optimizer_result.ngev),
+        ),
     )
 
 
@@ -660,10 +664,9 @@ def _observation(
     precision: str,
     driver: str,
     workflow_stages: tuple[str, ...],
-    nit: int,
-    nfev: int,
-    njev: int,
+    solver_counts: tuple[int, int, int],
 ) -> LaneObservation:
+    nit, nfev, njev = solver_counts
     success = bool(
         np.all(np.isfinite(values["initial:gradient"]))
         and np.all(np.isfinite(values["final:gradient"]))
