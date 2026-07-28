@@ -153,8 +153,7 @@ def _profile(profile_id: _ProfileId, mirror_index: int) -> dict[str, object]:
             )[len(warm) // 2],
             "warm_total_seconds_mad": 0.01,
             "peak_timing_process_tree_rss_bytes": max(
-                int(sample["peak_process_tree_rss_bytes"])
-                for sample in warm
+                int(sample["peak_process_tree_rss_bytes"]) for sample in warm
             ),
             "peak_allocation_gpu_process_bytes": (
                 1_500_000_000 if device == "gpu" else None
@@ -212,8 +211,7 @@ def _artifact() -> dict[str, object]:
             "cold": list(build_measurement_schedule(mirror_index).cold),
             "warmup": list(build_measurement_schedule(mirror_index).warmup),
             "warm": [
-                list(order)
-                for order in build_measurement_schedule(mirror_index).warm
+                list(order) for order in build_measurement_schedule(mirror_index).warm
             ],
         },
         "profiles": {
