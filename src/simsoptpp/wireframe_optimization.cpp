@@ -267,7 +267,7 @@ std::tuple<Array,IntArray,IntArray,Array,IntArray,Array,Array,Array> GSCO(
             stop_none_eligible = true;
             accept_current_loop = false;
         }
-        else if (i > 0 && (opt_ind + nLoops % (twoNLoops)) == opt_ind_prev) {
+        else if (i > 0 && ((opt_ind + nLoops) % twoNLoops) == opt_ind_prev) {
             stop_undone_loop = true;
             if (two_fs[opt_ind] > two_f_latest) {
                 accept_current_loop = false;
@@ -534,5 +534,4 @@ void check_eligibility(int nLoops, double default_current, double max_current,
     }
 
 }
-
 
