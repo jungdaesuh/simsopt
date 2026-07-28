@@ -209,6 +209,19 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     # here so manifest routes never embed or silently relax tolerances.
     "mirror_boozer_value": {"rtol": 1e-3, "atol": 1e-8},
     "mirror_boozer_parameters": {"rtol": 0.0, "atol": 2e-3},
+    "mirror_single_stage_initial_objective": {
+        "rtol": 1e-12,
+        "atol": 1e-15,
+    },
+    "mirror_single_stage_initial_gradient": {
+        "rtol": 2e-9,
+        "atol": 2e-12,
+    },
+    "mirror_single_stage_final_value": {"rtol": 2e-8, "atol": 2e-12},
+    "mirror_single_stage_final_parameters": {
+        "rtol": 2e-8,
+        "atol": 2e-10,
+    },
     "mirror_optimization_5e2": {"rtol": 5e-2, "atol": 1e-9},
     "mirror_optimization_3e2": {"rtol": 3e-2, "atol": 1e-9},
     "mirror_optimization_2e2": {"rtol": 2e-2, "atol": 1e-9},

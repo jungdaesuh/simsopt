@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -28,19 +29,61 @@ WORKFLOW_STAGES = (
 )
 
 
-def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
+@dataclass(frozen=True)
+class BoozerSingleStageSpec:
+    """Immutable scientific differences between Boozer single-stage examples."""
+
+    case_id: str
+    workflow_stages: tuple[str, ...]
+    bounded_resolution: int
+    native_resolution: int
+    inner_tolerance: float
+    bounded_outer_maxiter: int
+    native_outer_maxiter: int
+    bounded_non_qs_sdim: int
+    native_non_qs_sdim: int
+    residual_weight: float
+    report_residual: bool
+
+
+BOOZER_QA_SPEC = BoozerSingleStageSpec(
+    case_id="native-boozerqa",
+    workflow_stages=WORKFLOW_STAGES,
+    bounded_resolution=2,
+    native_resolution=6,
+    inner_tolerance=1.0e-10,
+    bounded_outer_maxiter=5,
+    native_outer_maxiter=1_000,
+    bounded_non_qs_sdim=20,
+    native_non_qs_sdim=20,
+    residual_weight=0.0,
+    report_residual=False,
+)
+
+
+def _scale_configuration(
+    scale: ExecutionScale,
+    spec: BoozerSingleStageSpec,
+) -> dict[str, object]:
     native_scale = scale == "native_default"
+    resolution = spec.native_resolution if native_scale else spec.bounded_resolution
     return {
-        "mpol": 6 if native_scale else 2,
-        "ntor": 6 if native_scale else 2,
+        "mpol": resolution,
+        "ntor": resolution,
         "inner_maxiter": 20,
-        "inner_tolerance": 1.0e-10,
-        "outer_maxiter": 1_000 if native_scale else 5,
+        "inner_tolerance": spec.inner_tolerance,
+        "outer_maxiter": (
+            spec.native_outer_maxiter if native_scale else spec.bounded_outer_maxiter
+        ),
         "outer_rtol": 0.0,
         "outer_atol": 1.0e-15,
         "initial_iota": -0.406,
         "surface_distance": 0.10,
-        "non_qs_sdim": 20,
+        "non_qs_sdim": (
+            spec.native_non_qs_sdim if native_scale else spec.bounded_non_qs_sdim
+        ),
+        "residual_weight": spec.residual_weight,
+        "report_residual": spec.report_residual,
         "reduced_coil_order": 3,
         "reduced_axis_order": 3,
         "reduced_points_per_period": 8,
@@ -121,9 +164,13 @@ def _problem(configuration: Mapping[str, object], scale: ExecutionScale):
     )
 
 
-def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
-    """Freeze reduced/full NCSX and initial surface state for every lane."""
-    configuration = _scale_configuration(scale)
+def create_variant_input(
+    root: Path,
+    scale: ExecutionScale,
+    spec: BoozerSingleStageSpec,
+) -> InputBundle:
+    """Freeze one configured Boozer single-stage problem for every lane."""
+    configuration = _scale_configuration(scale, spec)
     (
         _base_curves,
         _base_currents,
@@ -135,7 +182,7 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     ) = _problem(configuration, scale)
     return create_input_bundle(
         root,
-        case_id="native-boozerqa",
+        case_id=spec.case_id,
         random_seed=1,
         arrays={
             "axis_dofs": np.asarray(
@@ -152,6 +199,11 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
         },
         scale=scale,
     )
+
+
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
+    """Freeze the bounded/full Boozer-QA state for every lane."""
+    return create_variant_input(root, scale, BOOZER_QA_SPEC)
 
 
 def _array_digest(array: np.ndarray) -> str:
@@ -177,11 +229,13 @@ def _effective_fingerprint(
 def _native(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
+    spec: BoozerSingleStageSpec,
 ) -> LaneObservation:
     from scipy.optimize import minimize
     from simsopt.field import BiotSavart
     from simsopt.geo import (
         BoozerSurface,
+        BoozerResidual,
         CurveLength,
         Iotas,
         MajorRadius,
@@ -219,7 +273,9 @@ def _native(
     non_qs = NonQuasiSymmetricRatio(
         solver,
         BiotSavart(native_field.coils),
+        sDIM=_configuration_int(bundle.configuration, "non_qs_sdim"),
     )
+    residual = BoozerResidual(solver, native_field)
     iota_penalty = QuadraticPenalty(Iotas(solver), iota_target, "identity")
     radius_penalty = QuadraticPenalty(
         major_radius,
@@ -231,7 +287,13 @@ def _native(
         float(sum(lengths).J()),
         "max",
     )
-    objective = non_qs + iota_penalty + radius_penalty + length_penalty
+    objective = (
+        non_qs
+        + _configuration_float(bundle.configuration, "residual_weight") * residual
+        + iota_penalty
+        + radius_penalty
+        + length_penalty
+    )
     initial_parameters = np.asarray(objective.x, dtype=np.float64)
 
     def value_and_grad(parameters: np.ndarray) -> tuple[float, np.ndarray]:
@@ -275,8 +337,10 @@ def _native(
         final_volume=float(volume.J()),
         final_major_radius_penalty=float(radius_penalty.J()),
         final_length_penalty=float(length_penalty.J()),
+        final_boozer_residual=float(residual.J()),
         inner_solver_success=bool(solver.res["success"]),
         outer_solver_success=bool(optimizer_result.success),
+        report_residual=spec.report_residual,
     )
     return _observation(
         "native-cpu",
@@ -285,6 +349,7 @@ def _native(
         platform="cpu",
         precision="fp64",
         driver="simsopt_scipy_bfgs_with_boozer_newton",
+        workflow_stages=spec.workflow_stages,
     )
 
 
@@ -304,6 +369,7 @@ def _jax(
     lane: ParityLane,
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
+    spec: BoozerSingleStageSpec,
 ) -> LaneObservation:
     import jax
     from simsopt.geo import CurveLength, Volume
@@ -362,7 +428,10 @@ def _jax(
     total_length_target = float(sum(CurveLength(curve).J() for curve in base_curves))
     objective_configuration: dict[str, object] = {
         "non_qs_weight": 1.0,
-        "residual_weight": 0.0,
+        "residual_weight": _configuration_float(
+            bundle.configuration,
+            "residual_weight",
+        ),
         "iota_weight": 1.0,
         "major_radius_weight": 1.0,
         "length_weight": 1.0,
@@ -493,8 +562,10 @@ def _jax(
             final_metrics["final_major_radius_penalty"]
         ),
         final_length_penalty=_host_float(final_metrics["final_length_penalty"]),
+        final_boozer_residual=_host_float(final_metrics["final_boozer_residual"]),
         inner_solver_success=_host_bool(final_metrics["solver_success"]),
         outer_solver_success=bool(optimizer_result.converged),
+        report_residual=spec.report_residual,
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
@@ -505,6 +576,7 @@ def _jax(
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
         driver="simsopt_jax_host_bfgs_with_traceable_boozer_newton",
+        workflow_stages=spec.workflow_stages,
     )
 
 
@@ -525,10 +597,12 @@ def _values(
     final_volume: float,
     final_major_radius_penalty: float,
     final_length_penalty: float,
+    final_boozer_residual: float,
     inner_solver_success: bool,
     outer_solver_success: bool,
+    report_residual: bool,
 ) -> dict[str, np.ndarray]:
-    return {
+    values = {
         "construction:surface_dofs": surface_dofs,
         "construction:coil_dofs": coil_dofs,
         "initial:parameters": initial_parameters,
@@ -559,6 +633,16 @@ def _values(
             dtype=np.bool_,
         ),
     }
+    if report_residual:
+        values["final:boozer_residual"] = np.asarray(
+            final_boozer_residual,
+            dtype=np.float64,
+        )
+        values["final:boozer_residual_rms"] = np.asarray(
+            np.sqrt(2.0 * final_boozer_residual),
+            dtype=np.float64,
+        )
+    return values
 
 
 def _observation(
@@ -569,6 +653,7 @@ def _observation(
     platform: str,
     precision: str,
     driver: str,
+    workflow_stages: tuple[str, ...],
 ) -> LaneObservation:
     success = bool(
         np.all(np.isfinite(values["initial:gradient"]))
@@ -603,7 +688,7 @@ def _observation(
         nit=None,
         nfev=None,
         njev=None,
-        completed_workflow_stages=WORKFLOW_STAGES,
+        completed_workflow_stages=workflow_stages,
         provenance=None,
         values=values,
     )
@@ -615,6 +700,16 @@ def execute(
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     """Execute the matched Boozer-QA coil optimization."""
+    return execute_variant(lane, bundle, arrays, BOOZER_QA_SPEC)
+
+
+def execute_variant(
+    lane: ParityLane,
+    bundle: InputBundle,
+    arrays: dict[str, np.ndarray],
+    spec: BoozerSingleStageSpec,
+) -> LaneObservation:
+    """Execute one configured native/JAX Boozer single-stage workflow."""
     if lane == "native-cpu":
-        return _native(bundle, arrays)
-    return _jax(lane, bundle, arrays)
+        return _native(bundle, arrays, spec)
+    return _jax(lane, bundle, arrays, spec)
