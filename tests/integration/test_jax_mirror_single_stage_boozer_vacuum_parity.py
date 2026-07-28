@@ -56,6 +56,10 @@ def test_single_stage_boozer_vacuum_case_matches_native_and_jax_cpu(
 
     assert native.success is True
     assert jax.success is True
+    for observation in (native, jax):
+        assert observation.nit is not None and observation.nit > 0
+        assert observation.nfev is not None and observation.nfev > 0
+        assert observation.njev is not None and observation.njev > 0
     assert native.effective_construction_fingerprint == (
         jax.effective_construction_fingerprint
     )
