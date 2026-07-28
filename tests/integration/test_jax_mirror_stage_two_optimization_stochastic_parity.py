@@ -61,8 +61,9 @@ def test_exact_stochastic_stage_two_matches_native_and_jax_cpu(
         )
 
     for observation in (native, jax):
-        assert observation.values["final:objective"] < (
-            observation.values["initial:objective"]
+        assert (
+            observation.values["final:objective"]
+            < (observation.values["initial:objective"])
         )
         assert np.all(np.isfinite(observation.values["final:parameters"]))
         assert np.all(np.isfinite(observation.values["final:objective_gradient"]))
