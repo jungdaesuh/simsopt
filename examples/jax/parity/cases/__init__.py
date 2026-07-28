@@ -36,17 +36,23 @@ from examples.jax.parity.cases.native_qfm import (
     create_input as create_native_qfm_input,
 )
 from examples.jax.parity.cases.native_qfm import execute as execute_native_qfm
+from examples.jax.parity.cases.native_stage_two_optimization import (
+    create_input as create_native_stage_two_optimization_input,
+)
+from examples.jax.parity.cases.native_stage_two_optimization import (
+    execute as execute_native_stage_two_optimization,
+)
 from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
     create_input as create_native_stage_two_optimization_minimal_input,
 )
 from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
     execute as execute_native_stage_two_optimization_minimal,
 )
-from examples.jax.parity.cases.native_stage_two_optimization import (
-    create_input as create_native_stage_two_optimization_input,
+from examples.jax.parity.cases.native_stage_two_optimization_planar_coils import (
+    create_input as create_native_stage_two_optimization_planar_coils_input,
 )
-from examples.jax.parity.cases.native_stage_two_optimization import (
-    execute as execute_native_stage_two_optimization,
+from examples.jax.parity.cases.native_stage_two_optimization_planar_coils import (
+    execute as execute_native_stage_two_optimization_planar_coils,
 )
 from examples.jax.parity.cases.native_strain_optimization import (
     create_input as create_native_strain_optimization_input,
@@ -133,6 +139,11 @@ _CASES = {
         case_id="native-stage-two-optimization",
         create_input=create_native_stage_two_optimization_input,
         execute=execute_native_stage_two_optimization,
+    ),
+    "native-stage-two-optimization-planar-coils": CaseDefinition(
+        case_id="native-stage-two-optimization-planar-coils",
+        create_input=create_native_stage_two_optimization_planar_coils_input,
+        execute=execute_native_stage_two_optimization_planar_coils,
     ),
     "native-strain-optimization": CaseDefinition(
         case_id="native-strain-optimization",
