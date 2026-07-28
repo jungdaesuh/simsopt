@@ -6,6 +6,12 @@ name: JAX GPU Parity
 
 on:
   workflow_dispatch:
+    inputs:
+      run_native_default:
+        description: Run the unbudgeted native-default example authority lane
+        required: true
+        default: false
+        type: boolean
   schedule:
     # Sunday midnight UTC
     - cron: "0 0 * * 0"
@@ -183,7 +189,7 @@ jobs:
   native-jax-example-parity:
     name: Native/JAX example parity (CUDA strict)
     runs-on: [self-hosted, gpu]
-    timeout-minutes: 60
+    timeout-minutes: 720
     env:
       BENCHMARK_ENV_NAME: jax
       BENCHMARK_ENV_FILE: envs/jax.yml
@@ -222,6 +228,17 @@ jobs:
             python examples/jax/run_parity.py \
               --case all-applicable \
               --lanes native-cpu,jax-cpu,jax-gpu \
+              --scale bounded \
+              --artifact-root .artifacts/jax-example-parity
+
+      - name: Run manual native-default native/JAX parity
+        if: github.event_name == 'workflow_dispatch' && inputs.run_native_default
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_parity.py \
+              --case all-applicable \
+              --lanes native-cpu,jax-cpu,jax-gpu \
+              --scale native_default \
               --artifact-root .artifacts/jax-example-parity
 
       - name: Upload native/JAX parity receipts

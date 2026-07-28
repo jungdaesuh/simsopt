@@ -225,18 +225,18 @@ jobs:
             -v --tb=short
 
       - name: Run JAX examples on CPU in fast-default mode
-        run: python examples/jax/run_examples.py --device cpu
+        run: python examples/jax/run_examples.py --device cpu --scale bounded
 
       - name: Run JAX examples on CPU in explicit parity mode
-        run: python examples/jax/run_examples.py --device cpu --intent parity
+        run: python examples/jax/run_examples.py --device cpu --intent parity --scale bounded
 
       - name: Run native/JAX CPU example parity
         run: |
-          python examples/jax/run_parity.py \
-            --case all-applicable \
-            --lanes native-cpu,jax-cpu \
-            --smoke \
-            --artifact-root .artifacts/jax-example-parity
+            python examples/jax/run_parity.py \
+              --case all-applicable \
+              --lanes native-cpu,jax-cpu \
+              --scale bounded \
+              --artifact-root .artifacts/jax-example-parity
 
       - name: Upload native/JAX CPU parity receipts
         if: always()
@@ -293,12 +293,12 @@ jobs:
       - name: Run JAX examples on GPU in fast-default mode
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python examples/jax/run_examples.py --device gpu
+            python examples/jax/run_examples.py --device gpu --scale bounded
 
       - name: Run JAX examples on GPU in explicit parity mode
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python examples/jax/run_examples.py --device gpu --intent parity
+            python examples/jax/run_examples.py --device gpu --intent parity --scale bounded
 
       - name: Run native/JAX strict GPU example parity
         run: |
@@ -306,7 +306,7 @@ jobs:
             python examples/jax/run_parity.py \
               --case all-applicable \
               --lanes native-cpu,jax-cpu,jax-gpu \
-              --smoke \
+              --scale bounded \
               --artifact-root .artifacts/jax-example-parity
 
       - name: Upload native/JAX strict GPU parity receipts
