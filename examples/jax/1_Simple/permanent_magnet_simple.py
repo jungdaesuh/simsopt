@@ -15,6 +15,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from simsopt.field import ToroidalField
 from simsopt.geo import PermanentMagnetGrid, SurfaceRZFourier
@@ -59,31 +60,36 @@ def _build_grid() -> PermanentMagnetGridJAX:
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     grid = _build_grid()
-    initial_residual = np.asarray(jax.device_get(-grid.b_obj), dtype=np.float64)
     result = GPMO_baseline_jax(grid, K=max_steps)
-    final_moments = np.asarray(jax.device_get(result.m), dtype=np.float64)
-    final_residual = np.asarray(
-        jax.device_get(result.core_result.residual), dtype=np.float64
+    device_publication = (
+        jnp.linalg.norm(grid.b_obj),
+        jnp.linalg.norm(result.residual),
+        result.selected_dipoles,
+        jnp.count_nonzero(jnp.linalg.norm(result.m, axis=1)) / grid.ndipoles,
+        jnp.all(jnp.isfinite(result.m)),
+        result.m,
     )
-    selected = np.asarray(jax.device_get(result.selected_dipoles), dtype=np.int64)
-    initial_error = float(np.linalg.norm(initial_residual))
-    final_error = float(np.linalg.norm(final_residual))
-    nonzero_fraction = float(
-        np.count_nonzero(np.linalg.norm(final_moments, axis=1)) / grid.ndipoles
-    )
+    (
+        initial_error,
+        final_error,
+        selected,
+        nonzero_fraction,
+        finite_moments,
+        final_moments,
+    ) = jax.device_get(device_publication)
     scientific_success = bool(
         selected.size == max_steps
-        and np.all(np.isfinite(final_moments))
+        and finite_moments
         and final_error < initial_error
         and nonzero_fraction > 0.0
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
-            "initial_normal_error": initial_error,
-            "final_normal_error": final_error,
+            "initial_normal_error": float(initial_error),
+            "final_normal_error": float(final_error),
             "selected_dipoles": tuple(int(value) for value in selected),
-            "nonzero_fraction": nonzero_fraction,
+            "nonzero_fraction": float(nonzero_fraction),
             "solver_success": scientific_success,
             "moments": tuple(
                 tuple(float(component) for component in row) for row in final_moments
