@@ -33,7 +33,10 @@ def test_vmec_hybrid_keeps_vmec_on_host_and_jax_slice_explicit() -> None:
 
     assert "Vmec" in imported_names
     assert "BiotSavartJAX" in imported_names
+    assert "scalar_example_driver" in imported_names
+    assert "minimize_bfgs_host_core" in imported_names
     assert "minimize_lbfgs_host_core" in imported_names
+    assert "line_search_value_and_grad_more_thuente_host" in imported_names
     assert "pure_callback" not in called_attributes
 
 
