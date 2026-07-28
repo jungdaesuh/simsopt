@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -15,6 +14,7 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples import ExecutionScale
 
 if TYPE_CHECKING:
     import jax
@@ -120,12 +120,19 @@ def _global_column_swap_jacobian_invariants(
 
     The normalized difference association couples every residual row, so an
     independent row-wise column swap cannot masquerade as a global exchange.
+    Differences at roundoff scale are treated as exact column coincidence so
+    the normalization does not amplify an arbitrary native/JAX sign.
     """
     column_difference = left - right
     difference_scale = abs(column_difference).max()
-    normalized_difference = column_difference / (
-        difference_scale + (difference_scale == 0)
+    value_scale = abs(left).max() + abs(right).max()
+    roundoff_threshold = (
+        128.0 * np.finfo(np.dtype(left.dtype)).eps * (value_scale + (value_scale == 0))
     )
+    active = difference_scale > roundoff_threshold
+    normalized_difference = (
+        column_difference / (difference_scale + (difference_scale == 0))
+    ) * active
     return (
         left + right,
         left * right,

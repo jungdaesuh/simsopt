@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases.coil_flux import create_input as create_coil_flux_input
 from examples.jax.parity.cases.coil_flux import execute as execute_coil_flux
@@ -26,6 +25,12 @@ from examples.jax.parity.cases.native_minimize_curve_length import (
 )
 from examples.jax.parity.cases.native_minimize_curve_length import (
     execute as execute_native_minimize_curve_length,
+)
+from examples.jax.parity.cases.native_surf_vol_area import (
+    create_input as create_native_surf_vol_area_input,
+)
+from examples.jax.parity.cases.native_surf_vol_area import (
+    execute as execute_native_surf_vol_area,
 )
 from examples.jax.parity.cases.permanent_magnet import (
     create_input as create_permanent_magnet_input,
@@ -49,6 +54,7 @@ from examples.jax.parity.cases.wireframe import create_input as create_wireframe
 from examples.jax.parity.cases.wireframe import execute as execute_wireframe
 from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples import ExecutionScale
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,11 @@ _CASES = {
         case_id="native-minimize-curve-length",
         create_input=create_native_minimize_curve_length_input,
         execute=execute_native_minimize_curve_length,
+    ),
+    "native-surf-vol-area": CaseDefinition(
+        case_id="native-surf-vol-area",
+        create_input=create_native_surf_vol_area_input,
+        execute=execute_native_surf_vol_area,
     ),
     "traceable-least-squares": CaseDefinition(
         case_id="traceable-least-squares",
