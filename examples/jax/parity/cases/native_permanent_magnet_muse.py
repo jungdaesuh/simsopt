@@ -382,7 +382,6 @@ def _jax(
             {
                 "response_matrix": grid.A_obj,
                 "target": grid.b_obj,
-                "normal_norms": put("normal_norms"),
                 "atb": grid.ATb,
                 "ata_scale": grid.ATA_scale,
                 "initial_moments": grid.m0,
@@ -395,8 +394,11 @@ def _jax(
         )
     )
     host_arrays = {
-        name: np.asarray(value, dtype=arrays[name].dtype)
-        for name, value in construction_arrays.items()
+        **arrays,
+        **{
+            name: np.asarray(value, dtype=arrays[name].dtype)
+            for name, value in construction_arrays.items()
+        },
     }
     values = _values(
         arrays=host_arrays,
