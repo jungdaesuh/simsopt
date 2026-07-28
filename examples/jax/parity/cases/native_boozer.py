@@ -321,8 +321,12 @@ def _jax(
     )
     initial_x = jnp.concatenate(
         (
-            jnp.asarray(arrays["surface_dofs"], dtype=jnp.float64),
-            jnp.asarray([initial_iota, G0], dtype=jnp.float64),
+            jax.device_put(
+                np.asarray(arrays["surface_dofs"], dtype=np.float64)
+            ),
+            jax.device_put(
+                np.asarray([initial_iota, G0], dtype=np.float64)
+            ),
         )
     )
     kernels = solver._get_penalty_kernel_bundle(
