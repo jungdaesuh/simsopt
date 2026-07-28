@@ -26,6 +26,7 @@ from benchmarks.run_jax_native_example_measurements import (
     build_measurement_schedule,
     build_profile_command,
     classify_termination,
+    evaluate_gpu_concurrent_load_preflight,
     execute_monitored_command,
     parse_nvidia_smi_compute_apps,
     publish_artifact_exclusive,
@@ -611,3 +612,35 @@ def test_cpu_child_measurement_uses_parent_process_tree_rss_polling(
     assert (tmp_path / "child.stdout").read_text(encoding="utf-8").strip() == str(
         16 * 1024**2
     )
+
+
+def test_gpu_preflight_records_bounded_concurrent_use() -> None:
+    detail = evaluate_gpu_concurrent_load_preflight(
+        processes={101: 512 * 1024**2, 202: 256 * 1024**2},
+        utilization_samples=((3, 1), (2, 1), (4, 2), (1, 1), (2, 1)),
+        total_memory_bytes=32 * 1024**3,
+    )
+
+    assert detail.startswith("pass:")
+    assert "101:536870912" in detail
+    assert "max_gpu_utilization_percent=4" in detail
+
+
+@pytest.mark.parametrize(
+    ("processes", "samples", "match"),
+    (
+        ({}, ((6, 1),) * 5, "utilization"),
+        ({101: 2 * 1024**3}, ((1, 1),) * 5, "memory"),
+    ),
+)
+def test_gpu_preflight_rejects_material_concurrent_use(
+    processes: dict[int, int],
+    samples: tuple[tuple[int, int], ...],
+    match: str,
+) -> None:
+    with pytest.raises(MeasurementRunnerError, match=match):
+        evaluate_gpu_concurrent_load_preflight(
+            processes=processes,
+            utilization_samples=samples,
+            total_memory_bytes=32 * 1024**3,
+        )
