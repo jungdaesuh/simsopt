@@ -424,6 +424,7 @@ def test_child_command_is_exact_and_bounded(tmp_path: Path) -> None:
     )
     assert command == (
         "/venv/bin/python",
+        "-S",
         "-m",
         "examples.jax.parity.child",
         "--case",
