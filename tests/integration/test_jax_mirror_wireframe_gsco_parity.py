@@ -15,6 +15,7 @@ from examples.jax.parity.input_bundle import load_input_bundle
     (
         "native-wireframe-gsco-modular",
         "native-wireframe-gsco-sector-saddle",
+        "native-wireframe-gsco-multistep",
     ),
 )
 def test_exact_wireframe_gsco_matches_native_and_jax_cpu(
