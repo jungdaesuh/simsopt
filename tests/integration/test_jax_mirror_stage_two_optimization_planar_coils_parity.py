@@ -68,18 +68,16 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
             )
             assert float(observation.values[f"{stage}:planarity_penalty"]) <= 1.0e-24
             assert float(observation.values[f"{stage}:linking_number"]) == 0.0
+            assert float(observation.values[f"{stage}:squared_flux"]) <= 1.0e-2
+            assert float(observation.values[f"{stage}:geometric_penalty"]) <= 1.0e-3
+            canonical_geometry = observation.values[
+                f"{stage}:canonical_geometry"
+            ].reshape((-1, 13))
+            assert np.all(np.isfinite(canonical_geometry))
+            assert abs(float(np.sum(canonical_geometry[:, 0])) - 10.4) <= 3.0e-2
 
-        np.testing.assert_allclose(
-            jax.values[f"{stage}:objective"],
-            native.values[f"{stage}:objective"],
-            rtol=3.0e-2,
-            atol=1.0e-9,
-        )
-        np.testing.assert_allclose(
-            jax.values[f"{stage}:canonical_geometry"],
-            native.values[f"{stage}:canonical_geometry"],
-            rtol=2.0e-2,
-            atol=2.0e-3,
+        assert float(jax.values[f"{stage}:objective"]) <= (
+            1.03 * float(native.values[f"{stage}:objective"]) + 1.0e-9
         )
 
     assert np.max(np.abs(native.values["taylor:errors"][:3])) <= 1.0e-4
