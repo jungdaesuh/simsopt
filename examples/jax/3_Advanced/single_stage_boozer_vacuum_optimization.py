@@ -34,7 +34,7 @@ from simsopt_jax_adapters.geo.surface_objectives import (
     traceable_forward_result_outer_raw_terms,
 )
 
-EXAMPLE_ID = "native-single-stage-boozer-vacuum"
+EXAMPLE_ID = "native-single-stage-boozer-vacuum-optimization"
 NATIVE_ITERATIONS = 1000
 
 

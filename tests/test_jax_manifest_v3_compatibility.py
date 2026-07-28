@@ -24,8 +24,12 @@ def _document(relative_path: str) -> dict[str, object]:
 
 def _candidate() -> dict[str, object]:
     candidate = build_v3_candidates(
-        examples_v2_document=_document("examples/jax/manifest.json"),
-        parity_v1_document=_document("examples/jax/parity_manifest.json"),
+        examples_v2_document=_document(
+            "tests/fixtures/jax_manifests/manifest_v2.json"
+        ),
+        parity_v1_document=_document(
+            "tests/fixtures/jax_manifests/parity_manifest_v1.json"
+        ),
         inventory_document=_document("examples/jax/one_to_one_inventory.json"),
         repo_root=REPO_ROOT,
     )

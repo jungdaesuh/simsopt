@@ -527,13 +527,14 @@ def convert_v1_document_to_v2(
     document: object,
     *,
     repo_root: Path,
+    allow_historical_catalog: bool = False,
 ) -> tuple[bytes, dict[str, bool]]:
     """Return deterministic v2 bytes after proving semantic equivalence."""
     before = _parse_manifest_document(
         document,
         repo_root=repo_root,
         warn_legacy=False,
-        allow_historical_catalog=False,
+        allow_historical_catalog=allow_historical_catalog,
     )
     if before.schema_version != 1:
         raise ManifestValidationError("migration input must use absent-schema v1")
@@ -555,7 +556,7 @@ def convert_v1_document_to_v2(
         candidate,
         repo_root=repo_root,
         warn_legacy=False,
-        allow_historical_catalog=False,
+        allow_historical_catalog=allow_historical_catalog,
     )
     semantic_diff = manifest_semantic_diff(before, after)
     if not semantic_diff["semantic_equal"]:
