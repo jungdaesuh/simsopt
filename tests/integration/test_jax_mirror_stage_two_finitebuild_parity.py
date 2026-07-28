@@ -10,6 +10,17 @@ from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
 
 
+def test_exact_finitebuild_uses_traceable_runtime_boundaries() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "examples/jax/parity/cases/native_stage_two_optimization_finitebuild.py"
+    ).read_text(encoding="utf-8")
+
+    assert "TraceableArrayFunction" in source
+    assert "jax.value_and_grad(objective)" not in source
+    assert "jax.value_and_grad(scaled_objective)" not in source
+
+
 def test_exact_finitebuild_matches_native_and_jax_cpu(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
