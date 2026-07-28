@@ -42,6 +42,12 @@ from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
 from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
     execute as execute_native_stage_two_optimization_minimal,
 )
+from examples.jax.parity.cases.native_stage_two_optimization import (
+    create_input as create_native_stage_two_optimization_input,
+)
+from examples.jax.parity.cases.native_stage_two_optimization import (
+    execute as execute_native_stage_two_optimization,
+)
 from examples.jax.parity.cases.native_strain_optimization import (
     create_input as create_native_strain_optimization_input,
 )
@@ -122,6 +128,11 @@ _CASES = {
         case_id="native-stage-two-optimization-minimal",
         create_input=create_native_stage_two_optimization_minimal_input,
         execute=execute_native_stage_two_optimization_minimal,
+    ),
+    "native-stage-two-optimization": CaseDefinition(
+        case_id="native-stage-two-optimization",
+        create_input=create_native_stage_two_optimization_input,
+        execute=execute_native_stage_two_optimization,
     ),
     "native-strain-optimization": CaseDefinition(
         case_id="native-strain-optimization",
