@@ -7,16 +7,16 @@ from pathlib import Path
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
-from examples.jax.parity.cases.surface_geometry import (
-    _global_column_swap_jacobian_invariants,
-    _parameter_invariants,
-)
 from examples.jax.parity.input_bundle import (
     InputBundle,
     create_input_bundle,
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.symmetry import (
+    global_column_swap_jacobian_invariants,
+    parameter_invariants,
+)
 from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
@@ -127,7 +127,7 @@ def _state(
     jacobian: np.ndarray,
 ) -> dict[str, np.ndarray]:
     column_sum, column_product, column_association = (
-        _global_column_swap_jacobian_invariants(
+        global_column_swap_jacobian_invariants(
             jacobian[:, 0],
             jacobian[:, 1],
         )
@@ -138,7 +138,7 @@ def _state(
     objective_gradient = 2.0 * jacobian.T @ residual
     return {
         f"{prefix}:parameters": parameters,
-        f"{prefix}:parameter_invariants": _parameter_invariants(parameters),
+        f"{prefix}:parameter_invariants": parameter_invariants(parameters),
         f"{prefix}:area": np.asarray(area, dtype=np.float64),
         f"{prefix}:volume": np.asarray(volume, dtype=np.float64),
         f"{prefix}:residual": residual,
@@ -149,7 +149,7 @@ def _state(
             dtype=np.float64,
         ),
         f"{prefix}:objective_gradient": objective_gradient,
-        f"{prefix}:objective_gradient_invariants": _parameter_invariants(
+        f"{prefix}:objective_gradient_invariants": parameter_invariants(
             objective_gradient
         ),
     }
