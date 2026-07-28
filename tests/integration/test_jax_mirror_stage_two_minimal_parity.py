@@ -36,6 +36,9 @@ def test_exact_stage_two_minimal_matches_native_and_jax_cpu(
     assert native.scale == jax.scale == "bounded"
     assert native.input_fingerprint == jax.input_fingerprint
     assert native.configuration_fingerprint == jax.configuration_fingerprint
+    assert native.effective_construction_fingerprint == (
+        jax.effective_construction_fingerprint
+    )
     assert native.completed_workflow_stages == jax.completed_workflow_stages
     assert set(native.values) == set(jax.values)
 
