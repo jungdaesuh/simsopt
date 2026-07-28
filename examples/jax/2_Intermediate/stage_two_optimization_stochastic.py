@@ -46,6 +46,7 @@ from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-stage-two-optimization-stochastic"
 NATIVE_ITERATIONS = 400
+_STOCHASTIC_LBFGS_HISTORY_SIZE = 10
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
@@ -249,7 +250,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             problem,
             driver=driver,
             max_steps=max_steps,
-            maxcor=min(max_steps, 400),
+            maxcor=_STOCHASTIC_LBFGS_HISTORY_SIZE,
             rtol=1.0e-15,
             atol=1.0e-8,
             require_success=False,
@@ -264,7 +265,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             atol=1.0e-8,
             require_success=False,
         )
-    solution_device = jax.block_until_ready(problem.x)
+    solution_device = problem.x
     final_objective_device, final_gradient_device = problem.value_and_grad(
         solution_device
     )
@@ -278,22 +279,40 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         ),
         x=solution_device,
     )
-    flux_diagnostics_device = jax.block_until_ready(diagnostic(solution_device))
-    initial = np.asarray(jax.device_get(initial_device), dtype=np.float64)
-    initial_gradient = np.asarray(
-        jax.device_get(initial_gradient_device), dtype=np.float64
-    )
-    solution = np.asarray(jax.device_get(solution_device), dtype=np.float64)
-    final_gradient = np.asarray(jax.device_get(final_gradient_device), dtype=np.float64)
-    objective_values = np.asarray(
-        jax.device_get(
-            jnp.concatenate(
-                (
-                    jnp.stack((initial_objective_device, final_objective_device)),
-                    flux_diagnostics_device,
-                )
+    flux_diagnostics_device = diagnostic(solution_device)
+    (
+        initial,
+        initial_gradient,
+        solution,
+        final_gradient,
+        objective_values,
+    ) = jax.device_get(
+        jax.block_until_ready(
+            (
+                initial_device,
+                initial_gradient_device,
+                solution_device,
+                final_gradient_device,
+                jnp.concatenate(
+                    (
+                        jnp.stack(
+                            (
+                                initial_objective_device,
+                                final_objective_device,
+                            )
+                        ),
+                        flux_diagnostics_device,
+                    )
+                ),
             )
-        ),
+        )
+    )
+    initial = np.asarray(initial, dtype=np.float64)
+    initial_gradient = np.asarray(initial_gradient, dtype=np.float64)
+    solution = np.asarray(solution, dtype=np.float64)
+    final_gradient = np.asarray(final_gradient, dtype=np.float64)
+    objective_values = np.asarray(
+        objective_values,
         dtype=np.float64,
     )
     (
