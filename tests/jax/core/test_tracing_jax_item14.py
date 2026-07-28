@@ -1078,6 +1078,44 @@ def test_trace_guiding_center_and_fullorbit_jaxprs_use_scan():
     assert "while" not in fullorbit_primitives
 
 
+def test_fast_fieldline_loop_uses_while_and_matches_differentiable_scan():
+    """Fast tracing exits early while preserving the parity-loop result."""
+
+    def field_fn(_point: jax.Array) -> jax.Array:
+        return jnp.asarray([0.0, 1.0, 0.0], dtype=jnp.float64)
+
+    scan_spec = FieldlineTracingSpec(
+        tmax=0.05,
+        rtol=1.0e-10,
+        atol=1.0e-10,
+        max_steps=4_000,
+        dtmax=0.01,
+    )
+    while_spec = replace(scan_spec, adaptive_loop="while")
+    y0 = jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+
+    scan_result = trace_fieldline(scan_spec, y0, field_fn)
+    while_result = trace_fieldline(while_spec, y0, field_fn)
+
+    while_jaxpr = jax.make_jaxpr(
+        lambda initial: trace_fieldline(while_spec, initial, field_fn).t_final
+    )(y0)
+    primitives = _top_level_primitives(while_jaxpr)
+    assert "while" in primitives
+    assert "scan" not in primitives
+    np.testing.assert_allclose(
+        np.asarray(while_result.trajectory),
+        np.asarray(scan_result.trajectory),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(while_result.mask),
+        np.asarray(scan_result.mask),
+    )
+    assert int(np.asarray(while_result.steps_taken)) < scan_spec.max_steps
+
+
 def test_trajectory_batch_sharding_summary_surfaces_axis_contract():
     """Trace-batch sharding metadata is inspectable without multi-GPU hardware."""
 
