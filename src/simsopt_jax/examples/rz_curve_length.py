@@ -12,6 +12,7 @@ from simsopt_jax.core.curve_geometry import (
     curve_spec_with_dofs,
 )
 from simsopt_jax.core.specs import make_curve_rzfourier_spec
+from simsopt_jax.core.specs import CurveRZFourierSpec
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
@@ -38,6 +39,24 @@ def _partition_curve_dofs(
     free_dofs = full_dofs[free_positions]
     fixed_dofs = full_dofs.at[free_positions].set(jnp.zeros_like(free_dofs))
     return fixed_dofs, free_dofs
+
+
+@jax.jit
+def _curve_length_from_free_dofs(
+    free_dofs: jax.Array,
+    fixed_dofs: jax.Array,
+    free_positions: jax.Array,
+    spec: CurveRZFourierSpec,
+) -> jax.Array:
+    current_full = fixed_dofs.at[free_positions].set(free_dofs)
+    current_spec = curve_spec_with_dofs(spec, current_full)
+    incremental_arclength = curve_incremental_arclength_from_spec(current_spec)
+    return curve_length_pure(incremental_arclength)
+
+
+_curve_length_value_and_grad = jax.jit(
+    jax.value_and_grad(_curve_length_from_free_dofs, argnums=0)
+)
 
 
 def solve_rz_curve_length(
@@ -68,18 +87,22 @@ def solve_rz_curve_length(
     )
 
     def length(parameters: jax.Array) -> jax.Array:
-        current_full = fixed_dofs.at[free_positions_device].set(parameters)
-        current_spec = curve_spec_with_dofs(spec, current_full)
-        incremental_arclength = curve_incremental_arclength_from_spec(current_spec)
-        return curve_length_pure(incremental_arclength)
+        return _curve_length_from_free_dofs(
+            parameters,
+            fixed_dofs,
+            free_positions_device,
+            spec,
+        )
 
     def squared_length(parameters: jax.Array) -> jax.Array:
         length_value = length(parameters)
         return length_value * length_value
 
-    value_and_residual_jacobian = jax.jit(jax.value_and_grad(length))
-    initial_length, initial_residual_jacobian = value_and_residual_jacobian(
-        initial_parameters
+    initial_length, initial_residual_jacobian = _curve_length_value_and_grad(
+        initial_parameters,
+        fixed_dofs,
+        free_positions_device,
+        spec,
     )
     problem = TraceableScalarProblem(
         objective_fn=squared_length,
@@ -93,8 +116,11 @@ def solve_rz_curve_length(
         require_success=False,
     )
     final_parameters = problem.x
-    final_length, final_residual_jacobian = value_and_residual_jacobian(
-        final_parameters
+    final_length, final_residual_jacobian = _curve_length_value_and_grad(
+        final_parameters,
+        fixed_dofs,
+        free_positions_device,
+        spec,
     )
     completed = jax.block_until_ready(
         (
