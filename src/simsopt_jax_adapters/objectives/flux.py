@@ -49,6 +49,7 @@ from simsopt_jax.core.objectives_flux import (
     fixed_surface_flux_specs_from_surface,
 )
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
+from simsopt_jax.core.specs import FixedSurfaceFluxSpec
 from simsopt_jax.runtime.host_boundary import (
     host_array as _host_array,
 )
@@ -436,6 +437,11 @@ class SquaredFluxJAX(Optimizable):
 
         self._raise_if_field_contract_drifted()
         return self._traceable_forward_dofs
+
+    def fixed_surface_flux_spec(self) -> FixedSurfaceFluxSpec:
+        """Return the immutable public surface contract captured at construction."""
+        self._raise_if_field_contract_drifted()
+        return self._flux_spec
 
     # ------------------------------------------------------------------
     # Public API
