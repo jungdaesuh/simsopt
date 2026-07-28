@@ -26,6 +26,12 @@ from examples.jax.parity.cases.native_minimize_curve_length import (
 from examples.jax.parity.cases.native_minimize_curve_length import (
     execute as execute_native_minimize_curve_length,
 )
+from examples.jax.parity.cases.native_permanent_magnet_simple import (
+    create_input as create_native_permanent_magnet_simple_input,
+)
+from examples.jax.parity.cases.native_permanent_magnet_simple import (
+    execute as execute_native_permanent_magnet_simple,
+)
 from examples.jax.parity.cases.native_qfm import (
     create_input as create_native_qfm_input,
 )
@@ -84,6 +90,11 @@ _CASES = {
         case_id="native-minimize-curve-length",
         create_input=create_native_minimize_curve_length_input,
         execute=execute_native_minimize_curve_length,
+    ),
+    "native-permanent-magnet-simple": CaseDefinition(
+        case_id="native-permanent-magnet-simple",
+        create_input=create_native_permanent_magnet_simple_input,
+        execute=execute_native_permanent_magnet_simple,
     ),
     "native-qfm": CaseDefinition(
         case_id="native-qfm",
