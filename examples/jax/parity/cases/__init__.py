@@ -26,6 +26,10 @@ from examples.jax.parity.cases.native_minimize_curve_length import (
 from examples.jax.parity.cases.native_minimize_curve_length import (
     execute as execute_native_minimize_curve_length,
 )
+from examples.jax.parity.cases.native_qfm import (
+    create_input as create_native_qfm_input,
+)
+from examples.jax.parity.cases.native_qfm import execute as execute_native_qfm
 from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
     create_input as create_native_stage_two_optimization_minimal_input,
 )
@@ -80,6 +84,11 @@ _CASES = {
         case_id="native-minimize-curve-length",
         create_input=create_native_minimize_curve_length_input,
         execute=execute_native_minimize_curve_length,
+    ),
+    "native-qfm": CaseDefinition(
+        case_id="native-qfm",
+        create_input=create_native_qfm_input,
+        execute=execute_native_qfm,
     ),
     "native-surf-vol-area": CaseDefinition(
         case_id="native-surf-vol-area",
