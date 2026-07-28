@@ -565,8 +565,13 @@ def _run_optimistix_lm(
                 f"{dense_bytes} bytes, exceeding "
                 f"max_dense_linearization_bytes={options.max_dense_linearization_bytes}."
             )
-        jacobian = jax.jacrev(lambda x: jnp.ravel(jnp.asarray(residual_fn(x))))(
-            solution.value
+
+        def dense_residual(x, function_args):
+            return jnp.ravel(jnp.asarray(residual_fn(x, *function_args)))
+
+        jacobian = jax.jacrev(dense_residual, argnums=0)(
+            solution.value,
+            residual_args,
         )
         jacobian = jnp.reshape(jacobian, (residual_size, parameter_size))
         hessian = jacobian.T @ jacobian
@@ -576,11 +581,15 @@ def _run_optimistix_lm(
         hessian_host = _host_array(hessian)
     else:
 
-        def residual_cost(x):
-            current_residual = jnp.ravel(jnp.asarray(residual_fn(x, *residual_args)))
+        def residual_cost(x, function_args):
+            current_residual = jnp.ravel(jnp.asarray(residual_fn(x, *function_args)))
             return half * jnp.vdot(current_residual, current_residual)
 
-        _cost_value, pullback = jax.vjp(residual_cost, solution.value)
+        _cost_value, pullback = jax.vjp(
+            residual_cost,
+            solution.value,
+            residual_args,
+        )
         gradient = pullback(
             _device_scalar(1.0, residual.dtype),
         )[0]
@@ -773,19 +782,25 @@ def least_squares(
     start = time.perf_counter()
 
     if isinstance(options_used, ScipyLMOptions):
-        result = _scipy_lm_result(
-            residual_fn,
-            x0,
-            options=options_used,
-            residual_args=residual_args,
-        )
+        if residual_args:
+            result = _scipy_lm_result(
+                residual_fn,
+                x0,
+                options=options_used,
+                residual_args=residual_args,
+            )
+        else:
+            result = _scipy_lm_result(residual_fn, x0, options=options_used)
     elif isinstance(options_used, OptimistixLMOptions):
-        result = _run_optimistix_lm(
-            residual_fn,
-            x0,
-            options=options_used,
-            residual_args=residual_args,
-        )
+        if residual_args:
+            result = _run_optimistix_lm(
+                residual_fn,
+                x0,
+                options=options_used,
+                residual_args=residual_args,
+            )
+        else:
+            result = _run_optimistix_lm(residual_fn, x0, options=options_used)
     elif isinstance(options_used, SimsoptLMGMRESHostOptions) and not isinstance(
         options_used, SimsoptLMGMRESOptions
     ):
