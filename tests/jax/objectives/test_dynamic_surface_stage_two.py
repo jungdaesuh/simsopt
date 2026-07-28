@@ -16,6 +16,7 @@ from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 from simsopt.objectives import SquaredFlux
 from simsopt_jax.objectives.dynamic_surface_stage_two import (
     SurfaceRZFourierDofContract,
+    freeze_coil_dof_extraction_spec,
     make_dynamic_surface_stage_two_objective,
 )
 from simsopt_jax.objectives.stage_two import StageTwoObjectiveConfig
@@ -106,6 +107,20 @@ def test_dynamic_surface_contract_keeps_closed_constants_host_immutable() -> Non
     assert not contract.quadpoints_phi.flags.writeable
     assert isinstance(contract.quadpoints_theta, np.ndarray)
     assert not contract.quadpoints_theta.flags.writeable
+
+
+def test_dynamic_surface_contract_freezes_coil_spec_constants_on_host() -> None:
+    _contract, field, _coil_dofs, _surface_dofs, _surface, _coils = _problem()
+    extraction = freeze_coil_dof_extraction_spec(field)
+
+    array_leaves = tuple(
+        leaf
+        for leaf in jax.tree.leaves(extraction)
+        if isinstance(leaf, (jax.Array, np.ndarray))
+    )
+    assert array_leaves
+    assert all(isinstance(leaf, np.ndarray) for leaf in array_leaves)
+    assert all(not leaf.flags.writeable for leaf in array_leaves)
 
 
 def test_dynamic_surface_stage_two_surface_gradient_matches_central_difference() -> (
