@@ -10,6 +10,16 @@ from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
 
 
+def test_exact_coil_forces_uses_traceable_runtime_boundaries() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "examples/jax/parity/cases/native_coil_forces.py"
+    ).read_text(encoding="utf-8")
+
+    assert "TraceableArrayFunction" in source
+    assert "jax.value_and_grad(current_objective)" not in source
+
+
 def test_exact_coil_forces_matches_native_and_jax_cpu(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
