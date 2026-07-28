@@ -222,7 +222,7 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -c "import jax; devices=jax.devices(); print(devices); assert jax.config.jax_enable_x64; assert all(device.platform in {'cuda', 'gpu'} for device in devices)"
 
-      - name: Run every applicable native/JAX parity case
+      - name: Run bounded native/JAX parity authority
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python examples/jax/run_parity.py \
