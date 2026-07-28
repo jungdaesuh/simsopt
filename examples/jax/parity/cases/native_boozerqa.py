@@ -69,9 +69,7 @@ def _problem(configuration: Mapping[str, object], scale: ExecutionScale):
         {}
         if scale == "native_default"
         else {
-            "coil_order": _configuration_int(
-                configuration, "reduced_coil_order"
-            ),
+            "coil_order": _configuration_int(configuration, "reduced_coil_order"),
             "magnetic_axis_order": _configuration_int(
                 configuration, "reduced_axis_order"
             ),
@@ -256,11 +254,7 @@ def _native(
         initial_parameters,
         jac=True,
         method="BFGS",
-        options={
-            "maxiter": _configuration_int(
-                bundle.configuration, "outer_maxiter"
-            )
-        },
+        options={"maxiter": _configuration_int(bundle.configuration, "outer_maxiter")},
         tol=1.0e-15,
     )
     final_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
@@ -314,7 +308,10 @@ def _jax(
     import jax
     from simsopt.geo import CurveLength, Volume
     from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
+    from simsopt_jax.geo.optimizer_host_lbfgs import (
+        line_search_value_and_grad_more_thuente_host,
+        minimize_bfgs_host_core,
+    )
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
     from simsopt_jax_adapters.geo.surface_objectives import (
@@ -339,12 +336,8 @@ def _jax(
         volume,
         float(volume.J()),
         options={
-            "newton_maxiter": _configuration_int(
-                bundle.configuration, "inner_maxiter"
-            ),
-            "newton_tol": _configuration_float(
-                bundle.configuration, "inner_tolerance"
-            ),
+            "newton_maxiter": _configuration_int(bundle.configuration, "inner_maxiter"),
+            "newton_tol": _configuration_float(bundle.configuration, "inner_tolerance"),
             "verbose": False,
         },
     )
@@ -430,62 +423,68 @@ def _jax(
         Callable[..., Mapping[str, object]],
         runtime["reporting_metrics_from_solution"],
     )
-    initial_parameters_device = jax.device_put(
-        np.asarray(field.x, dtype=np.float64)
+    initial_parameters_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
+    initial_objective_device, initial_gradient_device = jax.value_and_grad(objective)(
+        initial_parameters_device
     )
-    initial_objective_device, initial_gradient_device = jax.value_and_grad(
-        objective
-    )(initial_parameters_device)
-    problem = TraceableScalarProblem(
-        objective_fn=objective,
-        x=initial_parameters_device,
+    jax.block_until_ready((initial_objective_device, initial_gradient_device))
+    initial_objective = _host_float(initial_objective_device)
+    initial_gradient = np.asarray(
+        jax.device_get(initial_gradient_device),
+        dtype=np.float64,
     )
-    optimizer_result = serial_solve_jax(
-        problem,
-        max_steps=_configuration_int(bundle.configuration, "outer_maxiter"),
-        rtol=_configuration_float(bundle.configuration, "outer_rtol"),
-        atol=_configuration_float(bundle.configuration, "outer_atol"),
-        require_success=False,
+
+    value_and_gradient = jax.value_and_grad(objective)
+
+    def host_value_and_gradient(
+        parameters: np.ndarray,
+    ) -> tuple[float, np.ndarray]:
+        parameters_device = jax.device_put(np.asarray(parameters, dtype=np.float64))
+        value_device, gradient_device = value_and_gradient(parameters_device)
+        jax.block_until_ready((value_device, gradient_device))
+        return (
+            _host_float(value_device),
+            np.asarray(jax.device_get(gradient_device), dtype=np.float64),
+        )
+
+    optimizer_result = minimize_bfgs_host_core(
+        host_value_and_gradient,
+        np.asarray(
+            jax.device_get(initial_parameters_device),
+            dtype=np.float64,
+        ),
+        maxiter=_configuration_int(bundle.configuration, "outer_maxiter"),
+        gtol=_configuration_float(bundle.configuration, "outer_atol"),
+        maxls=20,
+        initial_value_and_grad=(initial_objective, initial_gradient),
+        line_search_value_and_grad=(line_search_value_and_grad_more_thuente_host),
     )
-    final_objective_device, final_gradient_device = jax.value_and_grad(objective)(
-        problem.x
-    )
-    final_forward = forward_result(problem.x)
+    final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
+    final_parameters_device = jax.device_put(final_parameters)
+    final_forward = forward_result(final_parameters_device)
     final_metrics = reporting(
-        problem.x,
+        final_parameters_device,
         final_forward["x"],
         final_forward["success"],
         include_distance_metrics=False,
         outer_raw_terms=traceable_forward_result_outer_raw_terms(final_forward),
     )
-    (
-        initial_parameters,
-        initial_objective,
-        initial_gradient,
-        final_parameters,
-        final_objective,
-        final_gradient,
-    ) = jax.device_get(
-        (
-            initial_parameters_device,
-            initial_objective_device,
-            initial_gradient_device,
-            problem.x,
-            final_objective_device,
-            final_gradient_device,
-        )
+    jax.block_until_ready((final_forward, final_metrics))
+    initial_parameters = np.asarray(
+        jax.device_get(initial_parameters_device),
+        dtype=np.float64,
     )
     values = _values(
         surface_dofs=arrays["surface_dofs"],
         coil_dofs=arrays["coil_dofs"],
-        initial_parameters=np.asarray(initial_parameters, dtype=np.float64),
-        initial_objective=float(initial_objective),
-        initial_gradient=np.asarray(initial_gradient, dtype=np.float64),
+        initial_parameters=initial_parameters,
+        initial_objective=initial_objective,
+        initial_gradient=initial_gradient,
         initial_iota=iota_target,
         initial_volume=initial_volume,
-        final_parameters=np.asarray(final_parameters, dtype=np.float64),
-        final_objective=float(final_objective),
-        final_gradient=np.asarray(final_gradient, dtype=np.float64),
+        final_parameters=final_parameters,
+        final_objective=float(optimizer_result.f_k),
+        final_gradient=np.asarray(optimizer_result.g_k, dtype=np.float64),
         final_non_qs_ratio=_host_float(final_metrics["final_non_qs"]),
         final_iota=_host_float(final_metrics["final_iota"]),
         final_volume=_host_float(final_metrics["final_volume"]),
@@ -494,7 +493,7 @@ def _jax(
         ),
         final_length_penalty=_host_float(final_metrics["final_length_penalty"]),
         inner_solver_success=_host_bool(final_metrics["solver_success"]),
-        outer_solver_success=bool(optimizer_result.success),
+        outer_solver_success=bool(optimizer_result.converged),
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
@@ -504,7 +503,7 @@ def _jax(
         values,
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
-        driver="simsopt_jax_bfgs_with_traceable_boozer_newton",
+        driver="simsopt_jax_host_bfgs_with_traceable_boozer_newton",
     )
 
 
@@ -575,8 +574,7 @@ def _observation(
         and np.all(np.isfinite(values["final:gradient"]))
         and np.all(np.isfinite(values["final:parameters"]))
         and np.isfinite(float(values["final:objective"]))
-        and float(values["final:objective"])
-        <= float(values["initial:objective"])
+        and float(values["final:objective"]) <= float(values["initial:objective"])
         and bool(values["final:inner_solver_success"])
     )
     return LaneObservation(
