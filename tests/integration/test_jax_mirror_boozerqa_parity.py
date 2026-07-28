@@ -10,6 +10,20 @@ from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
 
 
+def test_boozerqa_parity_uses_bounded_host_outer_optimization() -> None:
+    source = (
+        Path(__file__).parents[2]
+        / "examples"
+        / "jax"
+        / "parity"
+        / "cases"
+        / "native_boozerqa.py"
+    ).read_text(encoding="utf-8")
+
+    assert "serial_solve_jax" not in source
+    assert "minimize_bfgs_host_core" in source
+
+
 def test_exact_boozerqa_workflow_matches_native_and_jax_cpu(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
