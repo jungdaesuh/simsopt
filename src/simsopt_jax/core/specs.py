@@ -425,7 +425,11 @@ class CoilSpec:
         "surface_map",
         "current_term_maps",
     ),
-    meta_fields=("surface_output_index", "current_term_scales"),
+    meta_fields=(
+        "surface_output_index",
+        "current_term_scales",
+        "curve_source_index",
+    ),
 )
 class CoilDofExtractionSpec:
     """Immutable owner-DOF -> coil-spec reconstruction payload."""
@@ -438,6 +442,7 @@ class CoilDofExtractionSpec:
     surface_output_index: int | None = None
     current_term_maps: tuple[OptimizableDofMapSpec, ...] = ()
     current_term_scales: tuple[float, ...] = ()
+    curve_source_index: int | None = None
 
 
 @_register_jax_spec(data_fields=("coils",), meta_fields=())
@@ -1313,6 +1318,7 @@ def make_coil_dof_extraction_spec(
     surface_output_index: int | None = None,
     current_term_maps: tuple[OptimizableDofMapSpec, ...] = (),
     current_term_scales: tuple[float, ...] = (),
+    curve_source_index: int | None = None,
     rotmat: object | None = None,
     scale: float = 1.0,
 ) -> CoilDofExtractionSpec:
@@ -1327,6 +1333,9 @@ def make_coil_dof_extraction_spec(
         surface_output_index=surface_output_index,
         current_term_maps=current_term_maps,
         current_term_scales=tuple(float(value) for value in current_term_scales),
+        curve_source_index=(
+            None if curve_source_index is None else int(curve_source_index)
+        ),
     )
 
 

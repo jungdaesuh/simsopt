@@ -61,6 +61,37 @@ def _length_penalty(total_length: jax.Array, config: StageTwoObjectiveConfig):
     return 0.5 * config.length_weight * excess * excess
 
 
+def stage_two_linking_number(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+) -> jax.Array:
+    """Return the total discrete linking number for a stacked coil set."""
+    pairs = tuple(
+        (first, second)
+        for first in range(int(gamma.shape[0]))
+        for second in range(first)
+    )
+    first = jnp.asarray(tuple(pair[0] for pair in pairs), dtype=jnp.int32)
+    second = jnp.asarray(tuple(pair[1] for pair in pairs), dtype=jnp.int32)
+    dphi = jnp.reciprocal(jnp.asarray(gamma.shape[1], dtype=gamma.dtype))
+    linking_numbers = jax.vmap(
+        lambda gamma_1, gammadash_1, gamma_2, gammadash_2: pair_linking_number_pure(
+            gamma_1,
+            gammadash_1,
+            gamma_2,
+            gammadash_2,
+            dphi,
+            dphi,
+        )
+    )(
+        gamma[first],
+        gammadash[first],
+        gamma[second],
+        gammadash[second],
+    )
+    return jnp.sum(linking_numbers)
+
+
 def stage_two_geometric_penalty(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -148,30 +179,10 @@ def stage_two_geometric_penalty(
         result = result + config.curve_surface_weight * jnp.sum(curve_surface)
 
     if config.linking_number_weight != 0.0:
-        linking_pairs = tuple(
-            (first, second)
-            for first in range(int(gamma.shape[0]))
-            for second in range(first)
+        result = result + config.linking_number_weight * stage_two_linking_number(
+            gamma,
+            gammadash,
         )
-        first = jnp.asarray(tuple(pair[0] for pair in linking_pairs), dtype=jnp.int32)
-        second = jnp.asarray(tuple(pair[1] for pair in linking_pairs), dtype=jnp.int32)
-        dphi = jnp.reciprocal(jnp.asarray(gamma.shape[1], dtype=gamma.dtype))
-        linking_numbers = jax.vmap(
-            lambda gamma_1, gammadash_1, gamma_2, gammadash_2: pair_linking_number_pure(
-                gamma_1,
-                gammadash_1,
-                gamma_2,
-                gammadash_2,
-                dphi,
-                dphi,
-            )
-        )(
-            gamma[first],
-            gammadash[first],
-            gamma[second],
-            gammadash[second],
-        )
-        result = result + config.linking_number_weight * jnp.sum(linking_numbers)
 
     return result
 
@@ -189,8 +200,17 @@ def make_stage_two_objective(
     def objective(parameters: jax.Array) -> jax.Array:
         coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
         geometry: list[tuple[jax.Array, jax.Array, jax.Array]] = []
+        geometry_by_curve: dict[
+            int,
+            tuple[jax.Array, jax.Array, jax.Array],
+        ] = {}
         for coil_spec in coil_specs:
-            gamma, gammadash, gammadashdash = curve_geometry_from_spec(coil_spec.curve)
+            curve_id = id(coil_spec.curve)
+            curve_geometry = geometry_by_curve.get(curve_id)
+            if curve_geometry is None:
+                curve_geometry = curve_geometry_from_spec(coil_spec.curve)
+                geometry_by_curve[curve_id] = curve_geometry
+            gamma, gammadash, gammadashdash = curve_geometry
             if coil_spec.symmetry.has_rotation:
                 rotation = coil_spec.symmetry.rotmat
                 gamma = gamma @ rotation
