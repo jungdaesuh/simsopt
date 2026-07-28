@@ -90,6 +90,12 @@ from examples.jax.parity.cases.native_tracing_fieldlines_ncsx import (
 from examples.jax.parity.cases.native_tracing_fieldlines_ncsx import (
     execute as execute_native_tracing_fieldlines_ncsx,
 )
+from examples.jax.parity.cases.native_tracing_fieldlines_qa import (
+    create_input as create_native_tracing_fieldlines_qa_input,
+)
+from examples.jax.parity.cases.native_tracing_fieldlines_qa import (
+    execute as execute_native_tracing_fieldlines_qa,
+)
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     create_input as create_native_wireframe_rcls_basic_input,
 )
@@ -168,6 +174,11 @@ _CASES = {
         case_id="native-tracing-fieldlines-ncsx",
         create_input=create_native_tracing_fieldlines_ncsx_input,
         execute=execute_native_tracing_fieldlines_ncsx,
+    ),
+    "native-tracing-fieldlines-qa": CaseDefinition(
+        case_id="native-tracing-fieldlines-qa",
+        create_input=create_native_tracing_fieldlines_qa_input,
+        execute=execute_native_tracing_fieldlines_qa,
     ),
     "native-stage-two-optimization-minimal": CaseDefinition(
         case_id="native-stage-two-optimization-minimal",
