@@ -488,14 +488,14 @@ def _jax(
         )
     )
     topology_states = jax.jit(
-        jax.vmap(
+        lambda extraction_operand, parameter_states_operand: jax.vmap(
             lambda parameters: stage_two_planar_topology_values(
-                extraction,
+                extraction_operand,
                 parameters,
                 regularization_config.num_base_curves,
-            )
-        )
-    )(parameter_states)
+            ),
+        )(parameter_states_operand)
+    )(extraction, parameter_states)
     initial, first, final, taylor_errors, topology_states = jax.device_get(
         (
             device_result.initial,
