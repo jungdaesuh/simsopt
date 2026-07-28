@@ -405,3 +405,41 @@ def test_native_allocation_sensitive_profile_is_rejected() -> None:
             allocation_sensitive=True,
             base_environment={},
         )
+
+
+def test_total_only_timing_is_accepted_when_no_truthful_inner_boundary_exists() -> None:
+    artifact = _artifact()
+    for profile_id in _PROFILE_IDS:
+        profile = _profile_at(artifact, profile_id)
+        timing = _timing_samples(profile)
+        for phase in ("cold", "warm"):
+            raw_samples = timing[phase]
+            samples = raw_samples if isinstance(raw_samples, list) else [raw_samples]
+            for sample in samples:
+                assert isinstance(sample, dict)
+                sample["setup_compile_seconds"] = None
+                sample["solver_seconds"] = None
+
+    assert validate_measurement_artifact(artifact).complete is True
+
+
+def test_partial_or_inconsistent_inner_timing_boundaries_fail_closed() -> None:
+    artifact = _artifact()
+    warm = _timing_samples(_profile_at(artifact, "jax_cpu_fast"))["warm"]
+    assert isinstance(warm, list)
+    sample = warm[0]
+    assert isinstance(sample, dict)
+    sample["setup_compile_seconds"] = None
+
+    with pytest.raises(MeasurementContractError, match="together"):
+        validate_measurement_artifact(artifact)
+
+
+def test_summary_median_absolute_deviation_must_match_raw_samples() -> None:
+    artifact = _artifact()
+    summary = _profile_at(artifact, "native_cpu")["summary"]
+    assert isinstance(summary, dict)
+    summary["warm_total_seconds_mad"] = 99.0
+
+    with pytest.raises(MeasurementContractError, match="warm_total_seconds_mad"):
+        validate_measurement_artifact(artifact)
