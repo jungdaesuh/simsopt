@@ -121,6 +121,18 @@ from examples.jax.parity.cases.native_tracing_particle import (
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     create_input as create_native_wireframe_rcls_basic_input,
 )
+from examples.jax.parity.cases.native_wireframe_gsco_modular import (
+    create_input as create_native_wireframe_gsco_modular_input,
+)
+from examples.jax.parity.cases.native_wireframe_gsco_modular import (
+    execute as execute_native_wireframe_gsco_modular,
+)
+from examples.jax.parity.cases.native_wireframe_gsco_sector_saddle import (
+    create_input as create_native_wireframe_gsco_sector_saddle_input,
+)
+from examples.jax.parity.cases.native_wireframe_gsco_sector_saddle import (
+    execute as execute_native_wireframe_gsco_sector_saddle,
+)
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     execute as execute_native_wireframe_rcls_basic,
 )
@@ -257,6 +269,16 @@ _CASES = {
         case_id="native-wireframe-rcls-basic",
         create_input=create_native_wireframe_rcls_basic_input,
         execute=execute_native_wireframe_rcls_basic,
+    ),
+    "native-wireframe-gsco-modular": CaseDefinition(
+        case_id="native-wireframe-gsco-modular",
+        create_input=create_native_wireframe_gsco_modular_input,
+        execute=execute_native_wireframe_gsco_modular,
+    ),
+    "native-wireframe-gsco-sector-saddle": CaseDefinition(
+        case_id="native-wireframe-gsco-sector-saddle",
+        create_input=create_native_wireframe_gsco_sector_saddle_input,
+        execute=execute_native_wireframe_gsco_sector_saddle,
     ),
     "native-wireframe-rcls-with-ports": CaseDefinition(
         case_id="native-wireframe-rcls-with-ports",
