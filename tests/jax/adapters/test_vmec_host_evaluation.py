@@ -10,6 +10,7 @@ import pytest
 from simsopt_jax_adapters.mhd.vmec_host import (
     VmecHostEvaluation,
     boundary_sha256,
+    hybrid_result_is_scientifically_successful,
     validate_vmec_host_evaluation,
 )
 
@@ -74,3 +75,22 @@ def test_vmec_host_receipt_rejects_incomplete_or_mismatched_authority(
             expected_mpi_world_size=4,
             expected_gradient_size=3,
         )
+
+
+def test_hybrid_scientific_success_rejects_failure_threshold_cap() -> None:
+    assert not hybrid_result_is_scientifically_successful(
+        initial_objective=100.0,
+        final_objective=100.0,
+        final_gradient=np.zeros(3, dtype=np.float64),
+        failure_threshold=100.0,
+        expected_boundary_sha256="a" * 64,
+        final_boundary_sha256="a" * 64,
+    )
+    assert hybrid_result_is_scientifically_successful(
+        initial_objective=2.0,
+        final_objective=1.0,
+        final_gradient=np.asarray((0.1, -0.2, 0.3), dtype=np.float64),
+        failure_threshold=100.0,
+        expected_boundary_sha256="a" * 64,
+        final_boundary_sha256="a" * 64,
+    )
