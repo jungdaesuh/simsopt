@@ -18,3 +18,7 @@ def test_standard_stage_two_uses_public_workflow_and_one_host_publication() -> N
     assert "make_stage_two_objective" not in source
     assert "serial_solve_jax" not in source
     assert source.count("jax.device_get(") == 1
+    assert "first_length_weight_device = jax.device_put(" in source
+    assert "second_length_weight_device = jax.device_put(" in source
+    assert "first_length_weight=first_length_weight_device" in source
+    assert "second_length_weight=second_length_weight_device" in source
