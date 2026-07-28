@@ -61,6 +61,19 @@ class StandardStageTwoDeviceResult:
     second_optimizer: OptimizerResult
 
 
+def _dynamic_length_penalty(
+    total_length: jax.Array,
+    config: StageTwoObjectiveConfig,
+    length_weight: jax.Array,
+) -> jax.Array:
+    if config.length_target is None:
+        return length_weight * total_length
+    excess = total_length - config.length_target
+    if config.length_target_mode == "max":
+        excess = jnp.maximum(excess, 0.0)
+    return 0.5 * length_weight * excess * excess
+
+
 def _objective_from_operands(
     parameters: jax.Array,
     extraction: CoilSetDofExtractionSpec,
@@ -78,7 +91,7 @@ def _objective_from_operands(
         surface_normal,
         config,
     )
-    return values[0] + length_weight * values[4]
+    return values[0] + _dynamic_length_penalty(values[4], config, length_weight)
 
 
 def _objective_with_aux_from_operands(
@@ -98,7 +111,7 @@ def _objective_with_aux_from_operands(
         surface_normal,
         config,
     )
-    length_penalty = length_weight * values[4]
+    length_penalty = _dynamic_length_penalty(values[4], config, length_weight)
     return (
         values[0] + length_penalty,
         (
@@ -238,13 +251,10 @@ def solve_standard_stage_two(
     Length weights remain explicit fixed-shape device parameters, while the
     returned initial, first-stage, and final states have fixed-size storage.
     """
-    if (
-        regularization_config.length_weight != 0.0
-        or regularization_config.length_target is not None
-    ):
+    if regularization_config.length_weight != 0.0:
         raise ValueError(
             "Standard Stage-II length weights are explicit device parameters; "
-            "config must not include a total-length penalty."
+            "config length_weight must be zero."
         )
     extraction = field.coil_dof_extraction_spec()
     surface_gamma_device = jnp.asarray(surface_gamma, dtype=jnp.float64)

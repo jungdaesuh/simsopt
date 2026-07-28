@@ -15,6 +15,7 @@ from .stage_two import (
     stage_two_coil_geometry,
     stage_two_geometric_penalty,
     stage_two_linking_number,
+    stage_two_planar_topology_values,
 )
 from .stochastic_stage_two import (
     StochasticCoilPerturbations,
@@ -35,5 +36,6 @@ __all__ = (
     "stage_two_coil_geometry",
     "stage_two_geometric_penalty",
     "stage_two_linking_number",
+    "stage_two_planar_topology_values",
     "stochastic_flux_mean_from_geometry",
 )

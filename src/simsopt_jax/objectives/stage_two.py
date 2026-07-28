@@ -265,6 +265,36 @@ def stage_two_coil_geometry(
     )
 
 
+def stage_two_planar_topology_values(
+    extraction: CoilSetDofExtractionSpec,
+    parameters: jax.Array,
+    num_base_curves: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Return planarity, linking, and physical coordinates for planar coils."""
+    gamma, gammadash, _, _ = stage_two_coil_geometry(extraction, parameters)
+    base_gamma = gamma[:num_base_curves]
+    centered = base_gamma - jnp.mean(base_gamma, axis=1, keepdims=True)
+    covariance = jnp.einsum("nqi,nqj->nij", centered, centered) / base_gamma.shape[1]
+    minimum_variance = jnp.linalg.eigvalsh(covariance)[:, 0]
+    lengths = jnp.mean(
+        jnp.linalg.norm(gammadash[:num_base_curves], axis=2),
+        axis=1,
+    )
+    canonical_geometry = jnp.concatenate(
+        (
+            lengths[:, None],
+            jnp.mean(base_gamma, axis=1),
+            covariance.reshape((base_gamma.shape[0], 9)),
+        ),
+        axis=1,
+    ).reshape((-1,))
+    return (
+        jnp.sum(jnp.square(minimum_variance)),
+        stage_two_linking_number(gamma, gammadash),
+        canonical_geometry,
+    )
+
+
 def make_stage_two_objective(
     field: CoilDofExtractionProvider,
     flux_objective: Callable[[jax.Array], jax.Array],
