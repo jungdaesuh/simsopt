@@ -5,10 +5,17 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from simsopt.field import Current, coils_via_symmetries
+from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.force import (
     curve_force_norms_pure,
     lp_force_pure,
+)
+from simsopt_jax_adapters.objectives import (
+    ForceStageTwoConfig,
+    force_stage_two_diagnostics,
 )
 
 
@@ -27,6 +34,51 @@ def _circle(radius: float, point_count: int) -> tuple[jax.Array, jax.Array]:
         axis=1,
     )
     return gamma, gammadash
+
+
+def test_force_stage_two_diagnostics_slice_on_device_under_transfer_guard() -> None:
+    surface = SurfaceRZFourier(nfp=2, stellsym=True, mpol=1, ntor=0)
+    curves = create_equally_spaced_curves(
+        2,
+        surface.nfp,
+        surface.stellsym,
+        R0=1.0,
+        R1=0.25,
+        order=1,
+        numquadpoints=8,
+        use_jax_curve=False,
+    )
+    currents = [Current(1.0e5), Current(1.0e5)]
+    currents[0].fix_all()
+    coils = coils_via_symmetries(
+        curves,
+        currents,
+        surface.nfp,
+        surface.stellsym,
+    )
+    field = BiotSavartJAX(coils)
+    parameters = jax.device_put(jnp.asarray(field.x, dtype=jnp.float64))
+    target_quadpoints = jax.device_put(
+        jnp.stack(
+            tuple(jnp.asarray(curve.quadpoints, dtype=jnp.float64) for curve in curves)
+        )
+    )
+    regularizations = jax.device_put(
+        jnp.full((len(coils),), 0.05**2 / np.sqrt(np.e), dtype=jnp.float64)
+    )
+    diagnostics = force_stage_two_diagnostics(
+        field,
+        target_quadpoints,
+        regularizations,
+        ForceStageTwoConfig(num_force_coils=len(curves)),
+    )
+
+    with jax.transfer_guard("disallow"):
+        values = diagnostics(parameters)
+        values.block_until_ready()
+
+    assert values.shape == (3,)
+    assert bool(jnp.all(jnp.isfinite(values)))
 
 
 def test_public_force_norms_reconstruct_lp_force_objective() -> None:
