@@ -276,18 +276,14 @@ def gsco_wireframe_jax(
     connections = np.asarray(wframe.connected_segments, dtype=np.int32)
 
     if x_init is None:
-        x_init_arr = np.reshape(
-            np.asarray(wframe.currents, dtype=_runtime_host_dtype()), (-1, 1)
-        )
+        x_init_arr = jnp.reshape(_as_runtime_array(wframe.currents), (-1, 1))
     else:
-        x_init_arr = np.reshape(
-            np.asarray(x_init, dtype=_runtime_host_dtype()), (-1, 1)
-        )
+        x_init_arr = jnp.reshape(_as_runtime_array(x_init), (-1, 1))
 
     if loop_count_init is None:
-        loop_count_arr = np.zeros(len(free_loops), dtype=np.int32)
+        loop_count_arr = jnp.zeros(len(free_loops), dtype=jnp.int32)
     else:
-        loop_count_arr = np.asarray(loop_count_init, dtype=np.int32)
+        loop_count_arr = _as_jax_int32(loop_count_init)
 
     return greedy_stellarator_coil_optimization_jax(
         no_crossing,
