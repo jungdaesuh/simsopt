@@ -1297,6 +1297,7 @@ class BoozerSurface(Optimizable):
             "PLU": (P, L, U),
             "mask": mask,
             "type": "exact",
+            "weight_inv_modB": False,
             "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
         }
 

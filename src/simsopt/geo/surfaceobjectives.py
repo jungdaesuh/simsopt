@@ -1128,7 +1128,11 @@ class BoozerResidual(Optimizable):
         )
         s.set_dofs(in_surface.get_dofs())
 
-        self.constraint_weight = boozer_surface.constraint_weight
+        self.constraint_weight = (
+            0.0
+            if boozer_surface.constraint_weight is None
+            else float(boozer_surface.constraint_weight)
+        )
         self.in_surface = in_surface
         self.surface = s
         self.biotsavart = bs
