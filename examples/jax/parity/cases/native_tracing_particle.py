@@ -35,7 +35,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "grid_size": 16 if native_scale else 6,
         "interpolation_degree": 3 if native_scale else 2,
         "particle_count": 100 if native_scale else 3,
-        "tmax": 1.0e-2 if native_scale else 1.0e-4,
+        "tmax": 1.0e-2 if native_scale else 1.0e-5,
         "integrator_tolerance": 1.0e-9,
         "surface_distance": 0.20,
         "classifier_h": 0.1,

@@ -25,7 +25,7 @@ from simsopt_jax_adapters.field.tracing import trace_particles
 EXAMPLE_ID = "native-tracing-particle"
 NATIVE_PARTICLE_COUNT = 100
 NATIVE_TRACE_TIME = 1.0e-2
-BOUNDED_TRACE_TIME = 1.0e-4
+BOUNDED_TRACE_TIME = 1.0e-5
 KINETIC_ENERGY = 5_000.0 * ONE_EV
 
 
