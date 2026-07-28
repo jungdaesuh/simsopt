@@ -233,7 +233,11 @@ def solve_standard_stage_two(
     rtol: float,
     atol: float,
 ) -> StandardStageTwoDeviceResult:
-    """Run both source-equivalent stages while retaining fixed-size endpoints."""
+    """Run both source-equivalent stages with one reusable compiled problem.
+
+    Length weights remain explicit fixed-shape device parameters, while the
+    returned initial, first-stage, and final states have fixed-size storage.
+    """
     if (
         regularization_config.length_weight != 0.0
         or regularization_config.length_target is not None
