@@ -198,6 +198,12 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
     from simsopt.objectives import QuadraticPenalty, SquaredFlux
 
     surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
+    construction_fingerprint = _effective_fingerprint(
+        bundle,
+        arrays,
+        surface,
+        base_curves,
+    )
     field = BiotSavart(coils)
     field.set_points(surface.gamma().reshape((-1, 3)))
     flux = SquaredFlux(surface, field)
@@ -290,12 +296,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
-        effective_construction_fingerprint=_effective_fingerprint(
-            bundle,
-            arrays,
-            surface,
-            base_curves,
-        ),
+        effective_construction_fingerprint=construction_fingerprint,
         driver="scipy_lbfgsb",
         normalized_status="converged" if success else "failed",
         raw_status=str(result.status),
@@ -325,6 +326,12 @@ def _jax(
     import jax
 
     surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
+    construction_fingerprint = _effective_fingerprint(
+        bundle,
+        arrays,
+        surface,
+        base_curves,
+    )
     field = BiotSavartJAX(coils)
     flux = SquaredFluxJAX(surface, field)
     device_result = solve_minimal_stage_two(
@@ -405,12 +412,7 @@ def _jax(
         scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
-        effective_construction_fingerprint=_effective_fingerprint(
-            bundle,
-            arrays,
-            surface,
-            base_curves,
-        ),
+        effective_construction_fingerprint=construction_fingerprint,
         driver=device_result.optimizer.driver.value,
         normalized_status="converged" if success else "failed",
         raw_status=str(device_result.optimizer.status),
