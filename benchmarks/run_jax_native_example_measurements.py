@@ -46,6 +46,18 @@ class MeasurementSchedule:
     warm: tuple[tuple[MeasurementProfileId, ...], ...]
 
 
+@dataclass(frozen=True)
+class CollectionRun:
+    """One position in the isolated timing and allocation-memory protocol."""
+
+    profile_id: MeasurementProfileId
+    phase: Literal["cold", "warmup", "warm", "allocation_memory"]
+    sample_index: int | None
+    order_position: int
+    measured: bool
+    allocation_sensitive: bool
+
+
 def _canonical_json_bytes(value: object) -> bytes:
     return (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode(
         "utf-8"
@@ -101,6 +113,57 @@ def build_measurement_schedule(mirror_index: int) -> MeasurementSchedule:
         warmup=tuple(reversed(cold)),
         warm=tuple(_rotate(cold, index) for index in range(WARM_SAMPLE_COUNT)),
     )
+
+
+def build_collection_plan(mirror_index: int) -> tuple[CollectionRun, ...]:
+    """Expand one balanced schedule into the exact 47-process protocol."""
+    schedule = build_measurement_schedule(mirror_index)
+    runs: list[CollectionRun] = [
+        CollectionRun(
+            profile_id=profile_id,
+            phase="cold",
+            sample_index=None,
+            order_position=order_position,
+            measured=True,
+            allocation_sensitive=False,
+        )
+        for order_position, profile_id in enumerate(schedule.cold)
+    ]
+    runs.extend(
+        CollectionRun(
+            profile_id=profile_id,
+            phase="warmup",
+            sample_index=None,
+            order_position=order_position,
+            measured=False,
+            allocation_sensitive=False,
+        )
+        for order_position, profile_id in enumerate(schedule.warmup)
+    )
+    for sample_index, order in enumerate(schedule.warm):
+        runs.extend(
+            CollectionRun(
+                profile_id=profile_id,
+                phase="warm",
+                sample_index=sample_index,
+                order_position=order_position,
+                measured=True,
+                allocation_sensitive=False,
+            )
+            for order_position, profile_id in enumerate(order)
+        )
+    runs.extend(
+        CollectionRun(
+            profile_id=profile_id,
+            phase="allocation_memory",
+            sample_index=None,
+            order_position=order_position,
+            measured=True,
+            allocation_sensitive=True,
+        )
+        for order_position, profile_id in enumerate(("jax_gpu_fast", "jax_gpu_parity"))
+    )
+    return tuple(runs)
 
 
 def classify_termination(returncode: int) -> str:
@@ -224,10 +287,12 @@ def build_measurement_environment(
 
 
 __all__ = [
+    "CollectionRun",
     "MEASUREMENT_EVIDENCE_KIND",
     "MEASUREMENT_SCHEMA_VERSION",
     "MeasurementSchedule",
     "MeasurementRunnerError",
+    "build_collection_plan",
     "build_measurement_environment",
     "build_measurement_schedule",
     "build_profile_command",
