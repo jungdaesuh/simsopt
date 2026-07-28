@@ -18,6 +18,16 @@ def _module() -> ast.Module:
 
 def test_vmec_hybrid_has_the_exact_native_mirror_path() -> None:
     assert EXAMPLE.is_file()
+    assignments = {
+        target.id: node.value.value
+        for node in _module().body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance((target := node.targets[0]), ast.Name)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    assert assignments["EXAMPLE_ID"] == "native-single-stage-optimization"
 
 
 def test_vmec_hybrid_keeps_vmec_on_host_and_jax_slice_explicit() -> None:
