@@ -72,10 +72,9 @@ def _build_problem(
     return field, flux, surface_gamma, surface_normal
 
 
-def _objective_config(length_weight: float) -> StageTwoObjectiveConfig:
+def _objective_config() -> StageTwoObjectiveConfig:
     return StageTwoObjectiveConfig(
         num_base_curves=4,
-        length_weight=length_weight,
         curve_curve_minimum_distance=0.1,
         curve_curve_weight=1000.0,
         curve_surface_minimum_distance=0.3,
@@ -98,6 +97,14 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         np.random.RandomState(1).uniform(size=initial_device.shape),
         device,
     )
+    first_length_weight_device = jax.device_put(
+        np.asarray(1.0e-6, dtype=np.float64),
+        device,
+    )
+    second_length_weight_device = jax.device_put(
+        np.asarray(1.0e-7, dtype=np.float64),
+        device,
+    )
     device_result = solve_standard_stage_two(
         field=field,
         flux_spec=flux.fixed_surface_flux_spec(),
@@ -105,8 +112,9 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         surface_normal=surface_normal,
         initial_parameters=initial_device,
         taylor_direction=taylor_direction_device,
-        first_config=_objective_config(1.0e-6),
-        second_config=_objective_config(1.0e-7),
+        config=_objective_config(),
+        first_length_weight=first_length_weight_device,
+        second_length_weight=second_length_weight_device,
         max_steps=max_steps,
         rtol=1.0e-12,
         atol=1.0e-10,
