@@ -56,7 +56,7 @@ def _options(max_steps: int) -> dict[str, object]:
     return {
         "bfgs_maxiter": 3 * max_steps,
         "bfgs_tol": 1.0e-10,
-        "newton_maxiter": max_steps,
+        "newton_maxiter": NATIVE_LS_ITERATIONS,
         "newton_tol": 1.0e-10,
         "verbose": False,
     }
@@ -71,8 +71,8 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     G0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1.0e-7 / (2.0 * np.pi))
 
     native_scale = max_steps >= NATIVE_LS_ITERATIONS
-    mpol = 5 if native_scale else 1
-    ntor = 5 if native_scale else 1
+    mpol = 5 if native_scale else 2
+    ntor = 5 if native_scale else 2
     surface = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -109,7 +109,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         Mapping[str, object],
         area_solver.minimize_boozer_penalty_constraints_ls(
             tol=1.0e-10,
-            maxiter=max_steps,
+            maxiter=NATIVE_LS_ITERATIONS,
             constraint_weight=100.0,
             iota=_host_float(rough["iota"]),
             G=_host_float(rough["G"]),
@@ -133,7 +133,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         Mapping[str, object],
         flux_solver.minimize_boozer_penalty_constraints_ls(
             tol=1.0e-10,
-            maxiter=max_steps,
+            maxiter=NATIVE_LS_ITERATIONS,
             constraint_weight=100.0,
             iota=_host_float(polished["iota"]),
             G=_host_float(polished["G"]),
@@ -145,7 +145,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     final_G = _host_float(expanded["G"])
     final_residual = _residual_norm(surface, final_iota, final_G, native_field)
     volume = float(Volume(surface).J())
-    solver_success = bool(expanded["success"])
+    solver_success = bool(polished["success"]) and bool(expanded["success"])
     scientific_success = bool(
         solver_success
         and np.isfinite(final_residual)
