@@ -48,11 +48,12 @@ Architecture
 - ``dopri5_step`` — single Dormand-Prince step returning the 5th-order
   state, the embedded error vector, and the trailing-stage derivative
   for FSAL reuse.
-- ``trace_fieldline`` — adaptive driver inside a fixed-length ``jax.lax.scan``
-  with a fixed-shape trajectory carry of shape
-  ``(max_steps + 1, 4)``. Padded rows are populated with the final
-  accepted state; the companion mask of shape ``(max_steps + 1,)``
-  identifies the live prefix.
+- ``trace_fieldline`` — adaptive driver with a fixed-shape trajectory carry
+  of shape ``(max_steps + 1, 4)``. Parity mode uses a differentiable
+  fixed-length ``jax.lax.scan``; fast mode uses an early-exit
+  ``jax.lax.while_loop``. Padded rows are populated with the final accepted
+  state; the companion mask of shape ``(max_steps + 1,)`` identifies the live
+  prefix.
 - ``bracket_root_jax`` — Illinois false-position event localizer. Returns the
   bracketed root and a bool indicating whether the bracket actually
   contained a sign change.
@@ -67,7 +68,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Callable, NamedTuple
+from typing import Callable, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -455,7 +456,19 @@ def _stage_fullorbit_spec(spec: FullorbitTracingSpec) -> FullorbitTracingSpec:
     )
 
 
-def _scan_adaptive_steps(cond, body, init_carry, max_steps: int):
+AdaptiveLoop = Literal["scan", "while"]
+
+
+def _run_adaptive_steps(
+    cond,
+    body,
+    init_carry,
+    max_steps: int,
+    adaptive_loop: AdaptiveLoop,
+):
+    if adaptive_loop == "while":
+        return jax.lax.while_loop(cond, body, init_carry)
+
     checked_body = jax.checkpoint(body)
 
     def scan_step(carry, _):
@@ -483,7 +496,7 @@ class FieldlineTracingSpec:
         Absolute tolerance fed to the embedded error norm.
     max_steps
         Static upper bound on the number of accepted/rejected step
-        iterations the JIT-compiled scan driver will execute. The
+        iterations the JIT-compiled adaptive driver may execute. The
         trajectory carry has shape ``(max_steps + 1, 4)`` (the ``+1``
         captures the initial state).
     dtmax
@@ -508,12 +521,13 @@ class FieldlineTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
+    adaptive_loop: AdaptiveLoop = "scan"
 
 
 jax.tree_util.register_dataclass(
     FieldlineTracingSpec,
     data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
+    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"],
 )
 
 
@@ -1663,7 +1677,13 @@ def trace_fieldline(
         _phi_init_final,
         status_event_final,
         stop_at_exit,
-    ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
+    ) = _run_adaptive_steps(
+        cond,
+        body,
+        init_carry,
+        max_steps,
+        spec.adaptive_loop,
+    )
 
     # Pad unused rows with the final accepted state so downstream code
     # that ignores the mask still sees a valid (constant-extension)
@@ -1860,12 +1880,13 @@ class GuidingCenterTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
+    adaptive_loop: AdaptiveLoop = "scan"
 
 
 jax.tree_util.register_dataclass(
     GuidingCenterTracingSpec,
     data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
+    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"],
 )
 
 
@@ -2317,7 +2338,13 @@ def trace_guiding_center(
         _phi_init_final,
         status_event_final,
         stop_at_exit,
-    ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
+    ) = _run_adaptive_steps(
+        cond,
+        body,
+        init_carry,
+        max_steps,
+        spec.adaptive_loop,
+    )
 
     last_row = jnp.concatenate([jnp.reshape(t_final, (1,)), y_final.reshape((4,))])
     traj_padded = jnp.where(
@@ -2523,6 +2550,7 @@ def _run_dopri5_4state(
     dtmax: jax.Array,
     max_steps: int,
     max_phi_hits: int = 1,
+    adaptive_loop: AdaptiveLoop = "scan",
 ) -> GuidingCenterTracingResult:
     """Run the DOPRI5 + PI controller driver on a generic 4-state RHS.
 
@@ -2671,7 +2699,13 @@ def _run_dopri5_4state(
         mask_final,
         status_event_final,
         stop_at_exit,
-    ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
+    ) = _run_adaptive_steps(
+        cond,
+        body,
+        init_carry,
+        max_steps,
+        adaptive_loop,
+    )
 
     last_row = jnp.concatenate(
         [jnp.asarray([t_final], dtype=dtype), y_final.reshape((4,))]
@@ -3273,6 +3307,7 @@ def trace_guiding_center_boozer(
             dtmax,
             max_steps,
             max_phi_hits=max_phi_hits,
+            adaptive_loop=spec.adaptive_loop,
         )
 
     h0 = _initial_step_size(t0, tmax, dtmax, _PARTICLE_INITIAL_STEP_FRACTION)
@@ -3552,7 +3587,13 @@ def trace_guiding_center_boozer(
         _zeta_init_final,
         status_event_final,
         stop_at_exit,
-    ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
+    ) = _run_adaptive_steps(
+        cond,
+        body,
+        init_carry,
+        max_steps,
+        spec.adaptive_loop,
+    )
 
     last_row = jnp.concatenate(
         [jnp.asarray([t_final], dtype=dtype), y_final.reshape((4,))]
@@ -3855,12 +3896,13 @@ class FullorbitTracingSpec:
     dtmax: float = np.inf
     max_root_iters: int = 60
     max_phi_hits: int = 128
+    adaptive_loop: AdaptiveLoop = "scan"
 
 
 jax.tree_util.register_dataclass(
     FullorbitTracingSpec,
     data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits"],
+    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"],
 )
 
 
@@ -4311,7 +4353,13 @@ def trace_fullorbit(
         _phi_init_final,
         status_event_final,
         stop_at_exit,
-    ) = _scan_adaptive_steps(cond, body, init_carry, max_steps)
+    ) = _run_adaptive_steps(
+        cond,
+        body,
+        init_carry,
+        max_steps,
+        spec.adaptive_loop,
+    )
 
     last_row = jnp.concatenate((jnp.reshape(t_final, (1,)), y_final.reshape((6,))))
     traj_padded = jnp.where(
