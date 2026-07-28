@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
-
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -72,28 +72,42 @@ def _configuration_int(bundle: InputBundle, name: str) -> int:
     return value
 
 
-def _build_geometry(configuration: dict[str, object]):
+def _mapping_float(configuration: Mapping[str, object], name: str) -> float:
+    value = configuration[name]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"configuration {name} must be numeric")
+    return float(value)
+
+
+def _mapping_int(configuration: Mapping[str, object], name: str) -> int:
+    value = configuration[name]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"configuration {name} must be an integer")
+    return value
+
+
+def _build_geometry(configuration: Mapping[str, object]):
     from simsopt.field import Current, coils_via_symmetries
     from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 
     surface = SurfaceRZFourier.from_vmec_input(
-        SURFACE_INPUT,
+        str(SURFACE_INPUT),
         range="half period",
-        nphi=int(configuration["surface_resolution"]),
-        ntheta=int(configuration["surface_resolution"]),
+        nphi=_mapping_int(configuration, "surface_resolution"),
+        ntheta=_mapping_int(configuration, "surface_resolution"),
     )
     surface.fix_all()
     base_curves = create_equally_spaced_curves(
-        int(configuration["num_base_curves"]),
+        _mapping_int(configuration, "num_base_curves"),
         surface.nfp,
         stellsym=True,
-        R0=float(configuration["major_radius"]),
-        R1=float(configuration["minor_radius"]),
-        order=int(configuration["curve_order"]),
-        numquadpoints=int(configuration["curve_quadrature"]),
+        R0=_mapping_float(configuration, "major_radius"),
+        R1=_mapping_float(configuration, "minor_radius"),
+        order=_mapping_int(configuration, "curve_order"),
+        numquadpoints=_mapping_int(configuration, "curve_quadrature"),
     )
     base_currents = [
-        Current(float(configuration["initial_current"])) for _ in base_curves
+        Current(_mapping_float(configuration, "initial_current")) for _ in base_curves
     ]
     base_currents[0].fix_all()
     coils = coils_via_symmetries(
@@ -226,9 +240,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         )
         for curve in base_curves
     ]
-    mean_squared_curvatures = [
-        MeanSquaredCurvature(curve) for curve in base_curves
-    ]
+    mean_squared_curvatures = [MeanSquaredCurvature(curve) for curve in base_curves]
     mean_squared_penalties = [
         QuadraticPenalty(
             value,
@@ -277,9 +289,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
 
     initial_parameters = arrays["initial_parameters"]
     direction = arrays["taylor_direction"]
-    first_objective = objective(
-        _configuration_float(bundle, "first_length_weight")
-    )
+    first_objective = objective(_configuration_float(bundle, "first_length_weight"))
     initial_values = state(
         "initial",
         initial_parameters,
@@ -294,9 +304,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         plus = float(first_objective.J())
         first_objective.x = initial_parameters - epsilon * direction
         minus = float(first_objective.J())
-        taylor_errors.append(
-            (plus - minus) / (2.0 * epsilon) - directional_derivative
-        )
+        taylor_errors.append((plus - minus) / (2.0 * epsilon) - directional_derivative)
 
     def minimize_objective(current_objective, initial: np.ndarray):
         def value_and_gradient(parameters: np.ndarray):
@@ -325,9 +333,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         first_parameters,
         first_objective,
     )
-    second_objective = objective(
-        _configuration_float(bundle, "second_length_weight")
-    )
+    second_objective = objective(_configuration_float(bundle, "second_length_weight"))
     second_result = minimize_objective(second_objective, first_parameters)
     final_parameters = np.asarray(second_result.x, dtype=np.float64)
     final_values = state(
@@ -372,13 +378,13 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.examples import solve_standard_stage_two
     from simsopt_jax.objectives import StageTwoObjectiveConfig
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+    import jax
 
     surface, base_curves, coils = _build_geometry(dict(bundle.configuration))
     construction_fingerprint = _effective_fingerprint(
@@ -390,6 +396,7 @@ def _jax(
     field = BiotSavartJAX(coils)
     flux = SquaredFluxJAX(surface, field)
     device = get_runtime_jax_device()
+    platform = "cpu" if device is None else device.platform
 
     def config(length_weight: float) -> StageTwoObjectiveConfig:
         return StageTwoObjectiveConfig(
@@ -439,12 +446,8 @@ def _jax(
         ),
         initial_parameters=jax.device_put(arrays["initial_parameters"], device),
         taylor_direction=jax.device_put(arrays["taylor_direction"], device),
-        first_config=config(
-            _configuration_float(bundle, "first_length_weight")
-        ),
-        second_config=config(
-            _configuration_float(bundle, "second_length_weight")
-        ),
+        first_config=config(_configuration_float(bundle, "first_length_weight")),
+        second_config=config(_configuration_float(bundle, "second_length_weight")),
         max_steps=_configuration_int(bundle, "max_steps"),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
@@ -484,7 +487,7 @@ def _jax(
     return LaneObservation(
         lane=lane,
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
-        platform="gpu" if device.platform in {"cuda", "gpu"} else device.platform,
+        platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if bool(jax.config.read("jax_enable_x64")) else "fp32",
         scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
@@ -497,18 +500,9 @@ def _jax(
             f"{device_result.second_optimizer.status}"
         ),
         success=success,
-        nit=(
-            device_result.first_optimizer.nit
-            + device_result.second_optimizer.nit
-        ),
-        nfev=(
-            device_result.first_optimizer.nfev
-            + device_result.second_optimizer.nfev
-        ),
-        njev=(
-            device_result.first_optimizer.njev
-            + device_result.second_optimizer.njev
-        ),
+        nit=(device_result.first_optimizer.nit + device_result.second_optimizer.nit),
+        nfev=(device_result.first_optimizer.nfev + device_result.second_optimizer.nfev),
+        njev=(device_result.first_optimizer.njev + device_result.second_optimizer.njev),
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values={
