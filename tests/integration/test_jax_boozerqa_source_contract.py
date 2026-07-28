@@ -18,4 +18,8 @@ def test_boozerqa_mirror_uses_traceable_jax_inner_and_outer_solves() -> None:
     assert '"iota_weight": 1.0' in source
     assert '"major_radius_weight": 1.0' in source
     assert '"length_weight": 1.0' in source
+    assert '"newton_maxiter": 20' in source
+    assert "qs_resolution = 20" in source
+    assert "rtol=0.0" in source
+    assert "require_success=False" in source
     assert "scipy" not in source.lower()

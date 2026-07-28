@@ -21,6 +21,12 @@ from examples.jax.parity.cases.native_boozer import (
     create_input as create_native_boozer_input,
 )
 from examples.jax.parity.cases.native_boozer import execute as execute_native_boozer
+from examples.jax.parity.cases.native_boozerqa import (
+    create_input as create_native_boozerqa_input,
+)
+from examples.jax.parity.cases.native_boozerqa import (
+    execute as execute_native_boozerqa,
+)
 from examples.jax.parity.cases.native_just_a_quadratic import (
     execute as execute_native_just_a_quadratic,
 )
@@ -149,6 +155,11 @@ _CASES = {
         case_id="native-boozer",
         create_input=create_native_boozer_input,
         execute=execute_native_boozer,
+    ),
+    "native-boozerqa": CaseDefinition(
+        case_id="native-boozerqa",
+        create_input=create_native_boozerqa_input,
+        execute=execute_native_boozerqa,
     ),
     "native-just-a-quadratic": CaseDefinition(
         case_id="native-just-a-quadratic",
