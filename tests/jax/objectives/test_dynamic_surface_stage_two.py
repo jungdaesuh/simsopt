@@ -96,6 +96,18 @@ def test_dynamic_surface_stage_two_is_jittable_and_differentiates_both_blocks() 
     assert bool(jnp.all(jnp.isfinite(surface_gradient)))
 
 
+def test_dynamic_surface_contract_keeps_closed_constants_host_immutable() -> None:
+    contract, _field, _coil_dofs, _surface_dofs, _surface, _coils = _problem()
+
+    assert isinstance(contract.free_indices, tuple)
+    assert isinstance(contract.full_dof_template, np.ndarray)
+    assert not contract.full_dof_template.flags.writeable
+    assert isinstance(contract.quadpoints_phi, np.ndarray)
+    assert not contract.quadpoints_phi.flags.writeable
+    assert isinstance(contract.quadpoints_theta, np.ndarray)
+    assert not contract.quadpoints_theta.flags.writeable
+
+
 def test_dynamic_surface_stage_two_surface_gradient_matches_central_difference() -> (
     None
 ):
