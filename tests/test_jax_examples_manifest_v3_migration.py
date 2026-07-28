@@ -86,13 +86,13 @@ def test_exact_v2_v1_bytes_map_deterministically_without_writing() -> None:
     parity = json.loads(first.parity_bytes)
     assert isinstance(examples, dict) and examples["schema_version"] == 3
     assert isinstance(parity, dict) and parity["schema_version"] == 2
-    assert len(_records(examples, "source_catalog")) == 51
-    assert len(_records(examples, "jax_examples")) == 37
-    assert len(_records(parity, "relationships")) == 26
+    assert len(_records(examples, "source_catalog")) == 52
+    assert len(_records(examples, "jax_examples")) == 38
+    assert len(_records(parity, "relationships")) == 27
     assert first.examples_sha256 == hashlib.sha256(first.examples_bytes).hexdigest()
     assert first.parity_sha256 == hashlib.sha256(first.parity_bytes).hexdigest()
     assert first.semantic_diff["legacy_tutorial_count"] == 11
-    assert first.semantic_diff["planned_one_to_one_count"] == 26
+    assert first.semantic_diff["planned_one_to_one_count"] == 27
 
 
 def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> None:
@@ -115,7 +115,7 @@ def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> 
         else:
             assert mirror_id is None
 
-    assert len(owned_ids) == 26
+    assert len(owned_ids) == 27
     assert {str(record["jax_example_id"]) for record in relationships} == owned_ids
     tutorial_ids = {
         str(record["id"])
@@ -124,6 +124,15 @@ def test_candidate_has_exact_name_mirrors_and_noncovering_legacy_tutorials() -> 
     }
     assert len(tutorial_ids) == 11
     assert tutorial_ids.isdisjoint(owned_ids)
+    boozer_source = _record_by(
+        examples,
+        "source_catalog",
+        "source",
+        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
+    )
+    boozer_mirror_id = boozer_source["mirror_example_id"]
+    assert isinstance(boozer_mirror_id, str)
+    assert by_id[boozer_mirror_id]["path"] == boozer_source["source"]
 
 
 def test_schema_v3_rejects_missing_duplicate_tutorial_and_alias_ownership() -> None:

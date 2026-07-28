@@ -37,6 +37,7 @@ MIRRORS = frozenset(
         "2_Intermediate/wireframe_rcls_basic.py",
         "2_Intermediate/wireframe_rcls_with_ports.py",
         "3_Advanced/coil_forces.py",
+        "3_Advanced/single_stage_boozer_vacuum_optimization.py",
         "3_Advanced/stage_two_optimization_finitebuild.py",
         "3_Advanced/wireframe_gsco_multistep.py",
     }
@@ -107,7 +108,7 @@ def test_inventory_freezes_exact_baseline_and_all_native_sources() -> None:
         assert baseline[key] == expected
 
     rows = _rows(inventory)
-    assert len(rows) == 51
+    assert len(rows) == 52
     assert all(isinstance(row["source"], str) for row in rows)
     sources = [str(row["source"]) for row in rows]
     assert len(sources) == len(set(sources))
@@ -228,5 +229,5 @@ def test_inventory_capability_probe_revalidates_all_rows() -> None:
     )
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["source_count"] == 51
+    assert payload["source_count"] == 52
     assert payload["validated"] is True
