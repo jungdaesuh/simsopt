@@ -85,6 +85,26 @@ def test_stage_two_geometric_penalty_supports_linear_and_target_length_terms() -
     np.testing.assert_allclose(identity, 1.0)
 
 
+def test_stage_two_geometric_penalty_supports_per_base_curve_length_targets() -> None:
+    gamma, gammadash, gammadashdash = _geometry()
+    value = stage_two_geometric_penalty(
+        gamma,
+        gammadash,
+        gammadashdash,
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        StageTwoObjectiveConfig(
+            num_base_curves=2,
+            length_weight=1.0e-8,
+            individual_length_target=1.5,
+            individual_length_weight=0.1,
+        ),
+    )
+
+    expected = 1.0e-8 * 4.0 + 0.1 * (0.5 * 0.5**2 + 0.5 * 0.5**2)
+    np.testing.assert_allclose(value, expected)
+
+
 def test_stage_two_geometric_penalty_is_jittable_and_differentiable() -> None:
     gamma, gammadash, gammadashdash = _geometry()
     surface_gamma = jnp.asarray(((3.0, 0.0, 0.0),), dtype=jnp.float64)
