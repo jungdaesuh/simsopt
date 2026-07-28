@@ -25,6 +25,7 @@ class SurfaceAreaVolumeStageDeviceResult:
     """One completed area-volume solve whose numerical values remain on device."""
 
     initial_parameters: jax.Array
+    solver_initial_parameters: jax.Array
     initial_area: jax.Array
     initial_volume: jax.Array
     initial_residuals: jax.Array
@@ -45,6 +46,9 @@ class SurfaceAreaVolumeSequenceDeviceResult:
     second: SurfaceAreaVolumeStageDeviceResult
 
 
+_AXIS_SYMMETRY_BREAKING_OFFSET = 1.0e-10
+
+
 @jax.jit
 def _partition_surface_dofs(
     full_dofs: jax.Array,
@@ -53,6 +57,16 @@ def _partition_surface_dofs(
     free_dofs = full_dofs[free_positions]
     fixed_dofs = full_dofs.at[free_positions].set(jnp.zeros_like(free_dofs))
     return fixed_dofs, free_dofs
+
+
+@jax.jit
+def _first_stage_solver_seed(initial_parameters: jax.Array) -> jax.Array:
+    """Break the circular-axis degeneracy of the exact autodiff Jacobian."""
+    offset = jnp.asarray(
+        (-_AXIS_SYMMETRY_BREAKING_OFFSET, _AXIS_SYMMETRY_BREAKING_OFFSET),
+        dtype=initial_parameters.dtype,
+    )
+    return initial_parameters + offset
 
 
 @jax.jit
@@ -77,7 +91,7 @@ def _quantities_and_jacobian(
     fixed_dofs: jax.Array,
     free_positions: jax.Array,
     spec: SurfaceRZFourierSpec,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     quantities = _surface_quantities_from_free_dofs(
         parameters,
         fixed_dofs,
@@ -93,12 +107,13 @@ def _quantities_and_jacobian(
         free_positions,
         spec,
     )
-    return quantities, jacobian
+    return quantities[0], quantities[1], quantities, jacobian
 
 
 def _solve_stage(
     *,
     initial_parameters: jax.Array,
+    solver_initial_parameters: jax.Array,
     targets: jax.Array,
     fixed_dofs: jax.Array,
     free_positions: jax.Array,
@@ -118,15 +133,17 @@ def _solve_stage(
     def residuals(parameters: jax.Array) -> jax.Array:
         return quantities(parameters) - targets
 
-    initial_quantities, initial_jacobian = _quantities_and_jacobian(
-        initial_parameters,
-        fixed_dofs,
-        free_positions,
-        spec,
+    initial_area, initial_volume, initial_quantities, initial_jacobian = (
+        _quantities_and_jacobian(
+            initial_parameters,
+            fixed_dofs,
+            free_positions,
+            spec,
+        )
     )
     problem = TraceableLeastSquaresProblem(
         residual_fn=residuals,
-        x=initial_parameters,
+        x=solver_initial_parameters,
     )
     optimizer = least_squares_serial_solve_jax(
         problem,
@@ -135,19 +152,26 @@ def _solve_stage(
         atol=atol,
     )
     final_parameters = problem.x
-    final_quantities, final_jacobian = _quantities_and_jacobian(
-        final_parameters,
-        fixed_dofs,
-        free_positions,
-        spec,
+    final_area, final_volume, final_quantities, final_jacobian = (
+        _quantities_and_jacobian(
+            final_parameters,
+            fixed_dofs,
+            free_positions,
+            spec,
+        )
     )
     completed = jax.block_until_ready(
         (
             initial_parameters,
+            solver_initial_parameters,
+            initial_area,
+            initial_volume,
             initial_quantities,
             initial_quantities - targets,
             initial_jacobian,
             final_parameters,
+            final_area,
+            final_volume,
             final_quantities,
             final_quantities - targets,
             final_jacobian,
@@ -155,15 +179,16 @@ def _solve_stage(
     )
     return SurfaceAreaVolumeStageDeviceResult(
         initial_parameters=completed[0],
-        initial_area=completed[1][0],
-        initial_volume=completed[1][1],
-        initial_residuals=completed[2],
-        initial_jacobian=completed[3],
-        final_parameters=completed[4],
-        final_area=completed[5][0],
-        final_volume=completed[5][1],
-        final_residuals=completed[6],
-        final_jacobian=completed[7],
+        solver_initial_parameters=completed[1],
+        initial_area=completed[2],
+        initial_volume=completed[3],
+        initial_residuals=completed[5],
+        initial_jacobian=completed[6],
+        final_parameters=completed[7],
+        final_area=completed[8],
+        final_volume=completed[9],
+        final_residuals=completed[11],
+        final_jacobian=completed[12],
         optimizer=optimizer,
     )
 
@@ -202,6 +227,7 @@ def solve_rz_surface_area_volume_sequence(
     )
     first = _solve_stage(
         initial_parameters=initial_parameters,
+        solver_initial_parameters=_first_stage_solver_seed(initial_parameters),
         targets=jnp.asarray(first_targets, dtype=jnp.float64),
         fixed_dofs=fixed_dofs,
         free_positions=free_positions_device,
@@ -212,6 +238,7 @@ def solve_rz_surface_area_volume_sequence(
     )
     second = _solve_stage(
         initial_parameters=first.final_parameters,
+        solver_initial_parameters=first.final_parameters,
         targets=jnp.asarray(second_targets, dtype=jnp.float64),
         fixed_dofs=fixed_dofs,
         free_positions=free_positions_device,
