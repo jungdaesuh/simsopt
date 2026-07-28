@@ -100,6 +100,12 @@ from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import 
 from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
     execute as execute_native_stage_two_optimization_stochastic,
 )
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    create_input as create_native_single_stage_boozer_vacuum_input,
+)
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    execute as execute_native_single_stage_boozer_vacuum,
+)
 from examples.jax.parity.cases.native_strain_optimization import (
     create_input as create_native_strain_optimization_input,
 )
@@ -292,6 +298,11 @@ _CASES = {
         case_id="native-strain-optimization",
         create_input=create_native_strain_optimization_input,
         execute=execute_native_strain_optimization,
+    ),
+    "native-single-stage-boozer-vacuum-optimization": CaseDefinition(
+        case_id="native-single-stage-boozer-vacuum-optimization",
+        create_input=create_native_single_stage_boozer_vacuum_input,
+        execute=execute_native_single_stage_boozer_vacuum,
     ),
     "native-wireframe-rcls-basic": CaseDefinition(
         case_id="native-wireframe-rcls-basic",
