@@ -9,9 +9,10 @@ import shlex
 import subprocess
 import sys
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence, TextIO
+from typing import Mapping, TextIO
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_ROOT = _REPO_ROOT / "src"
@@ -20,39 +21,21 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
         sys.path.insert(0, import_root)
 
 from simsopt_jax.config import ExecutionIntent, JaxDevice, JaxExecutionProfile
-
-if __package__:
-    from ._lane_environment import (
-        LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
-    )
-    from ._lane_environment import (
-        JaxLane as Lane,
-    )
-    from ._lane_environment import (
-        build_execution_environment,
-    )
-    from ._manifest import (
-        JaxExampleRecord,
-        JaxExamplesManifest,
-        ManifestValidationError,
-        load_manifest,
-    )
-else:
-    from _lane_environment import (  # type: ignore[no-redef]
-        LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
-    )
-    from _lane_environment import (
-        JaxLane as Lane,
-    )
-    from _lane_environment import (
-        build_execution_environment,
-    )
-    from _manifest import (  # type: ignore[no-redef]
-        JaxExampleRecord,
-        JaxExamplesManifest,
-        ManifestValidationError,
-        load_manifest,
-    )
+from examples.jax._lane_environment import (
+    LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
+)
+from examples.jax._lane_environment import (
+    JaxLane as Lane,
+)
+from examples.jax._lane_environment import (
+    build_execution_environment,
+)
+from examples.jax._manifest import JaxExampleRecord, JaxExamplesManifest
+from examples.jax.manifest_runtime import (
+    RuntimeContractPair,
+    RuntimeExample,
+    load_runtime_contract_pair,
+)
 
 
 class ChildResultValidationError(ValueError):
@@ -60,27 +43,19 @@ class ChildResultValidationError(ValueError):
 
 
 def manifest_observability_payload(
-    manifest: JaxExamplesManifest,
+    manifest: JaxExamplesManifest | RuntimeContractPair,
 ) -> dict[str, int | bool]:
     """Return the schema/adapter fields emitted by every runner invocation."""
+    if isinstance(manifest, RuntimeContractPair):
+        return {
+            "examples_manifest_schema_version": manifest.version_pair[0],
+            "parity_manifest_schema_version": manifest.version_pair[1],
+            "used_legacy_manifest_adapter": manifest.used_legacy_adapter,
+        }
     return {
         "manifest_schema_version": manifest.schema_version,
         "used_legacy_manifest_adapter": manifest.used_legacy_manifest_adapter,
     }
-
-
-class _RunnerArgumentParser(argparse.ArgumentParser):
-    def parse_args(
-        self,
-        args: Sequence[str] | None = None,
-        namespace: argparse.Namespace | None = None,
-    ) -> argparse.Namespace:
-        parsed = super().parse_args(args, namespace)
-        if parsed.lane is not None and parsed.intent is not None:
-            self.error("--lane cannot be combined with --intent; use --device")
-        if parsed.intent is None:
-            parsed.intent = "fast"
-        return parsed
 
 
 @dataclass(frozen=True)
@@ -94,7 +69,7 @@ class ChildResult:
 
 
 def build_child_command(
-    example: JaxExampleRecord, *, repo_root: Path
+    example: JaxExampleRecord | RuntimeExample, *, repo_root: Path
 ) -> tuple[str, ...]:
     """Return the only supported bounded child command for one example."""
 
@@ -157,7 +132,7 @@ def _parse_child_result(stdout: str, example_id: str) -> ChildResult:
 
 def _validate_child_result(
     result: ChildResult,
-    example: JaxExampleRecord,
+    example: JaxExampleRecord | RuntimeExample,
     profile: JaxExecutionProfile,
 ) -> None:
     expected_backend = profile.mode
@@ -189,7 +164,7 @@ def _validate_child_result(
 
 def _write_child_failure(
     *,
-    example: JaxExampleRecord,
+    example: JaxExampleRecord | RuntimeExample,
     command: tuple[str, ...],
     child_stdout: str,
     child_stderr: str,
@@ -197,7 +172,12 @@ def _write_child_failure(
     stderr: TextIO,
 ) -> None:
     print(f"FAIL {example.id}: {reason}", file=stderr)
-    print(f"inspired_by: {', '.join(example.inspired_by)}", file=stderr)
+    lineage = (
+        example.source or "non-covering tutorial"
+        if isinstance(example, RuntimeExample)
+        else ", ".join(example.inspired_by)
+    )
+    print(f"native_source: {lineage}", file=stderr)
     print(f"command: {shlex.join(command)}", file=stderr)
     print("stdout:", file=stderr)
     print(child_stdout, file=stderr, end="" if child_stdout.endswith("\n") else "\n")
@@ -206,7 +186,7 @@ def _write_child_failure(
 
 
 def run_lane(
-    manifest: JaxExamplesManifest,
+    manifest: JaxExamplesManifest | RuntimeContractPair,
     lane: Lane,
     *,
     repo_root: Path,
@@ -233,7 +213,7 @@ def run_lane(
 
 
 def run_profile(
-    manifest: JaxExamplesManifest,
+    manifest: JaxExamplesManifest | RuntimeContractPair,
     device: JaxDevice,
     intent: ExecutionIntent,
     *,
@@ -245,9 +225,14 @@ def run_profile(
     """Run every ready record for one explicit device and intent."""
     capability_lane: Lane = "cpu-smoke" if device == "cpu" else "gpu-strict"
 
+    examples = (
+        manifest.examples
+        if isinstance(manifest, RuntimeContractPair)
+        else manifest.jax_examples
+    )
     selected = tuple(
         example
-        for example in manifest.jax_examples
+        for example in examples
         if example.status == "ready" and capability_lane in example.lanes
     )
     if not selected:
@@ -301,7 +286,7 @@ def run_profile(
 
 
 def _argument_parser() -> argparse.ArgumentParser:
-    parser = _RunnerArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--lane", choices=_LEGACY_JAX_LANES)
     selector.add_argument("--device", choices=("cpu", "gpu"))
@@ -311,17 +296,35 @@ def _argument_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(__file__).with_name("manifest.json"),
     )
+    parser.add_argument(
+        "--parity-manifest",
+        type=Path,
+        default=Path(__file__).with_name("parity_manifest.json"),
+    )
     return parser
 
 
-def main(arguments: list[str] | None = None) -> int:
+def _parse_arguments(arguments: Iterable[str] | None = None) -> argparse.Namespace:
     parser = _argument_parser()
     parsed = parser.parse_args(arguments)
+    if parsed.lane is not None and parsed.intent is not None:
+        parser.error("--lane cannot be combined with --intent; use --device")
+    if parsed.intent is None:
+        parsed.intent = "fast"
+    return parsed
+
+
+def main(arguments: list[str] | None = None) -> int:
+    parsed = _parse_arguments(arguments)
     repo_root = _REPO_ROOT
     try:
-        manifest = load_manifest(parsed.manifest, repo_root=repo_root)
-    except ManifestValidationError as error:
-        print(f"manifest validation failed: {error}", file=sys.stderr)
+        manifest = load_runtime_contract_pair(
+            parsed.manifest,
+            parsed.parity_manifest,
+            repo_root=repo_root,
+        )
+    except ValueError as error:
+        print(f"manifest pair validation failed: {error}", file=sys.stderr)
         return 2
     print(
         json.dumps(
