@@ -169,32 +169,21 @@ def _jax(
 ) -> LaneObservation:
     import jax
     import jax.numpy as jnp
-    from simsopt_jax.solve.serial import (
-        TraceableLeastSquaresProblem,
-        least_squares_serial_solve_jax,
-    )
+    from simsopt_jax.examples import solve_weighted_quadratic
 
     initial = arrays["initial_parameters"]
     targets = arrays["targets"]
     weights = arrays["weights"]
-    square_root_weights = jnp.asarray(np.sqrt(weights), dtype=jnp.float64)
-    targets_device = jnp.asarray(targets, dtype=jnp.float64)
-
-    def residual(parameters: jax.Array) -> jax.Array:
-        return square_root_weights * (parameters - targets_device)
-
-    problem = TraceableLeastSquaresProblem(
-        residual_fn=residual,
-        x=jnp.asarray(initial, dtype=jnp.float64),
-    )
-    result = least_squares_serial_solve_jax(
-        problem,
+    device_result = solve_weighted_quadratic(
+        initial_parameters=jnp.asarray(initial, dtype=jnp.float64),
+        targets=jnp.asarray(targets, dtype=jnp.float64),
+        weights=jnp.asarray(weights, dtype=jnp.float64),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
         max_steps=_configuration_int(bundle, "max_steps"),
     )
     final = np.asarray(
-        jax.device_get(jax.block_until_ready(problem.x)),
+        jax.device_get(device_result.final_parameters),
         dtype=np.float64,
     )
     platform = jax.devices()[0].platform
@@ -207,13 +196,15 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(bundle, arrays),
-        driver=result.driver.value,
-        normalized_status="converged" if result.success else "failed",
-        raw_status=str(result.status),
-        success=result.success,
-        nit=result.nit,
-        nfev=result.nfev,
-        njev=result.njev,
+        driver=device_result.optimizer.driver.value,
+        normalized_status=(
+            "converged" if device_result.optimizer.success else "failed"
+        ),
+        raw_status=str(device_result.optimizer.status),
+        success=device_result.optimizer.success,
+        nit=device_result.optimizer.nit,
+        nfev=device_result.optimizer.nfev,
+        njev=device_result.optimizer.njev,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values=_values(initial, final, targets, weights),
