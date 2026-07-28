@@ -7,10 +7,14 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 import numpy as np
+from simsopt.field import Current, coils_via_symmetries
+from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 from simsopt_jax.objectives.stage_two import (
     StageTwoObjectiveConfig,
+    stage_two_coil_geometry,
     stage_two_geometric_penalty,
 )
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 
 
 def _geometry() -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -29,6 +33,39 @@ def _geometry() -> tuple[jax.Array, jax.Array, jax.Array]:
         dtype=jnp.float64,
     )
     return gamma, gammadash, -gamma
+
+
+def test_stage_two_current_linearization_avoids_host_zero_tangents() -> None:
+    surface = SurfaceRZFourier(nfp=2, stellsym=True, mpol=1, ntor=0)
+    curves = create_equally_spaced_curves(
+        2,
+        surface.nfp,
+        surface.stellsym,
+        R0=1.0,
+        R1=0.25,
+        order=1,
+        numquadpoints=8,
+        use_jax_curve=False,
+    )
+    currents = [Current(1.0e5), Current(1.0e5)]
+    currents[0].fix_all()
+    field = BiotSavartJAX(
+        coils_via_symmetries(curves, currents, surface.nfp, surface.stellsym)
+    )
+    extraction = field.coil_dof_extraction_spec()
+    parameters = jax.device_put(jnp.asarray(field.x, dtype=jnp.float64))
+    tangent = jax.device_put(jnp.ones_like(parameters))
+
+    def total_current(current_parameters: jax.Array) -> jax.Array:
+        return jnp.sum(stage_two_coil_geometry(extraction, current_parameters)[3])
+
+    with jax.transfer_guard("disallow"):
+        value, linearized = jax.linearize(total_current, parameters)
+        directional_derivative = linearized(tangent)
+        jax.block_until_ready((value, directional_derivative))
+
+    assert bool(jnp.isfinite(value))
+    assert bool(jnp.isfinite(directional_derivative))
 
 
 def _length_only_config(
