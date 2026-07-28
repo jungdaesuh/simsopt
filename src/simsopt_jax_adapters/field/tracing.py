@@ -416,6 +416,7 @@ def trace_particles(
     mode="gc_vac",
     forget_exact_path=False,
     phase_angle=0,
+    max_steps: int | None = None,
 ):
     """Trace particles with the JAX tracing backend."""
     nparticles = xyz_inits.shape[0]
@@ -439,6 +440,7 @@ def trace_particles(
             stopping_criteria=stopping_criteria,
             forget_exact_path=forget_exact_path,
             phase_angle=phase_angle,
+            max_steps=max_steps,
         )
     return _trace_particles_jax_guiding_center_vacuum(
         field,
@@ -454,6 +456,7 @@ def trace_particles(
         stopping_criteria=stopping_criteria,
         mode=mode,
         forget_exact_path=forget_exact_path,
+        max_steps=max_steps,
     )
 
 
@@ -472,6 +475,7 @@ def _trace_particles_jax_guiding_center_vacuum(
     stopping_criteria,
     mode,
     forget_exact_path,
+    max_steps,
 ):
     """JAX backend for Cartesian vacuum guiding-center tracing."""
     if mode != "gc_vac":
@@ -492,7 +496,7 @@ def _trace_particles_jax_guiding_center_vacuum(
         phis_arr = None
 
     nparticles = xyz_inits.shape[0]
-    max_steps = 4000
+    step_limit = 4000 if max_steps is None else max_steps
     max_phi_hits = 4096
     res_tys = []
     res_phi_hits = []
@@ -517,7 +521,7 @@ def _trace_particles_jax_guiding_center_vacuum(
             tmax=float(tmax),
             rtol=float(tol),
             atol=float(tol),
-            max_steps=max_steps,
+            max_steps=step_limit,
             max_phi_hits=max_phi_hits,
             adaptive_loop=_adaptive_loop_for_backend_mode(get_backend_mode()),
         )
@@ -574,6 +578,7 @@ def _trace_particles_jax_fullorbit_vacuum(
     stopping_criteria,
     forget_exact_path,
     phase_angle,
+    max_steps,
 ):
     """JAX backend for Cartesian full-orbit tracing."""
     field_fn, field_state = _resolve_jax_field_B(field)
@@ -583,7 +588,7 @@ def _trace_particles_jax_fullorbit_vacuum(
     else:
         phis_arr = None
 
-    max_steps = 20000
+    step_limit = 20000 if max_steps is None else max_steps
     max_phi_hits = 4096
     nparticles = xyz_inits.shape[0]
     first, last = parallel_loop_bounds(comm, nparticles)
@@ -612,7 +617,7 @@ def _trace_particles_jax_fullorbit_vacuum(
             tmax=float(tmax),
             rtol=float(tol),
             atol=float(tol),
-            max_steps=max_steps,
+            max_steps=step_limit,
             max_phi_hits=max_phi_hits,
             adaptive_loop=_adaptive_loop_for_backend_mode(get_backend_mode()),
         )

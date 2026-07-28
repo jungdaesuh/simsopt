@@ -26,6 +26,7 @@ EXAMPLE_ID = "native-tracing-particle"
 NATIVE_PARTICLE_COUNT = 100
 NATIVE_TRACE_TIME = 1.0e-2
 BOUNDED_TRACE_TIME = 1.0e-5
+BOUNDED_MAX_STEPS = 512
 KINETIC_ENERGY = 5_000.0 * ONE_EV
 
 
@@ -74,6 +75,11 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         if particle_count >= NATIVE_PARTICLE_COUNT
         else BOUNDED_TRACE_TIME
     )
+    trace_max_steps = (
+        4_000
+        if particle_count >= NATIVE_PARTICLE_COUNT
+        else BOUNDED_MAX_STEPS
+    )
 
     speed_total = np.sqrt(2.0 * KINETIC_ENERGY / PROTON_MASS)
     random_generator = np.random.RandomState(1)
@@ -110,6 +116,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         stopping_criteria=[LevelsetStoppingCriterion(classifier)],
         mode="gc_vac",
         forget_exact_path=True,
+        max_steps=trace_max_steps,
     )
 
     final_rows = np.stack([trajectory[-1] for trajectory in trajectories])
