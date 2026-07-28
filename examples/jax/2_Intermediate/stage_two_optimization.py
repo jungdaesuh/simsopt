@@ -112,7 +112,7 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         surface_normal=surface_normal,
         initial_parameters=initial_device,
         taylor_direction=taylor_direction_device,
-        config=_objective_config(),
+        regularization_config=_objective_config(),
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=max_steps,
