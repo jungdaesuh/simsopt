@@ -18,6 +18,7 @@ from simsopt_jax.core._finite_difference import (
 )
 from simsopt_jax.runtime.host_boundary import host_array, host_float
 from simsopt_jax.runtime.jaxpr_closure import (
+    closure_converted_array_function,
     closure_converted_value_and_grad,
     device_put_closure_consts,
 )
@@ -37,6 +38,7 @@ from simsopt_jax.solve.simsopt.contracts import (
 )
 
 __all__ = [
+    "TraceableArrayFunction",
     "TraceableEqualityConstrainedProblem",
     "TraceableLeastSquaresProblem",
     "TraceableScalarProblem",
@@ -45,6 +47,37 @@ __all__ = [
     "serial_solve_jax",
     "traceable_least_squares_jacobian",
 ]
+
+
+@dataclass
+class TraceableArrayFunction:
+    """Array-valued JAX function with explicit device-resident closure state."""
+
+    function_fn: Callable[[jax.Array], jax.Array]
+    x: jax.Array
+    _compiled_function: Callable[[jax.Array], jax.Array] = field(
+        init=False,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        x = jnp.asarray(self.x)
+        converted_function, function_consts = closure_converted_array_function(
+            self.function_fn,
+            x,
+        )
+        function_consts = device_put_closure_consts(function_consts, x)
+        compiled_function = jax.jit(converted_function)
+
+        def evaluate(current_x):
+            return compiled_function(current_x, function_consts)
+
+        self.x = x
+        self._compiled_function = evaluate
+
+    def __call__(self, x: jax.Array | None = None) -> jax.Array:
+        """Evaluate the compiled function on the active device."""
+        return self._compiled_function(self.x if x is None else x)
 
 
 @dataclass
