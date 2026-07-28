@@ -19,6 +19,7 @@ from benchmarks.jax_native_example_measurement_contract import (
 )
 from benchmarks.run_jax_native_example_measurements import (
     MeasurementRunnerError,
+    build_collection_plan,
     build_measurement_environment,
     build_measurement_schedule,
     build_profile_command,
@@ -535,3 +536,43 @@ def test_measurement_publication_is_exclusive(tmp_path: Path) -> None:
             artifact_root=tmp_path,
             run_directory_name="run-1",
         )
+
+
+def test_collection_plan_contains_exact_full_timing_and_memory_protocol() -> None:
+    plan = build_collection_plan(mirror_index=1)
+
+    assert len(plan) == 47
+    timing = tuple(run for run in plan if not run.allocation_sensitive)
+    allocation = tuple(run for run in plan if run.allocation_sensitive)
+    assert len(timing) == 45
+    assert len(allocation) == 2
+    assert tuple(run.profile_id for run in timing[:5]) == (
+        "jax_cpu_fast",
+        "jax_cpu_parity",
+        "jax_gpu_fast",
+        "jax_gpu_parity",
+        "native_cpu",
+    )
+    assert all(run.phase == "cold" and run.measured for run in timing[:5])
+    assert tuple(run.profile_id for run in timing[5:10]) == tuple(
+        reversed(tuple(run.profile_id for run in timing[:5]))
+    )
+    assert all(run.phase == "warmup" and not run.measured for run in timing[5:10])
+    assert len(tuple(run for run in timing if run.phase == "warm")) == 35
+    assert tuple(run.profile_id for run in allocation) == (
+        "jax_gpu_fast",
+        "jax_gpu_parity",
+    )
+    assert all(run.phase == "allocation_memory" for run in allocation)
+    assert all(run.measured for run in allocation)
+
+
+def test_collection_plan_rotates_every_warm_round() -> None:
+    plan = build_collection_plan(mirror_index=0)
+    warm = tuple(run for run in plan if run.phase == "warm")
+
+    for sample_index in range(WARM_SAMPLE_COUNT):
+        round_runs = tuple(run for run in warm if run.sample_index == sample_index)
+        assert len(round_runs) == 5
+        assert tuple(run.order_position for run in round_runs) == tuple(range(5))
+        assert set(run.profile_id for run in round_runs) == set(MEASUREMENT_PROFILE_IDS)
