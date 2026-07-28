@@ -84,6 +84,12 @@ from examples.jax.parity.cases.native_surf_vol_area import (
 from examples.jax.parity.cases.native_surf_vol_area import (
     execute as execute_native_surf_vol_area,
 )
+from examples.jax.parity.cases.native_tracing_fieldlines_ncsx import (
+    create_input as create_native_tracing_fieldlines_ncsx_input,
+)
+from examples.jax.parity.cases.native_tracing_fieldlines_ncsx import (
+    execute as execute_native_tracing_fieldlines_ncsx,
+)
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     create_input as create_native_wireframe_rcls_basic_input,
 )
@@ -157,6 +163,11 @@ _CASES = {
         case_id="native-surf-vol-area",
         create_input=create_native_surf_vol_area_input,
         execute=execute_native_surf_vol_area,
+    ),
+    "native-tracing-fieldlines-ncsx": CaseDefinition(
+        case_id="native-tracing-fieldlines-ncsx",
+        create_input=create_native_tracing_fieldlines_ncsx_input,
+        execute=execute_native_tracing_fieldlines_ncsx,
     ),
     "native-stage-two-optimization-minimal": CaseDefinition(
         case_id="native-stage-two-optimization-minimal",

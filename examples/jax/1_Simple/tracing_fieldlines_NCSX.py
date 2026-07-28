@@ -46,6 +46,16 @@ def _problem(max_steps: int):
     surface.fit_to_curve(magnetic_axis, 0.70, flip_theta=False)
     radii = np.linalg.norm(surface.gamma()[:, :, :2], axis=2)
     heights = surface.gamma()[:, :, 2]
+    classifier = SurfaceClassifier(surface, h=0.08 if not native_scale else 0.03, p=2)
+
+    def skip(
+        radii_values: np.ndarray,
+        phi_values: np.ndarray,
+        height_values: np.ndarray,
+    ) -> np.ndarray:
+        cylindrical_points = np.column_stack((radii_values, phi_values, height_values))
+        return (classifier.evaluate_rphiz(cylindrical_points) < -0.05).reshape(-1)
+
     interpolated = InterpolatedFieldJAX(
         source_field,
         degree,
@@ -55,12 +65,13 @@ def _problem(max_steps: int):
         True,
         nfp=nfp,
         stellsym=True,
+        skip=skip,
     )
-    return magnetic_axis, surface, source_field, interpolated, nfp
+    return magnetic_axis, source_field, interpolated, classifier, nfp
 
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    magnetic_axis, surface, source_field, interpolated, nfp = _problem(max_steps)
+    magnetic_axis, source_field, interpolated, classifier, nfp = _problem(max_steps)
     axis_points = np.asarray(magnetic_axis.gamma(), dtype=np.float64)
     source_field.set_points(axis_points)
     interpolated.set_points(axis_points)
@@ -79,7 +90,6 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     )
     vertical_initial = np.full(nfieldlines, axis_points[0, 2], dtype=np.float64)
     phis = tuple(index * 0.5 * np.pi / nfp for index in range(4))
-    classifier = SurfaceClassifier(surface, h=0.08 if nfieldlines == 3 else 0.03, p=2)
     trajectories, phi_hits = compute_fieldlines(
         interpolated,
         radial_initial,
