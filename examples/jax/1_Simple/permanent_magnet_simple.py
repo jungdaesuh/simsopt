@@ -27,6 +27,24 @@ EXAMPLE_ID = "native-permanent-magnet-simple"
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
+@jax.jit
+def _device_publication(
+    moments: jax.Array,
+    residual: jax.Array,
+    selected_dipoles: jax.Array,
+    target: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Fuse final diagnostics without retaining additional solver history."""
+    return (
+        jnp.linalg.norm(target),
+        jnp.linalg.norm(residual),
+        selected_dipoles,
+        jnp.count_nonzero(jnp.linalg.norm(moments, axis=1)) / moments.shape[0],
+        jnp.all(jnp.isfinite(moments)),
+        moments,
+    )
+
+
 def _build_grid() -> PermanentMagnetGridJAX:
     nphi = 2
     ntheta = 2
@@ -61,13 +79,11 @@ def _build_grid() -> PermanentMagnetGridJAX:
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     grid = _build_grid()
     result = GPMO_baseline_jax(grid, K=max_steps, retain_history=False)
-    device_publication = (
-        jnp.linalg.norm(grid.b_obj),
-        jnp.linalg.norm(result.residual),
-        result.selected_dipoles,
-        jnp.count_nonzero(jnp.linalg.norm(result.m, axis=1)) / grid.ndipoles,
-        jnp.all(jnp.isfinite(result.m)),
+    device_publication = _device_publication(
         result.m,
+        result.residual,
+        result.selected_dipoles,
+        grid.b_obj,
     )
     (
         initial_error,
