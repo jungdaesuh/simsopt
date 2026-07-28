@@ -168,24 +168,26 @@ def _taylor_errors_from_operands(
     )
     central_differences = jax.vmap(
         lambda epsilon: (
-            _objective_from_operands(
-                initial_parameters + epsilon * direction,
-                extraction,
-                flux_spec,
-                surface_gamma,
-                surface_normal,
-                config,
+            (
+                _objective_from_operands(
+                    initial_parameters + epsilon * direction,
+                    extraction,
+                    flux_spec,
+                    surface_gamma,
+                    surface_normal,
+                    config,
+                )
+                - _objective_from_operands(
+                    initial_parameters - epsilon * direction,
+                    extraction,
+                    flux_spec,
+                    surface_gamma,
+                    surface_normal,
+                    config,
+                )
             )
-            - _objective_from_operands(
-                initial_parameters - epsilon * direction,
-                extraction,
-                flux_spec,
-                surface_gamma,
-                surface_normal,
-                config,
-            )
+            / (2.0 * epsilon)
         )
-        / (2.0 * epsilon)
     )(epsilons)
     return central_differences - directional_derivative
 

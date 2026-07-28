@@ -38,7 +38,7 @@ def _build_problem(
     curve_order = 5 if native_scale else 2
     curve_quadrature = 100 if native_scale else 16
     surface = SurfaceRZFourier.from_vmec_input(
-        TEST_DATA / "input.LandremanPaul2021_QA",
+        str(TEST_DATA / "input.LandremanPaul2021_QA"),
         range="half period",
         nphi=surface_resolution,
         ntheta=surface_resolution,
@@ -124,8 +124,7 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
     field.x = solution
     field.save(str(output_directory / "biot_savart_opt.json"))
     solver_success = bool(
-        device_result.first_optimizer.success
-        and device_result.second_optimizer.success
+        device_result.first_optimizer.success and device_result.second_optimizer.success
     )
     scientific_success = bool(
         device_result.first_optimizer.status in (0, 1)
@@ -139,18 +138,14 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
     return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
-            "initial_parameters": tuple(
-                float(value) for value in initial.parameters
-            ),
+            "initial_parameters": tuple(float(value) for value in initial.parameters),
             "initial_objective": float(initial.objective),
             "initial_gradient": tuple(
                 float(value) for value in initial.objective_gradient
             ),
             "first_solution": tuple(float(value) for value in first.parameters),
             "first_objective": float(first.objective),
-            "first_gradient": tuple(
-                float(value) for value in first.objective_gradient
-            ),
+            "first_gradient": tuple(float(value) for value in first.objective_gradient),
             "solution": tuple(float(value) for value in solution),
             "final_objective": float(final.objective),
             "final_gradient": tuple(float(value) for value in final_gradient),
