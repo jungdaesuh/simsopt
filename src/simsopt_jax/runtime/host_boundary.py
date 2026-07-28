@@ -99,20 +99,19 @@ def host_inf_norm(value, *, dtype=None) -> float:
 
 
 def host_tree(value, *, dtype=None):
+    materialized = host_value(value)
+
     def _hostify_leaf(leaf):
         if isinstance(leaf, jax.core.Tracer):
             return leaf
-        if isinstance(leaf, jax.Array):
-            leaf_dtype = np.dtype(leaf.dtype) if dtype is None else dtype
-            return host_array(leaf, dtype=leaf_dtype)
         if isinstance(leaf, np.ndarray):
             leaf_dtype = leaf.dtype if dtype is None else dtype
-            return np.asarray(leaf, dtype=leaf_dtype)
+            return np.array(leaf, dtype=leaf_dtype, copy=True)
         if dtype is not None and (isinstance(leaf, np.generic) or np.isscalar(leaf)):
             return np.asarray(leaf, dtype=dtype)
         return leaf
 
-    return jax.tree.map(_hostify_leaf, value)
+    return jax.tree.map(_hostify_leaf, materialized)
 
 
 def host_tree_after_ready(value, *, dtype=None):
