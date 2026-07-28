@@ -7,9 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_optimization.py"
-AUTHORITY_WORKFLOW = (
-    ROOT / ".github" / "workflows" / "jax_vmec_hybrid_authority.yml"
-)
+AUTHORITY_WORKFLOW = ROOT / ".github" / "workflows" / "jax_vmec_hybrid_authority.yml"
 
 
 def _module() -> ast.Module:
