@@ -19,17 +19,17 @@ CANDIDATE_EXAMPLES = REPO_ROOT / "docs" / "jax_examples_manifest_v3_candidate.js
 CANDIDATE_PARITY = REPO_ROOT / "docs" / "jax_parity_manifest_v2_candidate.json"
 
 
-def test_legacy_pair_remains_readable_without_inventing_v3_alias_metadata() -> None:
+def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
     runtime = load_runtime_contract_pair(
         ACTIVE_EXAMPLES,
         ACTIVE_PARITY,
         repo_root=REPO_ROOT,
     )
-    assert runtime.version_pair == (2, 1)
-    assert runtime.used_legacy_adapter is True
-    assert len(runtime.examples) == 11
+    assert runtime.version_pair == (3, 2)
+    assert runtime.used_legacy_adapter is False
+    assert len(runtime.examples) == 38
     assert sum(example.status == "ready" for example in runtime.examples) == 10
-    assert all(example.compatibility is None for example in runtime.examples)
+    assert sum(example.teaching_kind == "one_to_one" for example in runtime.examples) == 27
 
 
 def test_canonical_pair_exposes_exact_mirrors_without_tutorial_coverage() -> None:
