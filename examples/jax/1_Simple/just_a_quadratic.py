@@ -17,21 +17,17 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 import jax
-import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
-from simsopt_jax.solve.serial import (
-    TraceableLeastSquaresProblem,
-    least_squares_serial_solve_jax,
+from simsopt_jax.examples import (
+    ExecutionScale,
+    example_runtime_metadata,
+    solve_weighted_quadratic,
 )
 
 EXAMPLE_ID = "native-just-a-quadratic"
 INITIAL_PARAMETERS = (0.0, 0.0, 0.0)
 TARGETS = (1.0, 2.0, 3.0)
 WEIGHTS = (1.0, 2.0, 3.0)
-RESIDUAL_JACOBIAN_DEVICE = jax.device_put(
-    np.diag(np.sqrt(np.asarray(WEIGHTS, dtype=np.float64)))
-)
 
 
 @dataclass(frozen=True)
@@ -80,70 +76,44 @@ class ExampleResult:
         }
 
 
-@jax.jit
-def weighted_residuals(parameters: jax.Array) -> jax.Array:
-    """Return native-compatible ``sqrt(weight) * (value - target)`` residuals."""
-
-    targets = jnp.asarray(TARGETS, dtype=jnp.float64)
-    weights = jnp.asarray(WEIGHTS, dtype=jnp.float64)
-    return jnp.sqrt(weights) * (parameters - targets)
-
-
-@jax.jit
-def objective_gradient(jacobian: jax.Array, residuals: jax.Array) -> jax.Array:
-    """Return the gradient of the native sum-of-squares objective."""
-
-    return 2.0 * jacobian.T @ residuals
-
-
 def solve(output_directory: Path, max_steps: int) -> ExampleResult:
     """Solve the quadratic and collect scientific parity observables."""
 
-    initial_parameters = jax.device_put(
-        np.asarray(INITIAL_PARAMETERS, dtype=np.float64)
-    )
-    initial_residuals_device = weighted_residuals(initial_parameters)
-    initial_jacobian_device = RESIDUAL_JACOBIAN_DEVICE
-    initial_objective_device = jnp.vdot(
-        initial_residuals_device,
-        initial_residuals_device,
-    ).real
-
-    problem = TraceableLeastSquaresProblem(
-        residual_fn=weighted_residuals,
-        x=initial_parameters,
-    )
     with chdir(output_directory):
-        solver_result = least_squares_serial_solve_jax(
-            problem,
+        device_result = solve_weighted_quadratic(
+            initial_parameters=jax.device_put(
+                np.asarray(INITIAL_PARAMETERS, dtype=np.float64)
+            ),
+            targets=jax.device_put(np.asarray(TARGETS, dtype=np.float64)),
+            weights=jax.device_put(np.asarray(WEIGHTS, dtype=np.float64)),
             max_steps=max_steps,
             rtol=1.0e-12,
             atol=1.0e-12,
         )
 
-    solution_device = problem.x
-    residuals_device = problem.residuals()
-    jacobian_device = RESIDUAL_JACOBIAN_DEVICE
-    objective_device = problem.objective()
-    gradient_device = objective_gradient(jacobian_device, residuals_device)
-
     initial_residuals = np.asarray(
-        jax.device_get(initial_residuals_device), dtype=np.float64
+        jax.device_get(device_result.initial_residuals), dtype=np.float64
     )
     initial_jacobian = np.asarray(
-        jax.device_get(initial_jacobian_device), dtype=np.float64
+        jax.device_get(device_result.initial_jacobian), dtype=np.float64
     )
-    solution = np.asarray(jax.device_get(solution_device), dtype=np.float64)
-    residuals = np.asarray(jax.device_get(residuals_device), dtype=np.float64)
-    gradient = np.asarray(jax.device_get(gradient_device), dtype=np.float64)
-    initial_objective = float(jax.device_get(initial_objective_device))
-    objective = float(jax.device_get(objective_device))
+    solution = np.asarray(
+        jax.device_get(device_result.final_parameters), dtype=np.float64
+    )
+    residuals = np.asarray(
+        jax.device_get(device_result.final_residuals), dtype=np.float64
+    )
+    gradient = np.asarray(
+        jax.device_get(device_result.final_gradient), dtype=np.float64
+    )
+    initial_objective = float(jax.device_get(device_result.initial_objective))
+    objective = float(jax.device_get(device_result.final_objective))
     residual_norm = float(np.linalg.norm(residuals))
     gradient_inf_norm = float(np.linalg.norm(gradient, ord=np.inf))
     scientific_success = bool(
         np.allclose(solution, np.asarray(TARGETS), rtol=1.0e-10, atol=1.0e-10)
         and objective <= 1.0e-16
-        and solver_result.success
+        and device_result.optimizer.success
     )
 
     return ExampleResult(
@@ -159,12 +129,12 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         objective=objective,
         residual_norm=residual_norm,
         gradient_inf_norm=gradient_inf_norm,
-        solver_driver=solver_result.driver.value,
-        solver_status=solver_result.status,
-        solver_success=solver_result.success,
-        iterations=solver_result.nit,
-        function_evaluations=solver_result.nfev,
-        jacobian_evaluations=solver_result.njev,
+        solver_driver=device_result.optimizer.driver.value,
+        solver_status=device_result.optimizer.status,
+        solver_success=device_result.optimizer.success,
+        iterations=device_result.optimizer.nit,
+        function_evaluations=device_result.optimizer.nfev,
+        jacobian_evaluations=device_result.optimizer.njev,
         status="ok" if scientific_success else "failed",
     )
 
