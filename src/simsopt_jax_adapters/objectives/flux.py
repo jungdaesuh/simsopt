@@ -202,6 +202,21 @@ def _cached_squared_flux_native_program(forward):
     return jax.jit(forward), jax.jit(jax.value_and_grad(forward, argnums=0))
 
 
+def _gather_axis_zero(array: jax.Array, indices: jax.Array) -> jax.Array:
+    dimension_numbers = jax.lax.GatherDimensionNumbers(
+        offset_dims=tuple(range(1, array.ndim)),
+        collapsed_slice_dims=(0,),
+        start_index_map=(0,),
+    )
+    return jax.lax.gather(
+        array,
+        jnp.reshape(indices, (-1, 1)),
+        dimension_numbers,
+        slice_sizes=(1, *array.shape[1:]),
+        mode="promise_in_bounds",
+    )
+
+
 def _squared_flux_curve_xyz_fourier_forward(
     flat_dofs,
     flux_spec,
@@ -215,25 +230,32 @@ def _squared_flux_curve_xyz_fourier_forward(
     current_scales,
 ):
     k = basis.shape[1]
+    flat_dof_sum = jnp.sum(flat_dofs)
+    flat_dof_zero = flat_dof_sum - flat_dof_sum
     curve_dofs = jnp.stack(
         [
-            optimizable_input_dofs_from_map_spec(curve_map, flat_dofs).reshape(3, k)
+            optimizable_input_dofs_from_map_spec(curve_map, flat_dofs).reshape(
+                3,
+                k,
+            )
+            + flat_dof_zero
             for curve_map in curve_dof_maps
         ]
     )
     current_vals = jnp.stack(
         [
             optimizable_input_dofs_from_map_spec(current_map, flat_dofs)[0]
+            + flat_dof_zero
             for current_map in current_dof_maps
         ]
     )
 
-    coeffs = curve_dofs[base_curve_idxs]
+    coeffs = _gather_axis_zero(curve_dofs, base_curve_idxs)
     gammas = jnp.einsum("qk,nck->nqc", basis, coeffs)
     gammadashs = jnp.einsum("qk,nck->nqc", dbasis, coeffs)
     gammas = jnp.einsum("nqi,nij->nqj", gammas, rotmats)
     gammadashs = jnp.einsum("nqi,nij->nqj", gammadashs, rotmats)
-    currents = current_vals[base_current_idxs] * current_scales
+    currents = _gather_axis_zero(current_vals, base_current_idxs) * current_scales
 
     B = biot_savart_B(
         flux_spec.points,
