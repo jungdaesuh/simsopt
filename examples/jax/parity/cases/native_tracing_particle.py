@@ -36,6 +36,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "interpolation_degree": 3 if native_scale else 2,
         "particle_count": 100 if native_scale else 3,
         "tmax": 1.0e-2 if native_scale else 1.0e-5,
+        "jax_max_steps": 4_000 if native_scale else 512,
         "integrator_tolerance": 1.0e-9,
         "surface_distance": 0.20,
         "classifier_h": 0.1,
@@ -392,6 +393,7 @@ def _jax(
         stopping_criteria=[LevelsetStoppingCriterion(classifier)],
         mode="gc_vac",
         forget_exact_path=True,
+        max_steps=_configuration_int(bundle, "jax_max_steps"),
     )
     speed_total = np.sqrt(
         2.0 * _configuration_float(bundle, "kinetic_energy")
