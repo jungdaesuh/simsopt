@@ -11,6 +11,7 @@ from examples.jax.manifest_runtime import (
     emit_compatibility_warning,
     load_runtime_contract_pair,
 )
+from examples.jax.parity.cases import implemented_case_ids
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACTIVE_EXAMPLES = REPO_ROOT / "examples" / "jax" / "manifest.json"
@@ -41,6 +42,26 @@ def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
         example for example in one_to_one if example.classification == "hybrid"
     )
     assert hybrid.status == "planned"
+
+
+def test_active_external_solver_free_mirrors_are_executable_parity_cases() -> None:
+    runtime = load_runtime_contract_pair(
+        ACTIVE_EXAMPLES,
+        ACTIVE_PARITY,
+        repo_root=REPO_ROOT,
+    )
+    implemented_native_cases = {
+        case_id
+        for case_id in implemented_case_ids()
+        if case_id.startswith("native-")
+    }
+    active_case_ids = {
+        relationship.case_id
+        for relationship in runtime.parity.relationships
+        if relationship.case_id is not None
+    }
+
+    assert implemented_native_cases <= active_case_ids
 
 
 def test_canonical_pair_exposes_exact_mirrors_without_tutorial_coverage() -> None:
