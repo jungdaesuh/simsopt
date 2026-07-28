@@ -148,10 +148,14 @@ def _half_like(reference: jax.Array) -> jax.Array:
     return _as_runtime_value(0.5, reference=reference, dtype=reference.dtype)
 
 
-def _scipy_lstsq_rcond(dtype) -> np.floating:
+def _scipy_normal_equation_rank_cutoff(dtype) -> np.floating:
+    """Map the native normal-equation rank cutoff to singular-value space."""
     host_dtype = np.dtype(dtype)
     eps = host_dtype.type(np.finfo(host_dtype).eps)
-    return np.nextafter(eps, host_dtype.type(np.inf))
+    return np.nextafter(
+        host_dtype.type(np.sqrt(eps)),
+        host_dtype.type(np.inf),
+    )
 
 
 @jax.jit
@@ -174,21 +178,27 @@ def _regularized_constrained_least_squares_core(
 
     AQ2mat = Amat @ Q2mat
     WQ2mat = _regularization_weighted_basis(W, n, Q2mat)
-    LHS = AQ2mat.T @ AQ2mat + WQ2mat.T @ WQ2mat
 
     AQ1mat = Amat @ Q1mat
     WQ1mat = _regularization_weighted_basis(W, n, Q1mat)
     AQ1uvec = AQ1mat @ uvec
     WQ1uvec = WQ1mat @ uvec
-    AQ2bvec = AQ2mat.T @ bvec
-    RHS = AQ2bvec - AQ2mat.T @ AQ1uvec - WQ2mat.T @ WQ1uvec
+    augmented_matrix = jnp.concatenate((AQ2mat, WQ2mat), axis=0)
+    augmented_target = jnp.concatenate(
+        (bvec - AQ1uvec, -WQ1uvec),
+        axis=0,
+    )
 
     rcond = _as_runtime_value(
-        _scipy_lstsq_rcond(LHS.dtype),
-        reference=LHS,
-        dtype=LHS.dtype,
+        _scipy_normal_equation_rank_cutoff(augmented_matrix.dtype),
+        reference=augmented_matrix,
+        dtype=augmented_matrix.dtype,
     )
-    vvec = jnp.linalg.lstsq(LHS, RHS, rcond=rcond)[0]
+    vvec = jnp.linalg.lstsq(
+        augmented_matrix,
+        augmented_target,
+        rcond=rcond,
+    )[0]
     return Qfull @ jnp.concatenate((uvec, vvec), axis=0)
 
 
