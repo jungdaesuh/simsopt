@@ -278,6 +278,40 @@ def test_arbiter_rejects_applicable_observable_without_routes() -> None:
         arbitrate(_routes(), observations)
 
 
+def test_arbiter_accepts_explicit_noncertifying_diagnostic_routes() -> None:
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            values={
+                **observation.values,
+                "final:diagnostic_trace": np.arange(3, dtype=np.float64),
+            },
+            applicability={},
+        )
+        for lane, observation in _observations().items()
+    }
+    diagnostic_routes = tuple(
+        ComparisonRoute(
+            phase="final",
+            observable="diagnostic_trace",
+            lane_pair=lane_pair,
+            applicable=False,
+            comparator="allclose",
+            tolerance_bucket="native_workflow",
+        )
+        for lane_pair in (
+            "native-cpu:jax-cpu",
+            "native-cpu:jax-gpu",
+            "jax-cpu:jax-gpu",
+        )
+    )
+
+    result = arbitrate((*_routes(), *diagnostic_routes), observations)
+
+    assert result.verdict == "pass"
+    assert len(result.comparisons) == 3
+
+
 def test_lane_receipts_expose_explicit_observable_applicability() -> None:
     observation = _observations()["native-cpu"]
 
