@@ -700,11 +700,38 @@ def _jax(
     )
 
     def taylor_error_batch(
+        extraction_operand,
         initial_parameters_operand,
         initial_gradient_operand,
         direction_operand,
         epsilons_operand,
+        flux_spec_operand,
+        training_operand,
+        surface_gamma_operand,
+        surface_normal_operand,
     ):
+        def objective_from_operands(parameters):
+            gamma, gammadash, gammadashdash, currents = stage_two_coil_geometry(
+                extraction_operand,
+                parameters,
+            )
+            stochastic_flux = stochastic_flux_mean_from_geometry(
+                gamma,
+                gammadash,
+                currents,
+                flux_spec_operand,
+                training_operand,
+            )
+            geometric_penalty = stage_two_geometric_penalty(
+                gamma,
+                gammadash,
+                gammadashdash,
+                surface_gamma_operand,
+                surface_normal_operand,
+                config,
+            )
+            return stochastic_flux + geometric_penalty
+
         directional_derivative = jnp.vdot(
             initial_gradient_operand,
             direction_operand,
@@ -712,12 +739,12 @@ def _jax(
         return jax.vmap(
             lambda epsilon: (
                 (
-                    problem.value_and_grad(
+                    objective_from_operands(
                         initial_parameters_operand + epsilon * direction_operand
-                    )[0]
-                    - problem.value_and_grad(
+                    )
+                    - objective_from_operands(
                         initial_parameters_operand - epsilon * direction_operand
-                    )[0]
+                    )
                 )
                 / (2.0 * epsilon)
                 - directional_derivative
@@ -725,10 +752,15 @@ def _jax(
         )(epsilons_operand)
 
     taylor_errors = jax.jit(taylor_error_batch)(
+        extraction,
         initial_parameters,
         initial_gradient,
         direction,
         epsilons,
+        flux_spec,
+        training,
+        surface_gamma,
+        surface_normal,
     )
     (
         initial_parameters_host,
