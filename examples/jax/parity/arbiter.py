@@ -223,11 +223,11 @@ def _validate_route_matrix(
     required_lanes: frozenset[str],
 ) -> None:
     grouped: dict[tuple[str, str], set[str]] = {}
+    applicability_by_key: dict[tuple[str, str], set[bool]] = {}
     for route in routes:
-        if route.applicable:
-            grouped.setdefault((route.phase, route.observable), set()).add(
-                route.lane_pair
-            )
+        key = (route.phase, route.observable)
+        grouped.setdefault(key, set()).add(route.lane_pair)
+        applicability_by_key.setdefault(key, set()).add(route.applicable)
     required_pairs = _required_lane_pairs(required_lanes)
     observable_keys = {
         lane: {
@@ -248,6 +248,8 @@ def _validate_route_matrix(
     for key, lane_pairs in grouped.items():
         if lane_pairs != required_pairs:
             raise ArbitrationError(f"{key} requires a complete direct lane-pair matrix")
+        if len(applicability_by_key[key]) != 1:
+            raise ArbitrationError(f"{key} has inconsistent comparison applicability")
 
 
 def _route_tolerance(route: ComparisonRoute) -> tuple[float, float]:
