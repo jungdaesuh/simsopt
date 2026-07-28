@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from simsopt_jax.core.specs import FixedSurfaceFluxSpec
+from simsopt_jax.core.specs import CoilSetDofExtractionSpec, FixedSurfaceFluxSpec
 from simsopt_jax.objectives import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
@@ -39,6 +39,83 @@ class MinimalStageTwoDeviceResult:
     final: MinimalStageTwoState
     taylor_errors: jax.Array
     optimizer: OptimizerResult
+
+
+def _objective_from_operands(
+    parameters: jax.Array,
+    extraction: CoilSetDofExtractionSpec,
+    flux_spec: FixedSurfaceFluxSpec,
+    surface_gamma: jax.Array,
+    surface_normal: jax.Array,
+    config: StageTwoObjectiveConfig,
+) -> jax.Array:
+    return fused_stage_two_values(
+        extraction,
+        parameters,
+        flux_spec,
+        surface_gamma,
+        surface_normal,
+        config,
+    )[0]
+
+
+_values_program = jax.jit(fused_stage_two_values, static_argnums=(5,))
+_value_and_grad_program = jax.jit(
+    jax.value_and_grad(_objective_from_operands, argnums=0),
+    static_argnums=(5,),
+)
+
+
+def _taylor_errors_from_operands(
+    initial_parameters: jax.Array,
+    direction: jax.Array,
+    extraction: CoilSetDofExtractionSpec,
+    flux_spec: FixedSurfaceFluxSpec,
+    surface_gamma: jax.Array,
+    surface_normal: jax.Array,
+    config: StageTwoObjectiveConfig,
+) -> jax.Array:
+    initial_gradient = jax.grad(_objective_from_operands, argnums=0)(
+        initial_parameters,
+        extraction,
+        flux_spec,
+        surface_gamma,
+        surface_normal,
+        config,
+    )
+    directional_derivative = jnp.vdot(initial_gradient, direction).real
+    epsilons = jnp.asarray(
+        (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7),
+        dtype=initial_parameters.dtype,
+    )
+    central_differences = jax.vmap(
+        lambda epsilon: (
+            _objective_from_operands(
+                initial_parameters + epsilon * direction,
+                extraction,
+                flux_spec,
+                surface_gamma,
+                surface_normal,
+                config,
+            )
+            - _objective_from_operands(
+                initial_parameters - epsilon * direction,
+                extraction,
+                flux_spec,
+                surface_gamma,
+                surface_normal,
+                config,
+            )
+        )
+        / (2.0 * epsilon)
+    )(epsilons)
+    return central_differences - directional_derivative
+
+
+_taylor_errors_program = jax.jit(
+    _taylor_errors_from_operands,
+    static_argnums=(6,),
+)
 
 
 def solve_minimal_stage_two(
@@ -75,8 +152,22 @@ def solve_minimal_stage_two(
         surface_normal_device,
         config,
     )
-    values = jax.jit(
-        lambda parameters: fused_stage_two_values(
+    def state(parameters: jax.Array) -> MinimalStageTwoState:
+        objective_value, objective_gradient = _value_and_grad_program(
+            parameters,
+            extraction,
+            flux_spec,
+            surface_gamma_device,
+            surface_normal_device,
+            config,
+        )
+        (
+            _,
+            squared_flux,
+            length_penalty,
+            maximum_normal_field,
+            total_curve_length,
+        ) = _values_program(
             extraction,
             parameters,
             flux_spec,
@@ -84,17 +175,6 @@ def solve_minimal_stage_two(
             surface_normal_device,
             config,
         )
-    )
-
-    def state(parameters: jax.Array) -> MinimalStageTwoState:
-        (
-            objective_value,
-            squared_flux,
-            length_penalty,
-            maximum_normal_field,
-            total_curve_length,
-        ) = values(parameters)
-        objective_gradient = jax.grad(objective)(parameters)
         return MinimalStageTwoState(
             parameters=parameters,
             objective=objective_value,
@@ -106,24 +186,15 @@ def solve_minimal_stage_two(
         )
 
     initial = state(initial_device)
-    directional_derivative = jnp.vdot(
-        initial.objective_gradient,
+    taylor_errors = _taylor_errors_program(
+        initial_device,
         direction_device,
-    ).real
-    epsilons = jnp.asarray(
-        (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7),
-        dtype=jnp.float64,
+        extraction,
+        flux_spec,
+        surface_gamma_device,
+        surface_normal_device,
+        config,
     )
-    central_differences = jax.vmap(
-        lambda epsilon: (
-            (
-                objective(initial_device + epsilon * direction_device)
-                - objective(initial_device - epsilon * direction_device)
-            )
-            / (2.0 * epsilon)
-        )
-    )(epsilons)
-    taylor_errors = central_differences - directional_derivative
 
     problem = TraceableScalarProblem(
         objective_fn=objective,
