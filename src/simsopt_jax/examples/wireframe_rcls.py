@@ -7,7 +7,9 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
-from simsopt_jax_adapters.solve.wireframe import rcls_wireframe_jax
+from simsopt_jax_adapters.solve.wireframe import (
+    regularized_constrained_least_squares_jax,
+)
 
 from simsopt_jax.core._math_utils import (
     as_jax_int32 as _as_jax_int32,
@@ -81,6 +83,15 @@ jax.tree_util.register_dataclass(
     ],
     meta_fields=[],
 )
+
+
+@jax.jit
+def _expand_free_currents(
+    initial_currents: jax.Array,
+    free_segments: jax.Array,
+    free_currents: jax.Array,
+) -> jax.Array:
+    return jnp.zeros_like(initial_currents).at[free_segments, :].set(free_currents)
 
 
 @jax.jit
@@ -176,12 +187,18 @@ def solve_wireframe_rcls(
     free_segments = _as_jax_int32(
         np.asarray(wireframe.unconstrained_segments(), dtype=np.int64)
     )
-    solve_result = rcls_wireframe_jax(
-        wireframe,
-        response_array,
+    free_response = jnp.take(response_array, free_segments, axis=1)
+    free_currents = regularized_constrained_least_squares_jax(
+        free_response,
         target_array,
         regularization,
-        assume_no_crossings=assume_no_crossings,
+        constraint_array,
+        constraint_target_array,
+    )
+    final_currents = _expand_free_currents(
+        initial_array,
+        free_segments,
+        free_currents,
     )
     return _wireframe_rcls_diagnostics(
         response_array,
@@ -195,7 +212,7 @@ def solve_wireframe_rcls(
         constraint_target_array,
         free_segments,
         initial_array,
-        solve_result.x,
+        final_currents,
         _as_runtime_array(plasma_points),
         _as_runtime_array(plasma_unit_normal),
         _as_runtime_array(plasma_area_weights),
