@@ -24,6 +24,8 @@ Phase = Literal[
     "poincare",
     "second",
     "taylor",
+    "toroidal_flux",
+    "volume",
 ]
 LanePair = Literal[
     "native-cpu:jax-cpu",
@@ -47,6 +49,8 @@ PHASES = frozenset(
         "poincare",
         "second",
         "taylor",
+        "toroidal_flux",
+        "volume",
     }
 )
 LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"})
