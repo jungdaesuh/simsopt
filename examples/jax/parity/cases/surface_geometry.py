@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -14,10 +13,11 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from examples.jax.parity.symmetry import (
+    global_column_swap_jacobian_invariants as _global_column_swap_jacobian_invariants,
+)
+from examples.jax.parity.symmetry import parameter_invariants as _parameter_invariants
 from simsopt_jax.examples import ExecutionScale
-
-if TYPE_CHECKING:
-    import jax
 
 WORKFLOW_STAGES = (
     "construct_area_volume_problem",
@@ -100,44 +100,6 @@ def _effective_fingerprint(
         "max_steps": bundle.configuration["max_steps"],
     }
     return effective_construction_fingerprint(bundle, payload)
-
-
-def _parameter_invariants(parameters: np.ndarray) -> np.ndarray:
-    """Return the quotient coordinates for interchangeable ellipse semi-axes."""
-    values = np.asarray(parameters, dtype=np.float64)
-    return np.asarray((np.sum(values), np.prod(values)), dtype=np.float64)
-
-
-def _global_column_swap_jacobian_invariants(
-    left: np.ndarray | jax.Array,
-    right: np.ndarray | jax.Array,
-) -> tuple[
-    np.ndarray | jax.Array,
-    np.ndarray | jax.Array,
-    np.ndarray | jax.Array,
-]:
-    """Identify two Jacobian columns up to one global column exchange.
-
-    The normalized difference association couples every residual row, so an
-    independent row-wise column swap cannot masquerade as a global exchange.
-    Differences at roundoff scale are treated as exact column coincidence so
-    the normalization does not amplify an arbitrary native/JAX sign.
-    """
-    column_difference = left - right
-    difference_scale = abs(column_difference).max()
-    value_scale = abs(left).max() + abs(right).max()
-    roundoff_threshold = (
-        128.0 * np.finfo(np.dtype(left.dtype)).eps * (value_scale + (value_scale == 0))
-    )
-    active = difference_scale > roundoff_threshold
-    normalized_difference = (
-        column_difference / (difference_scale + (difference_scale == 0))
-    ) * active
-    return (
-        left + right,
-        left * right,
-        normalized_difference[:, None] * normalized_difference[None, :],
-    )
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
