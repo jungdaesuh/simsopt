@@ -314,6 +314,39 @@ def test_arbiter_accepts_explicit_noncertifying_diagnostic_routes() -> None:
     assert len(result.comparisons) == 3
 
 
+def test_arbiter_accepts_a_source_owned_not_worse_objective() -> None:
+    observations = {
+        lane: dataclasses.replace(
+            observation,
+            values={
+                "initial:objective_sum_squares": np.asarray(
+                    1.0 if lane == "native-cpu" else 0.5,
+                    dtype=np.float64,
+                )
+            },
+            applicability={},
+        )
+        for lane, observation in _observations().items()
+        if lane in {"native-cpu", "jax-cpu"}
+    }
+    route = ComparisonRoute(
+        phase="initial",
+        observable="objective_sum_squares",
+        lane_pair="native-cpu:jax-cpu",
+        applicable=True,
+        comparator="not_worse",
+        tolerance_bucket="mirror_optimization_3e2",
+    )
+
+    result = arbitrate(
+        (route,),
+        observations,
+        required_lanes=frozenset({"native-cpu", "jax-cpu"}),
+    )
+
+    assert result.verdict == "pass"
+
+
 def test_lane_receipts_expose_explicit_observable_applicability() -> None:
     observation = _observations()["native-cpu"]
 
