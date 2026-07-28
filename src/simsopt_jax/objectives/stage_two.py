@@ -221,7 +221,7 @@ def _stage_two_coil_geometry(
         gamma, gammadash, current = apply_coil_symmetry(
             gamma,
             gammadash,
-            coil_spec.current.value,
+            coil_spec.current.value[0],
             coil_spec.symmetry,
         )
         if coil_spec.symmetry.has_rotation:
