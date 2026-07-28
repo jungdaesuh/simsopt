@@ -80,8 +80,14 @@ def _qfm_state(
             )
         )
 
-    state_values = values(parameters)
-    state_jacobian = jax.jacrev(values)(parameters)
+    def values_with_aux(surface_dofs: jax.Array) -> tuple[jax.Array, jax.Array]:
+        state_values = values(surface_dofs)
+        return state_values, state_values
+
+    state_jacobian, state_values = jax.jacrev(
+        values_with_aux,
+        has_aux=True,
+    )(parameters)
     return QfmDeviceState(
         parameters=parameters,
         qfm_value=state_values[0],
