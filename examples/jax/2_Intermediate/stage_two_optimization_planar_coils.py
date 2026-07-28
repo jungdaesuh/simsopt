@@ -18,18 +18,17 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_planar_curves
-from simsopt_jax.core import (
-    CoilSetDofExtractionSpec,
-    coil_specs_from_dof_extraction_spec,
-    curve_geometry_from_spec,
+from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.core import CoilSetDofExtractionSpec
+from simsopt_jax.examples import (
+    ExampleResult,
+    run_example,
+    solve_standard_stage_two,
 )
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
 from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
-    make_stage_two_objective,
-    stage_two_linking_number,
+    stage_two_planar_topology_values,
 )
-from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
@@ -40,6 +39,7 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 def _build_problem(
     max_steps: int,
+    device: jax.Device | None,
 ) -> tuple[BiotSavartJAX, SquaredFluxJAX, jax.Array, jax.Array]:
     native_scale = max_steps == NATIVE_ITERATIONS
     surface_resolution = 32 if native_scale else 4
@@ -67,18 +67,19 @@ def _build_problem(
     )
     flux = SquaredFluxJAX(surface, field)
     surface_gamma = jax.device_put(
-        np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3))
+        np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3)),
+        device,
     )
     surface_normal = jax.device_put(
-        np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3))
+        np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3)),
+        device,
     )
     return field, flux, surface_gamma, surface_normal
 
 
-def _objective_config(length_weight: float) -> StageTwoObjectiveConfig:
+def _regularization_config() -> StageTwoObjectiveConfig:
     return StageTwoObjectiveConfig(
         num_base_curves=4,
-        length_weight=length_weight,
         length_target=10.4,
         length_target_mode="identity",
         curve_curve_minimum_distance=0.08,
@@ -96,148 +97,99 @@ def _objective_config(length_weight: float) -> StageTwoObjectiveConfig:
 @jax.jit
 def _topology_diagnostics(
     extraction: CoilSetDofExtractionSpec,
-    parameters: jax.Array,
+    parameter_states: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    coil_specs = coil_specs_from_dof_extraction_spec(
-        extraction,
-        parameters,
-    )
-    geometry_by_curve: dict[int, tuple[jax.Array, jax.Array, jax.Array]] = {}
-    geometry = []
-    for spec in coil_specs:
-        curve_id = id(spec.curve)
-        curve_geometry = geometry_by_curve.get(curve_id)
-        if curve_geometry is None:
-            curve_geometry = curve_geometry_from_spec(spec.curve)
-            geometry_by_curve[curve_id] = curve_geometry
-        gamma, gammadash, gammadashdash = curve_geometry
-        if spec.symmetry.has_rotation:
-            gamma = gamma @ spec.symmetry.rotmat
-            gammadash = gammadash @ spec.symmetry.rotmat
-            gammadashdash = gammadashdash @ spec.symmetry.rotmat
-        geometry.append((gamma, gammadash, gammadashdash))
-    gamma = jnp.stack(tuple(terms[0] for terms in geometry))
-    gammadash = jnp.stack(tuple(terms[1] for terms in geometry))
-    base_gamma = gamma[:4]
-    centered = base_gamma - jnp.mean(base_gamma, axis=1, keepdims=True)
-    covariance = jnp.einsum("nqi,nqj->nij", centered, centered) / base_gamma.shape[1]
-    minimum_variance = jnp.linalg.eigvalsh(covariance)[:, 0]
-    lengths = jnp.mean(
-        jnp.linalg.norm(gammadash[:4], axis=2),
-        axis=1,
-    )
-    canonical_geometry = jnp.concatenate(
-        (
-            lengths[:, None],
-            jnp.mean(base_gamma, axis=1),
-            covariance.reshape((base_gamma.shape[0], 9)),
-        ),
-        axis=1,
-    ).reshape((-1,))
+    return jax.vmap(
+        lambda parameters: stage_two_planar_topology_values(
+            extraction,
+            parameters,
+            4,
+        )
+    )(parameter_states)
+
+
+def _topology_state(
+    topology_states: tuple[np.ndarray, np.ndarray, np.ndarray],
+    index: int,
+) -> tuple[float, float, np.ndarray]:
     return (
-        jnp.sum(jnp.square(minimum_variance)),
-        stage_two_linking_number(gamma, gammadash),
-        canonical_geometry,
+        float(topology_states[0][index]),
+        float(topology_states[1][index]),
+        np.asarray(topology_states[2][index], dtype=np.float64),
     )
 
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    field, flux, surface_gamma, surface_normal = _build_problem(max_steps)
-    flux_objective = flux.traceable_objective()
-    first_objective = make_stage_two_objective(
-        field,
-        flux_objective,
-        surface_gamma,
-        surface_normal,
-        _objective_config(10.0),
+    device = get_runtime_jax_device()
+    field, flux, surface_gamma, surface_normal = _build_problem(max_steps, device)
+    initial_device = jax.device_put(
+        np.asarray(field.x, dtype=np.float64),
+        device,
     )
-    second_objective = make_stage_two_objective(
-        field,
-        flux_objective,
-        surface_gamma,
-        surface_normal,
-        _objective_config(1.0),
+    taylor_direction_device = jax.device_put(
+        np.random.RandomState(1).uniform(size=initial_device.shape),
+        device,
     )
-    initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
-    flux_problem = TraceableScalarProblem(objective_fn=flux_objective, x=initial_device)
-    driver = scalar_example_driver()
-    problem = TraceableScalarProblem(objective_fn=first_objective, x=initial_device)
-    initial_objective_device = problem.objective(initial_device)
-    (
-        initial_planarity_device,
-        initial_linking_device,
-        initial_canonical_geometry_device,
-    ) = _topology_diagnostics(
-        field.coil_dof_extraction_spec(),
-        initial_device,
+    first_length_weight_device = jax.device_put(
+        np.asarray(10.0, dtype=np.float64),
+        device,
     )
-    first_result = serial_solve_jax(
-        problem,
-        driver=driver,
+    second_length_weight_device = jax.device_put(
+        np.asarray(1.0, dtype=np.float64),
+        device,
+    )
+    device_result = solve_standard_stage_two(
+        field=field,
+        flux_spec=flux.fixed_surface_flux_spec(),
+        surface_gamma=surface_gamma,
+        surface_normal=surface_normal,
+        initial_parameters=initial_device,
+        taylor_direction=taylor_direction_device,
+        regularization_config=_regularization_config(),
+        first_length_weight=first_length_weight_device,
+        second_length_weight=second_length_weight_device,
         max_steps=max_steps,
         rtol=1.0e-8,
         atol=1.0e-7,
-        line_search_max_steps=40 if driver.value == "simsopt_bfgs" else None,
-        require_success=False,
     )
-    problem = TraceableScalarProblem(objective_fn=second_objective, x=problem.x)
-    second_result = serial_solve_jax(
-        problem,
-        driver=driver,
-        max_steps=max_steps,
-        rtol=1.0e-8,
-        atol=1.0e-7,
-        line_search_max_steps=40 if driver.value == "simsopt_bfgs" else None,
-        require_success=False,
-    )
-    solution_device = jax.block_until_ready(problem.x)
-    (
-        final_planarity_device,
-        final_linking_device,
-        canonical_geometry_device,
-    ) = _topology_diagnostics(
+    topology_device = _topology_diagnostics(
         field.coil_dof_extraction_spec(),
-        solution_device,
+        jnp.stack(
+            (
+                device_result.initial.parameters,
+                device_result.final.parameters,
+            )
+        ),
     )
-    diagnostics_device = jnp.concatenate(
-        (
-            jnp.stack(
-                (
-                    initial_objective_device,
-                    problem.objective(solution_device),
-                    flux_problem.objective(solution_device),
-                    initial_planarity_device,
-                    final_planarity_device,
-                    initial_linking_device,
-                    final_linking_device,
-                )
-            ),
-            initial_canonical_geometry_device,
-            canonical_geometry_device,
+    initial_state, final_state, topology_states = jax.device_get(
+        jax.block_until_ready(
+            (
+                device_result.initial,
+                device_result.final,
+                topology_device,
+            )
         )
     )
-    initial = np.asarray(jax.device_get(initial_device), dtype=np.float64)
-    solution = np.asarray(jax.device_get(solution_device), dtype=np.float64)
-    diagnostics = np.asarray(
-        jax.device_get(jax.block_until_ready(diagnostics_device)),
-        dtype=np.float64,
-    )
-    scalar_diagnostics = diagnostics[:7]
-    canonical_size = int(canonical_geometry_device.shape[0])
-    initial_canonical_geometry = diagnostics[7 : 7 + canonical_size]
-    canonical_geometry = diagnostics[7 + canonical_size :]
+    initial = np.asarray(initial_state.parameters, dtype=np.float64)
+    solution = np.asarray(final_state.parameters, dtype=np.float64)
+    initial_objective = float(initial_state.objective)
+    final_objective = float(final_state.objective)
+    squared_flux = float(final_state.squared_flux)
     (
-        initial_objective,
-        final_objective,
-        squared_flux,
         initial_planarity_penalty,
-        planarity_penalty,
         initial_linking_number,
-        linking_number,
-    ) = (float(value) for value in scalar_diagnostics)
-    solver_success = bool(first_result.success and second_result.success)
+        initial_canonical_geometry,
+    ) = _topology_state(topology_states, 0)
+    planarity_penalty, linking_number, canonical_geometry = _topology_state(
+        topology_states,
+        1,
+    )
+    solver_success = bool(
+        device_result.first_optimizer.success and device_result.second_optimizer.success
+    )
     solver_accepted = bool(
-        first_result.status in (0, 1) and second_result.status in (0, 1)
+        device_result.first_optimizer.status in (0, 1)
+        and device_result.second_optimizer.status in (0, 1)
     )
     scientific_success = bool(
         solver_accepted
@@ -263,8 +215,14 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             "linking_number": linking_number,
             "squared_flux": squared_flux,
             "solver_success": solver_success,
-            "solver_status": (first_result.status, second_result.status),
-            "solver_iterations": (first_result.nit, second_result.nit),
+            "solver_status": (
+                device_result.first_optimizer.status,
+                device_result.second_optimizer.status,
+            ),
+            "solver_iterations": (
+                device_result.first_optimizer.nit,
+                device_result.second_optimizer.nit,
+            ),
         },
         status="ok" if scientific_success else "failed",
     )
