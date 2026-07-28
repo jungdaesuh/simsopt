@@ -1,10 +1,10 @@
 """JAX mirror of ``examples/1_Simple/qfm.py``.
 
-Host construction loads the canonical NCSX coils and constructs each native
-surface label.  Immutable surface and coil specifications enter
-``QfmSurfaceJAX``.  For volume, toroidal flux, and area in sequence, the example
-runs the penalty solve followed by SIMSOPT's JAX augmented-Lagrangian equality
-solve and publishes the accepted surface state once per solve.
+Host construction loads the canonical NCSX coils and fitted surface. Immutable
+surface and coil specifications then enter one device-resident volume,
+toroidal-flux, and area sequence. Each stage runs SIMSOPT's JAX penalty solve
+followed by its augmented-Lagrangian equality solve. The completed result tree
+crosses to the host once for reporting.
 """
 
 from __future__ import annotations
@@ -13,13 +13,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import jax
 import numpy as np
 from simsopt.configs.zoo import get_data
 from simsopt.geo import SurfaceRZFourier
-from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.examples import (
+    ExampleResult,
+    QfmStageDeviceResult,
+    run_example,
+    solve_qfm_sequence,
+)
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
-from simsopt_jax_adapters.geo.qfm_surface import QfmSurfaceJAX
 
 EXAMPLE_ID = "native-qfm"
 
@@ -49,93 +54,95 @@ def _build_surface() -> tuple[SurfaceRZFourier, BiotSavartJAX]:
     return surface, BiotSavartJAX(native_field.coils)
 
 
-def _state(qfm: QfmSurfaceJAX) -> tuple[float, np.ndarray, float, np.ndarray]:
-    parameters = np.asarray(qfm.surface.get_dofs(), dtype=np.float64)
-    qfm_value, qfm_gradient = qfm.qfm_objective(parameters, derivatives=1)
-    constraint_value, constraint_gradient = qfm.qfm_label_constraint(
-        parameters, derivatives=1
-    )
-    return (
-        float(qfm_value),
-        np.asarray(qfm_gradient, dtype=np.float64),
-        float(constraint_value),
-        np.asarray(constraint_gradient, dtype=np.float64),
-    )
-
-
-def _solve_stage(
-    qfm: QfmSurfaceJAX,
+def _stage_result(
+    stage: QfmStageDeviceResult,
     label: Literal["volume", "toroidal_flux", "area"],
-    max_steps: int,
 ) -> StageResult:
-    penalty = qfm.minimize_qfm_penalty_jax(
-        tol=1.0e-8,
-        maxiter=max_steps,
-        constraint_weight=1.0,
-    )
-    exact = qfm.minimize_qfm_exact_jax(
-        tol=1.0e-8,
-        maxiter=max_steps,
-    )
-    qfm_value, _qfm_gradient, constraint, _constraint_gradient = _state(qfm)
+    label_residual = float(stage.exact.label_residual_abs)
     return StageResult(
         label=label,
-        penalty_success=bool(penalty["success"]),
-        exact_success=bool(exact["success"]),
-        qfm_value=qfm_value,
-        constraint_objective=constraint,
+        penalty_success=bool(stage.penalty_optimizer.success),
+        exact_success=bool(stage.exact_optimizer.success),
+        qfm_value=float(stage.exact.qfm_value),
+        constraint_objective=0.5 * label_residual * label_residual,
     )
 
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     surface, field = _build_surface()
-    initial_parameters = np.asarray(surface.get_dofs(), dtype=np.float64)
-    volume = Volume(surface)
-    volume_qfm = QfmSurfaceJAX(field, surface, volume, float(volume.J()))
-    (
-        initial_qfm,
-        initial_qfm_gradient,
-        initial_constraint,
-        initial_constraint_gradient,
-    ) = _state(volume_qfm)
-    volume_result = _solve_stage(volume_qfm, "volume", max_steps)
-
-    toroidal_flux = ToroidalFlux(surface, field)
-    flux_qfm = QfmSurfaceJAX(
-        field,
-        surface,
-        toroidal_flux,
-        float(toroidal_flux.J()),
+    device = get_runtime_jax_device()
+    coil_set_spec = field.coil_set_spec_from_dofs(
+        jax.device_put(np.asarray(field.x, dtype=np.float64), device)
     )
-    flux_result = _solve_stage(flux_qfm, "toroidal_flux", max_steps)
-
-    area = Area(surface)
-    area_qfm = QfmSurfaceJAX(field, surface, area, float(area.J()))
-    area_result = _solve_stage(area_qfm, "area", max_steps)
-    final_parameters = np.asarray(surface.get_dofs(), dtype=np.float64)
-    final_qfm, final_qfm_gradient, final_constraint, final_constraint_gradient = _state(
-        area_qfm
+    device_result = solve_qfm_sequence(
+        initial_parameters=jax.device_put(
+            np.asarray(surface.get_dofs(), dtype=np.float64),
+            device,
+        ),
+        quadpoints_phi=jax.device_put(
+            np.asarray(surface.quadpoints_phi, dtype=np.float64),
+            device,
+        ),
+        quadpoints_theta=jax.device_put(
+            np.asarray(surface.quadpoints_theta, dtype=np.float64),
+            device,
+        ),
+        coil_set_spec=coil_set_spec,
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+        nfp=surface.nfp,
+        stellsym=surface.stellsym,
+        max_steps=max_steps,
+        tolerance=1.0e-8,
+        constraint_weight=1.0,
     )
-    initial_residuals = np.asarray((initial_qfm, initial_constraint), dtype=np.float64)
-    initial_jacobian = np.stack((initial_qfm_gradient, initial_constraint_gradient))
-    final_residuals = np.asarray((final_qfm, final_constraint), dtype=np.float64)
-    final_jacobian = np.stack((final_qfm_gradient, final_constraint_gradient))
-    stages = (volume_result, flux_result, area_result)
+    result = jax.device_get(device_result)
+    initial = result.volume.initial
+    final = result.area.exact
+    initial_label_residual = float(initial.label_value - result.volume.target)
+    final_label_residual = float(final.label_value - result.area.target)
+    initial_constraint = 0.5 * initial_label_residual * initial_label_residual
+    final_constraint = 0.5 * final_label_residual * final_label_residual
+    initial_residuals = np.asarray(
+        (initial.qfm_value, initial_constraint),
+        dtype=np.float64,
+    )
+    initial_jacobian = np.stack(
+        (
+            initial.qfm_gradient,
+            initial_label_residual * initial.label_gradient,
+        )
+    )
+    final_residuals = np.asarray(
+        (final.qfm_value, final_constraint),
+        dtype=np.float64,
+    )
+    final_jacobian = np.stack(
+        (
+            final.qfm_gradient,
+            final_label_residual * final.label_gradient,
+        )
+    )
+    stages = (
+        _stage_result(result.volume, "volume"),
+        _stage_result(result.toroidal_flux, "toroidal_flux"),
+        _stage_result(result.area, "area"),
+    )
     scientific_success = bool(
         all(stage.penalty_success and stage.exact_success for stage in stages)
-        and np.all(np.isfinite(final_parameters))
-        and final_qfm < initial_qfm
+        and np.all(np.isfinite(final.parameters))
+        and final.qfm_value < initial.qfm_value
         and final_constraint <= 1.0e-10
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
         observables={
-            "initial_parameters": tuple(float(value) for value in initial_parameters),
+            "initial_parameters": tuple(float(value) for value in initial.parameters),
             "initial_residuals": tuple(float(value) for value in initial_residuals),
             "initial_jacobian": tuple(
                 tuple(float(value) for value in row) for row in initial_jacobian
             ),
-            "solution": tuple(float(value) for value in final_parameters),
+            "solution": tuple(float(value) for value in final.parameters),
             "final_residuals": tuple(float(value) for value in final_residuals),
             "final_jacobian": tuple(
                 tuple(float(value) for value in row) for row in final_jacobian

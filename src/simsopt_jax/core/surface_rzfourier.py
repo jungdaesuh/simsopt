@@ -20,24 +20,29 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+
+from ._device_scalars import device_one, float_scalar, two_pi
 from ._math_utils import as_compute_array as _as_compute_array
 from ._math_utils import as_jax_float64 as _as_jax_float64
-from ._math_utils import runtime_device_put
-from ._device_scalars import device_one, float_scalar, two_pi
 from ._vector_norms import norm3 as _norm3
 from ._vector_norms import unit_vector3 as _unit_vector3
 from .specs import (
     SurfaceRZFourierSpec,
-    _surface_rz_fourier_block_mode_positions as _block_mode_positions,
     make_surface_rzfourier_spec,
+)
+from .specs import (
+    _surface_rz_fourier_block_mode_positions as _block_mode_positions,
+)
+from .specs import (
     surface_rz_fourier_dofs_from_spec as _surface_rz_fourier_dofs_from_spec,
 )
 
 __all__ = [
-    "surface_rz_fourier_aspect_ratio_from_spec",
-    "surface_rz_fourier_aspect_ratio_from_dofs",
-    "surface_rz_fourier_area_from_spec",
     "surface_rz_fourier_area_from_dofs",
+    "surface_rz_fourier_area_from_spec",
+    "surface_rz_fourier_aspect_ratio_from_dofs",
+    "surface_rz_fourier_aspect_ratio_from_spec",
     "surface_rz_fourier_d2area_from_dofs",
     "surface_rz_fourier_d2aspect_ratio_from_dofs",
     "surface_rz_fourier_d2major_radius_from_dofs",
@@ -46,62 +51,62 @@ __all__ = [
     "surface_rz_fourier_darea_from_dofs",
     "surface_rz_fourier_daspect_ratio_from_dofs",
     "surface_rz_fourier_dfirst_fund_form_from_dofs",
-    "surface_rz_fourier_dofs_from_spec",
-    "surface_rz_fourier_dmajor_radius_from_dofs",
-    "surface_rz_fourier_dmean_cross_sectional_area_from_dofs",
-    "surface_rz_fourier_dminor_radius_from_dofs",
-    "surface_rz_fourier_dsecond_fund_form_from_dofs",
-    "surface_rz_fourier_dsurface_curvatures_from_dofs",
-    "surface_rz_fourier_dvolume_from_dofs",
-    "surface_rz_fourier_first_fund_form_from_spec",
-    "surface_rz_fourier_first_fund_form_from_dofs",
-    "surface_rz_fourier_gamma_from_spec",
-    "surface_rz_fourier_gamma_from_dofs",
-    "surface_rz_fourier_gamma_lin_from_spec",
-    "surface_rz_fourier_gamma_lin_from_dofs",
-    "surface_rz_fourier_gammadash1dash1_from_spec",
-    "surface_rz_fourier_gammadash1dash1_from_dofs",
-    "surface_rz_fourier_gammadash1dash1dash1_lin_from_spec",
-    "surface_rz_fourier_gammadash1dash1dash1_lin_from_dofs",
-    "surface_rz_fourier_gammadash1dash1_vjp_from_dofs",
-    "surface_rz_fourier_gammadash1dash2_from_spec",
-    "surface_rz_fourier_gammadash1dash2_from_dofs",
-    "surface_rz_fourier_gammadash1dash1dash2_lin_from_spec",
-    "surface_rz_fourier_gammadash1dash1dash2_lin_from_dofs",
-    "surface_rz_fourier_gammadash1dash2dash2_lin_from_spec",
-    "surface_rz_fourier_gammadash1dash2dash2_lin_from_dofs",
-    "surface_rz_fourier_gammadash1dash2_vjp_from_dofs",
-    "surface_rz_fourier_gammadash1_from_spec",
-    "surface_rz_fourier_gammadash1_from_dofs",
-    "surface_rz_fourier_gammadash2dash2_from_spec",
-    "surface_rz_fourier_gammadash2dash2_from_dofs",
-    "surface_rz_fourier_gammadash2dash2dash2_lin_from_spec",
-    "surface_rz_fourier_gammadash2dash2dash2_lin_from_dofs",
-    "surface_rz_fourier_gammadash2dash2_vjp_from_dofs",
-    "surface_rz_fourier_gammadash2_from_spec",
-    "surface_rz_fourier_gammadash2_from_dofs",
-    "surface_rz_fourier_major_radius_from_spec",
-    "surface_rz_fourier_major_radius_from_dofs",
-    "surface_rz_fourier_mean_cross_sectional_area_from_spec",
-    "surface_rz_fourier_mean_cross_sectional_area_from_dofs",
-    "surface_rz_fourier_minor_radius_from_spec",
-    "surface_rz_fourier_minor_radius_from_dofs",
-    "surface_rz_fourier_normal_from_spec",
-    "surface_rz_fourier_normal_from_dofs",
-    "surface_rz_fourier_second_fund_form_from_spec",
-    "surface_rz_fourier_second_fund_form_from_dofs",
     "surface_rz_fourier_dgammadash1dash1_from_dofs",
     "surface_rz_fourier_dgammadash1dash2_from_dofs",
     "surface_rz_fourier_dgammadash2dash2_from_dofs",
+    "surface_rz_fourier_dmajor_radius_from_dofs",
+    "surface_rz_fourier_dmean_cross_sectional_area_from_dofs",
+    "surface_rz_fourier_dminor_radius_from_dofs",
     "surface_rz_fourier_dnormal_from_dofs",
-    "surface_rz_fourier_spec_from_dofs",
-    "surface_rz_fourier_surface_curvatures_from_spec",
-    "surface_rz_fourier_surface_curvatures_from_dofs",
-    "surface_rz_fourier_unitnormal_from_spec",
-    "surface_rz_fourier_unitnormal_from_dofs",
+    "surface_rz_fourier_dofs_from_spec",
+    "surface_rz_fourier_dsecond_fund_form_from_dofs",
+    "surface_rz_fourier_dsurface_curvatures_from_dofs",
     "surface_rz_fourier_dunitnormal_from_dofs",
-    "surface_rz_fourier_volume_from_spec",
+    "surface_rz_fourier_dvolume_from_dofs",
+    "surface_rz_fourier_first_fund_form_from_dofs",
+    "surface_rz_fourier_first_fund_form_from_spec",
+    "surface_rz_fourier_gamma_from_dofs",
+    "surface_rz_fourier_gamma_from_spec",
+    "surface_rz_fourier_gamma_lin_from_dofs",
+    "surface_rz_fourier_gamma_lin_from_spec",
+    "surface_rz_fourier_gammadash1_from_dofs",
+    "surface_rz_fourier_gammadash1_from_spec",
+    "surface_rz_fourier_gammadash1dash1_from_dofs",
+    "surface_rz_fourier_gammadash1dash1_from_spec",
+    "surface_rz_fourier_gammadash1dash1_vjp_from_dofs",
+    "surface_rz_fourier_gammadash1dash1dash1_lin_from_dofs",
+    "surface_rz_fourier_gammadash1dash1dash1_lin_from_spec",
+    "surface_rz_fourier_gammadash1dash1dash2_lin_from_dofs",
+    "surface_rz_fourier_gammadash1dash1dash2_lin_from_spec",
+    "surface_rz_fourier_gammadash1dash2_from_dofs",
+    "surface_rz_fourier_gammadash1dash2_from_spec",
+    "surface_rz_fourier_gammadash1dash2_vjp_from_dofs",
+    "surface_rz_fourier_gammadash1dash2dash2_lin_from_dofs",
+    "surface_rz_fourier_gammadash1dash2dash2_lin_from_spec",
+    "surface_rz_fourier_gammadash2_from_dofs",
+    "surface_rz_fourier_gammadash2_from_spec",
+    "surface_rz_fourier_gammadash2dash2_from_dofs",
+    "surface_rz_fourier_gammadash2dash2_from_spec",
+    "surface_rz_fourier_gammadash2dash2_vjp_from_dofs",
+    "surface_rz_fourier_gammadash2dash2dash2_lin_from_dofs",
+    "surface_rz_fourier_gammadash2dash2dash2_lin_from_spec",
+    "surface_rz_fourier_major_radius_from_dofs",
+    "surface_rz_fourier_major_radius_from_spec",
+    "surface_rz_fourier_mean_cross_sectional_area_from_dofs",
+    "surface_rz_fourier_mean_cross_sectional_area_from_spec",
+    "surface_rz_fourier_minor_radius_from_dofs",
+    "surface_rz_fourier_minor_radius_from_spec",
+    "surface_rz_fourier_normal_from_dofs",
+    "surface_rz_fourier_normal_from_spec",
+    "surface_rz_fourier_second_fund_form_from_dofs",
+    "surface_rz_fourier_second_fund_form_from_spec",
+    "surface_rz_fourier_spec_from_dofs",
+    "surface_rz_fourier_surface_curvatures_from_dofs",
+    "surface_rz_fourier_surface_curvatures_from_spec",
+    "surface_rz_fourier_unitnormal_from_dofs",
+    "surface_rz_fourier_unitnormal_from_spec",
     "surface_rz_fourier_volume_from_dofs",
+    "surface_rz_fourier_volume_from_spec",
 ]
 
 _HESSIAN_WORK_BYTES_LIMIT = 32 * 1024**3
@@ -416,7 +421,11 @@ def _scatter_coefficients_impl(
     source_offset: int,
 ) -> jax.Array:
     positions_array = np.asarray(positions, dtype=np.int32)
-    indices = runtime_device_put(positions_array, dtype=np.int32).reshape(-1, 1)
+    indices = explicit_device_array(
+        positions_array,
+        dtype=np.int32,
+        reference=dofs,
+    ).reshape(-1, 1)
     start = int(source_offset)
     values = lax.slice_in_dim(dofs, start, start + int(positions_array.size), axis=0)
     base = _scatter_zero_like(dofs, target_size)
@@ -477,14 +486,22 @@ def _scatter_coefficients_bwd(
     )
     updates = jnp.take(
         cotangent,
-        runtime_device_put(positions_array, dtype=np.int32),
+        explicit_device_array(
+            positions_array,
+            dtype=np.int32,
+            reference=cotangent,
+        ),
         axis=0,
     )
     base = _scatter_zero_like(cotangent, dofs_size)
     return (
         lax.scatter(
             base,
-            runtime_device_put(columns, dtype=np.int32).reshape(-1, 1),
+            explicit_device_array(
+                columns,
+                dtype=np.int32,
+                reference=cotangent,
+            ).reshape(-1, 1),
             updates,
             _SCATTER_SET_DIMS_1D,
             indices_are_sorted=True,
