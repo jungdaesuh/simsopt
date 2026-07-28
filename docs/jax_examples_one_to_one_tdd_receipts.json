@@ -596,6 +596,77 @@
           "timestamp_utc": "2026-07-28T05:28:46Z"
         }
       }
+    },
+    {
+      "behavior_id": "strict-transfer-weighted-quadratic-least-squares-closure",
+      "native_source_id": "1_Simple/just_a_quadratic.py",
+      "mirror_id": "native-just-a-quadratic",
+      "intended_red_failure": "least-squares closure captures device state as compiler constants",
+      "test_sha256": {
+        "tests/integration/test_jax_weighted_quadratic_strict_transfer.py": "9346ebd5fab05358b0d235c094d58ac28db85346942640184063994a6bc57b39"
+      },
+      "phases": {
+        "red": {
+          "revision": "95c72d30a97b255444b357ebb3b30ec839254673",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_weighted_quadratic_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed device-to-host transfer\" in output:\n    print(\"least-squares closure captures device state as compiler constants\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer least-squares outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "least-squares closure captures device state as compiler constants",
+          "combined_output_sha256": "26e48c43be1017e5a31718a364b8691aabf27ea707a9d21634213cf89f5b019b",
+          "source_sha256": {
+            "src/simsopt_jax/examples/weighted_quadratic.py": "425107de8b0ea987541cf04b14a3ae8c1156726c342fd5cc55e8eb737dcd9d42",
+            "src/simsopt_jax/geo/optimizers/optimizer.py": "e06bddd231a78fa313dd2c87ab2f19bbdcf5c00eba422eeb70b56770e46d4230",
+            "src/simsopt_jax/solve/dispatch.py": "2d0affd6d0341f2a87575cb6613aaa9f071a82da28edf8c4591f0f024194345d",
+            "src/simsopt_jax/solve/serial.py": "715a0cd7a8e970a334d9ec2980c5ced7ea7fc4cc3abe8e065d75e34152b629fa"
+          },
+          "timestamp_utc": "2026-07-28T05:44:16Z"
+        },
+        "green": {
+          "revision": "c3e39c8446c61f9e124eb589b3e116cfad9e471b",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_weighted_quadratic_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed device-to-host transfer\" in output:\n    print(\"least-squares closure captures device state as compiler constants\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer least-squares outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/weighted_quadratic.py": "425107de8b0ea987541cf04b14a3ae8c1156726c342fd5cc55e8eb737dcd9d42",
+            "src/simsopt_jax/geo/optimizers/optimizer.py": "7d70fd4222028f695e0d1749afb91fdd8d62176e37c54b8c987445a1bd18e2f6",
+            "src/simsopt_jax/solve/dispatch.py": "6217f3e86c1cf788ff2d083be0f90726c130b811ca7012d670960e2b08c6446c",
+            "src/simsopt_jax/solve/serial.py": "52b6e0248e3fe4331cc946297743137715bc8eed176afc76571e1facc0b1e9ff"
+          },
+          "timestamp_utc": "2026-07-28T05:44:21Z"
+        },
+        "refactor": {
+          "revision": "48d179c501bfce8d048a2a6495a5ced3dc21d10b",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_weighted_quadratic_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed device-to-host transfer\" in output:\n    print(\"least-squares closure captures device state as compiler constants\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer least-squares outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/weighted_quadratic.py": "425107de8b0ea987541cf04b14a3ae8c1156726c342fd5cc55e8eb737dcd9d42",
+            "src/simsopt_jax/geo/optimizers/optimizer.py": "7d70fd4222028f695e0d1749afb91fdd8d62176e37c54b8c987445a1bd18e2f6",
+            "src/simsopt_jax/solve/dispatch.py": "6040f2ea02f4c08114b4838734a70a6194eb40c314a8407c2e3688e2ab76ea5c",
+            "src/simsopt_jax/solve/serial.py": "b4d571160f64358b5c1695bae40846dad3b6ac03929799046c56fe32e1002137"
+          },
+          "timestamp_utc": "2026-07-28T05:44:26Z"
+        }
+      }
     }
   ]
 }
