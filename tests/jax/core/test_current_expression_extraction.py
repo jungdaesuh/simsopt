@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from simsopt.field import Coil, Current
+from simsopt.field import Coil, Current, coils_via_symmetries
 from simsopt.geo import create_equally_spaced_curves
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 
@@ -43,3 +43,23 @@ def test_coil_specs_preserve_fixed_total_current_expression() -> None:
         jax.jacrev(currents)(owner_dofs),
         np.asarray([[1.0], [-1.0]]),
     )
+
+
+def test_coil_specs_reuse_geometry_for_symmetry_replicas() -> None:
+    curve = create_equally_spaced_curves(
+        1,
+        2,
+        stellsym=True,
+        R0=1.0,
+        R1=0.25,
+        order=2,
+        numquadpoints=12,
+    )[0]
+    current = Current(3.0)
+    coils = coils_via_symmetries([curve], [current], 2, True)
+    field = BiotSavartJAX(coils)
+
+    coil_specs = field.coil_specs_from_dofs(jnp.asarray(field.x))
+
+    assert len(coil_specs) == 4
+    assert len({id(coil_spec.curve) for coil_spec in coil_specs}) == 1
