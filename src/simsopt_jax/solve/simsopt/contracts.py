@@ -22,6 +22,7 @@ class SimsoptBFGSOptions(OptionsBase):
     maxiter: int = 1500
     gtol: float = 1e-10
     xrtol: float = 0.0
+    line_search_max_steps: int = 20
 
 
 @dataclass(frozen=True)

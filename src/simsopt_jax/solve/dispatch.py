@@ -157,6 +157,8 @@ def _legacy_bfgs_options(options: ScipyBFGSOptions | SimsoptBFGSOptions):
     payload = {"xrtol": options.xrtol}
     if isinstance(options, ScipyBFGSOptions):
         payload["norm"] = options.norm
+    else:
+        payload["line_search_maxiter"] = options.line_search_max_steps
     return payload
 
 
