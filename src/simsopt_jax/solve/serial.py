@@ -86,23 +86,45 @@ class TraceableLeastSquaresProblem:
 
     residual_fn: Callable[[jax.Array], jax.Array]
     x: jax.Array
-    _solver_residual_fn: Callable[[jax.Array], jax.Array] = field(
+    _solver_residual_fn: Callable[..., jax.Array] = field(
+        init=False,
+        repr=False,
+    )
+    _solver_residual_args: tuple[jax.Array, ...] = field(
         init=False,
         repr=False,
     )
 
     def __post_init__(self) -> None:
         residual_fn = self.residual_fn
-        self._solver_residual_fn = jax.jit(
-            lambda x: jnp.ravel(residual_fn(jnp.asarray(x)))
+        x = jnp.asarray(self.x)
+
+        def normalized_residual(current_x):
+            return jnp.ravel(residual_fn(jnp.asarray(current_x)))
+
+        converted_residual, residual_consts = closure_converted_array_function(
+            normalized_residual,
+            x,
         )
+        residual_consts = device_put_closure_consts(residual_consts, x)
+        compiled_residual = jax.jit(converted_residual)
+
+        def solver_residual(current_x, *current_consts):
+            return compiled_residual(current_x, current_consts)
+
+        self.x = x
+        self._solver_residual_fn = solver_residual
+        self._solver_residual_args = residual_consts
 
     @property
     def dof_size(self) -> int:
         return int(jnp.ravel(self.x).size)
 
     def residuals(self, x: jax.Array | None = None) -> jax.Array:
-        return self._solver_residual_fn(self.x if x is None else x)
+        return self._solver_residual_fn(
+            self.x if x is None else x,
+            *self._solver_residual_args,
+        )
 
     def objective(self, x: jax.Array | None = None) -> jax.Array:
         residuals = self.residuals(x)
@@ -401,6 +423,7 @@ def least_squares_serial_solve_jax(
             atol=atol,
             max_steps=max_steps,
         ),
+        residual_args=prob._solver_residual_args,
     )
     _require_success(result, operation="JAX least-squares solve")
     final_x = jax.device_put(result.x, initial_x.sharding)

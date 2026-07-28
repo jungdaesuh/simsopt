@@ -246,9 +246,13 @@ def _scipy_lm_result(
     x0,
     *,
     options: ScipyLMOptions,
+    residual_args: tuple[object, ...] = (),
 ) -> OptimizeResult:
     def residual_host(x_host):
-        return np.asarray(residual_fn(np.asarray(x_host)), dtype=float).reshape(-1)
+        return np.asarray(
+            residual_fn(np.asarray(x_host), *residual_args),
+            dtype=float,
+        ).reshape(-1)
 
     result = scipy_least_squares(
         residual_host,
@@ -515,12 +519,13 @@ def _run_optimistix_lm(
     x0,
     *,
     options: OptimistixLMOptions,
+    residual_args: tuple[object, ...] = (),
 ) -> OptimizeResult:
     params = jnp.asarray(runtime_device_put_tree(x0))
     solver_tol = float(options.tol)
 
-    def residual_value(current, _args):
-        return jnp.ravel(jnp.asarray(residual_fn(current)))
+    def residual_value(current, function_args):
+        return jnp.ravel(jnp.asarray(residual_fn(current, *function_args)))
 
     if options.linear_solver == LinearSolver.LSMR:
         linear_solver = lineax.LSMR(rtol=solver_tol, atol=solver_tol)
@@ -536,12 +541,12 @@ def _run_optimistix_lm(
             residual_value,
             solver,
             params,
-            args=None,
+            args=residual_args,
             max_steps=options.maxiter,
             throw=False,
         )
     block_until_ready(solution.value)
-    residual = jnp.ravel(jnp.asarray(residual_fn(solution.value)))
+    residual = jnp.ravel(jnp.asarray(residual_fn(solution.value, *residual_args)))
     half = _device_scalar(0.5, residual.dtype)
     cost = half * jnp.vdot(residual, residual)
     if options.materialize_dense_linearization:
@@ -572,8 +577,8 @@ def _run_optimistix_lm(
     else:
 
         def residual_cost(x):
-            residual_value = jnp.ravel(jnp.asarray(residual_fn(x)))
-            return half * jnp.vdot(residual_value, residual_value)
+            current_residual = jnp.ravel(jnp.asarray(residual_fn(x, *residual_args)))
+            return half * jnp.vdot(current_residual, current_residual)
 
         _cost_value, pullback = jax.vjp(residual_cost, solution.value)
         gradient = pullback(
@@ -759,6 +764,7 @@ def least_squares(
     driver: Driver,
     options: OptionsBase | None = None,
     callback: Callback | None = None,
+    residual_args: tuple[object, ...] = (),
 ) -> OptimizerResult:
     """Solve a residual least-squares problem with a typed JAX-lane driver."""
     options_used = _resolve_options(driver, options, _LEAST_SQUARES_OPTIONS)
@@ -767,9 +773,19 @@ def least_squares(
     start = time.perf_counter()
 
     if isinstance(options_used, ScipyLMOptions):
-        result = _scipy_lm_result(residual_fn, x0, options=options_used)
+        result = _scipy_lm_result(
+            residual_fn,
+            x0,
+            options=options_used,
+            residual_args=residual_args,
+        )
     elif isinstance(options_used, OptimistixLMOptions):
-        result = _run_optimistix_lm(residual_fn, x0, options=options_used)
+        result = _run_optimistix_lm(
+            residual_fn,
+            x0,
+            options=options_used,
+            residual_args=residual_args,
+        )
     elif isinstance(options_used, SimsoptLMGMRESHostOptions) and not isinstance(
         options_used, SimsoptLMGMRESOptions
     ):
@@ -778,8 +794,12 @@ def least_squares(
             driver=driver,
             options=options_used,
         )
+
+        def residual_with_args(current_x):
+            return residual_fn(current_x, *residual_args)
+
         result = legacy.reference_least_squares(
-            residual_fn,
+            residual_with_args,
             x0,
             method=legacy_reference_least_squares_method(driver),
             maxiter=options_used.maxiter,
@@ -801,6 +821,7 @@ def least_squares(
             options=_legacy_lm_options(options_used),
             callback=legacy_callback,
             progress_callback=legacy_progress_callback,
+            args=residual_args,
         )
     else:
         raise ValueError(
