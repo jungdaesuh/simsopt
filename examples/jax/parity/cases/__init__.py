@@ -15,6 +15,12 @@ from examples.jax.parity.cases.coil_force import create_input as create_coil_for
 from examples.jax.parity.cases.coil_force import execute as execute_coil_force
 from examples.jax.parity.cases.curve_length import create_input as create_curve_input
 from examples.jax.parity.cases.curve_length import execute as execute_curve
+from examples.jax.parity.cases.native_just_a_quadratic import (
+    create_input as create_native_just_a_quadratic_input,
+)
+from examples.jax.parity.cases.native_just_a_quadratic import (
+    execute as execute_native_just_a_quadratic,
+)
 from examples.jax.parity.cases.permanent_magnet import (
     create_input as create_permanent_magnet_input,
 )
@@ -47,6 +53,11 @@ class CaseDefinition:
 
 
 _CASES = {
+    "native-just-a-quadratic": CaseDefinition(
+        case_id="native-just-a-quadratic",
+        create_input=create_native_just_a_quadratic_input,
+        execute=execute_native_just_a_quadratic,
+    ),
     "traceable-least-squares": CaseDefinition(
         case_id="traceable-least-squares",
         create_input=create_traceable_least_squares_input,
