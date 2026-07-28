@@ -45,6 +45,7 @@ class StageTwoObjectiveConfig:
     curvature_weight: float = 0.0
     mean_squared_curvature_threshold: float = 5.0
     mean_squared_curvature_weight: float = 0.0
+    arclength_variation_weight: float = 0.0
     linking_number_weight: float = 0.0
 
 
@@ -110,9 +111,10 @@ def stage_two_geometric_penalty(
         lengths = jnp.mean(jnp.linalg.norm(base_gammadash, axis=2), axis=1)
         result = result + _length_penalty(jnp.sum(lengths), config)
 
+    base_speed = jnp.linalg.norm(base_gammadash, axis=2)
+
     if config.curvature_weight != 0.0 or config.mean_squared_curvature_weight != 0.0:
         base_kappa = jax.vmap(kappa_pure)(base_gammadash, base_gammadashdash)
-        base_speed = jnp.linalg.norm(base_gammadash, axis=2)
         if config.curvature_weight != 0.0:
             curvature = jax.vmap(
                 lambda current_kappa, current_gammadash: (
@@ -137,6 +139,11 @@ def stage_two_geometric_penalty(
             result = result + (
                 0.5 * config.mean_squared_curvature_weight * jnp.sum(excess * excess)
             )
+
+    if config.arclength_variation_weight != 0.0:
+        result = result + config.arclength_variation_weight * jnp.sum(
+            jnp.var(base_speed, axis=1)
+        )
 
     if config.curve_curve_weight != 0.0:
         pairs = tuple(
