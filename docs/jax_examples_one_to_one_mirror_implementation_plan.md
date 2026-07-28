@@ -95,6 +95,11 @@ Existing receipts remain evidence for their exact recorded cases only.
   field and uses a precomputed `wout` only as seed/reference data.
 - The worktree already contains unrelated modified and untracked files. Every
   implementation commit must remain scoped and preserve them.
+- Execution through `57aeaf26b2cbac0522d457c5bf1477e64b428105` has closed
+  seven of the eight Wave-A source mirrors with replayable per-source TDD
+  receipts. `2_Intermediate/strain_optimization.py` is the remaining Wave-A
+  source. The five-profile claim-eligible timing/RSS/VRAM campaign remains a
+  separate later phase and has not been inferred from validation timings.
 
 ### Target classifications
 

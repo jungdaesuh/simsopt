@@ -1608,3 +1608,75 @@ document now contains 20 structurally valid behaviors. Matched cold/warm
 performance and process/device peak-memory comparison against the native
 example remain part of the later claim-eligible measurement phase; the
 validation timings above are not speed claims.
+
+## Exact `wireframe_rcls_basic.py` mirror RED -> GREEN -> REFACTOR (2026-07-28)
+
+The source-owned parity RED at
+`ccfdcae9f0323a245367d290fde28de475e10c58` failed because the exact
+`native-wireframe-rcls-basic` case was not registered. GREEN revision
+`01f093297126e1b4d57dcdc699baf141673d072a` implemented the bounded source
+workflow using the Landreman-Paul QA boundary, offset toroidal wireframe,
+poloidal-current constraint, area-weighted normal-field response, feasible
+initial currents, constrained RCLS solve, and full final wireframe field
+diagnostics.
+
+The bounded case contains 48 wireframe segments, a `(256, 48)` response
+matrix, and 256 final magnetic-field vectors. Native SIMSOPT and JAX CPU
+matched all construction arrays and source-level initial/final observables.
+The direct matched native CPU/JAX GPU execution reported `platform=gpu`,
+`precision=fp64`, and scientific success in both lanes. Representative maximum
+absolute differences were:
+
+```text
+final currents                    2.60770320892334e-08
+final normal-field residual       5.08273978461205e-16
+final normal objective            8.67361737988404e-19
+final magnetic field              4.71844785465692e-15
+final mean relative normal field  1.38777878078145e-17
+```
+
+The current difference is approximately `3.8e-14` of the maximum solved
+current. The final mean relative normal field is
+`3.13300741480366e-02`, below the source-owned `4e-2` success gate.
+
+The strict-transfer RED at
+`72d646db2ae0c2e77963b7c3d55f01a5857e9e72` failed because no public
+device-resident example workflow existed. GREEN revision
+`eb5fa15c7fcc5d68f9746e222b75a68641a25bad` introduced
+`solve_wireframe_rcls`, kept RCLS and final field diagnostics on the selected
+device, returned a final-state-only immutable result, and reduced the
+user-facing example to one explicit final `jax.device_get`.
+
+The performance RED at
+`a9ea641728d00c5eaabe086ef83f5a6871b52493` measured two independent
+constructions of the same host constraint system. GREEN revision
+`97d1b85e32d7f57c0e24a67eaac5bbb5282eef38` reuses one immutable constraint
+snapshot for both the RCLS solve and diagnostics. REFACTOR revision
+`57aeaf26b2cbac0522d457c5bf1477e64b428105` fuses the solve, free-current
+expansion, field evaluation, and reductions into one JIT entrypoint.
+
+On the RTX 5090 bounded compilation, the fused executable reported:
+
+```text
+argument bytes          127584
+result bytes             13505
+executable output bytes  13657
+temporary bytes       33795480
+result leaves               19
+```
+
+The result contains only initial/final states and final source diagnostics; it
+retains no iteration history or dense intermediate factorization. The
+temporary allocation is compiler-managed workspace for the constrained dense
+linear algebra and remains separate from the small persistent result.
+
+The focused CPU parity, strict-transfer, and efficiency suite passed
+`4 passed in 3.57 s`. Strict RTX 5090 FP64 execution passed
+`3 passed in 3.81 s` with production preallocation. All three immutable
+wireframe receipts replayed successfully, and the complete receipt document
+contains 23 structurally valid behaviors.
+
+This closes the seventh of eight Wave-A exact mirrors and the seventh of 25
+external-solver-free source mirrors overall. The later five-profile
+measurement phase still owns claim-eligible cold/warm timing, process-tree
+RSS, and process-attributed VRAM comparisons against the native source.
