@@ -658,34 +658,78 @@ def _jax(
             )
         )
 
-    diagnostics_program = jax.jit(diagnostics)
     parameter_states = jnp.stack((initial_parameters, final_parameters))
-    diagnostic_states = jax.vmap(
-        lambda parameters: diagnostics_program(
-            extraction,
-            parameters,
-            flux_spec,
-            training,
-            out_of_sample,
-            surface_gamma,
-            surface_normal,
+
+    def batched_diagnostics(
+        extraction_operand,
+        parameter_states_operand,
+        flux_spec_operand,
+        training_operand,
+        out_of_sample_operand,
+        surface_gamma_operand,
+        surface_normal_operand,
+    ):
+        return jax.vmap(
+            diagnostics,
+            in_axes=(None, 0, None, None, None, None, None),
+        )(
+            extraction_operand,
+            parameter_states_operand,
+            flux_spec_operand,
+            training_operand,
+            out_of_sample_operand,
+            surface_gamma_operand,
+            surface_normal_operand,
         )
-    )(parameter_states)
-    directional_derivative = jnp.vdot(initial_gradient, direction)
-    epsilons = jnp.asarray(
-        (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7),
-        dtype=initial_parameters.dtype,
+
+    diagnostic_states = jax.jit(batched_diagnostics)(
+        extraction,
+        parameter_states,
+        flux_spec,
+        training,
+        out_of_sample,
+        surface_gamma,
+        surface_normal,
     )
-    taylor_errors = jax.vmap(
-        lambda epsilon: (
-            (
-                problem.value_and_grad(initial_parameters + epsilon * direction)[0]
-                - problem.value_and_grad(initial_parameters - epsilon * direction)[0]
-            )
-            / (2.0 * epsilon)
-            - directional_derivative
+    epsilons = jax.device_put(
+        np.asarray(
+            (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7),
+            dtype=np.float64,
+        ),
+        device,
+    )
+
+    def taylor_error_batch(
+        initial_parameters_operand,
+        initial_gradient_operand,
+        direction_operand,
+        epsilons_operand,
+    ):
+        directional_derivative = jnp.vdot(
+            initial_gradient_operand,
+            direction_operand,
         )
-    )(epsilons)
+        return jax.vmap(
+            lambda epsilon: (
+                (
+                    problem.value_and_grad(
+                        initial_parameters_operand + epsilon * direction_operand
+                    )[0]
+                    - problem.value_and_grad(
+                        initial_parameters_operand - epsilon * direction_operand
+                    )[0]
+                )
+                / (2.0 * epsilon)
+                - directional_derivative
+            )
+        )(epsilons_operand)
+
+    taylor_errors = jax.jit(taylor_error_batch)(
+        initial_parameters,
+        initial_gradient,
+        direction,
+        epsilons,
+    )
     (
         initial_parameters_host,
         initial_objective_host,
