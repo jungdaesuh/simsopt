@@ -28,6 +28,7 @@ WORKFLOW_STAGES = (
     "reduce_length_penalty_and_optimize_second_stage",
     "evaluate_final_force_energy_flux_geometry_and_gradient",
 )
+_TAYLOR_EPSILONS = (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7)
 
 
 def _configuration(scale: ExecutionScale) -> dict[str, object]:
@@ -586,7 +587,7 @@ def _jax(
     initial_value, initial_gradient = first_problem.value_and_grad(initial_parameters)
     directional_derivative = jnp.vdot(initial_gradient, direction)
     epsilons = jax.device_put(
-        np.asarray((1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7)),
+        np.asarray(_TAYLOR_EPSILONS),
         device,
     )
 
