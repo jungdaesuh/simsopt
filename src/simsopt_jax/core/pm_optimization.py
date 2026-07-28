@@ -882,7 +882,7 @@ def _baseline_x_history(
     return x_history
 
 
-@partial(jax.jit, static_argnames=("K", "record_every"))
+@partial(jax.jit, static_argnames=("K", "record_every", "retain_history"))
 def gpmo_baseline_solve(
     spec: GPMOBaselineSpec,
     A_scaled: jax.Array,
@@ -890,12 +890,15 @@ def gpmo_baseline_solve(
     *,
     K: int,
     record_every: int | None = None,
+    retain_history: bool = True,
 ) -> GPMOBaselineResult:
     """Run the baseline greedy permanent-magnet optimizer in JAX.
 
     ``A_scaled`` has shape ``(M, 3N)`` and must already include the physical
     moment scaling by ``repeat(m_maxima, 3)``. The returned ``x`` is normalized,
     with at most one nonzero Cartesian component per selected dipole.
+    ``retain_history=False`` omits the iteration-state and residual histories
+    while retaining the selected-dipole trace and final state.
     """
 
     A_arr = _as_runtime_array(A_scaled)
@@ -905,6 +908,8 @@ def gpmo_baseline_solve(
     ndipoles = int(m_maxima.shape[0])
     _validate_gpmo_static_args(K, spec.single_direction, ndipoles)
     _validate_record_every(record_every)
+    if not retain_history and record_every is not None:
+        raise ValueError("record_every requires retain_history=True")
 
     x0 = _zeros_like_shape(A_arr, (ndipoles, 3))
     residual0 = -b_arr
@@ -957,6 +962,35 @@ def gpmo_baseline_solve(
             x_history=x_history,
             residual=final_state[1],
             residual_history=residual_history,
+            selected_dipoles=selected_dipoles,
+            selected_components=selected_components,
+            selected_signs=selected_signs,
+        )
+
+    if not retain_history:
+
+        def _final_state_scan_body(state, _):
+            next_state, trace_entry = gpmo_baseline_step(
+                spec,
+                state,
+                A_arr,
+                penalty=penalty,
+                col_sq=col_sq,
+            )
+            return next_state, trace_entry[:3]
+
+        final_state, selected = jax.lax.scan(
+            _final_state_scan_body,
+            (x0, residual0, available0),
+            xs=None,
+            length=K,
+        )
+        selected_dipoles, selected_components, selected_signs = selected
+        return GPMOBaselineResult(
+            x=final_state[0],
+            x_history=_zeros_like_shape(A_arr, (0, ndipoles, 3)),
+            residual=final_state[1],
+            residual_history=_zeros_like_shape(A_arr, (0,)),
             selected_dipoles=selected_dipoles,
             selected_components=selected_components,
             selected_signs=selected_signs,

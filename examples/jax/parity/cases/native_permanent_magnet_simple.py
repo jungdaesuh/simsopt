@@ -307,6 +307,7 @@ def _jax(
         K=_configuration_int(bundle, "iterations"),
         reg_l2=_configuration_float(bundle, "regularization_l2"),
         single_direction=_configuration_int(bundle, "single_direction"),
+        retain_history=False,
     )
     host_result, response, target, maxima, dipole_grid_xyz, initial_moments = (
         jax.device_get(
@@ -344,7 +345,7 @@ def _jax(
         and values["final:objective_sum_squares"]
         < values["initial:objective_sum_squares"]
     )
-    platform = device.platform
+    platform = "cpu" if device is None else device.platform
     return LaneObservation(
         lane=lane,
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
