@@ -667,6 +667,135 @@
           "timestamp_utc": "2026-07-28T05:44:26Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-surf-vol-area-native-jax-parity",
+      "native_source_id": "1_Simple/surf_vol_area.py",
+      "mirror_id": "native-surf-vol-area",
+      "intended_red_failure": "missing exact surface area-volume native JAX parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_surf_vol_area_parity.py": "627c1b73647bf556dd8dff26b0a9df8cd345d35430fea5885b81348794d1dec8"
+      },
+      "phases": {
+        "red": {
+          "revision": "43715c1aa23e6df7e003135619351b54bcdd892d",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_surf_vol_area_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-surf-vol-area\" in output:\n    print(\"missing exact surface area-volume native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact surface area-volume parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact surface area-volume native JAX parity case",
+          "combined_output_sha256": "baeed762cd2b4fae018876d7a62ce01f854a078e5ce8d7277a4a42cb38f476f3",
+          "source_sha256": {
+            "examples/jax/1_Simple/surf_vol_area.py": "47d4000a5d99f277db0f99edd5adac9e1c46c3d5528e1ca0d132226bd9fa925e",
+            "examples/jax/parity/cases/__init__.py": "749ccbb6ae78cd6ec55ede70e832c140d0c81b8df154ddce8b88a9d0ed527414"
+          },
+          "timestamp_utc": "2026-07-28T06:05:15Z"
+        },
+        "green": {
+          "revision": "9aac1f364d3bd21bef4287c8119812748b20be39",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_surf_vol_area_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-surf-vol-area\" in output:\n    print(\"missing exact surface area-volume native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact surface area-volume parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/surf_vol_area.py": "b323d8355d8b3f26181364cbad7dd7c0af56d4e63a35187ed99e84a99ad23847",
+            "examples/jax/parity/cases/__init__.py": "55733aed32b5ca7196e679bbbc9f2a867ab35915e3e4d31e14f83542dc6fa866",
+            "examples/jax/parity/cases/native_surf_vol_area.py": "89116415fe080309bc4c6a723db7243a2b6f7679f6482ca6d2385eb4effa3d97",
+            "src/simsopt_jax/examples/rz_surface_area_volume.py": "75b55946ecd2a974ed5cd30f529fdf1d98132b2a40b57ffc8283f018630cddb2"
+          },
+          "timestamp_utc": "2026-07-28T06:05:32Z"
+        },
+        "refactor": {
+          "revision": "42056d33ce37e07fc77fe0a0d5a60e2591c5ba5a",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_surf_vol_area_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-surf-vol-area\" in output:\n    print(\"missing exact surface area-volume native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact surface area-volume parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/surf_vol_area.py": "b323d8355d8b3f26181364cbad7dd7c0af56d4e63a35187ed99e84a99ad23847",
+            "examples/jax/parity/cases/native_surf_vol_area.py": "2ca0edd1bfac758696351c3b5b482da56efe5758c905c66587210fb0481fd5b4",
+            "examples/jax/parity/symmetry.py": "17b57270a2db462b8854674cccaedc1e685ede5d30b6b1d9e9231ebf7d673f32",
+            "src/simsopt_jax/examples/rz_surface_area_volume.py": "425b1166a20e40433b8e82feeff9bae9571c0ebb41ab55b287721f7a1d4a9097"
+          },
+          "timestamp_utc": "2026-07-28T06:05:47Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "strict-transfer-rz-surface-area-volume-sequence",
+      "native_source_id": "1_Simple/surf_vol_area.py",
+      "mirror_id": "native-surf-vol-area",
+      "intended_red_failure": "surface result extraction creates a forbidden host index operand",
+      "test_sha256": {
+        "tests/integration/test_jax_rz_surface_area_volume_strict_transfer.py": "73adbf41e30da0ba75ce550f1abcd5d4d5af882de298d7976e507ad0484a5e64"
+      },
+      "phases": {
+        "red": {
+          "revision": "ffb60c83b1588d7e4dabffb0f7fe488d959b79e6",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_rz_surface_area_volume_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed host-to-device transfer\" in output:\n    print(\"surface result extraction creates a forbidden host index operand\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer surface sequence outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "surface result extraction creates a forbidden host index operand",
+          "combined_output_sha256": "54d2e2a1118c63dc9dacf19483324ea9edce91b45291ab03da46283d16810b01",
+          "source_sha256": {
+            "src/simsopt_jax/examples/rz_surface_area_volume.py": "75b55946ecd2a974ed5cd30f529fdf1d98132b2a40b57ffc8283f018630cddb2"
+          },
+          "timestamp_utc": "2026-07-28T06:06:21Z"
+        },
+        "green": {
+          "revision": "90b505248207a5536ab268cec6c49d1aeb2969fd",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_rz_surface_area_volume_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed host-to-device transfer\" in output:\n    print(\"surface result extraction creates a forbidden host index operand\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer surface sequence outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/rz_surface_area_volume.py": "425b1166a20e40433b8e82feeff9bae9571c0ebb41ab55b287721f7a1d4a9097"
+          },
+          "timestamp_utc": "2026-07-28T06:06:48Z"
+        },
+        "refactor": {
+          "revision": "42056d33ce37e07fc77fe0a0d5a60e2591c5ba5a",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_rz_surface_area_volume_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed host-to-device transfer\" in output:\n    print(\"surface result extraction creates a forbidden host index operand\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer surface sequence outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/symmetry.py": "17b57270a2db462b8854674cccaedc1e685ede5d30b6b1d9e9231ebf7d673f32",
+            "src/simsopt_jax/examples/rz_surface_area_volume.py": "425b1166a20e40433b8e82feeff9bae9571c0ebb41ab55b287721f7a1d4a9097"
+          },
+          "timestamp_utc": "2026-07-28T06:07:15Z"
+        }
+      }
     }
   ]
 }
