@@ -150,8 +150,9 @@ def _geometry(bundle: InputBundle):
         h=_configuration_float(bundle, "classifier_h"),
         p=_configuration_int(bundle, "classifier_order"),
     )
-    radii = np.linalg.norm(surface.gamma()[:, :, :2], axis=2)
-    heights = surface.gamma()[:, :, 2]
+    surface_points = surface.gamma()
+    radii = np.linalg.norm(surface_points[:, :, :2], axis=2)
+    heights = surface_points[:, :, 2]
     grid_size = _configuration_int(bundle, "grid_size")
 
     def skip(
