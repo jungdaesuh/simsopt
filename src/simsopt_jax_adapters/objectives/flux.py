@@ -202,7 +202,7 @@ def _cached_squared_flux_native_program(forward):
     return jax.jit(forward), jax.jit(jax.value_and_grad(forward, argnums=0))
 
 
-def _gather_axis_zero(array: jax.Array, indices: jax.Array) -> jax.Array:
+def _gather_leading_axis(array: jax.Array, indices: jax.Array) -> jax.Array:
     dimension_numbers = jax.lax.GatherDimensionNumbers(
         offset_dims=tuple(range(1, array.ndim)),
         collapsed_slice_dims=(0,),
@@ -250,12 +250,12 @@ def _squared_flux_curve_xyz_fourier_forward(
         ]
     )
 
-    coeffs = _gather_axis_zero(curve_dofs, base_curve_idxs)
+    coeffs = _gather_leading_axis(curve_dofs, base_curve_idxs)
     gammas = jnp.einsum("qk,nck->nqc", basis, coeffs)
     gammadashs = jnp.einsum("qk,nck->nqc", dbasis, coeffs)
     gammas = jnp.einsum("nqi,nij->nqj", gammas, rotmats)
     gammadashs = jnp.einsum("nqi,nij->nqj", gammadashs, rotmats)
-    currents = _gather_axis_zero(current_vals, base_current_idxs) * current_scales
+    currents = _gather_leading_axis(current_vals, base_current_idxs) * current_scales
 
     B = biot_savart_B(
         flux_spec.points,
