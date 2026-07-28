@@ -391,6 +391,7 @@ def _jax(
     )
     from simsopt_jax.solve.driver import Driver
     from simsopt_jax.solve.serial import (
+        TraceableArrayFunction,
         TraceableScalarProblem,
         serial_solve_jax,
     )
@@ -498,39 +499,57 @@ def _jax(
             force_config,
         )
 
-    def state(prefix: str, parameters: jax.Array, current_objective):
-        objective_value, gradient = jax.value_and_grad(current_objective)(parameters)
+    num_base_curves = _configuration_int(bundle, "num_base_curves")
+
+    def state_diagnostics(parameters: jax.Array) -> jax.Array:
         force_objective, _, vacuum_energy = diagnostics(parameters)
         gamma, gammadash, _, _ = stage_two_coil_geometry(extraction, parameters)
+        base_gammadash = jax.lax.slice_in_dim(
+            gammadash,
+            0,
+            num_base_curves,
+            axis=0,
+        )
         total_length = jnp.sum(
             jnp.mean(
-                jnp.linalg.norm(
-                    gammadash[: _configuration_int(bundle, "num_base_curves")],
-                    axis=-1,
-                ),
+                jnp.linalg.norm(base_gammadash, axis=-1),
                 axis=1,
             )
         )
-        published = jax.device_get(
+        return jnp.stack(
             (
-                parameters,
-                objective_value,
-                gradient,
                 flux_objective(parameters),
                 force_objective,
                 vacuum_energy,
                 total_length,
             )
         )
+
+    def state(
+        prefix: str,
+        parameters: jax.Array,
+        problem: TraceableScalarProblem,
+        state_program: TraceableArrayFunction,
+    ):
+        objective_value, gradient = problem.value_and_grad(parameters)
+        published = jax.device_get(
+            (
+                parameters,
+                objective_value,
+                gradient,
+                state_program(parameters),
+            )
+        )
+        scalar_values = np.asarray(published[3], dtype=np.float64)
         return _state_values(
             prefix,
             parameters=np.asarray(published[0], dtype=np.float64),
             objective=float(published[1]),
             gradient=np.asarray(published[2], dtype=np.float64),
-            squared_flux=float(published[3]),
-            force_objective=float(published[4]),
-            vacuum_energy=float(published[5]),
-            total_curve_length=float(published[6]),
+            squared_flux=float(scalar_values[0]),
+            force_objective=float(scalar_values[1]),
+            vacuum_energy=float(scalar_values[2]),
+            total_curve_length=float(scalar_values[3]),
             force_weight=_configuration_float(bundle, "force_weight"),
             vacuum_energy_weight=_configuration_float(
                 bundle,
@@ -538,8 +557,7 @@ def _jax(
             ),
         )
 
-    def solve(current_objective, initial: jax.Array):
-        problem = TraceableScalarProblem(current_objective, initial)
+    def solve(problem: TraceableScalarProblem):
         result = serial_solve_jax(
             problem,
             driver=Driver.SIMSOPT_LBFGSB,
@@ -554,25 +572,43 @@ def _jax(
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
     direction = jax.device_put(arrays["taylor_direction"], device)
     first_objective = objective(_configuration_float(bundle, "first_length_weight"))
-    initial_values = state("initial", initial_parameters, first_objective)
-    initial_value, initial_gradient = jax.value_and_grad(first_objective)(
-        initial_parameters
+    first_problem = TraceableScalarProblem(first_objective, initial_parameters)
+    state_program = TraceableArrayFunction(
+        state_diagnostics,
+        initial_parameters,
     )
+    initial_values = state(
+        "initial",
+        initial_parameters,
+        first_problem,
+        state_program,
+    )
+    initial_value, initial_gradient = first_problem.value_and_grad(initial_parameters)
     directional_derivative = jnp.vdot(initial_gradient, direction)
-    taylor_errors_device = []
-    for epsilon in (1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7):
-        plus = first_objective(initial_parameters + epsilon * direction)
-        minus = first_objective(initial_parameters - epsilon * direction)
-        taylor_errors_device.append(
-            (plus - minus) / (2 * epsilon) - directional_derivative
-        )
-    first_result, first_parameters = solve(first_objective, initial_parameters)
-    first_values = state("first", first_parameters, first_objective)
+    epsilons = jax.device_put(
+        np.asarray((1.0e-3, 1.0e-4, 1.0e-5, 1.0e-6, 1.0e-7)),
+        device,
+    )
+
+    def taylor_error(epsilon: jax.Array) -> jax.Array:
+        plus = first_problem.objective(initial_parameters + epsilon * direction)
+        minus = first_problem.objective(initial_parameters - epsilon * direction)
+        return (plus - minus) / (epsilon + epsilon) - directional_derivative
+
+    taylor_errors_device = jax.vmap(taylor_error)(epsilons)
+    first_result, first_parameters = solve(first_problem)
+    first_values = state("first", first_parameters, first_problem, state_program)
     second_objective = objective(_configuration_float(bundle, "second_length_weight"))
-    second_result, final_parameters = solve(second_objective, first_parameters)
-    final_values = state("final", final_parameters, second_objective)
+    second_problem = TraceableScalarProblem(second_objective, first_parameters)
+    second_result, final_parameters = solve(second_problem)
+    final_values = state(
+        "final",
+        final_parameters,
+        second_problem,
+        state_program,
+    )
     taylor_errors = np.asarray(
-        jax.device_get(jnp.stack(taylor_errors_device)),
+        jax.device_get(taylor_errors_device),
         dtype=np.float64,
     )
     success = bool(
