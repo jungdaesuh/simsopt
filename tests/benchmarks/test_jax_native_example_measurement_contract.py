@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import statistics
 from copy import deepcopy
+from pathlib import Path
 from typing import Literal
 
 import pytest
@@ -17,8 +18,13 @@ from benchmarks.jax_native_example_measurement_contract import (
     validate_measurement_artifact,
 )
 from benchmarks.run_jax_native_example_measurements import (
+    MeasurementRunnerError,
     build_measurement_environment,
     build_measurement_schedule,
+    build_profile_command,
+    classify_termination,
+    parse_nvidia_smi_compute_apps,
+    publish_artifact_exclusive,
 )
 
 _SHA_A = "a" * 64
@@ -447,3 +453,85 @@ def test_summary_median_absolute_deviation_must_match_raw_samples() -> None:
 
     with pytest.raises(MeasurementContractError, match="warm_total_seconds_mad"):
         validate_measurement_artifact(artifact)
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_lane"),
+    (
+        ("native_cpu", "native-cpu"),
+        ("jax_cpu_fast", "jax-cpu"),
+        ("jax_cpu_parity", "jax-cpu"),
+        ("jax_gpu_fast", "jax-gpu"),
+        ("jax_gpu_parity", "jax-gpu"),
+    ),
+)
+def test_profile_command_consumes_the_canonical_bundle_in_parity_child(
+    profile_id: _ProfileId, expected_lane: str, tmp_path: Path
+) -> None:
+    command = build_profile_command(
+        python_executable="/python",
+        case_id="traceable-least-squares",
+        profile_id=profile_id,
+        input_bundle_path=tmp_path / "input_bundle.json",
+        result_directory=tmp_path / "result",
+        scale="bounded",
+    )
+
+    assert command == (
+        "/python",
+        "-m",
+        "examples.jax.parity.child",
+        "--case",
+        "traceable-least-squares",
+        "--lane",
+        expected_lane,
+        "--input-bundle",
+        str(tmp_path / "input_bundle.json"),
+        "--result-directory",
+        str(tmp_path / "result"),
+        "--scale",
+        "bounded",
+    )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    (
+        (0, "normal"),
+        (2, "exit_2"),
+        (-9, "resource_limit_or_oom"),
+        (-15, "signal_15"),
+    ),
+)
+def test_measurement_termination_is_explicit(returncode: int, expected: str) -> None:
+    assert classify_termination(returncode) == expected
+
+
+def test_process_attributed_gpu_memory_parser_is_fail_closed() -> None:
+    assert parse_nvidia_smi_compute_apps("101, 512\n202, 1024 MiB\n") == {
+        101: 512 * 1024**2,
+        202: 1024 * 1024**2,
+    }
+    assert parse_nvidia_smi_compute_apps("No running processes found") == {}
+
+    with pytest.raises(MeasurementRunnerError, match="malformed"):
+        parse_nvidia_smi_compute_apps("not,a,valid,row")
+
+
+def test_measurement_publication_is_exclusive(tmp_path: Path) -> None:
+    artifact = _artifact()
+
+    path = publish_artifact_exclusive(
+        artifact,
+        artifact_root=tmp_path,
+        run_directory_name="run-1",
+    )
+
+    assert path.name == "artifact.json"
+    assert path.read_text(encoding="utf-8").endswith("\n")
+    with pytest.raises(FileExistsError):
+        publish_artifact_exclusive(
+            artifact,
+            artifact_root=tmp_path,
+            run_directory_name="run-1",
+        )
