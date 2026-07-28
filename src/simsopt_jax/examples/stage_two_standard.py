@@ -20,6 +20,8 @@ from simsopt_jax.solve.serial import (
     serial_solve_jax,
 )
 
+_STAGE_TWO_LBFGS_HISTORY_SIZE = 10
+
 
 @dataclass(frozen=True)
 class StandardStageTwoState:
@@ -306,7 +308,7 @@ def solve_standard_stage_two(
         problem,
         driver=Driver.SIMSOPT_LBFGSB,
         max_steps=int(max_steps),
-        maxcor=min(int(max_steps), 300),
+        maxcor=_STAGE_TWO_LBFGS_HISTORY_SIZE,
         rtol=float(rtol),
         atol=float(atol),
         require_success=False,
@@ -326,7 +328,7 @@ def solve_standard_stage_two(
         problem,
         driver=Driver.SIMSOPT_LBFGSB,
         max_steps=int(max_steps),
-        maxcor=min(int(max_steps), 300),
+        maxcor=_STAGE_TWO_LBFGS_HISTORY_SIZE,
         rtol=float(rtol),
         atol=float(atol),
         require_success=False,
