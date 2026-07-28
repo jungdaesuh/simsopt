@@ -52,7 +52,9 @@ def test_vmec_host_receipt_accepts_hash_bound_fresh_complete_evaluation(
         ({"boundary_sha256": "0" * 64}, "boundary hash"),
         ({"vmec_iteration_after": 2}, "did not advance"),
         ({"mpi_world_size": 1}, "MPI world size"),
+        ({"success": False}, "solve failed"),
         ({"output_sha256": ""}, "output receipt"),
+        ({"output_mtime_ns": 0}, "stale"),
         ({"gradient": np.asarray((1.0, 2.0))}, "gradient size"),
     ),
 )
