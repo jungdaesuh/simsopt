@@ -59,9 +59,31 @@ def _objective_from_operands(
     )[0]
 
 
-_values_program = jax.jit(fused_stage_two_values, static_argnums=(5,))
+def _objective_with_aux_from_operands(
+    parameters: jax.Array,
+    extraction: CoilSetDofExtractionSpec,
+    flux_spec: FixedSurfaceFluxSpec,
+    surface_gamma: jax.Array,
+    surface_normal: jax.Array,
+    config: StageTwoObjectiveConfig,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array]]:
+    values = fused_stage_two_values(
+        extraction,
+        parameters,
+        flux_spec,
+        surface_gamma,
+        surface_normal,
+        config,
+    )
+    return values[0], values[1:]
+
+
 _value_and_grad_program = jax.jit(
-    jax.value_and_grad(_objective_from_operands, argnums=0),
+    jax.value_and_grad(
+        _objective_with_aux_from_operands,
+        argnums=0,
+        has_aux=True,
+    ),
     static_argnums=(5,),
 )
 
@@ -90,24 +112,26 @@ def _taylor_errors_from_operands(
     )
     central_differences = jax.vmap(
         lambda epsilon: (
-            _objective_from_operands(
-                initial_parameters + epsilon * direction,
-                extraction,
-                flux_spec,
-                surface_gamma,
-                surface_normal,
-                config,
+            (
+                _objective_from_operands(
+                    initial_parameters + epsilon * direction,
+                    extraction,
+                    flux_spec,
+                    surface_gamma,
+                    surface_normal,
+                    config,
+                )
+                - _objective_from_operands(
+                    initial_parameters - epsilon * direction,
+                    extraction,
+                    flux_spec,
+                    surface_gamma,
+                    surface_normal,
+                    config,
+                )
             )
-            - _objective_from_operands(
-                initial_parameters - epsilon * direction,
-                extraction,
-                flux_spec,
-                surface_gamma,
-                surface_normal,
-                config,
-            )
+            / (2.0 * epsilon)
         )
-        / (2.0 * epsilon)
     )(epsilons)
     return central_differences - directional_derivative
 
@@ -152,24 +176,22 @@ def solve_minimal_stage_two(
         surface_normal_device,
         config,
     )
+
     def state(parameters: jax.Array) -> MinimalStageTwoState:
-        objective_value, objective_gradient = _value_and_grad_program(
-            parameters,
-            extraction,
-            flux_spec,
-            surface_gamma_device,
-            surface_normal_device,
-            config,
-        )
         (
-            _,
-            squared_flux,
-            length_penalty,
-            maximum_normal_field,
-            total_curve_length,
-        ) = _values_program(
-            extraction,
+            (
+                objective_value,
+                (
+                    squared_flux,
+                    length_penalty,
+                    maximum_normal_field,
+                    total_curve_length,
+                ),
+            ),
+            objective_gradient,
+        ) = _value_and_grad_program(
             parameters,
+            extraction,
             flux_spec,
             surface_gamma_device,
             surface_normal_device,
