@@ -1306,6 +1306,67 @@ def test_gsco_wireframe_jax_wrapper_matches_cpp_without_mutating_wireframe() -> 
     np.testing.assert_array_equal(fixture.currents, x_init.ravel())
 
 
+def test_gsco_wireframe_jax_accepts_device_initial_state_under_transfer_guard() -> None:
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    fixture = _GSCOFixture(
+        currents=x_init.ravel().copy(),
+        loops=loops,
+        free_loops=free_loops,
+        segments=segments,
+        connected_segments=connections,
+    )
+    x_init_device = jax.device_put(jnp.asarray(x_init))
+    loop_count_device = jax.device_put(jnp.asarray(loop_count_init, dtype=jnp.int32))
+    A_device = jax.device_put(jnp.asarray(A))
+    b_device = jax.device_put(jnp.asarray(b))
+    expected = greedy_stellarator_coil_optimization_jax(
+        False,
+        False,
+        False,
+        A_device,
+        b_device,
+        0.2,
+        np.inf,
+        0,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.15,
+        5,
+        x_init_device,
+        loop_count_device,
+    )
+    expected.x.block_until_ready()
+
+    with jax.transfer_guard("disallow"):
+        actual = gsco_wireframe_jax(
+            fixture,
+            A_device,
+            b_device,
+            0.15,
+            False,
+            False,
+            0.2,
+            np.inf,
+            5,
+            1,
+            x_init=x_init_device,
+            loop_count_init=loop_count_device,
+            verbose=False,
+        )
+        actual.x.block_until_ready()
+
+    np.testing.assert_allclose(
+        np.asarray(actual.x), np.asarray(expected.x), rtol=_RTOL, atol=_ATOL
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.loop_count), np.asarray(expected.loop_count)
+    )
+
+
 def test_gsco_wireframe_jax_record_every_keeps_cadence_and_final_history_rows() -> None:
     A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
         _gsco_problem()
