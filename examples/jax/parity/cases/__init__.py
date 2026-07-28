@@ -48,6 +48,12 @@ from examples.jax.parity.cases.native_permanent_magnet_muse import (
 from examples.jax.parity.cases.native_permanent_magnet_muse import (
     execute as execute_native_permanent_magnet_muse,
 )
+from examples.jax.parity.cases.native_permanent_magnet_qa import (
+    create_input as create_native_permanent_magnet_qa_input,
+)
+from examples.jax.parity.cases.native_permanent_magnet_qa import (
+    execute as execute_native_permanent_magnet_qa,
+)
 from examples.jax.parity.cases.native_permanent_magnet_pm4stell import (
     create_input as create_native_permanent_magnet_pm4stell_input,
 )
@@ -180,6 +186,11 @@ _CASES = {
         case_id="native-permanent-magnet-muse",
         create_input=create_native_permanent_magnet_muse_input,
         execute=execute_native_permanent_magnet_muse,
+    ),
+    "native-permanent-magnet-qa": CaseDefinition(
+        case_id="native-permanent-magnet-qa",
+        create_input=create_native_permanent_magnet_qa_input,
+        execute=execute_native_permanent_magnet_qa,
     ),
     "native-permanent-magnet-pm4stell": CaseDefinition(
         case_id="native-permanent-magnet-pm4stell",

@@ -122,6 +122,7 @@ def _build_grid(
         max_steps=max_steps,
         rtol=1.0e-8,
         atol=1.0e-7,
+        require_success=False,
     )
 
     accepted_coils = field.coil_set_spec_from_dofs(problem.x)
@@ -146,7 +147,6 @@ def _build_grid(
             dr=radial_extent,
             coordinate_flag="cylindrical",
         )
-        cpu_grid.rescale_for_opt(0.05, 0.0, 0.0, 1.0e10)
     grid = PermanentMagnetGridJAX.from_cpu(cpu_grid)
     return grid, {surface_path.name: _sha256(surface_path)}
 

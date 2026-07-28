@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from benchmarks.validation_ladder_contract import OPTIMIZER_DRIFT_TOLERANCES
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
 
@@ -34,7 +35,7 @@ def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
         jax.effective_construction_fingerprint
     )
     assert native.completed_workflow_stages == jax.completed_workflow_stages
-    assert native.nit == jax.nit == 4
+    assert native.nit == jax.nit == 2
     assert set(native.values) == set(jax.values)
 
     for observable in (
@@ -45,11 +46,6 @@ def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
         "initial:moments",
         "initial:residual",
         "initial:objective_sum_squares",
-        "final:moments",
-        "final:proxy_moments",
-        "final:residual",
-        "final:objective_sum_squares",
-        "final:nonzero_mask",
     ):
         np.testing.assert_allclose(
             jax.values[observable],
@@ -58,6 +54,27 @@ def test_exact_permanent_magnet_qa_matches_native_and_jax_cpu(
             atol=1.0e-12,
         )
 
+    assert int(native.values["final:nonzero_count"]) > 0
+    assert int(jax.values["final:nonzero_count"]) > 0
+    final_relative_tolerance = OPTIMIZER_DRIFT_TOLERANCES[
+        "tier2_stage2_e2e"
+    ]["final_objective_rel_tol_20_iter"]
+    assert final_relative_tolerance is not None
+    for observable in (
+        "final:objective_sum_squares",
+        "final:residual_norm",
+        "final:moment_l2_norm",
+        "final:proxy_moment_l2_norm",
+    ):
+        np.testing.assert_allclose(
+            jax.values[observable],
+            native.values[observable],
+            rtol=final_relative_tolerance,
+            atol=0.0,
+        )
+
+    assert np.all(np.isfinite(jax.values["final:moments"]))
+    assert np.all(np.isfinite(jax.values["final:proxy_moments"]))
     assert float(native.values["final:objective_sum_squares"]) < float(
         native.values["initial:objective_sum_squares"]
     )

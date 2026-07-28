@@ -72,7 +72,7 @@ class PermanentMagnetGridJAX:
             A_obj=_as_runtime_array(pm_grid.A_obj),
             b_obj=_as_runtime_array(pm_grid.b_obj),
             ATb=_reshape_moments("ATb", pm_grid.ATb, ndipoles),
-            ATA_scale=_as_runtime_array(pm_grid.ATA_scale),
+            ATA_scale=jnp.reshape(_as_runtime_array(pm_grid.ATA_scale), ()),
             m0=_reshape_moments("m0", pm_grid.m0, ndipoles),
             m=_reshape_moments("m", pm_grid.m, ndipoles),
             m_proxy=_reshape_moments("m_proxy", m_proxy_source, ndipoles),
