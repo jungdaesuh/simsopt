@@ -1714,6 +1714,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     def _build_coil_dof_extraction_spec(self):
         external_surface_ids = {}
         external_surfaces = []
+        curve_source_ids = {}
 
         def affine_current_terms(current, coefficient=1.0):
             if isinstance(current, Current):
@@ -1738,6 +1739,9 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
         def coil_extraction_spec(coil):
             curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+            curve_id = id(curve)
+            if curve_id not in curve_source_ids:
+                curve_source_ids[curve_id] = len(curve_source_ids)
             current_terms = (
                 () if isinstance(current, Current) else affine_current_terms(current)
             )
@@ -1774,6 +1778,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 current_term_scales=tuple(
                     coefficient for _term, coefficient in current_terms
                 ),
+                curve_source_index=curve_source_ids[curve_id],
                 surface_map=surface_map,
                 surface_output_index=surface_output_index,
                 rotmat=rotmat,

@@ -5,6 +5,7 @@ from .stage_two import (
     StageTwoObjectiveConfig,
     make_stage_two_objective,
     stage_two_geometric_penalty,
+    stage_two_linking_number,
 )
 
 __all__ = (
@@ -12,4 +13,5 @@ __all__ = (
     "StageTwoObjectiveConfig",
     "make_stage_two_objective",
     "stage_two_geometric_penalty",
+    "stage_two_linking_number",
 )

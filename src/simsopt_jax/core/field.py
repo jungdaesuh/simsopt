@@ -62,6 +62,7 @@ from .specs import (
     CoilSetDofExtractionSpec,
     CoilSpec,
     CurrentValueSpec,
+    CurveSpec,
     GroupedCoilSetSpec,
     apply_coil_symmetry,
     make_grouped_coil_set_spec,
@@ -555,8 +556,14 @@ def grouped_coil_set_spec_from_coil_specs(
     gammas = []
     gammadashs = []
     currents = []
+    geometry_by_curve: dict[int, tuple[jax.Array, jax.Array]] = {}
     for coil_spec in coil_specs:
-        gamma, gammadash = curve_gamma_and_dash_from_spec(coil_spec.curve)
+        curve_id = id(coil_spec.curve)
+        geometry = geometry_by_curve.get(curve_id)
+        if geometry is None:
+            geometry = curve_gamma_and_dash_from_spec(coil_spec.curve)
+            geometry_by_curve[curve_id] = geometry
+        gamma, gammadash = geometry
         gamma, gammadash, current = apply_coil_symmetry(
             gamma,
             gammadash,
@@ -656,22 +663,32 @@ def coil_specs_from_dof_extraction_spec(
         owner_dofs = _as_compute_array(owner_dofs, reference=owner_dofs)
     else:
         owner_dofs = _as_runtime_float64(owner_dofs, reference=owner_dofs)
-    return tuple(
-        CoilSpec(
-            curve=_coil_curve_spec_from_dofs(
+    curves_by_source: dict[int, CurveSpec] = {}
+    coil_specs = []
+    for coil_spec in extraction_spec.coils:
+        source_index = coil_spec.curve_source_index
+        if source_index is None or source_index not in curves_by_source:
+            curve = _coil_curve_spec_from_dofs(
                 coil_spec,
                 owner_dofs,
                 use_compute_dtype=use_compute_dtype,
-            ),
-            current=_coil_current_value_from_dofs(
-                coil_spec,
-                owner_dofs,
-                use_compute_dtype=use_compute_dtype,
-            ),
-            symmetry=coil_spec.symmetry,
+            )
+            if source_index is not None:
+                curves_by_source[source_index] = curve
+        else:
+            curve = curves_by_source[source_index]
+        coil_specs.append(
+            CoilSpec(
+                curve=curve,
+                current=_coil_current_value_from_dofs(
+                    coil_spec,
+                    owner_dofs,
+                    use_compute_dtype=use_compute_dtype,
+                ),
+                symmetry=coil_spec.symmetry,
+            )
         )
-        for coil_spec in extraction_spec.coils
-    )
+    return tuple(coil_specs)
 
 
 def coil_set_spec_from_dof_extraction_spec(
