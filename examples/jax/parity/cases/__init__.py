@@ -24,6 +24,12 @@ from examples.jax.parity.cases.native_boozer import execute as execute_native_bo
 from examples.jax.parity.cases.native_boozerqa import (
     create_input as create_native_boozerqa_input,
 )
+from examples.jax.parity.cases.native_coil_forces import (
+    create_input as create_native_coil_forces_input,
+)
+from examples.jax.parity.cases.native_coil_forces import (
+    execute as execute_native_coil_forces,
+)
 from examples.jax.parity.cases.native_boozerqa import (
     execute as execute_native_boozerqa,
 )
@@ -190,6 +196,11 @@ _CASES = {
         case_id="native-boozerqa",
         create_input=create_native_boozerqa_input,
         execute=execute_native_boozerqa,
+    ),
+    "native-coil-forces": CaseDefinition(
+        case_id="native-coil-forces",
+        create_input=create_native_coil_forces_input,
+        execute=execute_native_coil_forces,
     ),
     "native-just-a-quadratic": CaseDefinition(
         case_id="native-just-a-quadratic",
