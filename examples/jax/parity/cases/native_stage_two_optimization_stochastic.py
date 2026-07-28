@@ -206,8 +206,12 @@ def _effective_fingerprint(
         {
             "initial_parameters": arrays["initial_parameters"].tolist(),
             "surface_dofs": np.asarray(surface.local_full_x).tolist(),
-            "surface_gamma": np.asarray(surface.gamma()).tolist(),
-            "surface_normal": np.asarray(surface.normal()).tolist(),
+            "surface_quadpoints_phi": np.asarray(
+                surface.quadpoints_phi,
+            ).tolist(),
+            "surface_quadpoints_theta": np.asarray(
+                surface.quadpoints_theta,
+            ).tolist(),
             "base_curve_dofs": [
                 np.asarray(curve.local_full_x).tolist() for curve in base_curves
             ],
