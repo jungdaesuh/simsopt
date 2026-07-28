@@ -42,7 +42,7 @@ def _host_bool(value: object) -> bool:
 
 
 def _surface_resolution(max_steps: int) -> tuple[int, int]:
-    return (6, 6) if max_steps >= NATIVE_OUTER_ITERATIONS else (1, 1)
+    return (6, 6) if max_steps >= NATIVE_OUTER_ITERATIONS else (2, 2)
 
 
 def _ncsx_configuration_options(max_steps: int) -> dict[str, int]:
@@ -55,9 +55,9 @@ def _ncsx_configuration_options(max_steps: int) -> dict[str, int]:
     }
 
 
-def _boozer_options(max_steps: int) -> dict[str, object]:
+def _boozer_options() -> dict[str, object]:
     return {
-        "newton_maxiter": min(max_steps, 20),
+        "newton_maxiter": 20,
         "newton_tol": 1.0e-10,
         "verbose": False,
     }
@@ -91,7 +91,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         surface,
         volume_label,
         volume_target,
-        options=_boozer_options(max_steps),
+        options=_boozer_options(),
     )
     initial_solve = cast(
         Mapping[str, object],
@@ -103,7 +103,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         ),
     )
     boozer_surface.install_traceable_solved_runtime_state(initial_solve)
-    initial_solver_success = bool(initial_solve["success"])
+    initial_solver_success = _host_bool(initial_solve["success"])
     initial_residual = _host_float(
         jnp.sqrt(
             jnp.mean(
@@ -117,7 +117,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         sum(CurveLength(curve).J() for curve in base_curves)
     )
 
-    qs_resolution = 20 if max_steps >= NATIVE_OUTER_ITERATIONS else 4
+    qs_resolution = 20
     objective_config: dict[str, object] = {
         "non_qs_weight": 1.0,
         "residual_weight": 0.0,
@@ -174,8 +174,9 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     optimizer_result = serial_solve_jax(
         problem,
         max_steps=max_steps,
-        rtol=1.0e-7,
-        atol=1.0e-7,
+        rtol=0.0,
+        atol=1.0e-15,
+        require_success=False,
     )
     final_objective = _host_float(objective(problem.x))
     final_forward = forward_result(problem.x)
@@ -196,7 +197,8 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         initial_solver_success and inner_solver_success and outer_solver_success
     )
     scientific_success = bool(
-        solver_success
+        initial_solver_success
+        and inner_solver_success
         and np.isfinite(initial_residual)
         and np.isfinite(final_residual)
         and final_residual <= 1.0e-7
