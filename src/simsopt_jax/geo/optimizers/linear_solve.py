@@ -1214,15 +1214,13 @@ def _solve_jacobian_operator_with_status(
     max_refinement_steps=_SQUARE_OPERATOR_GMRES_REFINEMENT_STEPS,
 ):
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    # Exact-Jacobian adjoint (``transpose``) opt-in: replace the stagnating
-    # operator-GMRES solve of the well-conditioned ``J^T λ = g`` system with a
-    # direct dense LU factorization plus one iterative-refinement step.  Scoped to
-    # the transpose (adjoint) solve and to single-vector or column-batched RHS
-    # inputs whose materialized dense matrix fits the ``max_dense_jacobian_bytes``
-    # policy; everything else keeps the operator-GMRES baseline so the flag
-    # A/B-compares cleanly.
+    # Exact-Jacobian adjoint: parity profiles require the deterministic direct
+    # solve, while fast profiles retain operator GMRES unless the explicit
+    # diagnostic opt-in is set. The dense route remains scoped to transpose
+    # solves and to matrices within the backend's byte budget.
+    exact_adjoint_dense_lu = _EXACT_ADJOINT_DENSE_LU or get_backend_policy().parity_mode
     if (
-        _EXACT_ADJOINT_DENSE_LU
+        exact_adjoint_dense_lu
         and transpose
         and _dense_square_operator_lu_materialization_allowed(rhs)
     ):

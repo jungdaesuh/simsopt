@@ -477,6 +477,20 @@ class NonQSRatioTests(unittest.TestCase):
 
 
 class BoozerResidualTests(unittest.TestCase):
+    def test_exact_surface_has_residual_metadata_and_zero_label_weight(self):
+        bs, boozer_surface = get_boozer_surface(
+            label="Volume",
+            boozer_type="exact",
+            optimize_G=True,
+            weight_inv_modB=False,
+        )
+        objective = BoozerResidual(boozer_surface, bs)
+
+        self.assertFalse(boozer_surface.res["weight_inv_modB"])
+        self.assertEqual(objective.constraint_weight, 0.0)
+        self.assertTrue(np.isfinite(objective.J()))
+        self.assertTrue(np.all(np.isfinite(objective.dJ())))
+
     def test_fixed_surface_value_matches_production_value(self):
         for optimize_G in (True, False):
             with self.subTest(optimize_G=optimize_G):

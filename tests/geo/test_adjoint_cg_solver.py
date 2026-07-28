@@ -23,6 +23,7 @@ Three opt-in adjoint paths are covered here:
    (flag-and-transpose only), and the numerical-singularity fail-closed guard.
 """
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -659,6 +660,46 @@ def test_solve_jacobian_operator_default_flag_does_not_use_dense_lu(monkeypatch)
     assert calls["n"] == 0
     _linear_solve._solve_jacobian_operator(operator, rhs, transpose=True, tol=1e-12)
     assert calls["n"] == 0
+
+
+def test_solve_jacobian_operator_parity_policy_uses_bounded_dense_lu(monkeypatch):
+    """Parity selects deterministic LU without changing the fast-mode default."""
+    policy = _linear_solve.get_backend_policy()
+    parity_policy = dataclasses.replace(policy, parity_mode=True)
+    matrix, _, rhs = _nonsymmetric_problem(seed=23)
+    operator = {
+        "matvec": lambda v: matrix @ v,
+        "transpose_matvec": lambda v: matrix.T @ v,
+    }
+    calls = {"n": 0}
+    real_lu = _linear_solve._solve_dense_square_operator_lu_system_with_status
+
+    def spy(*args, **kwargs):
+        calls["n"] += 1
+        return real_lu(*args, **kwargs)
+
+    monkeypatch.setattr(_linear_solve, "_EXACT_ADJOINT_DENSE_LU", False)
+    monkeypatch.setattr(_linear_solve, "get_backend_policy", lambda: parity_policy)
+    monkeypatch.setattr(
+        _linear_solve, "_solve_dense_square_operator_lu_system_with_status", spy
+    )
+
+    solution, status = _linear_solve._solve_jacobian_operator_with_status(
+        operator,
+        rhs,
+        transpose=True,
+        tol=1e-12,
+    )
+
+    assert calls["n"] == 1
+    assert bool(status.success)
+    expected = np.linalg.solve(np.asarray(matrix).T, np.asarray(rhs))
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        expected,
+        rtol=1e-10,
+        atol=1e-12,
+    )
 
 
 def test_dense_lu_status_reports_machine_precision_residual():
