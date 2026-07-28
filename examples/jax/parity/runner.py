@@ -110,6 +110,7 @@ def build_child_command(
     """Return the only supported child argv for one case and lane."""
     command = (
         python_executable,
+        "-S",
         "-m",
         "examples.jax.parity.child",
         "--case",
