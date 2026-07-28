@@ -1476,3 +1476,71 @@ After the repair, all 120 manifest, runner, artifact, input, publication, and
 runtime tests passed. Ruff, formatting, JSON parsing, compileall, and Git diff
 checks passed. The isolated runtime did not contain mypy, so no fresh mypy
 result is claimed for this repair.
+
+## Exact `qfm.py` mirror RED -> GREEN -> REFACTOR (2026-07-28)
+
+The source-owned parity test was committed first at RED revision
+`ecf0c1ee9c1a93fbcada594ddda2fe8bbde26427` and failed because the
+`native-qfm` case did not exist. GREEN revision
+`5845ffcc9de02cd941a01cc3584a2076bc68d7ea` added the matched native and JAX
+workflow:
+
+- the fitted bounded NCSX surface and fixed coil construction are hash-bound;
+- volume, toroidal flux, and area each run a penalty solve followed by an exact
+  equality-constrained solve;
+- native uses the source's LBFGS-B then SLSQP route;
+- JAX uses the SIMSOPT-owned BFGS then augmented-Lagrangian route;
+- initial parameters, QFM value/gradient, label value/gradient, all three
+  stage endpoints, feasibility, final parameters, and volume-persistence
+  diagnostics are retained.
+
+The first GREEN run exposed that native derivative arrays were views into
+reused SIMSOPT buffers. The receipt publisher now takes owned copies at each
+phase; the initial native/JAX QFM value and gradient then matched at the
+floating-point reduction floor. The unchanged parity test passed in
+`106.82 s`.
+
+The strict-device RED at
+`346e35ee06ba84e1c19cf09e730e58c4fd38d880` proved that the user-facing
+example still invoked adapter methods with repeated host publications. GREEN
+revision `52f9071fdb29ce0bb4b533565a3550ed77899bcb` moved the complete
+three-stage numerical sequence behind `solve_qfm_sequence`, retained the
+result as a device PyTree, and made one final `jax.device_get` publication.
+It also repaired RZ-Fourier scatter indices to inherit the reference DOF
+array's device and made example platform metadata report the selected runtime
+device rather than the first enumerated JAX device.
+
+The strict NVIDIA GeForce RTX 5090 FP64 test passed `2 passed in 51.88 s`
+under `jax.transfer_guard("disallow")`. A direct strict example run reported
+`platform=gpu`, `status=ok`, and:
+
+```text
+initial QFM       1.6614172567241663e-02
+final QFM         1.1461611986416241e-03
+area feasibility  6.7853656192419110e-23  (0.5 * raw_residual^2)
+```
+
+The matched native final QFM was `1.1461612104134106e-03`; the JAX CPU result
+was `1.1461611493776677e-03`. These differences are approximately
+`1.18e-11` and `6.10e-11` absolute respectively and passed the committed
+source-owned parity thresholds without weakening a tolerance. The combined
+CPU parity plus strict-transfer suite passed `3 passed in 104.78 s`.
+
+REFACTOR revision `113a62c7b760135137716e3c95c7ffd575487d03` uses
+`jax.jacrev(..., has_aux=True)` so each diagnostic state shares one
+field/geometry primal evaluation between its values and Jacobian. No iterate
+history is retained, the BFGS state remains fixed-size, and only the final
+result tree crosses to the host. Ruff and Pyright reported no issues in the
+touched QFM implementation.
+
+Both new immutable receipt slices replayed successfully. The complete
+17-receipt structural audit passed, while replaying every historical command
+is currently blocked by an older infrastructure receipt whose unpinned
+`python` command now resolves to host Python 3.14 and returns its normalized
+unexpected-outcome code. That stale historical-toolchain issue is separate
+from the environment-pinned QFM receipts.
+
+This closes the fifth of eight Wave-A exact mirrors and the fifth of 25
+external-solver-free source mirrors overall. Performance and peak-memory
+qualification remain a later matched-workload phase; the execution times
+above include compilation and are validation timings, not speed claims.
