@@ -5,9 +5,17 @@ from __future__ import annotations
 import numpy as np
 
 from simsopt.field.tracing import compute_gc_radius
+from simsopt_jax_adapters.field import tracing as tracing_module
 from simsopt_jax_adapters.field.poloidal_field import PoloidalFieldJAX
 from simsopt_jax_adapters.field.toroidal_field import ToroidalFieldJAX
 from simsopt_jax_adapters.field.tracing import trace_particles
+
+
+def test_runtime_mode_selects_early_exit_only_for_fast_tracing() -> None:
+    assert tracing_module._adaptive_loop_for_backend_mode("jax_cpu_fast") == "while"
+    assert tracing_module._adaptive_loop_for_backend_mode("jax_gpu_fast") == "while"
+    assert tracing_module._adaptive_loop_for_backend_mode("jax_cpu_parity") == "scan"
+    assert tracing_module._adaptive_loop_for_backend_mode("jax_gpu_parity") == "scan"
 
 
 def test_guiding_center_and_fullorbit_remain_within_gyroradius_bound():
