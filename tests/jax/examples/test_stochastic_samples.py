@@ -78,7 +78,7 @@ def test_materialized_samples_match_native_draw_order_and_symmetry() -> None:
 
     np.testing.assert_array_equal(bundle.gamma, np.stack(expected_gamma))
     np.testing.assert_array_equal(bundle.gammadash, np.stack(expected_gammadash))
-    assert bundle.generator == "PCG64DXSM"
+    assert bundle.generator == "numpy.random.Generator(PCG64DXSM)"
     assert bundle.seed == 7
     assert bundle.dtype == "<f8"
     assert bundle.byte_order == "little"
