@@ -12,6 +12,7 @@ from simsopt_jax_adapters.mhd.vmec_host import (
     boundary_sha256,
     hybrid_result_is_scientifically_successful,
     validate_vmec_host_evaluation,
+    vmec_result_is_receiptable,
 )
 
 
@@ -85,6 +86,16 @@ def test_hybrid_scientific_success_rejects_failure_threshold_cap() -> None:
         failure_threshold=100.0,
         expected_boundary_sha256="a" * 64,
         final_boundary_sha256="a" * 64,
+    )
+
+
+def test_failed_vmec_trial_without_output_is_not_receiptable(tmp_path: Path) -> None:
+    missing_output = tmp_path / "missing_wout.nc"
+
+    assert not vmec_result_is_receiptable(
+        objective=1.0e12,
+        failure_threshold=100.0,
+        output_file=missing_output,
     )
     assert hybrid_result_is_scientifically_successful(
         initial_objective=2.0,
