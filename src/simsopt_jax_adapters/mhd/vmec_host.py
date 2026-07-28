@@ -104,8 +104,44 @@ def validate_vmec_host_evaluation(
         raise RuntimeError("VMEC evaluation metadata is invalid.")
 
 
+def hybrid_result_is_scientifically_successful(
+    *,
+    initial_objective: float,
+    final_objective: float,
+    final_gradient: np.ndarray,
+    failure_threshold: float,
+    expected_boundary_sha256: str,
+    final_boundary_sha256: str,
+) -> bool:
+    """Return whether a hybrid endpoint is finite, improving, and uncapped."""
+    return bool(
+        np.isfinite(initial_objective)
+        and np.isfinite(final_objective)
+        and np.all(np.isfinite(final_gradient))
+        and final_objective < failure_threshold
+        and final_objective <= initial_objective
+        and final_boundary_sha256 == expected_boundary_sha256
+    )
+
+
+def vmec_result_is_receiptable(
+    *,
+    objective: float,
+    failure_threshold: float,
+    output_file: Path,
+) -> bool:
+    """Return whether a VMEC trial produced a finite, usable output file."""
+    return bool(
+        np.isfinite(objective)
+        and objective < failure_threshold
+        and output_file.is_file()
+    )
+
+
 __all__ = (
     "VmecHostEvaluation",
     "boundary_sha256",
+    "hybrid_result_is_scientifically_successful",
     "validate_vmec_host_evaluation",
+    "vmec_result_is_receiptable",
 )

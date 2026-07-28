@@ -38,7 +38,9 @@ from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.mhd.vmec_host import (
     VmecHostEvaluation,
     boundary_sha256,
+    hybrid_result_is_scientifically_successful,
     validate_vmec_host_evaluation,
+    vmec_result_is_receiptable,
 )
 
 EXAMPLE_ID = "native-single-stage-vmec-hybrid"
@@ -250,8 +252,8 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
             coil_result = minimize_lbfgs_host_core(
                 coil_value_and_gradient,
                 coil_initial,
-                maxiter=max_steps,
-                maxcor=min(max_steps, 300),
+                maxiter=NATIVE_ITERATIONS,
+                maxcor=min(NATIVE_ITERATIONS, 300),
                 ftol=0.0,
                 gtol=1.0e-8,
                 maxls=20,
@@ -264,6 +266,7 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         solution = np.array(initial, copy=True)
         vmec_elapsed_seconds = 0.0
         vmec_evaluation_count = 0
+        vmec_failed_evaluation_count = 0
         latest_vmec_evaluation: VmecHostEvaluation | None = None
         coil_size = coil_solution.size
         joint_initial_value_and_gradient: tuple[float, np.ndarray] | None = None
@@ -286,6 +289,7 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
                     nonlocal latest_vmec_evaluation
                     nonlocal vmec_elapsed_seconds
                     nonlocal vmec_evaluation_count
+                    nonlocal vmec_failed_evaluation_count
 
                     coil_dofs = np.asarray(parameters[:coil_size], dtype=np.float64)
                     surface_dofs = np.asarray(
@@ -299,6 +303,18 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
                     vmec_started = time.perf_counter()
                     vmec_objective = float(equilibrium_problem.objective())
                     output_file = Path(vmec.output_file)
+                    vmec_evaluation_count += 1
+                    if not vmec_result_is_receiptable(
+                        objective=vmec_objective,
+                        failure_threshold=config.jacobian_failure_threshold,
+                        output_file=output_file,
+                    ):
+                        vmec_elapsed_seconds += time.perf_counter() - vmec_started
+                        vmec_failed_evaluation_count += 1
+                        return (
+                            config.jacobian_failure_threshold,
+                            np.zeros_like(parameters),
+                        )
                     surface_hash = boundary_sha256(surface_dofs)
                     empty_gradient = np.zeros_like(surface_dofs)
                     evaluation = VmecHostEvaluation.from_output(
@@ -310,14 +326,13 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
                         objective=vmec_objective,
                         gradient=empty_gradient,
                         elapsed_seconds=time.perf_counter() - vmec_started,
-                        evaluation_count=vmec_evaluation_count + 1,
+                        evaluation_count=vmec_evaluation_count,
                         started_ns=wall_started_ns,
                     )
                     equilibrium_gradient = np.ravel(
                         equilibrium_jacobian.jac(surface_dofs)
                     )
                     vmec_elapsed_seconds += time.perf_counter() - vmec_started
-                    vmec_evaluation_count += 1
                     evaluation = replace(
                         evaluation,
                         gradient=np.ascontiguousarray(
@@ -400,12 +415,16 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
             )
             jax_elapsed_seconds += time.perf_counter() - jax_started
             platform = jax.devices()[0].platform
-            scientific_success = bool(
-                np.isfinite(final_objective)
-                and np.all(np.isfinite(final_gradient))
-                and final_objective <= joint_initial_value_and_gradient[0]
-                and latest_vmec_evaluation.boundary_sha256
-                == boundary_sha256(surface_final)
+            failure_threshold_triggered = bool(
+                final_objective >= config.jacobian_failure_threshold
+            )
+            scientific_success = hybrid_result_is_scientifically_successful(
+                initial_objective=joint_initial_value_and_gradient[0],
+                final_objective=final_objective,
+                final_gradient=final_gradient,
+                failure_threshold=config.jacobian_failure_threshold,
+                expected_boundary_sha256=boundary_sha256(surface_final),
+                final_boundary_sha256=latest_vmec_evaluation.boundary_sha256,
             )
             result = ExampleResult(
                 example_id=EXAMPLE_ID,
@@ -430,9 +449,11 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
                     ),
                     "initial_objective": joint_initial_value_and_gradient[0],
                     "final_objective": final_objective,
+                    "failure_threshold_triggered": failure_threshold_triggered,
                     "solution": tuple(float(value) for value in solution),
                     "gradient": tuple(float(value) for value in final_gradient),
                     "vmec_evaluations": vmec_evaluation_count,
+                    "vmec_failed_evaluations": vmec_failed_evaluation_count,
                     "solver_iterations": int(joint_result.k),
                     "solver_evaluations": int(joint_result.nfev),
                     "outer_solver_success": bool(joint_result.converged),
