@@ -42,20 +42,71 @@ def _force_stage_two_metrics(
     config: ForceStageTwoConfig,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     target_count = config.num_force_coils
+    coil_count = gamma.shape[0]
+    target_gamma = jax.lax.slice_in_dim(gamma, 0, target_count, axis=0)
+    source_gamma = jax.lax.slice_in_dim(
+        gamma,
+        target_count,
+        coil_count,
+        axis=0,
+    )
+    target_gammadash = jax.lax.slice_in_dim(
+        gammadash,
+        0,
+        target_count,
+        axis=0,
+    )
+    source_gammadash = jax.lax.slice_in_dim(
+        gammadash,
+        target_count,
+        coil_count,
+        axis=0,
+    )
+    target_gammadashdash = jax.lax.slice_in_dim(
+        gammadashdash,
+        0,
+        target_count,
+        axis=0,
+    )
+    target_currents = jax.lax.slice_in_dim(
+        currents,
+        0,
+        target_count,
+        axis=0,
+    )
+    source_currents = jax.lax.slice_in_dim(
+        currents,
+        target_count,
+        coil_count,
+        axis=0,
+    )
+    target_regularizations = jax.lax.slice_in_dim(
+        regularizations,
+        0,
+        target_count,
+        axis=0,
+    )
     force_norms = curve_force_norms_pure(
-        gamma[:target_count],
-        gamma[target_count:],
-        gammadash[:target_count],
-        gammadash[target_count:],
-        gammadashdash[:target_count],
+        target_gamma,
+        source_gamma,
+        target_gammadash,
+        source_gammadash,
+        target_gammadashdash,
         target_quadpoints,
-        currents[:target_count],
-        currents[target_count:],
-        regularizations[:target_count],
+        target_currents,
+        source_currents,
+        target_regularizations,
         config.downsample,
     )
+    sampled_target_gammadash = jax.lax.slice_in_dim(
+        target_gammadash,
+        0,
+        target_gammadash.shape[1],
+        stride=config.downsample,
+        axis=1,
+    )
     target_speed = jnp.linalg.norm(
-        gammadash[:target_count, :: config.downsample, :],
+        sampled_target_gammadash,
         axis=-1,
     )
     force_objective = (
@@ -76,6 +127,12 @@ def _force_stage_two_metrics(
     return force_objective, jnp.max(force_norms), vacuum_energy
 
 
+_compiled_force_stage_two_metrics = jax.jit(
+    _force_stage_two_metrics,
+    static_argnames=("config",),
+)
+
+
 def make_force_stage_two_objective(
     field: CoilDofExtractionProvider,
     flux_objective: Callable[[jax.Array], jax.Array],
@@ -94,7 +151,7 @@ def make_force_stage_two_objective(
             extraction,
             parameters,
         )
-        force_objective, _, vacuum_energy = _force_stage_two_metrics(
+        force_objective, _, vacuum_energy = _compiled_force_stage_two_metrics(
             gamma,
             gammadash,
             gammadashdash,
@@ -132,7 +189,7 @@ def force_stage_two_diagnostics(
     def diagnostics(parameters: jax.Array) -> jax.Array:
         geometry = stage_two_coil_geometry(extraction, parameters)
         return jnp.stack(
-            _force_stage_two_metrics(
+            _compiled_force_stage_two_metrics(
                 *geometry,
                 target_quadpoints,
                 regularizations,
