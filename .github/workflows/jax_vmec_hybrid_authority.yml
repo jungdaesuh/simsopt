@@ -49,6 +49,7 @@ jobs:
         run: |
           conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" python - <<'PY'
           import hashlib
+          import json
           import os
           from pathlib import Path
 
@@ -69,6 +70,26 @@ jobs:
           world_size = int(os.environ["EXPECTED_MPI_WORLD_SIZE"])
           if world_size < 1:
               raise SystemExit("expected_mpi_world_size must be positive")
+          artifact_directory = Path(".artifacts/jax-vmec-hybrid")
+          artifact_directory.mkdir(parents=True, exist_ok=True)
+          with (artifact_directory / "vmec-build.json").open(
+              "w",
+              encoding="utf-8",
+          ) as stream:
+              json.dump(
+                  {
+                      "vmec_extension": str(extension.resolve()),
+                      "vmec_sha256": observed,
+                      "mpi4py_path": str(Path(mpi4py.__file__).resolve()),
+                      "mpi_world_size": world_size,
+                      "repository_commit": os.environ["GITHUB_SHA"],
+                      "repository_dirty": False,
+                  },
+                  stream,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              stream.write("\n")
           print(f"vmec_extension={extension}")
           print(f"vmec_sha256={observed}")
           print(f"mpi4py={mpi4py.__file__}")
