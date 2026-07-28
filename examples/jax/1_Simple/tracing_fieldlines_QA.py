@@ -39,8 +39,23 @@ def _problem(max_steps: int):
     source_field = BiotSavartJAX(native_field.coils)
     grid_size = 20 if native_scale else 5
     degree = 4 if native_scale else 2
-    radii = np.linalg.norm(surface.gamma()[:, :, :2], axis=2)
-    heights = surface.gamma()[:, :, 2]
+    surface_points = surface.gamma()
+    radii = np.linalg.norm(surface_points[:, :, :2], axis=2)
+    heights = surface_points[:, :, 2]
+    classifier = SurfaceClassifier(
+        surface,
+        h=0.03 if native_scale else 0.08,
+        p=2,
+    )
+
+    def skip(
+        radial_values: np.ndarray,
+        phi_values: np.ndarray,
+        height_values: np.ndarray,
+    ) -> np.ndarray:
+        cylindrical_points = np.column_stack((radial_values, phi_values, height_values))
+        return (classifier.evaluate_rphiz(cylindrical_points) < -0.05).reshape(-1)
+
     interpolated = InterpolatedFieldJAX(
         source_field,
         degree,
@@ -50,12 +65,13 @@ def _problem(max_steps: int):
         True,
         nfp=surface.nfp,
         stellsym=True,
+        skip=skip,
     )
-    return surface, source_field, interpolated
+    return surface, source_field, interpolated, classifier
 
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    surface, source_field, interpolated = _problem(max_steps)
+    surface, source_field, interpolated, classifier = _problem(max_steps)
     surface_points = np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3))
     source_field.set_points(surface_points)
     interpolated.set_points(surface_points)
@@ -70,11 +86,6 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     radial_initial = np.linspace(1.2125346, 1.295, nfieldlines)
     vertical_initial = np.zeros(nfieldlines, dtype=np.float64)
     phis = tuple(index * 0.5 * np.pi / surface.nfp for index in range(4))
-    classifier = SurfaceClassifier(
-        surface,
-        h=0.08 if nfieldlines == 3 else 0.03,
-        p=2,
-    )
     trajectories, phi_hits = compute_fieldlines(
         interpolated,
         radial_initial,
