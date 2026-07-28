@@ -37,6 +37,11 @@ from .weighted_quadratic import (
     weighted_quadratic_gradient,
     weighted_quadratic_residuals,
 )
+from .wireframe_rcls import (
+    WireframeRCLSDeviceResult,
+    WireframeRCLSState,
+    solve_wireframe_rcls,
+)
 
 __all__ = (
     "EXECUTION_SCALES",
@@ -54,6 +59,8 @@ __all__ = (
     "SurfaceAreaVolumeSequenceDeviceResult",
     "SurfaceAreaVolumeStageDeviceResult",
     "WeightedQuadraticDeviceResult",
+    "WireframeRCLSDeviceResult",
+    "WireframeRCLSState",
     "example_runtime_metadata",
     "materialize_stochastic_coil_perturbations",
     "run_example",
@@ -63,6 +70,7 @@ __all__ = (
     "solve_rz_curve_length",
     "solve_rz_surface_area_volume_sequence",
     "solve_weighted_quadratic",
+    "solve_wireframe_rcls",
     "weighted_quadratic_gradient",
     "weighted_quadratic_residuals",
 )
