@@ -72,7 +72,7 @@ def _build_problem(
     return field, flux, surface_gamma, surface_normal
 
 
-def _objective_config() -> StageTwoObjectiveConfig:
+def _regularization_config() -> StageTwoObjectiveConfig:
     return StageTwoObjectiveConfig(
         num_base_curves=4,
         curve_curve_minimum_distance=0.1,
@@ -112,7 +112,7 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         surface_normal=surface_normal,
         initial_parameters=initial_device,
         taylor_direction=taylor_direction_device,
-        regularization_config=_objective_config(),
+        regularization_config=_regularization_config(),
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=max_steps,

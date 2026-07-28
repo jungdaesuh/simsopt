@@ -412,7 +412,7 @@ def _jax(
         device,
     )
 
-    def config() -> StageTwoObjectiveConfig:
+    def regularization_config() -> StageTwoObjectiveConfig:
         return StageTwoObjectiveConfig(
             num_base_curves=_configuration_int(bundle, "num_base_curves"),
             curve_curve_minimum_distance=_configuration_float(
@@ -459,7 +459,7 @@ def _jax(
         ),
         initial_parameters=jax.device_put(arrays["initial_parameters"], device),
         taylor_direction=jax.device_put(arrays["taylor_direction"], device),
-        regularization_config=config(),
+        regularization_config=regularization_config(),
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=_configuration_int(bundle, "max_steps"),
