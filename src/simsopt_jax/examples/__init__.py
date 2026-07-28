@@ -26,6 +26,11 @@ from .stage_two_minimal import (
     MinimalStageTwoState,
     solve_minimal_stage_two,
 )
+from .strain_optimization import (
+    StrainOptimizationDeviceResult,
+    StrainState,
+    solve_strain_rotation,
+)
 from .stochastic_samples import (
     GaussianPerturbationSampler,
     StochasticPerturbationBundle,
@@ -56,6 +61,8 @@ __all__ = (
     "QfmStageDeviceResult",
     "RZCurveLengthDeviceResult",
     "StochasticPerturbationBundle",
+    "StrainOptimizationDeviceResult",
+    "StrainState",
     "SurfaceAreaVolumeSequenceDeviceResult",
     "SurfaceAreaVolumeStageDeviceResult",
     "WeightedQuadraticDeviceResult",
@@ -69,6 +76,7 @@ __all__ = (
     "solve_qfm_sequence",
     "solve_rz_curve_length",
     "solve_rz_surface_area_volume_sequence",
+    "solve_strain_rotation",
     "solve_weighted_quadratic",
     "solve_wireframe_rcls",
     "weighted_quadratic_gradient",
