@@ -440,11 +440,11 @@ def _jax(
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
     reporting_problem = TraceableScalarProblem(objective, initial_parameters)
     scaled_problem = TraceableScalarProblem(scaled_objective, initial_parameters)
-    diagnostic_program = TraceableArrayFunction(diagnostics, initial_parameters)
+    diagnostics_program = TraceableArrayFunction(diagnostics, initial_parameters)
 
     def state(prefix: str, parameters: jax.Array) -> dict[str, np.ndarray]:
         objective_value, gradient = reporting_problem.value_and_grad(parameters)
-        diagnostic_values = diagnostic_program(parameters)
+        diagnostic_values = diagnostics_program(parameters)
         published = jax.device_get(
             (parameters, objective_value, gradient, diagnostic_values)
         )
