@@ -30,6 +30,16 @@ class RZCurveLengthDeviceResult:
     optimizer: OptimizerResult
 
 
+@jax.jit
+def _partition_curve_dofs(
+    full_dofs: jax.Array,
+    free_positions: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    free_dofs = full_dofs[free_positions]
+    fixed_dofs = full_dofs.at[free_positions].set(jnp.zeros_like(free_dofs))
+    return fixed_dofs, free_dofs
+
+
 def solve_rz_curve_length(
     *,
     full_dofs: jax.Array,
@@ -45,7 +55,10 @@ def solve_rz_curve_length(
     """Minimize squared curve length without dense free-DOF expansion arrays."""
     full_dofs_device = jnp.asarray(full_dofs, dtype=jnp.float64)
     free_positions_device = jnp.asarray(free_positions, dtype=jnp.int32)
-    fixed_dofs = full_dofs_device.at[free_positions_device].set(0.0)
+    fixed_dofs, initial_parameters = _partition_curve_dofs(
+        full_dofs_device,
+        free_positions_device,
+    )
     spec = make_curve_rzfourier_spec(
         dofs=full_dofs_device,
         quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
@@ -64,7 +77,6 @@ def solve_rz_curve_length(
         length_value = length(parameters)
         return length_value * length_value
 
-    initial_parameters = full_dofs_device[free_positions_device]
     value_and_residual_jacobian = jax.jit(jax.value_and_grad(length))
     initial_length, initial_residual_jacobian = value_and_residual_jacobian(
         initial_parameters
