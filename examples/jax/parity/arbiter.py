@@ -340,6 +340,11 @@ def arbitrate(
             rtol, atol = _route_tolerance(route)
             passed = bool(np.allclose(left, right, rtol=rtol, atol=atol))
             diagnostic = f"allclose rtol={rtol} atol={atol}"
+        elif route.comparator == "not_worse":
+            rtol, atol = _route_tolerance(route)
+            upper_bound = left + rtol * np.abs(left) + atol
+            passed = bool(np.all(right <= upper_bound))
+            diagnostic = f"not_worse rtol={rtol} atol={atol}"
         else:
             raise ArbitrationError(
                 f"equivalent comparator requires a case-owned invariant: {value_key}"
