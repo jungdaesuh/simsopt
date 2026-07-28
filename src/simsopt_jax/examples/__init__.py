@@ -26,6 +26,11 @@ from .stage_two_minimal import (
     MinimalStageTwoState,
     solve_minimal_stage_two,
 )
+from .stage_two_standard import (
+    StandardStageTwoDeviceResult,
+    StandardStageTwoState,
+    solve_standard_stage_two,
+)
 from .strain_optimization import (
     StrainOptimizationDeviceResult,
     StrainState,
@@ -61,6 +66,8 @@ __all__ = (
     "QfmStageDeviceResult",
     "RZCurveLengthDeviceResult",
     "StochasticPerturbationBundle",
+    "StandardStageTwoDeviceResult",
+    "StandardStageTwoState",
     "StrainOptimizationDeviceResult",
     "StrainState",
     "SurfaceAreaVolumeSequenceDeviceResult",
@@ -73,6 +80,7 @@ __all__ = (
     "run_example",
     "scalar_example_driver",
     "solve_minimal_stage_two",
+    "solve_standard_stage_two",
     "solve_qfm_sequence",
     "solve_rz_curve_length",
     "solve_rz_surface_area_volume_sequence",
