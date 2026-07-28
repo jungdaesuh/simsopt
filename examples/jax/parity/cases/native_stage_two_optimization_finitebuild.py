@@ -447,7 +447,7 @@ def _jax(
             squared_flux=float(values[0]),
             length_penalty=float(values[1]),
             distance_penalty=float(values[2]),
-            coil_lengths=values[3:],
+            coil_lengths=values[4:],
         )
 
     initial_parameters = jax.device_put(arrays["initial_parameters"], device)
