@@ -824,6 +824,16 @@ def test_squaredfluxjax_rejects_field_point_mutation_after_construction():
         objective.dJ()
 
 
+def test_squaredfluxjax_exposes_immutable_fixed_surface_flux_spec() -> None:
+    _, objective = _make_native_flux_objectives("quadratic flux")
+
+    flux_spec = objective.fixed_surface_flux_spec()
+
+    assert flux_spec is objective.fixed_surface_flux_spec()
+    assert flux_spec.points.shape == (flux_spec.nphi * flux_spec.ntheta, 3)
+    assert flux_spec.normal.shape == (flux_spec.nphi, flux_spec.ntheta, 3)
+
+
 def test_squaredfluxjax_rejects_field_dof_layout_mutation_after_construction():
     objective = _make_large_grouped_flux_objective()
     assert not objective.field._uses_uniform_curve_xyz_fourier_fastpath
