@@ -514,6 +514,54 @@ def test_regularized_constrained_least_squares_rank_deficient_matches_cpu() -> N
     )
 
 
+def test_regularized_constrained_least_squares_avoids_normal_equation_loss() -> (
+    None
+):
+    rng = np.random.default_rng(0)
+    rows = 14
+    columns = 10
+    left_basis = np.linalg.qr(rng.standard_normal(size=(rows, columns)))[0]
+    right_basis = np.linalg.qr(rng.standard_normal(size=(columns, columns)))[0]
+    singular_values = np.geomspace(1.0, 1.0e-8, columns)
+    A = np.ascontiguousarray(
+        left_basis @ np.diag(singular_values) @ right_basis.T
+    )
+    expected_currents = rng.standard_normal(size=(columns, 1))
+    b = np.ascontiguousarray(A @ expected_currents)
+    C = np.zeros((0, columns), dtype=np.float64)
+    d = np.zeros((0, 1), dtype=np.float64)
+    regularization = 1.0e-10
+    augmented_matrix = np.vstack(
+        (A, regularization * np.eye(columns, dtype=np.float64))
+    )
+    augmented_target = np.vstack((b, np.zeros((columns, 1), dtype=np.float64)))
+    rank_cutoff = np.nextafter(
+        np.sqrt(np.finfo(np.float64).eps),
+        np.inf,
+    )
+    expected = np.linalg.lstsq(
+        augmented_matrix,
+        augmented_target,
+        rcond=rank_cutoff,
+    )[0]
+
+    actual = regularized_constrained_least_squares_jax(
+        A,
+        b,
+        regularization,
+        C,
+        d,
+    )
+
+    assert np.linalg.cond(A) >= 1.0e8
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        expected,
+        rtol=1.0e-8,
+        atol=1.0e-10,
+    )
+
+
 @pytest.mark.parametrize(
     "reg_W",
     (
