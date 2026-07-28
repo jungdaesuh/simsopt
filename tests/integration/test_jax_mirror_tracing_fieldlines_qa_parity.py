@@ -65,6 +65,12 @@ def test_exact_tracing_fieldlines_qa_matches_native_and_jax_cpu(
         atol=2.0e-3,
     )
     np.testing.assert_allclose(
+        jax.values["final:states"][2],
+        native.values["final:states"][2],
+        rtol=0.0,
+        atol=5.0e-4,
+    )
+    np.testing.assert_allclose(
         jax.values["poincare:positions"],
         native.values["poincare:positions"],
         rtol=0.0,
