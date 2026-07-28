@@ -27,8 +27,12 @@ from simsopt.geo import create_equally_spaced_curves
 from simsopt.mhd import QuasisymmetryRatioResidual, Vmec
 from simsopt.objectives import LeastSquaresProblem
 from simsopt.util import MpiPartition
-from simsopt_jax.examples import ExampleResult, run_example
-from simsopt_jax.geo.optimizer_host_lbfgs import minimize_lbfgs_host_core
+from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.geo.optimizer_host_lbfgs import (
+    line_search_value_and_grad_more_thuente_host,
+    minimize_bfgs_host_core,
+    minimize_lbfgs_host_core,
+)
 from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
     SurfaceRZFourierDofContract,
@@ -42,6 +46,7 @@ from simsopt_jax_adapters.mhd.vmec_host import (
     validate_vmec_host_evaluation,
     vmec_result_is_receiptable,
 )
+from simsopt_jax.solve.driver import Driver
 
 EXAMPLE_ID = "native-single-stage-vmec-hybrid"
 NATIVE_ITERATIONS = 10
@@ -62,6 +67,7 @@ class HybridConfiguration:
     coil_order: int
     coil_quadpoints: int
     max_surface_mode: int
+    bounded_surface_dof: str | None
     finite_difference_method: str = "forward"
     finite_difference_abs_step: float = 1.0e-7
     finite_difference_rel_step: float = 0.0
@@ -92,6 +98,7 @@ def _configuration(native_scale: bool) -> HybridConfiguration:
         coil_order=7 if native_scale else 2,
         coil_quadpoints=128 if native_scale else 16,
         max_surface_mode=1,
+        bounded_surface_dof=None if native_scale else "rc(1,0)",
     )
 
 
@@ -169,14 +176,17 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         )
         surface = vmec.boundary
         surface.fix_all()
-        surface.fixed_range(
-            mmin=0,
-            mmax=config.max_surface_mode,
-            nmin=-config.max_surface_mode,
-            nmax=config.max_surface_mode,
-            fixed=False,
-        )
-        surface.fix("rc(0,0)")
+        if config.bounded_surface_dof is None:
+            surface.fixed_range(
+                mmin=0,
+                mmax=config.max_surface_mode,
+                nmin=-config.max_surface_mode,
+                nmax=config.max_surface_mode,
+                fixed=False,
+            )
+            surface.fix("rc(0,0)")
+        else:
+            surface.unfix(config.bounded_surface_dof)
 
         base_curves = create_equally_spaced_curves(
             3,
@@ -380,18 +390,31 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
                     return objective, gradient
 
                 joint_initial_value_and_gradient = joint_value_and_gradient(initial)
-                joint_result = minimize_lbfgs_host_core(
-                    joint_value_and_gradient,
-                    initial,
-                    maxiter=max_steps,
-                    maxcor=min(max_steps, 300),
-                    ftol=0.0,
-                    gtol=1.0e-8,
-                    maxls=20,
-                    initial_value_and_grad=joint_initial_value_and_gradient,
-                )
+                if scalar_example_driver() == Driver.SIMSOPT_LBFGSB:
+                    joint_result = minimize_lbfgs_host_core(
+                        joint_value_and_gradient,
+                        initial,
+                        maxiter=max_steps,
+                        maxcor=min(max_steps, 300),
+                        ftol=0.0,
+                        gtol=1.0e-8,
+                        maxls=20,
+                        initial_value_and_grad=joint_initial_value_and_gradient,
+                    )
+                else:
+                    joint_result = minimize_bfgs_host_core(
+                        joint_value_and_gradient,
+                        initial,
+                        maxiter=max_steps,
+                        gtol=1.0e-15,
+                        initial_value_and_grad=joint_initial_value_and_gradient,
+                        line_search_value_and_grad=(
+                            line_search_value_and_grad_more_thuente_host
+                        ),
+                    )
                 solution = np.asarray(joint_result.x_k, dtype=np.float64)
-                final_objective, final_gradient = joint_value_and_gradient(solution)
+                final_objective = float(joint_result.f_k)
+                final_gradient = np.asarray(joint_result.g_k, dtype=np.float64)
 
         mpi.comm_world.Bcast(solution, root=0)
         result: ExampleResult | None = None
