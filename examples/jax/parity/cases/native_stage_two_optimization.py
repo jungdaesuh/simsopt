@@ -459,7 +459,7 @@ def _jax(
         ),
         initial_parameters=jax.device_put(arrays["initial_parameters"], device),
         taylor_direction=jax.device_put(arrays["taylor_direction"], device),
-        config=config(),
+        regularization_config=config(),
         first_length_weight=first_length_weight_device,
         second_length_weight=second_length_weight_device,
         max_steps=_configuration_int(bundle, "max_steps"),

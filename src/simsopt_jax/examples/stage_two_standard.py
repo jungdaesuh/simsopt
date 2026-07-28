@@ -226,7 +226,7 @@ def solve_standard_stage_two(
     surface_normal: object,
     initial_parameters: object,
     taylor_direction: object,
-    config: StageTwoObjectiveConfig,
+    regularization_config: StageTwoObjectiveConfig,
     first_length_weight: jax.Array,
     second_length_weight: jax.Array,
     max_steps: int,
@@ -234,7 +234,10 @@ def solve_standard_stage_two(
     atol: float,
 ) -> StandardStageTwoDeviceResult:
     """Run both source-equivalent stages while retaining fixed-size endpoints."""
-    if config.length_weight != 0.0 or config.length_target is not None:
+    if (
+        regularization_config.length_weight != 0.0
+        or regularization_config.length_target is not None
+    ):
         raise ValueError(
             "Standard Stage-II length weights are explicit device parameters; "
             "config must not include a total-length penalty."
@@ -259,7 +262,7 @@ def solve_standard_stage_two(
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        config,
+        regularization_config,
         first_length_weight_device,
     )
     taylor_errors = _taylor_errors_program(
@@ -269,7 +272,7 @@ def solve_standard_stage_two(
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        config,
+        regularization_config,
         first_length_weight_device,
     )
     problem = TraceableParametricScalarProblem(
@@ -279,7 +282,7 @@ def solve_standard_stage_two(
             flux_spec,
             surface_gamma_device,
             surface_normal_device,
-            config,
+            regularization_config,
             length_weight,
         ),
         objective_parameter=first_length_weight_device,
@@ -300,7 +303,7 @@ def solve_standard_stage_two(
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        config,
+        regularization_config,
         first_length_weight_device,
     )
 
@@ -320,7 +323,7 @@ def solve_standard_stage_two(
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        config,
+        regularization_config,
         second_length_weight_device,
     )
     initial, first, final, taylor_errors = jax.block_until_ready(
