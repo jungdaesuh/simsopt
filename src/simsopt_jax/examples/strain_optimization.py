@@ -153,9 +153,7 @@ def _strain_objective(
         binormal_strain - curvature_threshold,
         0.0,
     )
-    return 0.5 * jnp.mean(
-        (torsional_excess**2 + binormal_excess**2) * arc_length
-    )
+    return 0.5 * jnp.mean((torsional_excess**2 + binormal_excess**2) * arc_length)
 
 
 _strain_value_and_gradient_program = jax.jit(
@@ -248,6 +246,7 @@ def solve_strain_rotation(
     gammadash_array = _as_runtime_array(gammadash)
     gammadashdash_array = _as_runtime_array(gammadashdash)
     initial_array = _as_runtime_array(initial_parameters)
+
     def value_and_gradient(parameters: jax.Array) -> tuple[jax.Array, jax.Array]:
         return _strain_value_and_gradient_program(
             quadpoints_array,
