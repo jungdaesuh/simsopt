@@ -19,10 +19,11 @@ from simsopt_jax.core._finite_difference import (
 from simsopt_jax.runtime.host_boundary import host_array, host_float
 from simsopt_jax.runtime.jaxpr_closure import (
     closure_converted_array_function,
+    closure_converted_parametric_value_and_grad,
     closure_converted_value_and_grad,
     device_put_closure_consts,
 )
-from simsopt_jax.solve.contracts import OptimizerResult
+from simsopt_jax.solve.contracts import OptimizerResult, ValueAndGradFn
 from simsopt_jax.solve.dispatch import least_squares, minimize
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.optax.contracts import OptaxLBFGSOptions
@@ -41,6 +42,7 @@ __all__ = [
     "TraceableArrayFunction",
     "TraceableEqualityConstrainedProblem",
     "TraceableLeastSquaresProblem",
+    "TraceableParametricScalarProblem",
     "TraceableScalarProblem",
     "constrained_serial_solve_jax",
     "least_squares_serial_solve_jax",
@@ -141,9 +143,7 @@ class TraceableScalarProblem:
         init=False,
         repr=False,
     )
-    _solver_value_and_grad_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array]] = (
-        field(init=False, repr=False)
-    )
+    _solver_value_and_grad_fn: ValueAndGradFn = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         objective_fn = self.objective_fn
@@ -183,7 +183,92 @@ class TraceableScalarProblem:
         x: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array]:
         """Evaluate the compiled objective and gradient on the active device."""
-        return self._solver_value_and_grad_fn(self.x if x is None else x)
+        value, gradient = self._solver_value_and_grad_fn(self.x if x is None else x)
+        return jnp.asarray(value), jnp.asarray(gradient)
+
+
+@dataclass
+class TraceableParametricScalarProblem:
+    """Scalar objective whose fixed-shape device parameter can change between solves."""
+
+    objective_fn: Callable[[jax.Array, jax.Array], jax.Array]
+    objective_parameter: jax.Array
+    x: jax.Array
+    _solver_value_and_grad_fn: ValueAndGradFn = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        objective_fn = self.objective_fn
+        x = jnp.asarray(self.x)
+        objective_parameter = jax.device_put(
+            jnp.asarray(self.objective_parameter),
+            x.sharding,
+        )
+
+        def normalized_objective(current_x, current_parameter):
+            return jnp.asarray(
+                objective_fn(
+                    jnp.asarray(current_x),
+                    jnp.asarray(current_parameter),
+                )
+            )
+
+        converted_value_and_grad, value_and_grad_consts = (
+            closure_converted_parametric_value_and_grad(
+                jax.value_and_grad(normalized_objective, argnums=0),
+                x,
+                objective_parameter,
+            )
+        )
+        value_and_grad_consts = device_put_closure_consts(
+            value_and_grad_consts,
+            x,
+        )
+        compiled_value_and_grad = jax.jit(converted_value_and_grad)
+
+        def solver_value_and_grad(current_x):
+            return compiled_value_and_grad(
+                current_x,
+                self.objective_parameter,
+                value_and_grad_consts,
+            )
+
+        self.x = x
+        self.objective_parameter = objective_parameter
+        self._solver_value_and_grad_fn = solver_value_and_grad
+
+    @property
+    def dof_size(self) -> int:
+        return int(jnp.ravel(self.x).size)
+
+    def set_objective_parameter(self, objective_parameter: jax.Array) -> None:
+        """Replace the parameter without changing its compiled shape or dtype."""
+        parameter = jnp.asarray(objective_parameter)
+        if parameter.shape != self.objective_parameter.shape:
+            raise ValueError(
+                "objective_parameter shape cannot change between solves: "
+                f"expected {self.objective_parameter.shape}, got {parameter.shape}."
+            )
+        if parameter.dtype != self.objective_parameter.dtype:
+            raise TypeError(
+                "objective_parameter dtype cannot change between solves: "
+                f"expected {self.objective_parameter.dtype}, got {parameter.dtype}."
+            )
+        self.objective_parameter = jax.device_put(
+            parameter,
+            self.x.sharding,
+        )
+
+    def objective(self, x: jax.Array | None = None) -> jax.Array:
+        value, _gradient = self.value_and_grad(x)
+        return value
+
+    def value_and_grad(
+        self,
+        x: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Evaluate the compiled objective at the current device parameter."""
+        value, gradient = self._solver_value_and_grad_fn(self.x if x is None else x)
+        return jnp.asarray(value), jnp.asarray(gradient)
 
 
 @dataclass
@@ -256,7 +341,7 @@ def _write_log_row(
 ) -> None:
     objective_file.write(f"{eval_index:6d},{elapsed_seconds:12.4e}")
     x_host = np.ravel(host_array(x))
-    objective_host = host_float(objective_value, dtype=objective_value.dtype)
+    objective_host = host_float(objective_value)
     for value in x_host:
         objective_file.write(f",{value:24.16e}")
     objective_file.write(f",{objective_host:24.16e}\n")
@@ -445,7 +530,7 @@ def least_squares_serial_solve_jax(
 
 
 def serial_solve_jax(
-    prob: TraceableScalarProblem,
+    prob: TraceableScalarProblem | TraceableParametricScalarProblem,
     *,
     driver: Driver = Driver.SIMSOPT_BFGS,
     optimizer: str | None = None,
@@ -458,8 +543,14 @@ def serial_solve_jax(
     **kwargs,
 ) -> OptimizerResult:
     """Minimize on device and optionally publish a nonconverged bounded state."""
-    if not isinstance(prob, TraceableScalarProblem):
-        raise TypeError("serial_solve_jax requires TraceableScalarProblem.")
+    if not isinstance(
+        prob,
+        TraceableScalarProblem | TraceableParametricScalarProblem,
+    ):
+        raise TypeError(
+            "serial_solve_jax requires TraceableScalarProblem or "
+            "TraceableParametricScalarProblem."
+        )
     if kwargs:
         unsupported = ", ".join(sorted(kwargs))
         raise TypeError(f"Unsupported JAX scalar solve options: {unsupported}")
