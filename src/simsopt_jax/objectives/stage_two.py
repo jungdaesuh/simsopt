@@ -229,6 +229,8 @@ def stage_two_coil_geometry(
     parameters: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
+    parameter_sum = jnp.sum(parameters)
+    parameter_zero = parameter_sum - parameter_sum
     geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
     geometry_by_curve: dict[
         int,
@@ -252,7 +254,9 @@ def stage_two_coil_geometry(
         )
         if coil_spec.symmetry.has_rotation:
             gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
-        geometry.append((gamma, gammadash, gammadashdash, current))
+        geometry.append(
+            (gamma, gammadash, gammadashdash, current + parameter_zero)
+        )
     gammas, gammadashs, gammadashdashs, currents = zip(
         *geometry,
         strict=True,
