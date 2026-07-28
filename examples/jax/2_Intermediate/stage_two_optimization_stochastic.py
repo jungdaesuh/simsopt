@@ -36,7 +36,11 @@ from simsopt_jax.objectives import (
     make_stochastic_stage_two_objective,
 )
 from simsopt_jax.solve.driver import Driver
-from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
+from simsopt_jax.solve.serial import (
+    TraceableArrayFunction,
+    TraceableScalarProblem,
+    serial_solve_jax,
+)
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
@@ -264,14 +268,15 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     final_objective_device, final_gradient_device = problem.value_and_grad(
         solution_device
     )
-    diagnostic = jax.jit(
-        lambda parameters: jnp.stack(
+    diagnostic = TraceableArrayFunction(
+        function_fn=lambda parameters: jnp.stack(
             (
                 training_flux(parameters),
                 nominal_flux(parameters),
                 out_of_sample_flux(parameters),
             )
-        )
+        ),
+        x=solution_device,
     )
     flux_diagnostics_device = jax.block_until_ready(diagnostic(solution_device))
     initial = np.asarray(jax.device_get(initial_device), dtype=np.float64)

@@ -12,6 +12,24 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 from simsopt_jax.backend.dtypes import runtime_device_put_tree
 
 
+def closure_converted_array_function(function, example_x):
+    """Return an array program with explicit closed-over array operands."""
+
+    def coerce_result(x):
+        return jnp.asarray(function(x), dtype=x.dtype)
+
+    converted = jax.make_jaxpr(coerce_result)(example_x)
+    function_jaxpr = converted.jaxpr
+    function_consts = tuple(converted.consts)
+
+    def function_from_jaxpr(x, consts):
+        closed_jaxpr = jax_core.ClosedJaxpr(function_jaxpr, consts)
+        (result,) = jax_core.jaxpr_as_fun(closed_jaxpr)(x)
+        return result
+
+    return function_from_jaxpr, function_consts
+
+
 def closure_converted_value_and_grad(value_and_grad, example_x):
     """Return a pure program and its explicit closed-over array operands."""
 
