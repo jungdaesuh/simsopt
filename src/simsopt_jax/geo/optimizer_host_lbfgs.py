@@ -152,6 +152,20 @@ class HostLBFGSResult(NamedTuple):
     optimizer_state_trace: tuple[dict[str, object], ...] = ()
 
 
+class HostBFGSResult(NamedTuple):
+    converged: bool
+    failed: bool
+    k: int
+    nfev: int
+    ngev: int
+    x_k: np.ndarray
+    f_k: float
+    g_k: np.ndarray
+    H_k: np.ndarray
+    status: int
+    ls_status: int
+
+
 class _HostLBFGSState(NamedTuple):
     converged: bool
     failed: bool
@@ -882,6 +896,282 @@ def line_search_value_and_grad_host(
     )
 
 
+def _more_thuente_step_host(
+    stx,
+    fx,
+    dx,
+    sty,
+    fy,
+    dy,
+    stp,
+    fp,
+    dp,
+    brackt,
+    stpmin,
+    stpmax,
+):
+    """Compute one safeguarded More-Thuente line-search step."""
+    sgnd = np.sign(dp) * np.sign(dx)
+    if fp > fx:
+        theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
+        scale = max(abs(theta), abs(dx), abs(dp))
+        gamma = scale * np.sqrt((theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        if stp < stx:
+            gamma = -gamma
+        p = (gamma - dx) + theta
+        q = ((gamma - dx) + gamma) + dp
+        cubic = stx + (p / q) * (stp - stx)
+        quadratic = stx + ((dx / ((fx - fp) / (stp - stx) + dx)) / 2.0) * (stp - stx)
+        next_stp = (
+            cubic
+            if abs(cubic - stx) <= abs(quadratic - stx)
+            else cubic + (quadratic - cubic) / 2.0
+        )
+        brackt = True
+    elif sgnd < 0.0:
+        theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
+        scale = max(abs(theta), abs(dx), abs(dp))
+        gamma = scale * np.sqrt((theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        if stp > stx:
+            gamma = -gamma
+        p = (gamma - dp) + theta
+        q = ((gamma - dp) + gamma) + dx
+        cubic = stp + (p / q) * (stx - stp)
+        secant = stp + (dp / (dp - dx)) * (stx - stp)
+        next_stp = cubic if abs(cubic - stp) > abs(secant - stp) else secant
+        brackt = True
+    elif abs(dp) < abs(dx):
+        theta = 3.0 * (fx - fp) / (stp - stx) + dx + dp
+        scale = max(abs(theta), abs(dx), abs(dp))
+        gamma = scale * np.sqrt(
+            max(0.0, (theta / scale) ** 2 - (dx / scale) * (dp / scale))
+        )
+        if stp > stx:
+            gamma = -gamma
+        p = (gamma - dp) + theta
+        q = (gamma + (dx - dp)) + gamma
+        ratio = p / q
+        if ratio < 0.0 and gamma != 0.0:
+            cubic = stp + ratio * (stx - stp)
+        elif stp > stx:
+            cubic = stpmax
+        else:
+            cubic = stpmin
+        secant = stp + (dp / (dp - dx)) * (stx - stp)
+        if brackt:
+            next_stp = cubic if abs(cubic - stp) < abs(secant - stp) else secant
+            if stp > stx:
+                next_stp = min(stp + 0.66 * (sty - stp), next_stp)
+            else:
+                next_stp = max(stp + 0.66 * (sty - stp), next_stp)
+        else:
+            next_stp = cubic if abs(cubic - stp) > abs(secant - stp) else secant
+            next_stp = np.clip(next_stp, stpmin, stpmax)
+    elif brackt:
+        theta = 3.0 * (fp - fy) / (sty - stp) + dy + dp
+        scale = max(abs(theta), abs(dy), abs(dp))
+        gamma = scale * np.sqrt((theta / scale) ** 2 - (dy / scale) * (dp / scale))
+        if stp > sty:
+            gamma = -gamma
+        p = (gamma - dp) + theta
+        q = ((gamma - dp) + gamma) + dy
+        next_stp = stp + (p / q) * (sty - stp)
+    else:
+        next_stp = stpmax if stp > stx else stpmin
+
+    if fp > fx:
+        sty, fy, dy = stp, fp, dp
+    else:
+        if sgnd < 0.0:
+            sty, fy, dy = stx, fx, dx
+        stx, fx, dx = stp, fp, dp
+    return stx, fx, dx, sty, fy, dy, next_stp, brackt
+
+
+def line_search_value_and_grad_more_thuente_host(
+    fun,
+    xk,
+    pk,
+    old_fval,
+    gfk,
+    old_old_fval=None,
+    initial_step_size=None,
+    c1=1e-4,
+    c2=0.9,
+    maxiter=100,
+):
+    """Run the MINPACK More-Thuente search used by native SciPy BFGS."""
+    xk = np.asarray(xk)
+    dtype = xk.dtype
+    pk = np.asarray(pk, dtype=dtype)
+    gfk = np.asarray(gfk, dtype=dtype)
+    phi0 = float(np.asarray(old_fval, dtype=dtype))
+    dphi0 = float(np.dot(gfk, pk))
+    if not np.isfinite(dphi0) or dphi0 >= 0.0:
+        return HostLineSearchResults(
+            True,
+            0,
+            0,
+            0,
+            1,
+            0.0,
+            phi0,
+            gfk,
+            1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            LINE_SEARCH_FAILURE_REASON_NOT_DESCENT,
+            float("nan"),
+            float("nan"),
+        )
+
+    if initial_step_size is not None:
+        stp = float(initial_step_size)
+    elif old_old_fval is None or dphi0 == 0.0:
+        stp = 1.0
+    else:
+        stp = min(1.0, 1.01 * 2.0 * (phi0 - float(old_old_fval)) / dphi0)
+        if stp < 0.0:
+            stp = 1.0
+    first_stp = stp
+    stpmin = 1.0e-100
+    stpmax = 1.0e100
+    xtol = 1.0e-14
+    brackt = False
+    stage = 1
+    gtest = c1 * dphi0
+    width = stpmax - stpmin
+    width1 = width / 0.5
+    stx = 0.0
+    fx = phi0
+    gx = dphi0
+    sty = 0.0
+    fy = phi0
+    gy = dphi0
+    stmin = 0.0
+    stmax = stp + 4.0 * stp
+    nfev = 0
+    last_phi = phi0
+    last_grad = gfk
+    accepted = False
+
+    for _ in range(maxiter):
+        last_phi_raw, last_grad_raw = fun(xk + dtype.type(stp) * pk)
+        last_phi = float(np.asarray(last_phi_raw, dtype=dtype))
+        last_grad = np.asarray(last_grad_raw, dtype=dtype)
+        last_dphi = float(np.dot(last_grad, pk))
+        nfev += 1
+        if not (
+            np.isfinite(stp)
+            and np.isfinite(last_phi)
+            and np.isfinite(last_dphi)
+            and np.all(np.isfinite(last_grad))
+        ):
+            break
+
+        ftest = phi0 + stp * gtest
+        if stage == 1 and last_phi <= ftest and last_dphi >= 0.0:
+            stage = 2
+        warning = (
+            (brackt and (stp <= stmin or stp >= stmax))
+            or (brackt and stmax - stmin <= xtol * stmax)
+            or (stp == stpmax and last_phi <= ftest and last_dphi <= gtest)
+            or (stp == stpmin and (last_phi > ftest or last_dphi >= gtest))
+        )
+        accepted = last_phi <= ftest and abs(last_dphi) <= c2 * -dphi0
+        if accepted or warning:
+            break
+
+        with np.errstate(invalid="ignore", over="ignore"):
+            if stage == 1 and last_phi <= fx and last_phi > ftest:
+                fm = last_phi - stp * gtest
+                fxm = fx - stx * gtest
+                fym = fy - sty * gtest
+                gm = last_dphi - gtest
+                gxm = gx - gtest
+                gym = gy - gtest
+                stx, fxm, gxm, sty, fym, gym, stp, brackt = _more_thuente_step_host(
+                    stx,
+                    fxm,
+                    gxm,
+                    sty,
+                    fym,
+                    gym,
+                    stp,
+                    fm,
+                    gm,
+                    brackt,
+                    stmin,
+                    stmax,
+                )
+                fx = fxm + stx * gtest
+                fy = fym + sty * gtest
+                gx = gxm + gtest
+                gy = gym + gtest
+            else:
+                stx, fx, gx, sty, fy, gy, stp, brackt = _more_thuente_step_host(
+                    stx,
+                    fx,
+                    gx,
+                    sty,
+                    fy,
+                    gy,
+                    stp,
+                    last_phi,
+                    last_dphi,
+                    brackt,
+                    stmin,
+                    stmax,
+                )
+        if brackt:
+            if abs(sty - stx) >= 0.66 * width1:
+                stp = stx + 0.5 * (sty - stx)
+            width1 = width
+            width = abs(sty - stx)
+            stmin = min(stx, sty)
+            stmax = max(stx, sty)
+        else:
+            stmin = stp + 1.1 * (stp - stx)
+            stmax = stp + 4.0 * (stp - stx)
+        stp = float(np.clip(stp, a_min=stpmin, a_max=stpmax))
+        if brackt and (stp <= stmin or stp >= stmax or stmax - stmin <= xtol * stmax):
+            stp = stx
+
+    armijo_margin, curvature_margin = _line_search_margins(
+        phi_0=phi0,
+        dphi_0=dphi0,
+        c1=c1,
+        c2=c2,
+        alpha=stp,
+        phi=last_phi,
+        dphi=float(np.dot(last_grad, pk)),
+    )
+    return HostLineSearchResults(
+        failed=not accepted,
+        nit=nfev,
+        nfev=nfev,
+        ngev=nfev,
+        k=nfev + 1,
+        a_k=stp if accepted else 0.0,
+        f_k=last_phi if accepted else phi0,
+        g_k=last_grad if accepted else gfk,
+        status=0 if accepted else 3,
+        requested_initial_step=first_stp,
+        first_tested_alpha=first_stp,
+        best_finite_alpha=stp,
+        returned_alpha=stp,
+        failure_reason=(
+            LINE_SEARCH_FAILURE_REASON_ACCEPTED
+            if accepted
+            else LINE_SEARCH_FAILURE_REASON_FAILED
+        ),
+        armijo_margin=armijo_margin,
+        curvature_margin=curvature_margin,
+    )
+
+
 def coerce_line_search_results(results, *, dtype):
     failed = bool(np.asarray(results.failed).item())
     raw_a_k = float(np.asarray(results.a_k, dtype=np.dtype(dtype)).item())
@@ -1159,6 +1449,144 @@ def _emit_iteration_callbacks(
             float(f_kp1),
             float(host_norm(g_kp1, ord=np.inf)),
         )
+
+
+def minimize_bfgs_host_core(
+    eval_value_and_grad_host: Callable[[np.ndarray], tuple[float, np.ndarray]],
+    x0_host,
+    *,
+    maxiter=None,
+    norm=np.inf,
+    gtol=1e-5,
+    xrtol=0.0,
+    maxls=20,
+    callback=None,
+    progress_callback=None,
+    initial_value_and_grad=None,
+    line_search_value_and_grad=line_search_value_and_grad_host,
+):
+    """Run dense BFGS on the host while objective kernels remain device-owned."""
+    x_k = np.asarray(x0_host)
+    if x_k.ndim != 1:
+        raise ValueError(f"BFGS expects a flat 1-D decision vector, got {x_k.shape}.")
+    dimension = len(x_k)
+    dtype = np.dtype(x_k.dtype)
+    iteration_limit = dimension * 200 if maxiter is None else int(maxiter)
+    gtol_value = dtype.type(gtol)
+    xrtol_value = dtype.type(xrtol)
+    if initial_value_and_grad is None:
+        f_k, g_k = eval_value_and_grad_host(x_k)
+    else:
+        f_k, g_k = _coerce_initial_value_and_grad(
+            initial_value_and_grad,
+            x_k.shape,
+            dtype=dtype,
+        )
+    f_k = float(dtype.type(f_k))
+    g_k = np.asarray(g_k, dtype=dtype)
+    H_k = np.eye(dimension, dtype=dtype)
+    old_old_fval = float(f_k + host_norm(g_k) * dtype.type(0.5))
+    nfev = 1
+    ngev = 1
+    iteration = 0
+    status = 0
+    ls_status = 0
+    converged = bool(host_norm(g_k, ord=norm) <= gtol_value)
+    failed = bool(
+        (not np.isfinite(f_k))
+        or (not np.all(np.isfinite(g_k)))
+        or (not np.all(np.isfinite(x_k)))
+    )
+    if failed:
+        status = 2
+
+    while (not converged) and (not failed) and iteration < iteration_limit:
+        direction = -(H_k @ g_k)
+        line_search = coerce_line_search_results(
+            line_search_value_and_grad(
+                fun=eval_value_and_grad_host,
+                xk=x_k,
+                pk=direction,
+                old_fval=f_k,
+                old_old_fval=old_old_fval,
+                gfk=g_k,
+                maxiter=maxls,
+            ),
+            dtype=dtype,
+        )
+        nfev += line_search.nfev
+        ngev += line_search.ngev
+        ls_status = line_search.status
+        if line_search.failed:
+            failed = True
+            status = 2
+            break
+
+        step = dtype.type(line_search.a_k) * direction
+        next_x = x_k + step
+        next_f = float(dtype.type(line_search.f_k))
+        next_g = np.asarray(line_search.g_k, dtype=dtype)
+        gradient_delta = next_g - g_k
+        finite_step = bool(
+            np.isfinite(next_f)
+            and np.all(np.isfinite(next_x))
+            and np.all(np.isfinite(next_g))
+            and np.all(np.isfinite(step))
+            and np.all(np.isfinite(gradient_delta))
+        )
+        if not finite_step:
+            failed = True
+            status = 2
+            break
+
+        curvature_inverse = float(np.dot(gradient_delta, step))
+        curvature = (
+            dtype.type(1000.0)
+            if curvature_inverse == 0.0
+            else dtype.type(1.0) / dtype.type(curvature_inverse)
+        )
+        identity = np.eye(dimension, dtype=dtype)
+        left = identity - curvature * np.outer(step, gradient_delta)
+        right = identity - curvature * np.outer(gradient_delta, step)
+        next_H = left @ H_k @ right + curvature * np.outer(step, step)
+
+        previous_f = f_k
+        x_k = np.asarray(next_x, dtype=dtype)
+        f_k = next_f
+        g_k = next_g
+        H_k = np.asarray(next_H, dtype=dtype)
+        old_old_fval = previous_f
+        iteration += 1
+        converged = bool(host_norm(g_k, ord=norm) <= gtol_value)
+        if not converged:
+            converged = bool(
+                host_norm(step) <= xrtol_value * (xrtol_value + host_norm(x_k))
+            )
+        _emit_iteration_callbacks(
+            callback,
+            progress_callback,
+            x_kp1=x_k,
+            next_k=iteration,
+            f_kp1=f_k,
+            g_kp1=g_k,
+        )
+
+    if (not converged) and (not failed) and iteration >= iteration_limit:
+        failed = True
+        status = 1
+    return HostBFGSResult(
+        converged=converged,
+        failed=failed,
+        k=iteration,
+        nfev=nfev,
+        ngev=ngev,
+        x_k=x_k,
+        f_k=f_k,
+        g_k=g_k,
+        H_k=H_k,
+        status=status,
+        ls_status=ls_status,
+    )
 
 
 def minimize_lbfgs_host_core(

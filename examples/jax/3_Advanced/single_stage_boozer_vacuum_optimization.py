@@ -3,8 +3,9 @@
 The host constructs the native NCSX coil graph and a volume-labelled surface.
 Each objective evaluation runs two bounded JAX kernels on the selected CPU or
 GPU: an exact Boozer solve followed by an implicit-adjoint value/gradient
-evaluation.  The SIMSOPT-owned L-BFGS outer loop remains on the host, so no JIT
-captures or stores the complete optimization history.
+evaluation. Fast mode uses bounded-memory SIMSOPT L-BFGS; parity mode uses
+SIMSOPT BFGS to match the native reference algorithm. The outer loop remains
+host-driven so nested optimization is not captured in one large JIT program.
 """
 
 from __future__ import annotations
@@ -18,8 +19,13 @@ import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
-from simsopt_jax.examples import ExampleResult, run_example
-from simsopt_jax.geo.optimizer_host_lbfgs import minimize_lbfgs_host_core
+from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.geo.optimizer_host_lbfgs import (
+    line_search_value_and_grad_more_thuente_host,
+    minimize_bfgs_host_core,
+    minimize_lbfgs_host_core,
+)
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.surface_objectives import (
@@ -170,13 +176,20 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         iota_target,
         outer_objective_config=objective_config,
     )
-    solved_pair = session.solved_pair()
     runtime_bundle = make_traceable_objective_runtime_bundle(
         boozer_surface,
         field,
         iota_target,
         outer_objective_config=objective_config,
         session=session,
+    )
+    value_and_gradient = cast(
+        Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+        runtime_bundle["value_and_grad"],
+    )
+    forward_result = cast(
+        Callable[[jax.Array], Mapping[str, object]],
+        runtime_bundle["forward_result"],
     )
     reporting_metrics_from_solution = cast(
         Callable[..., Mapping[str, object]],
@@ -185,66 +198,47 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
 
     initial_parameters = np.asarray(field.x, dtype=np.float64)
     initial_device = jax.device_put(initial_parameters)
-    baseline_forward = cast(
-        Mapping[str, object],
-        solved_pair.solve_fn(initial_device),
-    )
-    jax.block_until_ready(baseline_forward)
-    baseline_value_device, baseline_gradient_device = (
-        solved_pair.value_grad_from_solved(
-            initial_device,
-            baseline_forward["x"],
-            None,
-        )
-    )
-    jax.block_until_ready((baseline_value_device, baseline_gradient_device))
+    initial_value_device, initial_gradient_device = value_and_gradient(initial_device)
+    jax.block_until_ready((initial_value_device, initial_gradient_device))
     initial_value_and_gradient = (
-        _host_float(baseline_value_device),
-        _host_array(baseline_gradient_device),
+        _host_float(initial_value_device),
+        _host_array(initial_gradient_device),
     )
 
-    def value_and_gradient(parameters: np.ndarray) -> tuple[float, np.ndarray]:
+    def host_value_and_gradient(
+        parameters: np.ndarray,
+    ) -> tuple[float, np.ndarray]:
         parameters_device = jax.device_put(np.asarray(parameters, dtype=np.float64))
-        forward = cast(
-            Mapping[str, object],
-            solved_pair.solve_fn(parameters_device),
-        )
-        jax.block_until_ready(forward)
-        success = _host_bool(forward["success"])
-        primal_success = _host_bool(forward["primal_success"])
-        if success or primal_success:
-            gradient_parameters = parameters_device
-            gradient_solution = forward["x"]
-        else:
-            gradient_parameters = initial_device
-            gradient_solution = baseline_forward["x"]
-        _evaluated_value, gradient_device = solved_pair.value_grad_from_solved(
-            gradient_parameters,
-            gradient_solution,
-            None,
-        )
-        jax.block_until_ready(gradient_device)
-        value_device = _evaluated_value if success else forward["value"]
+        value_device, gradient_device = value_and_gradient(parameters_device)
+        jax.block_until_ready((value_device, gradient_device))
         return _host_float(value_device), _host_array(gradient_device)
 
-    optimizer_result = minimize_lbfgs_host_core(
-        value_and_gradient,
-        initial_parameters,
-        maxiter=max_steps,
-        maxcor=min(max_steps, 200),
-        ftol=0.0,
-        gtol=1.0e-8,
-        maxls=20,
-        initial_value_and_grad=initial_value_and_gradient,
-    )
+    driver = scalar_example_driver()
+    if driver == Driver.SIMSOPT_LBFGSB:
+        optimizer_result = minimize_lbfgs_host_core(
+            host_value_and_gradient,
+            initial_parameters,
+            maxiter=max_steps,
+            maxcor=min(max_steps, 200),
+            ftol=0.0,
+            gtol=1.0e-8,
+            maxls=20,
+            initial_value_and_grad=initial_value_and_gradient,
+        )
+    else:
+        optimizer_result = minimize_bfgs_host_core(
+            host_value_and_gradient,
+            initial_parameters,
+            maxiter=max_steps,
+            gtol=1.0e-8,
+            maxls=20,
+            initial_value_and_grad=initial_value_and_gradient,
+            line_search_value_and_grad=line_search_value_and_grad_more_thuente_host,
+        )
     solution = np.asarray(optimizer_result.x_k, dtype=np.float64)
     solution_device = jax.device_put(solution)
-    final_forward = cast(
-        Mapping[str, object],
-        solved_pair.solve_fn(solution_device),
-    )
-    jax.block_until_ready(final_forward)
-    final_value, gradient = value_and_gradient(solution)
+    final_value, gradient = host_value_and_gradient(solution)
+    final_forward = forward_result(solution_device)
     final_metrics = reporting_metrics_from_solution(
         solution_device,
         final_forward["x"],
@@ -252,7 +246,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         include_distance_metrics=False,
         outer_raw_terms=traceable_forward_result_outer_raw_terms(final_forward),
     )
-    jax.block_until_ready(final_metrics)
+    jax.block_until_ready((final_forward, final_metrics))
     inner_solver_success = _host_bool(final_metrics["solver_success"])
     boozer_residual = _host_float(final_metrics["final_boozer_residual"])
     final_iota = _host_float(final_metrics["final_iota"])

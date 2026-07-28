@@ -730,6 +730,34 @@ def test_minimize_bfgs_host_core_matches_dense_quadratic_steps():
     assert result.H_k.nbytes == initial.size**2 * initial.dtype.itemsize
 
 
+def test_more_thuente_host_line_search_matches_native_bfgs_step():
+    def rosenbrock_value_and_grad(x):
+        value = 100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2
+        gradient = np.asarray(
+            (
+                -400.0 * x[0] * (x[1] - x[0] ** 2) - 2.0 * (1.0 - x[0]),
+                200.0 * (x[1] - x[0] ** 2),
+            )
+        )
+        return value, gradient
+
+    x0 = np.asarray((-1.2, 1.0))
+    value0, gradient0 = rosenbrock_value_and_grad(x0)
+    result = _host_lbfgs.line_search_value_and_grad_more_thuente_host(
+        rosenbrock_value_and_grad,
+        x0,
+        -gradient0,
+        value0,
+        gradient0,
+        value0 + np.linalg.norm(gradient0) / 2.0,
+    )
+
+    assert not result.failed
+    np.testing.assert_allclose(result.a_k, 0.0008486542812509528, rtol=1.0e-15)
+    np.testing.assert_allclose(result.f_k, 4.231071765960791, rtol=1.0e-15)
+    assert result.nfev == 2
+
+
 def test_optimizer_state_trace_memory_uses_stored_float64_arrays():
     expected_entry_bytes = (6 * 2 + 24) * np.dtype(np.float64).itemsize
 

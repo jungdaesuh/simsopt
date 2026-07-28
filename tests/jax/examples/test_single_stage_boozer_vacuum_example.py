@@ -16,12 +16,7 @@ from examples.jax._lane_environment import build_execution_environment
 
 
 ROOT = Path(__file__).resolve().parents[3]
-NATIVE = (
-    ROOT
-    / "examples"
-    / "3_Advanced"
-    / "single_stage_boozer_vacuum_optimization.py"
-)
+NATIVE = ROOT / "examples" / "3_Advanced" / "single_stage_boozer_vacuum_optimization.py"
 JAX = (
     ROOT
     / "examples"
@@ -60,7 +55,6 @@ def test_jax_vacuum_single_stage_uses_decomposed_public_jax_kernels() -> None:
     }
 
     assert "make_traceable_objective_session" in imported_names
-    assert "minimize_lbfgs_host_core" in imported_names
     assert not any("vmec" in name.lower() for name in imported_modules)
     assert not any("scipy" in name.lower() for name in imported_modules)
 
@@ -75,7 +69,8 @@ def test_jax_vacuum_single_stage_uses_fast_parity_solver_policy() -> None:
     }
 
     assert "scalar_example_driver" in imported_names
-    assert "serial_solve_jax" in imported_names
+    assert "minimize_bfgs_host_core" in imported_names
+    assert "minimize_lbfgs_host_core" in imported_names
 
 
 def test_both_single_stage_examples_report_implicit_physics_state() -> None:
@@ -106,9 +101,18 @@ def _run_json(
     environment: dict[str, str],
     output_directory: Path,
 ) -> dict[str, object]:
+    environment = dict(environment)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(ROOT / "src"),
+            str(ROOT),
+            *(entry for entry in sys.path if entry),
+        )
+    )
     completed = subprocess.run(
         (
             sys.executable,
+            "-S",
             str(path),
             "--smoke",
             "--json",
