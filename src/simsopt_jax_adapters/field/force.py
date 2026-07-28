@@ -58,8 +58,11 @@ __all__ = [
     "_induced_currents_pure",
     "NetFluxes",
     "B2Energy",
+    "b2energy_pure",
+    "curve_force_norms_pure",
     "SquaredMeanForce",
     "LpCurveForce",
+    "lp_force_pure",
     "SquaredMeanTorque",
     "LpCurveTorque",
 ]
@@ -1975,6 +1978,104 @@ class SquaredMeanForce(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
+def curve_force_norms_pure(
+    gammas_targets,
+    gammas_sources,
+    gammadashs_targets,
+    gammadashs_sources,
+    gammadashdashs_targets,
+    quadpoints,
+    currents_targets,
+    currents_sources,
+    regularizations,
+    downsample,
+    eps=1e-10,
+    gammas_sources_fine=None,
+    gammadashs_sources_fine=None,
+    currents_sources_fine=None,
+):
+    """Return pointwise target-coil force magnitudes in MN/m."""
+    (
+        gammas_targets,
+        gammadashs_targets,
+        gammadashdashs_targets,
+        quadpoints,
+        gammas_sources,
+        gammadashs_sources,
+        currents_targets,
+        currents_sources,
+        regularizations,
+    ) = _prepare_regularized_target_source_inputs_pure(
+        gammas_targets,
+        gammadashs_targets,
+        gammadashdashs_targets,
+        quadpoints,
+        gammas_sources,
+        gammadashs_sources,
+        currents_targets,
+        currents_sources,
+        regularizations,
+        downsample,
+    )
+    if (
+        gammas_sources_fine is None
+        or gammadashs_sources_fine is None
+        or currents_sources_fine is None
+    ):
+        gammas_sources_fine, gammadashs_sources_fine, currents_sources_fine = (
+            _empty_source_fine_arrays()
+        )
+    elif hasattr(gammas_sources_fine, "shape") and gammas_sources_fine.shape[0] > 0:
+        gammas_sources_fine = gammas_sources_fine[:, ::downsample, :]
+        gammadashs_sources_fine = gammadashs_sources_fine[:, ::downsample, :]
+        currents_sources_fine = _as_jax_float64(currents_sources_fine)
+
+    target_count = gammas_targets.shape[0]
+    gammadash_norms = jnp.linalg.norm(gammadashs_targets, axis=-1)[:, :, None]
+    tangents = gammadashs_targets / gammadash_norms
+    self_field = vmap(B_regularized_pure, in_axes=(0, 0, 0, None, 0, 0))(
+        gammas_targets,
+        gammadashs_targets,
+        gammadashdashs_targets,
+        quadpoints,
+        currents_targets,
+        regularizations,
+    )
+
+    def per_coil_force_norm(index, gamma, tangent, current_self_field, current):
+        mutual_field = _map_force_points(
+            lambda point: _mutual_B_field_at_point_pure(
+                index,
+                point,
+                gammas_targets,
+                gammadashs_targets,
+                currents_targets,
+                gammas_sources,
+                gammadashs_sources,
+                currents_sources,
+                gammas_sources_fine,
+                gammadashs_sources_fine,
+                currents_sources_fine,
+                eps,
+            ),
+            gamma,
+        )
+        force_density = _lorentz_force_density_pure(
+            tangent,
+            current,
+            mutual_field + current_self_field,
+        )
+        return jnp.linalg.norm(force_density, axis=-1) / 1.0e6
+
+    return vmap(per_coil_force_norm, in_axes=(0, 0, 0, 0, 0))(
+        jnp.arange(target_count),
+        gammas_targets,
+        tangents,
+        self_field,
+        currents_targets,
+    )
+
+
 def lp_force_pure(
     gammas_targets,
     gammas_sources,
@@ -2059,90 +2160,32 @@ def lp_force_pure(
     Returns:
         float: The Lp force objective.
     """
-    (
+    force_norms = curve_force_norms_pure(
         gammas_targets,
+        gammas_sources,
         gammadashs_targets,
+        gammadashs_sources,
         gammadashdashs_targets,
         quadpoints,
-        gammas_sources,
-        gammadashs_sources,
-        currents_targets,
-        currents_sources,
-        regularizations,
-    ) = _prepare_regularized_target_source_inputs_pure(
-        gammas_targets,
-        gammadashs_targets,
-        gammadashdashs_targets,
-        quadpoints,
-        gammas_sources,
-        gammadashs_sources,
         currents_targets,
         currents_sources,
         regularizations,
         downsample,
+        eps,
+        gammas_sources_fine,
+        gammadashs_sources_fine,
+        currents_sources_fine,
     )
-    if (
-        gammas_sources_fine is None
-        or gammadashs_sources_fine is None
-        or currents_sources_fine is None
-    ):
-        gammas_sources_fine, gammadashs_sources_fine, currents_sources_fine = (
-            _empty_source_fine_arrays()
-        )
-    elif hasattr(gammas_sources_fine, "shape") and gammas_sources_fine.shape[0] > 0:
-        gammas_sources_fine = gammas_sources_fine[:, ::downsample, :]
-        gammadashs_sources_fine = gammadashs_sources_fine[:, ::downsample, :]
-        currents_sources_fine = _as_jax_float64(currents_sources_fine)
-
-    n1 = gammas_targets.shape[0]
-    npts1 = gammas_targets.shape[1]
-
-    # Precompute tangents and norms
-    gammadash_norms = jnp.linalg.norm(gammadashs_targets, axis=-1)[:, :, None]
-    tangents = gammadashs_targets / gammadash_norms
-
-    # Precompute B_self for each coil
-    B_self = vmap(B_regularized_pure, in_axes=(0, 0, 0, None, 0, 0))(
-        gammas_targets,
-        gammadashs_targets,
-        gammadashdashs_targets,
-        quadpoints,
-        currents_targets,
-        regularizations,
+    target_speed = jnp.linalg.norm(
+        _as_jax_float64(gammadashs_targets)[:, ::downsample, :],
+        axis=-1,
     )
-
-    def per_coil_obj_group1(i, gamma_i, tangent_i, B_self_i, current_i):
-        B_mutual = _map_force_points(
-            lambda pt: _mutual_B_field_at_point_pure(
-                i,
-                pt,
-                gammas_targets,
-                gammadashs_targets,
-                currents_targets,
-                gammas_sources,
-                gammadashs_sources,
-                currents_sources,
-                gammas_sources_fine,
-                gammadashs_sources_fine,
-                currents_sources_fine,
-                eps,
-            ),
-            gamma_i,
-        )
-        F = _lorentz_force_density_pure(tangent_i, current_i, B_mutual + B_self_i)
-        # Force per unit length is in N/m, convert to MN/m
-        return jnp.linalg.norm(F, axis=-1) / 1e6
-
-    obj1 = vmap(per_coil_obj_group1, in_axes=(0, 0, 0, 0, 0))(
-        jnp.arange(n1), gammas_targets, tangents, B_self, currents_targets
-    )
-
-    # obj1 is now in MN/m, threshold is in MN/m
+    point_count = force_norms.shape[1]
     return (
         jnp.sum(
-            jnp.sum(jnp.maximum(obj1 - threshold, 0) ** p * gammadash_norms[:, :, 0])
+            jnp.maximum(force_norms - threshold, 0) ** p * target_speed
         )
-        / npts1
+        / point_count
     ) * (1.0 / p)
 
 
