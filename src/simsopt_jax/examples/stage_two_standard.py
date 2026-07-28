@@ -251,7 +251,9 @@ def solve_standard_stage_two(
     """Run both source-equivalent stages with one reusable compiled problem.
 
     Length weights remain explicit fixed-shape device parameters, while the
-    returned initial, first-stage, and final states have fixed-size storage.
+    returned states have fixed-size storage. L-BFGS history is bounded
+    independently of the iteration budget so compiled state cannot scale with
+    example runtime.
     """
     if regularization_config.length_weight != 0.0:
         raise ValueError(
