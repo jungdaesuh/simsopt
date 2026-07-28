@@ -1,6 +1,6 @@
 # One-to-One JAX Example Mirrors and Native Parity Implementation Plan
 
-**Status:** Draft
+**Status:** In progress
 **Last updated:** 2026-07-27
 
 ## Purpose
@@ -101,6 +101,15 @@ Existing receipts remain evidence for their exact recorded cases only.
   schema activation, the complete ready-mirror CPU/GPU matrix, and the
   five-profile claim-eligible timing/RSS/VRAM campaign remain later gates.
   Validation timings have not been promoted into performance claims.
+- Standard `2_Intermediate/stage_two_optimization.py` is the first Wave-B
+  source to complete source-owned exact CPU parity, a batched public workflow
+  boundary, explicit strict-transfer-safe device parameter placement, and
+  immutable RED -> GREEN -> REFACTOR receipt replay. Strict RTX 5090 FP64
+  execution passed with `JAX_TRANSFER_GUARD=disallow`. Reusing one compiled
+  parametric problem across the two source stages reduced the bounded cold CPU
+  run from 19.23 s and 1,030,840 KiB peak RSS to 16.90 s and 1,019,196 KiB.
+  These are focused development measurements, not five-profile performance
+  certification or a speedup claim.
 
 ### Target classifications
 

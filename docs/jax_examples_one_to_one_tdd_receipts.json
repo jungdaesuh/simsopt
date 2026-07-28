@@ -1528,6 +1528,192 @@
           "timestamp_utc": "2026-07-28T08:40:05Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-stage-two-optimization-native-jax-parity",
+      "native_source_id": "2_Intermediate/stage_two_optimization.py",
+      "mirror_id": "native-stage-two-optimization",
+      "intended_red_failure": "missing exact standard stage two parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_stage_two_optimization_parity.py": "15dfafd3f87b4631d159ac64135f2d6d35484028a7ba0398e724b67573f65fb6"
+      },
+      "phases": {
+        "red": {
+          "revision": "40d174b6b2d1c3dbdeb54ca88098372258f72210",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_cpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization\" in output:\n    print(\"missing exact standard stage two parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact standard stage two parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact standard stage two parity case",
+          "combined_output_sha256": "b4d96cd3323b864193ca2cd815b5552003dac2bd1668633a3b5343969ac6a02e",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "0f2bc98b3761c0a15c65c1ff5f69abaee7c82a127cdec5d5cf4e527dceddb862"
+          },
+          "timestamp_utc": "2026-07-28T08:46:55Z"
+        },
+        "green": {
+          "revision": "8b0218abce94ec75b85a54c494ed8ff9e667e35c",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_cpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization\" in output:\n    print(\"missing exact standard stage two parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact standard stage two parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/native_stage_two_optimization.py": "cccd5add4f8791a19a0a74299b46a317ad661343bb082e4fe0e044ad0a6b46d4"
+          },
+          "timestamp_utc": "2026-07-28T09:08:52Z"
+        },
+        "refactor": {
+          "revision": "fb55d565e2c89c492b691f1b5df4754689e254e0",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_cpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization\" in output:\n    print(\"missing exact standard stage two parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact standard stage two parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_standard.py": "7f6a1dfc28d12fc9508f5388cb071921ee67724cfc04f00cbfed4ca985102be3"
+          },
+          "timestamp_utc": "2026-07-28T10:10:38Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "batched-stage-two-optimization-workflow-boundary",
+      "native_source_id": "2_Intermediate/stage_two_optimization.py",
+      "mirror_id": "native-stage-two-optimization",
+      "intended_red_failure": "standard example lacks batched public workflow boundary",
+      "test_sha256": {
+        "tests/integration/test_jax_stage_two_optimization_strict_transfer.py": "45f7e660214071d8d032bdcbc099c28a01a12d8339ff62e840af5d9179e79c97"
+      },
+      "phases": {
+        "red": {
+          "revision": "9541b5c3454af3ba5038336d2004334473326ac7",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"solve_standard_stage_two\" in output and \"AssertionError\" in output:\n    print(\"standard example lacks batched public workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected standard workflow boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "standard example lacks batched public workflow boundary",
+          "combined_output_sha256": "afa475d160488d77756f919dad4327cd918164e07dbbca264f0d69fccfc7909e",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/stage_two_optimization.py": "d1a697dbf2ac483e799d49a753d5db14233c974e9fb0908d506b59ce478cbcce"
+          },
+          "timestamp_utc": "2026-07-28T09:09:22Z"
+        },
+        "green": {
+          "revision": "d21d44806baef4152fbc01f66aaa0d87adabbda1",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"solve_standard_stage_two\" in output and \"AssertionError\" in output:\n    print(\"standard example lacks batched public workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected standard workflow boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_standard.py": "ea41e38a37588f33995922d005586d795518ca239ce0cb4bc01228b4899cd6c3"
+          },
+          "timestamp_utc": "2026-07-28T09:12:17Z"
+        },
+        "refactor": {
+          "revision": "4b9e50588e1b3725b0a6b81de6e03146cfdcd99a",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"solve_standard_stage_two\" in output and \"AssertionError\" in output:\n    print(\"standard example lacks batched public workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected standard workflow boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_standard.py": "920d237798c79eaa7f4df3cf820735fd6721dad078bd4f3f310b7f2390535f9d"
+          },
+          "timestamp_utc": "2026-07-28T09:21:49Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "explicit-stage-two-length-weight-placement",
+      "native_source_id": "2_Intermediate/stage_two_optimization.py",
+      "mirror_id": "native-stage-two-optimization",
+      "intended_red_failure": "stage weights are not explicitly device placed",
+      "test_sha256": {
+        "tests/integration/test_jax_stage_two_optimization_strict_transfer.py": "3c04f65266635749567c013b44408382d523c199c2716d06745d7302623881a9"
+      },
+      "phases": {
+        "red": {
+          "revision": "243720b0459189f12c87a896d54364c593d1023d",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"first_length_weight_device = jax.device_put(\" in output and \"AssertionError\" in output:\n    print(\"stage weights are not explicitly device placed\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected explicit stage weight placement outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "stage weights are not explicitly device placed",
+          "combined_output_sha256": "4ea1f60ea0d04cbd21813a9a99238a99ea0760485c1b64e472595a29819e0ca7",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/stage_two_optimization.py": "334c5d9235d5a9aec1f77ae9bab5682b28a4b18fdf81ea90328f5dbf24af2e43"
+          },
+          "timestamp_utc": "2026-07-28T10:07:37Z"
+        },
+        "green": {
+          "revision": "d5873620b8fcb202edf34cfe8aa409057d164bac",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"first_length_weight_device = jax.device_put(\" in output and \"AssertionError\" in output:\n    print(\"stage weights are not explicitly device placed\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected explicit stage weight placement outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/stage_two_optimization.py": "544978189e04e7c13e443cbc82dc17eb3b52dc7f79e518aec2ac30d01ae63054"
+          },
+          "timestamp_utc": "2026-07-28T10:07:41Z"
+        },
+        "refactor": {
+          "revision": "fb55d565e2c89c492b691f1b5df4754689e254e0",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\n\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"first_length_weight_device = jax.device_put(\" in output and \"AssertionError\" in output:\n    print(\"stage weights are not explicitly device placed\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected explicit stage weight placement outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_standard.py": "7f6a1dfc28d12fc9508f5388cb071921ee67724cfc04f00cbfed4ca985102be3"
+          },
+          "timestamp_utc": "2026-07-28T10:10:38Z"
+        }
+      }
     }
   ]
 }

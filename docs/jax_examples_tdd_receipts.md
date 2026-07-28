@@ -1737,3 +1737,65 @@ requires activating the new manifest identities and running the complete
 ready-mirror CPU/GPU matrix. Matched cold/warm timing, process-tree RSS, and
 process-attributed VRAM comparison against native remain owned by the later
 claim-eligible measurement phase.
+
+## Exact `stage_two_optimization.py` mirror RED -> GREEN -> REFACTOR (2026-07-28)
+
+The source-owned parity RED at
+`40d174b6b2d1c3dbdeb54ca88098372258f72210` failed because the exact
+`native-stage-two-optimization` case was absent. GREEN revision
+`8b0218abce94ec75b85a54c494ed8ff9e667e35c` implemented the native source's
+two sequential optimization stages with matched inputs, regularization, solver
+budgets, and retained initial, first-stage, and final observables. The unchanged
+native-CPU/JAX-CPU parity test passed after the later implementation refactors.
+
+The workflow-boundary RED at
+`9541b5c3454af3ba5038336d2004334473326ac7` proved that the example did not yet
+use the batched public `solve_standard_stage_two` boundary. GREEN revision
+`d21d44806baef4152fbc01f66aaa0d87adabbda1` introduced that boundary with
+fixed-size result storage. The subsequent parametric-problem refactor compiles
+one scalar value/gradient program and reuses it across both source stages; the
+length penalty weight is a fixed-shape device parameter rather than a new
+closure constant.
+
+A focused cold JAX-CPU one-step comparison measured:
+
+```text
+                                before       after
+elapsed time                    19.23 s      16.90 s
+peak process RSS             1,030,840 KiB 1,019,196 KiB
+```
+
+This is a 12.1% elapsed-time reduction and a 1.1% peak-RSS reduction in the
+bounded development run. The accepted parameters and published objectives
+were unchanged apart from negligible Taylor-diagnostic roundoff. These
+measurements are optimization evidence, not the plan's later claim-eligible
+five-profile native/JAX performance campaign.
+
+The first strict RTX 5090 run correctly failed because Python scalar weights
+caused implicit host-to-device transfers. Canonical RED revision
+`243720b0459189f12c87a896d54364c593d1023d` preserves that failing test.
+GREEN merge `d5873620b8fcb202edf34cfe8aa409057d164bac` explicitly places both
+weights on the selected device, and REFACTOR
+`fb55d565e2c89c492b691f1b5df4754689e254e0` documents the reusable parameter
+contract.
+
+Strict RTX 5090 FP64 execution then passed with
+`JAX_TRANSFER_GUARD=disallow`, production preallocation enabled, CUDA device
+0 selected, and no CPU fallback. It completed both 50-iteration stages and
+reported:
+
+```text
+initial objective  2.1318871811341572e-01
+stage-one objective 1.4926090743325486e-05
+final objective     1.4396779922585085e-06
+elapsed time       211.98 s
+peak process RSS     3,879,628 KiB
+```
+
+The exact parity, batched boundary, and explicit-placement receipts all replayed
+successfully from their detached historical revisions. The complete
+machine-readable document now contains 28 structurally valid behaviors.
+Standard Stage-II is therefore source-level complete, but formal ready-mirror
+promotion still depends on manifest v3/parity v2 activation and the complete
+CPU/GPU matrix. Native-comparative cold/warm time, process-tree RSS, and
+process-attributed VRAM remain later plan gates.
