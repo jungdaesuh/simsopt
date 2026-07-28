@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from contextlib import chdir
 from pathlib import Path
 
@@ -9,6 +10,32 @@ import numpy as np
 import pytest
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import load_input_bundle
+
+CASE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py"
+)
+
+
+def test_planar_topology_jit_receives_device_arrays_as_operands() -> None:
+    module = ast.parse(CASE_PATH.read_text(encoding="utf-8"))
+    topology_assignments = [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "topology_states"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+    ]
+
+    assert len(topology_assignments) == 1
+    assert [
+        argument.id
+        for argument in topology_assignments[0].value.args
+        if isinstance(argument, ast.Name)
+    ] == ["extraction", "parameter_states"]
 
 
 def test_exact_planar_stage_two_matches_native_and_jax_cpu(
