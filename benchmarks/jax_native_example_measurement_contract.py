@@ -406,19 +406,23 @@ def _validate_sample(
         sample.get("timing_synchronized"), True, f"{context}.timing_synchronized"
     )
     if measured:
-        setup = _positive_number(
-            sample.get("setup_compile_seconds"), f"{context}.setup_compile_seconds"
-        )
-        solver = _positive_number(
-            sample.get("solver_seconds"), f"{context}.solver_seconds"
-        )
+        setup_value = sample.get("setup_compile_seconds")
+        solver_value = sample.get("solver_seconds")
+        if (setup_value is None) != (solver_value is None):
+            raise MeasurementContractError(
+                f"{context}.setup_compile_seconds and solver_seconds must be "
+                "reported together or both be null"
+            )
         total: float | None = _positive_number(
             sample.get("total_seconds"), f"{context}.total_seconds"
         )
-        if setup + solver > total * (1.0 + 1e-12):
-            raise MeasurementContractError(
-                f"{context} setup/compile plus solver time exceeds total time"
-            )
+        if setup_value is not None and solver_value is not None:
+            setup = _positive_number(setup_value, f"{context}.setup_compile_seconds")
+            solver = _positive_number(solver_value, f"{context}.solver_seconds")
+            if setup + solver > total * (1.0 + 1e-12):
+                raise MeasurementContractError(
+                    f"{context} setup/compile plus solver time exceeds total time"
+                )
     else:
         for name in ("setup_compile_seconds", "solver_seconds", "total_seconds"):
             _require_equal(sample.get(name), None, f"{context}.{name}")
@@ -661,6 +665,14 @@ def _validate_profile(
     )
     mad = _nonnegative_number(
         summary.get("warm_total_seconds_mad"),
+        f"{context}.summary.warm_total_seconds_mad",
+    )
+    expected_mad = float(
+        statistics.median(abs(value - median) for value in warm_seconds)
+    )
+    _require_equal(
+        mad,
+        expected_mad,
         f"{context}.summary.warm_total_seconds_mad",
     )
     peak_rss = max(
