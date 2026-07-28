@@ -532,11 +532,16 @@ def _validate_allocation_memory(
         sample.get("monitor_interval_seconds"),
         f"{context}.monitor_interval_seconds",
     )
-    _require_equal(
+    concurrent_use_preflight = _string(
         sample.get("concurrent_use_preflight"),
-        "pass",
         f"{context}.concurrent_use_preflight",
     )
+    if concurrent_use_preflight != "pass" and not concurrent_use_preflight.startswith(
+        "pass:"
+    ):
+        raise MeasurementContractError(
+            f"{context}.concurrent_use_preflight must record a passing preflight"
+        )
     return gpu_bytes
 
 
