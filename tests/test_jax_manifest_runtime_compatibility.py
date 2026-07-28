@@ -46,7 +46,7 @@ def test_canonical_pair_exposes_exact_mirrors_without_tutorial_coverage() -> Non
     one_to_one = tuple(
         example for example in runtime.examples if example.teaching_kind == "one_to_one"
     )
-    assert len(one_to_one) == 26
+    assert len(one_to_one) == 27
     assert all(example.source == example.path for example in one_to_one)
     assert all(example.status == "planned" for example in one_to_one)
 
