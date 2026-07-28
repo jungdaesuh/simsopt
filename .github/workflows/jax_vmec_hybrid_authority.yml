@@ -70,9 +70,9 @@ jobs:
           world_size = int(os.environ["EXPECTED_MPI_WORLD_SIZE"])
           if world_size < 1:
               raise SystemExit("expected_mpi_world_size must be positive")
-          artifact_directory = Path(".artifacts/jax-vmec-hybrid")
-          artifact_directory.mkdir(parents=True, exist_ok=True)
-          with (artifact_directory / "vmec-build.json").open(
+          authority_artifact_directory = Path(".artifacts/jax-vmec-hybrid")
+          authority_artifact_directory.mkdir(parents=True, exist_ok=True)
+          with (authority_artifact_directory / "vmec-build.json").open(
               "w",
               encoding="utf-8",
           ) as stream:
