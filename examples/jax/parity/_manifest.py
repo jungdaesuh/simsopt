@@ -5,13 +5,26 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from examples.jax._manifest import JaxExamplesManifest
 
 Classification = Literal["full", "reduced", "unsupported"]
 ScaleTier = Literal["bounded", "native_default", "not_applicable"]
-Phase = Literal["initial", "final"]
+Phase = Literal[
+    "area",
+    "conservation",
+    "construction",
+    "final",
+    "first",
+    "flux",
+    "history",
+    "initial",
+    "interpolation",
+    "poincare",
+    "second",
+    "taylor",
+]
 LanePair = Literal[
     "native-cpu:jax-cpu",
     "native-cpu:jax-gpu",
@@ -20,7 +33,22 @@ LanePair = Literal[
 
 CLASSIFICATIONS = frozenset({"full", "reduced", "unsupported"})
 SCALE_TIERS = frozenset({"bounded", "native_default", "not_applicable"})
-PHASES = frozenset({"initial", "final"})
+PHASES = frozenset(
+    {
+        "area",
+        "conservation",
+        "construction",
+        "final",
+        "first",
+        "flux",
+        "history",
+        "initial",
+        "interpolation",
+        "poincare",
+        "second",
+        "taylor",
+    }
+)
 LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"})
 COMPARATORS = frozenset({"allclose", "exact", "equivalent"})
 ROOT_FIELDS = frozenset({"schema_version", "relationships"})
@@ -140,7 +168,7 @@ def _route(value: object, context: str) -> ComparisonRoute:
     if not isinstance(applicable, bool):
         raise ParityManifestValidationError(f"{context}.applicable must be boolean")
     return ComparisonRoute(
-        phase="initial" if phase_value == "initial" else "final",
+        phase=cast(Phase, phase_value),
         observable=_string(route["observable"], f"{context}.observable"),
         lane_pair=(
             "native-cpu:jax-cpu"
