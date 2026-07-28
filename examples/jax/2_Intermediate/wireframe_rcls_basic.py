@@ -12,10 +12,9 @@ from pathlib import Path
 import jax
 import numpy as np
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, run_example, solve_wireframe_rcls
 from simsopt_jax_adapters.solve.wireframe import (
     bnorm_obj_matrices_jax,
-    rcls_wireframe_jax,
 )
 
 EXAMPLE_ID = "native-wireframe-rcls-basic"
@@ -67,30 +66,42 @@ def solve(_output_directory: Path, resolution: int) -> ExampleResult:
         area_weighted=True,
         verbose=False,
     )
-    initial_currents, constraint, constraint_target, free_segments = (
-        _minimum_norm_feasible_currents(wireframe)
+    initial_currents, _, constraint_target, _ = _minimum_norm_feasible_currents(
+        wireframe
     )
-    initial_residual = response @ initial_currents - target
-
-    result = rcls_wireframe_jax(
-        wireframe,
-        response,
-        target,
-        REGULARIZATION_WEIGHT,
+    normal = np.asarray(plasma_surface.normal(), dtype=np.float64)
+    device_result = solve_wireframe_rcls(
+        wireframe=wireframe,
+        response=response,
+        target=target,
+        regularization=REGULARIZATION_WEIGHT,
+        initial_currents=initial_currents,
+        plasma_points=np.asarray(plasma_surface.gamma(), dtype=np.float64).reshape(
+            (-1, 3)
+        ),
+        plasma_unit_normal=np.asarray(
+            plasma_surface.unitnormal(), dtype=np.float64
+        ).reshape((-1, 3)),
+        plasma_area_weights=(
+            np.linalg.norm(normal, axis=2).reshape(-1)
+            / normal.shape[0]
+            / normal.shape[1]
+        ),
+        wireframe_nodes=np.stack(wireframe.nodes),
+        wireframe_segments=np.asarray(wireframe.segments, dtype=np.int32),
+        wireframe_segment_signs=np.asarray(wireframe.seg_signs, dtype=np.float64),
         assume_no_crossings=False,
     )
-    solution = np.asarray(jax.device_get(result.x), dtype=np.float64)
-    final_residual = response @ solution - target
-    constraint_residual = constraint @ solution[free_segments] - constraint_target
-
-    initial_normal_error = float(np.linalg.norm(initial_residual))
-    final_normal_error = float(np.linalg.norm(final_residual))
-    regularization_objective = float(jax.device_get(result.f_R))
-    constraint_error = float(np.linalg.norm(constraint_residual, ord=np.inf))
-    maximum_current = float(np.max(np.abs(solution)))
+    result = jax.device_get(device_result)
+    solution = np.asarray(result.final.currents, dtype=np.float64)
+    initial_normal_error = float(np.sqrt(2.0 * float(result.initial.normal_objective)))
+    final_normal_error = float(np.sqrt(2.0 * float(result.final.normal_objective)))
+    regularization_objective = float(result.final.regularization_objective)
+    constraint_error = float(result.final.constraint_max_abs)
+    maximum_current = float(result.maximum_current)
     constraint_scale = max(1.0, float(np.linalg.norm(constraint_target, ord=np.inf)))
     scientific_success = bool(
-        np.all(np.isfinite(solution))
+        result.finite_currents
         and final_normal_error < initial_normal_error
         and constraint_error <= 1.0e-11 * constraint_scale
         and maximum_current > 0.0
@@ -100,8 +111,11 @@ def solve(_output_directory: Path, resolution: int) -> ExampleResult:
         observables={
             "initial_normal_error": initial_normal_error,
             "final_normal_error": final_normal_error,
+            "normal_objective": float(result.final.normal_objective),
             "regularization_objective": regularization_objective,
+            "total_objective": float(result.final.total_objective),
             "constraint_residual": constraint_error,
+            "mean_relative_normal_field": float(result.mean_relative_normal_field),
             "maximum_current": maximum_current,
             "solver_success": scientific_success,
             "solution": tuple(float(value) for value in solution.ravel()),
