@@ -48,7 +48,7 @@ from simsopt_jax_adapters.mhd.vmec_host import (
 )
 from simsopt_jax.solve.driver import Driver
 
-EXAMPLE_ID = "native-single-stage-vmec-hybrid"
+EXAMPLE_ID = "native-single-stage-optimization"
 NATIVE_ITERATIONS = 10
 INPUT = (
     Path(__file__).resolve().parents[2]

@@ -1,0 +1,165 @@
+name: JAX VMEC Hybrid Authority
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: Pre-provisioned conda environment containing VMEC and MPI
+        required: true
+        default: jax-vmec-authority
+        type: string
+      expected_vmec_sha256:
+        description: SHA-256 of the loaded VMEC native extension
+        required: true
+        type: string
+      expected_mpi_world_size:
+        description: MPI ranks used by the VMEC host region
+        required: true
+        default: "1"
+        type: string
+
+jobs:
+  vmec-hybrid-authority:
+    name: VMEC CPU/MPI with JAX CPU and GPU slices
+    runs-on: [self-hosted, gpu, vmec, mpi]
+    timeout-minutes: 240
+    env:
+      AUTHORITY_ENV_NAME: ${{ inputs.environment_name }}
+      EXPECTED_VMEC_SHA256: ${{ inputs.expected_vmec_sha256 }}
+      EXPECTED_MPI_WORLD_SIZE: ${{ inputs.expected_mpi_world_size }}
+      JAX_ENABLE_X64: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a clean exact checkout
+        run: |
+          test -z "$(git status --porcelain=v1)"
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+
+      - name: Build current SIMSOPT checkout in the authority environment
+        run: |
+          conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" \
+            python -m pip install --no-deps -v -e ".[JAX_GPU,dev]"
+
+      - name: Verify VMEC Python extension and MPI build identity
+        run: |
+          conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          import mpi4py
+          import vmec
+
+          candidates = tuple(Path(vmec.__file__).parent.glob("_vmec*.so"))
+          if len(candidates) != 1:
+              raise SystemExit(f"Expected one VMEC native extension, got {candidates}")
+          extension = candidates[0]
+          observed = hashlib.sha256(extension.read_bytes()).hexdigest()
+          expected = os.environ["EXPECTED_VMEC_SHA256"]
+          if observed != expected:
+              raise SystemExit(
+                  "VMEC Python extension SHA-256 mismatch: "
+                  f"expected={expected} observed={observed}"
+              )
+          world_size = int(os.environ["EXPECTED_MPI_WORLD_SIZE"])
+          if world_size < 1:
+              raise SystemExit("expected_mpi_world_size must be positive")
+          print(f"vmec_extension={extension}")
+          print(f"vmec_sha256={observed}")
+          print(f"mpi4py={mpi4py.__file__}")
+          print(f"mpi_world_size={world_size}")
+          PY
+
+      - name: Run VMEC host with the JAX CPU parity slice
+        env:
+          SIMSOPT_BACKEND_MODE: jax_cpu_parity
+          SIMSOPT_BACKEND_STRICT: "1"
+          SIMSOPT_JAX_TRANSFER_GUARD: disallow
+          JAX_TRANSFER_GUARD: disallow
+          JAX_PLATFORMS: cpu
+        run: |
+          mkdir -p .artifacts/jax-vmec-hybrid/cpu
+          conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" \
+            mpiexec -n "$EXPECTED_MPI_WORLD_SIZE" \
+            python examples/jax/3_Advanced/single_stage_optimization.py \
+              --device cpu \
+              --intent parity \
+              --scale bounded \
+              --json \
+              --output-dir .artifacts/jax-vmec-hybrid/cpu \
+            | tee .artifacts/jax-vmec-hybrid/cpu/stdout.jsonl
+
+      - name: Run VMEC host with the strict JAX GPU parity slice
+        env:
+          SIMSOPT_BACKEND_MODE: jax_gpu_parity
+          SIMSOPT_BACKEND_STRICT: "1"
+          SIMSOPT_JAX_TRANSFER_GUARD: disallow
+          JAX_TRANSFER_GUARD: disallow
+          JAX_PLATFORMS: cuda
+        run: |
+          mkdir -p .artifacts/jax-vmec-hybrid/gpu
+          conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" \
+            mpiexec -n "$EXPECTED_MPI_WORLD_SIZE" \
+            python examples/jax/3_Advanced/single_stage_optimization.py \
+              --device gpu \
+              --intent parity \
+              --scale bounded \
+              --json \
+              --output-dir .artifacts/jax-vmec-hybrid/gpu \
+            | tee .artifacts/jax-vmec-hybrid/gpu/stdout.jsonl
+
+      - name: Validate hybrid scope and matched configuration
+        run: |
+          conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" python - <<'PY'
+          import json
+          from pathlib import Path
+
+          def result(lane: str) -> dict[str, object]:
+              lines = (
+                  Path(".artifacts/jax-vmec-hybrid")
+                  .joinpath(lane, "stdout.jsonl")
+                  .read_text(encoding="utf-8")
+                  .splitlines()
+              )
+              documents = [
+                  json.loads(line) for line in lines if line.startswith("{")
+              ]
+              if not documents or any(item != documents[0] for item in documents):
+                  raise SystemExit(f"{lane} did not emit one consistent MPI result")
+              return documents[0]
+
+          cpu = result("cpu")
+          gpu = result("gpu")
+          if cpu["status"] != "ok" or gpu["status"] != "ok":
+              raise SystemExit("hybrid scientific status did not pass")
+          cpu_values = cpu["observables"]
+          gpu_values = gpu["observables"]
+          if cpu_values["execution_scope"] != "jax_slice_cpu":
+              raise SystemExit("CPU receipt has incorrect execution_scope")
+          if gpu_values["execution_scope"] != "jax_slice_gpu":
+              raise SystemExit("GPU receipt has incorrect execution_scope")
+          if (
+              cpu_values["vmec_platform"] != "cpu_mpi"
+              or gpu_values["vmec_platform"] != "cpu_mpi"
+          ):
+              raise SystemExit("VMEC must remain on CPU/MPI")
+          if cpu_values["configuration_sha256"] != gpu_values["configuration_sha256"]:
+              raise SystemExit("configuration_sha256 differs across device slices")
+          PY
+
+      - name: Recheck clean checkout
+        if: always()
+        run: test -z "$(git status --porcelain=v1)"
+
+      - name: Publish VMEC hybrid authority evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-vmec-hybrid-authority-${{ github.sha }}
+          path: .artifacts/jax-vmec-hybrid/
+          retention-days: 30
