@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import statistics
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal
@@ -24,6 +26,7 @@ from benchmarks.run_jax_native_example_measurements import (
     build_measurement_schedule,
     build_profile_command,
     classify_termination,
+    execute_monitored_command,
     parse_nvidia_smi_compute_apps,
     publish_artifact_exclusive,
 )
@@ -576,3 +579,35 @@ def test_collection_plan_rotates_every_warm_round() -> None:
         assert len(round_runs) == 5
         assert tuple(run.order_position for run in round_runs) == tuple(range(5))
         assert set(run.profile_id for run in round_runs) == set(MEASUREMENT_PROFILE_IDS)
+
+
+def test_cpu_child_measurement_uses_parent_process_tree_rss_polling(
+    tmp_path: Path,
+) -> None:
+    result = execute_monitored_command(
+        command=(
+            sys.executable,
+            "-c",
+            "payload=bytearray(16 * 1024 * 1024); print(len(payload))",
+        ),
+        environment={**os.environ, "PYTHONUNBUFFERED": "1"},
+        cwd=tmp_path,
+        stdout_path=tmp_path / "child.stdout",
+        stderr_path=tmp_path / "child.stderr",
+        device="cpu",
+        gpu_index=0,
+        poll_interval_seconds=0.001,
+        timeout_seconds=10.0,
+    )
+
+    assert result.returncode == 0
+    assert result.termination == "normal"
+    assert result.wall_seconds > 0.0
+    assert result.peak_process_tree_rss_bytes >= 16 * 1024**2
+    assert result.peak_gpu_process_bytes is None
+    assert result.gpu_counter_status == "not_applicable"
+    assert len(result.stdout_sha256) == 64
+    assert len(result.stderr_sha256) == 64
+    assert (tmp_path / "child.stdout").read_text(encoding="utf-8").strip() == str(
+        16 * 1024**2
+    )
