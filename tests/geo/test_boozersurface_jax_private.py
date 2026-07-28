@@ -692,6 +692,44 @@ def test_minimize_lbfgs_host_core_does_not_record_trace_by_default():
     assert result.optimizer_state_trace == ()
 
 
+def test_minimize_bfgs_host_core_matches_dense_quadratic_steps():
+    matrix = np.array(
+        [
+            [4.0, 1.0, 0.0],
+            [1.0, 3.0, 0.5],
+            [0.0, 0.5, 2.0],
+        ],
+        dtype=np.float64,
+    )
+    linear = np.array([-1.0, 2.0, -0.5], dtype=np.float64)
+
+    def value_and_gradient(parameters):
+        gradient = matrix @ parameters + linear
+        value = 0.5 * parameters @ matrix @ parameters + linear @ parameters
+        return float(value), gradient
+
+    initial = np.array([1.5, -0.75, 2.0], dtype=np.float64)
+    result = _host_lbfgs.minimize_bfgs_host_core(
+        value_and_gradient,
+        initial,
+        maxiter=3,
+        gtol=0.0,
+    )
+    reference = optimize.minimize(
+        value_and_gradient,
+        initial,
+        jac=True,
+        method="BFGS",
+        options={"maxiter": 3, "gtol": 0.0},
+    )
+
+    assert result.k == reference.nit == 3
+    np.testing.assert_allclose(result.x_k, reference.x, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(result.f_k, reference.fun, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(result.g_k, reference.jac, rtol=1.0e-12, atol=1.0e-12)
+    assert result.H_k.nbytes == initial.size**2 * initial.dtype.itemsize
+
+
 def test_optimizer_state_trace_memory_uses_stored_float64_arrays():
     expected_entry_bytes = (6 * 2 + 24) * np.dtype(np.float64).itemsize
 
