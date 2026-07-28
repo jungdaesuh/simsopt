@@ -21,6 +21,12 @@ from examples.jax.parity.cases.native_just_a_quadratic import (
 from examples.jax.parity.cases.native_just_a_quadratic import (
     execute as execute_native_just_a_quadratic,
 )
+from examples.jax.parity.cases.native_minimize_curve_length import (
+    create_input as create_native_minimize_curve_length_input,
+)
+from examples.jax.parity.cases.native_minimize_curve_length import (
+    execute as execute_native_minimize_curve_length,
+)
 from examples.jax.parity.cases.permanent_magnet import (
     create_input as create_permanent_magnet_input,
 )
@@ -57,6 +63,11 @@ _CASES = {
         case_id="native-just-a-quadratic",
         create_input=create_native_just_a_quadratic_input,
         execute=execute_native_just_a_quadratic,
+    ),
+    "native-minimize-curve-length": CaseDefinition(
+        case_id="native-minimize-curve-length",
+        create_input=create_native_minimize_curve_length_input,
+        execute=execute_native_minimize_curve_length,
     ),
     "traceable-least-squares": CaseDefinition(
         case_id="traceable-least-squares",
