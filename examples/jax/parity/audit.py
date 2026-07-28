@@ -7,8 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from examples.jax._manifest import load_manifest
-from examples.jax.parity._manifest import load_parity_manifest
+from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import LaneObservation, arbitrate
 from examples.jax.parity.artifacts import read_bytes
 from examples.jax.parity.input_bundle import read_input_bundle
@@ -95,7 +94,8 @@ def audit_published_run(
     """Re-read all receipts and independently validate an aggregate verdict."""
     run_directory = require_published_run(run_directory.parent, run_directory.name)
     summary = _mapping(json.loads(read_bytes(run_directory, "summary.json")), "summary")
-    if summary.get("schema_version") != 1:
+    summary_schema = summary.get("schema_version")
+    if summary_schema not in (1, 2):
         raise ValueError("unsupported aggregate summary schema")
     run_id = _string(summary, "run_id", "summary")
     if run_id != run_directory.name:
@@ -114,20 +114,31 @@ def audit_published_run(
         raise ValueError(
             "authoritative audit requires the clean recorded repository checkout"
         )
-    examples_manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
-    if summary.get("manifest_schema_version") != examples_manifest.schema_version:
-        raise ValueError("aggregate manifest schema version mismatch")
-    if summary.get("used_legacy_manifest_adapter") is not (
-        examples_manifest.used_legacy_manifest_adapter
-    ):
-        raise ValueError("aggregate legacy manifest adapter mismatch")
-    parity_manifest = load_parity_manifest(
+    contract_pair = load_runtime_contract_pair(
+        repo_root / "examples" / "jax" / "manifest.json",
         repo_root / "examples" / "jax" / "parity_manifest.json",
-        examples_manifest=examples_manifest,
         repo_root=repo_root,
     )
+    if summary.get("manifest_schema_version") != contract_pair.version_pair[0]:
+        raise ValueError("aggregate manifest schema version mismatch")
+    if summary_schema == 2 and (
+        summary.get("parity_manifest_schema_version") != contract_pair.version_pair[1]
+    ):
+        raise ValueError("aggregate parity manifest schema version mismatch")
+    expected_legacy_adapter = (
+        contract_pair.used_legacy_adapter
+        if summary_schema == 2
+        else contract_pair.version_pair[0] == 1
+    )
+    if summary.get("used_legacy_manifest_adapter") is not expected_legacy_adapter:
+        raise ValueError("aggregate legacy manifest adapter mismatch")
+    scale_value = summary.get(
+        "scale",
+        "bounded" if summary.get("smoke") is True else "native_default",
+    )
+    if scale_value not in ("bounded", "native_default"):
+        raise ValueError("aggregate execution scale is invalid")
+    parity_manifest = contract_pair.parity
     relationships_by_case = {
         relationship.case_id: relationship
         for relationship in parity_manifest.relationships
@@ -166,6 +177,8 @@ def audit_published_run(
         )
         if input_bundle.case_id != case_id:
             raise ValueError(f"input bundle case mismatch: {case_id}")
+        if input_bundle.scale != scale_value:
+            raise ValueError(f"input bundle scale mismatch: {case_id}")
         if input_bundle.input_fingerprint != expected_input:
             raise ValueError(f"input bundle fingerprint mismatch: {case_id}")
         if input_bundle.configuration_fingerprint != expected_configuration:
@@ -207,6 +220,8 @@ def audit_published_run(
             observation = load_lane_observation(run_directory / case_id / lane)
             if observation.lane != lane:
                 raise ValueError(f"lane identity mismatch: {case_id}:{lane}")
+            if observation.scale != scale_value:
+                raise ValueError(f"lane scale mismatch: {case_id}:{lane}")
             if observation.input_fingerprint != expected_input:
                 raise ValueError(f"input fingerprint mismatch: {case_id}:{lane}")
             if observation.configuration_fingerprint != expected_configuration:

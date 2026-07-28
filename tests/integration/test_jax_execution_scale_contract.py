@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from examples.jax.manifest_runtime import RuntimeExample
+from examples.jax.parity.child import main as run_parity_child
 from examples.jax.parity.input_bundle import (
     create_input_bundle,
     read_input_bundle,
 )
 from examples.jax.parity.runner import build_child_command as build_parity_command
+from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
 from examples.jax.run_examples import (
     _parse_arguments as parse_example_arguments,
 )
@@ -61,13 +65,7 @@ def test_example_child_argv_derives_smoke_only_from_typed_scale(
 
     prefix = (
         sys.executable,
-        str(
-            tmp_path
-            / "examples"
-            / "jax"
-            / "1_Simple"
-            / "just_a_quadratic.py"
-        ),
+        str(tmp_path / "examples" / "jax" / "1_Simple" / "just_a_quadratic.py"),
     )
     assert bounded == (
         *prefix,
@@ -100,6 +98,27 @@ def test_parity_child_argv_carries_scale_without_boolean_inference(
     assert "--smoke" not in command
 
 
+def test_parity_scale_defaults_to_bounded_and_rejects_smoke_conflict(
+    tmp_path: Path,
+) -> None:
+    required = (
+        "--case",
+        "quadratic",
+        "--lanes",
+        "native-cpu",
+        "--artifact-root",
+        str(tmp_path),
+    )
+
+    assert parse_parity_arguments(list(required)).scale == "bounded"
+    assert (
+        parse_parity_arguments([*required, "--scale", "native_default"]).scale
+        == "native_default"
+    )
+    with pytest.raises(SystemExit):
+        parse_parity_arguments([*required, "--scale", "native_default", "--smoke"])
+
+
 def test_input_bundle_persists_scale_inside_its_fingerprint(
     tmp_path: Path,
 ) -> None:
@@ -115,3 +134,52 @@ def test_input_bundle_persists_scale_inside_its_fingerprint(
 
     assert bundle.scale == "native_default"
     assert loaded == bundle
+
+
+def test_input_bundle_rejects_scale_changed_without_fingerprint(
+    tmp_path: Path,
+) -> None:
+    create_input_bundle(
+        tmp_path,
+        case_id="quadratic",
+        random_seed=0,
+        arrays={"parameters": np.asarray([1.0], dtype=np.float64)},
+        configuration={"max_steps": 2},
+        scale="bounded",
+    )
+    path = tmp_path / "input_bundle.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["scale"] = "native_default"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        read_input_bundle(tmp_path)
+
+
+def test_parity_child_rejects_requested_scale_different_from_input(
+    tmp_path: Path,
+) -> None:
+    create_input_bundle(
+        tmp_path / "inputs",
+        case_id="traceable-least-squares",
+        random_seed=0,
+        arrays={"parameters": np.asarray([1.0], dtype=np.float64)},
+        configuration={"max_steps": 2},
+        scale="bounded",
+    )
+
+    with pytest.raises(ValueError, match="does not match requested"):
+        run_parity_child(
+            [
+                "--case",
+                "traceable-least-squares",
+                "--lane",
+                "native-cpu",
+                "--input-bundle",
+                str(tmp_path / "inputs" / "input_bundle.json"),
+                "--result-directory",
+                str(tmp_path / "result"),
+                "--scale",
+                "native_default",
+            ]
+        )

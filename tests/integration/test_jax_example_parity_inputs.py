@@ -92,7 +92,7 @@ def test_real_case_construction_receipts_change_for_every_input_class(
     tmp_path: Path,
 ) -> None:
     least_squares_root = tmp_path / "least-squares"
-    create_least_squares_input(least_squares_root, True)
+    create_least_squares_input(least_squares_root, "bounded")
     bundle, arrays = read_input_bundle(least_squares_root)
     baseline = least_squares_effective_fingerprint(bundle, arrays)
 
@@ -122,7 +122,7 @@ def test_real_case_construction_receipts_change_for_every_input_class(
         assert changed != baseline, field
 
     surface_root = tmp_path / "surface"
-    create_surface_input(surface_root, True)
+    create_surface_input(surface_root, "bounded")
     surface_bundle, surface_arrays = read_input_bundle(surface_root)
     surface = _build_surface(surface_bundle, surface_arrays)
     surface_baseline = surface_effective_fingerprint(

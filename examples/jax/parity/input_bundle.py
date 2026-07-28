@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.artifacts import (
     canonical_json_bytes,
     read_array,
@@ -28,6 +29,7 @@ _ARRAY_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 class InputBundle:
     schema_version: int
     case_id: str
+    scale: ExecutionScale
     random_seed: int
     configuration: Mapping[str, object]
     configuration_fingerprint: str
@@ -52,6 +54,7 @@ def effective_construction_fingerprint(
     return _digest(
         {
             "case_id": bundle.case_id,
+            "scale": bundle.scale,
             "random_seed": bundle.random_seed,
             "applied_construction": dict(applied_construction),
         }
@@ -62,6 +65,7 @@ def _payload(bundle: InputBundle) -> dict[str, object]:
     return {
         "schema_version": bundle.schema_version,
         "case_id": bundle.case_id,
+        "scale": bundle.scale,
         "random_seed": bundle.random_seed,
         "configuration": dict(bundle.configuration),
         "configuration_fingerprint": bundle.configuration_fingerprint,
@@ -80,6 +84,7 @@ def create_input_bundle(
     random_seed: int,
     arrays: Mapping[str, np.ndarray],
     configuration: Mapping[str, object],
+    scale: ExecutionScale = "bounded",
 ) -> InputBundle:
     """Persist canonical arrays and return their immutable bundle contract."""
     if not case_id:
@@ -95,6 +100,7 @@ def create_input_bundle(
     configuration_fingerprint = _digest(configuration_payload)
     fingerprint_payload = {
         "case_id": case_id,
+        "scale": scale,
         "random_seed": random_seed,
         "configuration_fingerprint": configuration_fingerprint,
         "arrays": {
@@ -103,8 +109,9 @@ def create_input_bundle(
         },
     }
     bundle = InputBundle(
-        schema_version=1,
+        schema_version=2,
         case_id=case_id,
+        scale=scale,
         random_seed=random_seed,
         configuration=configuration_payload,
         configuration_fingerprint=configuration_fingerprint,
@@ -142,8 +149,13 @@ def _reference(value: object, name: str) -> ArrayReference:
 def read_input_bundle(root: Path) -> tuple[InputBundle, dict[str, np.ndarray]]:
     """Load a persisted bundle and recompute every declared fingerprint."""
     document = json.loads(read_bytes(root, "input_bundle.json"))
-    if not isinstance(document, dict) or document.get("schema_version") != 1:
+    if not isinstance(document, dict) or document.get("schema_version") not in (1, 2):
         raise ValueError("unsupported input bundle schema")
+    schema_version = int(document["schema_version"])
+    scale_value = document.get("scale", "bounded")
+    if scale_value not in ("bounded", "native_default"):
+        raise ValueError("invalid input bundle scale")
+    scale: ExecutionScale = "bounded" if scale_value == "bounded" else "native_default"
     arrays_value = document.get("arrays")
     if not isinstance(arrays_value, dict):
         raise TypeError("input bundle arrays must be an object")
@@ -156,8 +168,9 @@ def read_input_bundle(root: Path) -> tuple[InputBundle, dict[str, np.ndarray]]:
     if not isinstance(configuration, dict):
         raise TypeError("input bundle configuration must be an object")
     loaded = InputBundle(
-        schema_version=1,
+        schema_version=schema_version,
         case_id=str(document.get("case_id", "")),
+        scale=scale,
         random_seed=int(document.get("random_seed", -1)),
         configuration=configuration,
         configuration_fingerprint=str(document.get("configuration_fingerprint", "")),
@@ -168,6 +181,7 @@ def read_input_bundle(root: Path) -> tuple[InputBundle, dict[str, np.ndarray]]:
         raise ValueError("persisted configuration fingerprint mismatch")
     fingerprint_payload = {
         "case_id": loaded.case_id,
+        **({"scale": loaded.scale} if loaded.schema_version >= 2 else {}),
         "random_seed": loaded.random_seed,
         "configuration_fingerprint": loaded.configuration_fingerprint,
         "arrays": {

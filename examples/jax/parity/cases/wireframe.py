@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
@@ -42,9 +43,8 @@ def _build_wireframe(bundle: InputBundle):
     return _wireframe_from_configuration(bundle.configuration)
 
 
-def create_input(root: Path, smoke: bool) -> InputBundle:
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Persist a deterministic response matrix instead of regenerating it."""
-    del smoke
     configuration = {
         "major_radius": 2.0,
         "minor_radius": 0.7,
@@ -67,6 +67,7 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "target": np.asarray(target, dtype=np.float64),
         },
         configuration=configuration,
+        scale=scale,
     )
 
 
@@ -167,6 +168,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         backend_mode="native_cpu",
         platform="cpu",
         precision="fp64",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
@@ -236,6 +238,7 @@ def _jax(
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if jax.config.jax_enable_x64 else "fp32",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
@@ -24,9 +25,8 @@ WORKFLOW_STAGES = (
 )
 
 
-def create_input(root: Path, smoke: bool) -> InputBundle:
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Create two concentric regularized coils and a zero-rotation frame."""
-    del smoke
     unit_circle_dofs = np.asarray(
         (0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0),
         dtype=np.float64,
@@ -48,6 +48,7 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "force_power": 2.0,
             "force_threshold": 0.0,
         },
+        scale=scale,
     )
 
 
@@ -146,6 +147,7 @@ def _observation(
         backend_mode=backend_mode,
         platform=platform,
         precision=precision,
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,

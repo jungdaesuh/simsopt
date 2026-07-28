@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.cases.coil_flux import create_input as create_coil_flux_input
 from examples.jax.parity.cases.coil_flux import execute as execute_coil_flux
@@ -41,7 +42,7 @@ from examples.jax.parity.runtime import ParityLane
 @dataclass(frozen=True)
 class CaseDefinition:
     case_id: str
-    create_input: Callable[[Path, bool], InputBundle]
+    create_input: Callable[[Path, ExecutionScale], InputBundle]
     execute: Callable[[ParityLane, InputBundle, dict[str, np.ndarray]], LaneObservation]
 
 

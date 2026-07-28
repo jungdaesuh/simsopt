@@ -16,8 +16,8 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
     if import_root not in sys.path:
         sys.path.insert(0, import_root)
 
-from examples.jax._manifest import load_manifest
-from examples.jax.parity._manifest import load_parity_manifest
+from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
+from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import arbitrate
 from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
 from examples.jax.parity.cases import get_case, implemented_case_ids
@@ -52,8 +52,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--case", action="append", required=True)
     parser.add_argument("--lanes", type=_lane_tuple, required=True)
     parser.add_argument("--artifact-root", type=Path, required=True)
+    parser.add_argument("--scale", choices=EXECUTION_SCALES)
     parser.add_argument("--smoke", action="store_true")
     return parser
+
+
+def _parse_arguments(argv: list[str] | None) -> argparse.Namespace:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.smoke and args.scale == "native_default":
+        parser.error("--smoke cannot be combined with --scale native_default")
+    if args.scale is None:
+        args.scale = "bounded"
+    return args
 
 
 def _run_id() -> str:
@@ -81,16 +92,15 @@ def _selected_cases(
 
 def main(argv: list[str] | None = None) -> int:
     """Execute requested cases and publish only a complete passing run."""
-    args = _parser().parse_args(argv)
+    args = _parse_arguments(argv)
+    scale: ExecutionScale = args.scale
     repo_root = _REPO_ROOT
-    examples_manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
-    parity_manifest = load_parity_manifest(
+    contract_pair = load_runtime_contract_pair(
+        repo_root / "examples" / "jax" / "manifest.json",
         repo_root / "examples" / "jax" / "parity_manifest.json",
-        examples_manifest=examples_manifest,
         repo_root=repo_root,
     )
+    parity_manifest = contract_pair.parity
     repository_state = collect_repository_state(repo_root)
     explicit_sources = collect_explicit_sources(
         repo_root,
@@ -111,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         for case_id in case_ids:
             case = get_case(case_id)
             input_root = paths.partial / case_id / "inputs"
-            bundle = case.create_input(input_root, args.smoke)
+            bundle = case.create_input(input_root, scale)
             executions, observations = execute_case_lanes(
                 case_id=case_id,
                 lanes=args.lanes,
@@ -120,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root=repo_root,
                 base_environment=os.environ,
                 python_executable=sys.executable,
-                smoke=args.smoke,
+                scale=scale,
             )
             relationships = tuple(
                 relationship
@@ -177,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                     "native_source": relationship.native_source,
                     "classification": relationship.classification,
                     "classification_reason": relationship.classification_reason,
-                    "scale_tier": relationship.scale_tier,
+                    "scale_tier": scale,
                     "oracle_kind": relationship.oracle_kind,
                     "cost_tier": relationship.cost_tier,
                     "omitted_scientific_stages": list(
@@ -256,14 +266,14 @@ def main(argv: list[str] | None = None) -> int:
             summary_path.name,
             canonical_json_bytes(
                 {
-                    "schema_version": 1,
-                    "manifest_schema_version": examples_manifest.schema_version,
-                    "used_legacy_manifest_adapter": (
-                        examples_manifest.used_legacy_manifest_adapter
-                    ),
+                    "schema_version": 2,
+                    "manifest_schema_version": contract_pair.version_pair[0],
+                    "parity_manifest_schema_version": contract_pair.version_pair[1],
+                    "used_legacy_manifest_adapter": (contract_pair.used_legacy_adapter),
                     "run_id": paths.run_id,
                     "lanes": list(args.lanes),
-                    "smoke": args.smoke,
+                    "scale": scale,
+                    "smoke": scale == "bounded",
                     "authoritative": authoritative,
                     "repository_commit": repository_state.repository_commit,
                     "repository_dirty": repository_state.repository_dirty,

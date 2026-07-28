@@ -7,12 +7,25 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Callable, Literal, Mapping
+from typing import Callable, Final, Literal, Mapping
 
 import jax
 
 from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
 from simsopt_jax.solve.driver import Driver
+
+ExecutionScale = Literal["bounded", "native_default"]
+EXECUTION_SCALES: Final = ("bounded", "native_default")
+
+
+def example_runtime_metadata(scale: ExecutionScale) -> dict[str, str]:
+    """Return the runtime identity every executable example must publish."""
+    return {
+        "backend_mode": get_backend_mode(),
+        "platform": jax.devices()[0].platform,
+        "precision": get_resolved_precision(),
+        "scale": scale,
+    }
 
 
 @dataclass(frozen=True)
@@ -23,12 +36,10 @@ class ExampleResult:
     observables: Mapping[str, object]
     status: Literal["ok", "failed"]
 
-    def json_object(self) -> dict[str, object]:
+    def json_object(self, scale: ExecutionScale) -> dict[str, object]:
         return {
             "example_id": self.example_id,
-            "backend_mode": get_backend_mode(),
-            "platform": jax.devices()[0].platform,
-            "precision": get_resolved_precision(),
+            **example_runtime_metadata(scale),
             "status": self.status,
             "observables": dict(self.observables),
         }
@@ -61,6 +72,7 @@ def run_example(
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--output-dir", type=Path)
     options = parser.parse_args(arguments)
+    scale: ExecutionScale = "bounded" if options.smoke else "native_default"
     max_steps = options.max_steps or (
         bounded_steps if options.smoke else native_default_steps
     )
@@ -73,7 +85,7 @@ def run_example(
     else:
         result = solve(Path.cwd(), max_steps)
     if options.json:
-        print(json.dumps(result.json_object(), sort_keys=True))
+        print(json.dumps(result.json_object(scale), sort_keys=True))
     else:
         print(f"example={result.example_id}")
         print(f"status={result.status}")

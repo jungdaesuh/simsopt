@@ -21,6 +21,7 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
         sys.path.insert(0, import_root)
 
 from simsopt_jax.config import ExecutionIntent, JaxDevice, JaxExecutionProfile
+from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 from examples.jax._lane_environment import (
     LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
 )
@@ -64,22 +65,25 @@ class ChildResult:
     backend_mode: str
     platform: str
     precision: str
+    scale: str
     status: str
     observables: dict[str, object]
 
 
 def build_child_command(
-    example: JaxExampleRecord | RuntimeExample, *, repo_root: Path
+    example: JaxExampleRecord | RuntimeExample,
+    *,
+    repo_root: Path,
+    scale: ExecutionScale = "bounded",
 ) -> tuple[str, ...]:
-    """Return the only supported bounded child command for one example."""
+    """Return one example child command derived from its typed execution scale."""
 
-    return (
+    prefix = (
         sys.executable,
         str(repo_root / "examples" / "jax" / example.path),
-        "--smoke",
-        "--json",
-        *example.smoke_args,
     )
+    scale_arguments = ("--smoke",) if scale == "bounded" else ()
+    return (*prefix, *scale_arguments, "--json", *example.smoke_args)
 
 
 def _required_result_string(
@@ -125,6 +129,7 @@ def _parse_child_result(stdout: str, example_id: str) -> ChildResult:
         backend_mode=_required_result_string(result, "backend_mode", example_id),
         platform=_required_result_string(result, "platform", example_id),
         precision=_required_result_string(result, "precision", example_id),
+        scale=_required_result_string(result, "scale", example_id),
         status=_required_result_string(result, "status", example_id),
         observables=observables,
     )
@@ -134,6 +139,7 @@ def _validate_child_result(
     result: ChildResult,
     example: JaxExampleRecord | RuntimeExample,
     profile: JaxExecutionProfile,
+    scale: ExecutionScale,
 ) -> None:
     expected_backend = profile.mode
     expected_platform = profile.device
@@ -159,6 +165,10 @@ def _validate_child_result(
         raise ChildResultValidationError(
             f"{example.id}: precision must be {expected_precision}, "
             f"got {result.precision}"
+        )
+    if result.scale != scale:
+        raise ChildResultValidationError(
+            f"{example.id}: scale must be {scale}, got {result.scale}"
         )
 
 
@@ -216,6 +226,7 @@ def run_profile(
     manifest: JaxExamplesManifest | RuntimeContractPair,
     device: JaxDevice,
     intent: ExecutionIntent,
+    scale: ExecutionScale = "bounded",
     *,
     repo_root: Path,
     base_environment: Mapping[str, str],
@@ -247,7 +258,7 @@ def run_profile(
     )
     failed = False
     for example in selected:
-        command = build_child_command(example, repo_root=repo_root)
+        command = build_child_command(example, repo_root=repo_root, scale=scale)
         completed = subprocess.run(
             command,
             cwd=repo_root,
@@ -269,7 +280,7 @@ def run_profile(
             continue
         try:
             child_result = _parse_child_result(completed.stdout, example.id)
-            _validate_child_result(child_result, example, profile)
+            _validate_child_result(child_result, example, profile, scale)
         except ChildResultValidationError as error:
             _write_child_failure(
                 example=example,
@@ -291,6 +302,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     selector.add_argument("--lane", choices=_LEGACY_JAX_LANES)
     selector.add_argument("--device", choices=("cpu", "gpu"))
     parser.add_argument("--intent", choices=("fast", "parity"))
+    parser.add_argument("--scale", choices=EXECUTION_SCALES, default="bounded")
     parser.add_argument(
         "--manifest",
         type=Path,
@@ -309,6 +321,8 @@ def _parse_arguments(arguments: Iterable[str] | None = None) -> argparse.Namespa
     parsed = parser.parse_args(arguments)
     if parsed.lane is not None and parsed.intent is not None:
         parser.error("--lane cannot be combined with --intent; use --device")
+    if parsed.lane is not None and parsed.scale != "bounded":
+        parser.error("legacy --lane supports only --scale bounded")
     if parsed.intent is None:
         parsed.intent = "fast"
     return parsed
@@ -350,10 +364,12 @@ def main(arguments: list[str] | None = None) -> int:
         )
     device: JaxDevice = parsed.device
     intent: ExecutionIntent = parsed.intent
+    scale: ExecutionScale = parsed.scale
     return run_profile(
         manifest,
         device,
         intent,
+        scale,
         repo_root=repo_root,
         base_environment=os.environ,
         stdout=sys.stdout,

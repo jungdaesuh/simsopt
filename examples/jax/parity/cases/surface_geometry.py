@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -26,7 +27,7 @@ WORKFLOW_STAGES = (
 )
 
 
-def create_input(root: Path, smoke: bool) -> InputBundle:
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Create the torus free state, quadrature, targets, and solve policy."""
     major_radius = 1.0
     minor_radius = 0.2
@@ -53,8 +54,9 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "stellsym": True,
             "rtol": 1.0e-12,
             "atol": 1.0e-12,
-            "max_steps": 24 if smoke else 96,
+            "max_steps": 24 if scale == "bounded" else 96,
         },
+        scale=scale,
     )
 
 
@@ -194,6 +196,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         backend_mode="native_cpu",
         platform="cpu",
         precision="fp64",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=effective_fingerprint,
@@ -339,6 +342,7 @@ def _jax(
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if jax.config.jax_enable_x64 else "fp32",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=effective_fingerprint,

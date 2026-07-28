@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.core.curve_geometry import (
     curve_incremental_arclength_from_spec,
     curve_spec_with_dofs,
@@ -40,12 +40,10 @@ class ExampleResult:
     optimizer_success: bool
     status: Literal["ok", "failed"]
 
-    def json_object(self) -> dict[str, object]:
+    def json_object(self, scale: ExecutionScale) -> dict[str, object]:
         return {
             "example_id": EXAMPLE_ID,
-            "backend_mode": get_backend_mode(),
-            "platform": jax.devices()[0].platform,
-            "precision": get_resolved_precision(),
+            **example_runtime_metadata(scale),
             "status": self.status,
             "observables": {
                 "final_length": self.final_length,
@@ -58,11 +56,23 @@ class ExampleResult:
 
 def _build_problem() -> tuple[CurveXYZFourier, CurveLengthJAX]:
     curve = CurveXYZFourier(64, order=2)
-    curve.set("xc(1)", RADIUS)
-    curve.set("ys(1)", RADIUS)
-    curve.set("xs(2)", 0.3)
-    curve.set("yc(2)", -0.2)
-    curve.set("zs(2)", 0.4)
+    values_by_name = {
+        "xc(1)": RADIUS,
+        "ys(1)": RADIUS,
+        "xs(2)": 0.3,
+        "yc(2)": -0.2,
+        "zs(2)": 0.4,
+    }
+    curve.local_full_x = np.asarray(
+        tuple(
+            values_by_name.get(str(name), float(value))
+            for name, value in zip(
+                curve.local_full_dof_names,
+                curve.local_full_x,
+            )
+        ),
+        dtype=np.float64,
+    )
     curve.fix_all()
     for name in DEFORMATION_NAMES:
         curve.unfix(name)
@@ -158,7 +168,8 @@ def main(arguments: list[str] | None = None) -> int:
     else:
         result = _solve(Path.cwd(), max_steps)
     if options.json:
-        print(json.dumps(result.json_object(), sort_keys=True))
+        scale: ExecutionScale = "bounded" if options.smoke else "native_default"
+        print(json.dumps(result.json_object(scale), sort_keys=True))
     else:
         print(f"final length={result.final_length:.12f}")
         print(f"circle oracle={result.circle_oracle:.12f}")
