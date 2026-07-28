@@ -108,6 +108,27 @@ def test_stage_two_geometric_penalty_is_jittable_and_differentiable() -> None:
     assert bool(jnp.all(jnp.isfinite(gradient)))
 
 
+def test_stage_two_geometric_penalty_includes_arclength_variation() -> None:
+    gamma, gammadash, gammadashdash = _geometry()
+    varying_speed = gammadash.at[0, 0].set(jnp.asarray((0.0, 1.0, 0.0)))
+    varying_speed = varying_speed.at[0, 1].set(jnp.asarray((-3.0, 0.0, 0.0)))
+    config = StageTwoObjectiveConfig(
+        num_base_curves=1,
+        arclength_variation_weight=2.0,
+    )
+
+    value = stage_two_geometric_penalty(
+        gamma,
+        varying_speed,
+        gammadashdash,
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        jnp.zeros((1, 3), dtype=jnp.float64),
+        config,
+    )
+
+    np.testing.assert_allclose(value, 2.0)
+
+
 def test_stage_two_geometric_penalty_includes_linking_number() -> None:
     angles = jnp.linspace(0.0, 2.0 * jnp.pi, 128, endpoint=False)
     gamma = jnp.stack(
