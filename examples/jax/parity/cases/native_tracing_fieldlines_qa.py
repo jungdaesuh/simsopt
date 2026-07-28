@@ -45,7 +45,7 @@ def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
         "fieldline_count": 10 if native_scale else 3,
         "tmax": 20_000.0 if native_scale else 50.0,
         "native_integrator_tolerance": 1.0e-16,
-        "jax_integrator_tolerance": 1.0e-12,
+        "jax_integrator_tolerance": 1.0e-13,
         "classifier_h": 0.03 if native_scale else 0.08,
         "classifier_order": 2,
         "skip_distance": -0.05,

@@ -203,6 +203,25 @@ def _validate_complete_route_matrix(routes: tuple[ComparisonRoute, ...]) -> None
             )
 
 
+def _validate_source_owned_tolerance_matrix(
+    routes: tuple[ComparisonRoute, ...],
+) -> None:
+    """Keep each source-owned scientific threshold identical across lane pairs."""
+    grouped: dict[tuple[Phase, str], set[str]] = {}
+    for route in routes:
+        if route.applicable:
+            grouped.setdefault((route.phase, route.observable), set()).add(
+                route.tolerance_bucket
+            )
+    for key, tolerance_buckets in grouped.items():
+        if any(bucket.startswith("mirror_") for bucket in tolerance_buckets) and len(
+            tolerance_buckets
+        ) != 1:
+            raise ParityManifestValidationError(
+                f"{key} source-owned tolerance must apply to every lane pair"
+            )
+
+
 def _relationship(value: object, index: int, repo_root: Path) -> ParityRelationship:
     context = f"relationships[{index}]"
     record = _mapping(value, context)
@@ -246,6 +265,7 @@ def _relationship(value: object, index: int, repo_root: Path) -> ParityRelations
     if len(route_keys) != len(set(route_keys)):
         raise ParityManifestValidationError("duplicate comparison route")
     _validate_complete_route_matrix(routes)
+    _validate_source_owned_tolerance_matrix(routes)
     if classification_value == "unsupported":
         if case_id is not None:
             raise ParityManifestValidationError(
