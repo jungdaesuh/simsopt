@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -27,6 +28,11 @@ WORKFLOW_STAGES = (
     "trace_three_fieldlines_with_levelset_stop",
     "record_endpoints_statuses_and_poincare_crossings",
 )
+
+
+class _LevelsetClassifier(Protocol):
+    def evaluate_xyz(self, xyz: np.ndarray) -> np.ndarray:
+        """Evaluate signed distance at Cartesian points."""
 
 
 def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
@@ -190,7 +196,7 @@ def _values(
     trajectories: list[np.ndarray],
     phi_hits: list[np.ndarray],
     tmax: float,
-    classifier,
+    classifier: _LevelsetClassifier,
 ) -> dict[str, np.ndarray]:
     final_times = np.asarray(
         [trajectory[-1, 0] for trajectory in trajectories],
