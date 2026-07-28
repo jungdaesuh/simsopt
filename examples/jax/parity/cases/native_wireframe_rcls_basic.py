@@ -291,11 +291,15 @@ def _field_values(
     }
 
 
-def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
+def _native(
+    bundle: InputBundle,
+    arrays: dict[str, np.ndarray],
+    build_geometry=_build_geometry,
+) -> LaneObservation:
     from simsopt.field import WireframeField
     from simsopt.solve.wireframe_optimization import rcls_wireframe
 
-    _, wireframe = _build_geometry(bundle.configuration)
+    _, wireframe = build_geometry(bundle.configuration)
     regularization = _configuration_float(bundle, "regularization_weight")
     final, _, _, _ = rcls_wireframe(
         wireframe,
@@ -363,13 +367,14 @@ def _jax(
     lane: ParityLane,
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
+    build_geometry=_build_geometry,
 ) -> LaneObservation:
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.examples import solve_wireframe_rcls
 
     import jax
 
-    _, wireframe = _build_geometry(bundle.configuration)
+    _, wireframe = build_geometry(bundle.configuration)
     regularization = _configuration_float(bundle, "regularization_weight")
     device = get_runtime_jax_device()
 
@@ -478,6 +483,16 @@ def execute(
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     """Execute the exact wireframe RCLS workflow in the selected lane."""
+    return execute_problem(lane, bundle, arrays, _build_geometry)
+
+
+def execute_problem(
+    lane: ParityLane,
+    bundle: InputBundle,
+    arrays: dict[str, np.ndarray],
+    build_geometry,
+) -> LaneObservation:
+    """Execute an RCLS source workflow with its exact geometry constructor."""
     if lane == "native-cpu":
-        return _native(bundle, arrays)
-    return _jax(lane, bundle, arrays)
+        return _native(bundle, arrays, build_geometry)
+    return _jax(lane, bundle, arrays, build_geometry)

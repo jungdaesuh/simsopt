@@ -124,6 +124,12 @@ from examples.jax.parity.cases.native_wireframe_rcls_basic import (
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     execute as execute_native_wireframe_rcls_basic,
 )
+from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
+    create_input as create_native_wireframe_rcls_with_ports_input,
+)
+from examples.jax.parity.cases.native_wireframe_rcls_with_ports import (
+    execute as execute_native_wireframe_rcls_with_ports,
+)
 from examples.jax.parity.cases.permanent_magnet import (
     create_input as create_permanent_magnet_input,
 )
@@ -251,6 +257,11 @@ _CASES = {
         case_id="native-wireframe-rcls-basic",
         create_input=create_native_wireframe_rcls_basic_input,
         execute=execute_native_wireframe_rcls_basic,
+    ),
+    "native-wireframe-rcls-with-ports": CaseDefinition(
+        case_id="native-wireframe-rcls-with-ports",
+        create_input=create_native_wireframe_rcls_with_ports_input,
+        execute=execute_native_wireframe_rcls_with_ports,
     ),
     "traceable-least-squares": CaseDefinition(
         case_id="traceable-least-squares",
