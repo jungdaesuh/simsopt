@@ -29,7 +29,7 @@ WORKFLOW_STAGES = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoozerSingleStageSpec:
     """Immutable scientific differences between Boozer single-stage examples."""
 
