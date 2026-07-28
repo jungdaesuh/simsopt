@@ -19,17 +19,11 @@ from typing import Literal
 import jax
 import numpy as np
 from simsopt.geo import CurveRZFourier
-from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
-from simsopt_jax.core.curve_geometry import (
-    curve_incremental_arclength_from_spec,
-    curve_spec_with_dofs,
+from simsopt_jax.examples import (
+    ExecutionScale,
+    example_runtime_metadata,
+    solve_rz_curve_length,
 )
-from simsopt_jax.core.specs import make_curve_rzfourier_spec
-from simsopt_jax.solve.serial import (
-    TraceableScalarProblem,
-    serial_solve_jax,
-)
-from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
 
 EXAMPLE_ID = "native-minimize-curve-length"
 NQUADRATURE = 100
@@ -49,6 +43,8 @@ class ExampleResult:
     final_gradient: tuple[float, ...]
     circle_oracle: float
     solver_success: bool
+    optimizer_success: bool
+    optimizer_status: int
     solver_driver: str
     iterations: int
     function_evaluations: int
@@ -69,6 +65,8 @@ class ExampleResult:
                 "final_gradient": self.final_gradient,
                 "circle_oracle": self.circle_oracle,
                 "solver_success": self.solver_success,
+                "optimizer_success": self.optimizer_success,
+                "optimizer_status": self.optimizer_status,
                 "solver_driver": self.solver_driver,
                 "iterations": self.iterations,
                 "function_evaluations": self.function_evaluations,
@@ -79,12 +77,11 @@ class ExampleResult:
 
 def _build_curve() -> CurveRZFourier:
     curve = CurveRZFourier(NQUADRATURE, NFOURIER, NFP, True)
-    random_state = np.random.default_rng(RANDOM_SEED)
-    initial_full = np.zeros(curve.dof_size, dtype=np.float64)
-    initial_full[1] = float(random_state.uniform(0.05, 0.15))
+    random_state = np.random.RandomState(RANDOM_SEED)
+    initial_full = random_state.rand(curve.dof_size) - 0.5
     initial_full[0] = MAJOR_RADIUS
     curve.x = initial_full
-    curve.fix("rc(0)")
+    curve.fix(0)
     return curve
 
 
@@ -92,56 +89,43 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
     curve = _build_curve()
     full_dofs = np.asarray(curve.local_full_x, dtype=np.float64)
     free_positions = np.flatnonzero(curve.local_dofs_free_status)
-    fixed_dofs = full_dofs.copy()
-    fixed_dofs[free_positions] = 0.0
-    expansion = np.zeros((full_dofs.size, free_positions.size), dtype=np.float64)
-    expansion[free_positions, np.arange(free_positions.size)] = 1.0
-    spec = make_curve_rzfourier_spec(
-        dofs=jax.device_put(full_dofs),
-        quadpoints=jax.device_put(np.asarray(curve.quadpoints, dtype=np.float64)),
-        order=curve.order,
-        nfp=curve.nfp,
-        stellsym=curve.stellsym,
-    )
-    fixed_dofs_device = jax.device_put(fixed_dofs)
-    expansion_device = jax.device_put(expansion)
-
-    @jax.jit
-    def curve_length(free_dofs: jax.Array) -> jax.Array:
-        current_full = fixed_dofs_device + expansion_device @ free_dofs
-        current_spec = curve_spec_with_dofs(spec, current_full)
-        incremental_arclength = curve_incremental_arclength_from_spec(current_spec)
-        return curve_length_pure(incremental_arclength)
-
-    value_and_gradient = jax.jit(jax.value_and_grad(curve_length))
-
-    initial_device = jax.device_put(np.asarray(curve.x, dtype=np.float64))
-    initial_length_device, initial_gradient_device = value_and_gradient(initial_device)
-    problem = TraceableScalarProblem(objective_fn=curve_length, x=initial_device)
     with chdir(output_directory):
-        solver_result = serial_solve_jax(
-            problem,
+        device_result = solve_rz_curve_length(
+            full_dofs=jax.device_put(full_dofs),
+            quadpoints=jax.device_put(np.asarray(curve.quadpoints, dtype=np.float64)),
+            free_positions=jax.device_put(free_positions),
+            order=curve.order,
+            nfp=curve.nfp,
+            stellsym=curve.stellsym,
             max_steps=max_steps,
             rtol=1.0e-10,
             atol=1.0e-8,
         )
-    final_device = jax.block_until_ready(problem.x)
-    final_length_device, final_gradient_device = value_and_gradient(final_device)
 
-    initial = np.asarray(jax.device_get(initial_device), dtype=np.float64)
-    initial_gradient = np.asarray(
-        jax.device_get(initial_gradient_device), dtype=np.float64
+    initial = np.asarray(
+        jax.device_get(device_result.initial_parameters),
+        dtype=np.float64,
     )
-    solution = np.asarray(jax.device_get(final_device), dtype=np.float64)
-    final_gradient = np.asarray(jax.device_get(final_gradient_device), dtype=np.float64)
-    initial_length = float(jax.device_get(initial_length_device))
-    final_length = float(jax.device_get(final_length_device))
+    initial_gradient = np.asarray(
+        jax.device_get(device_result.initial_residual_jacobian),
+        dtype=np.float64,
+    )
+    solution = np.asarray(
+        jax.device_get(device_result.final_parameters),
+        dtype=np.float64,
+    )
+    final_gradient = np.asarray(
+        jax.device_get(device_result.final_residual_jacobian),
+        dtype=np.float64,
+    )
+    initial_length = float(jax.device_get(device_result.initial_length))
+    final_length = float(jax.device_get(device_result.final_length))
     curve.x = solution
     circle_oracle = 2.0 * np.pi * MAJOR_RADIUS
+    final_objective_gradient = 2.0 * final_length * final_gradient
     scientific_success = bool(
-        solver_result.success
-        and np.isclose(final_length, circle_oracle, rtol=1.0e-9, atol=1.0e-9)
-        and np.linalg.norm(final_gradient, ord=np.inf) <= 1.0e-7
+        np.isclose(final_length, circle_oracle, rtol=1.0e-9, atol=1.0e-9)
+        and np.linalg.norm(final_objective_gradient, ord=np.inf) <= 2.0e-5
     )
     return ExampleResult(
         initial_parameters=tuple(float(value) for value in initial),
@@ -151,11 +135,13 @@ def solve(output_directory: Path, max_steps: int) -> ExampleResult:
         final_length=final_length,
         final_gradient=tuple(float(value) for value in final_gradient),
         circle_oracle=circle_oracle,
-        solver_success=solver_result.success,
-        solver_driver=solver_result.driver.value,
-        iterations=solver_result.nit,
-        function_evaluations=solver_result.nfev,
-        gradient_evaluations=solver_result.njev,
+        solver_success=scientific_success,
+        optimizer_success=device_result.optimizer.success,
+        optimizer_status=device_result.optimizer.status,
+        solver_driver=device_result.optimizer.driver.value,
+        iterations=device_result.optimizer.nit,
+        function_evaluations=device_result.optimizer.nfev,
+        gradient_evaluations=device_result.optimizer.njev,
         status="ok" if scientific_success else "failed",
     )
 

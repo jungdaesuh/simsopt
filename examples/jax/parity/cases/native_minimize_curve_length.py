@@ -184,84 +184,39 @@ def _jax(
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     import jax
-    import jax.numpy as jnp
 
-    from simsopt_jax.core.curve_geometry import (
-        curve_incremental_arclength_from_spec,
-        curve_spec_with_dofs,
-    )
-    from simsopt_jax.core.specs import make_curve_rzfourier_spec
-    from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
-    from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
+    from simsopt_jax.examples import solve_rz_curve_length
 
     curve = _build_curve(bundle, arrays["initial_full_parameters"])
     effective_fingerprint = _effective_fingerprint(bundle, curve)
     full_dofs = np.asarray(curve.local_full_x, dtype=np.float64)
     free_positions = np.flatnonzero(curve.local_dofs_free_status)
-    fixed_dofs = full_dofs.copy()
-    fixed_dofs[free_positions] = 0.0
-    expansion = np.zeros((full_dofs.size, free_positions.size), dtype=np.float64)
-    expansion[free_positions, np.arange(free_positions.size)] = 1.0
-    spec = make_curve_rzfourier_spec(
-        dofs=jnp.asarray(full_dofs, dtype=jnp.float64),
-        quadpoints=jnp.asarray(curve.quadpoints, dtype=jnp.float64),
+    device_result = solve_rz_curve_length(
+        full_dofs=jax.device_put(full_dofs),
+        quadpoints=jax.device_put(np.asarray(curve.quadpoints, dtype=np.float64)),
+        free_positions=jax.device_put(free_positions),
         order=curve.order,
         nfp=curve.nfp,
         stellsym=curve.stellsym,
-    )
-    fixed_dofs_device = jnp.asarray(fixed_dofs, dtype=jnp.float64)
-    expansion_device = jnp.asarray(expansion, dtype=jnp.float64)
-
-    def residual(parameters: jax.Array) -> jax.Array:
-        current_full = fixed_dofs_device + expansion_device @ parameters
-        current_spec = curve_spec_with_dofs(spec, current_full)
-        incremental_arclength = curve_incremental_arclength_from_spec(current_spec)
-        return jnp.reshape(curve_length_pure(incremental_arclength), (1,))
-
-    def objective(parameters: jax.Array) -> jax.Array:
-        residual_value = residual(parameters)
-        return jnp.vdot(residual_value, residual_value).real
-
-    initial_device = jnp.asarray(curve.x, dtype=jnp.float64)
-    residual_jacobian = jax.jit(jax.jacfwd(residual))
-    initial_residual = residual(initial_device)
-    initial_jacobian = residual_jacobian(initial_device)
-    problem = TraceableScalarProblem(objective_fn=objective, x=initial_device)
-    optimizer = serial_solve_jax(
-        problem,
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
         max_steps=_configuration_int(bundle, "max_steps"),
-        require_success=False,
-    )
-    final_device = problem.x
-    final_residual = residual(final_device)
-    final_jacobian = residual_jacobian(final_device)
-    completed = jax.block_until_ready(
-        (
-            initial_device,
-            initial_residual,
-            initial_jacobian,
-            final_device,
-            final_residual,
-            final_jacobian,
-        )
     )
 
     def host(value: jax.Array) -> np.ndarray:
         return np.asarray(jax.device_get(value), dtype=np.float64)
 
-    initial_parameters_host = host(completed[0])
-    initial_residual_host = host(completed[1])
-    initial_jacobian_host = host(completed[2])[0]
-    final_parameters_host = host(completed[3])
-    final_residual_host = host(completed[4])
-    final_jacobian_host = host(completed[5])[0]
+    initial_parameters_host = host(device_result.initial_parameters)
+    initial_length = float(host(device_result.initial_length))
+    initial_jacobian_host = host(device_result.initial_residual_jacobian)
+    final_parameters_host = host(device_result.final_parameters)
+    final_length = float(host(device_result.final_length))
+    final_jacobian_host = host(device_result.final_residual_jacobian)
     circle_oracle = 2.0 * np.pi * arrays["initial_full_parameters"][0]
-    final_objective_gradient = 2.0 * float(final_residual_host[0]) * final_jacobian_host
+    final_objective_gradient = 2.0 * final_length * final_jacobian_host
     scientific_success = bool(
         np.isclose(
-            final_residual_host[0],
+            final_length,
             circle_oracle,
             rtol=1.0e-9,
             atol=1.0e-9,
@@ -278,26 +233,26 @@ def _jax(
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=effective_fingerprint,
-        driver=optimizer.driver.value,
+        driver=device_result.optimizer.driver.value,
         normalized_status="converged" if scientific_success else "failed",
-        raw_status=str(optimizer.status),
+        raw_status=str(device_result.optimizer.status),
         success=scientific_success,
-        nit=optimizer.nit,
-        nfev=optimizer.nfev,
-        njev=optimizer.njev,
+        nit=device_result.optimizer.nit,
+        nfev=device_result.optimizer.nfev,
+        njev=device_result.optimizer.njev,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
         values={
             **_state(
                 "initial",
                 initial_parameters_host,
-                float(initial_residual_host[0]),
+                initial_length,
                 initial_jacobian_host,
             ),
             **_state(
                 "final",
                 final_parameters_host,
-                float(final_residual_host[0]),
+                final_length,
                 final_jacobian_host,
             ),
         },
