@@ -48,6 +48,12 @@ from examples.jax.parity.cases.native_surf_vol_area import (
 from examples.jax.parity.cases.native_surf_vol_area import (
     execute as execute_native_surf_vol_area,
 )
+from examples.jax.parity.cases.native_wireframe_rcls_basic import (
+    create_input as create_native_wireframe_rcls_basic_input,
+)
+from examples.jax.parity.cases.native_wireframe_rcls_basic import (
+    execute as execute_native_wireframe_rcls_basic,
+)
 from examples.jax.parity.cases.permanent_magnet import (
     create_input as create_permanent_magnet_input,
 )
@@ -110,6 +116,11 @@ _CASES = {
         case_id="native-stage-two-optimization-minimal",
         create_input=create_native_stage_two_optimization_minimal_input,
         execute=execute_native_stage_two_optimization_minimal,
+    ),
+    "native-wireframe-rcls-basic": CaseDefinition(
+        case_id="native-wireframe-rcls-basic",
+        create_input=create_native_wireframe_rcls_basic_input,
+        execute=execute_native_wireframe_rcls_basic,
     ),
     "traceable-least-squares": CaseDefinition(
         case_id="traceable-least-squares",
