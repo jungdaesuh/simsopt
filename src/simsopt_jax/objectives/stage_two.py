@@ -11,6 +11,7 @@ import jax.numpy as jnp
 
 from simsopt_jax.core import (
     CoilSetDofExtractionSpec,
+    apply_coil_symmetry,
     coil_specs_from_dof_extraction_spec,
     curve_geometry_from_spec,
 )
@@ -21,6 +22,12 @@ from simsopt_jax.core.curve_kernels import (
     kappa_pure,
 )
 from simsopt_jax.core.curve_geometry import pair_linking_number_pure
+from simsopt_jax.core.specs import FixedSurfaceFluxSpec
+
+from .stochastic_stage_two import (
+    StochasticCoilPerturbations,
+    stochastic_flux_mean_from_geometry,
+)
 
 
 class CoilDofExtractionProvider(Protocol):
@@ -194,6 +201,44 @@ def stage_two_geometric_penalty(
     return result
 
 
+def _stage_two_coil_geometry(
+    extraction: CoilSetDofExtractionSpec,
+    parameters: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
+    geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
+    geometry_by_curve: dict[
+        int,
+        tuple[jax.Array, jax.Array, jax.Array],
+    ] = {}
+    for coil_spec in coil_specs:
+        curve_id = id(coil_spec.curve)
+        curve_geometry = geometry_by_curve.get(curve_id)
+        if curve_geometry is None:
+            curve_geometry = curve_geometry_from_spec(coil_spec.curve)
+            geometry_by_curve[curve_id] = curve_geometry
+        gamma, gammadash, gammadashdash = curve_geometry
+        gamma, gammadash, current = apply_coil_symmetry(
+            gamma,
+            gammadash,
+            coil_spec.current.value,
+            coil_spec.symmetry,
+        )
+        if coil_spec.symmetry.has_rotation:
+            gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
+        geometry.append((gamma, gammadash, gammadashdash, current))
+    gammas, gammadashs, gammadashdashs, currents = zip(
+        *geometry,
+        strict=True,
+    )
+    return (
+        jnp.stack(gammas),
+        jnp.stack(gammadashs),
+        jnp.stack(gammadashdashs),
+        jnp.stack(currents),
+    )
+
+
 def make_stage_two_objective(
     field: CoilDofExtractionProvider,
     flux_objective: Callable[[jax.Array], jax.Array],
@@ -205,29 +250,46 @@ def make_stage_two_objective(
     extraction = field.coil_dof_extraction_spec()
 
     def objective(parameters: jax.Array) -> jax.Array:
-        coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
-        geometry: list[tuple[jax.Array, jax.Array, jax.Array]] = []
-        geometry_by_curve: dict[
-            int,
-            tuple[jax.Array, jax.Array, jax.Array],
-        ] = {}
-        for coil_spec in coil_specs:
-            curve_id = id(coil_spec.curve)
-            curve_geometry = geometry_by_curve.get(curve_id)
-            if curve_geometry is None:
-                curve_geometry = curve_geometry_from_spec(coil_spec.curve)
-                geometry_by_curve[curve_id] = curve_geometry
-            gamma, gammadash, gammadashdash = curve_geometry
-            if coil_spec.symmetry.has_rotation:
-                rotation = coil_spec.symmetry.rotmat
-                gamma = gamma @ rotation
-                gammadash = gammadash @ rotation
-                gammadashdash = gammadashdash @ rotation
-            geometry.append((gamma, gammadash, gammadashdash))
-        gamma, gammadash, gammadashdash = (
-            jnp.stack(terms) for terms in zip(*geometry, strict=True)
+        gamma, gammadash, gammadashdash, _ = _stage_two_coil_geometry(
+            extraction,
+            parameters,
         )
         return flux_objective(parameters) + stage_two_geometric_penalty(
+            gamma,
+            gammadash,
+            gammadashdash,
+            surface_gamma,
+            surface_normal,
+            config,
+        )
+
+    return objective
+
+
+def make_stochastic_stage_two_objective(
+    field: CoilDofExtractionProvider,
+    flux_spec: FixedSurfaceFluxSpec,
+    perturbations: StochasticCoilPerturbations,
+    surface_gamma: jax.Array,
+    surface_normal: jax.Array,
+    config: StageTwoObjectiveConfig,
+) -> Callable[[jax.Array], jax.Array]:
+    """Compose a scan-based stochastic flux mean with nominal coil penalties."""
+    extraction = field.coil_dof_extraction_spec()
+
+    def objective(parameters: jax.Array) -> jax.Array:
+        gamma, gammadash, gammadashdash, currents = _stage_two_coil_geometry(
+            extraction,
+            parameters,
+        )
+        stochastic_flux = stochastic_flux_mean_from_geometry(
+            gamma,
+            gammadash,
+            currents,
+            flux_spec,
+            perturbations,
+        )
+        return stochastic_flux + stage_two_geometric_penalty(
             gamma,
             gammadash,
             gammadashdash,
