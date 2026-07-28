@@ -357,6 +357,23 @@ def test_serial_solve_jax_forwards_relative_step_tolerance():
     assert result.options_used.xrtol == 0.0
 
 
+def test_serial_solve_jax_accepts_bounded_bfgs_line_search_budget() -> None:
+    with ScratchDir("."):
+        problem = TraceableScalarProblem(
+            objective_fn=lambda x: jnp.sum(jnp.square(x - 1.0)),
+            x=jnp.zeros(4, dtype=jnp.float64),
+        )
+        result = serial_solve_jax(
+            problem,
+            driver=Driver.SIMSOPT_BFGS,
+            max_steps=32,
+            line_search_max_steps=40,
+        )
+
+    assert isinstance(result.options_used, SimsoptBFGSOptions)
+    assert result.options_used.line_search_max_steps == 40
+
+
 @pytest.mark.parametrize(
     ("driver", "options_type"),
     [
