@@ -89,7 +89,7 @@ def _strain_values(
     *,
     rotation_order: int,
     width: float,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     alpha = rotation_alpha(rotation_dofs, quadpoints, rotation_order)
     alphadash = rotation_alphadash(
@@ -120,6 +120,7 @@ def _strain_values(
     return (
         torsion**2 * width**2 / 12.0,
         width * jnp.abs(binormal_curvature) / 2.0,
+        arc_length,
     )
 
 
@@ -135,7 +136,7 @@ def _strain_objective(
     torsional_threshold: float,
     curvature_threshold: float,
 ) -> jax.Array:
-    torsional_strain, binormal_strain = _strain_values(
+    torsional_strain, binormal_strain, arc_length = _strain_values(
         quadpoints,
         gamma,
         gammadash,
@@ -144,7 +145,6 @@ def _strain_objective(
         rotation_order=rotation_order,
         width=objective_width,
     )
-    arc_length = jnp.linalg.norm(gammadash, axis=1)
     torsional_excess = jnp.maximum(
         torsional_strain - torsional_threshold,
         0.0,
@@ -199,7 +199,7 @@ def solve_strain_rotation(
     @jax.jit
     def state(parameters: jax.Array) -> StrainState:
         objective_value, gradient = value_and_gradient(parameters)
-        torsional_strain, binormal_strain = _strain_values(
+        torsional_strain, binormal_strain, _arc_length = _strain_values(
             quadpoints_array,
             gamma_array,
             gammadash_array,
