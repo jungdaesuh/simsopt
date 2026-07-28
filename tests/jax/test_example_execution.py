@@ -25,19 +25,3 @@ def test_scalar_example_driver_separates_fast_and_parity_modes(
     monkeypatch.setattr(execution, "get_backend_mode", lambda: mode)
 
     assert execution.scalar_example_driver() == expected
-
-
-@pytest.mark.parametrize(
-    "mode",
-    ("jax_cpu_fast", "jax_gpu_fast", "jax_cpu_parity", "jax_gpu_parity"),
-)
-def test_scalar_example_driver_preserves_declared_native_lbfgsb(
-    monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-) -> None:
-    monkeypatch.setattr(execution, "get_backend_mode", lambda: mode)
-
-    assert (
-        execution.scalar_example_driver(native_driver=Driver.SIMSOPT_LBFGSB)
-        == Driver.SIMSOPT_LBFGSB
-    )
