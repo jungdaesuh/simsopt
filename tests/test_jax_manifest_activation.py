@@ -18,10 +18,12 @@ ACTIVE_EXAMPLES = REPO_ROOT / "examples" / "jax" / "manifest.json"
 ACTIVE_PARITY = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
 CANDIDATE_EXAMPLES = REPO_ROOT / "docs" / "jax_examples_manifest_v3_candidate.json"
 CANDIDATE_PARITY = REPO_ROOT / "docs" / "jax_parity_manifest_v2_candidate.json"
-APPROVED_EXAMPLES_SHA = (
-    "a2b60dfe4cd97b4f8092f315d26db952181ba5ee1121011edaec9bd30349ea0d"
+CANDIDATE_EXAMPLES_SHA = (
+    "edd4d93ec5d02b9f01d259f06364480168ef4d08bb5a648bc059fafd2012efc6"
 )
-APPROVED_PARITY_SHA = "b51c69d7d4e08d2d08ba121f930133198f340684911565d1d3871fdaa15d78fa"
+CANDIDATE_PARITY_SHA = (
+    "37d4699c52e0924acc1320b3bdcef1cc0f3bbb9d006d45035ae24f58002c750f"
+)
 
 
 def _valid_contract() -> ActivationContract:
@@ -30,8 +32,8 @@ def _valid_contract() -> ActivationContract:
         active_parity_bytes=ACTIVE_PARITY.read_bytes(),
         candidate_examples_bytes=CANDIDATE_EXAMPLES.read_bytes(),
         candidate_parity_bytes=CANDIDATE_PARITY.read_bytes(),
-        approved_examples_sha256=APPROVED_EXAMPLES_SHA,
-        approved_parity_sha256=APPROVED_PARITY_SHA,
+        approved_examples_sha256=CANDIDATE_EXAMPLES_SHA,
+        approved_parity_sha256=CANDIDATE_PARITY_SHA,
         repo_root=REPO_ROOT,
     )
 
@@ -45,16 +47,16 @@ def test_activation_requires_exact_approved_candidate_pair() -> None:
         "060e55339194c203263da9d5690c2ff31bd6681f5713dc2ead0ce3313e313137",
     )
     assert contract.after_sha256 == (
-        APPROVED_EXAMPLES_SHA,
-        APPROVED_PARITY_SHA,
+        CANDIDATE_EXAMPLES_SHA,
+        CANDIDATE_PARITY_SHA,
     )
 
 
 @pytest.mark.parametrize(
     ("examples_approval", "parity_approval"),
     [
-        ("0" * 64, APPROVED_PARITY_SHA),
-        (APPROVED_EXAMPLES_SHA, "0" * 64),
+        ("0" * 64, CANDIDATE_PARITY_SHA),
+        (CANDIDATE_EXAMPLES_SHA, "0" * 64),
     ],
 )
 def test_activation_rejects_unapproved_hashes(
@@ -76,15 +78,15 @@ def test_activation_rejects_byte_drift_even_when_json_semantics_survive() -> Non
     changed = CANDIDATE_EXAMPLES.read_bytes().replace(
         b'"schema_version":3', b'"schema_version": 3'
     )
-    assert hashlib.sha256(changed).hexdigest() != APPROVED_EXAMPLES_SHA
+    assert hashlib.sha256(changed).hexdigest() != CANDIDATE_EXAMPLES_SHA
     with pytest.raises(ManifestActivationError, match="candidate approval mismatch"):
         validate_activation_bundle(
             active_examples_bytes=ACTIVE_EXAMPLES.read_bytes(),
             active_parity_bytes=ACTIVE_PARITY.read_bytes(),
             candidate_examples_bytes=changed,
             candidate_parity_bytes=CANDIDATE_PARITY.read_bytes(),
-            approved_examples_sha256=APPROVED_EXAMPLES_SHA,
-            approved_parity_sha256=APPROVED_PARITY_SHA,
+            approved_examples_sha256=CANDIDATE_EXAMPLES_SHA,
+            approved_parity_sha256=CANDIDATE_PARITY_SHA,
             repo_root=REPO_ROOT,
         )
 

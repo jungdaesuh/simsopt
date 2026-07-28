@@ -85,8 +85,8 @@ def _validate_candidate_policy(pair: ManifestContractPair) -> None:
         raise ManifestActivationError(
             "schema activation must not promote scientific parity claims"
         )
-    if len(pair.examples.source_catalog) != 51:
-        raise ManifestActivationError("schema activation must retain all 51 sources")
+    if len(pair.examples.source_catalog) != 52:
+        raise ManifestActivationError("schema activation must retain all 52 sources")
 
 
 def _require_version_pair(

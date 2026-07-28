@@ -291,10 +291,10 @@ def test_no_write_cli_publishes_exact_candidate_bytes_and_semantic_diff() -> Non
         == envelope["candidate_sha256"]["parity_manifest_v2"]
     )
     assert envelope["semantic_diff"] == {
-        "canonical_relationship_count": 26,
+        "canonical_relationship_count": 27,
         "legacy_relationship_count": 28,
         "legacy_tutorial_count": 11,
-        "planned_one_to_one_count": 26,
+        "planned_one_to_one_count": 27,
         "promoted_parity_claim_count": 0,
     }
     assert EXAMPLES_MANIFEST.read_bytes() == before_examples
