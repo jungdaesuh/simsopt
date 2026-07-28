@@ -239,12 +239,19 @@ def solve_strain_rotation(
             initial_state.gradient,
         ),
     )
+    final_parameters = jax.device_put(optimizer_result.x, initial_array.sharding)
     return StrainOptimizationDeviceResult(
         initial=initial_state,
-        final=state(optimizer_result.x),
-        success=jnp.asarray(optimizer_result.success),
-        status=jnp.asarray(optimizer_result.status),
-        iterations=jnp.asarray(optimizer_result.nit),
-        function_evaluations=jnp.asarray(optimizer_result.nfev),
-        gradient_evaluations=jnp.asarray(optimizer_result.njev),
+        final=state(final_parameters),
+        success=jax.device_put(optimizer_result.success, initial_array.sharding),
+        status=jax.device_put(optimizer_result.status, initial_array.sharding),
+        iterations=jax.device_put(optimizer_result.nit, initial_array.sharding),
+        function_evaluations=jax.device_put(
+            optimizer_result.nfev,
+            initial_array.sharding,
+        ),
+        gradient_evaluations=jax.device_put(
+            optimizer_result.njev,
+            initial_array.sharding,
+        ),
     )
