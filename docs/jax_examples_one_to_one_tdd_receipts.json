@@ -1714,6 +1714,254 @@
           "timestamp_utc": "2026-07-28T10:10:38Z"
         }
       }
+    },
+{
+    "behavior_id": "exact-stage-two-optimization-planar-coils-native-jax-parity",
+    "native_source_id": "2_Intermediate/stage_two_optimization_planar_coils.py",
+    "mirror_id": "native-stage-two-optimization-planar-coils",
+    "intended_red_failure": "missing exact planar stage two parity case",
+    "test_sha256": {
+      "tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py": "047ac54c561fad1b2bc2fdb7258d43d0cdd28ce6b964c4160a37cdf5f8267569"
+    },
+    "phases": {
+      "red": {
+        "revision": "ad96be684a63f2a17bc5d073e151fb13ecf27305",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_cpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py\"])\noutput = captured.getvalue()\nif result == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization-planar-coils\" in output:\n    print(\"missing exact planar stage two parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact planar stage two parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 1,
+        "failure_excerpt": "missing exact planar stage two parity case",
+        "combined_output_sha256": "64198874af41a5e49728771b57fe8d0baa0e4529d8d54765006a82cc67c0fb6b",
+        "source_sha256": {
+          "examples/jax/parity/cases/__init__.py": "4efab38816f46472b46cbcae16d1e6b87f0cec39790be8273ac558024f4a44ae"
+        },
+        "timestamp_utc": "2026-07-28T11:45:29.313521Z"
+      },
+      "green": {
+        "revision": "d47f1e75a9fe1f4f3b4ca9581f8d876f7541f40b",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_cpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py\"])\noutput = captured.getvalue()\nif result == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization-planar-coils\" in output:\n    print(\"missing exact planar stage two parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact planar stage two parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py": "36f08586f00f5b6782efabafa5e3fbccc907b8170b896fd8d2a167c6d24ae67e"
+        },
+        "timestamp_utc": "2026-07-28T11:45:32.338060Z"
+      },
+      "refactor": {
+        "revision": "c091315fd02e68d46a07ee213936b59f64028f5c",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_cpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py\"])\noutput = captured.getvalue()\nif result == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization-planar-coils\" in output:\n    print(\"missing exact planar stage two parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact planar stage two parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py": "36f08586f00f5b6782efabafa5e3fbccc907b8170b896fd8d2a167c6d24ae67e"
+        },
+        "timestamp_utc": "2026-07-28T11:48:03.047117Z"
+      }
     }
+  },
+  {
+    "behavior_id": "reusable-planar-stage-two-workflow-boundary",
+    "native_source_id": "2_Intermediate/stage_two_optimization_planar_coils.py",
+    "mirror_id": "native-stage-two-optimization-planar-coils",
+    "intended_red_failure": "planar example lacks reusable device workflow boundary",
+    "test_sha256": {
+      "tests/jax/examples/test_stage_two_planar_example.py": "14ddd78193184a9276158a8199e373d38a0d83b84aaf719aaac3e883df45106f"
+    },
+    "phases": {
+      "red": {
+        "revision": "26df59bf64f5dce214fe6af489e47cd0166396dc",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/jax/examples/test_stage_two_planar_example.py\", \"-k\", \"reuses_one_parametric_device_workflow\"])\noutput = captured.getvalue()\nif result == 1 and \"solve_standard_stage_two\" in output and \"AssertionError\" in output:\n    print(\"planar example lacks reusable device workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected reusable-planar-stage-two-workflow-boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 1,
+        "failure_excerpt": "planar example lacks reusable device workflow boundary",
+        "combined_output_sha256": "0f0f3d837daf4fefa51fa59df8222efaaef1d2b48c2f306a406bf862f7c080a3",
+        "source_sha256": {
+          "examples/jax/2_Intermediate/stage_two_optimization_planar_coils.py": "1ba0c2862246dd0d330c70a4f5a25f4aecb3638bebcd881d67b3ea22620a6940"
+        },
+        "timestamp_utc": "2026-07-28T11:52:06.879047Z"
+      },
+      "green": {
+        "revision": "f9ca2fd13c48d12330990bbb0809b8962a1f9b3c",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/jax/examples/test_stage_two_planar_example.py\", \"-k\", \"reuses_one_parametric_device_workflow\"])\noutput = captured.getvalue()\nif result == 1 and \"solve_standard_stage_two\" in output and \"AssertionError\" in output:\n    print(\"planar example lacks reusable device workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected reusable-planar-stage-two-workflow-boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "examples/jax/2_Intermediate/stage_two_optimization_planar_coils.py": "07facac2fb7df47ef834bc74d38a05ba9ea249f1bf716a86884889b78db560a0"
+        },
+        "timestamp_utc": "2026-07-28T11:52:08.161867Z"
+      },
+      "refactor": {
+        "revision": "c091315fd02e68d46a07ee213936b59f64028f5c",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/jax/examples/test_stage_two_planar_example.py\", \"-k\", \"reuses_one_parametric_device_workflow\"])\noutput = captured.getvalue()\nif result == 1 and \"solve_standard_stage_two\" in output and \"AssertionError\" in output:\n    print(\"planar example lacks reusable device workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected reusable-planar-stage-two-workflow-boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "examples/jax/2_Intermediate/stage_two_optimization_planar_coils.py": "c41c7a4d3048fc3d11d207faf0a9df9f86c16afac111b4d41a085e99d5fe5d90"
+        },
+        "timestamp_utc": "2026-07-28T11:52:09.455419Z"
+      }
+    }
+  },
+  {
+    "behavior_id": "bounded-stage-two-lbfgs-history",
+    "native_source_id": "2_Intermediate/stage_two_optimization_planar_coils.py",
+    "mirror_id": "native-stage-two-optimization-planar-coils",
+    "intended_red_failure": "stage two LBFGS history scales with iteration budget",
+    "test_sha256": {
+      "tests/integration/test_jax_stage_two_optimization_strict_transfer.py": "b6ec17ccf65481e2e53b81f8a5feedf9e1e52c9a15717d100724ffe61d49cfd8"
+    },
+    "phases": {
+      "red": {
+        "revision": "70e654ff43ff92a92f44114d9f4a4d1010f6a47c",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\", \"-k\", \"lbfgs_history_is_bounded\"])\noutput = captured.getvalue()\nif result == 1 and \"_STAGE_TWO_LBFGS_HISTORY_SIZE\" in output and \"AssertionError\" in output:\n    print(\"stage two LBFGS history scales with iteration budget\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected bounded-stage-two-lbfgs-history outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 1,
+        "failure_excerpt": "stage two LBFGS history scales with iteration budget",
+        "combined_output_sha256": "221fd96953118c4d7b8d3dcd1d01c299e3b0c42d74fc941a2d888206e27de463",
+        "source_sha256": {
+          "src/simsopt_jax/examples/stage_two_standard.py": "625b8b707d8b6d1950a9b6a509d6860bb2550a0b1c252f55426ff7fb65ed9b29"
+        },
+        "timestamp_utc": "2026-07-28T11:52:10.890197Z"
+      },
+      "green": {
+        "revision": "2ef1f7afb59b66ba9884424c7f55a752ef56068a",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\", \"-k\", \"lbfgs_history_is_bounded\"])\noutput = captured.getvalue()\nif result == 1 and \"_STAGE_TWO_LBFGS_HISTORY_SIZE\" in output and \"AssertionError\" in output:\n    print(\"stage two LBFGS history scales with iteration budget\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected bounded-stage-two-lbfgs-history outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "src/simsopt_jax/examples/stage_two_standard.py": "7b6be04939317e74e67d4f3f26e4897a3fea0f7b632ffc3343ee846906f0c5bf"
+        },
+        "timestamp_utc": "2026-07-28T11:52:12.328912Z"
+      },
+      "refactor": {
+        "revision": "e536ea7be56714ee97225ce43761f94b3697990a",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_optimization_strict_transfer.py\", \"-k\", \"lbfgs_history_is_bounded\"])\noutput = captured.getvalue()\nif result == 1 and \"_STAGE_TWO_LBFGS_HISTORY_SIZE\" in output and \"AssertionError\" in output:\n    print(\"stage two LBFGS history scales with iteration budget\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected bounded-stage-two-lbfgs-history outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "src/simsopt_jax/examples/stage_two_standard.py": "d82d67665a82b1b31ea2356790c9cea2572d3b9d0ef0b4220ea9f9c54211a128"
+        },
+        "timestamp_utc": "2026-07-28T11:52:13.678808Z"
+      }
+    }
+  },
+  {
+    "behavior_id": "device-resident-planar-topology-jit",
+    "native_source_id": "2_Intermediate/stage_two_optimization_planar_coils.py",
+    "mirror_id": "native-stage-two-optimization-planar-coils",
+    "intended_red_failure": "planar topology JIT captures device arrays as constants",
+    "test_sha256": {
+      "tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py": "f29dd2222f0d276cf9689d722fbcd34d4cca6703f4e094af7bb41ce1d8260d0d"
+    },
+    "phases": {
+      "red": {
+        "revision": "80659ef246e7196a8c59c5e0e97548d62e5998e3",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py\", \"-k\", \"topology_jit_receives_device_arrays_as_operands\"])\noutput = captured.getvalue()\nif result == 1 and \"extraction\" in output and \"parameter_states\" in output and \"AssertionError\" in output:\n    print(\"planar topology JIT captures device arrays as constants\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected device-resident-planar-topology-jit outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 1,
+        "failure_excerpt": "planar topology JIT captures device arrays as constants",
+        "combined_output_sha256": "5e3bc04119ba6bcd2d328352f8b3fd8555c3a8b5c2e9e2092821ef457e232a44",
+        "source_sha256": {
+          "examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py": "36f08586f00f5b6782efabafa5e3fbccc907b8170b896fd8d2a167c6d24ae67e"
+        },
+        "timestamp_utc": "2026-07-28T11:52:15.048906Z"
+      },
+      "green": {
+        "revision": "771ff75eb54a4d65240b3e42cdb931b2c8b2239f",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py\", \"-k\", \"topology_jit_receives_device_arrays_as_operands\"])\noutput = captured.getvalue()\nif result == 1 and \"extraction\" in output and \"parameter_states\" in output and \"AssertionError\" in output:\n    print(\"planar topology JIT captures device arrays as constants\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected device-resident-planar-topology-jit outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py": "443d43b8a045701354892418696a517c916c9d1b512c943b5f29e6a3f5ea19b1"
+        },
+        "timestamp_utc": "2026-07-28T11:52:18.494475Z"
+      },
+      "refactor": {
+        "revision": "e536ea7be56714ee97225ce43761f94b3697990a",
+        "command": [
+          "/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/bin/python",
+          "-S",
+          "-c",
+          "import contextlib\nimport io\nimport os\nimport sys\nsys.path[:0] = [\"src\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/build/cp311-cp311-linux_x86_64\", \"/home/jungdaesuh/code/columbia/simsopt-pr-jax-port-squashed/.venv/lib/python3.11/site-packages\", \"/home/jungdaesuh/code/columbia/.venv-simsopt-dense-evidence-fa6fcf221/lib/python3.11/site-packages\"]\nos.environ.pop(\"DISPLAY\", None)\nos.environ.pop(\"WAYLAND_DISPLAY\", None)\nos.environ.pop(\"GNOME_SETUP_DISPLAY\", None)\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"JAX_PLATFORMS\"] = \"cpu\"\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    result = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_optimization_planar_coils_parity.py\", \"-k\", \"topology_jit_receives_device_arrays_as_operands\"])\noutput = captured.getvalue()\nif result == 1 and \"extraction\" in output and \"parameter_states\" in output and \"AssertionError\" in output:\n    print(\"planar topology JIT captures device arrays as constants\", file=sys.stderr)\n    raise SystemExit(1)\nif result == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected device-resident-planar-topology-jit outcome\", file=sys.stderr)\nraise SystemExit(99)"
+        ],
+        "cwd": ".",
+        "expected_exit": 0,
+        "failure_excerpt": null,
+        "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "source_sha256": {
+          "examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py": "852307cf8efdcb52d6b6014eda9e580b533c543a0fabac83d49ea300f098eac0"
+        },
+        "timestamp_utc": "2026-07-28T11:52:22.181900Z"
+      }
+    }
+  }
   ]
 }
