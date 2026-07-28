@@ -91,6 +91,12 @@ from examples.jax.parity.cases.native_stage_two_optimization_planar_coils import
 from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
     create_input as create_native_stage_two_optimization_stochastic_input,
 )
+from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import (
+    create_input as create_native_stage_two_finitebuild_input,
+)
+from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import (
+    execute as execute_native_stage_two_finitebuild,
+)
 from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
     execute as execute_native_stage_two_optimization_stochastic,
 )
@@ -266,6 +272,11 @@ _CASES = {
         case_id="native-stage-two-optimization",
         create_input=create_native_stage_two_optimization_input,
         execute=execute_native_stage_two_optimization,
+    ),
+    "native-stage-two-optimization-finitebuild": CaseDefinition(
+        case_id="native-stage-two-optimization-finitebuild",
+        create_input=create_native_stage_two_finitebuild_input,
+        execute=execute_native_stage_two_finitebuild,
     ),
     "native-stage-two-optimization-planar-coils": CaseDefinition(
         case_id="native-stage-two-optimization-planar-coils",
