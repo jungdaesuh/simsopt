@@ -22,6 +22,8 @@ def test_boozerqa_parity_uses_bounded_host_outer_optimization() -> None:
 
     assert "serial_solve_jax" not in source
     assert "minimize_bfgs_host_core" in source
+    assert 'runtime["value_and_grad"]' in source
+    assert "jax.value_and_grad(objective)" not in source
 
 
 def test_exact_boozerqa_workflow_matches_native_and_jax_cpu(
