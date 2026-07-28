@@ -201,7 +201,7 @@ def stage_two_geometric_penalty(
     return result
 
 
-def _stage_two_coil_geometry(
+def stage_two_coil_geometry(
     extraction: CoilSetDofExtractionSpec,
     parameters: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
@@ -250,7 +250,7 @@ def make_stage_two_objective(
     extraction = field.coil_dof_extraction_spec()
 
     def objective(parameters: jax.Array) -> jax.Array:
-        gamma, gammadash, gammadashdash, _ = _stage_two_coil_geometry(
+        gamma, gammadash, gammadashdash, _ = stage_two_coil_geometry(
             extraction,
             parameters,
         )
@@ -278,7 +278,7 @@ def make_stochastic_stage_two_objective(
     extraction = field.coil_dof_extraction_spec()
 
     def objective(parameters: jax.Array) -> jax.Array:
-        gamma, gammadash, gammadashdash, currents = _stage_two_coil_geometry(
+        gamma, gammadash, gammadashdash, currents = stage_two_coil_geometry(
             extraction,
             parameters,
         )

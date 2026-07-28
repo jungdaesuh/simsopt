@@ -1,3 +1,13 @@
-"""Legacy objective adapters for ``simsopt_jax``."""
+"""Native graph adapters for public traceable JAX objectives."""
 
-__all__ = ()
+from .force_stage_two import (
+    ForceStageTwoConfig,
+    force_stage_two_diagnostics,
+    make_force_stage_two_objective,
+)
+
+__all__ = (
+    "ForceStageTwoConfig",
+    "force_stage_two_diagnostics",
+    "make_force_stage_two_objective",
+)
