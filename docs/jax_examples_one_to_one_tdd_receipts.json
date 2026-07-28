@@ -924,6 +924,138 @@
           "timestamp_utc": "2026-07-28T06:33:59Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-qfm-native-jax-parity",
+      "native_source_id": "1_Simple/qfm.py",
+      "mirror_id": "native-qfm",
+      "intended_red_failure": "missing exact QFM native JAX parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_qfm_parity.py": "be60300e969df95d2d1f964946c7bf90cfe3a2dd18a03b1c1fe5095063190a71"
+      },
+      "phases": {
+        "red": {
+          "revision": "ecf0c1ee9c1a93fbcada594ddda2fe8bbde26427",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_qfm_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-qfm\" in output:\n    print(\"missing exact QFM native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact QFM parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact QFM native JAX parity case",
+          "combined_output_sha256": "ab65a1c96010a42a290da65a7aa240764cfe61faefb3b27d250223352c302da3",
+          "source_sha256": {
+            "examples/jax/1_Simple/qfm.py": "bbb703880d788dcefe66ef4f25bc1ab14295d21d68c4536043da40159d5f90ba",
+            "examples/jax/parity/cases/__init__.py": "640ea0290e699c9f2fca29b36688643beb6861ad5b1ad7ed43efd8c5c8c97528"
+          },
+          "timestamp_utc": "2026-07-28T06:59:31Z"
+        },
+        "green": {
+          "revision": "5845ffcc9de02cd941a01cc3584a2076bc68d7ea",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_qfm_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-qfm\" in output:\n    print(\"missing exact QFM native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact QFM parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "2b7e9f16819be88955dfba51d44358f259c5e75325b9ce84bdd63b5bac748e7a",
+            "examples/jax/parity/cases/native_qfm.py": "42db69e603a768ba760dc04ad0c96a8bcd9bfe550fb6bb2fb10f7dc2f7a46366",
+            "src/simsopt_jax/examples/qfm_sequence.py": "bbb4e1ef1fce2496d32a57de818496d16a54674f26f77724fd397750019c6711"
+          },
+          "timestamp_utc": "2026-07-28T06:59:36Z"
+        },
+        "refactor": {
+          "revision": "113a62c7b760135137716e3c95c7ffd575487d03",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_qfm_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-qfm\" in output:\n    print(\"missing exact QFM native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact QFM parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/qfm.py": "0dad5dbea0e2ddcf9cc8074813bf5dd39254ab505aee2c3131d2c39cb29e0bba",
+            "examples/jax/parity/cases/native_qfm.py": "b99615a3c9234a994d9187fdaaf2c0d4c7b322b8e3d8edb84dcbedd3e8e1fba4",
+            "src/simsopt_jax/examples/qfm_sequence.py": "3ef32fe55e10c56d034196ffb69b71a4a80a4783b0eaf8ea3dbe1518c2cca55c"
+          },
+          "timestamp_utc": "2026-07-28T07:15:14Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "strict-transfer-qfm-sequence",
+      "native_source_id": "1_Simple/qfm.py",
+      "mirror_id": "native-qfm",
+      "intended_red_failure": "QFM workflow is not device resident",
+      "test_sha256": {
+        "tests/integration/test_jax_qfm_strict_transfer.py": "db4b83cf1efc099d96ff21d5dd6717fa8a166f5fc6e1aabcd2572f4527a68b4e"
+      },
+      "phases": {
+        "red": {
+          "revision": "346e35ee06ba84e1c19cf09e730e58c4fd38d880",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_gpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/lib/python3.11/site-packages\")\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_qfm_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_qfm_example_has_one_batched_numerical_host_boundary\" in output:\n    print(\"QFM workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer QFM outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "QFM workflow is not device resident",
+          "combined_output_sha256": "e19aa649309aa865f15b617fc6a847a03f20b9abff803be91284a1831f3c7266",
+          "source_sha256": {
+            "examples/jax/1_Simple/qfm.py": "bbb703880d788dcefe66ef4f25bc1ab14295d21d68c4536043da40159d5f90ba",
+            "src/simsopt_jax/core/surface_rzfourier.py": "64d97f13e0584cd4438c7703dad59e0e5be50af06ffe4157bdb7cd2b37f9c3b0",
+            "src/simsopt_jax/examples/qfm_sequence.py": "bbb4e1ef1fce2496d32a57de818496d16a54674f26f77724fd397750019c6711"
+          },
+          "timestamp_utc": "2026-07-28T07:06:39Z"
+        },
+        "green": {
+          "revision": "52f9071fdb29ce0bb4b533565a3550ed77899bcb",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_gpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/lib/python3.11/site-packages\")\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_qfm_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_qfm_example_has_one_batched_numerical_host_boundary\" in output:\n    print(\"QFM workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer QFM outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/qfm.py": "0dad5dbea0e2ddcf9cc8074813bf5dd39254ab505aee2c3131d2c39cb29e0bba",
+            "src/simsopt_jax/core/surface_rzfourier.py": "40488fde0ca7a86903521f388438776f2190e1196a215f3a3acd5a39b0e4fb0a",
+            "src/simsopt_jax/examples/execution.py": "e21cbb8e5daef2ddc63bbce0ebf98faf92f1e133193fae7f505063bdc990cc2b"
+          },
+          "timestamp_utc": "2026-07-28T07:11:59Z"
+        },
+        "refactor": {
+          "revision": "113a62c7b760135137716e3c95c7ffd575487d03",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"SIMSOPT_BACKEND_MODE\"] = \"jax_gpu_parity\"\nos.environ[\"SIMSOPT_PRECISION\"] = \"fp64\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/lib/python3.11/site-packages\")\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_qfm_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_qfm_example_has_one_batched_numerical_host_boundary\" in output:\n    print(\"QFM workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer QFM outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/qfm.py": "0dad5dbea0e2ddcf9cc8074813bf5dd39254ab505aee2c3131d2c39cb29e0bba",
+            "src/simsopt_jax/core/surface_rzfourier.py": "40488fde0ca7a86903521f388438776f2190e1196a215f3a3acd5a39b0e4fb0a",
+            "src/simsopt_jax/examples/qfm_sequence.py": "3ef32fe55e10c56d034196ffb69b71a4a80a4783b0eaf8ea3dbe1518c2cca55c"
+          },
+          "timestamp_utc": "2026-07-28T07:15:14Z"
+        }
+      }
     }
   ]
 }
