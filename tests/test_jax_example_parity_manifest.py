@@ -102,8 +102,26 @@ def test_coil_flux_relationship_routes_each_scientific_observable() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "phase",
+    (
+        "area",
+        "conservation",
+        "construction",
+        "first",
+        "flux",
+        "history",
+        "interpolation",
+        "poincare",
+        "second",
+        "taylor",
+        "toroidal_flux",
+        "volume",
+    ),
+)
 def test_parity_manifest_accepts_named_scientific_phases(
     tmp_path: Path,
+    phase: str,
 ) -> None:
     document = deepcopy(_document())
     relationship = next(
@@ -119,7 +137,7 @@ def test_parity_manifest_accepts_named_scientific_phases(
     for route in routes:
         assert isinstance(route, dict)
         if route["phase"] == "initial" and route["observable"] == observable:
-            route["phase"] = "construction"
+            route["phase"] = phase
 
     load_parity_manifest(
         _write_document(tmp_path, document),
