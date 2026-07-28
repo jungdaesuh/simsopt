@@ -109,14 +109,10 @@ def _force_stage_two_metrics(
         sampled_target_gammadash,
         axis=-1,
     )
-    force_objective = (
-        jnp.sum(
-            jnp.maximum(force_norms - config.force_threshold, 0.0)
-            ** config.force_power
-            * target_speed
-        )
-        / (force_norms.shape[1] * config.force_power)
-    )
+    force_objective = jnp.sum(
+        jnp.maximum(force_norms - config.force_threshold, 0.0) ** config.force_power
+        * target_speed
+    ) / (force_norms.shape[1] * config.force_power)
     vacuum_energy = b2energy_pure(
         gamma,
         gammadash,

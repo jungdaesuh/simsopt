@@ -265,6 +265,7 @@ def _prepare_target_source_inputs_pure(
     Returns:
         Tuple of arrays: (gammas_targets, gammadashs_targets, gammas_sources, gammadashs_sources, currents_targets, currents_sources).
     """
+
     def downsample_points(value):
         array = _as_jax_float64(value)
         return lax.slice_in_dim(
@@ -2210,9 +2211,7 @@ def lp_force_pure(
     )
     point_count = force_norms.shape[1]
     return (
-        jnp.sum(
-            jnp.maximum(force_norms - threshold, 0) ** p * target_speed
-        )
+        jnp.sum(jnp.maximum(force_norms - threshold, 0) ** p * target_speed)
         / point_count
     ) * (1.0 / p)
 
