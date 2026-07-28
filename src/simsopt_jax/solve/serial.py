@@ -218,7 +218,10 @@ def traceable_least_squares_jacobian(
     mesh=None,
 ) -> jax.Array:
     """Return the traceable residual Jacobian using the caller-selected route."""
-    residuals = prob.residuals
+
+    def residuals(current_x):
+        return jnp.ravel(prob.residual_fn(current_x))
+
     if method == "jacfwd":
         return jax.jacfwd(residuals)(x)
     if method == "vmap":
