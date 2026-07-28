@@ -20,9 +20,11 @@ from simsopt._core.tracing_metadata import (
 )
 from simsopt.field.magneticfield import MagneticField
 from simsopt.field.tracing import gc_to_fullorbit_initial_guesses
+from simsopt_jax.backend.runtime import get_backend_mode
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.runtime.host_boundary import host_array as _jax_trace_host_array
 from simsopt_jax.core.tracing import (
+    AdaptiveLoop,
     FieldlineTracingSpec,
     FullorbitTracingSpec,
     GuidingCenterTracingSpec,
@@ -68,6 +70,10 @@ __all__ = [
     "trace_particles",
     "trace_particles_boozer",
 ]
+
+
+def _adaptive_loop_for_backend_mode(mode: str) -> AdaptiveLoop:
+    return "while" if mode.endswith("_fast") else "scan"
 
 
 def _normalize_parallel_speeds(
@@ -356,6 +362,7 @@ def _trace_particles_boozer_jax(
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            adaptive_loop=_adaptive_loop_for_backend_mode(get_backend_mode()),
         )
         result = trace_guiding_centers_boozer_batched(
             spec,
@@ -512,6 +519,7 @@ def _trace_particles_jax_guiding_center_vacuum(
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            adaptive_loop=_adaptive_loop_for_backend_mode(get_backend_mode()),
         )
         y0s = np.column_stack([local_xyz, local_speed_par])
         result = trace_guiding_centers_batched(
@@ -606,6 +614,7 @@ def _trace_particles_jax_fullorbit_vacuum(
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            adaptive_loop=_adaptive_loop_for_backend_mode(get_backend_mode()),
         )
         result = trace_fullorbits_batched(
             spec,
@@ -823,6 +832,7 @@ def _compute_fieldlines_jax(field, R0, Z0, tmax, tol, phis, stopping_criteria, c
             atol=float(tol),
             max_steps=max_steps,
             max_phi_hits=max_phi_hits,
+            adaptive_loop=_adaptive_loop_for_backend_mode(get_backend_mode()),
         )
         result = trace_fieldlines_batched(
             spec,
