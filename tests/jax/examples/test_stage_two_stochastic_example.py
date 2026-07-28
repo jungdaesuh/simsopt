@@ -48,3 +48,12 @@ def test_stochastic_stage_two_is_an_exact_name_public_jax_example() -> None:
         "out_of_sample_objective",
         "solver_status",
     } <= observable_keys
+
+
+def test_stochastic_stage_two_bounds_history_and_publishes_once() -> None:
+    source = EXAMPLE.read_text(encoding="utf-8")
+
+    assert "_STOCHASTIC_LBFGS_HISTORY_SIZE = 10" in source
+    assert "maxcor=_STOCHASTIC_LBFGS_HISTORY_SIZE" in source
+    assert "maxcor=min(max_steps, 400)" not in source
+    assert source.count("jax.device_get(") == 1
