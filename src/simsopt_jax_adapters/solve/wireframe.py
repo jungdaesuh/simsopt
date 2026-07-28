@@ -275,10 +275,8 @@ def gsco_wireframe_jax(
     segments = np.asarray(wframe.segments, dtype=np.int32)
     connections = np.asarray(wframe.connected_segments, dtype=np.int32)
 
-    if x_init is None:
-        x_init_arr = jnp.reshape(_as_runtime_array(wframe.currents), (-1, 1))
-    else:
-        x_init_arr = jnp.reshape(_as_runtime_array(x_init), (-1, 1))
+    initial_currents = wframe.currents if x_init is None else x_init
+    x_init_arr = jnp.reshape(_as_runtime_array(initial_currents), (-1, 1))
 
     if loop_count_init is None:
         loop_count_arr = jnp.zeros(len(free_loops), dtype=jnp.int32)
