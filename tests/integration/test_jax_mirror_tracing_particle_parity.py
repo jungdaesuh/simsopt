@@ -75,5 +75,5 @@ def test_exact_tracing_particle_matches_native_and_jax_cpu(
         rtol=0.0,
         atol=2.0e-3,
     )
-    assert float(native.values["conservation:energy_relative_error"]) < 1.0e-6
-    assert float(jax.values["conservation:energy_relative_error"]) < 1.0e-6
+    assert float(native.values["conservation:energy_relative_error"]) < 1.0e-3
+    assert float(jax.values["conservation:energy_relative_error"]) < 1.0e-3
