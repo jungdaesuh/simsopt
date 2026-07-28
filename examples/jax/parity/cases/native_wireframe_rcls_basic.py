@@ -365,11 +365,9 @@ def _jax(
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
     from simsopt_jax.backend.runtime import get_runtime_jax_device
-    from simsopt_jax.core.wireframe import wireframe_B
-    from simsopt_jax_adapters.solve.wireframe import rcls_wireframe_jax
+    from simsopt_jax.examples import solve_wireframe_rcls
 
     import jax
-    import jax.numpy as jnp
 
     _, wireframe = _build_geometry(bundle.configuration)
     regularization = _configuration_float(bundle, "regularization_weight")
@@ -378,92 +376,64 @@ def _jax(
     def put(name: str):
         return jax.device_put(arrays[name], device)
 
-    response = put("response_matrix")
-    target = put("target")
-    initial_currents = put("initial_currents")
-    constraint_matrix = put("constraint_matrix")
-    constraint_target = put("constraint_target")
-    free_segments = put("free_segments")
-    plasma_points = put("plasma_points")
-    plasma_unit_normal = put("plasma_unit_normal")
-    plasma_area_weights = put("plasma_area_weights")
-    result = rcls_wireframe_jax(
-        wireframe,
-        response,
-        target,
-        regularization,
+    device_result = solve_wireframe_rcls(
+        wireframe=wireframe,
+        response=put("response_matrix"),
+        target=put("target"),
+        regularization=regularization,
+        initial_currents=put("initial_currents"),
+        plasma_points=put("plasma_points"),
+        plasma_unit_normal=put("plasma_unit_normal"),
+        plasma_area_weights=put("plasma_area_weights"),
+        wireframe_nodes=put("wireframe_nodes"),
+        wireframe_segments=put("wireframe_segments"),
+        wireframe_segment_signs=put("wireframe_segment_signs"),
         assume_no_crossings=bool(bundle.configuration["assume_no_crossings"]),
     )
-
-    def device_state(currents):
-        residual = response @ currents - target
-        constraint_residual = (
-            constraint_matrix @ currents[free_segments] - constraint_target
-        )
-        normal_objective = 0.5 * jnp.vdot(residual, residual)
-        regularization_objective = (
-            0.5 * regularization**2 * jnp.vdot(currents, currents)
-        )
-        return (
-            currents,
-            residual,
-            normal_objective,
-            regularization_objective,
-            normal_objective + regularization_objective,
-            constraint_residual,
-        )
-
-    magnetic_field = wireframe_B(
-        plasma_points,
-        put("wireframe_nodes"),
-        put("wireframe_segments"),
-        put("wireframe_segment_signs"),
-        result.x.reshape(-1),
-    )
-    normal_field = jnp.sum(magnetic_field * plasma_unit_normal, axis=1)
-    field_magnitude = jnp.linalg.norm(magnetic_field, axis=1)
-    mean_relative_normal_field = jnp.sum(
-        jnp.abs(normal_field / field_magnitude) * plasma_area_weights
-    ) / jnp.sum(plasma_area_weights)
-    host = jax.device_get(
-        (
-            device_state(initial_currents),
-            device_state(result.x),
-            magnetic_field,
-            normal_field,
-            mean_relative_normal_field,
-            jnp.max(jnp.abs(result.x)),
-        )
-    )
-    (
-        initial_state,
-        final_state,
-        magnetic_field_host,
-        normal_field_host,
-        mean,
-        maximum,
-    ) = host
+    result = jax.device_get(device_result)
 
     def published_state(prefix: str, state) -> dict[str, np.ndarray]:
         return {
-            f"{prefix}:currents": np.asarray(state[0], dtype=np.float64),
-            f"{prefix}:normal_field_residual": np.asarray(state[1], dtype=np.float64),
-            f"{prefix}:normal_objective": np.asarray(state[2], dtype=np.float64),
-            f"{prefix}:regularization_objective": np.asarray(
-                state[3], dtype=np.float64
+            f"{prefix}:currents": np.asarray(state.currents, dtype=np.float64),
+            f"{prefix}:normal_field_residual": np.asarray(
+                state.normal_field_residual,
+                dtype=np.float64,
             ),
-            f"{prefix}:total_objective": np.asarray(state[4], dtype=np.float64),
-            f"{prefix}:constraint_residual": np.asarray(state[5], dtype=np.float64),
+            f"{prefix}:normal_objective": np.asarray(
+                state.normal_objective,
+                dtype=np.float64,
+            ),
+            f"{prefix}:regularization_objective": np.asarray(
+                state.regularization_objective,
+                dtype=np.float64,
+            ),
+            f"{prefix}:total_objective": np.asarray(
+                state.total_objective,
+                dtype=np.float64,
+            ),
+            f"{prefix}:constraint_residual": np.asarray(
+                state.constraint_residual,
+                dtype=np.float64,
+            ),
         }
 
     values = {
         **_construction_values(arrays),
-        **published_state("initial", initial_state),
-        **published_state("final", final_state),
-        "final:magnetic_field": np.asarray(magnetic_field_host, dtype=np.float64),
-        "final:normal_field": np.asarray(normal_field_host, dtype=np.float64),
-        "final:mean_relative_normal_field": np.asarray(mean, dtype=np.float64),
-        "final:maximum_current": np.asarray(maximum, dtype=np.float64),
+        **published_state("initial", result.initial),
+        **published_state("final", result.final),
+        "final:magnetic_field": np.asarray(
+            result.magnetic_field,
+            dtype=np.float64,
+        ),
+        "final:normal_field": np.asarray(result.normal_field, dtype=np.float64),
+        "final:mean_relative_normal_field": np.asarray(
+            result.mean_relative_normal_field,
+            dtype=np.float64,
+        ),
+        "final:maximum_current": np.asarray(
+            result.maximum_current,
+            dtype=np.float64,
+        ),
         "final:degrees_of_freedom": np.asarray(
             _configuration_int(bundle, "degrees_of_freedom"),
             dtype=np.int64,
@@ -474,7 +444,7 @@ def _jax(
         float(np.linalg.norm(arrays["constraint_target"], ord=np.inf)),
     )
     success = bool(
-        np.all(np.isfinite(values["final:currents"]))
+        result.finite_currents
         and np.linalg.norm(values["final:constraint_residual"], ord=np.inf)
         <= 1.0e-11 * constraint_scale
         and values["final:normal_objective"] < values["initial:normal_objective"]
