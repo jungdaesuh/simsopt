@@ -33,9 +33,9 @@ Existing receipts remain evidence for their exact recorded cases only.
   explicit FP64 parity intent.
 - Compare identical-input native CPU, JAX CPU, and strict JAX GPU outcomes at
   the initial state and after optimization or integration.
-- Measure numerical precision, end-to-end and steady-state performance, and
-  peak host/device memory for every mirror against its native example under a
-  versioned matched-workload contract.
+- Measure numerical precision for every mirror, and retain bounded wall-time
+  and peak-memory sanity evidence without turning each example into a bespoke
+  benchmark.
 - Maintain bounded deterministic parity in normal CI and native-default-scale
   parity in scheduled/manual authority runs.
 - Preserve an explicit host/device contract for adapter examples and the
@@ -98,8 +98,8 @@ Existing receipts remain evidence for their exact recorded cases only.
 - Execution through `8b8965fce23175724560ab67391b11bcc7ab60c2` has implemented
   all eight Wave-A source mirrors with replayable per-source TDD receipts.
   The focused Wave-A CPU matrix and strict RTX 5090 strain lane pass, but
-  schema activation, the complete ready-mirror CPU/GPU matrix, and the
-  five-profile claim-eligible timing/RSS/VRAM campaign remain later gates.
+  schema activation, the complete ready-mirror CPU/GPU matrix, and lean
+  representative timing/RSS/VRAM checks remain later gates.
   Validation timings have not been promoted into performance claims.
 - Standard `2_Intermediate/stage_two_optimization.py` is the first Wave-B
   source to complete source-owned exact CPU parity, a batched public workflow
@@ -108,8 +108,14 @@ Existing receipts remain evidence for their exact recorded cases only.
   execution passed with `JAX_TRANSFER_GUARD=disallow`. Reusing one compiled
   parametric problem across the two source stages reduced the bounded cold CPU
   run from 19.23 s and 1,030,840 KiB peak RSS to 16.90 s and 1,019,196 KiB.
-  These are focused development measurements, not five-profile performance
-  certification or a speedup claim.
+  These are focused development measurements, not a speedup claim.
+- Planar `2_Intermediate/stage_two_optimization_planar_coils.py` now has
+  source-owned exact native/JAX parity, a reusable two-stage device workflow,
+  bounded L-BFGS history, and strict-GPU topology diagnostics whose arrays are
+  explicit JIT operands. Native CPU, JAX CPU, and strict RTX 5090 GPU exact
+  lanes pass. Its four immutable RED -> GREEN -> REFACTOR receipts validate
+  structurally; manifest promotion remains part of the paired schema
+  activation.
 
 ### Target classifications
 
@@ -516,75 +522,24 @@ exception; GREEN must run the unchanged RED test.
    - [ ] Generate a results table that separates full, reduced, blocked,
      bounded, native-default, full-GPU, adapter, and hybrid evidence.
 
-10. Add a native-versus-JAX performance and peak-memory measurement contract.
-    - [ ] Add the separate versioned owner
-      `benchmarks/jax_native_example_measurement_contract.py` and collector
-      `benchmarks/run_jax_native_example_measurements.py`; do not overload
-      `jax_example_execution_mode_contract.py`, whose current scope is JAX fast
-      versus JAX parity.
-    - [ ] Measure five profiles for every eligible mirror and scale: native
-      SIMSOPT/`simsoptpp` CPU, JAX CPU fast, JAX CPU parity, JAX GPU fast, and
-      JAX GPU parity. For a hybrid, additionally split VMEC-host and JAX-slice
-      measurements instead of reporting an indivisible GPU workflow.
-    - [ ] Bind all profiles to identical canonical input bytes, data/source
-      hashes, scale, resolution/quadrature, materialized stochastic samples,
-      random seed, weights, constraints, FP64 policy, and comparable stopping
-      criteria. Reject the artifact if any identity differs or its scientific
-      comparison has not passed.
-    - [ ] Record cold end-to-end elapsed time in an isolated subprocess with a
-      declared fresh or disabled persistent compilation cache, one unmeasured
-      warmup, and exactly seven measured warm runs per profile in a
-      deterministic balanced order. Synchronize every asynchronous JAX result
-      before stopping the monotonic parent-process clock.
-    - [ ] Record setup/compilation, solver/integration, and total elapsed time
-      separately where the workflow exposes truthful boundaries; retain
-      iteration and evaluation counts without treating unequal solver counts as
-      a performance failure.
-    - [ ] Measure peak process-tree host RSS for every profile with the same
-      Linux `/proc` polling owner. For GPU profiles, also measure peak
-      process-attributed device bytes with the checked GPU monitor, record the
-      sampling interval and concurrent-use preflight, and represent unavailable
-      device counters explicitly rather than substituting host RSS. An
-      unavailable GPU counter may be published diagnostically but blocks the
-      required peak-memory gate.
-    - [ ] Separate ordinary performance collection from allocation-sensitive
-      GPU memory collection. Time the declared production preallocation policy;
-      collect workload-attributed peak VRAM in a second isolated profile with
-      `XLA_PYTHON_CLIENT_PREALLOCATE=false`. Never compare timing across those
-      policies, and do not change the ordinary execution default to satisfy the
-      measurement harness.
-    - [ ] Record CPU model/count/affinity, thread environment, RAM, OS, Python,
-      package/commit identities, GPU/driver/CUDA identities, JAX/XLA versions,
-      `XLA_PYTHON_CLIENT_PREALLOCATE`, compilation-cache configuration, monitor
-      interval, and complete command/environment fingerprints.
-    - [ ] Report JAX-CPU/native-CPU time and host-RSS ratios only on the same
-      host and resource policy. Report JAX-GPU versus native-CPU values side by
-      side as a labeled cross-device comparison; never present VRAM/RSS as one
-      commensurate memory ratio or call the cross-device result an intrinsic
-      implementation speedup.
-    - [ ] Publish every sample plus median, dispersion/confidence interval, peak
-      bytes, and ratios. Keep bounded and native-default measurements separate,
-      and never merge cold and warm statistics.
-    - [ ] Require every declared profile to finish without OOM at bounded scale
-      and at its approved native-default shape. Add shape-scaling probes for
-      Boozer, tracing, finite-build, and other allocation-sensitive workflows;
-      record an OOM as a failed execution contract, never as missing data.
-    - [ ] **RED:** Before implementing the collector/auditor, add mutation tests
-      that reject mismatched input/source hashes, a failed precision gate,
-      missing synchronization, incomplete or unbalanced repetitions, reused
-      cold-cache state, absent RSS, mislabeled/unavailable VRAM, undeclared XLA
-      preallocation, fast/parity/native confusion, and cross-device speedup or
-      RSS/VRAM-ratio claims.
-    - [ ] **GREEN:** Collect and independently audit complete bounded evidence
-      for one mirror in all five profiles, then expand source by source only
-      after each mirror's functional GREEN.
-    - [ ] **REFACTOR:** Share immutable measurement primitives with the existing
-      fast-versus-parity benchmark only after contract tests prove that evidence
-      kinds, schemas, and certification eligibility remain distinct.
-    - [ ] Treat completeness and integrity of measurement as the gate. Runtime
-      or memory is not a mirror pass/fail threshold and is not a speedup claim;
-      any later regression or promotion threshold must be predeclared in a
-      separately versioned rule before viewing candidate measurements.
+10. Keep performance and memory validation proportional to example risk.
+    - [ ] Record one bounded native-CPU smoke and one bounded JAX CPU/strict-GPU
+      smoke for each mirror, including wall time and peak host RSS. This is a
+      regression sanity check, not a speedup study.
+    - [ ] Synchronize JAX results before timing and retain the canonical input,
+      scale, revision, backend mode, platform, FP64 policy, and solver counts.
+    - [ ] For GPU smokes, retain peak process-attributed VRAM when the existing
+      checked monitor can provide it. Never substitute host RSS for VRAM.
+    - [ ] Run detailed cold/warm timing and allocation-sensitive VRAM checks
+      once per representative workload class: optimization, tracing, Boozer,
+      permanent magnets, wireframes, finite-build/forces, and hybrid execution.
+      Re-run an individual mirror only when its smoke reveals a regression.
+    - [ ] Keep native-default measurements scheduled/manual. Record an OOM as a
+      failure and investigate its cause; do not build a large benchmark
+      framework solely to repeat the same check across every example.
+    - [ ] Report JAX CPU and native CPU only under matched host/resource policy.
+      Label GPU-versus-CPU results as cross-device observations and make no
+      speedup or commensurate RSS/VRAM claim.
 
 11. Add bounded CI and native-default scheduled authority.
     - [ ] Materialize the exact candidate revision in a fresh checkout, build
@@ -710,21 +665,13 @@ exception; GREEN must run the unchanged RED test.
     --require-authoritative
   ```
 
-- [ ] Native/JAX precision, performance, and peak-memory contract tests and
-  bounded measurement audit:
+- [ ] Representative bounded performance and peak-memory sanity runs:
 
   ```bash
-  python -m pytest -q \
-    tests/benchmarks/test_jax_native_example_measurement_contract.py \
-    tests/integration/test_jax_native_example_measurements.py
-  native_measurement_run_dir="$(python \
-    benchmarks/run_jax_native_example_measurements.py \
-    --case all-applicable \
-    --scale bounded \
-    --profiles native-cpu,jax-cpu-fast,jax-cpu-parity,jax-gpu-fast,jax-gpu-parity \
-    --artifact-root .artifacts/jax-native-example-measurements)"
-  python -m benchmarks.audit_jax_native_example_measurements \
-    --run "${native_measurement_run_dir}"
+  /usr/bin/time -v python examples/jax/run_examples.py \
+    --device cpu --intent fast --scale bounded
+  /usr/bin/time -v python examples/jax/run_examples.py \
+    --device gpu --intent parity --scale bounded
   ```
 
 - [ ] Machine-validated authentic TDD receipts:
@@ -829,11 +776,10 @@ exception; GREEN must run the unchanged RED test.
 - [ ] Every ready mirror has matched bounded native CPU/JAX CPU/strict JAX GPU
   parity for all applicable initial and final observables, with retained
   absolute, relative, and scale-aware precision discrepancies.
-- [ ] Every ready mirror has independently audited native CPU, JAX CPU
-  fast/parity, and JAX GPU fast/parity timing and peak-memory evidence at
-  bounded scale; each practical native-default case has separate evidence.
-  Cold/warm timing, host RSS, and GPU VRAM remain distinct metrics, and every
-  required profile finishes without OOM.
+- [ ] Every ready mirror has bounded timing and peak-host-memory sanity evidence
+  for native/JAX CPU and strict-GPU execution. Representative workload classes
+  retain detailed cold/warm and VRAM evidence, and every required execution
+  finishes without OOM.
 - [ ] Native-default-scale evidence is separately recorded for every practical
   mirror; absent evidence remains explicitly `not_run`.
 - [ ] The VMEC-free Boozer/vacuum single-stage pair passes native/JAX CPU/GPU

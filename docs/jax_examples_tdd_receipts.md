@@ -1799,3 +1799,30 @@ Standard Stage-II is therefore source-level complete, but formal ready-mirror
 promotion still depends on manifest v3/parity v2 activation and the complete
 CPU/GPU matrix. Native-comparative cold/warm time, process-tree RSS, and
 process-attributed VRAM remain later plan gates.
+
+## Exact planar Stage-II mirror RED -> GREEN -> REFACTOR (2026-07-28)
+
+The exact parity receipt preserves the missing-case RED at `ad96be684`, the
+source-equivalent GREEN at `d47f1e75a`, and the reusable-workflow REFACTOR at
+`c091315fd`. Native CPU and JAX CPU exact tests pass, and an isolated native
+CPU versus strict RTX 5090 GPU run passes the same initial-value, derivative,
+two-stage physics, topology, geometry, and Taylor-convergence checks.
+
+The original 100-step JAX workflow coupled L-BFGS history size to the iteration
+budget. It was interrupted after more than 12 minutes while compiling at about
+9.8 GiB RSS. RED `70e654ff4` and GREEN `2ef1f7afb` fix the history at 10
+vectors, independent of runtime. The complete CPU fast smoke then passed in
+40.97 seconds at 1,714,140 KiB peak RSS.
+
+Strict GPU parity exposed a second issue in the parity case: a nested JIT
+captured device arrays as constants and attempted a forbidden device-to-host
+transfer. RED `80659ef24`, GREEN `771ff75eb`, and REFACTOR `e536ea7be` pass the
+extraction state and parameter batch as explicit operands. The exact isolated
+lanes then passed at 74.67 seconds and 916,017,152 bytes host RSS for native CPU,
+and 142.95 seconds and 2,130,300,928 bytes host RSS for strict GPU. These are
+bounded regression measurements, not speedup claims.
+
+The machine-readable receipt document now contains 32 structurally valid
+behaviors. Detailed benchmark expansion is intentionally limited to
+representative workload classes; the implementation sequence proceeds to the
+remaining mirrors.
