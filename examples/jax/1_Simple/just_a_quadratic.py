@@ -19,7 +19,7 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.solve.serial import (
     TraceableLeastSquaresProblem,
     least_squares_serial_solve_jax,
@@ -54,12 +54,10 @@ class ExampleResult:
     jacobian_evaluations: int
     status: Literal["ok", "failed"]
 
-    def json_object(self) -> dict[str, object]:
+    def json_object(self, scale: ExecutionScale) -> dict[str, object]:
         return {
             "example_id": EXAMPLE_ID,
-            "backend_mode": get_backend_mode(),
-            "platform": jax.devices()[0].platform,
-            "precision": get_resolved_precision(),
+            **example_runtime_metadata(scale),
             "status": self.status,
             "observables": {
                 "initial_parameters": self.initial_parameters,
@@ -193,7 +191,8 @@ def main(arguments: list[str] | None = None) -> int:
         result = solve(Path.cwd(), max_steps)
 
     if options.json:
-        print(json.dumps(result.json_object(), sort_keys=True))
+        scale: ExecutionScale = "bounded" if options.smoke else "native_default"
+        print(json.dumps(result.json_object(scale), sort_keys=True))
     else:
         print(f"solution={result.solution}")
         print(f"objective={result.objective:.6e}")

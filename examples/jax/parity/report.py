@@ -33,7 +33,7 @@ def _boolean(record: dict[str, object], field: str) -> bool:
 def render_results_document(summary: object, *, artifact_reference: str) -> str:
     """Render a deterministic Markdown report from one aggregate summary."""
     document = _mapping(summary, "summary")
-    if document.get("schema_version") != 1:
+    if document.get("schema_version") not in (1, 2):
         raise ValueError("unsupported aggregate summary schema")
     cases_value = document.get("cases")
     lanes_value = document.get("lanes")
@@ -68,9 +68,10 @@ def render_results_document(summary: object, *, artifact_reference: str) -> str:
     authority = (
         "authoritative" if _boolean(document, "authoritative") else "exploratory"
     )
+    scale = _string(document, "scale") if "scale" in document else "bounded"
     evidence_note = (
         "This authoritative run is source-bound to the named clean committed "
-        "checkout and may promote only the classifications and bounded scale "
+        f"checkout and may promote only the classifications and {scale} scale "
         "reported below."
         if authority == "authoritative"
         else (
@@ -95,6 +96,7 @@ def render_results_document(summary: object, *, artifact_reference: str) -> str:
             f"- Evidence class: **{authority}** ({repository_state} checkout)",
             f"- Repository commit: `{_string(document, 'repository_commit')}`",
             f"- Lanes: {', '.join(f'`{lane}`' for lane in lanes_value)}",
+            f"- Scale: `{scale}`",
             f"- Aggregate artifact: `{artifact_reference}`",
             "",
             evidence_note,

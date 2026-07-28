@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
@@ -44,7 +45,7 @@ def _surface_from_state(bundle: InputBundle, arrays: dict[str, np.ndarray]):
     return surface
 
 
-def create_input(root: Path, smoke: bool) -> InputBundle:
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Snapshot NCSX coil state and one fitted bounded surface."""
     from simsopt.configs.zoo import get_data
     from simsopt.geo import Area, SurfaceRZFourier
@@ -91,8 +92,9 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "constraint_weight": 12.0,
             "relative_objective_tol": 0.0,
             "gradient_tol": 5.0e-8,
-            "max_steps": 200 if smoke else 300,
+            "max_steps": 200 if scale == "bounded" else 300,
         },
+        scale=scale,
     )
 
 
@@ -235,6 +237,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         backend_mode="native_cpu",
         platform="cpu",
         precision="fp64",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,
@@ -286,6 +289,7 @@ def _jax(
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if jax.config.jax_enable_x64 else "fp32",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=fingerprint,

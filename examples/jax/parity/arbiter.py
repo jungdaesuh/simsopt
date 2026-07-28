@@ -8,6 +8,7 @@ from typing import Mapping
 
 import numpy as np
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.contracts import ComparisonResult
 from examples.jax.parity.provenance import LaneProvenance
@@ -28,6 +29,7 @@ class LaneObservation:
     backend_mode: str
     platform: str
     precision: str
+    scale: ExecutionScale
     input_fingerprint: str
     configuration_fingerprint: str
     effective_construction_fingerprint: str
@@ -163,6 +165,9 @@ def _validate_lanes(
     }
     if len(normalized_statuses) != 1:
         raise ArbitrationError("normalized convergence category mismatch")
+    scales = {observations[lane].scale for lane in sorted(required_lanes)}
+    if len(scales) != 1:
+        raise ArbitrationError("execution scale mismatch")
     fingerprint_fields = (
         ("input", "input_fingerprint"),
         ("configuration", "configuration_fingerprint"),
@@ -174,23 +179,20 @@ def _validate_lanes(
         }
         if len(values) != 1:
             raise ArbitrationError(f"{label} fingerprint mismatch")
-    commits = {
-        observations[lane].provenance.repository_commit
-        for lane in sorted(required_lanes)
-        if observations[lane].provenance is not None
-    }
-    if len(commits) != 1:
-        raise ArbitrationError("repository provenance mismatch: repository_commit")
+    commits: set[str] = set()
     source_manifests: dict[str, dict[str, str]] = {}
     for lane in sorted(required_lanes):
         provenance = observations[lane].provenance
         assert provenance is not None
+        commits.add(provenance.repository_commit)
         source_map = {
             source.path: source.sha256 for source in provenance.executed_sources
         }
         if len(source_map) != len(provenance.executed_sources):
             raise ArbitrationError(f"{lane} has duplicate executed source paths")
         source_manifests[lane] = source_map
+    if len(commits) != 1:
+        raise ArbitrationError("repository provenance mismatch: repository_commit")
     lanes = sorted(required_lanes)
     for left_index, left_lane in enumerate(lanes):
         for right_lane in lanes[left_index + 1 :]:

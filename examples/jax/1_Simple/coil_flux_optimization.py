@@ -17,7 +17,7 @@ import jax
 import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
-from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.curve_objectives import CurveLengthJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
@@ -37,12 +37,10 @@ class ExampleResult:
     coil_length_oracle: float
     status: Literal["ok", "failed"]
 
-    def json_object(self) -> dict[str, object]:
+    def json_object(self, scale: ExecutionScale) -> dict[str, object]:
         return {
             "example_id": EXAMPLE_ID,
-            "backend_mode": get_backend_mode(),
-            "platform": jax.devices()[0].platform,
-            "precision": get_resolved_precision(),
+            **example_runtime_metadata(scale),
             "status": self.status,
             "observables": {
                 "initial_flux": self.initial_flux,
@@ -140,7 +138,8 @@ def main(arguments: list[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
     result = _solve()
     if options.json:
-        print(json.dumps(result.json_object(), sort_keys=True))
+        scale: ExecutionScale = "bounded" if options.smoke else "native_default"
+        print(json.dumps(result.json_object(scale), sort_keys=True))
     else:
         print(f"initial flux={result.initial_flux:.6e}")
         print(f"final flux={result.final_flux:.6e}")

@@ -17,7 +17,7 @@ import numpy as np
 from simsopt.configs.zoo import get_data
 from simsopt.geo import SurfaceRZFourier
 from simsopt.geo.surfaceobjectives import Area
-from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.qfm_surface import QfmSurfaceJAX
 
@@ -35,12 +35,10 @@ class ExampleResult:
     iterations: int
     status: Literal["ok", "failed"]
 
-    def json_object(self) -> dict[str, object]:
+    def json_object(self, scale: ExecutionScale) -> dict[str, object]:
         return {
             "example_id": EXAMPLE_ID,
-            "backend_mode": get_backend_mode(),
-            "platform": jax.devices()[0].platform,
-            "precision": get_resolved_precision(),
+            **example_runtime_metadata(scale),
             "status": self.status,
             "observables": {
                 "initial_penalty": self.initial_penalty,
@@ -126,7 +124,8 @@ def main(arguments: list[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
     result = _solve(options.max_steps or (75 if options.smoke else 200))
     if options.json:
-        print(json.dumps(result.json_object(), sort_keys=True))
+        scale: ExecutionScale = "bounded" if options.smoke else "native_default"
+        print(json.dumps(result.json_object(scale), sort_keys=True))
     else:
         print(f"initial penalty={result.initial_penalty:.6e}")
         print(f"final penalty={result.final_penalty:.6e}")

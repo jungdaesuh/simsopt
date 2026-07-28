@@ -120,6 +120,7 @@ def _observations() -> dict[str, LaneObservation]:
             backend_mode="native_cpu",
             platform="cpu",
             precision="fp64",
+            scale="bounded",
             input_fingerprint="a" * 64,
             configuration_fingerprint="b" * 64,
             effective_construction_fingerprint="c" * 64,
@@ -139,6 +140,7 @@ def _observations() -> dict[str, LaneObservation]:
             backend_mode="jax_cpu_parity",
             platform="cpu",
             precision="fp64",
+            scale="bounded",
             input_fingerprint="a" * 64,
             configuration_fingerprint="b" * 64,
             effective_construction_fingerprint="c" * 64,
@@ -158,6 +160,7 @@ def _observations() -> dict[str, LaneObservation]:
             backend_mode="jax_gpu_parity",
             platform="gpu",
             precision="fp64",
+            scale="bounded",
             input_fingerprint="a" * 64,
             configuration_fingerprint="b" * 64,
             effective_construction_fingerprint="c" * 64,
@@ -417,7 +420,7 @@ def test_child_command_is_exact_and_bounded(tmp_path: Path) -> None:
         lane="jax-gpu",
         input_bundle_path=tmp_path / "input_bundle.json",
         result_directory=tmp_path / "result",
-        smoke=True,
+        scale="bounded",
     )
     assert command == (
         "/venv/bin/python",
@@ -431,7 +434,8 @@ def test_child_command_is_exact_and_bounded(tmp_path: Path) -> None:
         str(tmp_path / "input_bundle.json"),
         "--result-directory",
         str(tmp_path / "result"),
-        "--smoke",
+        "--scale",
+        "bounded",
     )
 
 
@@ -475,7 +479,7 @@ def test_runner_executes_isolated_lanes_and_loads_hash_bound_receipts(
         repo_root=Path(__file__).resolve().parents[2],
         base_environment={"PRESERVED": "yes"},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
         executor=executor,
     )
 
@@ -525,7 +529,7 @@ def test_runner_fails_closed_on_child_failure(tmp_path: Path, failure: str) -> N
             repo_root=Path(__file__).resolve().parents[2],
             base_environment={},
             python_executable=sys.executable,
-            smoke=True,
+            scale="bounded",
             executor=executor,
         )
 
@@ -535,7 +539,7 @@ def test_traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("traceable-least-squares")
-    bundle = case.create_input(tmp_path / "inputs", True)
+    bundle = case.create_input(tmp_path / "inputs", "bounded")
 
     executions, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -545,7 +549,7 @@ def test_traceable_least_squares_case_runs_native_and_jax_cpu_end_to_end(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     assert bundle.case_id == case.case_id
@@ -629,7 +633,9 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     summary = json.loads((published[0] / "summary.json").read_text(encoding="utf-8"))
     assert summary["verdict"] == "pass"
     assert summary["manifest_schema_version"] == 2
-    assert summary["used_legacy_manifest_adapter"] is False
+    assert summary["parity_manifest_schema_version"] == 1
+    assert summary["used_legacy_manifest_adapter"] is True
+    assert summary["scale"] == "bounded"
     assert summary["lanes"] == ["native-cpu", "jax-cpu"]
     assert summary["authoritative"] is False
     assert len(summary["repository_commit"]) == 40
@@ -738,7 +744,7 @@ def test_curve_length_case_runs_native_and_jax_cpu_end_to_end(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("curve-length-optimization")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
 
     _, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -748,7 +754,7 @@ def test_curve_length_case_runs_native_and_jax_cpu_end_to_end(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     native = observations["native-cpu"]
@@ -831,7 +837,7 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("surface-geometry-optimization")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
     _, observations = execute_case_lanes(
         case_id=case.case_id,
         lanes=("native-cpu", "jax-cpu"),
@@ -840,7 +846,7 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
     native = observations["native-cpu"]
     jax_cpu = observations["jax-cpu"]
@@ -897,7 +903,7 @@ def test_surface_geometry_case_runs_native_and_jax_cpu_end_to_end(
 def test_coil_flux_case_runs_native_and_jax_cpu_end_to_end(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("coil-flux-optimization")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
 
     _, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -907,7 +913,7 @@ def test_coil_flux_case_runs_native_and_jax_cpu_end_to_end(tmp_path: Path) -> No
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     native = observations["native-cpu"]
@@ -931,7 +937,7 @@ def test_permanent_magnet_case_matches_cpp_and_jax_cpu_end_to_end(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("permanent-magnet-optimization")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
 
     _, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -941,7 +947,7 @@ def test_permanent_magnet_case_matches_cpp_and_jax_cpu_end_to_end(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     native = observations["native-cpu"]
@@ -970,7 +976,7 @@ def test_wireframe_rcls_case_matches_native_and_jax_cpu_end_to_end(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("wireframe-optimization")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
 
     _, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -980,7 +986,7 @@ def test_wireframe_rcls_case_matches_native_and_jax_cpu_end_to_end(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     native = observations["native-cpu"]
@@ -1008,7 +1014,7 @@ def test_coil_force_fixed_state_matches_native_and_jax_cpu_end_to_end(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("coil-force-and-finite-build")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
 
     _, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -1018,7 +1024,7 @@ def test_coil_force_fixed_state_matches_native_and_jax_cpu_end_to_end(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     native = observations["native-cpu"]
@@ -1049,7 +1055,7 @@ def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     case = get_case("qfm-surface-optimization")
-    case.create_input(tmp_path / "inputs", True)
+    case.create_input(tmp_path / "inputs", "bounded")
 
     _, observations = execute_case_lanes(
         case_id=case.case_id,
@@ -1059,7 +1065,7 @@ def test_qfm_case_matches_native_and_jax_cpu_original_residuals(
         repo_root=repo_root,
         base_environment={},
         python_executable=sys.executable,
-        smoke=True,
+        scale="bounded",
     )
 
     native = observations["native-cpu"]

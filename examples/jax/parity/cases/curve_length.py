@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -24,7 +25,7 @@ WORKFLOW_STAGES = (
 )
 
 
-def create_input(root: Path, smoke: bool) -> InputBundle:
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Create the curve's canonical free state and solve configuration."""
     return create_input_bundle(
         root,
@@ -38,8 +39,9 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "deformation_names": list(_DEFORMATION_NAMES),
             "rtol": 1.0e-10,
             "atol": 1.0e-8,
-            "max_steps": 32 if smoke else 128,
+            "max_steps": 32 if scale == "bounded" else 128,
         },
+        scale=scale,
     )
 
 
@@ -115,6 +117,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         backend_mode="native_cpu",
         platform="cpu",
         precision="fp64",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=effective_fingerprint,
@@ -192,6 +195,7 @@ def _jax(
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if jax.config.jax_enable_x64 else "fp32",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=effective_fingerprint,

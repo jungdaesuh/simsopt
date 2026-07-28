@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+from simsopt_jax.examples import ExecutionScale
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
@@ -23,9 +24,8 @@ WORKFLOW_STAGES = (
 )
 
 
-def create_input(root: Path, smoke: bool) -> InputBundle:
+def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     """Create the fixed coil/surface geometry and one-current solve policy."""
-    del smoke
     return create_input_bundle(
         root,
         case_id="coil-flux-optimization",
@@ -42,6 +42,7 @@ def create_input(root: Path, smoke: bool) -> InputBundle:
             "definition": "quadratic flux",
             "max_steps": 1,
         },
+        scale=scale,
     )
 
 
@@ -133,6 +134,7 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         backend_mode="native_cpu",
         platform="cpu",
         precision="fp64",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(
@@ -199,6 +201,7 @@ def _jax(
         backend_mode=os.environ["SIMSOPT_BACKEND_MODE"],
         platform="gpu" if platform in {"cuda", "gpu"} else platform,
         precision="fp64" if jax.config.jax_enable_x64 else "fp32",
+        scale=bundle.scale,
         input_fingerprint=bundle.input_fingerprint,
         configuration_fingerprint=bundle.configuration_fingerprint,
         effective_construction_fingerprint=_effective_fingerprint(

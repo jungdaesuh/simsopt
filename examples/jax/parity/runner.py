@@ -12,6 +12,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Mapping
 
+from simsopt_jax.examples import ExecutionScale
+
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.receipts import load_lane_observation
 from examples.jax.parity.runtime import ParityLane, build_parity_lane_environment
@@ -103,7 +105,7 @@ def build_child_command(
     lane: ParityLane,
     input_bundle_path: Path,
     result_directory: Path,
-    smoke: bool,
+    scale: ExecutionScale,
 ) -> tuple[str, ...]:
     """Return the only supported child argv for one case and lane."""
     command = (
@@ -118,8 +120,10 @@ def build_child_command(
         str(input_bundle_path),
         "--result-directory",
         str(result_directory),
+        "--scale",
+        scale,
     )
-    return (*command, "--smoke") if smoke else command
+    return command
 
 
 def execute_case_lanes(
@@ -131,7 +135,7 @@ def execute_case_lanes(
     repo_root: Path,
     base_environment: Mapping[str, str],
     python_executable: str,
-    smoke: bool,
+    scale: ExecutionScale,
     executor: ChildExecutor = execute_child_process,
 ) -> tuple[tuple[ChildExecution, ...], dict[str, LaneObservation]]:
     """Execute all requested lanes and validate their published observations."""
@@ -149,7 +153,7 @@ def execute_case_lanes(
             lane=lane,
             input_bundle_path=input_bundle_path,
             result_directory=result_directory,
-            smoke=smoke,
+            scale=scale,
         )
         environment = build_parity_lane_environment(
             lane, base_environment, repo_root=repo_root
@@ -186,6 +190,11 @@ def execute_case_lanes(
         if observation.lane != lane:
             failures.append(
                 f"{lane}: lane receipt names unexpected lane {observation.lane}"
+            )
+            continue
+        if observation.scale != scale:
+            failures.append(
+                f"{lane}: lane receipt scale {observation.scale} does not match {scale}"
             )
             continue
         if parent_peak_rss_bytes is not None:

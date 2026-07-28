@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from simsopt_jax.examples import ExecutionScale
+
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.artifacts import (
     canonical_json_bytes,
@@ -21,7 +23,7 @@ from examples.jax.parity.provenance import (
     lane_provenance_payload,
 )
 
-_RECEIPT_FIELDS = frozenset(
+_RECEIPT_V1_FIELDS = frozenset(
     {
         "schema_version",
         "lane",
@@ -44,6 +46,7 @@ _RECEIPT_FIELDS = frozenset(
         "values",
     }
 )
+_RECEIPT_V2_FIELDS = _RECEIPT_V1_FIELDS | {"scale"}
 
 
 def _value_filename(key: str) -> str:
@@ -60,11 +63,12 @@ def write_lane_observation(root: Path, observation: LaneObservation) -> Path:
         for key, value in sorted(observation.values.items())
     }
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "lane": observation.lane,
         "backend_mode": observation.backend_mode,
         "platform": observation.platform,
         "precision": observation.precision,
+        "scale": observation.scale,
         "input_fingerprint": observation.input_fingerprint,
         "configuration_fingerprint": observation.configuration_fingerprint,
         "effective_construction_fingerprint": (
@@ -173,10 +177,20 @@ def load_lane_observation(root: Path) -> LaneObservation:
     document = {
         key: value for key, value in raw_document.items() if isinstance(key, str)
     }
-    if set(document) != _RECEIPT_FIELDS:
-        raise ValueError("lane receipt has invalid fields")
-    if document["schema_version"] != 1:
+    schema_version = document.get("schema_version")
+    expected_fields = (
+        _RECEIPT_V1_FIELDS
+        if schema_version == 1
+        else _RECEIPT_V2_FIELDS
+        if schema_version == 2
+        else frozenset()
+    )
+    if not expected_fields or set(document) != expected_fields:
         raise ValueError("unsupported lane receipt schema")
+    scale_value = document.get("scale", "bounded")
+    if scale_value not in ("bounded", "native_default"):
+        raise ValueError("lane receipt field scale is invalid")
+    scale: ExecutionScale = "bounded" if scale_value == "bounded" else "native_default"
     values = document["values"]
     if not isinstance(values, dict) or not all(isinstance(key, str) for key in values):
         raise ValueError("lane receipt values must be an object")
@@ -190,6 +204,7 @@ def load_lane_observation(root: Path) -> LaneObservation:
         backend_mode=_required_string(document, "backend_mode"),
         platform=_required_string(document, "platform"),
         precision=_required_string(document, "precision"),
+        scale=scale,
         input_fingerprint=_required_string(document, "input_fingerprint"),
         configuration_fingerprint=_required_string(
             document, "configuration_fingerprint"

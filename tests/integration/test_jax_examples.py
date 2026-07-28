@@ -144,6 +144,7 @@ def _result_payload(
     backend_mode: str = "jax_gpu_parity",
     platform: str = "gpu",
     precision: str = "fp64",
+    scale: str = "bounded",
     status: str = "ok",
 ) -> dict[str, object]:
     return {
@@ -151,6 +152,7 @@ def _result_payload(
         "backend_mode": backend_mode,
         "platform": platform,
         "precision": precision,
+        "scale": scale,
         "status": status,
         "observables": {"value": 1.0},
     }
@@ -318,6 +320,34 @@ def test_gpu_profiles_reject_cpu_fallback_result(
     assert "platform must be gpu" in stderr.getvalue()
 
 
+def test_runner_rejects_child_result_for_different_scale(tmp_path: Path) -> None:
+    payload = _result_payload(
+        backend_mode="jax_cpu_fast",
+        platform="cpu",
+        scale="native_default",
+    )
+    child = _write_child(
+        tmp_path,
+        "wrong_scale.py",
+        f"import json\nprint(json.dumps({payload!r}, sort_keys=True))\n",
+    )
+    stderr = io.StringIO()
+
+    exit_code = run_profile(
+        _manifest(_record(child)),
+        "cpu",
+        "fast",
+        "bounded",
+        repo_root=tmp_path,
+        base_environment={},
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 1
+    assert "scale must be bounded, got native_default" in stderr.getvalue()
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected_device", "expected_intent"),
     (
@@ -344,6 +374,9 @@ def test_runner_parser_rejects_mixed_legacy_and_new_selectors() -> None:
 
     with pytest.raises(SystemExit):
         _parse_arguments(("--lane", "cpu-smoke", "--intent", "fast"))
+
+    with pytest.raises(SystemExit):
+        _parse_arguments(("--lane", "cpu-smoke", "--scale", "native_default"))
 
 
 def test_runner_manifest_observability_distinguishes_v1_adapter() -> None:
