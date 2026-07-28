@@ -199,6 +199,29 @@ def _make_fastpath_flux_objective():
     return objective
 
 
+def test_fastpath_flux_linearization_avoids_host_zero_current_tangents() -> None:
+    coils, surface = _make_native_flux_parity_case()
+    coils[0].current.fix_all()
+    objective = SquaredFluxJAX(
+        surface,
+        BiotSavartJAX(coils),
+        definition="quadratic flux",
+    )
+    parameters = jax.device_put(jnp.asarray(objective.field.x, dtype=jnp.float64))
+    tangent = jax.device_put(jnp.ones_like(parameters))
+
+    with jax.transfer_guard("disallow"):
+        value, linearized = jax.linearize(
+            objective.traceable_objective(),
+            parameters,
+        )
+        directional_derivative = linearized(tangent)
+        jax.block_until_ready((value, directional_derivative))
+
+    assert bool(jnp.isfinite(value))
+    assert bool(jnp.isfinite(directional_derivative))
+
+
 def _set_field_kernel_tuning(
     monkeypatch,
     *,
