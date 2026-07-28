@@ -1680,3 +1680,60 @@ This closes the seventh of eight Wave-A exact mirrors and the seventh of 25
 external-solver-free source mirrors overall. The later five-profile
 measurement phase still owns claim-eligible cold/warm timing, process-tree
 RSS, and process-attributed VRAM comparisons against the native source.
+
+## Exact `strain_optimization.py` mirror RED -> GREEN -> REFACTOR (2026-07-28)
+
+The source-owned parity RED at
+`6e8a5c34c0cc92d7a2e89b348daf084b2cc6fff0` failed because the exact
+`native-strain-optimization` case was not registered. GREEN revision
+`438efddd2136fd61711d824a7ba0ec378f9717a6` implemented the bounded source
+workflow with the scaled HSX coil, order-10 tape-frame rotation, centroid-frame
+torsional and binormal-curvature strains, the source penalty widths and
+thresholds, and the source L-BFGS-B budget.
+
+The native and JAX lanes retain the fixed construction, initial/final
+parameters, objective, gradient, both strain fields, maxima, raw solver status,
+and evaluation counts. The unchanged parity test passed on JAX CPU. The
+focused Wave-A execution, strain parity, and boundary suite passed
+`9 passed in 72.10 s`.
+
+The device-boundary RED at
+`1cb24012d2cedbb7bd3b831b1672fbd86263c138` proved that the prior user-facing
+example duplicated private strain kernels and performed seven separate
+`jax.device_get` publications. GREEN revision
+`8e4a2806d5351c7cdfb0af672eadc0a1f5b42d7d` moved the workflow behind the
+public `solve_strain_rotation` contract and reduced reporting to one batched
+result-tree publication. The solver uses the SIMSOPT-owned JAX L-BFGS
+implementation in memory-bounded stepwise mode and disables optimizer-state
+history; it does not JIT a monolithic outer loop. REFACTOR revision
+`8b8965fce23175724560ab67391b11bcc7ab60c2` reuses the quadrature arc length
+inside each objective evaluation instead of computing the same norm twice.
+
+A direct strict NVIDIA GeForce RTX 5090 execution used FP64, reported
+`platform=gpu`, and completed without CPU fallback under the strict transfer
+configuration. Native CPU and JAX GPU both used 50 iterations and 54 function
+and gradient evaluations. Representative maximum absolute differences were:
+
+```text
+initial objective                  6.776263578034403e-21
+initial gradient                   3.218725199566341e-20
+final parameters                   2.553512956637860e-14
+final objective                    5.293955920339377e-23
+final gradient                     4.229721887840903e-19
+final torsional strain             2.655861641720492e-15
+final binormal-curvature strain    3.308117668687772e-15
+```
+
+Both new immutable receipts replayed successfully from detached clean
+worktrees. The complete receipt document contains 25 structurally valid
+behaviors. A full historical replay currently stops on an older infrastructure
+receipt whose normalized RED wrapper now returns `99` instead of its recorded
+`2`; the two environment-pinned strain receipts are independently replay-clean,
+and the stale historical receipt remains an explicit follow-up rather than
+being silently relabeled.
+
+This implements all eight Wave-A exact mirrors. Formal Wave-A readiness still
+requires activating the new manifest identities and running the complete
+ready-mirror CPU/GPU matrix. Matched cold/warm timing, process-tree RSS, and
+process-attributed VRAM comparison against native remain owned by the later
+claim-eligible measurement phase.

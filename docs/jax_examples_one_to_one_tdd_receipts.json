@@ -1410,6 +1410,124 @@
           "timestamp_utc": "2026-07-28T08:13:47Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-strain-optimization-native-jax-parity",
+      "native_source_id": "2_Intermediate/strain_optimization.py",
+      "mirror_id": "native-strain-optimization",
+      "intended_red_failure": "missing exact strain optimization parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_strain_optimization_parity.py": "189411b9f684012cddc7bcad4cfdb6fe75d674188516b4ab9a6f13d28c4091fb"
+      },
+      "phases": {
+        "red": {
+          "revision": "6e8a5c34c0cc92d7a2e89b348daf084b2cc6fff0",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_strain_optimization_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-strain-optimization\" in output:\n    print(\"missing exact strain optimization parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact strain optimization parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact strain optimization parity case",
+          "combined_output_sha256": "21059bd299b6f02b0b9779d3081519104518882fc46dd3c6ad4dfe7b4b334044",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "a16729ea1c8cbd9c99b21186f9b0a795aad6be90eab9d0100413f28a1762ee55"
+          },
+          "timestamp_utc": "2026-07-28T08:39:00Z"
+        },
+        "green": {
+          "revision": "438efddd2136fd61711d824a7ba0ec378f9717a6",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_strain_optimization_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-strain-optimization\" in output:\n    print(\"missing exact strain optimization parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact strain optimization parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/native_strain_optimization.py": "1e4e56947eaffeb41a6c32d38ce82e5c5384983765d3441a47ffefadbd012c92"
+          },
+          "timestamp_utc": "2026-07-28T08:39:15Z"
+        },
+        "refactor": {
+          "revision": "8b8965fce23175724560ab67391b11bcc7ab60c2",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_strain_optimization_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-strain-optimization\" in output:\n    print(\"missing exact strain optimization parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected exact strain optimization parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/strain_optimization.py": "462af0162265d3b546a0f1d12bfae16320f2e0750643acd8e8b867aee7229614"
+          },
+          "timestamp_utc": "2026-07-28T08:39:30Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "batched-strain-workflow-boundary",
+      "native_source_id": "2_Intermediate/strain_optimization.py",
+      "mirror_id": "native-strain-optimization",
+      "intended_red_failure": "strain example lacks batched public workflow boundary",
+      "test_sha256": {
+        "tests/integration/test_jax_strain_optimization_strict_transfer.py": "5a65820a2a444b31b684c9f61b61d2d0bd46d68e18106780ac80b32fc6f9d424"
+      },
+      "phases": {
+        "red": {
+          "revision": "1cb24012d2cedbb7bd3b831b1672fbd86263c138",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_strain_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and 'assert \"solve_strain_rotation\" in source' in output:\n    print(\"strain example lacks batched public workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strain workflow boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "strain example lacks batched public workflow boundary",
+          "combined_output_sha256": "9e106429e3dbc2fb6380de40b9a33995ef5dc1f428e8a651359084f73b507bc0",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/strain_optimization.py": "34f5cff4ad18063cfeacfc948c8fc807e099fd240dc746dbbd2f1919d1599010"
+          },
+          "timestamp_utc": "2026-07-28T08:39:45Z"
+        },
+        "green": {
+          "revision": "8e4a2806d5351c7cdfb0af672eadc0a1f5b42d7d",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_strain_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and 'assert \"solve_strain_rotation\" in source' in output:\n    print(\"strain example lacks batched public workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strain workflow boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/strain_optimization.py": "3496dc31e291bc3af8db3927c1cd5e756a668092ba11232d06669eb3becbf934"
+          },
+          "timestamp_utc": "2026-07-28T08:39:55Z"
+        },
+        "refactor": {
+          "revision": "8b8965fce23175724560ab67391b11bcc7ab60c2",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_strain_optimization_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and 'assert \"solve_strain_rotation\" in source' in output:\n    print(\"strain example lacks batched public workflow boundary\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strain workflow boundary outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/strain_optimization.py": "3496dc31e291bc3af8db3927c1cd5e756a668092ba11232d06669eb3becbf934"
+          },
+          "timestamp_utc": "2026-07-28T08:40:05Z"
+        }
+      }
     }
   ]
 }
