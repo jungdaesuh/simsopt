@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 EXAMPLE = (
     Path(__file__).resolve().parents[3]
     / "examples"
