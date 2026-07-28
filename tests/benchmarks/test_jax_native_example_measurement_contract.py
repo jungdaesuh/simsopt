@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import statistics
 from copy import deepcopy
 from typing import Literal
 
@@ -95,6 +96,11 @@ def _profile(profile_id: _ProfileId, mirror_index: int) -> dict[str, object]:
         for sample_index, order in enumerate(schedule.warm)
     ]
     device = _profile_device(profile_id)
+    warm_seconds = tuple(float(sample["total_seconds"]) for sample in warm)
+    warm_median = float(statistics.median(warm_seconds))
+    warm_mad = float(
+        statistics.median(abs(value - warm_median) for value in warm_seconds)
+    )
     return {
         "profile_id": profile_id,
         "device": device,
@@ -148,10 +154,8 @@ def _profile(profile_id: _ProfileId, mirror_index: int) -> dict[str, object]:
         ),
         "summary": {
             "cold_total_seconds": 1.0 + 0.01 * cold_position,
-            "warm_total_seconds_median": sorted(
-                float(sample["total_seconds"]) for sample in warm
-            )[len(warm) // 2],
-            "warm_total_seconds_mad": 0.01,
+            "warm_total_seconds_median": warm_median,
+            "warm_total_seconds_mad": warm_mad,
             "peak_timing_process_tree_rss_bytes": max(
                 int(sample["peak_process_tree_rss_bytes"]) for sample in warm
             ),
