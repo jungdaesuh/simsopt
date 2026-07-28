@@ -532,6 +532,7 @@ def GPMO_baseline_jax(
     reg_l2: float = 0.0,
     single_direction: int = -1,
     record_every: int | None = None,
+    retain_history: bool = True,
 ) -> GPMOBaselineResult:
     """Run the baseline greedy GPMO algorithm on a fixed JAX PM grid.
 
@@ -539,7 +540,8 @@ def GPMO_baseline_jax(
     the multi-neighbour variant, ``GPMO_ArbVec_jax`` for arbitrary-vector
     placement, ``GPMO_backtracking_jax`` for baseline backtracking, and
     ``GPMO_ArbVec_backtracking_jax`` for the arbitrary-vector backtracking
-    variant.
+    variant. Set ``retain_history=False`` for final-state-only workflows to
+    avoid materializing the ``K x ndipoles x 3`` moment history.
     """
 
     mmax_vec = _component_mmax(grid)
@@ -554,6 +556,7 @@ def GPMO_baseline_jax(
         grid.b_obj,
         K=K,
         record_every=record_every,
+        retain_history=retain_history,
     )
     return _gpmo_public_result(core, grid, GPMOBaselineResult)
 

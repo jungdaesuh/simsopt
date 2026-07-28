@@ -60,7 +60,7 @@ def _build_grid() -> PermanentMagnetGridJAX:
 
 def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     grid = _build_grid()
-    result = GPMO_baseline_jax(grid, K=max_steps)
+    result = GPMO_baseline_jax(grid, K=max_steps, retain_history=False)
     device_publication = (
         jnp.linalg.norm(grid.b_obj),
         jnp.linalg.norm(result.residual),
