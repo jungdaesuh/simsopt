@@ -265,11 +265,21 @@ def _prepare_target_source_inputs_pure(
     Returns:
         Tuple of arrays: (gammas_targets, gammadashs_targets, gammas_sources, gammadashs_sources, currents_targets, currents_sources).
     """
+    def downsample_points(value):
+        array = _as_jax_float64(value)
+        return lax.slice_in_dim(
+            array,
+            0,
+            array.shape[1],
+            stride=downsample,
+            axis=1,
+        )
+
     return (
-        _as_jax_float64(gammas_targets)[:, ::downsample, :],
-        _as_jax_float64(gammadashs_targets)[:, ::downsample, :],
-        _as_jax_float64(gammas_sources)[:, ::downsample, :],
-        _as_jax_float64(gammadashs_sources)[:, ::downsample, :],
+        downsample_points(gammas_targets),
+        downsample_points(gammadashs_targets),
+        downsample_points(gammas_sources),
+        downsample_points(gammadashs_sources),
         _as_jax_float64(currents_targets),
         _as_jax_float64(currents_sources),
     )
@@ -322,11 +332,29 @@ def _prepare_regularized_target_source_inputs_pure(
         currents_sources,
         downsample,
     )
+    gammadashdashs_targets = _as_jax_float64(gammadashdashs_targets)
+    gammadashdashs_targets = lax.slice_in_dim(
+        gammadashdashs_targets,
+        0,
+        gammadashdashs_targets.shape[1],
+        stride=downsample,
+        axis=1,
+    )
+    quadpoints = _as_jax_float64(quadpoints)
+    quadpoints = lax.slice_in_dim(quadpoints, 0, 1, axis=0)
+    quadpoints = jnp.reshape(quadpoints, (quadpoints.shape[1],))
+    quadpoints = lax.slice_in_dim(
+        quadpoints,
+        0,
+        quadpoints.shape[0],
+        stride=downsample,
+        axis=0,
+    )
     return (
         gammas_targets,
         gammadashs_targets,
-        _as_jax_float64(gammadashdashs_targets)[:, ::downsample, :],
-        _as_jax_float64(quadpoints[0])[::downsample],
+        gammadashdashs_targets,
+        quadpoints,
         gammas_sources,
         gammadashs_sources,
         currents_targets,
