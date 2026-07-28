@@ -4,16 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import jax
 import jax.numpy as jnp
 
-from simsopt_jax.core import (
-    CoilSetDofExtractionSpec,
-    apply_coil_symmetry,
-    coil_specs_from_dof_extraction_spec,
+from simsopt_jax.core.curve_geometry import (
     curve_geometry_from_spec,
+    pair_linking_number_pure,
 )
 from simsopt_jax.core.curve_kernels import (
     curvature_p_norm_from_kappa_pure,
@@ -21,8 +19,12 @@ from simsopt_jax.core.curve_kernels import (
     curve_surface_distance_penalty_pure,
     kappa_pure,
 )
-from simsopt_jax.core.curve_geometry import pair_linking_number_pure
-from simsopt_jax.core.specs import FixedSurfaceFluxSpec
+from simsopt_jax.core.field import coil_specs_from_dof_extraction_spec
+from simsopt_jax.core.specs import (
+    CoilSetDofExtractionSpec,
+    FixedSurfaceFluxSpec,
+    apply_coil_symmetry,
+)
 
 from .stochastic_stage_two import (
     StochasticCoilPerturbations,
@@ -44,6 +46,8 @@ class StageTwoObjectiveConfig:
     length_weight: float = 0.0
     length_target: float | None = None
     length_target_mode: Literal["max", "identity"] = "max"
+    individual_length_target: float | None = None
+    individual_length_weight: float = 0.0
     curve_curve_minimum_distance: float = 0.1
     curve_curve_weight: float = 0.0
     curve_surface_minimum_distance: float = 0.3
@@ -117,6 +121,23 @@ def stage_two_geometric_penalty(
     if config.length_weight != 0.0:
         lengths = jnp.mean(jnp.linalg.norm(base_gammadash, axis=2), axis=1)
         result = result + _length_penalty(jnp.sum(lengths), config)
+
+    if config.individual_length_weight != 0.0:
+        if config.individual_length_target is None:
+            raise ValueError(
+                "individual_length_target is required when "
+                "individual_length_weight is nonzero."
+            )
+        individual_lengths = jnp.mean(
+            jnp.linalg.norm(base_gammadash, axis=2),
+            axis=1,
+        )
+        individual_excess = individual_lengths - config.individual_length_target
+        result = result + (
+            0.5
+            * config.individual_length_weight
+            * jnp.sum(individual_excess * individual_excess)
+        )
 
     base_speed = jnp.linalg.norm(base_gammadash, axis=2)
 
@@ -215,7 +236,10 @@ def stage_two_coil_geometry(
         curve_id = id(coil_spec.curve)
         curve_geometry = geometry_by_curve.get(curve_id)
         if curve_geometry is None:
-            curve_geometry = curve_geometry_from_spec(coil_spec.curve)
+            curve_geometry = cast(
+                tuple[jax.Array, jax.Array, jax.Array],
+                curve_geometry_from_spec(coil_spec.curve),
+            )
             geometry_by_curve[curve_id] = curve_geometry
         gamma, gammadash, gammadashdash = curve_geometry
         gamma, gammadash, current = apply_coil_symmetry(

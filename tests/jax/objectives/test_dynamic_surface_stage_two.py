@@ -5,8 +5,15 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from simsopt.field import Current, coils_via_symmetries
+from simsopt.field import (
+    BiotSavart,
+    Coil,
+    Current,
+    RegularizedCoil,
+    coils_via_symmetries,
+)
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
+from simsopt.objectives import SquaredFlux
 from simsopt_jax.objectives.dynamic_surface_stage_two import (
     SurfaceRZFourierDofContract,
     make_dynamic_surface_stage_two_objective,
@@ -20,6 +27,8 @@ def _problem() -> tuple[
     BiotSavartJAX,
     jax.Array,
     jax.Array,
+    SurfaceRZFourier,
+    list[Coil] | list[RegularizedCoil],
 ]:
     surface = SurfaceRZFourier(
         mpol=1,
@@ -47,20 +56,21 @@ def _problem() -> tuple[
     )
     current = Current(1.0e5)
     current.fix_all()
-    field = BiotSavartJAX(
-        coils_via_symmetries(base_curves, [current], surface.nfp, True)
-    )
+    coils = coils_via_symmetries(base_curves, [current], surface.nfp, True)
+    field = BiotSavartJAX(coils)
     contract = SurfaceRZFourierDofContract.from_surface(surface)
     return (
         contract,
         field,
         jnp.asarray(field.x, dtype=jnp.float64),
         jnp.asarray(surface.local_x, dtype=jnp.float64),
+        surface,
+        coils,
     )
 
 
 def test_dynamic_surface_stage_two_is_jittable_and_differentiates_both_blocks() -> None:
-    contract, field, coil_dofs, surface_dofs = _problem()
+    contract, field, coil_dofs, surface_dofs, _surface, _coils = _problem()
     objective = make_dynamic_surface_stage_two_objective(
         field,
         contract,
@@ -86,8 +96,10 @@ def test_dynamic_surface_stage_two_is_jittable_and_differentiates_both_blocks() 
     assert bool(jnp.all(jnp.isfinite(surface_gradient)))
 
 
-def test_dynamic_surface_stage_two_surface_gradient_matches_central_difference() -> None:
-    contract, field, coil_dofs, surface_dofs = _problem()
+def test_dynamic_surface_stage_two_surface_gradient_matches_central_difference() -> (
+    None
+):
+    contract, field, coil_dofs, surface_dofs, _surface, _coils = _problem()
     objective = make_dynamic_surface_stage_two_objective(
         field,
         contract,
@@ -112,4 +124,64 @@ def test_dynamic_surface_stage_two_surface_gradient_matches_central_difference()
         np.asarray(finite_difference),
         rtol=2.0e-5,
         atol=1.0e-9,
+    )
+
+
+def test_dynamic_surface_stage_two_matches_native_local_flux_and_mixed_gradient() -> (
+    None
+):
+    contract, field, coil_dofs, surface_dofs, surface, coils = _problem()
+    objective = make_dynamic_surface_stage_two_objective(
+        field,
+        contract,
+        StageTwoObjectiveConfig(num_base_curves=1),
+        definition="local",
+    )
+    value, (_coil_gradient, surface_gradient) = jax.jit(
+        jax.value_and_grad(objective, argnums=(0, 1))
+    )(coil_dofs, surface_dofs)
+
+    native_field = BiotSavart(coils)
+    native_flux = SquaredFlux(surface, native_field, definition="local")
+    native_value = native_flux.J()
+    normal = surface.normal()
+    abs_normal = np.linalg.norm(normal, axis=2)
+    magnetic_field = native_field.B().reshape(normal.shape)
+    field_spatial_derivative = native_field.dB_by_dX().reshape((*normal.shape, 3))
+    unit_normal = normal / abs_normal[:, :, None]
+    field_normal = np.sum(magnetic_field * unit_normal, axis=2)
+    field_norm = np.linalg.norm(magnetic_field, axis=2)
+    field_dot_normal = np.sum(magnetic_field * normal, axis=2)
+    derivative_position = (field_normal / field_norm**2)[:, :, None] * np.sum(
+        field_spatial_derivative
+        * (normal - magnetic_field * (field_dot_normal / field_norm**2)[:, :, None])[
+            :, :, None, :
+        ],
+        axis=3,
+    )
+    derivative_normal = (field_normal / field_norm**2)[
+        :, :, None
+    ] * magnetic_field - 0.5 * (field_dot_normal**2 / abs_normal**3 / field_norm**2)[
+        :, :, None
+    ] * normal
+    full_native_gradient = surface.dnormal_by_dcoeff_vjp(
+        derivative_normal / (normal.shape[0] * normal.shape[1])
+    ) + surface.dgamma_by_dcoeff_vjp(
+        derivative_position / (normal.shape[0] * normal.shape[1])
+    )
+    native_surface_gradient = full_native_gradient[
+        np.asarray(surface.local_dofs_free_status, dtype=np.bool_)
+    ]
+
+    np.testing.assert_allclose(
+        np.asarray(value),
+        native_value,
+        rtol=2.0e-12,
+        atol=2.0e-14,
+    )
+    np.testing.assert_allclose(
+        np.asarray(surface_gradient),
+        native_surface_gradient,
+        rtol=2.0e-10,
+        atol=2.0e-12,
     )

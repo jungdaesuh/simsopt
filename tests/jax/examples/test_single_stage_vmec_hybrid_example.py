@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_optimization.py"
 

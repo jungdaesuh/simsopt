@@ -7,7 +7,6 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from simsopt_jax.objectives.stage_two import (
     StageTwoObjectiveConfig,
     stage_two_geometric_penalty,
