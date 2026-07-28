@@ -17,6 +17,9 @@ ACTIVE_EXAMPLES = REPO_ROOT / "examples" / "jax" / "manifest.json"
 ACTIVE_PARITY = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
 CANDIDATE_EXAMPLES = REPO_ROOT / "docs" / "jax_examples_manifest_v3_candidate.json"
 CANDIDATE_PARITY = REPO_ROOT / "docs" / "jax_parity_manifest_v2_candidate.json"
+LEGACY_PARITY = (
+    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
+)
 
 
 def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
@@ -28,8 +31,16 @@ def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
     assert runtime.version_pair == (3, 2)
     assert runtime.used_legacy_adapter is False
     assert len(runtime.examples) == 38
-    assert sum(example.status == "ready" for example in runtime.examples) == 10
-    assert sum(example.teaching_kind == "one_to_one" for example in runtime.examples) == 27
+    assert sum(example.status == "ready" for example in runtime.examples) == 36
+    one_to_one = tuple(
+        example for example in runtime.examples if example.teaching_kind == "one_to_one"
+    )
+    assert len(one_to_one) == 27
+    assert sum(example.status == "ready" for example in one_to_one) == 26
+    hybrid = next(
+        example for example in one_to_one if example.classification == "hybrid"
+    )
+    assert hybrid.status == "planned"
 
 
 def test_canonical_pair_exposes_exact_mirrors_without_tutorial_coverage() -> None:
@@ -88,6 +99,6 @@ def test_runtime_loader_rejects_mixed_contract_files() -> None:
     with pytest.raises(ContractVersionError, match="mixed manifest versions"):
         load_runtime_contract_pair(
             CANDIDATE_EXAMPLES,
-            ACTIVE_PARITY,
+            LEGACY_PARITY,
             repo_root=REPO_ROOT,
         )
