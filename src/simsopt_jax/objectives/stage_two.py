@@ -9,6 +9,7 @@ from typing import Literal, Protocol, cast
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.curve_geometry import (
     curve_geometry_from_spec,
     pair_linking_number_pure,
@@ -20,6 +21,7 @@ from simsopt_jax.core.curve_kernels import (
     kappa_pure,
 )
 from simsopt_jax.core.field import coil_specs_from_dof_extraction_spec
+from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral_from_B
 from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
     FixedSurfaceFluxSpec,
@@ -286,6 +288,83 @@ def make_stage_two_objective(
             surface_normal,
             config,
         )
+
+    return objective
+
+
+def fused_stage_two_values(
+    extraction: CoilSetDofExtractionSpec,
+    parameters: jax.Array,
+    flux_spec: FixedSurfaceFluxSpec,
+    surface_gamma: jax.Array,
+    surface_normal: jax.Array,
+    config: StageTwoObjectiveConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Evaluate Stage-II objective and diagnostics from one coil geometry pass."""
+    gamma, gammadash, gammadashdash, currents = stage_two_coil_geometry(
+        extraction,
+        parameters,
+    )
+    magnetic_field = biot_savart_B(
+        flux_spec.points,
+        gamma,
+        gammadash,
+        currents,
+    )
+    squared_flux = fixed_surface_flux_integral_from_B(
+        magnetic_field,
+        flux_spec,
+    )
+    geometric_penalty = stage_two_geometric_penalty(
+        gamma,
+        gammadash,
+        gammadashdash,
+        surface_gamma,
+        surface_normal,
+        config,
+    )
+    base_speed = jnp.linalg.norm(
+        gammadash[: config.num_base_curves],
+        axis=2,
+    )
+    total_curve_length = jnp.sum(jnp.mean(base_speed, axis=1))
+    surface_normal_flat = flux_spec.normal.reshape((-1, 3))
+    unit_normal = surface_normal_flat / jnp.linalg.norm(
+        surface_normal_flat,
+        axis=1,
+        keepdims=True,
+    )
+    maximum_normal_field = jnp.max(
+        jnp.abs(jnp.sum(magnetic_field * unit_normal, axis=1))
+    )
+    return (
+        squared_flux + geometric_penalty,
+        squared_flux,
+        geometric_penalty,
+        maximum_normal_field,
+        total_curve_length,
+    )
+
+
+def make_fused_stage_two_objective(
+    field: CoilDofExtractionProvider,
+    flux_spec: FixedSurfaceFluxSpec,
+    surface_gamma: jax.Array,
+    surface_normal: jax.Array,
+    config: StageTwoObjectiveConfig,
+) -> Callable[[jax.Array], jax.Array]:
+    """Compose Stage II without duplicating coil geometry evaluation."""
+    extraction = field.coil_dof_extraction_spec()
+
+    def objective(parameters: jax.Array) -> jax.Array:
+        return fused_stage_two_values(
+            extraction,
+            parameters,
+            flux_spec,
+            surface_gamma,
+            surface_normal,
+            config,
+        )[0]
 
     return objective
 

@@ -15,6 +15,11 @@ from .rz_surface_area_volume import (
     SurfaceAreaVolumeStageDeviceResult,
     solve_rz_surface_area_volume_sequence,
 )
+from .stage_two_minimal import (
+    MinimalStageTwoDeviceResult,
+    MinimalStageTwoState,
+    solve_minimal_stage_two,
+)
 from .stochastic_samples import (
     GaussianPerturbationSampler,
     StochasticPerturbationBundle,
@@ -33,6 +38,8 @@ __all__ = (
     "ExampleSolve",
     "ExecutionScale",
     "GaussianPerturbationSampler",
+    "MinimalStageTwoDeviceResult",
+    "MinimalStageTwoState",
     "RZCurveLengthDeviceResult",
     "StochasticPerturbationBundle",
     "SurfaceAreaVolumeSequenceDeviceResult",
@@ -42,6 +49,7 @@ __all__ = (
     "materialize_stochastic_coil_perturbations",
     "run_example",
     "scalar_example_driver",
+    "solve_minimal_stage_two",
     "solve_rz_curve_length",
     "solve_rz_surface_area_volume_sequence",
     "solve_weighted_quadratic",

@@ -26,6 +26,12 @@ from examples.jax.parity.cases.native_minimize_curve_length import (
 from examples.jax.parity.cases.native_minimize_curve_length import (
     execute as execute_native_minimize_curve_length,
 )
+from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
+    create_input as create_native_stage_two_optimization_minimal_input,
+)
+from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
+    execute as execute_native_stage_two_optimization_minimal,
+)
 from examples.jax.parity.cases.native_surf_vol_area import (
     create_input as create_native_surf_vol_area_input,
 )
@@ -79,6 +85,11 @@ _CASES = {
         case_id="native-surf-vol-area",
         create_input=create_native_surf_vol_area_input,
         execute=execute_native_surf_vol_area,
+    ),
+    "native-stage-two-optimization-minimal": CaseDefinition(
+        case_id="native-stage-two-optimization-minimal",
+        create_input=create_native_stage_two_optimization_minimal_input,
+        execute=execute_native_stage_two_optimization_minimal,
     ),
     "traceable-least-squares": CaseDefinition(
         case_id="traceable-least-squares",
