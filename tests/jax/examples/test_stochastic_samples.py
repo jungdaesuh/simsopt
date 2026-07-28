@@ -34,9 +34,7 @@ def test_materialized_samples_match_native_draw_order_and_symmetry() -> None:
         n_derivs=1,
     )
     source_indices = (0, 1, 0, 1)
-    rotations = np.stack(
-        (np.eye(3), np.eye(3), _rotation(np.pi), _rotation(np.pi))
-    )
+    rotations = np.stack((np.eye(3), np.eye(3), _rotation(np.pi), _rotation(np.pi)))
     bundle = materialize_stochastic_coil_perturbations(
         sampler,
         source_indices=source_indices,
@@ -86,6 +84,7 @@ def test_materialized_samples_match_native_draw_order_and_symmetry() -> None:
     np.testing.assert_array_equal(bundle.gamma, np.stack(expected_gamma))
     np.testing.assert_array_equal(bundle.gammadash, np.stack(expected_gammadash))
     assert bundle.generator == "numpy.random.Generator(PCG64DXSM)"
+    assert bundle.ordering == "sample:systematic-base-curve,statistical-final-coil"
     assert bundle.seed == 7
     assert bundle.dtype == "<f8"
     assert bundle.byte_order == "little"
@@ -109,9 +108,7 @@ def test_materialized_sample_hash_binds_values_and_metadata() -> None:
     }
 
     first = materialize_stochastic_coil_perturbations(sampler, seed=0, **arguments)
-    repeated = materialize_stochastic_coil_perturbations(
-        sampler, seed=0, **arguments
-    )
+    repeated = materialize_stochastic_coil_perturbations(sampler, seed=0, **arguments)
     changed = materialize_stochastic_coil_perturbations(sampler, seed=1, **arguments)
 
     assert first.sha256 == repeated.sha256
@@ -185,9 +182,7 @@ def test_materialized_samples_reproduce_native_perturbed_coil_geometry() -> None
     ]
 
     actual_gamma = np.stack(tuple(coil.curve.gamma() for coil in nominal_coils))
-    actual_gammadash = np.stack(
-        tuple(coil.curve.gammadash() for coil in nominal_coils)
-    )
+    actual_gammadash = np.stack(tuple(coil.curve.gammadash() for coil in nominal_coils))
     expected_gamma = np.stack(tuple(coil.curve.gamma() for coil in perturbed_coils))
     expected_gammadash = np.stack(
         tuple(coil.curve.gammadash() for coil in perturbed_coils)

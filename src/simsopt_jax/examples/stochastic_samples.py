@@ -50,6 +50,10 @@ class StochasticPerturbationBundle:
         init=False,
         default="numpy.random.Generator(PCG64DXSM)",
     )
+    ordering: str = field(
+        init=False,
+        default="sample:systematic-base-curve,statistical-final-coil",
+    )
     dtype: str = field(init=False, default="<f8")
     byte_order: str = field(init=False, default="little")
     sha256: str = field(init=False)
@@ -100,6 +104,7 @@ class StochasticPerturbationBundle:
             "generator": self.generator,
             "length_scale": self.length_scale,
             "n_derivs": self.n_derivs,
+            "ordering": self.ordering,
             "schema_version": 1,
             "seed": self.seed,
             "sigma": self.sigma,
