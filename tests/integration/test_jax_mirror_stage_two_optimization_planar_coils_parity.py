@@ -80,5 +80,8 @@ def test_exact_planar_stage_two_matches_native_and_jax_cpu(
             1.03 * float(native.values[f"{stage}:objective"]) + 1.0e-9
         )
 
-    assert np.max(np.abs(native.values["taylor:errors"][:3])) <= 1.0e-4
-    assert np.max(np.abs(jax.values["taylor:errors"][:3])) <= 1.0e-4
+    for observation in (native, jax):
+        taylor_errors = np.abs(observation.values["taylor:errors"][:3])
+        assert taylor_errors[1] <= 2.0e-2 * taylor_errors[0]
+        assert taylor_errors[2] <= 2.0e-2 * taylor_errors[1]
+        assert taylor_errors[2] <= 1.0e-4
