@@ -242,6 +242,7 @@ def _scalar_options(
     atol: float,
     max_steps: int,
     maxcor: int | None,
+    line_search_max_steps: int | None,
 ) -> (
     SimsoptBFGSOptions
     | SimsoptLBFGSBOptions
@@ -249,7 +250,16 @@ def _scalar_options(
     | OptimistixLBFGSOptions
 ):
     if driver == Driver.SIMSOPT_BFGS:
-        return SimsoptBFGSOptions(maxiter=max_steps, gtol=atol, xrtol=rtol)
+        return SimsoptBFGSOptions(
+            maxiter=max_steps,
+            gtol=atol,
+            xrtol=rtol,
+            line_search_max_steps=(
+                SimsoptBFGSOptions().line_search_max_steps
+                if line_search_max_steps is None
+                else line_search_max_steps
+            ),
+        )
     if driver == Driver.SIMSOPT_LBFGSB:
         return SimsoptLBFGSBOptions(
             maxiter=max_steps,
@@ -384,6 +394,7 @@ def serial_solve_jax(
     atol: float = 1.0e-8,
     max_steps: int = 256,
     maxcor: int | None = None,
+    line_search_max_steps: int | None = None,
     require_success: bool = True,
     **kwargs,
 ) -> OptimizerResult:
@@ -398,6 +409,13 @@ def serial_solve_jax(
             raise TypeError("maxcor is only supported by Driver.SIMSOPT_LBFGSB")
         if maxcor < 1:
             raise ValueError("maxcor must be positive")
+    if line_search_max_steps is not None:
+        if driver != Driver.SIMSOPT_BFGS:
+            raise TypeError(
+                "line_search_max_steps is only supported by Driver.SIMSOPT_BFGS"
+            )
+        if line_search_max_steps < 1:
+            raise ValueError("line_search_max_steps must be positive")
     if optimizer is not None:
         if driver != Driver.SIMSOPT_BFGS:
             raise TypeError("Specify only driver or the deprecated optimizer keyword.")
@@ -423,6 +441,7 @@ def serial_solve_jax(
             atol=atol,
             max_steps=max_steps,
             maxcor=maxcor,
+            line_search_max_steps=line_search_max_steps,
         ),
     )
     if require_success:
