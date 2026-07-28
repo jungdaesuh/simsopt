@@ -303,20 +303,22 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
+    from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.examples import solve_qfm_sequence
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 
     import jax
 
     biotsavart, surface, fingerprint = _problem_components(bundle, arrays)
+    device = get_runtime_jax_device()
     field = BiotSavartJAX(biotsavart.coils)
     coil_set_spec = field.coil_set_spec_from_dofs(
-        jax.device_put(np.asarray(field.x, dtype=np.float64))
+        jax.device_put(np.asarray(field.x, dtype=np.float64), device)
     )
     device_result = solve_qfm_sequence(
-        initial_parameters=jax.device_put(arrays["initial_parameters"]),
-        quadpoints_phi=jax.device_put(arrays["quadrature_phi"]),
-        quadpoints_theta=jax.device_put(arrays["quadrature_theta"]),
+        initial_parameters=jax.device_put(arrays["initial_parameters"], device),
+        quadpoints_phi=jax.device_put(arrays["quadrature_phi"], device),
+        quadpoints_theta=jax.device_put(arrays["quadrature_theta"], device),
         coil_set_spec=coil_set_spec,
         mpol=surface.mpol,
         ntor=surface.ntor,

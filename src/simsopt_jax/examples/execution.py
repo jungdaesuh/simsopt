@@ -9,9 +9,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable, Final, Literal, Mapping
 
-import jax
-
-from simsopt_jax.backend.runtime import get_backend_mode, get_resolved_precision
+from simsopt_jax.backend.runtime import (
+    get_backend_mode,
+    get_resolved_precision,
+    get_runtime_jax_device,
+)
 from simsopt_jax.solve.driver import Driver
 
 ExecutionScale = Literal["bounded", "native_default"]
@@ -20,9 +22,10 @@ EXECUTION_SCALES: Final = ("bounded", "native_default")
 
 def example_runtime_metadata(scale: ExecutionScale) -> dict[str, str]:
     """Return the runtime identity every executable example must publish."""
+    device = get_runtime_jax_device()
     return {
         "backend_mode": get_backend_mode(),
-        "platform": jax.devices()[0].platform,
+        "platform": "cpu" if device is None else device.platform,
         "precision": get_resolved_precision(),
         "scale": scale,
     }
