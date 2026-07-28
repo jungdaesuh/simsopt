@@ -7291,6 +7291,7 @@ def target_least_squares(
     options=None,
     callback=None,
     progress_callback=None,
+    args=(),
 ):
     """Explicit JAX target least-squares entrypoint."""
     if method not in _TARGET_LEAST_SQUARES_METHODS:
@@ -7328,6 +7329,7 @@ def target_least_squares(
             max_dense_linearization_bytes=max_dense_linearization_bytes,
             callback=callback,
             progress_callback=progress_callback,
+            args=args,
         )
         return _least_squares_state_to_optimize_result(result)
 
@@ -7351,6 +7353,7 @@ def target_least_squares(
         max_dense_linearization_bytes=max_dense_linearization_bytes,
         callback=callback,
         progress_callback=progress_callback,
+        args=args,
     )
 
     return _least_squares_state_to_optimize_result(result)
