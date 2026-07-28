@@ -7,6 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = ROOT / "examples" / "jax" / "3_Advanced" / "single_stage_optimization.py"
+AUTHORITY_WORKFLOW = (
+    ROOT / ".github" / "workflows" / "jax_vmec_hybrid_authority.yml"
+)
 
 
 def _module() -> ast.Module:
@@ -62,3 +65,20 @@ def test_vmec_hybrid_reports_separate_host_and_jax_slice_evidence() -> None:
         "gradient",
     }
     assert required <= observable_keys
+
+
+def test_vmec_hybrid_authority_is_manual_and_build_identity_bound() -> None:
+    workflow = AUTHORITY_WORKFLOW.read_text(encoding="utf-8")
+
+    trigger = workflow.split("jobs:", maxsplit=1)[0]
+    assert "workflow_dispatch:" in trigger
+    assert "schedule:" not in trigger
+    assert "pull_request:" not in trigger
+    assert "push:" not in trigger
+    assert "expected_vmec_sha256:" in trigger
+    assert "expected_mpi_world_size:" in trigger
+    assert "VMEC Python extension SHA-256 mismatch" in workflow
+    assert "configuration_sha256" in workflow
+    assert "execution_scope" in workflow
+    assert "jax_slice_gpu" in workflow
+    assert "actions/upload-artifact@v4" in workflow
