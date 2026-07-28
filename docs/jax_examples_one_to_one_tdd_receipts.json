@@ -796,6 +796,134 @@
           "timestamp_utc": "2026-07-28T06:07:15Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-minimal-stage-two-native-jax-parity",
+      "native_source_id": "1_Simple/stage_two_optimization_minimal.py",
+      "mirror_id": "native-stage-two-optimization-minimal",
+      "intended_red_failure": "missing exact minimal Stage-II native JAX parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_stage_two_minimal_parity.py": "ed045e9c514ecd15b276c40c112620bf8d4eb550c9d30a5d111402749cb4684f"
+      },
+      "phases": {
+        "red": {
+          "revision": "b277bd7d8019266013a426c2c650d86566671430",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_minimal_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization-minimal\" in output:\n    print(\"missing exact minimal Stage-II native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact minimal Stage-II parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact minimal Stage-II native JAX parity case",
+          "combined_output_sha256": "f5b8df4571c3e2529e11bb250f9accf756fa46b074d19ae3e30154d71c8c5f90",
+          "source_sha256": {
+            "examples/jax/1_Simple/stage_two_optimization_minimal.py": "b17d2caf9768a237ac61f49a0a3aeec6281e4e3fdd8ffd8b1ca097dfbec5d1bb",
+            "examples/jax/parity/cases/__init__.py": "55733aed32b5ca7196e679bbbc9f2a867ab35915e3e4d31e14f83542dc6fa866"
+          },
+          "timestamp_utc": "2026-07-28T06:31:32Z"
+        },
+        "green": {
+          "revision": "5ec6b3db901d4da25756b73404f065038e9a6c06",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_minimal_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization-minimal\" in output:\n    print(\"missing exact minimal Stage-II native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact minimal Stage-II parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/stage_two_optimization_minimal.py": "0d6cea6db00bee97a13ac2bb5bf9d3f1d74e162015ae0c97973919348eba2bab",
+            "examples/jax/parity/cases/native_stage_two_optimization_minimal.py": "b4df3a2bc774c16fdd540b43070ce6d8cb5d118029a8b489f24113fdaf8f1cb2",
+            "src/simsopt_jax/examples/stage_two_minimal.py": "4b445e5a8008c06cf5bfac5a6aa029792cdbd6a82d2ae0259c1f211dccce239d",
+            "src/simsopt_jax/objectives/stage_two.py": "dabca27088bd65e319ffccc686877eb8e99c3daa6693e14d72d075e582113d31"
+          },
+          "timestamp_utc": "2026-07-28T06:32:00Z"
+        },
+        "refactor": {
+          "revision": "e290a1e7d8241816f1c35461c0a9e98523e7fa63",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_stage_two_minimal_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-stage-two-optimization-minimal\" in output:\n    print(\"missing exact minimal Stage-II native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact minimal Stage-II parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/stage_two_optimization_minimal.py": "0d6cea6db00bee97a13ac2bb5bf9d3f1d74e162015ae0c97973919348eba2bab",
+            "examples/jax/parity/cases/native_stage_two_optimization_minimal.py": "b4df3a2bc774c16fdd540b43070ce6d8cb5d118029a8b489f24113fdaf8f1cb2",
+            "src/simsopt_jax/examples/stage_two_minimal.py": "024d61db3b7ebc5a80c15663b114b46fc31f3efd3e4d41f7d7bebee54ffc8dbb",
+            "src/simsopt_jax/objectives/stage_two.py": "dabca27088bd65e319ffccc686877eb8e99c3daa6693e14d72d075e582113d31"
+          },
+          "timestamp_utc": "2026-07-28T06:32:27Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "strict-transfer-minimal-stage-two-workflow",
+      "native_source_id": "1_Simple/stage_two_optimization_minimal.py",
+      "mirror_id": "native-stage-two-optimization-minimal",
+      "intended_red_failure": "minimal Stage-II captures device state as compiler constants",
+      "test_sha256": {
+        "tests/integration/test_jax_stage_two_minimal_strict_transfer.py": "32114a4c62107de9256c09004a6f037aa41478409b560a46ad2c326021561f0b"
+      },
+      "phases": {
+        "red": {
+          "revision": "ebd56df2e2748bbc2403ade62d8380471d34510d",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_minimal_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed device-to-host transfer\" in output:\n    print(\"minimal Stage-II captures device state as compiler constants\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer minimal Stage-II outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "minimal Stage-II captures device state as compiler constants",
+          "combined_output_sha256": "82ed9416c9ff23ede132f4a91ed71ce40f7e6467aa29b92a465e4828235ea72b",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_minimal.py": "4b445e5a8008c06cf5bfac5a6aa029792cdbd6a82d2ae0259c1f211dccce239d"
+          },
+          "timestamp_utc": "2026-07-28T06:32:46Z"
+        },
+        "green": {
+          "revision": "3d0832a9a747cec9a6f1102dd5373b30682be911",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_minimal_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed device-to-host transfer\" in output:\n    print(\"minimal Stage-II captures device state as compiler constants\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer minimal Stage-II outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_minimal.py": "b475600e0dc92f730da9b00e2e283ae7b0414db0c75886bc349bbdcc17f5eb3c"
+          },
+          "timestamp_utc": "2026-07-28T06:33:25Z"
+        },
+        "refactor": {
+          "revision": "e290a1e7d8241816f1c35461c0a9e98523e7fa63",
+          "command": [
+            "/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/bin/python",
+            "-S",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport sys\n\nos.environ[\"JAX_ENABLE_X64\"] = \"true\"\nos.environ[\"JAX_PLATFORMS\"] = \"cuda\"\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\nos.environ[\"XLA_PYTHON_CLIENT_PREALLOCATE\"] = \"true\"\nsys.path.insert(0, \"/home/jungdaesuh/code/columbia/simopt-jax-clean-local/.pixi/envs/default/lib/python3.11/site-packages\")\nsys.path.insert(0, \"src\")\nimport pytest\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_stage_two_minimal_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed device-to-host transfer\" in output:\n    print(\"minimal Stage-II captures device state as compiler constants\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(output, file=sys.stderr)\nprint(\"unexpected strict-transfer minimal Stage-II outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/stage_two_minimal.py": "024d61db3b7ebc5a80c15663b114b46fc31f3efd3e4d41f7d7bebee54ffc8dbb"
+          },
+          "timestamp_utc": "2026-07-28T06:33:59Z"
+        }
+      }
     }
   ]
 }
