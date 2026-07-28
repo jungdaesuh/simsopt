@@ -5,21 +5,33 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from examples.jax._manifest import load_manifest
+from examples.jax._manifest import parse_manifest_document
 from examples.jax.parity._manifest import (
     ParityManifestValidationError,
     load_parity_manifest,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES_MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
-PARITY_MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
+EXAMPLES_MANIFEST_PATH = (
+    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
+)
+PARITY_MANIFEST_PATH = (
+    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
+)
 
 
 def _document() -> dict[str, object]:
     document = json.loads(PARITY_MANIFEST_PATH.read_text(encoding="utf-8"))
     assert isinstance(document, dict)
     return document
+
+
+def _examples_manifest():
+    return parse_manifest_document(
+        json.loads(EXAMPLES_MANIFEST_PATH.read_text(encoding="utf-8")),
+        repo_root=REPO_ROOT,
+        allow_historical_catalog=True,
+    )
 
 
 def _write_document(tmp_path: Path, document: dict[str, object]) -> Path:
@@ -36,7 +48,7 @@ def _relationships(document: dict[str, object]) -> list[dict[str, object]]:
 
 
 def test_parity_manifest_covers_every_ready_inspiration_exactly_once() -> None:
-    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    examples_manifest = _examples_manifest()
     parity_manifest = load_parity_manifest(
         PARITY_MANIFEST_PATH,
         examples_manifest=examples_manifest,
@@ -69,7 +81,7 @@ def test_parity_manifest_declares_scientific_workflow_stage_coverage() -> None:
 
 
 def test_coil_flux_relationship_routes_each_scientific_observable() -> None:
-    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    examples_manifest = _examples_manifest()
     parity_manifest = load_parity_manifest(
         PARITY_MANIFEST_PATH,
         examples_manifest=examples_manifest,
@@ -229,7 +241,7 @@ def test_parity_manifest_rejects_invalid_contracts(
     else:
         raise AssertionError(f"unhandled mutation: {mutation}")
 
-    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    examples_manifest = _examples_manifest()
     with pytest.raises(ParityManifestValidationError, match=expected_message):
         load_parity_manifest(
             _write_document(tmp_path, document),
@@ -239,7 +251,7 @@ def test_parity_manifest_rejects_invalid_contracts(
 
 
 def test_traceable_final_jacobian_has_all_direct_routes() -> None:
-    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    examples_manifest = _examples_manifest()
     parity_manifest = load_parity_manifest(
         PARITY_MANIFEST_PATH,
         examples_manifest=examples_manifest,
@@ -263,7 +275,7 @@ def test_traceable_final_jacobian_has_all_direct_routes() -> None:
 
 
 def test_surface_owns_symmetric_jacobian_invariant_routes() -> None:
-    examples_manifest = load_manifest(EXAMPLES_MANIFEST_PATH, repo_root=REPO_ROOT)
+    examples_manifest = _examples_manifest()
     parity_manifest = load_parity_manifest(
         PARITY_MANIFEST_PATH,
         examples_manifest=examples_manifest,

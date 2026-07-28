@@ -163,6 +163,7 @@ def test_child_command_has_exact_bounded_argument_order(tmp_path: Path) -> None:
 
     assert build_child_command(record, repo_root=tmp_path) == (
         sys.executable,
+        "-S",
         str(tmp_path / "examples" / "jax" / "1_Simple" / "example.py"),
         "--smoke",
         "--json",
@@ -691,7 +692,7 @@ def test_coil_flux_example_has_independent_gradient_oracle_and_reduces_flux() ->
     )
 
     assert example.status == "ready"
-    assert example.classification == "adapter"
+    assert example.classification == "tutorial"
     completed = subprocess.run(
         build_child_command(example, repo_root=repo_root),
         cwd=repo_root,

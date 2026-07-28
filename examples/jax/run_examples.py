@@ -80,6 +80,7 @@ def build_child_command(
 
     prefix = (
         sys.executable,
+        "-S",
         str(repo_root / "examples" / "jax" / example.path),
     )
     scale_arguments = ("--smoke",) if scale == "bounded" else ()

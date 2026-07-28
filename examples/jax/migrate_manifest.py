@@ -14,7 +14,7 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
     if import_root not in sys.path:
         sys.path.insert(0, import_root)
 
-from examples.jax._manifest import convert_v1_document_to_v2, load_manifest
+from examples.jax._manifest import convert_v1_document_to_v2, parse_manifest_document
 
 _COMPATIBILITY_DURATION = "one release"
 _ROLLBACK_COMMAND = "git checkout -- examples/jax/manifest.json"
@@ -31,10 +31,16 @@ def main(arguments: list[str] | None = None) -> int:
     """Print deterministic candidate bytes and migration evidence only."""
     parsed = _parser().parse_args(arguments)
     document = json.loads(parsed.input.read_text(encoding="utf-8"))
-    observed = load_manifest(parsed.input, repo_root=_REPO_ROOT)
+    observed = parse_manifest_document(
+        document,
+        repo_root=_REPO_ROOT,
+        warn_legacy=True,
+        allow_historical_catalog=True,
+    )
     candidate_bytes, semantic_diff = convert_v1_document_to_v2(
         document,
         repo_root=_REPO_ROOT,
+        allow_historical_catalog=True,
     )
     candidate_text = candidate_bytes.decode("utf-8")
     output = "\n".join(

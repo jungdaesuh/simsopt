@@ -33,7 +33,7 @@ from simsopt.geo import (
 from simsopt.objectives import QuadraticPenalty
 
 
-EXAMPLE_ID = "native-single-stage-boozer-vacuum"
+EXAMPLE_ID = "native-single-stage-boozer-vacuum-optimization"
 NATIVE_ITERATIONS = 1000
 
 

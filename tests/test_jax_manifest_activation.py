@@ -14,8 +14,10 @@ from examples.jax.manifest_activation import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ACTIVE_EXAMPLES = REPO_ROOT / "examples" / "jax" / "manifest.json"
-ACTIVE_PARITY = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
+ACTIVE_EXAMPLES = REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
+ACTIVE_PARITY = (
+    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
+)
 CANDIDATE_EXAMPLES = REPO_ROOT / "docs" / "jax_examples_manifest_v3_candidate.json"
 CANDIDATE_PARITY = REPO_ROOT / "docs" / "jax_parity_manifest_v2_candidate.json"
 CANDIDATE_EXAMPLES_SHA = (

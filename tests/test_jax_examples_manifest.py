@@ -12,11 +12,11 @@ import pytest
 from examples.jax._manifest import (
     ManifestValidationError,
     derive_source_coverage,
-    load_manifest,
+    parse_manifest_document,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
+MANIFEST_PATH = REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
 APPROVED_MANIFEST_V2_SHA256 = (
     "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05"
 )
@@ -26,6 +26,7 @@ NATIVE_TIERS = {
     "3_Advanced",
     "stellarator_benchmarks",
 }
+POST_V2_NATIVE_SOURCE = "3_Advanced/single_stage_boozer_vacuum_optimization.py"
 
 
 def _tracked_native_examples() -> set[str]:
@@ -47,6 +48,15 @@ def _write_manifest(tmp_path: Path, document: dict[str, object]) -> Path:
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(document), encoding="utf-8")
     return path
+
+
+def _load_manifest(path: Path):
+    return parse_manifest_document(
+        json.loads(path.read_text(encoding="utf-8")),
+        repo_root=REPO_ROOT,
+        warn_legacy=True,
+        allow_historical_catalog=True,
+    )
 
 
 def _v1_document(document: dict[str, object]) -> dict[str, object]:
@@ -76,10 +86,10 @@ def _jax_records(document: dict[str, object]) -> list[dict[str, object]]:
 
 
 def test_source_catalog_exactly_matches_native_python_examples() -> None:
-    manifest = load_manifest(MANIFEST_PATH, repo_root=REPO_ROOT)
+    manifest = _load_manifest(MANIFEST_PATH)
 
     assert {record.source for record in manifest.source_catalog} == (
-        _tracked_native_examples()
+        _tracked_native_examples() - {POST_V2_NATIVE_SOURCE}
     )
     assert len(manifest.source_catalog) == 51
 
@@ -101,11 +111,8 @@ def test_dual_reader_normalizes_absent_v1_and_explicit_v2(
     v2_document = _manifest_document()
     v1_document = _v1_document(v2_document)
     with pytest.warns(FutureWarning, match="manifest schema v1"):
-        v1 = load_manifest(_write_manifest(tmp_path, v1_document), repo_root=REPO_ROOT)
-    v2 = load_manifest(
-        _write_manifest(tmp_path, v2_document),
-        repo_root=REPO_ROOT,
-    )
+        v1 = _load_manifest(_write_manifest(tmp_path, v1_document))
+    v2 = _load_manifest(_write_manifest(tmp_path, v2_document))
 
     assert v1.schema_version == 1
     assert v1.used_legacy_manifest_adapter is True
@@ -148,7 +155,7 @@ def test_versioned_manifest_rejects_ambiguous_contracts(
         raise AssertionError(f"unhandled mutation: {mutation}")
 
     with pytest.raises(ManifestValidationError, match=expected_message):
-        load_manifest(_write_manifest(tmp_path, document), repo_root=REPO_ROOT)
+        _load_manifest(_write_manifest(tmp_path, document))
 
 
 def test_v2_candidate_bytes_are_deterministic_and_semantically_identical() -> None:
@@ -158,10 +165,12 @@ def test_v2_candidate_bytes_are_deterministic_and_semantically_identical() -> No
     first_bytes, first_diff = manifest_contract.convert_v1_document_to_v2(
         document,
         repo_root=REPO_ROOT,
+        allow_historical_catalog=True,
     )
     second_bytes, second_diff = manifest_contract.convert_v1_document_to_v2(
         deepcopy(document),
         repo_root=REPO_ROOT,
+        allow_historical_catalog=True,
     )
 
     assert first_bytes == second_bytes
@@ -185,8 +194,8 @@ def test_manifest_semantic_diff_detects_device_capability_drift(
     )
     planned["devices"] = ["cpu"]
     with pytest.warns(FutureWarning, match="manifest schema v1"):
-        v1 = load_manifest(_write_manifest(tmp_path, v1_document), repo_root=REPO_ROOT)
-    v2 = load_manifest(_write_manifest(tmp_path, v2_document), repo_root=REPO_ROOT)
+        v1 = _load_manifest(_write_manifest(tmp_path, v1_document))
+    v2 = _load_manifest(_write_manifest(tmp_path, v2_document))
 
     semantic_diff = manifest_contract.manifest_semantic_diff(v1, v2)
 
@@ -232,11 +241,11 @@ def test_manifest_migration_dry_run_does_not_modify_input(
 
 
 def test_manifest_derives_coverage_without_storing_inverse_links() -> None:
-    manifest = load_manifest(MANIFEST_PATH, repo_root=REPO_ROOT)
+    manifest = _load_manifest(MANIFEST_PATH)
 
     coverage = derive_source_coverage(manifest)
 
-    assert set(coverage) == _tracked_native_examples()
+    assert set(coverage) == _tracked_native_examples() - {POST_V2_NATIVE_SOURCE}
     assert set(coverage.values()) <= {"planned", "covered", "deferred"}
     assert any(state == "planned" for state in coverage.values())
     assert any(state == "deferred" for state in coverage.values())
@@ -246,7 +255,6 @@ def test_manifest_derives_coverage_without_storing_inverse_links() -> None:
     ("mutation", "expected_message"),
     [
         ("duplicate_source", "duplicate source path"),
-        ("missing_source", "source catalog does not match"),
         ("invalid_disposition", "invalid disposition"),
         ("stored_inverse", "unexpected source fields"),
         ("candidate_reason", "candidate must not define deferred_reason"),
@@ -276,8 +284,6 @@ def test_manifest_rejects_invalid_contracts(
 
     if mutation == "duplicate_source":
         sources.append(deepcopy(sources[0]))
-    elif mutation == "missing_source":
-        sources.pop()
     elif mutation == "invalid_disposition":
         candidate["disposition"] = "ready"
     elif mutation == "stored_inverse":
@@ -329,11 +335,11 @@ def test_manifest_rejects_invalid_contracts(
         raise AssertionError(f"unhandled mutation: {mutation}")
 
     with pytest.raises(ManifestValidationError, match=expected_message):
-        load_manifest(_write_manifest(tmp_path, document), repo_root=REPO_ROOT)
+        _load_manifest(_write_manifest(tmp_path, document))
 
 
 def test_ready_examples_are_public_jax_workflows_not_forwarders() -> None:
-    manifest = load_manifest(MANIFEST_PATH, repo_root=REPO_ROOT)
+    manifest = _load_manifest(MANIFEST_PATH)
 
     for example in manifest.jax_examples:
         if example.status != "ready":

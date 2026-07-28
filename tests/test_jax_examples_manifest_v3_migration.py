@@ -19,8 +19,10 @@ from examples.jax.manifest_contracts_v3 import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES_MANIFEST = REPO_ROOT / "examples" / "jax" / "manifest.json"
-PARITY_MANIFEST = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
+EXAMPLES_MANIFEST = REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "manifest_v2.json"
+PARITY_MANIFEST = (
+    REPO_ROOT / "tests" / "fixtures" / "jax_manifests" / "parity_manifest_v1.json"
+)
 INVENTORY = REPO_ROOT / "examples" / "jax" / "one_to_one_inventory.json"
 CANDIDATE_CLI = REPO_ROOT / "examples" / "jax" / "build_manifest_v3_candidate.py"
 EXAMPLES_V2_SHA256 = "2aeae6a63f631b205955c288e3308ad42c0191bbfcdef78b6cba7b2797db0b05"

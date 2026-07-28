@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sysconfig
 from pathlib import Path
 from typing import Literal, Mapping
 
@@ -83,10 +84,14 @@ def build_execution_environment(
     if repo_root is not None:
         source_root = str(repo_root / "src")
         inherited_pythonpath = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = (
-            source_root
+        dependency_root = sysconfig.get_paths()["purelib"]
+        pythonpath_entries = (
+            (source_root, dependency_root)
             if not inherited_pythonpath
-            else os.pathsep.join((source_root, inherited_pythonpath))
+            else (source_root, inherited_pythonpath, dependency_root)
+        )
+        environment["PYTHONPATH"] = os.pathsep.join(
+            dict.fromkeys(pythonpath_entries)
         )
     return profile, environment
 

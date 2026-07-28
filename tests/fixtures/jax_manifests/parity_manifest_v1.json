@@ -1,0 +1,2691 @@
+{
+  "schema_version": 1,
+  "relationships": [
+    {
+      "case_id": "traceable-least-squares",
+      "jax_example_id": "traceable-least-squares",
+      "native_source": "1_Simple/just_a_quadratic.py",
+      "classification": "full",
+      "classification_reason": "The bounded case reconstructs every quadratic workflow stage with identical inputs and compares the complete initial and final least-squares contract.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_python_scipy",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_weighted_least_squares_problem",
+        "evaluate_initial_residual_and_jacobian",
+        "solve_least_squares_problem",
+        "evaluate_final_residual_and_jacobian"
+      ],
+      "omitted_scientific_stages": [],
+      "excluded_teaching_stages": [
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": "curve-length-optimization",
+      "jax_example_id": "curve-length-optimization",
+      "native_source": "1_Simple/minimize_curve_length.py",
+      "classification": "full",
+      "classification_reason": "The bounded case reconstructs curve construction, fixed/free DOFs, native/JAX length value and gradient evaluation, solve, and final accepted state.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_python_scipy",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_fourier_curve_problem",
+        "evaluate_initial_length_and_gradient",
+        "optimize_curve_length",
+        "evaluate_final_length_and_gradient"
+      ],
+      "omitted_scientific_stages": [],
+      "excluded_teaching_stages": [
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": "surface-geometry-optimization",
+      "jax_example_id": "surface-geometry-optimization",
+      "native_source": "1_Simple/surf_vol_area.py",
+      "classification": "reduced",
+      "classification_reason": "The bounded case reconstructs the first area-volume least-squares solve with identical inputs and records raw final parameters and Jacobians plus a global-column-swap orbit representation for the interchangeable ellipse semi-axes and Jacobian columns. Raw terminal coordinates remain diagnostic because distinct solvers can stop at different representatives of the nearly rank-deficient circular optimum. It omits the native script's save/load and second retargeted centered-difference solve.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_python_scipy",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_area_volume_problem",
+        "evaluate_initial_area_volume_residual_and_jacobian",
+        "solve_area_volume_least_squares_problem",
+        "evaluate_final_area_volume_state"
+      ],
+      "omitted_scientific_stages": [
+        "second_retargeted_centered_difference_area_volume_solve"
+      ],
+      "excluded_teaching_stages": [
+        "surface_save_load_round_trip",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "solver_cost",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "area",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "area",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "area",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "volume",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "volume",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "volume",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "parameter_invariants",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameter_invariants",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameter_invariants",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": false,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": false,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": false,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual_jacobian_invariants",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "solver_cost",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "area",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "area",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "area",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "volume",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "volume",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "volume",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": "coil-flux-optimization",
+      "jax_example_id": "coil-flux-optimization",
+      "native_source": "1_Simple/stage_two_optimization_minimal.py",
+      "classification": "reduced",
+      "classification_reason": "This bounded matched workflow executes every declared reduced scientific stage with a shared serialized input contract.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_python_scipy",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_bounded_stage_two_problem",
+        "evaluate_initial_flux_penalties_and_gradient",
+        "optimize_coil_dofs",
+        "evaluate_final_flux_penalties_and_gradient"
+      ],
+      "omitted_scientific_stages": [
+        "native_default_coil_resolution_and_optimization_budget"
+      ],
+      "excluded_teaching_stages": [
+        "vtk_and_json_exports",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "flux",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "flux",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "flux",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "flux_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "flux_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "flux_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "coil_length",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "coil_length",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "coil_length",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "flux",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "flux",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "flux",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "flux_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "flux_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "flux_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "coil_length",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "coil_length",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "coil_length",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "coil-flux-optimization",
+      "native_source": "2_Intermediate/stage_two_optimization.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/stage_two_optimization.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "coil-flux-optimization",
+      "native_source": "2_Intermediate/stage_two_optimization_planar_coils.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/stage_two_optimization_planar_coils.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "coil-flux-optimization",
+      "native_source": "2_Intermediate/stage_two_optimization_stochastic.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/stage_two_optimization_stochastic.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": "qfm-surface-optimization",
+      "jax_example_id": "qfm-surface-optimization",
+      "native_source": "1_Simple/qfm.py",
+      "classification": "reduced",
+      "classification_reason": "This bounded matched workflow executes every declared reduced scientific stage with a shared serialized input contract.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_python_scipy",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_bounded_qfm_volume_problem",
+        "evaluate_initial_qfm_residual_constraint_and_derivatives",
+        "solve_qfm_penalty_problem",
+        "evaluate_final_qfm_residual_and_feasibility"
+      ],
+      "omitted_scientific_stages": [
+        "exact_slsqp_volume_solve",
+        "toroidal_flux_constraint_branch",
+        "area_constraint_branch"
+      ],
+      "excluded_teaching_stages": [
+        "interactive_plotting",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "qfm_objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "qfm_objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "qfm_objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "qfm_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "qfm_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "qfm_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_value",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_value",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_value",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "penalty_objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "penalty_objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "penalty_objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "penalty_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "penalty_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "penalty_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "qfm_objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "qfm_objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "qfm_objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "qfm_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "qfm_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "qfm_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_value",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_value",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_value",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "penalty_objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "penalty_objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "penalty_objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "penalty_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "penalty_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "penalty_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": "permanent-magnet-optimization",
+      "jax_example_id": "permanent-magnet-optimization",
+      "native_source": "1_Simple/permanent_magnet_simple.py",
+      "classification": "reduced",
+      "classification_reason": "This bounded matched workflow executes every declared reduced scientific stage with a shared serialized input contract.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_simsoptpp",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_bounded_permanent_magnet_problem",
+        "evaluate_initial_normal_field_residual",
+        "run_deterministic_greedy_magnet_solve",
+        "evaluate_final_moments_and_normal_field_residual"
+      ],
+      "omitted_scientific_stages": [
+        "native_default_magnet_grid_and_gpmo_iteration_count"
+      ],
+      "excluded_teaching_stages": [
+        "vtk_and_famus_exports",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "moments",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "moments",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "moments",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "selected_dipoles",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "selected_dipoles",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "selected_dipoles",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "moments",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "moments",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "moments",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_sum_squares",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "selected_dipoles",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "selected_dipoles",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "selected_dipoles",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "exact",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "permanent-magnet-optimization",
+      "native_source": "2_Intermediate/permanent_magnet_MUSE.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/permanent_magnet_MUSE.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "permanent-magnet-optimization",
+      "native_source": "2_Intermediate/permanent_magnet_PM4Stell.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/permanent_magnet_PM4Stell.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "permanent-magnet-optimization",
+      "native_source": "2_Intermediate/permanent_magnet_QA.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/permanent_magnet_QA.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "fieldline-and-particle-tracing",
+      "native_source": "1_Simple/tracing_fieldlines_NCSX.py",
+      "classification": "unsupported",
+      "classification_reason": "The ready JAX lesson and this cited native source solve different physical workflows, so numerical parity would be scientifically invalid.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:1_Simple/tracing_fieldlines_NCSX.py"
+      ],
+      "excluded_teaching_stages": [
+        "trajectory_file_exports",
+        "interactive_plotting",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No identical serialized physical problem is currently consumed by this native source and the ready JAX lesson."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "fieldline-and-particle-tracing",
+      "native_source": "1_Simple/tracing_fieldlines_QA.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:1_Simple/tracing_fieldlines_QA.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "fieldline-and-particle-tracing",
+      "native_source": "1_Simple/tracing_particle.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:1_Simple/tracing_particle.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "fieldline-and-particle-tracing",
+      "native_source": "2_Intermediate/tracing_boozer.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/tracing_boozer.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "boozer-surface-optimization",
+      "native_source": "2_Intermediate/QH_fixed_resolution_boozer.py",
+      "classification": "unsupported",
+      "classification_reason": "The ready JAX lesson and this cited native source solve different physical workflows, so numerical parity would be scientifically invalid.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/QH_fixed_resolution_boozer.py"
+      ],
+      "excluded_teaching_stages": [
+        "surface_exports",
+        "interactive_plotting",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No identical serialized physical problem is currently consumed by this native source and the ready JAX lesson."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "boozer-surface-optimization",
+      "native_source": "2_Intermediate/boozer.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/boozer.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "boozer-surface-optimization",
+      "native_source": "2_Intermediate/boozerQA.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/boozerQA.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "boozer-surface-optimization",
+      "native_source": "2_Intermediate/resolution_increase_boozer.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/resolution_increase_boozer.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "wireframe-optimization",
+      "native_source": "2_Intermediate/wireframe_gsco_modular.py",
+      "classification": "unsupported",
+      "classification_reason": "The bounded executable case exercises RCLS, not this native GSCO workflow.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/wireframe_gsco_modular.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No matched native/JAX GSCO decision sequence is implemented."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "wireframe-optimization",
+      "native_source": "2_Intermediate/wireframe_gsco_sector_saddle.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/wireframe_gsco_sector_saddle.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": "wireframe-optimization",
+      "jax_example_id": "wireframe-optimization",
+      "native_source": "2_Intermediate/wireframe_rcls_basic.py",
+      "classification": "reduced",
+      "classification_reason": "This bounded matched workflow executes the native and JAX RCLS solve with identical response, target, constraints, and regularization.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_python_scipy",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_bounded_wireframe_system",
+        "evaluate_initial_system_and_constraints",
+        "solve_wireframe_current_problem",
+        "evaluate_final_currents_objective_and_feasibility"
+      ],
+      "omitted_scientific_stages": [
+        "native_default_wireframe_grid_and_field_construction"
+      ],
+      "excluded_teaching_stages": [
+        "vtk_and_current_exports",
+        "interactive_plotting",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "currents",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "currents",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "currents",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "normal_field_residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "normal_field_residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "normal_field_residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "constraint_residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "currents",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "currents",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "currents",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "normal_field_residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "normal_field_residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "normal_field_residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "objective_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "constraint_residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "wireframe-optimization",
+      "native_source": "2_Intermediate/wireframe_rcls_with_ports.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:2_Intermediate/wireframe_rcls_with_ports.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "wireframe-optimization",
+      "native_source": "3_Advanced/wireframe_gsco_multistep.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:3_Advanced/wireframe_gsco_multistep.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": "coil-force-and-finite-build",
+      "jax_example_id": "coil-force-and-finite-build",
+      "native_source": "2_Intermediate/strain_optimization.py",
+      "classification": "reduced",
+      "classification_reason": "This bounded matched workflow executes every declared reduced scientific stage with a shared serialized input contract.",
+      "scale_tier": "bounded",
+      "oracle_kind": "native_simsoptpp",
+      "cost_tier": "smoke",
+      "workflow_stages": [
+        "construct_bounded_fixed_coil_state",
+        "evaluate_force_and_finite_build_objectives",
+        "evaluate_force_and_frame_derivatives",
+        "publish_fixed_state_diagnostics"
+      ],
+      "omitted_scientific_stages": [
+        "native_strain_optimization_and_finite_build_continuation"
+      ],
+      "excluded_teaching_stages": [
+        "vtk_and_json_exports",
+        "interactive_plotting",
+        "console_diagnostics"
+      ],
+      "comparison_routes": [
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "force_objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "force_objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "force_objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "force_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "force_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "force_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "frame",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "frame",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "frame",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "frame_orthonormality_residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "frame_orthonormality_residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "frame_orthonormality_residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "initial",
+          "observable": "torsion",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "torsion",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "initial",
+          "observable": "torsion",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "parameters",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "force_objective",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "force_objective",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "force_objective",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "force_gradient",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "force_gradient",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "force_gradient",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "frame",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "frame",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "frame",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "frame_orthonormality_residual",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "frame_orthonormality_residual",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "frame_orthonormality_residual",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        },
+        {
+          "phase": "final",
+          "observable": "torsion",
+          "lane_pair": "native-cpu:jax-cpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "torsion",
+          "lane_pair": "native-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "native_workflow"
+        },
+        {
+          "phase": "final",
+          "observable": "torsion",
+          "lane_pair": "jax-cpu:jax-gpu",
+          "applicable": true,
+          "comparator": "allclose",
+          "tolerance_bucket": "gpu_runtime"
+        }
+      ],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py",
+        "tests/integration/test_jax_example_parity_runner.py"
+      ],
+      "blocker": null
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "coil-force-and-finite-build",
+      "native_source": "3_Advanced/coil_forces.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:3_Advanced/coil_forces.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    },
+    {
+      "case_id": null,
+      "jax_example_id": "coil-force-and-finite-build",
+      "native_source": "3_Advanced/stage_two_optimization_finitebuild.py",
+      "classification": "unsupported",
+      "classification_reason": "This combined JAX lesson does not yet reconstruct this native source workflow end to end.",
+      "scale_tier": "not_applicable",
+      "oracle_kind": "not_applicable",
+      "cost_tier": "not_applicable",
+      "workflow_stages": [],
+      "omitted_scientific_stages": [
+        "complete_scientific_workflow:3_Advanced/stage_two_optimization_finitebuild.py"
+      ],
+      "excluded_teaching_stages": [],
+      "comparison_routes": [],
+      "correctness_tests": [
+        "tests/test_jax_example_parity_manifest.py"
+      ],
+      "blocker": "No typed matched case currently consumes this source workflow's complete inputs and stages."
+    }
+  ]
+}
