@@ -17,11 +17,15 @@ from examples.jax._lane_environment import (
 from examples.jax._manifest import (
     JaxExampleRecord,
     JaxExamplesManifest,
-    derive_source_coverage,
-    load_manifest,
 )
+from examples.jax.manifest_runtime import (
+    RuntimeContractPair,
+    RuntimeExample,
+    load_runtime_contract_pair,
+)
+from examples.jax.parity._manifest import ParityManifest
 from examples.jax.run_examples import (
-    _argument_parser,
+    _parse_arguments,
     build_child_command,
     run_lane,
     run_profile,
@@ -55,15 +59,20 @@ def _manifest(record: JaxExampleRecord) -> JaxExamplesManifest:
     return JaxExamplesManifest(source_catalog=(), jax_examples=(record,))
 
 
+def _repository_examples(repo_root: Path) -> tuple[RuntimeExample, ...]:
+    return load_runtime_contract_pair(
+        repo_root / "examples" / "jax" / "manifest.json",
+        repo_root / "examples" / "jax" / "parity_manifest.json",
+        repo_root=repo_root,
+    ).examples
+
+
 def test_every_ready_repository_example_runs_on_cpu_and_gpu() -> None:
     """Ready JAX lessons use the same implementation on both real platforms."""
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json",
-        repo_root=repo_root,
-    )
+    examples = _repository_examples(repo_root)
 
-    for example in manifest.jax_examples:
+    for example in examples:
         if example.status == "ready":
             assert example.lanes == ("cpu-smoke", "gpu-strict"), example.id
 
@@ -71,10 +80,7 @@ def test_every_ready_repository_example_runs_on_cpu_and_gpu() -> None:
 def test_every_ready_example_runs_with_global_strict_transfer_guard_on_cpu() -> None:
     """Exercise the global JAX guard without requiring CUDA in the CPU test job."""
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json",
-        repo_root=repo_root,
-    )
+    examples = _repository_examples(repo_root)
     environment = build_lane_environment(
         "cpu-smoke",
         os.environ,
@@ -83,7 +89,7 @@ def test_every_ready_example_runs_with_global_strict_transfer_guard_on_cpu() -> 
     environment["SIMSOPT_JAX_TRANSFER_GUARD"] = "disallow"
     environment["JAX_TRANSFER_GUARD"] = "disallow"
 
-    for example in manifest.jax_examples:
+    for example in examples:
         if example.status != "ready":
             continue
         completed = subprocess.run(
@@ -100,12 +106,9 @@ def test_every_ready_example_runs_with_global_strict_transfer_guard_on_cpu() -> 
 def test_gpu_examples_do_not_import_host_scipy_optimizers() -> None:
     """A GPU-strict example cannot hide a CPU optimizer behind JAX metrics."""
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json",
-        repo_root=repo_root,
-    )
+    examples = _repository_examples(repo_root)
 
-    for example in manifest.jax_examples:
+    for example in examples:
         if example.status != "ready" or "gpu-strict" not in example.lanes:
             continue
         example_path = repo_root / "examples" / "jax" / example.path
@@ -329,7 +332,7 @@ def test_runner_parser_supports_device_and_execution_intent(
     expected_device: str,
     expected_intent: str,
 ) -> None:
-    parsed = _argument_parser().parse_args(arguments)
+    parsed = _parse_arguments(arguments)
 
     assert parsed.device == expected_device
     assert parsed.intent == expected_intent
@@ -337,10 +340,10 @@ def test_runner_parser_supports_device_and_execution_intent(
 
 def test_runner_parser_rejects_mixed_legacy_and_new_selectors() -> None:
     with pytest.raises(SystemExit):
-        _argument_parser().parse_args(("--lane", "cpu-smoke", "--device", "cpu"))
+        _parse_arguments(("--lane", "cpu-smoke", "--device", "cpu"))
 
     with pytest.raises(SystemExit):
-        _argument_parser().parse_args(("--lane", "cpu-smoke", "--intent", "fast"))
+        _parse_arguments(("--lane", "cpu-smoke", "--intent", "fast"))
 
 
 def test_runner_manifest_observability_distinguishes_v1_adapter() -> None:
@@ -362,14 +365,16 @@ def test_runner_emits_manifest_observability_before_execution(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    manifest = JaxExamplesManifest(
-        source_catalog=(),
-        jax_examples=(),
-        schema_version=2,
-        used_legacy_manifest_adapter=False,
+    manifest = RuntimeContractPair(
+        version_pair=(3, 2),
+        used_legacy_adapter=False,
+        examples=(),
+        parity=ParityManifest(schema_version=2, relationships=()),
     )
     monkeypatch.setattr(
-        example_runner, "load_manifest", lambda *_args, **_kwargs: manifest
+        example_runner,
+        "load_runtime_contract_pair",
+        lambda *_args, **_kwargs: manifest,
     )
     monkeypatch.setattr(example_runner, "run_profile", lambda *_args, **_kwargs: 0)
 
@@ -379,7 +384,9 @@ def test_runner_emits_manifest_observability_before_execution(
 
     assert exit_code == 0
     assert capsys.readouterr().err == (
-        '{"manifest_schema_version":2,"used_legacy_manifest_adapter":false}\n'
+        '{"examples_manifest_schema_version":3,'
+        '"parity_manifest_schema_version":2,'
+        '"used_legacy_manifest_adapter":false}\n'
     )
 
 
@@ -496,18 +503,12 @@ def test_gpu_strict_rejects_malformed_result(tmp_path: Path) -> None:
 
 def test_traceable_least_squares_example_matches_analytic_optimum() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "traceable-least-squares"
+        record for record in examples if record.id == "traceable-least-squares"
     )
-    coverage = derive_source_coverage(manifest)
 
     assert example.status == "ready"
-    assert coverage["1_Simple/just_a_quadratic.py"] == "covered"
     existing_logs = set(repo_root.glob("simsopt_*.dat"))
     completed = subprocess.run(
         build_child_command(example, repo_root=repo_root),
@@ -540,13 +541,9 @@ def test_traceable_least_squares_example_matches_analytic_optimum() -> None:
 
 def test_curve_length_example_matches_circle_oracle_and_directional_fd() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "curve-length-optimization"
+        record for record in examples if record.id == "curve-length-optimization"
     )
 
     assert example.status == "ready"
@@ -571,13 +568,9 @@ def test_curve_length_example_matches_circle_oracle_and_directional_fd() -> None
 
 def test_surface_geometry_example_matches_axisymmetric_torus_oracle() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "surface-geometry-optimization"
+        record for record in examples if record.id == "surface-geometry-optimization"
     )
 
     assert example.status == "ready"
@@ -605,13 +598,9 @@ def test_surface_geometry_example_matches_axisymmetric_torus_oracle() -> None:
 
 def test_permanent_magnet_example_matches_greedy_coordinate_oracle() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "permanent-magnet-optimization"
+        record for record in examples if record.id == "permanent-magnet-optimization"
     )
 
     assert example.status == "ready"
@@ -635,13 +624,9 @@ def test_permanent_magnet_example_matches_greedy_coordinate_oracle() -> None:
 
 def test_fieldline_example_matches_pure_toroidal_orbit_oracle() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "fieldline-and-particle-tracing"
+        record for record in examples if record.id == "fieldline-and-particle-tracing"
     )
 
     assert example.status == "ready"
@@ -667,20 +652,13 @@ def test_fieldline_example_matches_pure_toroidal_orbit_oracle() -> None:
 
 def test_coil_flux_example_has_independent_gradient_oracle_and_reduces_flux() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "coil-flux-optimization"
+        record for record in examples if record.id == "coil-flux-optimization"
     )
 
     assert example.status == "ready"
-    assert example.execution_kind == "adapter"
-    assert example.host_boundaries == (
-        "native coil and surface construction plus immutable snapshots",
-    )
+    assert example.classification == "adapter"
     completed = subprocess.run(
         build_child_command(example, repo_root=repo_root),
         cwd=repo_root,
@@ -703,13 +681,9 @@ def test_coil_flux_example_has_independent_gradient_oracle_and_reduces_flux() ->
 
 def test_qfm_example_reduces_penalty_and_publishes_final_surface() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "qfm-surface-optimization"
+        record for record in examples if record.id == "qfm-surface-optimization"
     )
 
     assert example.status == "ready"
@@ -736,13 +710,9 @@ def test_qfm_example_reduces_penalty_and_publishes_final_surface() -> None:
 
 def test_boozer_example_reports_solver_certificate_and_final_surface() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "boozer-surface-optimization"
+        record for record in examples if record.id == "boozer-surface-optimization"
     )
 
     assert example.status == "ready"
@@ -767,13 +737,9 @@ def test_boozer_example_reports_solver_certificate_and_final_surface() -> None:
 
 def test_wireframe_example_matches_constrained_oracle_and_publishes_state() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "wireframe-optimization"
+        record for record in examples if record.id == "wireframe-optimization"
     )
 
     assert example.status == "ready"
@@ -799,13 +765,9 @@ def test_wireframe_example_matches_constrained_oracle_and_publishes_state() -> N
 
 def test_force_finite_build_example_matches_force_and_frame_oracles() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = load_manifest(
-        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
-    )
+    examples = _repository_examples(repo_root)
     example = next(
-        record
-        for record in manifest.jax_examples
-        if record.id == "coil-force-and-finite-build"
+        record for record in examples if record.id == "coil-force-and-finite-build"
     )
 
     assert example.status == "ready"
