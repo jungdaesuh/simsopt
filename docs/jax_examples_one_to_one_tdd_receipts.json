@@ -1233,6 +1233,183 @@
           "timestamp_utc": "2026-07-28T07:45:46Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-wireframe-rcls-basic-native-jax-parity",
+      "native_source_id": "2_Intermediate/wireframe_rcls_basic.py",
+      "mirror_id": "native-wireframe-rcls-basic",
+      "intended_red_failure": "missing exact wireframe RCLS basic parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_wireframe_rcls_basic_parity.py": "de5ff5e9094a42d92ae00cecfffb9e73f5a3ee2df1b42d03480a5cb339698a36"
+      },
+      "phases": {
+        "red": {
+          "revision": "ccfdcae9f0323a245367d290fde28de475e10c58",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_wireframe_rcls_basic_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-wireframe-rcls-basic\" in output:\n    print(\"missing exact wireframe RCLS basic parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact wireframe RCLS basic parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact wireframe RCLS basic parity case",
+          "combined_output_sha256": "fd705905c0fce7f3f242cae03252fefaaa1b875b0f6d0609366c94a927e0bbf2",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "2071497cc9b8513e3d79ac2a7feaa2ca24bcf765729c5a5b3970f92621707ee5"
+          },
+          "timestamp_utc": "2026-07-28T07:56:03Z"
+        },
+        "green": {
+          "revision": "01f093297126e1b4d57dcdc699baf141673d072a",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_wireframe_rcls_basic_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-wireframe-rcls-basic\" in output:\n    print(\"missing exact wireframe RCLS basic parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact wireframe RCLS basic parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/native_wireframe_rcls_basic.py": "b6904a98ff29c0fe534df4fbe335f7f47e1b49f1ff018f12d8bb6a7cfdc055d5"
+          },
+          "timestamp_utc": "2026-07-28T07:58:27Z"
+        },
+        "refactor": {
+          "revision": "7a8549f7b750fa019d28e57098b6cf9a02f17830",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_wireframe_rcls_basic_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-wireframe-rcls-basic\" in output:\n    print(\"missing exact wireframe RCLS basic parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact wireframe RCLS basic parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/native_wireframe_rcls_basic.py": "adf8f0160f349c3aaa4c5b0197f9b11649bf6850e9bea458ca16477feb32ba29"
+          },
+          "timestamp_utc": "2026-07-28T08:04:33Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "strict-transfer-wireframe-rcls-basic",
+      "native_source_id": "2_Intermediate/wireframe_rcls_basic.py",
+      "mirror_id": "native-wireframe-rcls-basic",
+      "intended_red_failure": "wireframe RCLS workflow is not device resident",
+      "test_sha256": {
+        "tests/integration/test_jax_wireframe_rcls_basic_strict_transfer.py": "7fddfe927a9649837606fdfd18b69138b10d44920ea49aec7e93c59a0fe390c7"
+      },
+      "phases": {
+        "red": {
+          "revision": "72d646db2ae0c2e77963b7c3d55f01a5857e9e72",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_wireframe_rcls_basic_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 2 and \"cannot import name 'solve_wireframe_rcls'\" in output:\n    print(\"wireframe RCLS workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer wireframe RCLS outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "wireframe RCLS workflow is not device resident",
+          "combined_output_sha256": "696de492d51d3d2a3587e1d65db9f226d576f7337ef4ffde924134fcfa19e48b",
+          "source_sha256": {
+            "examples/jax/2_Intermediate/wireframe_rcls_basic.py": "18ee1655f8b6af4035106d10ccac2920cd02ca798c56680a2ca2dd99e6ebeac3"
+          },
+          "timestamp_utc": "2026-07-28T07:59:38Z"
+        },
+        "green": {
+          "revision": "eb5fa15c7fcc5d68f9746e222b75a68641a25bad",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_wireframe_rcls_basic_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 2 and \"cannot import name 'solve_wireframe_rcls'\" in output:\n    print(\"wireframe RCLS workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer wireframe RCLS outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/wireframe_rcls.py": "97ef541b107f1323990c83ab418c05980bb315afe937005de260c97803126284"
+          },
+          "timestamp_utc": "2026-07-28T08:01:41Z"
+        },
+        "refactor": {
+          "revision": "7a8549f7b750fa019d28e57098b6cf9a02f17830",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_wireframe_rcls_basic_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 2 and \"cannot import name 'solve_wireframe_rcls'\" in output:\n    print(\"wireframe RCLS workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer wireframe RCLS outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/wireframe_rcls.py": "97ef541b107f1323990c83ab418c05980bb315afe937005de260c97803126284"
+          },
+          "timestamp_utc": "2026-07-28T08:04:33Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "single-snapshot-wireframe-rcls",
+      "native_source_id": "2_Intermediate/wireframe_rcls_basic.py",
+      "mirror_id": "native-wireframe-rcls-basic",
+      "intended_red_failure": "duplicate wireframe constraint snapshots",
+      "test_sha256": {
+        "tests/integration/test_jax_wireframe_rcls_basic_efficiency.py": "f2fee2d9eb750a87a6fa76b70c352bd14d9b8dea9237a50ef2c10695ac214477"
+      },
+      "phases": {
+        "red": {
+          "revision": "a9ea641728d00c5eaabe086ef83f5a6871b52493",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_wireframe_rcls_basic_efficiency.py\"])\noutput = captured.getvalue()\nif code == 1 and \"assert 2 == 1\" in output:\n    print(\"duplicate wireframe constraint snapshots\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected wireframe constraint snapshot outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "duplicate wireframe constraint snapshots",
+          "combined_output_sha256": "0c5d1be2de7356feec17f2b7bc98c0ba7f8960ed2beead16039df7834d9810cc",
+          "source_sha256": {
+            "src/simsopt_jax/examples/wireframe_rcls.py": "97ef541b107f1323990c83ab418c05980bb315afe937005de260c97803126284"
+          },
+          "timestamp_utc": "2026-07-28T08:11:50Z"
+        },
+        "green": {
+          "revision": "97d1b85e32d7f57c0e24a67eaac5bbb5282eef38",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_wireframe_rcls_basic_efficiency.py\"])\noutput = captured.getvalue()\nif code == 1 and \"assert 2 == 1\" in output:\n    print(\"duplicate wireframe constraint snapshots\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected wireframe constraint snapshot outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/wireframe_rcls.py": "f4632570596ffa14afbc2ff7b68096b00097469b412fd6491dbb1ec4354d6de6"
+          },
+          "timestamp_utc": "2026-07-28T08:12:56Z"
+        },
+        "refactor": {
+          "revision": "57aeaf26b2cbac0522d457c5bf1477e64b428105",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_wireframe_rcls_basic_efficiency.py\"])\noutput = captured.getvalue()\nif code == 1 and \"assert 2 == 1\" in output:\n    print(\"duplicate wireframe constraint snapshots\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected wireframe constraint snapshot outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/wireframe_rcls.py": "2501f8f68432db273bad77ba3d04400f6d2c6d58f3424a89ff6e4fa8bffcfdb9"
+          },
+          "timestamp_utc": "2026-07-28T08:13:47Z"
+        }
+      }
     }
   ]
 }
