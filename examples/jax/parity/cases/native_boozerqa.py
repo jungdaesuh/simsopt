@@ -414,7 +414,10 @@ def _jax(
         iota_target,
         outer_objective_config=objective_configuration,
     )
-    objective = cast(Callable[[jax.Array], jax.Array], runtime["objective"])
+    value_and_gradient = cast(
+        Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+        runtime["value_and_grad"],
+    )
     forward_result = cast(
         Callable[[jax.Array], Mapping[str, object]],
         runtime["forward_result"],
@@ -424,7 +427,7 @@ def _jax(
         runtime["reporting_metrics_from_solution"],
     )
     initial_parameters_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
-    initial_objective_device, initial_gradient_device = jax.value_and_grad(objective)(
+    initial_objective_device, initial_gradient_device = value_and_gradient(
         initial_parameters_device
     )
     jax.block_until_ready((initial_objective_device, initial_gradient_device))
@@ -433,8 +436,6 @@ def _jax(
         jax.device_get(initial_gradient_device),
         dtype=np.float64,
     )
-
-    value_and_gradient = jax.value_and_grad(objective)
 
     def host_value_and_gradient(
         parameters: np.ndarray,
