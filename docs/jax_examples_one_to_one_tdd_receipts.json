@@ -537,6 +537,65 @@
           "timestamp_utc": "2026-07-28T05:18:47Z"
         }
       }
+    },
+    {
+      "behavior_id": "strict-transfer-rz-curve-length-workflow",
+      "native_source_id": "1_Simple/minimize_curve_length.py",
+      "mirror_id": "native-minimize-curve-length",
+      "intended_red_failure": "curve setup performs a forbidden numerical host-to-device transfer",
+      "test_sha256": {
+        "tests/integration/test_jax_rz_curve_length_strict_transfer.py": "3a1f13157e9b25c19aa924ccfe6deda85d49c889c592d590a2b8cf4d31932d72"
+      },
+      "phases": {
+        "red": {
+          "revision": "b97cd9d181565d057ec5978df64b5b0aa6241156",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_rz_curve_length_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed host-to-device transfer\" in output:\n    print(\"curve setup performs a forbidden numerical host-to-device transfer\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer curve workflow outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "curve setup performs a forbidden numerical host-to-device transfer",
+          "combined_output_sha256": "6145bf5c499ce9cc4486a2b4d28ff33dc815cbd477f103d355cf5adeafb15bc1",
+          "source_sha256": {
+            "src/simsopt_jax/examples/rz_curve_length.py": "ee8edd789ea3b6ec8d1c5155fcc384c7fa6b8d288570c4a94d03a5ac84e41499"
+          },
+          "timestamp_utc": "2026-07-28T05:24:12Z"
+        },
+        "green": {
+          "revision": "ba9cc8fbd610929756f2f8a78e5e6f0411fd1090",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_rz_curve_length_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed host-to-device transfer\" in output:\n    print(\"curve setup performs a forbidden numerical host-to-device transfer\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer curve workflow outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/rz_curve_length.py": "8507b0c9334a5acf49d887d57795326a6cea25380c40b8ae4a0af19dda7dac1f"
+          },
+          "timestamp_utc": "2026-07-28T05:26:03Z"
+        },
+        "refactor": {
+          "revision": "7b69c195a61d33780760814f4160715fed4363e5",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_rz_curve_length_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"Disallowed host-to-device transfer\" in output:\n    print(\"curve setup performs a forbidden numerical host-to-device transfer\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer curve workflow outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/examples/rz_curve_length.py": "dcbb85199db6f3dfa1ed8afb93d5ac79e395d455343b639ed6ebda14784d7c33"
+          },
+          "timestamp_utc": "2026-07-28T05:28:46Z"
+        }
+      }
     }
   ]
 }
