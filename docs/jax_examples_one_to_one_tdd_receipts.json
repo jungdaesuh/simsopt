@@ -1056,6 +1056,183 @@
           "timestamp_utc": "2026-07-28T07:15:14Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-permanent-magnet-simple-native-jax-parity",
+      "native_source_id": "1_Simple/permanent_magnet_simple.py",
+      "mirror_id": "native-permanent-magnet-simple",
+      "intended_red_failure": "missing exact permanent magnet simple parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_permanent_magnet_simple_parity.py": "31c1092093490d5e9f08f743903bcd326996217491018c214e58ce14de109842"
+      },
+      "phases": {
+        "red": {
+          "revision": "205a27e9a5594668388aa318aaf1dfff61091cd5",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_permanent_magnet_simple_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-permanent-magnet-simple\" in output:\n    print(\"missing exact permanent magnet simple parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact permanent magnet simple parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact permanent magnet simple parity case",
+          "combined_output_sha256": "7c39112c2770c526f953e4e89928a01cc3a7bd543313691b0380bdd36c82d4dd",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "2b7e9f16819be88955dfba51d44358f259c5e75325b9ce84bdd63b5bac748e7a"
+          },
+          "timestamp_utc": "2026-07-28T07:36:11Z"
+        },
+        "green": {
+          "revision": "b7df9cf15bc56108a0bbaa8427f11c44e6f2565d",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_permanent_magnet_simple_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-permanent-magnet-simple\" in output:\n    print(\"missing exact permanent magnet simple parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact permanent magnet simple parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/native_permanent_magnet_simple.py": "a3affb6b3f8c7782fa23c8463f233a325442a8e331cc03122b1e6d9935be3dcb"
+          },
+          "timestamp_utc": "2026-07-28T07:39:31Z"
+        },
+        "refactor": {
+          "revision": "ca6fc50800c4b85e3b24a30275e058ad027703e2",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_permanent_magnet_simple_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-permanent-magnet-simple\" in output:\n    print(\"missing exact permanent magnet simple parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact permanent magnet simple parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/permanent_magnet_simple.py": "5fba7d015e34ce1441baa37edeeea920d6018322f268e3147870faed417b4cd2"
+          },
+          "timestamp_utc": "2026-07-28T07:45:46Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "strict-transfer-permanent-magnet-simple",
+      "native_source_id": "1_Simple/permanent_magnet_simple.py",
+      "mirror_id": "native-permanent-magnet-simple",
+      "intended_red_failure": "permanent magnet workflow is not device resident",
+      "test_sha256": {
+        "tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py": "db43711e0c7bac0e31a1627b68e0c0c09ad972836f338444ef4f9b8d9c97d140"
+      },
+      "phases": {
+        "red": {
+          "revision": "afa4d42ef0068a57984baf001c119402ad0300d0",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_permanent_magnet_example_has_one_batched_numerical_host_boundary\" in output and \"assert 4 == 1\" in output:\n    print(\"permanent magnet workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer permanent magnet outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "permanent magnet workflow is not device resident",
+          "combined_output_sha256": "cc5cf509fb1f8df6391d216b92704490248d9133c42ad2826209156f88b01c6e",
+          "source_sha256": {
+            "examples/jax/1_Simple/permanent_magnet_simple.py": "c192cf46a289ccc6795a0b35510484f716ea02bc677edd26259265bcb4a1e846"
+          },
+          "timestamp_utc": "2026-07-28T07:40:18Z"
+        },
+        "green": {
+          "revision": "1f5272fca7f734dd50f4259889ed1cd412afe4b4",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_permanent_magnet_example_has_one_batched_numerical_host_boundary\" in output and \"assert 4 == 1\" in output:\n    print(\"permanent magnet workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer permanent magnet outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/permanent_magnet_simple.py": "3b078c7b14a4b59912aff1c00952fa1c7e6b1413e4fdfc97fe16676dc47dbb27"
+          },
+          "timestamp_utc": "2026-07-28T07:40:58Z"
+        },
+        "refactor": {
+          "revision": "7f95a5b1ea9e6eff9f8c46bcd1a11b7440edc9bc",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_permanent_magnet_example_has_one_batched_numerical_host_boundary\" in output and \"assert 4 == 1\" in output:\n    print(\"permanent magnet workflow is not device resident\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected strict-transfer permanent magnet outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/permanent_magnet_simple.py": "5fba7d015e34ce1441baa37edeeea920d6018322f268e3147870faed417b4cd2"
+          },
+          "timestamp_utc": "2026-07-28T07:48:47Z"
+        }
+      }
+    },
+    {
+      "behavior_id": "memory-bounded-gpmo-final-state",
+      "native_source_id": "1_Simple/permanent_magnet_simple.py",
+      "mirror_id": "native-permanent-magnet-simple",
+      "intended_red_failure": "missing memory-bounded GPMO final state mode",
+      "test_sha256": {
+        "tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py": "eccee5a1b29777f07db33d4a4b47ad7e4aa6de7c2851977be07357a44a1ec4cd"
+      },
+      "phases": {
+        "red": {
+          "revision": "a65ccd387bcd55f7d738fba99855e6dc441f6480",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_permanent_magnet_example_can_omit_iteration_state_history\" in output and \"unexpected keyword argument 'retain_history'\" in output:\n    print(\"missing memory-bounded GPMO final state mode\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected memory-bounded GPMO outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing memory-bounded GPMO final state mode",
+          "combined_output_sha256": "5fb5a9006ed7be0babdc35cac82533d1dd433725b6e7ac902e9ff228cad5f309",
+          "source_sha256": {
+            "src/simsopt_jax/core/pm_optimization.py": "9db8b6ff20972dad4902342c87d323d90c94c4d582463a5acbd2859186429ea6"
+          },
+          "timestamp_utc": "2026-07-28T07:41:48Z"
+        },
+        "green": {
+          "revision": "23e8fd58adf464676938347604c085d60a0528f4",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_permanent_magnet_example_can_omit_iteration_state_history\" in output and \"unexpected keyword argument 'retain_history'\" in output:\n    print(\"missing memory-bounded GPMO final state mode\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected memory-bounded GPMO outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/core/pm_optimization.py": "4b32bea1dd8b615684b22f5b7129b90d630565d0d343da9dbcb261a1bc197120"
+          },
+          "timestamp_utc": "2026-07-28T07:45:08Z"
+        },
+        "refactor": {
+          "revision": "ca6fc50800c4b85e3b24a30275e058ad027703e2",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_permanent_magnet_simple_strict_transfer.py\"])\noutput = captured.getvalue()\nif code == 1 and \"test_permanent_magnet_example_can_omit_iteration_state_history\" in output and \"unexpected keyword argument 'retain_history'\" in output:\n    print(\"missing memory-bounded GPMO final state mode\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected memory-bounded GPMO outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "src/simsopt_jax/core/pm_optimization.py": "4b32bea1dd8b615684b22f5b7129b90d630565d0d343da9dbcb261a1bc197120"
+          },
+          "timestamp_utc": "2026-07-28T07:45:46Z"
+        }
+      }
     }
   ]
 }

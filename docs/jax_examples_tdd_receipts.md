@@ -1544,3 +1544,67 @@ This closes the fifth of eight Wave-A exact mirrors and the fifth of 25
 external-solver-free source mirrors overall. Performance and peak-memory
 qualification remain a later matched-workload phase; the execution times
 above include compilation and are validation timings, not speed claims.
+
+## Exact `permanent_magnet_simple.py` mirror RED -> GREEN -> REFACTOR (2026-07-28)
+
+The source-owned parity RED at
+`205a27e9a5594668388aa318aaf1dfff61091cd5` failed because the
+`native-permanent-magnet-simple` case was not registered. GREEN revision
+`b7df9cf15bc56108a0bbaa8427f11c44e6f2565d` replaced the former two-dipole
+toy evidence with the source workflow's bounded NCSX/FAMUS problem:
+
+- the fixed-boundary WOUT and FAMUS inputs are SHA-256 bound;
+- the bounded grid contains 574 dipole locations and a `(4, 1722)` response
+  matrix;
+- the native lane calls `simsoptpp.GPMO_baseline`;
+- the JAX lanes call the SIMSOPT-owned `GPMO_baseline_jax`;
+- construction arrays, initial state, all final physical moments, residual,
+  objective, selected-magnet mask, and nonzero fraction are retained.
+
+The native CPU and JAX CPU final moment arrays matched under
+`rtol=1e-13, atol=1e-14`. The native final residual sum of squares was
+`3.6520685774992756e-01`.
+
+The strict-transfer RED at
+`afa4d42ef0068a57984baf001c119402ad0300d0` found four separate host
+publications in the user-facing example. GREEN revision
+`1f5272fca7f734dd50f4259889ed1cd412afe4b4` moved every diagnostic reduction
+onto the selected device and retained one explicit final `jax.device_get`.
+REFACTOR revision `ca6fc50800c4b85e3b24a30275e058ad027703e2`
+fused those reductions behind one JIT boundary.
+
+The memory RED at
+`a65ccd387bcd55f7d738fba99855e6dc441f6480` proved the public solver had no
+final-state-only mode and therefore retained the full
+`K x ndipoles x 3` moment history. GREEN revision
+`23e8fd58adf464676938347604c085d60a0528f4` added
+`retain_history=False`. The example and exact parity lane now retain only the
+final state and selected-dipole trace. On the bounded RTX 5090 compilation,
+JAX executable memory analysis reported:
+
+```text
+history-retaining output bytes   566184
+final-state-only output bytes     14824
+output reduction bytes           551360
+history-retaining temp bytes      32344
+final-state-only temp bytes       58704
+combined output+temp reduction   525000
+```
+
+The strict RTX 5090 FP64 suite passed `3 passed in 3.29 s` with the production
+preallocation policy. A direct matched native/GPU execution reported
+`platform=gpu`, matching construction fingerprints, identical final physical
+moments, and maximum absolute differences of `2.22e-16` in both the final
+residual and objective.
+
+The focused CPU parity, strict-transfer, and memory-contract tests passed.
+Nine core baseline tests and thirteen solve-level baseline/history tests also
+passed. A broader permanent-magnet test invocation later terminated in the
+pre-existing native `relax_and_split` test with `SIGFPE`; it was outside the
+modified baseline GPMO path and is not reported as a passing regression run.
+
+All three new immutable receipts replayed successfully. The complete receipt
+document now contains 20 structurally valid behaviors. Matched cold/warm
+performance and process/device peak-memory comparison against the native
+example remain part of the later claim-eligible measurement phase; the
+validation timings above are not speed claims.
