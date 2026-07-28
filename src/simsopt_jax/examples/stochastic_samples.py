@@ -46,7 +46,10 @@ class StochasticPerturbationBundle:
     sigma: float
     length_scale: float
     n_derivs: int
-    generator: str = field(init=False, default="PCG64DXSM")
+    generator: str = field(
+        init=False,
+        default="numpy.random.Generator(PCG64DXSM)",
+    )
     dtype: str = field(init=False, default="<f8")
     byte_order: str = field(init=False, default="little")
     sha256: str = field(init=False)
