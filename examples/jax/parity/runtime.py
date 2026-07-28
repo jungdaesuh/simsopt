@@ -39,6 +39,9 @@ def build_parity_lane_environment(
                 "JAX_PLATFORMS": "cpu",
                 "CUDA_VISIBLE_DEVICES": "",
                 "MPI4PY_RC_INITIALIZE": "false",
+                "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
             }
         )
         source_root = str(repo_root / "src")
