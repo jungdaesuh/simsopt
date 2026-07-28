@@ -12,11 +12,13 @@ from simsopt_jax.objectives import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
     fused_stage_two_values,
-    make_fused_stage_two_objective,
 )
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
-from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
+from simsopt_jax.solve.serial import (
+    TraceableParametricScalarProblem,
+    serial_solve_jax,
+)
 
 
 @dataclass(frozen=True)
@@ -66,15 +68,17 @@ def _objective_from_operands(
     surface_gamma: jax.Array,
     surface_normal: jax.Array,
     config: StageTwoObjectiveConfig,
+    length_weight: jax.Array,
 ) -> jax.Array:
-    return fused_stage_two_values(
+    values = fused_stage_two_values(
         extraction,
         parameters,
         flux_spec,
         surface_gamma,
         surface_normal,
         config,
-    )[0]
+    )
+    return values[0] + length_weight * values[4]
 
 
 def _objective_with_aux_from_operands(
@@ -84,6 +88,7 @@ def _objective_with_aux_from_operands(
     surface_gamma: jax.Array,
     surface_normal: jax.Array,
     config: StageTwoObjectiveConfig,
+    length_weight: jax.Array,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array, jax.Array]]:
     values = fused_stage_two_values(
         extraction,
@@ -93,7 +98,16 @@ def _objective_with_aux_from_operands(
         surface_normal,
         config,
     )
-    return values[0], values[1:]
+    length_penalty = length_weight * values[4]
+    return (
+        values[0] + length_penalty,
+        (
+            values[1],
+            values[2] + length_penalty,
+            values[3],
+            values[4],
+        ),
+    )
 
 
 _value_and_grad_program = jax.jit(
@@ -113,6 +127,7 @@ def _state(
     surface_gamma: jax.Array,
     surface_normal: jax.Array,
     config: StageTwoObjectiveConfig,
+    length_weight: jax.Array,
 ) -> StandardStageTwoState:
     (
         (
@@ -132,6 +147,7 @@ def _state(
         surface_gamma,
         surface_normal,
         config,
+        length_weight,
     )
     return StandardStageTwoState(
         parameters=parameters,
@@ -152,6 +168,7 @@ def _taylor_errors_from_operands(
     surface_gamma: jax.Array,
     surface_normal: jax.Array,
     config: StageTwoObjectiveConfig,
+    length_weight: jax.Array,
 ) -> jax.Array:
     initial_gradient = jax.grad(_objective_from_operands, argnums=0)(
         initial_parameters,
@@ -160,6 +177,7 @@ def _taylor_errors_from_operands(
         surface_gamma,
         surface_normal,
         config,
+        length_weight,
     )
     directional_derivative = jnp.vdot(initial_gradient, direction).real
     epsilons = jnp.asarray(
@@ -176,6 +194,7 @@ def _taylor_errors_from_operands(
                     surface_gamma,
                     surface_normal,
                     config,
+                    length_weight,
                 )
                 - _objective_from_operands(
                     initial_parameters - epsilon * direction,
@@ -184,6 +203,7 @@ def _taylor_errors_from_operands(
                     surface_gamma,
                     surface_normal,
                     config,
+                    length_weight,
                 )
             )
             / (2.0 * epsilon)
@@ -206,18 +226,32 @@ def solve_standard_stage_two(
     surface_normal: object,
     initial_parameters: object,
     taylor_direction: object,
-    first_config: StageTwoObjectiveConfig,
-    second_config: StageTwoObjectiveConfig,
+    config: StageTwoObjectiveConfig,
+    first_length_weight: jax.Array,
+    second_length_weight: jax.Array,
     max_steps: int,
     rtol: float,
     atol: float,
 ) -> StandardStageTwoDeviceResult:
     """Run both source-equivalent stages while retaining fixed-size endpoints."""
+    if config.length_weight != 0.0 or config.length_target is not None:
+        raise ValueError(
+            "Standard Stage-II length weights are explicit device parameters; "
+            "config must not include a total-length penalty."
+        )
     extraction = field.coil_dof_extraction_spec()
     surface_gamma_device = jnp.asarray(surface_gamma, dtype=jnp.float64)
     surface_normal_device = jnp.asarray(surface_normal, dtype=jnp.float64)
     initial_device = jnp.asarray(initial_parameters, dtype=jnp.float64)
     direction_device = jnp.asarray(taylor_direction, dtype=jnp.float64)
+    first_length_weight_device = jnp.asarray(
+        first_length_weight,
+        dtype=initial_device.dtype,
+    )
+    second_length_weight_device = jnp.asarray(
+        second_length_weight,
+        dtype=initial_device.dtype,
+    )
 
     initial = _state(
         initial_device,
@@ -225,7 +259,8 @@ def solve_standard_stage_two(
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        first_config,
+        config,
+        first_length_weight_device,
     )
     taylor_errors = _taylor_errors_program(
         initial_device,
@@ -234,20 +269,24 @@ def solve_standard_stage_two(
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        first_config,
+        config,
+        first_length_weight_device,
     )
-    first_problem = TraceableScalarProblem(
-        objective_fn=make_fused_stage_two_objective(
-            field,
+    problem = TraceableParametricScalarProblem(
+        objective_fn=lambda parameters, length_weight: _objective_from_operands(
+            parameters,
+            extraction,
             flux_spec,
             surface_gamma_device,
             surface_normal_device,
-            first_config,
+            config,
+            length_weight,
         ),
+        objective_parameter=first_length_weight_device,
         x=initial_device,
     )
     first_optimizer = serial_solve_jax(
-        first_problem,
+        problem,
         driver=Driver.SIMSOPT_LBFGSB,
         max_steps=int(max_steps),
         maxcor=min(int(max_steps), 300),
@@ -256,26 +295,18 @@ def solve_standard_stage_two(
         require_success=False,
     )
     first = _state(
-        first_problem.x,
+        problem.x,
         extraction,
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        first_config,
+        config,
+        first_length_weight_device,
     )
 
-    second_problem = TraceableScalarProblem(
-        objective_fn=make_fused_stage_two_objective(
-            field,
-            flux_spec,
-            surface_gamma_device,
-            surface_normal_device,
-            second_config,
-        ),
-        x=first_problem.x,
-    )
+    problem.set_objective_parameter(second_length_weight_device)
     second_optimizer = serial_solve_jax(
-        second_problem,
+        problem,
         driver=Driver.SIMSOPT_LBFGSB,
         max_steps=int(max_steps),
         maxcor=min(int(max_steps), 300),
@@ -284,12 +315,13 @@ def solve_standard_stage_two(
         require_success=False,
     )
     final = _state(
-        second_problem.x,
+        problem.x,
         extraction,
         flux_spec,
         surface_gamma_device,
         surface_normal_device,
-        second_config,
+        config,
+        second_length_weight_device,
     )
     initial, first, final, taylor_errors = jax.block_until_ready(
         (initial, first, final, taylor_errors)

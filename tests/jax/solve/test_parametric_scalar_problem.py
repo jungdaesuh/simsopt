@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.serial import (
     TraceableParametricScalarProblem,
@@ -37,9 +36,7 @@ def test_parametric_scalar_problem_reuses_one_traced_program(
         atol=1.0e-12,
     )
 
-    problem.set_objective_parameter(
-        jnp.asarray([-3.0, 4.0], dtype=jnp.float64)
-    )
+    problem.set_objective_parameter(jnp.asarray([-3.0, 4.0], dtype=jnp.float64))
     second = serial_solve_jax(
         problem,
         driver=Driver.SIMSOPT_LBFGSB,

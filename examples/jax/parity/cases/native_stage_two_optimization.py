@@ -397,11 +397,24 @@ def _jax(
     flux = SquaredFluxJAX(surface, field)
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
+    first_length_weight_device = jax.device_put(
+        np.asarray(
+            _configuration_float(bundle, "first_length_weight"),
+            dtype=np.float64,
+        ),
+        device,
+    )
+    second_length_weight_device = jax.device_put(
+        np.asarray(
+            _configuration_float(bundle, "second_length_weight"),
+            dtype=np.float64,
+        ),
+        device,
+    )
 
-    def config(length_weight: float) -> StageTwoObjectiveConfig:
+    def config() -> StageTwoObjectiveConfig:
         return StageTwoObjectiveConfig(
             num_base_curves=_configuration_int(bundle, "num_base_curves"),
-            length_weight=length_weight,
             curve_curve_minimum_distance=_configuration_float(
                 bundle,
                 "curve_curve_threshold",
@@ -446,8 +459,9 @@ def _jax(
         ),
         initial_parameters=jax.device_put(arrays["initial_parameters"], device),
         taylor_direction=jax.device_put(arrays["taylor_direction"], device),
-        first_config=config(_configuration_float(bundle, "first_length_weight")),
-        second_config=config(_configuration_float(bundle, "second_length_weight")),
+        config=config(),
+        first_length_weight=first_length_weight_device,
+        second_length_weight=second_length_weight_device,
         max_steps=_configuration_int(bundle, "max_steps"),
         rtol=_configuration_float(bundle, "rtol"),
         atol=_configuration_float(bundle, "atol"),
