@@ -203,6 +203,10 @@ def test_parity_workflows_reach_cpu_and_strict_gpu_without_case_duplication() ->
         ("unknown_lane_pair", "invalid lane pair"),
         ("duplicate_route", "duplicate comparison route"),
         ("incomplete_route_matrix", "complete direct lane-pair matrix"),
+        (
+            "inconsistent_source_tolerance",
+            "source-owned tolerance must apply to every lane pair",
+        ),
         ("missing_test_owner", "correctness test does not exist"),
         ("full_with_omitted_stage", "full relationship must not omit"),
         ("reduced_without_omitted_stage", "reduced relationship requires omitted"),
@@ -270,6 +274,18 @@ def test_parity_manifest_rejects_invalid_contracts(
                 and route["lane_pair"] == "native-cpu:jax-gpu"
             )
         ]
+    elif mutation == "inconsistent_source_tolerance":
+        first_route = supported["comparison_routes"][0]
+        assert isinstance(first_route, dict)
+        for route in supported["comparison_routes"]:
+            assert isinstance(route, dict)
+            if (
+                route["phase"] == first_route["phase"]
+                and route["observable"] == first_route["observable"]
+            ):
+                route["tolerance_bucket"] = "mirror_boozer_value"
+                if route["lane_pair"] == "jax-cpu:jax-gpu":
+                    route["tolerance_bucket"] = "gpu_runtime"
     elif mutation == "missing_test_owner":
         supported["correctness_tests"] = ["tests/does_not_exist.py"]
     elif mutation == "full_with_omitted_stage":
