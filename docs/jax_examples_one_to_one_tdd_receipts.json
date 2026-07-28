@@ -475,6 +475,68 @@
           "timestamp_utc": "2026-07-28T04:57:22Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-minimize-curve-length-native-jax-parity",
+      "native_source_id": "1_Simple/minimize_curve_length.py",
+      "mirror_id": "native-minimize-curve-length",
+      "intended_red_failure": "missing exact curve-length native JAX parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_minimize_curve_length_parity.py": "8f129f5c3c863e83f1d9ecd94d8cc0e3d1294718af622992aadc3cd6e90812f3"
+      },
+      "phases": {
+        "red": {
+          "revision": "1872089f02fe3361240e2757c44854273fffa8b2",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_minimize_curve_length_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-minimize-curve-length\" in output:\n    print(\"missing exact curve-length native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact curve-length parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact curve-length native JAX parity case",
+          "combined_output_sha256": "5a81968d8103deadf7b989e3c3415b06bf9948b1accc0d80327f8f17acb63186",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "74ab9a2b49a02a4156b971232547bc3b699dd106fa784654ac4139472b33b24f"
+          },
+          "timestamp_utc": "2026-07-28T05:06:25Z"
+        },
+        "green": {
+          "revision": "0762b5063191b849eb8f12135c680eb6c3428383",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_minimize_curve_length_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-minimize-curve-length\" in output:\n    print(\"missing exact curve-length native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact curve-length parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "749ccbb6ae78cd6ec55ede70e832c140d0c81b8df154ddce8b88a9d0ed527414",
+            "examples/jax/parity/cases/native_minimize_curve_length.py": "df5d78932c6d7280b074852c0ed4558b81c54bbcfac4e737d5a9f47fb440c19b"
+          },
+          "timestamp_utc": "2026-07-28T05:12:00Z"
+        },
+        "refactor": {
+          "revision": "37bcfbde15e83116810edf3afe6ae6514622f9af",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_minimize_curve_length_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-minimize-curve-length\" in output:\n    print(\"missing exact curve-length native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact curve-length parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/minimize_curve_length.py": "40b44df5a01bfad7fc6a2d1ee441b5e6fc0b21a333d0a06f228ab52c71b7432f",
+            "examples/jax/parity/cases/native_minimize_curve_length.py": "5782187aff3d93f299808eed74ac1a2cc40aabd49daa6db82936638c5f29d14b",
+            "src/simsopt_jax/examples/rz_curve_length.py": "ee8edd789ea3b6ec8d1c5155fcc384c7fa6b8d288570c4a94d03a5ac84e41499"
+          },
+          "timestamp_utc": "2026-07-28T05:18:47Z"
+        }
+      }
     }
   ]
 }
