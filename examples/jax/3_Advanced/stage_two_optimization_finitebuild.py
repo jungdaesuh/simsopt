@@ -45,7 +45,7 @@ from simsopt_jax_adapters.objectives import (
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 
-EXAMPLE_ID = "native-stage-two-finitebuild"
+EXAMPLE_ID = "native-stage-two-optimization-finitebuild"
 NATIVE_ITERATIONS = 400
 NUM_BASE_CURVES = 4
 NUM_FILAMENTS_N = 2
@@ -204,15 +204,15 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         jax.device_get(jnp.concatenate((initial_values_device, final_values_device))),
         dtype=np.float64,
     )
-    metric_count = 3 + NUM_BASE_CURVES
+    metric_count = 4 + NUM_BASE_CURVES
     initial_values = values[:metric_count]
     final_values = values[metric_count:]
     initial_objective = float(np.sum(initial_values[:3]))
     final_objective = float(np.sum(final_values[:3]))
-    squared_flux, length_penalty, distance_penalty = (
-        float(value) for value in final_values[:3]
+    squared_flux, length_penalty, distance_penalty, minimum_clearance = (
+        float(value) for value in final_values[:4]
     )
-    coil_lengths = tuple(float(value) for value in final_values[3:])
+    coil_lengths = tuple(float(value) for value in final_values[4:])
     solver_accepted = result.status in (0, 1)
     scientific_success = bool(
         solver_accepted
@@ -224,6 +224,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         and squared_flux >= 0.0
         and length_penalty >= 0.0
         and distance_penalty >= 0.0
+        and minimum_clearance > 0.0
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
@@ -234,6 +235,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             "squared_flux": squared_flux,
             "length_penalty": length_penalty,
             "distance_penalty": distance_penalty,
+            "minimum_clearance": minimum_clearance,
             "coil_lengths": coil_lengths,
             "gradient": tuple(float(value) for value in gradient),
             "solver_success": bool(result.success),

@@ -44,6 +44,7 @@ def test_finitebuild_is_an_exact_name_public_jax_example() -> None:
         "squared_flux",
         "length_penalty",
         "distance_penalty",
+        "minimum_clearance",
         "coil_lengths",
         "gradient",
         "solver_status",

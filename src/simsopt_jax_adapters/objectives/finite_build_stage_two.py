@@ -28,6 +28,7 @@ from simsopt_jax.core.curve_geometry import (
     optimizable_input_dofs_from_map_spec,
 )
 from simsopt_jax.core.curve_kernels import curve_curve_distance_penalty_pure
+from simsopt_jax.core._pairwise_reductions import pairwise_min_distance_pure
 from simsopt_jax.core.field import grouped_coil_set_spec_from_lists
 from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec, GroupedCoilSetSpec
@@ -133,7 +134,7 @@ def _finite_build_penalties(
     base_gammas: jax.Array,
     base_gammadashs: jax.Array,
     config: FiniteBuildStageTwoConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     base_lengths = jnp.mean(
         jnp.linalg.norm(base_gammadashs[: config.num_base_curves], axis=-1),
         axis=1,
@@ -168,7 +169,13 @@ def _finite_build_penalties(
         base_gammadashs[second],
     )
     distance_penalty = config.curve_curve_weight * jnp.sum(distances)
-    return length_penalty, distance_penalty, base_lengths
+    minimum_clearance = jnp.min(
+        jax.vmap(pairwise_min_distance_pure)(
+            base_gammas[first],
+            base_gammas[second],
+        )
+    )
+    return length_penalty, distance_penalty, minimum_clearance, base_lengths
 
 
 def make_finite_build_stage_two_objective(
@@ -185,10 +192,12 @@ def make_finite_build_stage_two_objective(
             parameters,
             config,
         )
-        length_penalty, distance_penalty, _lengths = _finite_build_penalties(
-            base_gammas,
-            base_gammadashs,
-            config,
+        length_penalty, distance_penalty, _minimum_clearance, _lengths = (
+            _finite_build_penalties(
+                base_gammas,
+                base_gammadashs,
+                config,
+            )
         )
         return (
             fixed_surface_flux_integral(coil_set, flux_spec)
@@ -204,7 +213,7 @@ def finite_build_stage_two_diagnostics(
     flux_spec: FixedSurfaceFluxSpec,
     config: FiniteBuildStageTwoConfig,
 ):
-    """Return flux, weighted penalties, and base-coil lengths on device."""
+    """Return flux, penalties, minimum clearance, and coil lengths on device."""
     extraction = field.coil_dof_extraction_spec()
 
     def diagnostics(parameters: jax.Array) -> jax.Array:
@@ -213,14 +222,26 @@ def finite_build_stage_two_diagnostics(
             parameters,
             config,
         )
-        length_penalty, distance_penalty, lengths = _finite_build_penalties(
-            base_gammas,
-            base_gammadashs,
-            config,
+        length_penalty, distance_penalty, minimum_clearance, lengths = (
+            _finite_build_penalties(
+                base_gammas,
+                base_gammadashs,
+                config,
+            )
         )
         squared_flux = fixed_surface_flux_integral(coil_set, flux_spec)
         return jnp.concatenate(
-            (jnp.stack((squared_flux, length_penalty, distance_penalty)), lengths)
+            (
+                jnp.stack(
+                    (
+                        squared_flux,
+                        length_penalty,
+                        distance_penalty,
+                        minimum_clearance,
+                    )
+                ),
+                lengths,
+            )
         )
 
     return diagnostics
