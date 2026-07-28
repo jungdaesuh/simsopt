@@ -11,6 +11,7 @@ from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     _scale_configuration,
 )
 from simsopt.solve.wireframe_optimization import bnorm_obj_matrices
+from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import solve_wireframe_rcls
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -49,34 +50,45 @@ def test_wireframe_rcls_and_field_postprocessing_stay_on_device() -> None:
     initial_currents = np.zeros((wireframe.n_segments, 1), dtype=np.float64)
     initial_currents[free_segments] = free_currents
     normal = np.asarray(plasma_surface.normal(), dtype=np.float64)
+    device = get_runtime_jax_device()
+    response_device = jax.device_put(response, device)
+    target_device = jax.device_put(target, device)
+    initial_currents_device = jax.device_put(initial_currents, device)
+    plasma_points_device = jax.device_put(
+        np.asarray(plasma_surface.gamma(), dtype=np.float64).reshape((-1, 3)),
+        device,
+    )
+    plasma_unit_normal_device = jax.device_put(
+        np.asarray(plasma_surface.unitnormal(), dtype=np.float64).reshape((-1, 3)),
+        device,
+    )
+    plasma_area_weights_device = jax.device_put(
+        np.linalg.norm(normal, axis=2).reshape(-1) / normal.shape[0] / normal.shape[1],
+        device,
+    )
+    wireframe_nodes_device = jax.device_put(np.stack(wireframe.nodes), device)
+    wireframe_segments_device = jax.device_put(
+        np.asarray(wireframe.segments, dtype=np.int32),
+        device,
+    )
+    wireframe_segment_signs_device = jax.device_put(
+        np.asarray(wireframe.seg_signs, dtype=np.float64),
+        device,
+    )
 
     with jax.transfer_guard("disallow"):
         result = solve_wireframe_rcls(
             wireframe=wireframe,
-            response=jax.device_put(response),
-            target=jax.device_put(target),
+            response=response_device,
+            target=target_device,
             regularization=1.0e-10,
-            initial_currents=jax.device_put(initial_currents),
-            plasma_points=jax.device_put(
-                np.asarray(plasma_surface.gamma(), dtype=np.float64).reshape((-1, 3))
-            ),
-            plasma_unit_normal=jax.device_put(
-                np.asarray(plasma_surface.unitnormal(), dtype=np.float64).reshape(
-                    (-1, 3)
-                )
-            ),
-            plasma_area_weights=jax.device_put(
-                np.linalg.norm(normal, axis=2).reshape(-1)
-                / normal.shape[0]
-                / normal.shape[1]
-            ),
-            wireframe_nodes=jax.device_put(np.stack(wireframe.nodes)),
-            wireframe_segments=jax.device_put(
-                np.asarray(wireframe.segments, dtype=np.int32)
-            ),
-            wireframe_segment_signs=jax.device_put(
-                np.asarray(wireframe.seg_signs, dtype=np.float64)
-            ),
+            initial_currents=initial_currents_device,
+            plasma_points=plasma_points_device,
+            plasma_unit_normal=plasma_unit_normal_device,
+            plasma_area_weights=plasma_area_weights_device,
+            wireframe_nodes=wireframe_nodes_device,
+            wireframe_segments=wireframe_segments_device,
+            wireframe_segment_signs=wireframe_segment_signs_device,
             assume_no_crossings=False,
         )
 
