@@ -102,6 +102,32 @@ def test_coil_flux_relationship_routes_each_scientific_observable() -> None:
     }
 
 
+def test_parity_manifest_accepts_named_scientific_phases(
+    tmp_path: Path,
+) -> None:
+    document = deepcopy(_document())
+    relationship = next(
+        item
+        for item in _relationships(document)
+        if item["classification"] != "unsupported"
+    )
+    routes = relationship["comparison_routes"]
+    assert isinstance(routes, list)
+    first_route = routes[0]
+    assert isinstance(first_route, dict)
+    observable = first_route["observable"]
+    for route in routes:
+        assert isinstance(route, dict)
+        if route["phase"] == "initial" and route["observable"] == observable:
+            route["phase"] = "construction"
+
+    load_parity_manifest(
+        _write_document(tmp_path, document),
+        examples_manifest=_examples_manifest(),
+        repo_root=REPO_ROOT,
+    )
+
+
 def test_parity_artifact_ignore_is_narrow_and_effective() -> None:
     ignore_lines = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
