@@ -413,6 +413,68 @@
           "timestamp_utc": "2026-07-27T18:34:44Z"
         }
       }
+    },
+    {
+      "behavior_id": "exact-just-a-quadratic-native-jax-parity",
+      "native_source_id": "1_Simple/just_a_quadratic.py",
+      "mirror_id": "native-just-a-quadratic",
+      "intended_red_failure": "missing exact quadratic native JAX parity case",
+      "test_sha256": {
+        "tests/integration/test_jax_mirror_just_a_quadratic_parity.py": "2f4eabfcbf99d1b28a61111fac9648ced67a30f594990dd33d89e7eb0454bb80"
+      },
+      "phases": {
+        "red": {
+          "revision": "3e0b37e75e1ea89c0fef70021ff457695b68bdc9",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_just_a_quadratic_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-just-a-quadratic\" in output:\n    print(\"missing exact quadratic native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact quadratic parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 1,
+          "failure_excerpt": "missing exact quadratic native JAX parity case",
+          "combined_output_sha256": "0b60d26854fa623ff8a2d47ee4d3ce8e1cce40b184684ce5ff325b411d45157a",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "a583169fec135ba8523d9efd915febb6352ff4384d9a0f2c2dda289ca51ccb9c"
+          },
+          "timestamp_utc": "2026-07-28T04:49:49Z"
+        },
+        "green": {
+          "revision": "7125e79bb9e70a5b4f67ba9c501edf24aa83dba2",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_just_a_quadratic_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-just-a-quadratic\" in output:\n    print(\"missing exact quadratic native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact quadratic parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/parity/cases/__init__.py": "74ab9a2b49a02a4156b971232547bc3b699dd106fa784654ac4139472b33b24f",
+            "examples/jax/parity/cases/native_just_a_quadratic.py": "b69b1121bc396b7cf8b35b330f729ce48e6795a6a64842b946cd4086b2e18d95"
+          },
+          "timestamp_utc": "2026-07-28T04:55:09Z"
+        },
+        "refactor": {
+          "revision": "424b01a7a1cb9198fdf6a713e92413d0b391aa05",
+          "command": [
+            "/home/jungdaesuh/code/columbia/.venv-simsopt-linux-x86/bin/python",
+            "-c",
+            "import contextlib\nimport io\nimport os\nimport pytest\nimport sys\n\nsys.path.insert(0, \"src\")\nos.environ[\"MPI4PY_RC_INITIALIZE\"] = \"false\"\ncaptured = io.StringIO()\nwith contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):\n    code = pytest.main([\"-q\", \"-p\", \"no:cacheprovider\", \"tests/integration/test_jax_mirror_just_a_quadratic_parity.py\"])\noutput = captured.getvalue()\nif code == 1 and \"unknown or unimplemented parity case: native-just-a-quadratic\" in output:\n    print(\"missing exact quadratic native JAX parity case\", file=sys.stderr)\n    raise SystemExit(1)\nif code == 0:\n    raise SystemExit(0)\nprint(\"unexpected exact quadratic parity outcome\", file=sys.stderr)\nraise SystemExit(99)"
+          ],
+          "cwd": ".",
+          "expected_exit": 0,
+          "failure_excerpt": null,
+          "combined_output_sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+          "source_sha256": {
+            "examples/jax/1_Simple/just_a_quadratic.py": "86208c4ceb81a7631712c825fab878de344455efe33d5c9b6fd1c75028b6481a",
+            "examples/jax/parity/cases/native_just_a_quadratic.py": "026183a024e7bf0e261157e3470cd84dcec08a8a3c226a37af27a026cc996a41",
+            "src/simsopt_jax/examples/weighted_quadratic.py": "425107de8b0ea987541cf04b14a3ae8c1156726c342fd5cc55e8eb737dcd9d42"
+          },
+          "timestamp_utc": "2026-07-28T04:57:22Z"
+        }
+      }
     }
   ]
 }
