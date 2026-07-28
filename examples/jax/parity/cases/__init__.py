@@ -124,6 +124,12 @@ from examples.jax.parity.cases.native_wireframe_rcls_basic import (
 from examples.jax.parity.cases.native_wireframe_gsco_modular import (
     create_input as create_native_wireframe_gsco_modular_input,
 )
+from examples.jax.parity.cases.native_wireframe_gsco_multistep import (
+    create_input as create_native_wireframe_gsco_multistep_input,
+)
+from examples.jax.parity.cases.native_wireframe_gsco_multistep import (
+    execute as execute_native_wireframe_gsco_multistep,
+)
 from examples.jax.parity.cases.native_wireframe_gsco_modular import (
     execute as execute_native_wireframe_gsco_modular,
 )
@@ -274,6 +280,11 @@ _CASES = {
         case_id="native-wireframe-gsco-modular",
         create_input=create_native_wireframe_gsco_modular_input,
         execute=execute_native_wireframe_gsco_modular,
+    ),
+    "native-wireframe-gsco-multistep": CaseDefinition(
+        case_id="native-wireframe-gsco-multistep",
+        create_input=create_native_wireframe_gsco_multistep_input,
+        execute=execute_native_wireframe_gsco_multistep,
     ),
     "native-wireframe-gsco-sector-saddle": CaseDefinition(
         case_id="native-wireframe-gsco-sector-saddle",
