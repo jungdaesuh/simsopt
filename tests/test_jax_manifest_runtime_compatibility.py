@@ -40,7 +40,7 @@ def test_canonical_pair_exposes_exact_mirrors_without_tutorial_coverage() -> Non
     )
     assert runtime.version_pair == (3, 2)
     assert runtime.used_legacy_adapter is False
-    assert len(runtime.examples) == 37
+    assert len(runtime.examples) == 38
     assert sum(example.status == "ready" for example in runtime.examples) == 10
 
     one_to_one = tuple(

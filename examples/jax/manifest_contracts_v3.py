@@ -641,6 +641,7 @@ def load_manifest_contract_pair_documents(
             examples_document,
             repo_root=repo_root,
             warn_legacy=False,
+            allow_historical_catalog=True,
         )
         parity = parse_parity_manifest_document(
             parity_document,
@@ -734,14 +735,16 @@ def _one_to_one_payload(
     source: str,
     target_classification: str,
     covering_examples: tuple[JaxExampleRecord, ...],
+    jax_surfaces: tuple[str, ...],
 ) -> dict[str, object]:
     if not covering_examples:
         raise ManifestV3ValidationError(
             f"target source has no current public JAX surface coverage: {source}"
         )
-    surfaces = _ordered_union(
-        tuple(example.jax_surfaces for example in covering_examples)
-    )
+    if not jax_surfaces:
+        raise ManifestV3ValidationError(
+            f"target source has no declared public JAX surfaces: {source}"
+        )
     host_boundaries = _ordered_union(
         tuple(example.host_boundaries for example in covering_examples)
     )
@@ -766,7 +769,7 @@ def _one_to_one_payload(
         "tier": relative.parts[0],
         "classification": classification,
         "teaching_kind": "one_to_one",
-        "jax_surfaces": surfaces,
+        "jax_surfaces": list(jax_surfaces),
         "host_boundaries": pure_host_boundaries,
         "extras": extras,
         "smoke_args": [],
@@ -790,6 +793,39 @@ def _inventory_rows(document: object) -> tuple[dict[str, object], ...]:
     if sources != tuple(sorted(set(sources))):
         raise ManifestV3ValidationError("inventory sources must be sorted and unique")
     return rows
+
+
+def _inventory_coverage(
+    inventory: dict[str, object],
+    legacy_examples: JaxExamplesManifest,
+) -> tuple[tuple[JaxExampleRecord, ...], tuple[str, ...]]:
+    source = _string(inventory.get("source"), "inventory source")
+    raw_entries = _sequence(
+        inventory.get("current_public_jax_surface_coverage"),
+        f"inventory coverage for {source}",
+    )
+    examples_by_id = {example.id: example for example in legacy_examples.jax_examples}
+    covering_examples: list[JaxExampleRecord] = []
+    surface_groups: list[tuple[str, ...]] = []
+    for index, raw_entry in enumerate(raw_entries):
+        entry = _mapping(raw_entry, f"inventory coverage for {source}[{index}]")
+        example_id = _string(
+            entry.get("example_id"),
+            f"inventory coverage example for {source}",
+        )
+        example = examples_by_id.get(example_id)
+        if example is None:
+            raise ManifestV3ValidationError(
+                f"inventory coverage references unknown example {example_id}: {source}"
+            )
+        covering_examples.append(example)
+        surface_groups.append(
+            _strings(
+                entry.get("jax_surfaces"),
+                f"inventory coverage surfaces for {source}",
+            )
+        )
+    return tuple(covering_examples), tuple(_ordered_union(tuple(surface_groups)))
 
 
 def _source_payload(
@@ -895,12 +931,18 @@ def _candidate_documents(
         )
         if target in {"mirror", "hybrid"}:
             mirror_id = _stable_mirror_id(source)
-            covering = tuple(
-                example
-                for example in legacy_examples.jax_examples
-                if source in example.inspired_by
+            covering, jax_surfaces = _inventory_coverage(
+                inventory,
+                legacy_examples,
             )
-            one_to_one_payloads.append(_one_to_one_payload(source, target, covering))
+            one_to_one_payloads.append(
+                _one_to_one_payload(
+                    source,
+                    target,
+                    covering,
+                    jax_surfaces,
+                )
+            )
             relationships.append(
                 _pending_parity_payload(
                     source,
@@ -941,6 +983,7 @@ def build_v3_candidates(
         examples_v2_document,
         repo_root=repo_root,
         warn_legacy=False,
+        allow_historical_catalog=True,
     )
     if legacy_examples.schema_version != 2:
         raise ManifestV3ValidationError("migration requires example schema v2")
@@ -950,11 +993,13 @@ def build_v3_candidates(
         repo_root=repo_root,
     )
     inventory_rows = _inventory_rows(inventory_document)
-    if tuple(row.source for row in legacy_examples.source_catalog) != tuple(
+    legacy_sources = tuple(row.source for row in legacy_examples.source_catalog)
+    inventory_sources = tuple(
         _string(row.get("source"), "inventory source") for row in inventory_rows
-    ):
+    )
+    if not set(legacy_sources) <= set(inventory_sources):
         raise ManifestV3ValidationError(
-            "inventory does not exactly map the current v2 source catalog"
+            "inventory does not retain every source from the v2 source catalog"
         )
 
     documents = _candidate_documents(

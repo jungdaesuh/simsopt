@@ -300,12 +300,23 @@ def _validate_ready_source(example: JaxExampleRecord, repo_root: Path) -> None:
         )
 
 
-def _validate_manifest(manifest: JaxExamplesManifest, repo_root: Path) -> None:
+def _validate_manifest(
+    manifest: JaxExamplesManifest,
+    repo_root: Path,
+    *,
+    allow_historical_catalog: bool,
+) -> None:
     source_paths = [record.source for record in manifest.source_catalog]
     if len(source_paths) != len(set(source_paths)):
         raise ManifestValidationError("duplicate source path in source_catalog")
     native_sources = _native_source_paths(repo_root)
-    if set(source_paths) != native_sources:
+    catalog_sources = set(source_paths)
+    catalog_is_valid = (
+        catalog_sources <= native_sources
+        if allow_historical_catalog
+        else catalog_sources == native_sources
+    )
+    if not catalog_is_valid:
         raise ManifestValidationError(
             "source catalog does not match tracked native Python examples"
         )
@@ -386,6 +397,7 @@ def _parse_manifest_document(
     *,
     repo_root: Path,
     warn_legacy: bool,
+    allow_historical_catalog: bool,
 ) -> JaxExamplesManifest:
     root = _mapping(document, "manifest")
     schema_version = _schema_version(root)
@@ -412,7 +424,11 @@ def _parse_manifest_document(
         schema_version=schema_version,
         used_legacy_manifest_adapter=schema_version == 1,
     )
-    _validate_manifest(manifest, repo_root)
+    _validate_manifest(
+        manifest,
+        repo_root,
+        allow_historical_catalog=allow_historical_catalog,
+    )
     return manifest
 
 
@@ -423,6 +439,7 @@ def load_manifest(path: Path, *, repo_root: Path) -> JaxExamplesManifest:
         json.loads(path.read_text(encoding="utf-8")),
         repo_root=repo_root,
         warn_legacy=True,
+        allow_historical_catalog=False,
     )
 
 
@@ -431,12 +448,14 @@ def parse_manifest_document(
     *,
     repo_root: Path,
     warn_legacy: bool = False,
+    allow_historical_catalog: bool = False,
 ) -> JaxExamplesManifest:
     """Parse manifest bytes already decoded by an atomic contract reader."""
     return _parse_manifest_document(
         document,
         repo_root=repo_root,
         warn_legacy=warn_legacy,
+        allow_historical_catalog=allow_historical_catalog,
     )
 
 
@@ -514,6 +533,7 @@ def convert_v1_document_to_v2(
         document,
         repo_root=repo_root,
         warn_legacy=False,
+        allow_historical_catalog=False,
     )
     if before.schema_version != 1:
         raise ManifestValidationError("migration input must use absent-schema v1")
@@ -535,6 +555,7 @@ def convert_v1_document_to_v2(
         candidate,
         repo_root=repo_root,
         warn_legacy=False,
+        allow_historical_catalog=False,
     )
     semantic_diff = manifest_semantic_diff(before, after)
     if not semantic_diff["semantic_equal"]:

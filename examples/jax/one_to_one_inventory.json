@@ -1642,6 +1642,56 @@
           "--inventory",
           "examples/jax/one_to_one_inventory.json",
           "--source",
+          "3_Advanced/single_stage_boozer_vacuum_optimization.py"
+        ],
+        "contract": "syntax-source-hash-and-dependency-inventory",
+        "expected_exit": 0
+      },
+      "current_disposition": "candidate",
+      "current_public_jax_surface_coverage": [
+        {
+          "example_id": "single-stage-vacuum-optimization",
+          "jax_surfaces": [
+            "simsopt_jax.geo.optimizer_host_lbfgs.minimize_lbfgs_host_core",
+            "simsopt_jax_adapters.field.biotsavart_backend.BiotSavartJAX",
+            "simsopt_jax_adapters.geo.boozer_surface.BoozerSurfaceJAX",
+            "simsopt_jax_adapters.geo.surface_objectives.make_traceable_objective_runtime_bundle",
+            "simsopt_jax_adapters.geo.surface_objectives.make_traceable_objective_session"
+          ]
+        }
+      ],
+      "evidence": [
+        "examples/3_Advanced/single_stage_boozer_vacuum_optimization.py",
+        "examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py",
+        "tests/jax/examples/test_single_stage_boozer_vacuum_example.py"
+      ],
+      "reason": "The exact-name VMEC-free Boozer workflow uses public JAX kernels for the implicit surface solve, adjoint objective, and bounded host L-BFGS orchestration.",
+      "recommended_target_classification": "mirror",
+      "reconsideration_condition": null,
+      "runtime_dependencies": {
+        "external_runtimes": [],
+        "python_import_roots": [
+          "__future__",
+          "argparse",
+          "json",
+          "numpy",
+          "pathlib",
+          "scipy",
+          "simsopt",
+          "tempfile"
+        ]
+      },
+      "source": "3_Advanced/single_stage_boozer_vacuum_optimization.py",
+      "source_sha256": "a8ed26de3318fd7dacd623487bdc686e0288d7db496ea5659a7f7950052a111b"
+    },
+    {
+      "capability_probe": {
+        "argv": [
+          "python",
+          "examples/jax/probe_one_to_one_inventory.py",
+          "--inventory",
+          "examples/jax/one_to_one_inventory.json",
+          "--source",
           "3_Advanced/single_stage_optimization.py"
         ],
         "contract": "syntax-source-hash-and-dependency-inventory",
