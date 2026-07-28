@@ -32,6 +32,7 @@ from simsopt_jax.solve.optimistix.contracts import (
     OptimistixLMOptions,
 )
 from simsopt_jax.solve.serial import (
+    TraceableArrayFunction,
     TraceableEqualityConstrainedProblem,
     TraceableLeastSquaresProblem,
     TraceableScalarProblem,
@@ -282,6 +283,22 @@ def test_serial_solve_jax_matches_host_general_quadratic_problem():
         objectives = [float(row["objective_function"]) for row in rows]
         assert objectives[0] > objectives[-1]
         assert min(objectives) <= 1e-16
+
+
+def test_traceable_array_function_keeps_closure_operands_on_device() -> None:
+    x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+    scale = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        function = TraceableArrayFunction(
+            function_fn=lambda parameters: jnp.stack(
+                (jnp.sum(parameters * scale), jnp.sum(parameters))
+            ),
+            x=x,
+        )
+        result = jax.block_until_ready(function(x))
+
+    np.testing.assert_allclose(np.asarray(result), np.asarray([11.0, 3.0]))
 
 
 def test_serial_solve_jax_supports_simsopt_owned_limited_memory_driver():
