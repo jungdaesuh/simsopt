@@ -7,8 +7,7 @@ from pathlib import Path
 
 def test_boozerqa_mirror_uses_memory_bounded_host_outer_solve() -> None:
     source = (
-        Path(__file__).resolve().parents[2]
-        / "examples/jax/2_Intermediate/boozerQA.py"
+        Path(__file__).resolve().parents[2] / "examples/jax/2_Intermediate/boozerQA.py"
     ).read_text(encoding="utf-8")
 
     assert "BoozerSurfaceJAX" in source
@@ -23,6 +22,6 @@ def test_boozerqa_mirror_uses_memory_bounded_host_outer_solve() -> None:
     assert '"major_radius_weight": 1.0' in source
     assert '"length_weight": 1.0' in source
     assert '"newton_maxiter": 20' in source
-    assert "qs_resolution = 20" in source
+    assert "qs_resolution = 20 if max_steps >= NATIVE_OUTER_ITERATIONS else 4" in source
     assert "bounded_steps=2" in source
     assert "scipy" not in source.lower()
