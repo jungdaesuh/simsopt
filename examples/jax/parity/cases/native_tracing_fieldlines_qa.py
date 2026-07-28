@@ -190,6 +190,7 @@ def _values(
     trajectories: list[np.ndarray],
     phi_hits: list[np.ndarray],
     tmax: float,
+    classifier,
 ) -> dict[str, np.ndarray]:
     final_times = np.asarray(
         [trajectory[-1, 0] for trajectory in trajectories],
@@ -214,6 +215,10 @@ def _values(
         "final:states": final_states,
         "final:times": final_times,
         "final:status": statuses,
+        "final:levelset_distance": np.asarray(
+            classifier.evaluate_xyz(final_states),
+            dtype=np.float64,
+        ).reshape(-1),
         "poincare:counts": hit_counts,
         "poincare:positions": hit_positions,
     }
@@ -303,6 +308,7 @@ def _native(
         trajectories=trajectories,
         phi_hits=phi_hits,
         tmax=_configuration_float(bundle, "tmax"),
+        classifier=classifier,
     )
     return _observation(
         "native-cpu",
@@ -365,6 +371,7 @@ def _jax(
         trajectories=trajectories,
         phi_hits=phi_hits,
         tmax=_configuration_float(bundle, "tmax"),
+        classifier=classifier,
     )
     device = get_runtime_jax_device()
     platform = "cpu" if device is None else device.platform
