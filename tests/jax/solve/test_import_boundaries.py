@@ -189,6 +189,9 @@ def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
     assert pyright["pythonVersion"] == "3.11"
     assert pyright["extraPaths"] == ["src"]
     assert pyright["include"] == [
+        "examples/jax/native_to_jax_index.py",
+        "src/simsopt_jax/examples/execution.py",
+        "src/simsopt_jax/examples/stochastic_stage_two.py",
         "src/simsopt_jax/objectives",
         "src/simsopt_jax/parity_tolerances.py",
         "src/simsopt_jax/solve/dispatch.py",
@@ -198,12 +201,17 @@ def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
         "src/simsopt_jax/solve/scipy",
         "src/simsopt_jax/solve/shared",
         "src/simsopt_jax/solve/simsopt",
+        "src/simsopt_jax_adapters/mhd/vmec_host.py",
+        "tests/integration/test_jax_execution_scale_contract.py",
+        "tests/integration/test_jax_stochastic_configuration_ssot.py",
+        "tests/jax/adapters/test_vmec_host_evaluation.py",
         "tests/jax/solve/test_algorithm_change_gates.py",
         "tests/jax/solve/test_compat_shim_translation.py",
         "tests/jax/solve/test_deprecation_warnings.py",
         "tests/jax/solve/test_import_boundaries.py",
         "tests/jax/solve/test_optimizer_result_schema.py",
         "tests/jax/solve/test_options_typing.py",
+        "tests/test_jax_native_to_jax_index.py",
     ]
     assert pyright_requirement in workflow
     assert "pyright --warnings" in workflow
