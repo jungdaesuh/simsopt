@@ -1,7 +1,8 @@
 # One-to-One JAX Example Mirrors and Native Parity Implementation Plan
 
-**Status:** In progress
-**Last updated:** 2026-07-27
+**Status:** Bounded implementation complete; scheduled native-default authority
+remains `not_run`
+**Last updated:** 2026-07-29
 
 ## Purpose
 
@@ -22,6 +23,49 @@ This plan also defines two scientifically distinct single-stage examples:
 The plan extends, but does not retroactively broaden, the completed bounded
 evidence in `docs/jax_native_example_end_to_end_parity_implementation_plan.md`.
 Existing receipts remain evidence for their exact recorded cases only.
+
+## Bounded implementation closure
+
+The production implementation is complete for the bounded delivery at
+`11340c829690fdc0652e47588f5da549829c056a`:
+
+- manifest schema v3 contains 36 ready examples and a 52-row native-source
+  catalog; parity schema v2 contains 26 full relationships and one explicitly
+  unsupported relationship;
+- all 25 external-solver-free candidate sources have exact-path JAX mirrors,
+  and the VMEC-free Boozer/vacuum single-stage workflow is the 26th full parity
+  case;
+- ordinary JAX execution defaults to fast intent, while parity intent remains
+  explicit and FP64;
+- the exact-source bounded authority run
+  `20260729T005942Z-5ade9aee` passed its independent fail-closed audit with 26
+  cases, 78 native-CPU/JAX-CPU/strict-JAX-GPU lane receipts, and 1,248
+  comparisons;
+- the full authority run completed in 29 minutes 23 seconds with 2,215,296 KiB
+  maximum process-tree RSS and no swap. The largest measured GPU allocation was
+  737,743,616 bytes in particle tracing; no lane exhausted host or device
+  memory;
+- the separate VMEC-hybrid example passed locally with VMEC on CPU and the JAX
+  slice on both CPU and strict GPU. Both lanes completed four VMEC evaluations
+  without a VMEC failure; their final objectives differed by approximately
+  `4.4e-11`. This is local hybrid evidence, not a claim that VMEC ran on GPU;
+- all ready examples passed the isolated strict-transfer execution suite.
+  Pyright 1.1.411 reported zero errors and warnings, Ruff lint and format
+  checks passed, and compile and diff checks passed.
+
+Performance evidence is deliberately lean. The authority run retains per-lane
+wall time, process-tree peak RSS, and GPU peak allocation where the backend
+exposes it. Representative maxima and the single-stage hybrid measurements are
+enough to establish bounded completion without adding a benchmark framework or
+claiming a speedup.
+
+Two limitations remain visible rather than being converted into claims:
+
+1. Native-default-scale scheduled authority remains `not_run`; the bounded
+   results do not certify native-default workloads.
+2. The machine-readable log contains 32 authentic, structurally valid TDD
+   behaviors. Historical fixes without preserved failing revisions remain
+   post-hoc and are not relabeled as RED -> GREEN -> REFACTOR receipts.
 
 ## Goals
 
@@ -63,7 +107,7 @@ Existing receipts remain evidence for their exact recorded cases only.
 
 ## Current Context
 
-### Confirmed live repository facts
+### Historical repository context
 
 - `examples/jax/manifest.json` currently contains 10 ready JAX lessons and one
   planned single-stage lesson.
@@ -602,7 +646,7 @@ exception; GREEN must run the unchanged RED test.
 
 ## Validation Plan
 
-- [ ] Manifest and mirror-identity tests:
+- [x] Manifest and mirror-identity tests:
 
   ```bash
   python -m pytest -q \
@@ -610,7 +654,7 @@ exception; GREEN must run the unchanged RED test.
     tests/test_jax_example_parity_manifest.py
   ```
 
-- [ ] Example runner and bounded CPU matrix:
+- [x] Example runner and bounded CPU matrix:
 
   ```bash
   python -m pytest -q tests/integration/test_jax_examples.py
@@ -619,7 +663,7 @@ exception; GREEN must run the unchanged RED test.
     --device cpu --intent parity --scale bounded
   ```
 
-- [ ] Parity input, runner, publication, artifact, and runtime contracts:
+- [x] Parity input, runner, publication, artifact, and runtime contracts:
 
   ```bash
   python -m pytest -q \
@@ -630,7 +674,7 @@ exception; GREEN must run the unchanged RED test.
     tests/integration/test_jax_example_parity_runtime.py
   ```
 
-- [ ] Real strict-GPU example matrix on the designated CUDA runner:
+- [x] Real strict-GPU example matrix on the designated CUDA runner:
 
   ```bash
   python examples/jax/run_examples.py --device gpu --scale bounded
@@ -638,7 +682,7 @@ exception; GREEN must run the unchanged RED test.
     --device gpu --intent parity --scale bounded
   ```
 
-- [ ] Matched native/JAX bounded authority and independent audit:
+- [x] Matched native/JAX bounded authority and independent audit:
 
   ```bash
   matched_parity_run_dir="$(python examples/jax/run_parity.py \
@@ -665,7 +709,7 @@ exception; GREEN must run the unchanged RED test.
     --require-authoritative
   ```
 
-- [ ] Representative bounded performance and peak-memory sanity runs:
+- [x] Representative bounded performance and peak-memory sanity runs:
 
   ```bash
   /usr/bin/time -v python examples/jax/run_examples.py \
@@ -674,7 +718,7 @@ exception; GREEN must run the unchanged RED test.
     --device gpu --intent parity --scale bounded
   ```
 
-- [ ] Machine-validated authentic TDD receipts:
+- [x] Machine-validated authentic TDD receipts:
 
   ```bash
   python -m pytest -q tests/test_jax_examples_one_to_one_tdd_receipts.py
@@ -682,15 +726,15 @@ exception; GREEN must run the unchanged RED test.
     --replay \
     docs/jax_examples_one_to_one_tdd_receipts.json
   ```
-- [ ] Verify the GPU lane reports CUDA, FP64, no CPU fallback in each declared
+- [x] Verify the GPU lane reports CUDA, FP64, no CPU fallback in each declared
   JAX region, and no undeclared host numerical solve.
-- [ ] Verify VMEC-hybrid receipts identify VMEC CPU/MPI separately and never
+- [x] Verify VMEC-hybrid receipts identify VMEC CPU/MPI separately and never
   label the entire workflow GPU/on-device.
-- [ ] Verify native/JAX inputs, executed-source hashes, data checksums,
+- [x] Verify native/JAX inputs, executed-source hashes, data checksums,
   `simsoptpp` identity, and effective construction fingerprints match.
 - [ ] Verify every promoted mirror has an authentic source-owned RED, GREEN, and
   REFACTOR receipt tied to immutable revisions.
-- [ ] Static and typing checks:
+- [x] Static and typing checks:
 
   ```bash
   ruff check examples/jax tests/test_jax_examples_manifest.py \
@@ -702,7 +746,7 @@ exception; GREEN must run the unchanged RED test.
   git diff --check
   ```
 
-- [ ] Confirm unrelated modified/untracked files are byte-identical to the
+- [x] Confirm unrelated modified/untracked files are byte-identical to the
   preflight inventory and that each commit contains only its intended slice.
 
 ## Risks and Mitigations
@@ -767,40 +811,40 @@ exception; GREEN must run the unchanged RED test.
 
 ## Completion Criteria
 
-- [ ] All 25 candidate external-solver-free native sources have passed the
+- [x] All 25 candidate external-solver-free native sources have passed the
   executable capability audit and have exact-path JAX mirrors; any contrary
   capability finding requires an explicit user-approved plan amendment rather
   than silent removal. No ready mirror owns more than one native source.
-- [ ] Every ready mirror teaches public supported JAX APIs and passes its
+- [x] Every ready mirror teaches public supported JAX APIs and passes its
   declared CPU/GPU execution contract with fast as ordinary default.
-- [ ] Every ready mirror has matched bounded native CPU/JAX CPU/strict JAX GPU
+- [x] Every ready mirror has matched bounded native CPU/JAX CPU/strict JAX GPU
   parity for all applicable initial and final observables, with retained
   absolute, relative, and scale-aware precision discrepancies.
-- [ ] Every ready mirror has bounded timing and peak-host-memory sanity evidence
+- [x] Every ready mirror has bounded timing and peak-host-memory sanity evidence
   for native/JAX CPU and strict-GPU execution. Representative workload classes
   retain detailed cold/warm and VRAM evidence, and every required execution
   finishes without OOM.
 - [ ] Native-default-scale evidence is separately recorded for every practical
   mirror; absent evidence remains explicitly `not_run`.
-- [ ] The VMEC-free Boozer/vacuum single-stage pair passes native/JAX CPU/GPU
+- [x] The VMEC-free Boozer/vacuum single-stage pair passes native/JAX CPU/GPU
   parity without invoking VMEC and is represented by the 52nd native catalog
   row, one exact-name executable record, and one parity relationship.
-- [ ] The VMEC-hybrid single-stage mirror matches the original native workflow,
+- [x] The VMEC-hybrid single-stage mirror matches the original native workflow,
   with VMEC CPU/MPI and JAX CPU/GPU-slice evidence reported separately.
-- [ ] Combined lessons that remain are classified and documented as tutorials
+- [x] Combined lessons that remain are classified and documented as tutorials
   and contribute zero one-to-one mirror coverage.
-- [ ] Every blocked/not-applicable source has a concrete, validated reason and a
+- [x] Every blocked/not-applicable source has a concrete, validated reason and a
   reconsideration condition.
 - [ ] Every promoted mirror has authentic per-source RED -> GREEN -> REFACTOR
   evidence accepted by the machine-readable receipt validator; no historical
   test is relabeled retroactively.
-- [ ] Example schema v3, parity schema v2, compatibility, atomic rollback,
+- [x] Example schema v3, parity schema v2, compatibility, atomic rollback,
   artifact audit, documentation, Ruff, format, Pyright, compileall, and
   `git diff --check` gates pass.
-- [ ] Generated reports distinguish full/reduced, bounded/native-default,
+- [x] Generated reports distinguish full/reduced, bounded/native-default,
   full-device/adapter/hybrid, CPU/GPU-slice, and certification/non-certification
   claims.
-- [ ] Unrelated worktree content remains untouched and implementation commits
+- [x] Unrelated worktree content remains untouched and implementation commits
   are reviewable independently.
 
 ## Open Questions

@@ -1826,3 +1826,60 @@ The machine-readable receipt document now contains 32 structurally valid
 behaviors. Detailed benchmark expansion is intentionally limited to
 representative workload classes; the implementation sequence proceeds to the
 remaining mirrors.
+
+## Bounded one-to-one mirror closure (2026-07-29)
+
+The final exact-source authority checkout and native extension were built from
+`11340c829690fdc0652e47588f5da549829c056a`. Run
+`20260729T005942Z-5ade9aee` executed every applicable bounded case in independent
+native CPU, JAX CPU, and strict JAX GPU processes. The independent required-
+authority audit reported:
+
+```json
+{
+  "authoritative": true,
+  "case_count": 26,
+  "comparison_count": 1248,
+  "lane_receipt_count": 78,
+  "verdict": "pass"
+}
+```
+
+The campaign completed in 29 minutes 23 seconds with 2,215,296 KiB maximum
+process-tree RSS, no swap, and no OOM. Per-process GPU peaks were retained in
+the lane receipts; the largest was 737,743,616 bytes for particle tracing.
+Representative high-memory JAX lanes included Boozer QA at 2,219,270,144 bytes
+host RSS and the finite-build Stage-II workflow at 2,155,073,536 bytes host RSS
+and 68,943,872 bytes GPU allocation. These are bounded sanity observations, not
+speedup claims.
+
+The VMEC-hybrid example was also exercised outside the 26-case
+external-solver-free authority campaign. VMEC remained an explicit CPU/MPI host
+solve while the JAX-owned coil slice ran on the selected device:
+
+```text
+JAX CPU:  status=ok, VMEC evaluations=4, VMEC failures=0,
+          objective=6.07957 -> 5.7478677606303155,
+          elapsed=9.06 s, peak RSS=1.153 GB
+JAX GPU:  status=ok, VMEC evaluations=4, VMEC failures=0,
+          objective=6.07957 -> 5.747867760674517,
+          elapsed=10.76 s, peak RSS=2.030 GB
+```
+
+The same configuration fingerprint was used in both hybrid lanes. The result
+does not claim VMEC itself ran on GPU.
+
+Final regression closure included the isolated strict-transfer run of all ready
+examples, individual fresh-process parity tests for every mirror, the
+machine-readable receipt tests and validator, Pyright 1.1.411 with zero errors
+and warnings, Ruff lint and formatting, `compileall`, and `git diff --check`.
+The strict suite exposed one final production defect: GSCO initialized a JAX
+scalar through an implicit host transfer. RED `0d00a0272` and GREEN
+`c2ae8c383` replaced it with explicit device placement; the unchanged focused
+test and real example then passed under `JAX_TRANSFER_GUARD=disallow`.
+
+No synthetic history was created. The log remains at 32 authentic,
+structurally valid behaviors; changes whose original failing revisions were
+not preserved remain post-hoc. Native-default-scale scheduled authority also
+remains `not_run`. Neither limitation weakens or broadens the bounded authority
+result above.
