@@ -19,7 +19,12 @@ import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    scalar_example_driver,
+)
 from simsopt_jax.geo.optimizer_host_lbfgs import (
     line_search_value_and_grad_more_thuente_host,
     minimize_bfgs_host_core,
@@ -105,8 +110,10 @@ def _objective_config(
     }
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    native_scale = scale == "native_default"
     base_curves, base_currents, magnetic_axis, nfp, native_field = get_data(
         "ncsx",
         **_configuration_options(native_scale),

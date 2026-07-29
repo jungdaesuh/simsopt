@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
-
 from examples.jax.manifest_runtime import RuntimeExample
 from examples.jax.parity.child import main as run_parity_child
 from examples.jax.parity.input_bundle import (
@@ -16,13 +16,14 @@ from examples.jax.parity.input_bundle import (
     read_input_bundle,
 )
 from examples.jax.parity.runner import build_child_command as build_parity_command
-from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
 from examples.jax.run_examples import (
     _parse_arguments as parse_example_arguments,
 )
 from examples.jax.run_examples import (
     build_child_command as build_example_command,
 )
+from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 
 
 def _example() -> RuntimeExample:
@@ -81,6 +82,64 @@ def test_example_child_argv_derives_smoke_only_from_typed_scale(
         "--max-steps",
         "2",
     )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_scale", "expected_steps"),
+    (
+        (("--json", "--max-steps", "1"), "native_default", 1),
+        (("--smoke", "--json", "--max-steps", "999"), "bounded", 999),
+    ),
+)
+def test_shared_example_runner_passes_scale_independently_of_step_budget(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    expected_scale: ExecutionScale,
+    expected_steps: int,
+) -> None:
+    observed: list[tuple[int, ExecutionScale]] = []
+
+    def solve(
+        _output_directory: Path,
+        max_steps: int,
+        scale: ExecutionScale,
+    ) -> ExampleResult:
+        observed.append((max_steps, scale))
+        return ExampleResult(example_id="scale-probe", observables={}, status="ok")
+
+    exit_code = run_example(
+        [*arguments, "--output-dir", str(tmp_path)],
+        description=None,
+        temporary_prefix="unused-",
+        bounded_steps=2,
+        native_default_steps=20,
+        solve=solve,
+    )
+
+    assert exit_code == 0
+    assert observed == [(expected_steps, expected_scale)]
+
+
+def test_shared_examples_never_infer_scale_from_step_thresholds() -> None:
+    examples_root = Path(__file__).resolve().parents[2] / "examples" / "jax"
+    offenders: list[str] = []
+    for path in sorted(examples_root.glob("[123]_*/*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "run_example(" not in source:
+            continue
+        module = ast.parse(source)
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Compare):
+                continue
+            names = {
+                child.id for child in ast.walk(node) if isinstance(child, ast.Name)
+            }
+            if "max_steps" in names and any(
+                name.startswith("NATIVE_") for name in names
+            ):
+                offenders.append(str(path.relative_to(examples_root)))
+
+    assert offenders == []
 
 
 def test_parity_child_argv_carries_scale_without_boolean_inference(

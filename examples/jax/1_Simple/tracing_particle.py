@@ -17,7 +17,7 @@ from simsopt.field import LevelsetStoppingCriterion, SurfaceClassifier
 from simsopt.field.sampling import draw_uniform_on_curve
 from simsopt.geo import SurfaceRZFourier
 from simsopt.util.constants import ELEMENTARY_CHARGE, ONE_EV, PROTON_MASS
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
 from simsopt_jax_adapters.field.tracing import trace_particles
@@ -30,10 +30,10 @@ BOUNDED_MAX_STEPS = 512
 KINETIC_ENERGY = 5_000.0 * ONE_EV
 
 
-def _problem(particle_count: int):
+def _problem(scale: ExecutionScale):
     _base_curves, _currents, magnetic_axis, nfp, native_field = get_data("ncsx")
     source_field = BiotSavartJAX(native_field.coils)
-    native_scale = particle_count >= NATIVE_PARTICLE_COUNT
+    native_scale = scale == "native_default"
     nphi, ntheta = (64, 24) if native_scale else (16, 8)
     grid_size = 16 if native_scale else 6
     degree = 3 if native_scale else 2
@@ -67,17 +67,13 @@ def _field_strength(field: InterpolatedFieldJAX, points: np.ndarray) -> np.ndarr
     return np.linalg.norm(np.asarray(field.B(), dtype=np.float64), axis=1)
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
     particle_count = int(max_steps)
-    magnetic_axis, surface, interpolated, nfp = _problem(particle_count)
-    trace_time = (
-        NATIVE_TRACE_TIME
-        if particle_count >= NATIVE_PARTICLE_COUNT
-        else BOUNDED_TRACE_TIME
-    )
-    trace_max_steps = (
-        4_000 if particle_count >= NATIVE_PARTICLE_COUNT else BOUNDED_MAX_STEPS
-    )
+    magnetic_axis, surface, interpolated, nfp = _problem(scale)
+    trace_time = NATIVE_TRACE_TIME if scale == "native_default" else BOUNDED_TRACE_TIME
+    trace_max_steps = 4_000 if scale == "native_default" else BOUNDED_MAX_STEPS
 
     speed_total = np.sqrt(2.0 * KINETIC_ENERGY / PROTON_MASS)
     random_generator = np.random.RandomState(1)

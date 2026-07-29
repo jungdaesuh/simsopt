@@ -17,6 +17,7 @@ from simsopt import load
 from simsopt.geo import SurfaceRZFourier
 from simsopt_jax.examples import (
     ExampleResult,
+    ExecutionScale,
     run_example,
     solve_rz_surface_area_volume_sequence,
 )
@@ -45,7 +46,9 @@ def _build_surface() -> SurfaceRZFourier:
     return surface
 
 
-def solve(output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    output_directory: Path, max_steps: int, _scale: ExecutionScale
+) -> ExampleResult:
     surface = _build_surface()
     full_dofs = np.asarray(surface.local_full_x, dtype=np.float64)
     free_positions = np.flatnonzero(surface.local_dofs_free_status)

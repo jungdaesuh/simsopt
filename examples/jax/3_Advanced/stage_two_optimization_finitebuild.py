@@ -29,7 +29,12 @@ from simsopt.geo import (
     create_multifilament_grid,
 )
 from simsopt_jax.core import compute_filament_offsets
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    scalar_example_driver,
+)
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.serial import (
@@ -84,13 +89,13 @@ def _run_optimizer(
 
 
 def _build_problem(
-    max_steps: int,
+    scale: ExecutionScale,
 ) -> tuple[
     BiotSavartJAX,
     SquaredFluxJAX,
     FiniteBuildStageTwoConfig,
 ]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     surface = SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
         range="half period",
@@ -166,8 +171,10 @@ def _build_problem(
     return field, flux, config
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    field, flux, config = _build_problem(max_steps)
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    field, flux, config = _build_problem(scale)
     objective = make_finite_build_stage_two_objective(
         field,
         flux.fixed_surface_flux_spec(),

@@ -16,6 +16,7 @@ from simsopt.geo import CurveXYZFourier
 from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import (
     ExampleResult,
+    ExecutionScale,
     run_example,
     solve_strain_rotation,
 )
@@ -50,7 +51,9 @@ def _fixed_hsx_geometry() -> tuple[
     )
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, _scale: ExecutionScale
+) -> ExampleResult:
     geometry = _fixed_hsx_geometry()
     device = get_runtime_jax_device()
     device_result = solve_strain_rotation(

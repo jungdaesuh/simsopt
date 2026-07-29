@@ -17,7 +17,7 @@ from simsopt.configs import get_data
 from simsopt.field import LevelsetStoppingCriterion, SurfaceClassifier
 from simsopt.geo import SurfaceRZFourier
 from simsopt.geo.curve import Curve
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
 from simsopt_jax_adapters.field.tracing import compute_fieldlines
@@ -26,11 +26,11 @@ EXAMPLE_ID = "native-tracing-fieldlines-ncsx"
 NATIVE_TMAX = 40_000
 
 
-def _problem(max_steps: int):
+def _problem(scale: ExecutionScale):
     _base_curves, _currents, magnetic_axis, nfp, native_field = get_data("ncsx")
     magnetic_axis = cast(Curve, magnetic_axis)
     source_field = BiotSavartJAX(native_field.coils)
-    native_scale = max_steps >= NATIVE_TMAX
+    native_scale = scale == "native_default"
     nphi, ntheta = (64, 24) if native_scale else (16, 8)
     grid_size = 20 if native_scale else 5
     degree = 4 if native_scale else 2
@@ -71,8 +71,10 @@ def _problem(max_steps: int):
     return magnetic_axis, source_field, interpolated, classifier, nfp
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    magnetic_axis, source_field, interpolated, classifier, nfp = _problem(max_steps)
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    magnetic_axis, source_field, interpolated, classifier, nfp = _problem(scale)
     axis_points = np.asarray(magnetic_axis.gamma(), dtype=np.float64)
     source_field.set_points(axis_points)
     interpolated.set_points(axis_points)
@@ -83,7 +85,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         / np.linalg.norm(source_values)
     )
 
-    nfieldlines = 3 if max_steps < NATIVE_TMAX else 30
+    nfieldlines = 30 if scale == "native_default" else 3
     radial_initial = np.linspace(
         axis_points[0, 0],
         axis_points[0, 0] + 0.14,

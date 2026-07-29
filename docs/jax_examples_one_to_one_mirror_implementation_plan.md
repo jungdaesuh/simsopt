@@ -634,7 +634,7 @@ exception; GREEN must run the unchanged RED test.
     - [ ] Rewrite `examples/jax/README.md` around exact native/JAX pairs and show
       CPU fast, GPU fast, CPU parity, GPU parity, Boozer/vacuum single-stage,
       and VMEC-hybrid commands.
-    - [ ] Add a generated native-to-JAX index showing mirror path,
+    - [x] Add a generated native-to-JAX index showing mirror path,
       classification, runtime dependencies, device scope, scale, and latest
       evidence status.
     - [ ] Mark combined examples as tutorials in help text and remove wording

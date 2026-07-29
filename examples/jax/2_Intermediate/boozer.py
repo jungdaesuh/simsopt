@@ -24,7 +24,7 @@ from simsopt.geo import (
     boozer_surface_residual,
 )
 from simsopt.geo.curve import Curve
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 
@@ -62,7 +62,9 @@ def _options(max_steps: int) -> dict[str, object]:
     }
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
     base_curves, base_currents, magnetic_axis, nfp, native_field = get_data("ncsx")
     del base_curves
     magnetic_axis = cast(Curve, magnetic_axis)
@@ -70,7 +72,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     current_sum = nfp * sum(abs(current.get_value()) for current in base_currents)
     G0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1.0e-7 / (2.0 * np.pi))
 
-    native_scale = max_steps >= NATIVE_LS_ITERATIONS
+    native_scale = scale == "native_default"
     mpol = 5 if native_scale else 2
     ntor = 5 if native_scale else 2
     surface = SurfaceXYZTensorFourier(

@@ -20,6 +20,7 @@ from simsopt.geo import SurfaceRZFourier
 from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import (
     ExampleResult,
+    ExecutionScale,
     QfmStageDeviceResult,
     run_example,
     solve_qfm_sequence,
@@ -68,7 +69,9 @@ def _stage_result(
     )
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, _scale: ExecutionScale
+) -> ExampleResult:
     surface, field = _build_surface()
     device = get_runtime_jax_device()
     coil_set_spec = field.coil_set_spec_from_dofs(

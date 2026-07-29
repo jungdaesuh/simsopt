@@ -21,7 +21,12 @@ import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import CurveLength, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import Curve
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    scalar_example_driver,
+)
 from simsopt_jax.geo.optimizer_host_lbfgs import (
     line_search_value_and_grad_more_thuente_host,
     minimize_bfgs_host_core,
@@ -47,12 +52,12 @@ def _host_bool(value: object) -> bool:
     return bool(np.asarray(jax.device_get(value), dtype=np.bool_))
 
 
-def _surface_resolution(max_steps: int) -> tuple[int, int]:
-    return (6, 6) if max_steps >= NATIVE_OUTER_ITERATIONS else (2, 2)
+def _surface_resolution(scale: ExecutionScale) -> tuple[int, int]:
+    return (6, 6) if scale == "native_default" else (2, 2)
 
 
-def _ncsx_configuration_options(max_steps: int) -> dict[str, int]:
-    if max_steps >= NATIVE_OUTER_ITERATIONS:
+def _ncsx_configuration_options(scale: ExecutionScale) -> dict[str, int]:
+    if scale == "native_default":
         return {}
     return {
         "coil_order": 3,
@@ -69,10 +74,12 @@ def _boozer_options() -> dict[str, object]:
     }
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
     base_curves, base_currents, magnetic_axis, nfp, native_field = get_data(
         "ncsx",
-        **_ncsx_configuration_options(max_steps),
+        **_ncsx_configuration_options(scale),
     )
     magnetic_axis = cast(Curve, magnetic_axis)
     base_currents[0].fix_all()
@@ -80,7 +87,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
     current_sum = nfp * sum(abs(current.get_value()) for current in base_currents)
     G0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1.0e-7 / (2.0 * np.pi))
 
-    mpol, ntor = _surface_resolution(max_steps)
+    mpol, ntor = _surface_resolution(scale)
     surface = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -123,7 +130,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         sum(CurveLength(curve).J() for curve in base_curves)
     )
 
-    qs_resolution = 20 if max_steps >= NATIVE_OUTER_ITERATIONS else 4
+    qs_resolution = 20 if scale == "native_default" else 4
     objective_config: dict[str, object] = {
         "non_qs_weight": 1.0,
         "residual_weight": 0.0,

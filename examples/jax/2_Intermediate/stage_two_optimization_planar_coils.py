@@ -22,6 +22,7 @@ from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.core import CoilSetDofExtractionSpec
 from simsopt_jax.examples import (
     ExampleResult,
+    ExecutionScale,
     run_example,
     solve_standard_stage_two,
 )
@@ -38,10 +39,10 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
 def _build_problem(
-    max_steps: int,
+    scale: ExecutionScale,
     device: jax.Device | None,
 ) -> tuple[BiotSavartJAX, SquaredFluxJAX, jax.Array, jax.Array]:
-    native_scale = max_steps == NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     surface_resolution = 32 if native_scale else 4
     curve_order = 5 if native_scale else 2
     curve_quadrature = 100 if native_scale else 32
@@ -119,9 +120,11 @@ def _topology_state(
     )
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
     device = get_runtime_jax_device()
-    field, flux, surface_gamma, surface_normal = _build_problem(max_steps, device)
+    field, flux, surface_gamma, surface_normal = _build_problem(scale, device)
     initial_device = jax.device_put(
         np.asarray(field.x, dtype=np.float64),
         device,

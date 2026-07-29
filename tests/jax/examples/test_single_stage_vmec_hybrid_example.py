@@ -48,11 +48,13 @@ def test_vmec_hybrid_keeps_vmec_on_host_and_jax_slice_explicit() -> None:
     assert "minimize_bfgs_host_core" in imported_names
     assert "minimize_lbfgs_host_core" in imported_names
     assert "line_search_value_and_grad_more_thuente_host" in imported_names
+    assert "validate_hybrid_jax_evaluation" in imported_names
     called_names = {
         node.func.id
         for node in ast.walk(module)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
+    assert "validate_hybrid_jax_evaluation" in called_names
     for callback_name in ("pure_callback", "io_callback"):
         assert callback_name not in imported_names
         assert callback_name not in called_attributes
