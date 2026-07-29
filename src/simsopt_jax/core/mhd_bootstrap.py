@@ -23,9 +23,7 @@ def _not_a_knot_coefficients(values: jax.Array) -> jax.Array:
     if intervals == 3:
         c_tail = jnp.reshape(0.5 * (delta[-1] - delta[-2]), (1,))
     else:
-        interior_rhs = 3.0 * (
-            delta[2 : intervals - 1] - delta[1 : intervals - 2]
-        )
+        interior_rhs = 3.0 * (delta[2 : intervals - 1] - delta[1 : intervals - 2])
         tail_rhs = jnp.concatenate(
             (interior_rhs, jnp.reshape(delta[-1] - delta[-2], (1,))),
             axis=0,

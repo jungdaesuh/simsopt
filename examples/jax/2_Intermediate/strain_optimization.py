@@ -97,9 +97,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             ),
             "solution": tuple(float(value) for value in result.final.parameters),
             "final_objective": float(result.final.objective),
-            "final_gradient": tuple(
-                float(value) for value in result.final.gradient
-            ),
+            "final_gradient": tuple(float(value) for value in result.final.gradient),
             "maximum_strain": maximum_strain,
             "solver_success": bool(result.success),
             "solver_driver": "simsopt_lbfgsb",

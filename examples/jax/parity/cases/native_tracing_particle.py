@@ -120,8 +120,7 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
     magnetic_axis, nfp, native_field = _ncsx_objects()
     particle_count = int(configuration["particle_count"])
     speed_total = np.sqrt(
-        2.0 * float(configuration["kinetic_energy"])
-        / float(configuration["mass"])
+        2.0 * float(configuration["kinetic_energy"]) / float(configuration["mass"])
     )
     random_generator = np.random.RandomState(1)
     pitch = random_generator.uniform(-1.0, 1.0, size=particle_count)
@@ -194,9 +193,7 @@ def _values(
         axis=0,
     )
     initial_abs_field = np.linalg.norm(initial_field, axis=1)
-    magnetic_moments = (speed_total**2 - parallel_speeds**2) / (
-        2.0 * initial_abs_field
-    )
+    magnetic_moments = (speed_total**2 - parallel_speeds**2) / (2.0 * initial_abs_field)
     return {
         "construction:axis_dofs": axis_dofs,
         "construction:field_dofs": field_dofs,
@@ -319,7 +316,8 @@ def _native(
         forget_exact_path=True,
     )
     speed_total = np.sqrt(
-        2.0 * _configuration_float(bundle, "kinetic_energy")
+        2.0
+        * _configuration_float(bundle, "kinetic_energy")
         / _configuration_float(bundle, "mass")
     )
     values = _values(
@@ -396,7 +394,8 @@ def _jax(
         max_steps=_configuration_int(bundle, "jax_max_steps"),
     )
     speed_total = np.sqrt(
-        2.0 * _configuration_float(bundle, "kinetic_energy")
+        2.0
+        * _configuration_float(bundle, "kinetic_energy")
         / _configuration_float(bundle, "mass")
     )
     values = _values(

@@ -405,15 +405,11 @@ def vmec_compute_geometry_jax(
     d_R_d_phi = _mode_sum(rmnc * xn, -rmns * xn, sinangle, cosangle)
     d2_R_d_phi2 = _mode_sum(-rmnc * xn2, -rmns * xn2, cosangle, sinangle)
     d2_R_d_theta_vmec2 = _mode_sum(-rmnc * xm2, -rmns * xm2, cosangle, sinangle)
-    d2_R_d_theta_vmec_d_phi = _mode_sum(
-        rmnc * xmxn, rmns * xmxn, cosangle, sinangle
-    )
+    d2_R_d_theta_vmec_d_phi = _mode_sum(rmnc * xmxn, rmns * xmxn, cosangle, sinangle)
     d2_R_d_s_d_theta_vmec = _mode_sum(
         -d_rmnc_d_s * xm, d_rmns_d_s * xm, sinangle, cosangle
     )
-    d2_R_d_s_d_phi = _mode_sum(
-        d_rmnc_d_s * xn, -d_rmns_d_s * xn, sinangle, cosangle
-    )
+    d2_R_d_s_d_phi = _mode_sum(d_rmnc_d_s * xn, -d_rmns_d_s * xn, sinangle, cosangle)
 
     Z = _mode_sum(zmns, zmnc, sinangle, cosangle)
     d_Z_d_s = _mode_sum(d_zmns_d_s, d_zmnc_d_s, sinangle, cosangle)
@@ -421,15 +417,11 @@ def vmec_compute_geometry_jax(
     d_Z_d_phi = _mode_sum(-zmns * xn, zmnc * xn, cosangle, sinangle)
     d2_Z_d_phi2 = _mode_sum(-zmns * xn2, -zmnc * xn2, sinangle, cosangle)
     d2_Z_d_theta_vmec2 = _mode_sum(-zmns * xm2, -zmnc * xm2, sinangle, cosangle)
-    d2_Z_d_theta_vmec_d_phi = _mode_sum(
-        zmns * xmxn, zmnc * xmxn, sinangle, cosangle
-    )
+    d2_Z_d_theta_vmec_d_phi = _mode_sum(zmns * xmxn, zmnc * xmxn, sinangle, cosangle)
     d2_Z_d_s_d_theta_vmec = _mode_sum(
         d_zmns_d_s * xm, -d_zmnc_d_s * xm, cosangle, sinangle
     )
-    d2_Z_d_s_d_phi = _mode_sum(
-        -d_zmns_d_s * xn, d_zmnc_d_s * xn, cosangle, sinangle
-    )
+    d2_Z_d_s_d_phi = _mode_sum(-d_zmns_d_s * xn, d_zmnc_d_s * xn, cosangle, sinangle)
 
     lambd = _mode_sum(lmns, lmnc, sinangle, cosangle)
     d_lambda_d_s = _mode_sum(d_lmns_d_s, d_lmnc_d_s, sinangle, cosangle)
@@ -452,9 +444,7 @@ def vmec_compute_geometry_jax(
     d_B_d_theta_vmec = _mode_sum(
         -bmnc * xm_nyq, bmns * xm_nyq, sinangle_nyq, cosangle_nyq
     )
-    d_B_d_phi = _mode_sum(
-        bmnc * xn_nyq, -bmns * xn_nyq, sinangle_nyq, cosangle_nyq
-    )
+    d_B_d_phi = _mode_sum(bmnc * xn_nyq, -bmns * xn_nyq, sinangle_nyq, cosangle_nyq)
     B_sup_theta_vmec = _mode_sum(bsupumnc, bsupumns, cosangle_nyq, sinangle_nyq)
     B_sup_phi = _mode_sum(bsupvmnc, bsupvmns, cosangle_nyq, sinangle_nyq)
     B_sub_s = _mode_sum(bsubsmns, bsubsmnc, sinangle_nyq, cosangle_nyq)

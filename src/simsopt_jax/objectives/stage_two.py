@@ -254,9 +254,7 @@ def stage_two_coil_geometry(
         )
         if coil_spec.symmetry.has_rotation:
             gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
-        geometry.append(
-            (gamma, gammadash, gammadashdash, current + parameter_zero)
-        )
+        geometry.append((gamma, gammadash, gammadashdash, current + parameter_zero))
     gammas, gammadashs, gammadashdashs, currents = zip(
         *geometry,
         strict=True,

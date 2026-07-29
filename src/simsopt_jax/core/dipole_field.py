@@ -48,9 +48,7 @@ __all__ = [
 _MU0_OVER_4PI = np.float64(1e-7)
 _GRID_RAY_COUNT = 2000
 _GRID_RAY_LENGTH = np.float64(4.0)
-_DIPOLE_FIELD_BN_COORDINATE_FLAGS = frozenset(
-    ("cartesian", "cylindrical", "toroidal")
-)
+_DIPOLE_FIELD_BN_COORDINATE_FLAGS = frozenset(("cartesian", "cylindrical", "toroidal"))
 
 
 @dataclass(frozen=True)
@@ -487,9 +485,7 @@ def _symmetry_angles_and_signs(
     field_periods = jnp.arange(nfp, dtype=reference.dtype)
     stellarator_copies = jnp.arange(stellsym + 1, dtype=reference.dtype)
     phi0 = 2.0 * jnp.pi * field_periods[None, :] / _scalar(reference, nfp)
-    stell_sign = jnp.power(
-        _scalar(reference, -1.0), stellarator_copies[:, None]
-    )
+    stell_sign = jnp.power(_scalar(reference, -1.0), stellarator_copies[:, None])
     phi0 = jnp.broadcast_to(phi0, (stellsym + 1, nfp))
     stell_sign = jnp.broadcast_to(stell_sign, (stellsym + 1, nfp))
     return phi0.reshape(-1), stell_sign.reshape(-1)
@@ -520,9 +516,7 @@ def _dipole_field_Bn_jit(
             return _rotate_normal_matrix_to_toroidal_basis(
                 normal_matrix, phi0, stell_sign, sphi, cphi, stheta, ctheta
             )
-        return _rotate_normal_matrix_to_cartesian_basis(
-            normal_matrix, phi0, stell_sign
-        )
+        return _rotate_normal_matrix_to_cartesian_basis(normal_matrix, phi0, stell_sign)
 
     contributions = jax.vmap(per_symmetry)(phi0_values, stell_sign_values)
     return _scale(points) * jnp.sum(contributions, axis=0)

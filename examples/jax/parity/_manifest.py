@@ -214,9 +214,10 @@ def _validate_source_owned_tolerance_matrix(
                 route.tolerance_bucket
             )
     for key, tolerance_buckets in grouped.items():
-        if any(bucket.startswith("mirror_") for bucket in tolerance_buckets) and len(
-            tolerance_buckets
-        ) != 1:
+        if (
+            any(bucket.startswith("mirror_") for bucket in tolerance_buckets)
+            and len(tolerance_buckets) != 1
+        ):
             raise ParityManifestValidationError(
                 f"{key} source-owned tolerance must apply to every lane pair"
             )

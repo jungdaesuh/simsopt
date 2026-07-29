@@ -173,7 +173,7 @@ class WireframeFieldJAX(MagneticField):
         )
         unitn_flat = _as_runtime_array(np.reshape(unitn, (n_points, 3)))
         fac_flat = _as_runtime_array(np.reshape(fac, (n_points,)))
-        matrix = jnp.einsum("spc,pc->ps", contributions, unitn_flat) * fac_flat[
-            :, None
-        ]
-        return np.ascontiguousarray(_host_cache_array(matrix, dtype=_runtime_host_dtype()))
+        matrix = jnp.einsum("spc,pc->ps", contributions, unitn_flat) * fac_flat[:, None]
+        return np.ascontiguousarray(
+            _host_cache_array(matrix, dtype=_runtime_host_dtype())
+        )

@@ -141,9 +141,7 @@ def _finite_build_penalties(
     )
     targets = jnp.asarray(config.length_targets, dtype=base_lengths.dtype)
     length_excess = jnp.maximum(base_lengths - targets, 0.0)
-    length_penalty = (
-        0.5 * config.length_weight * jnp.sum(length_excess * length_excess)
-    )
+    length_penalty = 0.5 * config.length_weight * jnp.sum(length_excess * length_excess)
 
     pairs = tuple(
         (first, second)

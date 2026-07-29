@@ -388,7 +388,9 @@ def test_regularized_constrained_least_squares_jits_under_transfer_guard() -> No
     assert np.all(np.isfinite(np.asarray(out)))
 
 
-def test_regularized_constrained_least_squares_runs_eager_under_transfer_guard() -> None:
+def test_regularized_constrained_least_squares_runs_eager_under_transfer_guard() -> (
+    None
+):
     A, b, C, d, _ = _least_squares_problem()
     W = np.array([0.2, 0.3, 0.4, 0.5], dtype=np.float64)
 
@@ -514,18 +516,14 @@ def test_regularized_constrained_least_squares_rank_deficient_matches_cpu() -> N
     )
 
 
-def test_regularized_constrained_least_squares_avoids_normal_equation_loss() -> (
-    None
-):
+def test_regularized_constrained_least_squares_avoids_normal_equation_loss() -> None:
     rng = np.random.default_rng(0)
     rows = 14
     columns = 10
     left_basis = np.linalg.qr(rng.standard_normal(size=(rows, columns)))[0]
     right_basis = np.linalg.qr(rng.standard_normal(size=(columns, columns)))[0]
     singular_values = np.geomspace(1.0, 1.0e-8, columns)
-    A = np.ascontiguousarray(
-        left_basis @ np.diag(singular_values) @ right_basis.T
-    )
+    A = np.ascontiguousarray(left_basis @ np.diag(singular_values) @ right_basis.T)
     expected_currents = rng.standard_normal(size=(columns, 1))
     b = np.ascontiguousarray(A @ expected_currents)
     C = np.zeros((0, columns), dtype=np.float64)

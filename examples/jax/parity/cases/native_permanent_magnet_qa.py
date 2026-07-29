@@ -137,9 +137,7 @@ def create_input(root: Path, scale: ExecutionScale) -> InputBundle:
         arrays={
             "response_matrix": np.asarray(grid.A_obj, dtype=np.float64),
             "target": np.asarray(grid.b_obj, dtype=np.float64),
-            "atb": np.asarray(grid.ATb, dtype=np.float64).reshape(
-                (grid.ndipoles, 3)
-            ),
+            "atb": np.asarray(grid.ATb, dtype=np.float64).reshape((grid.ndipoles, 3)),
             "ata_scale_unregularized": np.asarray(
                 grid.ATA_scale,
                 dtype=np.float64,
@@ -284,10 +282,9 @@ def _observation(
         and values["final:objective_sum_squares"]
         < values["initial:objective_sum_squares"]
     )
-    iterations = (
-        _configuration_int(bundle.configuration, "continuation_stages")
-        * _configuration_int(bundle.configuration, "outer_iterations")
-    )
+    iterations = _configuration_int(
+        bundle.configuration, "continuation_stages"
+    ) * _configuration_int(bundle.configuration, "outer_iterations")
     return LaneObservation(
         lane=lane,
         backend_mode=(
@@ -304,8 +301,7 @@ def _observation(
         raw_status="fixed_iteration_budget_complete",
         success=success,
         nit=iterations,
-        nfev=iterations
-        * _configuration_int(bundle.configuration, "inner_iterations"),
+        nfev=iterations * _configuration_int(bundle.configuration, "inner_iterations"),
         njev=None,
         completed_workflow_stages=WORKFLOW_STAGES,
         provenance=None,
@@ -322,15 +318,12 @@ def _native(
 
     grid = _NativeGrid(bundle, arrays)
     nu = _configuration_float(bundle.configuration, "nu")
-    base_reg_l0 = (
-        _configuration_float(bundle.configuration, "unscaled_reg_l0")
-        / (2.0 * nu)
+    base_reg_l0 = _configuration_float(bundle.configuration, "unscaled_reg_l0") / (
+        2.0 * nu
     )
     alpha = 2.0 * (1.0 - 1.0e-5) / grid.ATA_scale
     initial = np.array(grid.m0, copy=True)
-    for stage in range(
-        _configuration_int(bundle.configuration, "continuation_stages")
-    ):
+    for stage in range(_configuration_int(bundle.configuration, "continuation_stages")):
         reg_l0 = base_reg_l0 * (stage + 1) / 2.0
         moments = np.array(initial, copy=True)
         proxy = prox_l0(moments, grid.m_maxima, reg_l0, nu)
@@ -418,20 +411,13 @@ def _jax(
         ndipoles=_configuration_int(bundle.configuration, "ndipoles"),
     )
     nu = _configuration_float(bundle.configuration, "nu")
-    base_reg_l0 = (
-        _configuration_float(bundle.configuration, "unscaled_reg_l0")
-        / (2.0 * nu)
+    base_reg_l0 = _configuration_float(bundle.configuration, "unscaled_reg_l0") / (
+        2.0 * nu
     )
-    alpha = (
-        2.0
-        * (1.0 - 1.0e-5)
-        / (arrays["ata_scale_unregularized"].item() + 1.0 / nu)
-    )
+    alpha = 2.0 * (1.0 - 1.0e-5) / (arrays["ata_scale_unregularized"].item() + 1.0 / nu)
     initial = grid.m0
     result = None
-    for stage in range(
-        _configuration_int(bundle.configuration, "continuation_stages")
-    ):
+    for stage in range(_configuration_int(bundle.configuration, "continuation_stages")):
         result = relax_and_split_jax(
             grid,
             m0=initial,

@@ -115,8 +115,7 @@ def _build_problem(
     target_quadpoints = jax.device_put(
         np.stack(
             tuple(
-                np.asarray(curve.quadpoints, dtype=np.float64)
-                for curve in base_curves
+                np.asarray(curve.quadpoints, dtype=np.float64) for curve in base_curves
             )
         )
     )
@@ -222,9 +221,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         jax.device_get(
             jnp.concatenate(
                 (
-                    jnp.stack(
-                        (initial_objective_device, final_objective_device)
-                    ),
+                    jnp.stack((initial_objective_device, final_objective_device)),
                     force_values_device,
                 )
             )

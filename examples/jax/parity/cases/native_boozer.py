@@ -212,9 +212,9 @@ def _native(
     )
 
     toroidal_flux = ToroidalFlux(surface, field)
-    flux_target = _configuration_float(
-        bundle.configuration, "flux_multiplier"
-    ) * float(toroidal_flux.J())
+    flux_target = _configuration_float(bundle.configuration, "flux_multiplier") * float(
+        toroidal_flux.J()
+    )
     flux_solver = BoozerSurface(
         native_field,
         surface,
@@ -294,18 +294,10 @@ def _jax(
     initial_iota = _configuration_float(bundle.configuration, "initial_iota")
     jax_field = BiotSavartJAX(native_field.coils)
     options = {
-        "bfgs_maxiter": _configuration_int(
-            bundle.configuration, "jax_bfgs_maxiter"
-        ),
-        "bfgs_tol": _configuration_float(
-            bundle.configuration, "solver_tolerance"
-        ),
-        "newton_maxiter": _configuration_int(
-            bundle.configuration, "jax_ls_maxiter"
-        ),
-        "newton_tol": _configuration_float(
-            bundle.configuration, "solver_tolerance"
-        ),
+        "bfgs_maxiter": _configuration_int(bundle.configuration, "jax_bfgs_maxiter"),
+        "bfgs_tol": _configuration_float(bundle.configuration, "solver_tolerance"),
+        "newton_maxiter": _configuration_int(bundle.configuration, "jax_ls_maxiter"),
+        "newton_tol": _configuration_float(bundle.configuration, "solver_tolerance"),
         "verbose": False,
     }
     area = Area(surface)
@@ -321,12 +313,8 @@ def _jax(
     )
     initial_x = jnp.concatenate(
         (
-            jax.device_put(
-                np.asarray(arrays["surface_dofs"], dtype=np.float64)
-            ),
-            jax.device_put(
-                np.asarray([initial_iota, G0], dtype=np.float64)
-            ),
+            jax.device_put(np.asarray(arrays["surface_dofs"], dtype=np.float64)),
+            jax.device_put(np.asarray([initial_iota, G0], dtype=np.float64)),
         )
     )
     kernels = solver._get_penalty_kernel_bundle(
@@ -388,9 +376,9 @@ def _jax(
     )
 
     toroidal_flux = ToroidalFlux(surface, field)
-    flux_target = _configuration_float(
-        bundle.configuration, "flux_multiplier"
-    ) * float(toroidal_flux.J())
+    flux_target = _configuration_float(bundle.configuration, "flux_multiplier") * float(
+        toroidal_flux.J()
+    )
     flux_field = BiotSavartJAX(native_field.coils)
     flux_solver = BoozerSurfaceJAX(
         flux_field,
@@ -508,8 +496,7 @@ def _observation(
     success = bool(
         np.all(np.isfinite(values["flux:surface_dofs"]))
         and np.isfinite(float(values["flux:residual_norm"]))
-        and float(values["flux:residual_norm"])
-        < float(values["initial:residual_norm"])
+        and float(values["flux:residual_norm"]) < float(values["initial:residual_norm"])
         and np.isfinite(float(values["flux:iota"]))
         and np.isfinite(float(values["flux:G"]))
     )

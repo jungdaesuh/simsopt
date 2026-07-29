@@ -132,8 +132,7 @@ def resolve_boozer_optimizer_method(
     if least_squares_algorithm == "lm":
         if limited_memory:
             raise ValueError(
-                "least_squares_algorithm='lm' is incompatible with "
-                "limited_memory=True."
+                "least_squares_algorithm='lm' is incompatible with limited_memory=True."
             )
         return "lm" if boozer_optimizer_backend == "host-jax" else "lm-ondevice"
     if boozer_optimizer_backend == "host-jax":
