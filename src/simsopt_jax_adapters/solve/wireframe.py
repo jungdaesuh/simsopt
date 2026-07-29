@@ -289,7 +289,9 @@ def gsco_wireframe_jax(
     x_init_arr = jnp.reshape(_as_runtime_array(initial_currents), (-1, 1))
 
     if loop_count_init is None:
-        loop_count_arr = jnp.zeros(len(free_loops), dtype=jnp.int32)
+        loop_count_arr = _as_jax_int32(
+            np.zeros(len(free_loops), dtype=np.int32)
+        )
     else:
         loop_count_arr = _as_jax_int32(loop_count_init)
 
