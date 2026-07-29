@@ -15,66 +15,40 @@ comparisons passed
 
 ## Executive summary
 
-- All 26 bounded native examples passed in three independently launched lanes:
-  native SIMSOPT/simsoptpp CPU, JAX CPU, and strict JAX GPU on an NVIDIA
-  GeForce RTX 5090.
-- All 416 declared native-CPU/JAX-GPU comparison routes passed their predefined
-  tolerances. Across all three lane pairs, 1,064 comparisons were numerical
-  `allclose` checks, 180 were exact checks, and 4 were `not_worse` checks.
-- Initial-state agreement is generally exact or at FP64 roundoff. The largest
-  relative difference among the representative initial scalars below is
-  `8.06e-13%`.
-- All 26 native and GPU lanes passed the normalized bounded-workflow predicate.
-  This is not a claim that every underlying optimizer converged: raw statuses
-  include fixed iteration budgets, iteration-limit exits, and unsuccessful
-  outer solves with accepted finite endpoints.
-- Final objectives can differ when the solver sequences accept different
-  bounded-run endpoints. The largest representative non-near-zero difference
-  is planar Stage-II, for which the GPU objective is 16.2633% lower. Standard
-  and stochastic Stage-II differ by 1.56037% and 0.736265%, respectively.
-- The authority run retains one parent-observed, isolated-child wall time and
-  launched-child RSS measurement for each of its 78 lane launches, together with
-  child peak RSS and GPU allocation. It does **not** isolate compile time or
-  provide controlled-cold or warmed repetitions.
-- Summed across the 26 one-shot bounded executions, native CPU used 84.740877 s,
-  JAX CPU used 457.572343 s, and JAX GPU used 1,196.250171 s. The GPU total was
-  14.1166x the native total (+1,311.657%). These are validation-campaign costs,
-  not steady-state benchmark results.
-- A separate five-workload JAX fast-versus-parity benchmark has cold and warm
-  timing, RSS, and VRAM measurements. It does not provide a native C++ baseline
-  and is therefore reported separately.
+- All 26 bounded examples passed native CPU, JAX CPU, and strict RTX 5090 GPU
+  lanes.
+- All 416 native-CPU/JAX-GPU routes passed. Across all lane pairs, 1,064 checks
+  were `allclose`, 180 exact, and 4 `not_worse`.
+- Representative initial values agree exactly or at FP64 roundoff.
+- Workflow acceptance does not imply solver convergence. Some runs ended at
+  fixed budgets or iteration limits.
+- Planar Stage-II has the largest non-near-zero final gap: its GPU objective is
+  16.2633% lower.
+- Authority timings are single validation launches, not steady-state
+  benchmarks. Total GPU time was 14.1166x native CPU time.
+- The separate fast/parity benchmark has no native C++ baseline.
 
-This is a bounded-scale parity result. Native-default-scale certification
-remains `not_run`, and no table in this report claims that JAX GPU is generally
-faster than native C++.
+This report covers bounded scale. Native-default scale remains `not_run`.
 
 ## How to read the numerical tables
 
-For a scalar observable, “raw” is the literal recorded FP64 scalar. For a
-vector or tensor, “raw” is its L2 norm and the table also gives the maximum
-elementwise absolute difference. Relative difference is
+For scalars, “raw” is the recorded FP64 value. For arrays, it is the L2 norm;
+the table also reports the maximum elementwise absolute difference. Scalar
+relative difference is
 
 ```text
 100 * abs(JAX_GPU - native_CPU) / abs(native_CPU).
 ```
 
-For vector or tensor rows, relative error is
+Array relative error is
 
 ```text
 100 * norm(JAX_GPU - native_CPU, 2) / norm(native_CPU, 2).
 ```
 
-This normwise error detects direction and component changes that subtracting
-the two vector norms can hide. When the native scalar or vector norm is zero,
-the relative result is undefined and is shown as `—`. When a native scalar is
-merely close to zero, the percentage is mathematically valid but
-ill-conditioned; the absolute difference is the scientifically useful number.
-
-Each row selects one representative primary observable so that all 26 cases
-fit in a reviewable table. This is not a replacement for the complete
-machine-readable record: the authority artifact contains every residual,
-gradient, Jacobian, constraint, parameter, trajectory, and diagnostic route
-used in the 1,248-check verdict.
+This normwise metric captures component changes. `—` marks an undefined
+relative result. Near zero, use the absolute difference. Each row shows one
+representative observable; the artifact retains all declared routes.
 
 ## Initial-state parity: native CPU versus strict JAX GPU
 
@@ -140,8 +114,7 @@ used in the 1,248-check verdict.
 
 ## Solver, iteration, evaluation, and status parity
 
-`—` means that the lane did not publish that counter. A missing counter is not
-treated as zero.
+`—` means the lane did not publish that counter.
 
 | Case | Native driver | JAX GPU driver | iterations native/GPU | function evaluations native/GPU | Jacobian evaluations native/GPU | normalized workflow status native/GPU |
 |---|---|---|---:|---:|---:|---|
@@ -182,39 +155,28 @@ The nonzero counter differences are:
 | stage-two-optimization-planar-coils | 100/100 | 0% | 277/149 | -46.209% |
 | stage-two-optimization-stochastic | 20/20 | 0% | 25/22 | -12.000% |
 
-Every other case with native and GPU iteration counters has a 0% iteration
-difference. Every other case with native and GPU function-evaluation counters
-has a 0% evaluation difference. Negative percentages mean that the GPU lane's
-solver sequence used fewer published iterations or evaluations; they do not
-by themselves imply shorter wall time.
+All other paired iteration and evaluation counters match. Negative percentages
+mean fewer GPU iterations or evaluations, not shorter wall time.
 
-The status column reproduces the authority schema's `normalized_status`; it is
-a workflow-level acceptance label. It must not be read as the underlying
-solver's raw convergence result. Examples of retained raw statuses include
-`fixed_iteration_budget_complete`, iteration-limit exits, and Boozer
+`normalized_status` is workflow acceptance, not raw solver convergence. Raw
+statuses include fixed budgets, iteration limits, and Boozer
 `inner=True;outer=False`.
 
-The driver names show that “parity” means matched scientific behavior, not
-necessarily the same implementation:
+Parity targets scientific behavior, not identical implementations:
 
 - native SciPy L-BFGS-B is paired with SIMSOPT-owned JAX BFGS or L-BFGS-B;
 - native serial least squares is paired with SIMSOPT-owned JAX LM-GMRES;
 - native LSODA tracing is paired with SIMSOPT-owned JAX DOPRI5;
 - simsoptpp GPMO, MwPGP, and GSCO are paired with their SIMSOPT-owned JAX
   implementations;
-- Boozer QA and vacuum single-stage retain a host-controlled BFGS outer loop,
-  while the JAX objective, derivatives, and traceable Boozer inner solve run on
-  the selected JAX device.
+- Boozer QA and vacuum single-stage use host-controlled BFGS around JAX
+  objectives, derivatives, and inner solves.
 
 ## Peak memory in the 26-case authority run
 
-Host values are child-reported `ru_maxrss` converted to MiB. GPU values are
-JAX `peak_bytes_in_use` converted to MiB. “GPU host versus native” is
-`100 * (GPU_host/native_host - 1)`.
-
-These measurements cover imports, compilation/warmup, and one bounded
-execution. They are not steady-state memory measurements and should not be
-added together as if they were simultaneous allocations.
+Host values are child `ru_maxrss`; device values are JAX
+`peak_bytes_in_use`. Both are MiB. Measurements include imports,
+compilation/warmup, and one bounded execution; they are not steady state.
 
 | Case | Native host peak MiB | GPU host peak MiB | GPU host versus native | GPU device peak MiB |
 |---|---:|---:|---:|---:|
@@ -245,11 +207,8 @@ added together as if they were simultaneous allocations.
 | wireframe-rcls-basic | 1016.055 | 1133.922 | +11.600% | 70.139 |
 | wireframe-rcls-with-ports | 1021.707 | 1136.531 | +11.238% | 73.047 |
 
-The largest child-reported host peak is 2,219,270,144 bytes
-(2,116.461 MiB) for Boozer QA. The separate parent-observed launched-child
-measurement reaches 2,292,080,640 bytes for the strict-GPU Boozer-vacuum
-single-stage lane. The largest GPU allocation is 737,743,616 bytes
-(703.567 MiB) for particle tracing.
+Maxima: child host 2,116.461 MiB (Boozer QA), parent-observed child 2,185.898
+MiB (Boozer-vacuum GPU), and device 703.567 MiB (particle tracing).
 
 ## Wall time, cold time, compile time, and warm time
 
@@ -261,28 +220,15 @@ single-stage lane. The largest GPU allocation is 737,743,616 bytes
 | Five-workload JAX fast/parity benchmark | JAX-only, no native baseline | yes | not isolated | 7 paired repetitions | yes | yes |
 | VMEC-hybrid local run | metrics not retained in a receipt | not established | not measured | not measured | not claim-grade | not retained |
 
-The 26-case campaign took 29 minutes 21 seconds from the run identifier
-timestamp to its completion marker. This is orchestration wall time for all 78
-independent lane launches.
-
-Compile-only time is unavailable. The cold measurements below include process
-startup, imports, persistent-cache state, JIT compilation, execution,
-synchronization, and receipt publication. Subtracting a warm median from a
-cold time would not produce a defensible compile time.
+The 78-launch campaign took 29 minutes 21 seconds. Compile-only time was not
+measured. Cold time includes startup, imports, cache state, JIT, execution,
+synchronization, and receipt publication.
 
 ### Authority-run isolated end-to-end wall time
 
-The authority runner measured each child with a parent `perf_counter()` around
-the complete subprocess. Each value therefore includes process startup,
-imports, the lane's existing cache state, JIT/compilation where applicable,
-execution, synchronization, and receipt publication. There is one observation
-per lane, without a controlled cache protocol or repetitions. The percentages
-are useful for describing this validation campaign, but they are not
-steady-state speedups.
-
-Parent-observed RSS is the launched child process's peak `VmHWM` sampled by the
-runner. It does not aggregate descendants and is distinct from the child
-`ru_maxrss` values in the memory table above.
+Each value wraps one complete subprocess with `perf_counter()`. Cache state was
+not controlled and runs were not repeated. Parent RSS is the launched child's
+peak `VmHWM`; it excludes descendants.
 
 | Case | Native CPU wall s | JAX CPU wall s | JAX GPU wall s | GPU wall versus native | Native/GPU parent peak MiB | GPU parent RSS versus native |
 |---|---:|---:|---:|---:|---:|---:|
@@ -314,18 +260,14 @@ runner. It does not aggregate descendants and is distinct from the child
 | wireframe-gsco-multistep | 1.790057 | 2.892382 | 4.777306 | +166.880% | 669.051/1053.172 | +57.413% |
 | **Sum of lane elapsed times** | **84.740877** | **457.572343** | **1196.250171** | **+1311.657%** | — | — |
 
-The authority GPU lane is slower than native CPU in every bounded case. That
-observation is specific to fresh isolated validation launches and includes JAX
-startup and compilation effects. It does not predict throughput for a larger
-same-process workload that amortizes compilation.
+GPU was slower in every isolated bounded launch. These runs include JAX startup
+and compilation; they do not predict warmed throughput.
 
 ### JAX GPU fast versus JAX GPU parity: cold and warmed measurements
 
-This local RTX 5090 diagnostic is not native C++ versus JAX GPU evidence. It is
-included to document the measured fast-mode behavior. Each cold run started
-with an empty profile-specific persistent cache. Warm statistics use seven
-balanced paired repetitions. “Paired warm speedup” is the benchmark's median
-of paired `parity/fast` ratios; positive percentage means fast is faster.
+This RTX 5090 diagnostic compares JAX fast and parity modes, not native C++ and
+JAX GPU. Cold runs used empty profile caches; warm results use seven balanced
+pairs. Paired speedup is the median `parity/fast` ratio.
 
 | Workload | Cold parity/fast s | Warm median parity/fast s | Paired warm speedup | 95% lower bound | Host peak fast/parity ratio | VRAM peak fast/parity ratio |
 |---|---:|---:|---:|---:|---:|---:|
@@ -335,29 +277,18 @@ of paired `parity/fast` ratios; positive percentage means fast is faster.
 | coil-flux-optimization | 3.737068 / 4.033779 | 2.472577 / 2.240982 | 1.104171x (+10.417%) | 0.992904x | 1.071184x (+7.118%) | 1.468864x (+46.886%) |
 | fieldline-and-particle-tracing | 3.462484 / 3.986709 | 2.434236 / 2.260534 | 1.058354x (+5.835%) | 1.001966x | 1.013405x (+1.341%) | 1.059480x (+5.948%) |
 
-The raw median time ratio can differ from the median of paired speedup ratios
-because process order was balanced within each pair. The paired ratio and its
-bootstrap lower bound are the prespecified policy statistics.
-
-Only field-line/particle tracing passed every fast-mode promotion gate in this
-run. The overall fast policy was not promoted: four workloads missed the
-one-sided warm-speed confidence gate, and surface/coil exceeded the unchanged
-1.25 VRAM-ratio ceiling.
+Only field-line/particle tracing passed every promotion gate. Four workloads
+missed the warm-speed confidence gate; surface and coil also exceeded the 1.25
+VRAM ceiling. Fast mode was not promoted.
 
 ### VMEC-hybrid evidence gap
 
-VMEC remains a CPU/MPI host solve in the hybrid example; only the JAX-owned
-coil slice moves between CPU and GPU. A local run at ancestor revision
-`e07a30635` left CPU/GPU VMEC inputs, `wout`, `threed1`, and finite-difference
-working files under
+VMEC stays on CPU/MPI; only the JAX coil slice moves between CPU and GPU. A run
+at `e07a30635` left working files under
 `.artifacts/jax-authority-evidence/vmec-hybrid-e07a/`.
 
-The run's JSON stdout containing objectives, evaluation counts, wall time, RSS,
-configuration fingerprint, and hardware identity was never persisted. Exact
-VMEC-hybrid performance numbers are therefore excluded from this report:
-working outputs alone cannot reconstruct or authenticate those metrics. The
-hybrid workflow needs a machine-readable, checksum-bound CPU/GPU receipt
-before it can appear in a performance table.
+Its JSON stdout was not retained, so exact performance numbers are excluded.
+A checksum-bound CPU/GPU receipt is still required.
 
 ## Evidence provenance and limitations
 
@@ -369,9 +300,8 @@ Primary authority evidence:
 
 The archived `summary.json` SHA-256 is
 `fa235cacb0f3e4fa7abc6e8ff4b2f888b2e20c7392bd1531eeb983abad67d66a`.
-The run is bound to a clean checkout, exact source hashes, exact input bundles,
-FP64, strict GPU transfer guards, and an independently replayed fail-closed
-audit.
+The run binds source hashes, inputs, FP64, transfer guards, and a replayed
+fail-closed audit.
 
 Fast/parity performance evidence:
 
@@ -379,54 +309,39 @@ Fast/parity performance evidence:
 .artifacts/jax-example-execution-modes/20260727T064728Z-gpu-829eb1cbf037/
 ```
 
-This run used JAX/JAXLIB 0.10.2, an NVIDIA GeForce RTX 5090, and an AMD Ryzen
-Threadripper 9970X. Its artifact labels itself non-certifying and its decision
-is `promoted: false`. SHA-256:
+This non-certifying run used JAX/JAXLIB 0.10.2, an RTX 5090, and a Threadripper
+9970X. Its decision is `promoted: false`. SHA-256:
 
 ```text
 artifact.json  6213e4a6a826c4d45ae82d63c644f3c24074d0e0225160d0eb45dcb612f73a4f
 decision.json  cc7b5ade9ee50be1d64547127e484f7bc1e92e14ff7cfe77eb8afb39f65ce3d8
 ```
 
-The exact declared per-case route matrix is owned by
+The route matrix is owned by
 [`examples/jax/parity_manifest.json`](../examples/jax/parity_manifest.json),
 whose authority-bound SHA-256 is
 `dd532a55f7baeb841fc2f8c0df1c8c4368438ccbdd6c8e9ad11d2d41ae616b78`.
-The archived artifacts are host-local and Git-ignored; their retention and
-audit command are documented in
+Artifacts are host-local and Git-ignored. Retention and replay instructions:
 `.artifacts/jax-authority-evidence/README.md`.
 
 Limitations:
 
-1. The scientific authority campaign is bounded-scale, not native-default
-   scale.
-2. Its memory numbers include compilation and execution and are not
-   steady-state measurements.
-3. It contains one end-to-end elapsed time per lane, but no isolated compile
-   time, controlled-cold repetitions, or warmed repetitions.
-4. The five-workload cold/warm benchmark compares JAX fast against JAX parity,
-   not native C++ against JAX GPU.
-5. The authority elapsed times are one-shot validation-campaign diagnostics
-   and cannot support a steady-state speed claim.
-6. Percent differences near a zero native result are ill-conditioned; raw
-   absolute differences and the declared scientific tolerances control the
-   verdict.
+1. Authority scale is bounded, not native default.
+2. Memory includes compilation and execution.
+3. Authority timing has one end-to-end sample per lane; no compile-only or
+   warmed samples.
+4. The cold/warm benchmark is JAX fast versus JAX parity.
+5. One-shot authority timings do not establish steady-state speed.
+6. Near-zero relative differences are ill-conditioned; use absolute values and
+   declared tolerances.
 7. No Perlmutter data is used in this report.
 
 ## Bottom line
 
-The evidence supports a strong bounded scientific-parity claim: all applicable
-declared routes across the 26 one-to-one relationships pass native CPU, JAX
-CPU, and strict RTX 5090 GPU validation. Derivatives, constraints,
-trajectories, and counters are compared only for the cases whose parity
-manifest declares those observables.
+All declared bounded routes pass native CPU, JAX CPU, and strict RTX 5090 GPU
+validation. Coverage remains case-specific to the parity manifest.
 
-The evidence does **not** yet support a broad performance claim. Current
-authority-run timing shows all 26 isolated bounded GPU launches slower than
-their native CPU counterparts, while the JAX-only fast/parity diagnostic shows
-modest warmed gains for some workload classes and a statistically clean gain
-only for the combined field-line/particle-tracing workload. A future native
-SIMSOPT-CPU/JAX-GPU performance campaign should record synchronized cold
-end-to-end time, compile-only time, same-process warmed time, process-tree RSS,
-and process-attributed VRAM in one machine-readable receipt per representative
-workload.
+No broad performance claim is supported. All isolated GPU launches were
+slower than native CPU. Only field-line/particle tracing showed a statistically
+clean warmed fast-mode gain. A future native-CPU/JAX-GPU campaign needs cold,
+compile-only, warmed, RSS, and VRAM measurements in machine-readable receipts.
