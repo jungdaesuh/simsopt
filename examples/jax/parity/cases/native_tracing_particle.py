@@ -354,12 +354,13 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
     from simsopt.field import LevelsetStoppingCriterion
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
     from simsopt_jax_adapters.field.tracing import trace_particles
+
+    import jax
 
     (
         magnetic_axis,

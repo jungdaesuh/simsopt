@@ -14,9 +14,6 @@ from examples.jax.parity.cases.coil_force import create_input as create_coil_for
 from examples.jax.parity.cases.coil_force import execute as execute_coil_force
 from examples.jax.parity.cases.curve_length import create_input as create_curve_input
 from examples.jax.parity.cases.curve_length import execute as execute_curve
-from examples.jax.parity.cases.native_just_a_quadratic import (
-    create_input as create_native_just_a_quadratic_input,
-)
 from examples.jax.parity.cases.native_boozer import (
     create_input as create_native_boozer_input,
 )
@@ -24,14 +21,17 @@ from examples.jax.parity.cases.native_boozer import execute as execute_native_bo
 from examples.jax.parity.cases.native_boozerqa import (
     create_input as create_native_boozerqa_input,
 )
+from examples.jax.parity.cases.native_boozerqa import (
+    execute as execute_native_boozerqa,
+)
 from examples.jax.parity.cases.native_coil_forces import (
     create_input as create_native_coil_forces_input,
 )
 from examples.jax.parity.cases.native_coil_forces import (
     execute as execute_native_coil_forces,
 )
-from examples.jax.parity.cases.native_boozerqa import (
-    execute as execute_native_boozerqa,
+from examples.jax.parity.cases.native_just_a_quadratic import (
+    create_input as create_native_just_a_quadratic_input,
 )
 from examples.jax.parity.cases.native_just_a_quadratic import (
     execute as execute_native_just_a_quadratic,
@@ -42,23 +42,11 @@ from examples.jax.parity.cases.native_minimize_curve_length import (
 from examples.jax.parity.cases.native_minimize_curve_length import (
     execute as execute_native_minimize_curve_length,
 )
-from examples.jax.parity.cases.native_permanent_magnet_simple import (
-    create_input as create_native_permanent_magnet_simple_input,
-)
-from examples.jax.parity.cases.native_permanent_magnet_simple import (
-    execute as execute_native_permanent_magnet_simple,
-)
 from examples.jax.parity.cases.native_permanent_magnet_muse import (
     create_input as create_native_permanent_magnet_muse_input,
 )
 from examples.jax.parity.cases.native_permanent_magnet_muse import (
     execute as execute_native_permanent_magnet_muse,
-)
-from examples.jax.parity.cases.native_permanent_magnet_qa import (
-    create_input as create_native_permanent_magnet_qa_input,
-)
-from examples.jax.parity.cases.native_permanent_magnet_qa import (
-    execute as execute_native_permanent_magnet_qa,
 )
 from examples.jax.parity.cases.native_permanent_magnet_pm4stell import (
     create_input as create_native_permanent_magnet_pm4stell_input,
@@ -66,15 +54,39 @@ from examples.jax.parity.cases.native_permanent_magnet_pm4stell import (
 from examples.jax.parity.cases.native_permanent_magnet_pm4stell import (
     execute as execute_native_permanent_magnet_pm4stell,
 )
+from examples.jax.parity.cases.native_permanent_magnet_qa import (
+    create_input as create_native_permanent_magnet_qa_input,
+)
+from examples.jax.parity.cases.native_permanent_magnet_qa import (
+    execute as execute_native_permanent_magnet_qa,
+)
+from examples.jax.parity.cases.native_permanent_magnet_simple import (
+    create_input as create_native_permanent_magnet_simple_input,
+)
+from examples.jax.parity.cases.native_permanent_magnet_simple import (
+    execute as execute_native_permanent_magnet_simple,
+)
 from examples.jax.parity.cases.native_qfm import (
     create_input as create_native_qfm_input,
 )
 from examples.jax.parity.cases.native_qfm import execute as execute_native_qfm
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    create_input as create_native_single_stage_boozer_vacuum_input,
+)
+from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
+    execute as execute_native_single_stage_boozer_vacuum,
+)
 from examples.jax.parity.cases.native_stage_two_optimization import (
     create_input as create_native_stage_two_optimization_input,
 )
 from examples.jax.parity.cases.native_stage_two_optimization import (
     execute as execute_native_stage_two_optimization,
+)
+from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import (
+    create_input as create_native_stage_two_finitebuild_input,
+)
+from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import (
+    execute as execute_native_stage_two_finitebuild,
 )
 from examples.jax.parity.cases.native_stage_two_optimization_minimal import (
     create_input as create_native_stage_two_optimization_minimal_input,
@@ -91,20 +103,8 @@ from examples.jax.parity.cases.native_stage_two_optimization_planar_coils import
 from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
     create_input as create_native_stage_two_optimization_stochastic_input,
 )
-from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import (
-    create_input as create_native_stage_two_finitebuild_input,
-)
-from examples.jax.parity.cases.native_stage_two_optimization_finitebuild import (
-    execute as execute_native_stage_two_finitebuild,
-)
 from examples.jax.parity.cases.native_stage_two_optimization_stochastic import (
     execute as execute_native_stage_two_optimization_stochastic,
-)
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    create_input as create_native_single_stage_boozer_vacuum_input,
-)
-from examples.jax.parity.cases.native_single_stage_boozer_vacuum import (
-    execute as execute_native_single_stage_boozer_vacuum,
 )
 from examples.jax.parity.cases.native_strain_optimization import (
     create_input as create_native_strain_optimization_input,
@@ -136,11 +136,11 @@ from examples.jax.parity.cases.native_tracing_particle import (
 from examples.jax.parity.cases.native_tracing_particle import (
     execute as execute_native_tracing_particle,
 )
-from examples.jax.parity.cases.native_wireframe_rcls_basic import (
-    create_input as create_native_wireframe_rcls_basic_input,
-)
 from examples.jax.parity.cases.native_wireframe_gsco_modular import (
     create_input as create_native_wireframe_gsco_modular_input,
+)
+from examples.jax.parity.cases.native_wireframe_gsco_modular import (
+    execute as execute_native_wireframe_gsco_modular,
 )
 from examples.jax.parity.cases.native_wireframe_gsco_multistep import (
     create_input as create_native_wireframe_gsco_multistep_input,
@@ -148,14 +148,14 @@ from examples.jax.parity.cases.native_wireframe_gsco_multistep import (
 from examples.jax.parity.cases.native_wireframe_gsco_multistep import (
     execute as execute_native_wireframe_gsco_multistep,
 )
-from examples.jax.parity.cases.native_wireframe_gsco_modular import (
-    execute as execute_native_wireframe_gsco_modular,
-)
 from examples.jax.parity.cases.native_wireframe_gsco_sector_saddle import (
     create_input as create_native_wireframe_gsco_sector_saddle_input,
 )
 from examples.jax.parity.cases.native_wireframe_gsco_sector_saddle import (
     execute as execute_native_wireframe_gsco_sector_saddle,
+)
+from examples.jax.parity.cases.native_wireframe_rcls_basic import (
+    create_input as create_native_wireframe_rcls_basic_input,
 )
 from examples.jax.parity.cases.native_wireframe_rcls_basic import (
     execute as execute_native_wireframe_rcls_basic,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -130,8 +131,8 @@ def _build_geometry(configuration: Mapping[str, object]):
             current
             * (_mapping_float(configuration, "initial_total_current") / filament_count)
         )
-    base_filaments = sum(
-        (
+    base_filaments = list(
+        itertools.chain.from_iterable(
             create_multifilament_grid(
                 curve,
                 _mapping_int(configuration, "num_filaments_normal"),
@@ -141,12 +142,12 @@ def _build_geometry(configuration: Mapping[str, object]):
                 rotation_order=_mapping_int(configuration, "rotation_order"),
             )
             for curve in base_curves
-        ),
-        [],
+        )
     )
-    filament_currents = sum(
-        ([current] * filament_count for current in base_currents),
-        [],
+    filament_currents = list(
+        itertools.chain.from_iterable(
+            [current] * filament_count for current in base_currents
+        )
     )
     filament_curves = apply_symmetries_to_curves(
         base_filaments,
@@ -400,9 +401,6 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-    import jax.numpy as jnp
-
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.solve.driver import Driver
     from simsopt_jax.solve.serial import (
@@ -416,6 +414,9 @@ def _jax(
         make_finite_build_stage_two_objective,
     )
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+    import jax
+    import jax.numpy as jnp
 
     surface, base_curves, _, coils, config = _build_geometry(bundle.configuration)
     fingerprint = _fingerprint(bundle, arrays, surface, base_curves)
@@ -462,7 +463,7 @@ def _jax(
 
     initial_values = state("initial", initial_parameters)
     direction = jax.device_put(arrays["taylor_direction"], device)
-    initial_scaled, initial_scaled_gradient = scaled_problem.value_and_grad(
+    _initial_scaled, initial_scaled_gradient = scaled_problem.value_and_grad(
         initial_parameters
     )
     directional_derivative = jnp.vdot(initial_scaled_gradient, direction)

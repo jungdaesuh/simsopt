@@ -24,8 +24,8 @@ from simsopt.geo import PermanentMagnetGrid, SurfaceRZFourier
 from simsopt.util.permanent_magnet_helper_functions import (
     initialize_coils_for_pm_optimization,
 )
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
 from simsopt_jax.core import grouped_biot_savart_B_from_spec
+from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.objectives import StageTwoObjectiveConfig, make_stage_two_objective
 from simsopt_jax.solve.permanent_magnet import relax_and_split_jax

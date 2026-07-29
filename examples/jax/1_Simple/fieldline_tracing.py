@@ -13,13 +13,13 @@ from typing import Literal
 
 import jax
 import numpy as np
-from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.core.tracing import (
     FieldlineTracingSpec,
     FullorbitTracingSpec,
     trace_fieldline,
     trace_fullorbit,
 )
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax_adapters.field.reiman import ReimanJAX
 
 EXAMPLE_ID = "fieldline-and-particle-tracing"

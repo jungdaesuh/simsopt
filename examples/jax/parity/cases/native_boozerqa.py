@@ -234,8 +234,8 @@ def _native(
     from scipy.optimize import minimize
     from simsopt.field import BiotSavart
     from simsopt.geo import (
-        BoozerSurface,
         BoozerResidual,
+        BoozerSurface,
         CurveLength,
         Iotas,
         MajorRadius,
@@ -376,7 +376,6 @@ def _jax(
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
 ) -> LaneObservation:
-    import jax
     from simsopt.geo import CurveLength, Volume
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.geo.optimizer_host_lbfgs import (
@@ -389,6 +388,8 @@ def _jax(
         make_traceable_objective_runtime_bundle,
         traceable_forward_result_outer_raw_terms,
     )
+
+    import jax
 
     (
         base_curves,

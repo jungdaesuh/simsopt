@@ -10,6 +10,7 @@ bounded-memory SIMSOPT L-BFGS; parity mode uses SIMSOPT BFGS.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import jax
@@ -43,7 +44,6 @@ from simsopt_jax_adapters.objectives import (
     make_finite_build_stage_two_objective,
 )
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
-
 
 EXAMPLE_ID = "native-stage-two-optimization-finitebuild"
 NATIVE_ITERATIONS = 400
@@ -114,8 +114,8 @@ def _build_problem(
         if index == 0:
             current.fix_all()
         base_currents.append(current * (1.0e5 / filament_count))
-    base_filaments = sum(
-        (
+    base_filaments = list(
+        itertools.chain.from_iterable(
             create_multifilament_grid(
                 curve,
                 NUM_FILAMENTS_N,
@@ -125,12 +125,12 @@ def _build_problem(
                 rotation_order=ROTATION_ORDER,
             )
             for curve in base_curves
-        ),
-        [],
+        )
     )
-    filament_currents = sum(
-        ([current] * filament_count for current in base_currents),
-        [],
+    filament_currents = list(
+        itertools.chain.from_iterable(
+            [current] * filament_count for current in base_currents
+        )
     )
     filament_curves = apply_symmetries_to_curves(
         base_filaments,

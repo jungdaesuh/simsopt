@@ -7,8 +7,6 @@ import hashlib
 import json
 from pathlib import Path
 
-from simsopt_jax.examples import ExecutionScale
-
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.artifacts import (
     canonical_json_bytes,
@@ -22,6 +20,7 @@ from examples.jax.parity.provenance import (
     lane_provenance_from_payload,
     lane_provenance_payload,
 )
+from simsopt_jax.examples import ExecutionScale
 
 _RECEIPT_V1_FIELDS = frozenset(
     {

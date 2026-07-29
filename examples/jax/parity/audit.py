@@ -11,12 +11,12 @@ from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import LaneObservation, arbitrate
 from examples.jax.parity.artifacts import read_bytes
 from examples.jax.parity.input_bundle import read_input_bundle
-from examples.jax.parity.publication import require_published_run
 from examples.jax.parity.provenance import (
     ExecutedSource,
     collect_repository_state,
     validate_sources_current,
 )
+from examples.jax.parity.publication import require_published_run
 from examples.jax.parity.receipts import load_lane_observation
 
 _LANES = frozenset({"native-cpu", "jax-cpu", "jax-gpu"})

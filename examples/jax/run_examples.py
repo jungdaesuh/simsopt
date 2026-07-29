@@ -20,8 +20,6 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
     if import_root not in sys.path:
         sys.path.insert(0, import_root)
 
-from simsopt_jax.config import ExecutionIntent, JaxDevice, JaxExecutionProfile
-from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 from examples.jax._lane_environment import (
     LEGACY_JAX_LANES as _LEGACY_JAX_LANES,
 )
@@ -37,6 +35,8 @@ from examples.jax.manifest_runtime import (
     RuntimeExample,
     load_runtime_contract_pair,
 )
+from simsopt_jax.config import ExecutionIntent, JaxDevice, JaxExecutionProfile
+from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 
 
 class ChildResultValidationError(ValueError):

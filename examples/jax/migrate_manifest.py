@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_ROOT = _REPO_ROOT / "src"
@@ -46,8 +46,10 @@ def main(arguments: list[str] | None = None) -> int:
     output = "\n".join(
         (
             f"manifest_schema_version={observed.schema_version}",
-            "used_legacy_manifest_adapter="
-            f"{str(observed.used_legacy_manifest_adapter).lower()}",
+            (
+                "used_legacy_manifest_adapter="
+                f"{str(observed.used_legacy_manifest_adapter).lower()}"
+            ),
             f"compatibility_duration={_COMPATIBILITY_DURATION}",
             "semantic_diff="
             + json.dumps(semantic_diff, separators=(",", ":"), sort_keys=True),

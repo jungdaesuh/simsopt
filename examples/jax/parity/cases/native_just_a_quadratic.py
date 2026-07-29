@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
-
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -17,6 +15,7 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
     "construct_three_identity_optimizable_objects",
@@ -167,9 +166,10 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
+    from simsopt_jax.examples import solve_weighted_quadratic
+
     import jax
     import jax.numpy as jnp
-    from simsopt_jax.examples import solve_weighted_quadratic
 
     initial = arrays["initial_parameters"]
     targets = arrays["targets"]

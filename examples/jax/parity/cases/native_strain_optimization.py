@@ -151,8 +151,8 @@ def _scientific_success(
 def _native_problem(bundle: InputBundle):
     from simsopt.geo import (
         CoilStrain,
-        FrameRotation,
         FramedCurveCentroid,
+        FrameRotation,
         LPBinormalCurvatureStrainPenalty,
         LPTorsionalStrainPenalty,
     )
@@ -212,8 +212,9 @@ def _native_state(
 
 
 def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservation:
-    import jax
     from scipy.optimize import minimize
+
+    import jax
 
     jax.config.update("jax_enable_x64", True)
     objective, strain = _native_problem(bundle)
@@ -282,10 +283,10 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.examples import solve_strain_rotation
+
+    import jax
 
     device = get_runtime_jax_device()
 

@@ -449,13 +449,13 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.core.wireframe_workflow import (
         WireframeGSCOLiveParams,
         wireframe_gsco_multistep_loop_jax,
     )
+
+    import jax
 
     device = get_runtime_jax_device()
 

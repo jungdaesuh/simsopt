@@ -12,7 +12,6 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.artifacts import (
     canonical_json_bytes,
     read_array,
@@ -21,6 +20,7 @@ from examples.jax.parity.artifacts import (
     write_bytes_exclusive,
 )
 from examples.jax.parity.contracts import ArrayReference
+from simsopt_jax.examples import ExecutionScale
 
 _ARRAY_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
