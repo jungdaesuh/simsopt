@@ -108,9 +108,7 @@ jobs:
           conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" \
             mpiexec -n "$EXPECTED_MPI_WORLD_SIZE" \
             python examples/jax/3_Advanced/single_stage_optimization.py \
-              --device cpu \
-              --intent parity \
-              --scale bounded \
+              --smoke \
               --json \
               --output-dir .artifacts/jax-vmec-hybrid/cpu \
             | tee .artifacts/jax-vmec-hybrid/cpu/stdout.jsonl
@@ -127,9 +125,7 @@ jobs:
           conda run --no-capture-output -n "$AUTHORITY_ENV_NAME" \
             mpiexec -n "$EXPECTED_MPI_WORLD_SIZE" \
             python examples/jax/3_Advanced/single_stage_optimization.py \
-              --device gpu \
-              --intent parity \
-              --scale bounded \
+              --smoke \
               --json \
               --output-dir .artifacts/jax-vmec-hybrid/gpu \
             | tee .artifacts/jax-vmec-hybrid/gpu/stdout.jsonl
