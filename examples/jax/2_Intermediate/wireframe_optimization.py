@@ -14,11 +14,11 @@ from typing import Literal
 import jax
 import numpy as np
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
-from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.core.wireframe_workflow import (
     WireframeGSCOLiveParams,
     wireframe_gsco_multistep_loop_jax,
 )
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax_adapters.solve.wireframe import rcls_wireframe_jax
 
 EXAMPLE_ID = "wireframe-optimization"

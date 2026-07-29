@@ -6,12 +6,11 @@ import argparse
 import dataclasses
 from pathlib import Path
 
-from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
-
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.provenance import collect_lane_provenance
 from examples.jax.parity.receipts import write_lane_observation
+from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 

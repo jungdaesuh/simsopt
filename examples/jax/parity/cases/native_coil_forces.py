@@ -382,9 +382,6 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-    import jax.numpy as jnp
-
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.objectives import (
         StageTwoObjectiveConfig,
@@ -403,6 +400,9 @@ def _jax(
         make_force_stage_two_objective,
     )
     from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+    import jax
+    import jax.numpy as jnp
 
     surface, base_curves, coils = _build_geometry(bundle.configuration)
     fingerprint = _fingerprint(bundle, arrays, surface, base_curves)
@@ -504,7 +504,7 @@ def _jax(
 
     def state_diagnostics(parameters: jax.Array) -> jax.Array:
         force_objective, _, vacuum_energy = diagnostics(parameters)
-        gamma, gammadash, _, _ = stage_two_coil_geometry(extraction, parameters)
+        _gamma, gammadash, _, _ = stage_two_coil_geometry(extraction, parameters)
         base_gammadash = jax.lax.slice_in_dim(
             gammadash,
             0,
@@ -584,7 +584,7 @@ def _jax(
         first_problem,
         state_program,
     )
-    initial_value, initial_gradient = first_problem.value_and_grad(initial_parameters)
+    _initial_value, initial_gradient = first_problem.value_and_grad(initial_parameters)
     directional_derivative = jnp.vdot(initial_gradient, direction)
     epsilons = jax.device_put(
         np.asarray(_TAYLOR_EPSILONS),

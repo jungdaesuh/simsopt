@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
-
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -15,6 +13,7 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
     "construct_fourier_curve_problem",
@@ -183,9 +182,9 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-
     from simsopt_jax.examples import solve_rz_curve_length
+
+    import jax
 
     curve = _build_curve(bundle, arrays["initial_full_parameters"])
     effective_fingerprint = _effective_fingerprint(bundle, curve)

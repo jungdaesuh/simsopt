@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import stat
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
 
 import numpy as np

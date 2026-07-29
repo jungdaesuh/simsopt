@@ -18,8 +18,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from simsopt.geo import SurfaceRZFourier
-from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.solve.serial import (
     TraceableLeastSquaresProblem,
     least_squares_serial_solve_jax,

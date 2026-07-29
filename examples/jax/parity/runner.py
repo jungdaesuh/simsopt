@@ -12,11 +12,10 @@ from pathlib import Path
 from time import perf_counter
 from typing import Mapping
 
-from simsopt_jax.examples import ExecutionScale
-
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.receipts import load_lane_observation
 from examples.jax.parity.runtime import ParityLane, build_parity_lane_environment
+from simsopt_jax.examples import ExecutionScale
 
 
 class RunnerError(RuntimeError):

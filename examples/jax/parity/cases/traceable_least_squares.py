@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -14,6 +13,7 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples import ExecutionScale
 
 WORKFLOW_STAGES = (
     "construct_weighted_least_squares_problem",

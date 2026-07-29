@@ -275,10 +275,10 @@ def _jax(
     arrays: dict[str, np.ndarray],
     build_geometry: GeometryBuilder,
 ) -> LaneObservation:
-    import jax
-
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax_adapters.solve.wireframe import gsco_wireframe_jax
+
+    import jax
 
     wireframe, _, _ = build_geometry(bundle.configuration)
     max_iterations = _configuration_int(bundle, "max_iterations")

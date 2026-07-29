@@ -18,11 +18,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.core.curve_geometry import (
     curve_incremental_arclength_from_spec,
     curve_spec_with_dofs,
 )
+from simsopt_jax.examples import ExecutionScale, example_runtime_metadata
 from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 from simsopt_jax_adapters.geo.curve_objectives import CurveLengthJAX, curve_length_pure
 from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve

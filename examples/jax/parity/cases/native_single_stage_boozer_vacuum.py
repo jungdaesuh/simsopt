@@ -15,7 +15,6 @@ from examples.jax.parity.input_bundle import InputBundle
 from examples.jax.parity.runtime import ParityLane
 from simsopt_jax.examples import ExecutionScale
 
-
 WORKFLOW_STAGES = (
     "construct_ncsx_coils_and_volume_labelled_surface",
     "solve_initial_boozer_surface",

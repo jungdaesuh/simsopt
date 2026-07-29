@@ -38,6 +38,7 @@ from simsopt_jax.objectives import (
     SurfaceRZFourierDofContract,
     make_dynamic_surface_stage_two_objective,
 )
+from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.mhd.vmec_host import (
     VmecHostEvaluation,
@@ -46,7 +47,6 @@ from simsopt_jax_adapters.mhd.vmec_host import (
     validate_vmec_host_evaluation,
     vmec_result_is_receiptable,
 )
-from simsopt_jax.solve.driver import Driver
 
 EXAMPLE_ID = "native-single-stage-optimization"
 NATIVE_ITERATIONS = 10

@@ -283,12 +283,13 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
-    import jax.numpy as jnp
     from simsopt.geo import Area, ToroidalFlux
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
     from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+
+    import jax
+    import jax.numpy as jnp
 
     magnetic_axis, native_field, field, surface, G0 = _problem(bundle.configuration)
     initial_iota = _configuration_float(bundle.configuration, "initial_iota")

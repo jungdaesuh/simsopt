@@ -8,10 +8,10 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
-from pathlib import Path
 import stat
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 
 from examples.jax.parity.artifacts import (
     ArtifactValidationError,

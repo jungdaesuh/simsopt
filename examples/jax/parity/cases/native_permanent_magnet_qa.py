@@ -376,10 +376,11 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
 ) -> LaneObservation:
-    import jax
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
     from simsopt_jax.solve.permanent_magnet import relax_and_split_jax
+
+    import jax
 
     device = get_runtime_jax_device()
 
