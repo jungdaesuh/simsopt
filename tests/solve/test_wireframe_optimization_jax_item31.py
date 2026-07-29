@@ -1427,8 +1427,28 @@ def test_gsco_wireframe_jax_places_default_loop_counts_explicitly() -> None:
         connected_segments=connections,
     )
     x_init_device = jax.device_put(jnp.asarray(x_init))
+    loop_count_device = jax.device_put(jnp.asarray(loop_count_init, dtype=jnp.int32))
     A_device = jax.device_put(jnp.asarray(A))
     b_device = jax.device_put(jnp.asarray(b))
+    expected = greedy_stellarator_coil_optimization_jax(
+        False,
+        False,
+        False,
+        A_device,
+        b_device,
+        0.2,
+        np.inf,
+        0,
+        loops,
+        free_loops,
+        segments,
+        connections,
+        0.15,
+        5,
+        x_init_device,
+        loop_count_device,
+    )
+    expected.x.block_until_ready()
 
     with jax.transfer_guard("disallow"):
         actual = gsco_wireframe_jax(
@@ -1449,7 +1469,7 @@ def test_gsco_wireframe_jax_places_default_loop_counts_explicitly() -> None:
 
     np.testing.assert_array_equal(
         np.asarray(actual.loop_count),
-        loop_count_init,
+        np.asarray(expected.loop_count),
     )
 
 
