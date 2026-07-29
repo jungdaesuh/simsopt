@@ -301,9 +301,13 @@ def integral_BdotN_surface_sharded(Bcoil, target, normal, definition="quadratic 
         B2 = jnp.sum(safe_Bcoil * safe_Bcoil, axis=-1)
         singular = has_normal & (B2 <= 0.0)
         safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
-        local_sum = jnp.sum(jnp.where(has_normal, BdotN * BdotN * norm_n / safe_B2, 0.0))
+        local_sum = jnp.sum(
+            jnp.where(has_normal, BdotN * BdotN * norm_n / safe_B2, 0.0)
+        )
         total_sum = jax.lax.psum(local_sum, config.axis_name)
-        invalid_count = jax.lax.psum(jnp.sum(singular.astype(jnp.int32)), config.axis_name)
+        invalid_count = jax.lax.psum(
+            jnp.sum(singular.astype(jnp.int32)), config.axis_name
+        )
         return jnp.where(
             invalid_count > 0,
             jnp.asarray(jnp.inf, dtype=Bcoil_block.dtype),

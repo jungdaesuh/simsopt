@@ -76,9 +76,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         else BOUNDED_TRACE_TIME
     )
     trace_max_steps = (
-        4_000
-        if particle_count >= NATIVE_PARTICLE_COUNT
-        else BOUNDED_MAX_STEPS
+        4_000 if particle_count >= NATIVE_PARTICLE_COUNT else BOUNDED_MAX_STEPS
     )
 
     speed_total = np.sqrt(2.0 * KINETIC_ENERGY / PROTON_MASS)

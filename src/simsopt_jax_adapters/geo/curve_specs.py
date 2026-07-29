@@ -109,10 +109,14 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed):
     sample_gamma = curve.sample[0]
     sample_gammadash = curve.sample[1]
     sample_gammadashdash = (
-        curve.sample[2] if len(curve.sample._sample) > 2 else np.zeros_like(sample_gamma)
+        curve.sample[2]
+        if len(curve.sample._sample) > 2
+        else np.zeros_like(sample_gamma)
     )
     sample_gammadashdashdash = (
-        curve.sample[3] if len(curve.sample._sample) > 3 else np.zeros_like(sample_gamma)
+        curve.sample[3]
+        if len(curve.sample._sample) > 3
+        else np.zeros_like(sample_gamma)
     )
 
     return make_curve_perturbed_spec(
@@ -135,7 +139,9 @@ def _curve_filament_spec_from_curve(curve: CurveFilament):
         base_curve_map=_optimizable_dof_map_spec(curve, curve.curve),
         rotation=_rotation_spec_from_curve(curve.rotation, curve.curve.quadpoints),
         rotation_map=_optimizable_dof_map_spec(curve, curve.rotation),
-        frame_kind="frenet" if isinstance(curve.framedcurve, FramedCurveFrenet) else "centroid",
+        frame_kind="frenet"
+        if isinstance(curve.framedcurve, FramedCurveFrenet)
+        else "centroid",
         dn=curve.dn,
         db=curve.db,
     )

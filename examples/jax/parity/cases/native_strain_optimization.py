@@ -72,9 +72,8 @@ def _fixed_geometry(configuration: dict[str, object]):
     )
     source_curve = source_curves[int(configuration["coil_index"])]
     curve = CurveXYZFourier(source_curve.quadpoints, source_curve.order)
-    curve.x = (
-        np.asarray(source_curve.x, dtype=np.float64)
-        * float(configuration["scale_factor"])
+    curve.x = np.asarray(source_curve.x, dtype=np.float64) * float(
+        configuration["scale_factor"]
     )
     curve.fix_all()
     return curve
@@ -145,8 +144,7 @@ def _scientific_success(
         np.isfinite(final_state["final:objective"])
         and final_state["final:objective"] < initial_state["initial:objective"]
         and np.all(np.isfinite(final_gradient))
-        and np.linalg.norm(final_gradient, ord=np.inf)
-        <= SCIENTIFIC_GRADIENT_TOLERANCE
+        and np.linalg.norm(final_gradient, ord=np.inf) <= SCIENTIFIC_GRADIENT_TOLERANCE
     )
 
 
@@ -343,16 +341,8 @@ def _jax(
         **state_values("final", result.final),
     }
     success = _scientific_success(
-        {
-            name: value
-            for name, value in values.items()
-            if name.startswith("initial:")
-        },
-        {
-            name: value
-            for name, value in values.items()
-            if name.startswith("final:")
-        },
+        {name: value for name, value in values.items() if name.startswith("initial:")},
+        {name: value for name, value in values.items() if name.startswith("final:")},
     )
     platform = "cpu" if device is None else device.platform
     return LaneObservation(

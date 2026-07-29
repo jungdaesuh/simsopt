@@ -173,6 +173,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         flux.fixed_surface_flux_spec(),
         config,
     )
+
     def scaled_objective(parameters: jax.Array) -> jax.Array:
         return 1.0e-4 * objective(parameters)
 

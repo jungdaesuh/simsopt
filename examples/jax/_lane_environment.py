@@ -90,9 +90,7 @@ def build_execution_environment(
             if not inherited_pythonpath
             else (source_root, inherited_pythonpath, dependency_root)
         )
-        environment["PYTHONPATH"] = os.pathsep.join(
-            dict.fromkeys(pythonpath_entries)
-        )
+        environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(pythonpath_entries))
     return profile, environment
 
 

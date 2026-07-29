@@ -111,9 +111,7 @@ def centercurve_pure(dofs, quadpoints, order):
         for j in range(0, order):
             mode = scalar_like(two_pi, float(j + 1))
             angle = two_pi * mode * points
-            component = component + (
-                _vector_entry(coeffs[i], 2 * j) * jnp.sin(angle)
-            )
+            component = component + (_vector_entry(coeffs[i], 2 * j) * jnp.sin(angle))
             component = component + (
                 _vector_entry(coeffs[i], 2 * j + 1) * jnp.cos(angle)
             )

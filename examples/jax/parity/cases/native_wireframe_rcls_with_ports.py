@@ -104,11 +104,7 @@ def _build_geometry(configuration: Mapping[str, object]):
     )
     mu0 = 4.0 * np.pi * 1.0e-7
     poloidal_current = (
-        -2.0
-        * np.pi
-        * plasma.get_rc(0, 0)
-        * float(configuration["field_on_axis"])
-        / mu0
+        -2.0 * np.pi * plasma.get_rc(0, 0) * float(configuration["field_on_axis"]) / mu0
     )
     wireframe.set_poloidal_current(poloidal_current)
     return plasma, wireframe
@@ -212,9 +208,7 @@ def execute(
     values = {
         **observation.values,
         "construction:constrained_segments": constrained_segments,
-        "final:port_constraints_satisfied": np.asarray(
-            port_constraints_satisfied
-        ),
+        "final:port_constraints_satisfied": np.asarray(port_constraints_satisfied),
     }
     success = bool(observation.success and port_constraints_satisfied)
     return replace(
