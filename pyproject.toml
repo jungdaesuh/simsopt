@@ -155,6 +155,7 @@ extend-exclude = ["thirdparty"]
 [tool.pyright]
 include = [
     "src/simsopt_jax/objectives",
+    "src/simsopt_jax/parity_tolerances.py",
     "src/simsopt_jax/solve/dispatch.py",
     "src/simsopt_jax/solve/minimize_runtime.py",
     "src/simsopt_jax/solve/optax",

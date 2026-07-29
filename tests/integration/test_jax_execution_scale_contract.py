@@ -65,6 +65,7 @@ def test_example_child_argv_derives_smoke_only_from_typed_scale(
 
     prefix = (
         sys.executable,
+        "-S",
         str(tmp_path / "examples" / "jax" / "1_Simple" / "just_a_quadratic.py"),
     )
     assert bounded == (

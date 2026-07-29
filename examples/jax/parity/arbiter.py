@@ -7,11 +7,11 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
-from simsopt_jax.examples import ExecutionScale
 from examples.jax.parity._manifest import ComparisonRoute
 from examples.jax.parity.contracts import ComparisonResult
 from examples.jax.parity.provenance import LaneProvenance
+from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 _REQUIRED_LANES = frozenset({"native-cpu", "jax-cpu", "jax-gpu"})
 _REQUIRED_PAIRS = frozenset(

@@ -48,7 +48,15 @@ def test_vmec_hybrid_keeps_vmec_on_host_and_jax_slice_explicit() -> None:
     assert "minimize_bfgs_host_core" in imported_names
     assert "minimize_lbfgs_host_core" in imported_names
     assert "line_search_value_and_grad_more_thuente_host" in imported_names
-    assert "pure_callback" not in called_attributes
+    called_names = {
+        node.func.id
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    for callback_name in ("pure_callback", "io_callback"):
+        assert callback_name not in imported_names
+        assert callback_name not in called_attributes
+        assert callback_name not in called_names
 
 
 def test_vmec_hybrid_reports_separate_host_and_jax_slice_evidence() -> None:

@@ -190,6 +190,7 @@ def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
     assert pyright["extraPaths"] == ["src"]
     assert pyright["include"] == [
         "src/simsopt_jax/objectives",
+        "src/simsopt_jax/parity_tolerances.py",
         "src/simsopt_jax/solve/dispatch.py",
         "src/simsopt_jax/solve/minimize_runtime.py",
         "src/simsopt_jax/solve/optax",

@@ -716,10 +716,11 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
             sys.executable,
             str(repo_root / "examples" / "jax" / "run_parity.py"),
             "--case",
-            "traceable-least-squares",
+            "native-just-a-quadratic",
             "--lanes",
             "native-cpu,jax-cpu",
-            "--smoke",
+            "--scale",
+            "bounded",
             "--artifact-root",
             str(tmp_path),
         ),
@@ -735,9 +736,9 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert not published[0].name.endswith(".partial")
     summary = json.loads((published[0] / "summary.json").read_text(encoding="utf-8"))
     assert summary["verdict"] == "pass"
-    assert summary["manifest_schema_version"] == 2
-    assert summary["parity_manifest_schema_version"] == 1
-    assert summary["used_legacy_manifest_adapter"] is True
+    assert summary["manifest_schema_version"] == 3
+    assert summary["parity_manifest_schema_version"] == 2
+    assert summary["used_legacy_manifest_adapter"] is False
     assert summary["scale"] == "bounded"
     assert summary["lanes"] == ["native-cpu", "jax-cpu"]
     assert summary["authoritative"] is False
@@ -746,12 +747,12 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert len(summary["tracked_diff_sha256"]) == 64
     assert summary["untracked_files"] == sorted(summary["untracked_files"])
     assert len(summary["cases"]) == 1
-    assert summary["cases"][0]["jax_example_id"] == "traceable-least-squares"
+    assert summary["cases"][0]["jax_example_id"] == "native-just-a-quadratic"
     assert summary["cases"][0]["native_source"] == "1_Simple/just_a_quadratic.py"
     assert summary["cases"][0]["classification"] == "full"
     assert summary["cases"][0]["scale_tier"] == "bounded"
-    assert summary["cases"][0]["oracle_kind"] == "native_python_scipy"
-    assert len(summary["cases"][0]["comparisons"]) == 11
+    assert summary["cases"][0]["oracle_kind"] == "native_source_owned_simsopt"
+    assert len(summary["cases"][0]["comparisons"]) == 10
     executions = {
         execution["lane"]: execution for execution in summary["cases"][0]["executions"]
     }
@@ -759,7 +760,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
         assert executions[lane]["parent_peak_rss_bytes"] > 0
         receipt = json.loads(
             (
-                published[0] / "traceable-least-squares" / lane / "lane_result.json"
+                published[0] / "native-just-a-quadratic" / lane / "lane_result.json"
             ).read_text(encoding="utf-8")
         )
         provenance = receipt["provenance"]
@@ -775,7 +776,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     for mutation in ("input-json", "input-sidecar"):
         copied_run = tmp_path / mutation / published[0].name
         shutil.copytree(published[0], copied_run)
-        input_root = copied_run / "traceable-least-squares" / "inputs"
+        input_root = copied_run / "native-just-a-quadratic" / "inputs"
         bundle_path = input_root / "input_bundle.json"
         bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
         if mutation == "input-json":
@@ -793,7 +794,7 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
             audit_published_run(copied_run, repo_root=repo_root)
 
     jax_receipt_path = (
-        published[0] / "traceable-least-squares" / "jax-cpu" / "lane_result.json"
+        published[0] / "native-just-a-quadratic" / "jax-cpu" / "lane_result.json"
     )
     jax_receipt = json.loads(jax_receipt_path.read_text(encoding="utf-8"))
     changed_value_path = (
@@ -824,10 +825,11 @@ def test_run_parity_cli_resolves_relative_artifact_root(
             sys.executable,
             str(repo_root / "examples" / "jax" / "run_parity.py"),
             "--case",
-            "traceable-least-squares",
+            "native-just-a-quadratic",
             "--lanes",
             "native-cpu,jax-cpu",
-            "--smoke",
+            "--scale",
+            "bounded",
             "--artifact-root",
             "parity-artifacts",
         ),
@@ -840,6 +842,40 @@ def test_run_parity_cli_resolves_relative_artifact_root(
     assert completed.returncode == 0, completed.stderr
     published = tuple((tmp_path / "parity-artifacts").glob("*/summary.json"))
     assert len(published) == 1
+
+
+def test_run_parity_cli_rejects_scale_unsupported_by_relationship(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        (
+            sys.executable,
+            str(repo_root / "examples" / "jax" / "run_parity.py"),
+            "--case",
+            "native-just-a-quadratic",
+            "--lanes",
+            "native-cpu,jax-cpu",
+            "--scale",
+            "native_default",
+            "--artifact-root",
+            str(tmp_path),
+        ),
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "declares scale_tier 'bounded'" in completed.stderr
+    assert "requested scale 'native_default' is unsupported" in completed.stderr
+    published = [
+        path
+        for path in tmp_path.iterdir()
+        if path.is_dir() and not path.name.endswith(".partial")
+    ]
+    assert published == []
 
 
 def test_curve_length_case_runs_native_and_jax_cpu_end_to_end(

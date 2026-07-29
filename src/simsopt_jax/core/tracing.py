@@ -37,7 +37,7 @@ same static ``jax.lax.while_loop`` carry shape required by JAX while
 using one RHS-style event residual evaluation per active iteration and
 avoiding the linear convergence of bisection. The accepted accuracy
 contract is the ``event_time_tracing`` lane in
-``benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES``.
+``simsopt_jax.parity_tolerances.PARITY_LADDER_TOLERANCES``.
 
 Architecture
 ============
