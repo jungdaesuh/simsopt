@@ -16,7 +16,6 @@ for import_root in (str(_SOURCE_ROOT), str(_REPO_ROOT)):
     if import_root not in sys.path:
         sys.path.insert(0, import_root)
 
-from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import arbitrate
 from examples.jax.parity.artifacts import canonical_json_bytes, write_bytes_exclusive
@@ -33,6 +32,7 @@ from examples.jax.parity.publication import (
     publish_run,
 )
 from examples.jax.parity.runner import RunnerError, execute_case_lanes
+from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 
 _LANES = frozenset({"native-cpu", "jax-cpu", "jax-gpu"})
 
@@ -120,6 +120,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for case_id in case_ids:
             case = get_case(case_id)
+            relationships = tuple(
+                relationship
+                for relationship in parity_manifest.relationships
+                if relationship.case_id == case_id
+            )
+            if len(relationships) != 1:
+                raise RunnerError(
+                    f"case {case_id} must own exactly one executable relationship"
+                )
+            relationship = relationships[0]
+            if relationship.scale_tier != scale:
+                raise RunnerError(
+                    f"case {case_id} declares scale_tier "
+                    f"{relationship.scale_tier!r}; requested scale {scale!r} "
+                    "is unsupported"
+                )
             input_root = paths.partial / case_id / "inputs"
             bundle = case.create_input(input_root, scale)
             executions, observations = execute_case_lanes(
@@ -132,16 +148,6 @@ def main(argv: list[str] | None = None) -> int:
                 python_executable=sys.executable,
                 scale=scale,
             )
-            relationships = tuple(
-                relationship
-                for relationship in parity_manifest.relationships
-                if relationship.case_id == case_id
-            )
-            if len(relationships) != 1:
-                raise RunnerError(
-                    f"case {case_id} must own exactly one executable relationship"
-                )
-            relationship = relationships[0]
             arbitration = arbitrate(
                 relationship.comparison_routes,
                 observations,

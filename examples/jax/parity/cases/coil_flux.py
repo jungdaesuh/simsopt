@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-from simsopt_jax.examples import ExecutionScale
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from examples.jax.parity.arbiter import LaneObservation
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -15,6 +13,8 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
+from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 WORKFLOW_STAGES = (
     "construct_bounded_stage_two_problem",
