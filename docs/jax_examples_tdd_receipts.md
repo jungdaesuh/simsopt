@@ -1845,8 +1845,12 @@ authority audit reported:
 }
 ```
 
-The campaign completed in 29 minutes 23 seconds with 2,215,296 KiB maximum
-process-tree RSS, no swap, and no OOM. Per-process GPU peaks were retained in
+The campaign completed in 29 minutes 21 seconds measured from the run
+identifier timestamp to the run's completion marker. The largest
+parent-observed process-tree RSS in the lane receipts was 2,292,080,640 bytes
+(Boozer-vacuum single-stage strict-GPU lane) and the largest child-reported
+host peak RSS was 2,219,270,144 bytes; every lane completed without exhausting
+host or device memory. Per-process GPU peaks were retained in
 the lane receipts; the largest was 737,743,616 bytes for particle tracing.
 Representative high-memory JAX lanes included Boozer QA at 2,219,270,144 bytes
 host RSS and the finite-build Stage-II workflow at 2,155,073,536 bytes host RSS
@@ -1867,7 +1871,11 @@ JAX GPU:  status=ok, VMEC evaluations=4, VMEC failures=0,
 ```
 
 The same configuration fingerprint was used in both hybrid lanes. The result
-does not claim VMEC itself ran on GPU.
+does not claim VMEC itself ran on GPU. These lane figures were read from the
+example's JSON stdout and were not persisted as machine-readable receipts; the
+retained on-disk evidence is the VMEC working output (input, wout, threed1,
+and finite-difference logs) of the local run, executed at ancestor revision
+`e07a30635` whose hybrid example file is byte-identical through `11340c829`.
 
 Final regression closure included the isolated strict-transfer run of all ready
 examples, individual fresh-process parity tests for every mirror, the

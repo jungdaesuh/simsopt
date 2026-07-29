@@ -41,14 +41,18 @@ The production implementation is complete for the bounded delivery at
   `20260729T005942Z-5ade9aee` passed its independent fail-closed audit with 26
   cases, 78 native-CPU/JAX-CPU/strict-JAX-GPU lane receipts, and 1,248
   comparisons;
-- the full authority run completed in 29 minutes 23 seconds with 2,215,296 KiB
-  maximum process-tree RSS and no swap. The largest measured GPU allocation was
+- the full authority run completed in 29 minutes 21 seconds (run identifier
+  timestamp to completion marker) with a largest parent-observed process-tree
+  RSS of 2,292,080,640 bytes and a largest child-reported host peak RSS of
+  2,219,270,144 bytes. The largest measured GPU allocation was
   737,743,616 bytes in particle tracing; no lane exhausted host or device
   memory;
 - the separate VMEC-hybrid example passed locally with VMEC on CPU and the JAX
   slice on both CPU and strict GPU. Both lanes completed four VMEC evaluations
   without a VMEC failure; their final objectives differed by approximately
-  `4.4e-11`. This is local hybrid evidence, not a claim that VMEC ran on GPU;
+  `4.4e-11`. This is local hybrid evidence recorded from the example's JSON
+  stdout without a persisted machine-readable receipt, and it is not a claim
+  that VMEC ran on GPU;
 - all ready examples passed the isolated strict-transfer execution suite.
   Pyright 1.1.411 reported zero errors and warnings, Ruff lint and format
   checks passed, and compile and diff checks passed.
