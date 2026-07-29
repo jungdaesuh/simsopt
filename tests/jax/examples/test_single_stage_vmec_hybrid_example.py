@@ -90,3 +90,8 @@ def test_vmec_hybrid_authority_is_manual_and_build_identity_bound() -> None:
     assert "execution_scope" in workflow
     assert "jax_slice_gpu" in workflow
     assert "actions/upload-artifact@v4" in workflow
+    assert "--smoke" in workflow
+    assert "--device cpu" not in workflow
+    assert "--device gpu" not in workflow
+    assert "--intent parity" not in workflow
+    assert "--scale bounded" not in workflow
