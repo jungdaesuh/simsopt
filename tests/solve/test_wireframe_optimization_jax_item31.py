@@ -1415,6 +1415,44 @@ def test_gsco_wireframe_jax_accepts_device_initial_state_under_transfer_guard() 
     )
 
 
+def test_gsco_wireframe_jax_places_default_loop_counts_explicitly() -> None:
+    A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
+        _gsco_problem()
+    )
+    fixture = _GSCOFixture(
+        currents=x_init.ravel().copy(),
+        loops=loops,
+        free_loops=free_loops,
+        segments=segments,
+        connected_segments=connections,
+    )
+    x_init_device = jax.device_put(jnp.asarray(x_init))
+    A_device = jax.device_put(jnp.asarray(A))
+    b_device = jax.device_put(jnp.asarray(b))
+
+    with jax.transfer_guard("disallow"):
+        actual = gsco_wireframe_jax(
+            fixture,
+            A_device,
+            b_device,
+            0.15,
+            False,
+            False,
+            0.2,
+            np.inf,
+            5,
+            1,
+            x_init=x_init_device,
+            verbose=False,
+        )
+        actual.x.block_until_ready()
+
+    np.testing.assert_array_equal(
+        np.asarray(actual.loop_count),
+        loop_count_init,
+    )
+
+
 def test_gsco_wireframe_jax_record_every_keeps_cadence_and_final_history_rows() -> None:
     A, b, loops, free_loops, segments, connections, x_init, loop_count_init = (
         _gsco_problem()
