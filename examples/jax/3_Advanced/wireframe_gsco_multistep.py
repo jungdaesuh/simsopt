@@ -24,7 +24,7 @@ from simsopt_jax.core.wireframe_workflow import (
     WireframeGSCOLiveParams,
     wireframe_gsco_multistep_loop_jax,
 )
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.solve.wireframe import bnorm_obj_matrices_jax
 
@@ -34,9 +34,9 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
 def _build_problem(
-    max_steps: int,
+    scale: ExecutionScale,
 ) -> tuple[ToroidalWireframe, SurfaceRZFourier, BiotSavartJAX, float]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     plasma_resolution = 32 if native_scale else 4
     wireframe_nphi = 96 if native_scale else 24
     wireframe_ntheta = 100 if native_scale else 8
@@ -84,8 +84,10 @@ def _build_problem(
     return wireframe, plasma, BiotSavartJAX(tf_coils), poloidal_current
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    wireframe, plasma, external_field, poloidal_current = _build_problem(max_steps)
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    wireframe, plasma, external_field, poloidal_current = _build_problem(scale)
     response, target = bnorm_obj_matrices_jax(
         wireframe,
         plasma,
@@ -144,10 +146,10 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         neighbors_device,
         jax.device_put(base_constrained),
         max_iter_per_step=max_steps,
-        max_outer_steps=12 if max_steps >= NATIVE_ITERATIONS else 4,
+        max_outer_steps=12 if scale == "native_default" else 4,
         initial_current_fraction=initial_fraction,
         current_scale=current_scale,
-        min_coil_size=20 if max_steps >= NATIVE_ITERATIONS else 2,
+        min_coil_size=20 if scale == "native_default" else 2,
         final_max_current=1.1 * initial_default_current,
     )
     stage_count = int(jax.device_get(result.stage_count))

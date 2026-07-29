@@ -17,7 +17,12 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    scalar_example_driver,
+)
 from simsopt_jax.objectives import StageTwoObjectiveConfig
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
@@ -68,7 +73,7 @@ def _force_config() -> ForceStageTwoConfig:
 
 
 def _build_problem(
-    max_steps: int,
+    scale: ExecutionScale,
 ) -> tuple[
     BiotSavartJAX,
     SquaredFluxJAX,
@@ -77,7 +82,7 @@ def _build_problem(
     jax.Array,
     jax.Array,
 ]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     surface = SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
         range="half period",
@@ -159,7 +164,9 @@ def _run_stage(
     )
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
     (
         field,
         flux,
@@ -167,7 +174,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         surface_normal,
         target_quadpoints,
         regularizations,
-    ) = _build_problem(max_steps)
+    ) = _build_problem(scale)
     flux_objective = flux.traceable_objective()
     force_config = _force_config()
     first_objective = make_force_stage_two_objective(

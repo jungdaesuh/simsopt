@@ -27,7 +27,12 @@ from simsopt.geo import create_equally_spaced_curves
 from simsopt.mhd import QuasisymmetryRatioResidual, Vmec
 from simsopt.objectives import LeastSquaresProblem
 from simsopt.util import MpiPartition
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    scalar_example_driver,
+)
 from simsopt_jax.geo.optimizer_host_lbfgs import (
     line_search_value_and_grad_more_thuente_host,
     minimize_bfgs_host_core,
@@ -44,6 +49,7 @@ from simsopt_jax_adapters.mhd.vmec_host import (
     VmecHostEvaluation,
     boundary_sha256,
     hybrid_result_is_scientifically_successful,
+    validate_hybrid_jax_evaluation,
     validate_vmec_host_evaluation,
     vmec_result_is_receiptable,
 )
@@ -149,16 +155,24 @@ def _host_value_and_gradient(
     )
     jax.block_until_ready((value_device, gradients_device))
     coil_gradient_device, surface_gradient_device = gradients_device
-    return (
-        float(np.asarray(jax.device_get(value_device), dtype=np.float64)),
-        np.asarray(jax.device_get(coil_gradient_device), dtype=np.float64),
-        np.asarray(jax.device_get(surface_gradient_device), dtype=np.float64),
+    return validate_hybrid_jax_evaluation(
+        value=float(np.asarray(jax.device_get(value_device), dtype=np.float64)),
+        coil_gradient=np.asarray(
+            jax.device_get(coil_gradient_device), dtype=np.float64
+        ),
+        surface_gradient=np.asarray(
+            jax.device_get(surface_gradient_device), dtype=np.float64
+        ),
+        expected_coil_gradient_size=coil_dofs.size,
+        expected_surface_gradient_size=surface_dofs.size,
     )
 
 
-def solve(output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
     mpi = MpiPartition()
-    native_scale = max_steps >= NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     config = _configuration(native_scale)
     vmec_directory = output_directory / "vmec"
     if mpi.proc0_world:

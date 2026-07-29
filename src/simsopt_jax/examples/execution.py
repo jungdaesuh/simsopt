@@ -48,7 +48,7 @@ class ExampleResult:
         }
 
 
-ExampleSolve = Callable[[Path, int], ExampleResult]
+ExampleSolve = Callable[[Path, int, ExecutionScale], ExampleResult]
 
 
 def scalar_example_driver() -> Driver:
@@ -81,12 +81,12 @@ def run_example(
     )
     if options.output_dir is not None:
         options.output_dir.mkdir(parents=True, exist_ok=True)
-        result = solve(options.output_dir, max_steps)
+        result = solve(options.output_dir, max_steps, scale)
     elif options.smoke:
         with TemporaryDirectory(prefix=temporary_prefix) as temporary:
-            result = solve(Path(temporary), max_steps)
+            result = solve(Path(temporary), max_steps, scale)
     else:
-        result = solve(Path.cwd(), max_steps)
+        result = solve(Path.cwd(), max_steps, scale)
     if options.json:
         print(json.dumps(result.json_object(scale), sort_keys=True))
     else:

@@ -27,7 +27,7 @@ from simsopt.util import (
     polarization_axes,
     read_focus_coils,
 )
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.solve.permanent_magnet import GPMO_ArbVec_backtracking_jax
 
@@ -71,8 +71,10 @@ def _face_triplet_polarizations(
     )
 
 
-def _build_grid(max_steps: int) -> tuple[PermanentMagnetGridJAX, dict[str, str]]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+def _build_grid(
+    scale: ExecutionScale,
+) -> tuple[PermanentMagnetGridJAX, dict[str, str]]:
+    native_scale = scale == "native_default"
     resolution = 16 if native_scale else 2
     downsample = 10 if native_scale else 100
     plasma_path = TEST_DATA / "c09r00_B_axis_half_tesla_PM4Stell.plasma"
@@ -118,16 +120,18 @@ def _build_grid(max_steps: int) -> tuple[PermanentMagnetGridJAX, dict[str, str]]
     }
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    grid, input_sha256 = _build_grid(max_steps)
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    grid, input_sha256 = _build_grid(scale)
     initial_error_device = jnp.linalg.norm(grid.b_obj)
     result = GPMO_ArbVec_backtracking_jax(
         grid,
         K=max_steps,
         Nadjacent=10,
-        backtracking=200 if max_steps >= NATIVE_ITERATIONS else 20,
+        backtracking=200 if scale == "native_default" else 20,
         thresh_angle=np.pi,
-        max_nMagnets=1000 if max_steps >= NATIVE_ITERATIONS else 20,
+        max_nMagnets=1000 if scale == "native_default" else 20,
         record_every=max_steps,
     )
     final_error_device = jnp.linalg.norm(result.residual)

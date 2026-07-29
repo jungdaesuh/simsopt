@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.field import ToroidalField
 from simsopt.geo import PermanentMagnetGrid, SurfaceRZFourier
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.solve.permanent_magnet import GPMO_baseline_jax
 
@@ -76,7 +76,9 @@ def _build_grid() -> PermanentMagnetGridJAX:
     return PermanentMagnetGridJAX.from_cpu(cpu_grid)
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, _scale: ExecutionScale
+) -> ExampleResult:
     grid = _build_grid()
     result = GPMO_baseline_jax(grid, K=max_steps, retain_history=False)
     device_publication = _device_publication(

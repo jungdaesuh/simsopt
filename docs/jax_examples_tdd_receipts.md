@@ -1891,3 +1891,47 @@ structurally valid behaviors; changes whose original failing revisions were
 not preserved remain post-hoc. Native-default-scale scheduled authority also
 remains `not_run`. Neither limitation weakens or broadens the bounded authority
 result above.
+
+## Post-closure integrity repairs (2026-07-28)
+
+This follow-up preserves the bounded authority result rather than rerunning or
+relabeling it at a newer revision. Four new RED contracts were observed before
+implementation:
+
+- the shared example runner raised `TypeError` because it did not pass an
+  explicit `ExecutionScale`, and the AST ratchet found 29 comparisons that
+  inferred scientific scale from `max_steps`;
+- the stochastic Stage-II production configuration owner did not exist;
+- the native-to-JAX index generator and tracked index did not exist; and
+- the VMEC-hybrid mixed-derivative validator did not exist.
+
+GREEN implementation passes scale independently of the step budget to all 25
+shared-runner mirrors, gives stochastic construction and default step budgets
+one immutable owner, generates the 52-row index from manifest v3/parity v2, and
+fails closed on non-finite or wrong-shape hybrid JAX gradients. The compact
+authority record is explicitly `local_only`; its optional verification path
+hashes the retained summary and recomputes top-level authority, identity,
+authoritative/pass cases, nonempty passing comparisons, exact successful lane
+executions, case IDs, and counts. The focused current-tree gate passed:
+
+```text
+40 passed in 5.60s
+```
+
+The complete historical receipt replay was also executed from its recorded
+revision worktrees and exited zero:
+
+```json
+{"receipt_count":32,"replayed":true}
+```
+
+No missing historical RED revision was invented. The existing permanent
+limitation for changes whose original failing revisions were not retained
+remains unchanged.
+
+The retained local authority trees were copied out of the worktree to
+`/home/jungdaesuh/Backups/simsopt-jax-authority/20260729T005942Z-5ade9aee/`.
+Both copied trees passed `diff -qr`; the copied `summary.json` retained SHA-256
+`fa235cacb0f3e4fa7abc6e8ff4b2f888b2e20c7392bd1531eeb983abad67d66a`.
+This protects against worktree deletion, not host-disk loss; it is not an
+offsite backup.

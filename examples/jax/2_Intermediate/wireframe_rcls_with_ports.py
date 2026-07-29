@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from simsopt.geo import CircularPort, PortSet, SurfaceRZFourier, ToroidalWireframe
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.solve.wireframe import (
     bnorm_obj_matrices_jax,
     rcls_wireframe_jax,
@@ -77,7 +77,9 @@ def _active_segments_clear_ports(
     return not bool(np.any(collisions))
 
 
-def solve(_output_directory: Path, resolution: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, resolution: int, _scale: ExecutionScale
+) -> ExampleResult:
     plasma = SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
         nphi=resolution,

@@ -15,7 +15,7 @@ import numpy as np
 import simsopt
 from simsopt.field import LevelsetStoppingCriterion, SurfaceClassifier
 from simsopt.geo import SurfaceRZFourier
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.field.interpolated import InterpolatedFieldJAX
 from simsopt_jax_adapters.field.tracing import compute_fieldlines
@@ -25,8 +25,8 @@ NATIVE_TMAX = 20_000
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _problem(max_steps: int):
-    native_scale = max_steps >= NATIVE_TMAX
+def _problem(scale: ExecutionScale):
+    native_scale = scale == "native_default"
     surface = SurfaceRZFourier.from_vmec_input(
         str(REPO_ROOT / "tests" / "test_files" / "input.LandremanPaul2021_QA"),
         nphi=200 if native_scale else 24,
@@ -70,8 +70,10 @@ def _problem(max_steps: int):
     return surface, source_field, interpolated, classifier
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    surface, source_field, interpolated, classifier = _problem(max_steps)
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    surface, source_field, interpolated, classifier = _problem(scale)
     surface_points = np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3))
     source_field.set_points(surface_points)
     interpolated.set_points(surface_points)
@@ -82,7 +84,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         / np.linalg.norm(source_values)
     )
 
-    nfieldlines = 3 if max_steps < NATIVE_TMAX else 10
+    nfieldlines = 10 if scale == "native_default" else 3
     radial_initial = np.linspace(1.2125346, 1.295, nfieldlines)
     vertical_initial = np.zeros(nfieldlines, dtype=np.float64)
     phis = tuple(index * 0.5 * np.pi / surface.nfp for index in range(4))

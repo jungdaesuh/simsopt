@@ -11,6 +11,7 @@ from simsopt_jax_adapters.mhd.vmec_host import (
     VmecHostEvaluation,
     boundary_sha256,
     hybrid_result_is_scientifically_successful,
+    validate_hybrid_jax_evaluation,
     validate_vmec_host_evaluation,
     vmec_result_is_receiptable,
 )
@@ -105,3 +106,53 @@ def test_failed_vmec_trial_without_output_is_not_receiptable(tmp_path: Path) -> 
         expected_boundary_sha256="a" * 64,
         final_boundary_sha256="a" * 64,
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "coil_gradient", "surface_gradient", "message"),
+    (
+        (
+            1.0,
+            np.asarray((0.1, 0.2)),
+            np.asarray((np.nan,)),
+            "surface gradient is non-finite",
+        ),
+        (
+            1.0,
+            np.asarray((np.inf, 0.2)),
+            np.asarray((0.3,)),
+            "coil gradient is non-finite",
+        ),
+        (
+            np.nan,
+            np.asarray((0.1, 0.2)),
+            np.asarray((0.3,)),
+            "objective is non-finite",
+        ),
+    ),
+)
+def test_hybrid_jax_evaluation_rejects_non_finite_mixed_derivatives(
+    value: float,
+    coil_gradient: np.ndarray,
+    surface_gradient: np.ndarray,
+    message: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        validate_hybrid_jax_evaluation(
+            value=value,
+            coil_gradient=coil_gradient,
+            surface_gradient=surface_gradient,
+            expected_coil_gradient_size=2,
+            expected_surface_gradient_size=1,
+        )
+
+
+def test_hybrid_jax_evaluation_rejects_same_size_matrix_gradient() -> None:
+    with pytest.raises(RuntimeError, match="surface gradient shape"):
+        validate_hybrid_jax_evaluation(
+            value=1.0,
+            coil_gradient=np.asarray((0.1, 0.2)),
+            surface_gradient=np.asarray(((0.3,),)),
+            expected_coil_gradient_size=2,
+            expected_surface_gradient_size=1,
+        )

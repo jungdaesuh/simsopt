@@ -41,6 +41,10 @@ from .stochastic_samples import (
     StochasticPerturbationBundle,
     materialize_stochastic_coil_perturbations,
 )
+from .stochastic_stage_two import (
+    StochasticStageTwoConfiguration,
+    stochastic_stage_two_configuration,
+)
 from .weighted_quadratic import (
     WeightedQuadraticDeviceResult,
     solve_weighted_quadratic,
@@ -66,6 +70,7 @@ __all__ = (
     "QfmStageDeviceResult",
     "RZCurveLengthDeviceResult",
     "StochasticPerturbationBundle",
+    "StochasticStageTwoConfiguration",
     "StandardStageTwoDeviceResult",
     "StandardStageTwoState",
     "StrainOptimizationDeviceResult",
@@ -87,6 +92,7 @@ __all__ = (
     "solve_strain_rotation",
     "solve_weighted_quadratic",
     "solve_wireframe_rcls",
+    "stochastic_stage_two_configuration",
     "weighted_quadratic_gradient",
     "weighted_quadratic_residuals",
 )

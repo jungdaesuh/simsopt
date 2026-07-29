@@ -104,6 +104,32 @@ def validate_vmec_host_evaluation(
         raise RuntimeError("VMEC evaluation metadata is invalid.")
 
 
+def validate_hybrid_jax_evaluation(
+    *,
+    value: float,
+    coil_gradient: np.ndarray,
+    surface_gradient: np.ndarray,
+    expected_coil_gradient_size: int,
+    expected_surface_gradient_size: int,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Normalize and validate one on-device objective and mixed derivative."""
+    normalized_coil_gradient = np.ascontiguousarray(coil_gradient, dtype=np.float64)
+    normalized_surface_gradient = np.ascontiguousarray(
+        surface_gradient, dtype=np.float64
+    )
+    if not np.isfinite(value):
+        raise RuntimeError("hybrid JAX objective is non-finite.")
+    if normalized_coil_gradient.shape != (expected_coil_gradient_size,):
+        raise RuntimeError("hybrid JAX coil gradient shape does not match.")
+    if normalized_surface_gradient.shape != (expected_surface_gradient_size,):
+        raise RuntimeError("hybrid JAX surface gradient shape does not match.")
+    if not np.all(np.isfinite(normalized_coil_gradient)):
+        raise RuntimeError("hybrid JAX coil gradient is non-finite.")
+    if not np.all(np.isfinite(normalized_surface_gradient)):
+        raise RuntimeError("hybrid JAX surface gradient is non-finite.")
+    return value, normalized_coil_gradient, normalized_surface_gradient
+
+
 def hybrid_result_is_scientifically_successful(
     *,
     initial_objective: float,
@@ -142,6 +168,7 @@ __all__ = (
     "VmecHostEvaluation",
     "boundary_sha256",
     "hybrid_result_is_scientifically_successful",
+    "validate_hybrid_jax_evaluation",
     "validate_vmec_host_evaluation",
     "vmec_result_is_receiptable",
 )

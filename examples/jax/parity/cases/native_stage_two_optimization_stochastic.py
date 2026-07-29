@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.runtime import ParityLane
-from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples import ExecutionScale, stochastic_stage_two_configuration
 
 TEST_DATA = Path(__file__).resolve().parents[4] / "tests" / "test_files"
 SURFACE_INPUT = TEST_DATA / "input.LandremanPaul2021_QA"
@@ -32,35 +33,11 @@ WORKFLOW_STAGES = (
 
 
 def _scale_configuration(scale: ExecutionScale) -> dict[str, object]:
-    native_scale = scale == "native_default"
-    return {
-        "surface_nphi": 64 if native_scale else 4,
-        "surface_ntheta": 16 if native_scale else 4,
-        "curve_order": 24 if native_scale else 2,
-        "curve_quadrature": 360 if native_scale else 16,
-        "num_base_curves": 4,
-        "major_radius": 1.0,
-        "minor_radius": 0.5,
-        "initial_current": 1.0e5,
-        "length_weight": 1.0e-6,
-        "curve_curve_threshold": 0.1,
-        "curve_curve_weight": 10.0,
-        "curvature_threshold": 5.0,
-        "curvature_weight": 1.0e-6,
-        "mean_squared_curvature_threshold": 5.0,
-        "mean_squared_curvature_weight": 1.0e-6,
-        "arclength_variation_weight": 1.0e-2,
-        "perturbation_sigma": 1.0e-3,
-        "perturbation_length_scale": 0.5,
-        "training_sample_count": 16 if native_scale else 2,
-        "out_of_sample_count": 256 if native_scale else 4,
-        "training_seed": 0,
-        "out_of_sample_seed": 1,
-        "max_steps": 400 if native_scale else 20,
-        "rtol": 1.0e-15,
-        "atol": 1.0e-8,
-        "surface_input_sha256": hashlib.sha256(SURFACE_INPUT.read_bytes()).hexdigest(),
-    }
+    configuration: dict[str, object] = asdict(stochastic_stage_two_configuration(scale))
+    configuration["surface_input_sha256"] = hashlib.sha256(
+        SURFACE_INPUT.read_bytes()
+    ).hexdigest()
+    return configuration
 
 
 def _configuration_float(bundle: InputBundle, name: str) -> float:

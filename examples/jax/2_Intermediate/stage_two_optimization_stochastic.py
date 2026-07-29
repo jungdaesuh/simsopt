@@ -26,9 +26,12 @@ from simsopt.geo import (
 )
 from simsopt_jax.examples import (
     ExampleResult,
+    ExecutionScale,
+    StochasticStageTwoConfiguration,
     materialize_stochastic_coil_perturbations,
     run_example,
     scalar_example_driver,
+    stochastic_stage_two_configuration,
 )
 from simsopt_jax.objectives import (
     StageTwoObjectiveConfig,
@@ -45,7 +48,6 @@ from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
 EXAMPLE_ID = "native-stage-two-optimization-stochastic"
-NATIVE_ITERATIONS = 400
 _STOCHASTIC_LBFGS_HISTORY_SIZE = 10
 TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
@@ -85,26 +87,32 @@ def _symmetry_layout(
     return source_indices, np.stack(rotations)
 
 
-def _objective_config() -> StageTwoObjectiveConfig:
+def _objective_config(
+    configuration: StochasticStageTwoConfiguration,
+) -> StageTwoObjectiveConfig:
     return StageTwoObjectiveConfig(
-        num_base_curves=4,
-        length_weight=1.0e-6,
-        curve_curve_minimum_distance=0.1,
-        curve_curve_weight=10.0,
-        curvature_threshold=5.0,
-        curvature_weight=1.0e-6,
-        mean_squared_curvature_threshold=5.0,
-        mean_squared_curvature_weight=1.0e-6,
-        arclength_variation_weight=1.0e-2,
+        num_base_curves=configuration.num_base_curves,
+        length_weight=configuration.length_weight,
+        curve_curve_minimum_distance=configuration.curve_curve_threshold,
+        curve_curve_weight=configuration.curve_curve_weight,
+        curvature_threshold=configuration.curvature_threshold,
+        curvature_weight=configuration.curvature_weight,
+        mean_squared_curvature_threshold=(
+            configuration.mean_squared_curvature_threshold
+        ),
+        mean_squared_curvature_weight=configuration.mean_squared_curvature_weight,
+        arclength_variation_weight=configuration.arclength_variation_weight,
     )
 
 
-def _flux_only_config() -> StageTwoObjectiveConfig:
-    return StageTwoObjectiveConfig(num_base_curves=4)
+def _flux_only_config(
+    configuration: StochasticStageTwoConfiguration,
+) -> StageTwoObjectiveConfig:
+    return StageTwoObjectiveConfig(num_base_curves=configuration.num_base_curves)
 
 
 def _build_problem(
-    max_steps: int,
+    configuration: StochasticStageTwoConfiguration,
 ) -> tuple[
     BiotSavartJAX,
     SquaredFluxJAX,
@@ -114,23 +122,22 @@ def _build_problem(
     StochasticCoilPerturbations,
     _SampleIdentity,
 ]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
     surface = SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
         range="full torus",
-        nphi=64 if native_scale else 4,
-        ntheta=16 if native_scale else 4,
+        nphi=configuration.surface_nphi,
+        ntheta=configuration.surface_ntheta,
     )
     base_curves = create_equally_spaced_curves(
-        4,
+        configuration.num_base_curves,
         surface.nfp,
         stellsym=True,
-        R0=1.0,
-        R1=0.5,
-        order=24 if native_scale else 2,
-        numquadpoints=360 if native_scale else 16,
+        R0=configuration.major_radius,
+        R1=configuration.minor_radius,
+        order=configuration.curve_order,
+        numquadpoints=configuration.curve_quadrature,
     )
-    base_currents = [Current(1.0e5) for _ in base_curves]
+    base_currents = [Current(configuration.initial_current) for _ in base_curves]
     base_currents[0].fix_all()
     coils = coils_via_symmetries(
         base_curves,
@@ -141,8 +148,8 @@ def _build_problem(
     source_indices, rotations = _symmetry_layout(coils, base_curves)
     sampler = GaussianSampler(
         base_curves[0].quadpoints,
-        sigma=1.0e-3,
-        length_scale=0.5,
+        sigma=configuration.perturbation_sigma,
+        length_scale=configuration.perturbation_length_scale,
         n_derivs=1,
     )
     training_bundle = materialize_stochastic_coil_perturbations(
@@ -150,16 +157,16 @@ def _build_problem(
         source_indices=source_indices,
         rotations=rotations,
         base_curve_count=len(base_curves),
-        sample_count=16 if native_scale else 2,
-        seed=0,
+        sample_count=configuration.training_sample_count,
+        seed=configuration.training_seed,
     )
     out_of_sample_bundle = materialize_stochastic_coil_perturbations(
         sampler,
         source_indices=source_indices,
         rotations=rotations,
         base_curve_count=len(base_curves),
-        sample_count=256 if native_scale else 4,
-        seed=1,
+        sample_count=configuration.out_of_sample_count,
+        seed=configuration.out_of_sample_seed,
     )
     field = BiotSavartJAX(coils)
     flux = SquaredFluxJAX(surface, field)
@@ -203,7 +210,10 @@ def _build_problem(
     )
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    configuration = stochastic_stage_two_configuration(scale)
     (
         field,
         flux,
@@ -212,7 +222,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         training,
         out_of_sample,
         sample_identity,
-    ) = _build_problem(max_steps)
+    ) = _build_problem(configuration)
     flux_spec = flux.fixed_surface_flux_spec()
     objective = make_stochastic_stage_two_objective(
         field,
@@ -220,7 +230,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         training,
         surface_gamma,
         surface_normal,
-        _objective_config(),
+        _objective_config(configuration),
     )
     training_flux = make_stochastic_stage_two_objective(
         field,
@@ -228,7 +238,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         training,
         surface_gamma,
         surface_normal,
-        _flux_only_config(),
+        _flux_only_config(configuration),
     )
     out_of_sample_flux = make_stochastic_stage_two_objective(
         field,
@@ -236,7 +246,7 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
         out_of_sample,
         surface_gamma,
         surface_normal,
-        _flux_only_config(),
+        _flux_only_config(configuration),
     )
     nominal_flux = flux.traceable_objective()
     initial_device = jax.device_put(np.asarray(field.x, dtype=np.float64))
@@ -251,8 +261,8 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             driver=driver,
             max_steps=max_steps,
             maxcor=_STOCHASTIC_LBFGS_HISTORY_SIZE,
-            rtol=1.0e-15,
-            atol=1.0e-8,
+            rtol=configuration.rtol,
+            atol=configuration.atol,
             require_success=False,
         )
     else:
@@ -261,8 +271,8 @@ def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
             driver=driver,
             max_steps=max_steps,
             line_search_max_steps=40,
-            rtol=1.0e-15,
-            atol=1.0e-8,
+            rtol=configuration.rtol,
+            atol=configuration.atol,
             require_success=False,
         )
     solution_device = problem.x
@@ -383,8 +393,10 @@ def main(arguments: list[str] | None = None) -> int:
         arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-stage-two-stochastic-",
-        bounded_steps=20,
-        native_default_steps=NATIVE_ITERATIONS,
+        bounded_steps=stochastic_stage_two_configuration("bounded").max_steps,
+        native_default_steps=stochastic_stage_two_configuration(
+            "native_default"
+        ).max_steps,
         solve=solve,
     )
 

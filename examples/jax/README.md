@@ -12,6 +12,14 @@ typed as `tutorial`, they own no native source, and they contribute zero
 one-to-one mirror coverage. The manifest validator enforces that: a tutorial
 record cannot own a catalog source.
 
+The generated
+[`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists all 52 native sources,
+their exact JAX mirrors or blockers, device scope, execution scale, and latest
+authority status. Regenerate it from the validated manifests and compact
+authority record with
+`python -m examples.jax.native_to_jax_index --write`; use `--check` in
+validation.
+
 Install the CPU runtime from the repository root with:
 
 ```console
@@ -39,6 +47,10 @@ defaults to `bounded`, but state it explicitly in CI and authority commands so
 the emitted child argv, canonical input, receipt, and artifact scale are all
 attributable. Only `bounded` maps to the child `--smoke` flag; `native_default`
 emits no scale flag and runs the example's native-default step budget.
+Callbacks passed to the public `run_example` helper receive
+`(output_directory, max_steps, execution_scale)`. The scale is independent of
+the step budget; custom callbacks must not recover it from iteration-count
+thresholds.
 
 Omitting `--intent` selects `fast`. Fast is the ordinary default and is not
 certifying. The fully unset repository default remains `native_cpu`; JAX is
@@ -217,9 +229,8 @@ for source in manifest["source_catalog"]:
 PY
 ```
 
-A generated native-to-JAX index document carrying classification, runtime
-dependencies, device scope, scale, and latest evidence status is a separate
-planned deliverable. It does not exist yet; do not cite one.
+The generated native-to-JAX index linked above replaces this ad hoc listing
+when a stable, citable source-to-mirror inventory is needed.
 
 ## Classification vocabulary
 

@@ -22,6 +22,6 @@ def test_boozerqa_mirror_uses_memory_bounded_host_outer_solve() -> None:
     assert '"major_radius_weight": 1.0' in source
     assert '"length_weight": 1.0' in source
     assert '"newton_maxiter": 20' in source
-    assert "qs_resolution = 20 if max_steps >= NATIVE_OUTER_ITERATIONS else 4" in source
+    assert 'qs_resolution = 20 if scale == "native_default" else 4' in source
     assert "bounded_steps=2" in source
     assert "scipy" not in source.lower()

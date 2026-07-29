@@ -12,7 +12,12 @@ from pathlib import Path
 import jax
 import numpy as np
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
-from simsopt_jax.examples import ExampleResult, run_example, solve_wireframe_rcls
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    solve_wireframe_rcls,
+)
 from simsopt_jax_adapters.solve.wireframe import (
     bnorm_obj_matrices_jax,
 )
@@ -39,7 +44,9 @@ def _minimum_norm_feasible_currents(
     return currents, constraint_array, target_array, free_segments
 
 
-def solve(_output_directory: Path, resolution: int) -> ExampleResult:
+def solve(
+    _output_directory: Path, resolution: int, _scale: ExecutionScale
+) -> ExampleResult:
     plasma_surface = SurfaceRZFourier.from_vmec_input(
         str(TEST_DATA / "input.LandremanPaul2021_QA"),
         nphi=4 * resolution,

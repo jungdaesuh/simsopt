@@ -25,7 +25,12 @@ from simsopt.util.permanent_magnet_helper_functions import (
     initialize_coils_for_pm_optimization,
 )
 from simsopt_jax.core import grouped_biot_savart_B_from_spec
-from simsopt_jax.examples import ExampleResult, run_example, scalar_example_driver
+from simsopt_jax.examples import (
+    ExampleResult,
+    ExecutionScale,
+    run_example,
+    scalar_example_driver,
+)
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX
 from simsopt_jax.objectives import StageTwoObjectiveConfig, make_stage_two_objective
 from simsopt_jax.solve.permanent_magnet import relax_and_split_jax
@@ -66,8 +71,9 @@ def _coil_objective_config(surface: SurfaceRZFourier) -> StageTwoObjectiveConfig
 def _build_grid(
     output_directory: Path,
     max_steps: int,
+    scale: ExecutionScale,
 ) -> tuple[PermanentMagnetGridJAX, dict[str, str]]:
-    native_scale = max_steps >= NATIVE_COIL_ITERATIONS
+    native_scale = scale == "native_default"
     resolution = 16 if native_scale else 4
     radial_extent = 0.02 if native_scale else 0.05
     surface_path = TEST_DATA / "input.LandremanPaul2021_QA_lowres"
@@ -151,9 +157,11 @@ def _build_grid(
     return grid, {surface_path.name: _sha256(surface_path)}
 
 
-def solve(output_directory: Path, max_steps: int) -> ExampleResult:
-    grid, input_sha256 = _build_grid(output_directory, max_steps)
-    native_scale = max_steps >= NATIVE_COIL_ITERATIONS
+def solve(
+    output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    grid, input_sha256 = _build_grid(output_directory, max_steps, scale)
+    native_scale = scale == "native_default"
     inner_steps = 10 if native_scale else 3
     outer_steps = 10 if native_scale else 2
     nu = 1.0e10

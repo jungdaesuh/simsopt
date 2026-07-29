@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
-from simsopt_jax.examples import ExampleResult, run_example
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
 from simsopt_jax_adapters.solve.wireframe import (
     bnorm_obj_matrices_jax,
     gsco_wireframe_jax,
@@ -27,9 +27,9 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
 def _build_problem(
-    max_steps: int,
+    scale: ExecutionScale,
 ) -> tuple[ToroidalWireframe, SurfaceRZFourier, float]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     plasma_resolution = 32 if native_scale else 4
     wireframe_nphi = 48 if native_scale else 18
     wireframe_ntheta = 50 if native_scale else 8
@@ -62,8 +62,10 @@ def _build_problem(
     return wireframe, plasma, poloidal_current
 
 
-def solve(_output_directory: Path, max_steps: int) -> ExampleResult:
-    wireframe, plasma, poloidal_current = _build_problem(max_steps)
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    wireframe, plasma, poloidal_current = _build_problem(scale)
     response, target = bnorm_obj_matrices_jax(
         wireframe,
         plasma,

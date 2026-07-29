@@ -18,6 +18,7 @@ from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
 from simsopt_jax.backend.runtime import get_runtime_jax_device
 from simsopt_jax.examples import (
     ExampleResult,
+    ExecutionScale,
     run_example,
     solve_standard_stage_two,
 )
@@ -31,9 +32,9 @@ TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
 
 
 def _build_problem(
-    max_steps: int,
+    scale: ExecutionScale,
 ) -> tuple[BiotSavartJAX, SquaredFluxJAX, jax.Array, jax.Array]:
-    native_scale = max_steps >= NATIVE_ITERATIONS
+    native_scale = scale == "native_default"
     surface_resolution = 32 if native_scale else 4
     curve_order = 5 if native_scale else 2
     curve_quadrature = 100 if native_scale else 16
@@ -86,8 +87,10 @@ def _regularization_config() -> StageTwoObjectiveConfig:
     )
 
 
-def solve(output_directory: Path, max_steps: int) -> ExampleResult:
-    field, flux, surface_gamma, surface_normal = _build_problem(max_steps)
+def solve(
+    output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    field, flux, surface_gamma, surface_normal = _build_problem(scale)
     device = get_runtime_jax_device()
     initial_device = jax.device_put(
         np.asarray(field.x, dtype=np.float64),
