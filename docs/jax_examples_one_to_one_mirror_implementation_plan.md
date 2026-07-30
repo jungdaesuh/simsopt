@@ -42,9 +42,9 @@ The production implementation is complete for the bounded delivery at
   cases, 78 native-CPU/JAX-CPU/strict-JAX-GPU lane receipts, and 1,248
   comparisons;
 - the full authority run completed in 29 minutes 21 seconds (run identifier
-  timestamp to completion marker) with a largest parent-observed process-tree
-  RSS of 2,292,080,640 bytes and a largest child-reported host peak RSS of
-  2,219,270,144 bytes. The largest measured GPU allocation was
+  timestamp to completion marker) with a largest parent-observed child peak
+  RSS (VmHWM, excluding descendants) of 2,292,080,640 bytes and a largest
+  child-reported (`ru_maxrss`) host peak RSS of 2,219,270,144 bytes. The largest measured GPU allocation was
   737,743,616 bytes in particle tracing; no lane exhausted host or device
   memory;
 - the separate VMEC-hybrid example passed locally with VMEC on CPU and the JAX
@@ -58,7 +58,8 @@ The production implementation is complete for the bounded delivery at
   checks passed, and compile and diff checks passed.
 
 Performance evidence is deliberately lean. The authority run retains per-lane
-wall time, process-tree peak RSS, and GPU peak allocation where the backend
+wall time, per-process peak RSS (parent-observed child VmHWM and
+child-reported `ru_maxrss`), and GPU peak allocation where the backend
 exposes it. Representative maxima and the single-stage hybrid measurements are
 enough to establish bounded completion without adding a benchmark framework or
 claiming a speedup.
