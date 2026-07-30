@@ -96,6 +96,17 @@ def test_staged_like_tracer_does_not_embed_a_runtime_device_put(monkeypatch):
     np.testing.assert_array_equal(np.asarray(result), np.asarray((2.0, 3.0)))
 
 
+def test_staged_like_tracer_preserves_explicit_integer_dtype():
+    @jax.jit
+    def staged_integer(reference):
+        return staged_like(reference, 1, dtype=jnp.int32)
+
+    result = staged_integer(jnp.asarray((1.0, 2.0), dtype=jnp.float64))
+
+    assert result.dtype == jnp.int32
+    assert int(np.asarray(result)) == 1
+
+
 def test_reference_sharding_handles_tracer_leaf_in_sequence():
     """The list/tuple branch returns None for a tracer leaf and does not crash.
 

@@ -12,13 +12,14 @@ from simsopt_jax.backend.dtypes import explicit_device_array
 
 
 @lru_cache(maxsize=None)
-def _staged_scalar_builder(host_value: float, dtype_string: str):
+def _staged_scalar_builder(host_value: object, dtype_string: str):
     resolved_dtype = np.dtype(dtype_string)
 
     @jax.jit
     def build(reference):
         zero = jnp.sum(reference - reference).astype(resolved_dtype)
-        return zero + host_value
+        literal = jnp.asarray(host_value, dtype=resolved_dtype)
+        return zero + literal
 
     return build
 
@@ -43,8 +44,9 @@ def staged_like(reference: jax.Array, host_value, *, dtype=None) -> jax.Array:
     if isinstance(host_value, jax.Array):
         return jnp.asarray(host_value, dtype=resolved_dtype)
     if isinstance(reference, jax.core.Tracer) and np.ndim(host_value) == 0:
+        typed_host_value = np.asarray(host_value, dtype=resolved_dtype)[()]
         return _staged_scalar_builder(
-            float(host_value),
+            typed_host_value,
             resolved_dtype.str,
         )(reference)
     if isinstance(reference, jax.core.Tracer):
