@@ -159,9 +159,15 @@ explicit comparator rather than a custom-solver parity oracle.
   gradient, and parameters for finiteness before assigning a stopping reason.
   A finite endpoint at the iteration cap remains `iteration-limit`; a
   nonfinite endpoint is `nonfinite` even when the raw solver status is `1`.
-  CPU and strict-CUDA runner contracts pass `40/40`. The current-source fast
+  CPU and strict-CUDA runner contracts pass `41/41`. The current-source fast
   Boozer GPU diagnostic receipt is finite but not converged:
   `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-gpu-fast-maxiter2-current-b33ed2523/`.
+- Diagnostic application endpoint: a current-source native/custom CPU
+  comparison at the 200-step cap still ended `status=1/iteration-limit` for
+  both providers. Native/custom final objectives were
+  `5.740094853529039e-06/6.002098329574805e-06`; final gradient infinity norms
+  were `1.3279709057487923e-04/8.818160364313335e-05`. Receipt:
+  `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter200-b7a012d05/`.
 - Green final receipt replay: clean candidate `8f29ca7a6` validates `39`
   manifests, including the five-sample GPU/VRAM receipt, against the same
   external bundle. The fresh receipt tests pass `7/7`.
@@ -960,7 +966,7 @@ custom method name.
       status, Python/JAX/JAXLIB/SciPy/Optax versions, device, FP64 state,
       options, commands, exit codes, and fixture hashes. The clean candidate
       receipts bind these fields to commit `3b2b9f40a` and the CPU/GPU locks;
-      current-head `validate-all` revalidates the 41 tracked manifests and
+      current-head `validate-all` revalidates the 42 tracked manifests and
       archive checksums.
 - [x] Add the reviewed build-requirement input and relocatable hash-locked CPU/
       GPU dependency files described under Supported environments. The CPU
@@ -1376,7 +1382,7 @@ The runner writes local working data to
 - [x] tracked compact `metrics.json` and `summary.md` beside the manifest; and
 - [x] raw logs/JSON copied to the archive URI and verified from a fresh process.
 
-Current-head validation: `validate-all` rechecked `41` manifests with exit
+Current-head validation: `validate-all` rechecked `42` manifests with exit
 code 0. The rollback receipt records the clean base/candidate tree hashes and
 the bounded selector results; the external archive is local and not yet
 replicated off-host.
