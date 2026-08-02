@@ -11,9 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
 from examples.jax._lane_environment import build_execution_environment
-
 
 ROOT = Path(__file__).resolve().parents[3]
 NATIVE = ROOT / "examples" / "3_Advanced" / "single_stage_boozer_vacuum_optimization.py"
@@ -73,6 +71,30 @@ def test_jax_vacuum_single_stage_uses_fast_parity_solver_policy() -> None:
     assert "minimize_lbfgs_host_core" in imported_names
 
 
+def test_jax_vacuum_single_stage_uses_fail_closed_endpoint_certificate() -> None:
+    module = _module(JAX)
+    imported_names = {
+        alias.name
+        for node in ast.walk(module)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    observable_keys = {
+        key.value
+        for node in ast.walk(module)
+        if isinstance(node, ast.Dict)
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+
+    assert "certify_optimization_endpoint" in imported_names
+    assert {
+        "outer_stopping_reason",
+        "initial_stationary",
+        "terminal_stationary",
+    } <= observable_keys
+
+
 def test_both_single_stage_examples_report_implicit_physics_state() -> None:
     required = {
         "inner_solver_success",
@@ -100,6 +122,7 @@ def _run_json(
     *,
     environment: dict[str, str],
     output_directory: Path,
+    expected_returncode: int = 0,
 ) -> dict[str, object]:
     environment = dict(environment)
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -121,10 +144,11 @@ def _run_json(
         ),
         cwd=ROOT,
         env=environment,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == expected_returncode, completed.stderr[-2000:]
     result = json.loads(completed.stdout.splitlines()[-1])
     assert isinstance(result, dict)
     return result
@@ -158,11 +182,17 @@ def test_public_vacuum_single_stage_matches_native_in_cpu_parity_mode(
         JAX,
         environment=jax_environment,
         output_directory=tmp_path / "jax",
+        expected_returncode=1,
     )
 
     native_values = _observables(native)
     jax_values = _observables(jax_result)
-    assert native["status"] == jax_result["status"] == "ok"
+    # Smoke is a bounded diagnostic/parity lane, never convergence evidence:
+    # the JAX example fails closed on its two-step budget while native retains
+    # the legacy lenient status. Observable parity below is the actual gate.
+    assert native["status"] == "ok"
+    assert jax_result["status"] == "failed"
+    assert jax_values["outer_stopping_reason"] == "iteration-limit"
     assert jax_result["backend_mode"] == "jax_cpu_parity"
     assert jax_result["platform"] == "cpu"
     assert jax_result["precision"] == "fp64"
