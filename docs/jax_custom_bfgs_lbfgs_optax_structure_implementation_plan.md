@@ -13,9 +13,9 @@ but the change is not promotion-ready.
 
 | Area | Current evidence | Open gate |
 | --- | --- | --- |
-| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. The broad Boozer compatibility set is green when partitioned into fresh processes. | Complete application-scale endpoint closure. |
+| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. The broad Boozer compatibility set is green when partitioned into fresh processes. The native-scale exact Boozer inner solve completes in current CPU/GPU parity runs with a bounded matrix-free GMRES path. | Complete application-scale endpoint closure, including the default fast outer solve. |
 | Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
-| GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU. The current-source fast Boozer two-step receipt is finite but diagnostic, ending `status=1/iteration-limit`. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
+| GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU. The native-scale exact Boozer inner solve passes in the current strict GPU parity run; the outer result is unsuccessful at the two-step diagnostic cap. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
 | Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; a clean strict-RTX-5090 `coil47` five-sample receipt now includes process-attributed VRAM and phase-scoped RSS. | Complete the StableHLO/compile promotion comparison and the A100 gate. |
 | Evidence | Local candidate receipts have artifact checksum tests. A clean candidate worktree validates all `39` manifests against the external bundle `/home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802`; bundle inventory SHA-256 is `43ea7e7dd07c7914d16054c1dae206c3a6cdbc2293b493c255dfb87b43659ea9`. CPU lock SHA-256 is `159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35` and GPU lock SHA-256 is `fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8`. | Replicate the bundle off-host and re-run the same validator there. |
 | Quality | Focused tests and compile/diff checks are green. The current large Boozer source/test files still report existing Ruff findings. | Close scoped Pyright, project-wide Ruff, application-scale endpoint, and clean-checkout gates. |
@@ -488,8 +488,19 @@ explicit comparator rather than a custom-solver parity oracle.
   `1.6400701660477423e-05`). Initial objective values remained matched to
   `2.17e-19`. The native inner-solve failure and JAX rejected-objective policy
   remain the unresolved parity boundary; no solver tolerance was weakened.
-  Receipt:
-  `docs/receipts/custom-quasi-newton/boozer-outer-bfgs-native-custom-cpu-maxiter50-20260802/`.
+- RED -> GREEN exact inner-solve closure: the native-scale Boozer example
+  (`resolution=6`, 255-state exact Newton solve) previously stagnated with the
+  generic restarted GMRES budget. The exact path now permits up to two full
+  255-vector Krylov cycles for systems up to 256 variables and retains a
+  256-vector cap for larger systems; the generic least-squares/operator path is
+  unchanged. The current source-owned example run with `--max-steps 2` and
+  `jax_*_parity` completed the exact inner solve on strict CPU and strict RTX
+  5090 GPU. Inner success was true; Boozer residuals were
+  `1.9847460904955183e-29` and `2.516488847956131e-29`, respectively. Both
+  outer solves made zero accepted steps (`status=2`, `iterations=0`) and are
+  diagnostic only. The receipt records the selected raw JSON observables,
+  commands, device metadata, and hashes:
+  `docs/receipts/custom-quasi-newton/boozer-exact-inner-native-scale-cpu-gpu-20260802/`.
 - RED -> GREEN diagnostic: the exact traceable Newton residual now crosses a
   nested JIT boundary and rematerializes intermediates with the FP64
   `nothing_saveable` policy. The focused exact-Newton selector is `8 passed,

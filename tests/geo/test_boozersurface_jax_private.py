@@ -3561,6 +3561,39 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert _linear_solve._gmres_iteration_limits(39) == (39, 10)
         assert _linear_solve._gmres_iteration_limits(663) == (64, 10)
 
+    def test_exact_newton_gmres_limits_use_full_small_system_cycle(self):
+        assert _linear_solve._exact_newton_gmres_iteration_limits(255) == (255, 2)
+        assert _linear_solve._exact_newton_gmres_iteration_limits(663) == (256, 10)
+
+    def test_exact_newton_forwards_specific_gmres_limits(self, monkeypatch):
+        calls = []
+
+        def spy_gmres(matvec, rhs, *, tol, restart=None, maxiter=None):
+            del matvec, tol
+            calls.append((restart, maxiter))
+            return jnp.zeros_like(rhs), jnp.zeros_like(rhs)
+
+        monkeypatch.setattr(_opt, "_run_operator_gmres", spy_gmres)
+        x = jnp.ones(255, dtype=jnp.float64)
+        rhs = jnp.ones(255, dtype=jnp.float64)
+        _opt._gmres_solve_exact_newton_system(
+            lambda _x, vector: vector,
+            x,
+            rhs,
+            tol=1.0e-10,
+        )
+        assert calls == [(255, 2)]
+
+        calls.clear()
+        _opt._gmres_solve_newton_system(
+            lambda _x, vector: vector,
+            x,
+            rhs,
+            stab=0.0,
+            tol=1.0e-10,
+        )
+        assert calls == [(None, None)]
+
     @pytest.mark.parametrize(
         "linear_solver",
         (
