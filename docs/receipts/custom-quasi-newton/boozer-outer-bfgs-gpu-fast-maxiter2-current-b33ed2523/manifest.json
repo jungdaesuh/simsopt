@@ -1,0 +1,30 @@
+{
+  "archive_uri": "file:///home/jungdaesuh/simsopt-jax-quasi-newton-evidence/20260802/receipts/boozer-outer-bfgs-gpu-fast-maxiter2-current-b33ed2523",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "682866ae7e9a64cb279d31fd0c4edb9535d74673d5058c0a6723f0bdb4b56f4d"
+    },
+    {
+      "path": "raw/boozer-outer-bfgs-gpu-maxiter2-current-fast-b33ed2523/measurements.json",
+      "sha256": "4063cc15e3d13a4c79fc7e11fabbd0c0b24358d7a4dde5ff2e5936a7d83eb220"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "0aa18bf528264e6b367e0db76ca60623c06d0b129b7f5c53eca83a7bda40ecdf"
+    }
+  ],
+  "candidate_commit": "b33ed252355a76b3cd6a32899d330b0b83ee6701",
+  "candidate_worktree_clean": false,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_gpu.lock.txt",
+    "sha256": "04e77f2a39bd2d5bd602e0a0596462f5dbd4f21cc2ebfc3b537fe95ec591758f"
+  },
+  "kind": "custom-quasi-newton-runner",
+  "receipt_id": "boozer-outer-bfgs-gpu-fast-maxiter2-current-b33ed2523",
+  "schema_version": 1,
+  "source_runs": [
+    "boozer-outer-bfgs-gpu-maxiter2-current-fast-b33ed2523"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}
