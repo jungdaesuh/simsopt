@@ -31,6 +31,7 @@ from simsopt_jax.geo.optimizer_host_lbfgs import (
     minimize_lbfgs_host_core,
 )
 from simsopt_jax.solve.driver import Driver
+from simsopt_jax.solve.endpoint_certificate import certify_optimization_endpoint
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 from simsopt_jax_adapters.geo.surface_objectives import (
@@ -204,12 +205,9 @@ def solve(
     )
 
     initial_parameters = np.asarray(field.x, dtype=np.float64)
-    initial_device = jax.device_put(initial_parameters)
-    initial_value_device, initial_gradient_device = value_and_gradient(initial_device)
-    jax.block_until_ready((initial_value_device, initial_gradient_device))
-    initial_value_and_gradient = (
-        _host_float(initial_value_device),
-        _host_array(initial_gradient_device),
+    incumbent_controller = session.accepted_incumbent_host_value_and_grad()
+    initial_value_and_gradient = incumbent_controller.value_and_grad(
+        initial_parameters
     )
 
     def host_value_and_gradient(
@@ -223,7 +221,7 @@ def solve(
     driver = scalar_example_driver()
     if driver == Driver.SIMSOPT_LBFGSB:
         optimizer_result = minimize_lbfgs_host_core(
-            host_value_and_gradient,
+            incumbent_controller.value_and_grad,
             initial_parameters,
             maxiter=max_steps,
             maxcor=min(max_steps, 200),
@@ -231,16 +229,18 @@ def solve(
             gtol=1.0e-8,
             maxls=20,
             initial_value_and_grad=initial_value_and_gradient,
+            callback=incumbent_controller.accept,
         )
     else:
         optimizer_result = minimize_bfgs_host_core(
-            host_value_and_gradient,
+            incumbent_controller.value_and_grad,
             initial_parameters,
             maxiter=max_steps,
             gtol=1.0e-8,
             maxls=20,
             initial_value_and_grad=initial_value_and_gradient,
             line_search_value_and_grad=line_search_value_and_grad_more_thuente_host,
+            callback=incumbent_controller.accept,
         )
     solution = np.asarray(optimizer_result.x_k, dtype=np.float64)
     solution_device = jax.device_put(solution)
@@ -259,17 +259,29 @@ def solve(
     final_iota = _host_float(final_metrics["final_iota"])
     final_volume = _host_float(final_metrics["final_volume"])
     final_non_qs = _host_float(final_metrics["final_non_qs"])
-    scientific_success = bool(
-        initial_inner_success
-        and inner_solver_success
-        and np.all(np.isfinite(solution))
-        and np.all(np.isfinite(gradient))
-        and np.isfinite(final_value)
-        and final_value <= initial_value_and_gradient[0]
+    parameters_finite = bool(
+        np.all(np.isfinite(solution)) and np.all(np.isfinite(gradient))
+    )
+    observables_finite = bool(
+        np.isfinite(final_value)
         and np.isfinite(final_iota)
         and np.isfinite(final_volume)
         and np.isfinite(final_non_qs)
         and np.isfinite(boozer_residual)
+    )
+    endpoint_certificate = certify_optimization_endpoint(
+        provider_success=bool(optimizer_result.converged),
+        provider_status=int(optimizer_result.status),
+        iterations=int(optimizer_result.k),
+        max_iterations=max_steps,
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_value_and_gradient[1]))),
+        final_gradient_inf_norm=float(np.max(np.abs(gradient))),
+        parameters_finite=parameters_finite,
+        observables_finite=observables_finite,
+        inner_success=bool(initial_inner_success and inner_solver_success),
+    )
+    scientific_success = bool(
+        endpoint_certificate.success and final_value <= initial_value_and_gradient[0]
     )
     return ExampleResult(
         example_id=EXAMPLE_ID,
@@ -283,6 +295,9 @@ def solve(
             "gradient": tuple(float(value) for value in gradient),
             "inner_solver_success": inner_solver_success,
             "outer_solver_success": bool(optimizer_result.converged),
+            "outer_stopping_reason": endpoint_certificate.stopping_reason,
+            "initial_stationary": endpoint_certificate.initial_stationary,
+            "terminal_stationary": endpoint_certificate.terminal_stationary,
             "solver_status": int(optimizer_result.status),
             "solver_iterations": int(optimizer_result.k),
             "solver_evaluations": int(optimizer_result.nfev),
