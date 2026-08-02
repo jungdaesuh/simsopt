@@ -13,7 +13,7 @@ but the change is not promotion-ready.
 
 | Area | Current evidence | Open gate |
 | --- | --- | --- |
-| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. | Complete application-scale compatibility and broad traceable closure. |
+| Runtime | Eager BFGS uses the typed host driver; eager L-BFGS uses the specialized design-B facade. Traced whole-solve routes remain available. The broad Boozer compatibility set is green when partitioned into fresh processes. | Complete application-scale endpoint closure. |
 | Numerical parity | Rosenbrock accepted states are byte-identical to the pre-refactor solver. Matched `coil47` native CPU/custom CPU/custom GPU/Optax endpoints converge at the recorded FP64 objective tolerance. | Close a matched converged Boozer endpoint and the full accepted-state matrix. |
 | GPU | The 41 non-slow runtime contracts and the broader Boozer/traceable compatibility selector pass on strict RTX 5090 CUDA. Custom `coil47` converges on GPU; the Boozer outer BFGS now has a current-HEAD 20-iteration CPU/GPU diagnostic pair. | Qualify a converged Boozer endpoint and run the declared A100 lane. |
 | Performance and memory | Bounded diagnostics favor specialized design B over generic design A. Custom now exposes a production `prepare_lbfgs_private`/`PreparedLBFGS` boundary; Optax uses the same prepare/run split. Both reuse fixed-shape programs for warm runs; a clean strict-RTX-5090 `coil47` five-sample receipt now includes process-attributed VRAM and phase-scoped RSS. | Complete the StableHLO/compile promotion comparison and the A100 gate. |
@@ -1324,8 +1324,11 @@ declared RSS guard.
       on the rehearsed rollback tree, and archive the base, candidate, ordered
       SHA list, commands, exit codes, tree hashes, and receipt hashes. Return
       to the candidate commit and rerun the same bounded selectors.
-- [ ] Complete the broad traceable Boozer compatibility selector; the rollback
-      receipt records its RSS-guard stop as incomplete.
+- [x] Complete the broad traceable Boozer compatibility selector in fresh
+      private/public/shim processes on strict CPU and RTX 5090 CUDA. The
+      partitioned receipt records `111 passed, 3 skipped` on CPU and
+      `110 passed, 4 skipped` on GPU; the earlier rollback-base RSS stop is
+      superseded and remains historical only.
 - [x] Do not remove the traceable whole-solve implementation in this plan.
 
 ## Receipt contract
