@@ -30,6 +30,10 @@ import optax
 import scipy
 from scipy import optimize
 from simsopt_jax.backend.runtime import resolve_jax_execution_profile
+from simsopt_jax.geo.optimizer_host_lbfgs import (
+    line_search_value_and_grad_more_thuente_host,
+    minimize_bfgs_host_core,
+)
 from simsopt_jax.geo.optimizers.private import (
     PreparedLBFGS,
     _result_converters,
@@ -43,15 +47,34 @@ from simsopt_jax.geo.optimizers.private._bfgs import (
 )
 from simsopt_jax.geo.optimizers.private._lbfgs import _minimize_lbfgs_private
 from simsopt_jax.runtime.host_boundary import host_transfer_audit
+from simsopt_jax.solve.endpoint_certificate import (
+    OptimizationEndpointCertificate,
+    certify_optimization_endpoint,
+)
 
+from benchmarks.boozer_trial_diagnostic import (
+    TrialProvider,
+    run_boozer_host_diagnostic,
+    validate_boozer_trial_trace,
+)
 from benchmarks.fixtures.custom_quasi_newton import (
     Fixture,
     NativeValueAndGrad,
+    ScientificEndpointEvidence,
     fixture,
+    fixture_method,
+)
+from benchmarks.process_gpu_monitor import (
+    ProcessGpuMemoryMeasurement,
+    ProcessGpuMemoryMonitor,
+    cpu_gpu_memory_unavailable,
+    process_gpu_memory_artifact,
 )
 
 Provider = Literal["native", "custom", "optax"]
 Method = Literal["bfgs", "lbfgs"]
+
+_RUNNER_SCHEMA_VERSION = 7
 
 
 class _OptaxValueAndGrad(Protocol):
@@ -106,9 +129,12 @@ class _PreparedCustom:
 
 
 _PROVIDER_CHILD_TIMEOUT_SECONDS = 120
+_BOOZER_PROVIDER_CHILD_TIMEOUT_SECONDS = 1800
 _PROVIDER_CHILD_RSS_LIMIT_KIB = 8 * 1024 * 1024
 _PROVIDER_CHILD_TERM_GRACE_SECONDS = 5
 _PROVIDER_CHILD_POLL_SECONDS = 0.1
+_GPU_MEMORY_ARTIFACT_NAME = "gpu_memory.json"
+_BOOZER_TRIAL_TRACE_ARTIFACT_NAME = "boozer_trial_trace.json"
 _SOLVER_FTOL = 0.0
 _SOLVER_GTOL = 1.0e-10
 _SOLVER_MAXLS = 20
@@ -184,12 +210,54 @@ class PhaseRSSMeasurement:
 
 
 @dataclass(frozen=True)
+class DeviceIdentity:
+    requested_device: str
+    backend: str
+    platform: str
+    jax_device: str
+    device_kind: str
+    device_id: int | None
+    process_index: int | None
+    gpu_uuid: str | None
+    gpu_model: str | None
+    compute_capability: str | None
+    total_memory_bytes: int | None
+    driver_version: str | None
+    cuda_version: str | None
+    visible_devices: str | None
+    hostname: str
+    scheduler_job_id: str | None
+
+
+@dataclass(frozen=True)
+class WorkMeasurement:
+    accepted_iterations: int
+    objective_evaluations: int | None
+    transfer_calls: int
+    transfer_leaves: int
+    transfer_bytes: int
+    advance_observations: int | None
+
+
+@dataclass(frozen=True)
+class _NvidiaSmiIdentity:
+    index: int
+    uuid: str
+    model: str
+    total_memory_bytes: int
+    driver_version: str
+    compute_capability: str
+
+
+@dataclass(frozen=True)
 class Measurement:
     case: str
     provider: Provider
     method: Method
     device: str
     intent: str
+    solver_route: str
+    device_identity: DeviceIdentity
     dimension: int
     maxiter: int
     maxcor: int
@@ -209,17 +277,138 @@ class Measurement:
     status: int | None
     success: bool
     stopping_reason: str
+    preparation_seconds: float
+    first_execution_seconds: float
     cold_seconds: float
     warm_seconds: float
     peak_rss_kib: int
     peak_rss_scope: str
+    peak_vram_mib: float | None
     process_pid: int
     certificate: str
     warm_transfer_audit: tuple[TransferMeasurement, ...]
+    work_counters: WorkMeasurement
+    inner_success: bool
+    parameters_finite: bool
+    observables_finite: bool
+    constraint_norm: float | None
+    endpoint_certificate: OptimizationEndpointCertificate
+    scientific_observables: dict[str, float]
+    scientific_certification_seconds: float
+    diagnostic_artifacts: dict[str, str | None]
     phase_rss: tuple[PhaseRSSMeasurement, ...]
     fixture_metadata: tuple[tuple[str, object], ...]
     fixture_contract: dict[str, object]
     algorithm_memory_contract: dict[str, int | bool] | None
+
+
+def _solver_route(provider: Provider, method: Method) -> str:
+    if provider == "native":
+        return "scipy_bfgs" if method == "bfgs" else "scipy_lbfgsb"
+    if provider == "optax":
+        return "optax_lbfgs"
+    if method == "bfgs":
+        return "custom_bfgs_stepwise"
+    return "stepwise"
+
+
+def _parse_nvidia_smi_identity_rows(output: str) -> tuple[_NvidiaSmiIdentity, ...]:
+    """Parse the fixed CSV projection used to authenticate a CUDA device."""
+
+    records: list[_NvidiaSmiIdentity] = []
+    for line in output.splitlines():
+        fields = tuple(field.strip() for field in line.split(","))
+        if len(fields) != 6:
+            raise ValueError(f"invalid nvidia-smi identity row: {line!r}")
+        index, uuid, model, memory_mib, driver, compute_capability = fields
+        records.append(
+            _NvidiaSmiIdentity(
+                index=int(index),
+                uuid=uuid,
+                model=model,
+                total_memory_bytes=int(memory_mib) * 1024 * 1024,
+                driver_version=driver,
+                compute_capability=compute_capability,
+            )
+        )
+    return tuple(records)
+
+
+def _selected_nvidia_smi_identity(device_id: int | None) -> _NvidiaSmiIdentity:
+    completed = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,name,memory.total,driver_version,compute_cap",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    records = _parse_nvidia_smi_identity_rows(completed.stdout)
+    selector = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if selector is not None:
+        selectors = tuple(part.strip() for part in selector.split(",") if part.strip())
+        if len(selectors) != 1:
+            raise RuntimeError(
+                "strict GPU qualification requires exactly one visible device"
+            )
+        selected = selectors[0]
+        if selected.startswith("GPU-"):
+            matches = tuple(record for record in records if record.uuid == selected)
+        else:
+            physical_index = int(selected)
+            matches = tuple(
+                record for record in records if record.index == physical_index
+            )
+    else:
+        matches = tuple(record for record in records if record.index == device_id)
+    if len(matches) != 1:
+        raise RuntimeError("could not bind the JAX CUDA device to one nvidia-smi UUID")
+    return matches[0]
+
+
+def _device_identity(requested_device: str) -> DeviceIdentity:
+    """Bind one measurement process to its exact host and JAX device."""
+
+    devices = tuple(jax.devices())
+    device = devices[0]
+    device_id_value = getattr(device, "id", None)
+    process_index_value = getattr(device, "process_index", None)
+    client = getattr(device, "client", None)
+    cuda_version_value = getattr(client, "platform_version", None)
+    device_id = int(device_id_value) if isinstance(device_id_value, int) else None
+    gpu_identity = (
+        _selected_nvidia_smi_identity(device_id) if requested_device == "gpu" else None
+    )
+    return DeviceIdentity(
+        requested_device=requested_device,
+        backend=str(jax.default_backend()),
+        platform=str(getattr(device, "platform", "")),
+        jax_device=str(device),
+        device_kind=str(getattr(device, "device_kind", "")),
+        device_id=device_id,
+        process_index=(
+            int(process_index_value) if isinstance(process_index_value, int) else None
+        ),
+        gpu_uuid=None if gpu_identity is None else gpu_identity.uuid,
+        gpu_model=None if gpu_identity is None else gpu_identity.model,
+        compute_capability=(
+            None if gpu_identity is None else gpu_identity.compute_capability
+        ),
+        total_memory_bytes=(
+            None if gpu_identity is None else gpu_identity.total_memory_bytes
+        ),
+        driver_version=(None if gpu_identity is None else gpu_identity.driver_version),
+        cuda_version=(
+            str(cuda_version_value) if cuda_version_value is not None else None
+        ),
+        visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        hostname=platform.node(),
+        scheduler_job_id=(
+            os.environ.get("SLURM_JOB_ID") or os.environ.get("PBS_JOBID")
+        ),
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -426,20 +615,50 @@ def _stop_provider_child(
     )
 
 
-def _run_provider_child_process(command: list[str]) -> None:
+def _provider_child_timeout_seconds(cases: str) -> int:
+    """Return the bounded child watchdog for the selected fixture set."""
+
+    selected_cases = {name.strip() for name in cases.split(",")}
+    if "boozer" in selected_cases:
+        return _BOOZER_PROVIDER_CHILD_TIMEOUT_SECONDS
+    return _PROVIDER_CHILD_TIMEOUT_SECONDS
+
+
+def _run_provider_child_process(
+    command: list[str],
+    *,
+    gpu_uuid: str | None = None,
+    timeout_seconds: int | None = None,
+) -> ProcessGpuMemoryMeasurement:
+    """Run one direct provider child and measure its GPU memory externally.
+
+    ``gpu_uuid`` is the authenticated GPU the child must run on; ``None``
+    selects the explicit CPU evidence instead of NVIDIA sampling.
+    """
+
+    effective_timeout_seconds = (
+        _PROVIDER_CHILD_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    )
     child = subprocess.Popen(
         command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
     )
+    monitor = (
+        None
+        if gpu_uuid is None
+        else ProcessGpuMemoryMonitor(gpu_uuid=gpu_uuid, provider_pid=child.pid)
+    )
+    if monitor is not None:
+        monitor.start()
     started = time.monotonic()
     while child.poll() is None:
         elapsed = time.monotonic() - started
-        if elapsed >= _PROVIDER_CHILD_TIMEOUT_SECONDS:
+        if elapsed >= effective_timeout_seconds:
             _stop_provider_child(
                 child,
-                f"exceeded {_PROVIDER_CHILD_TIMEOUT_SECONDS}-second watchdog",
+                f"exceeded {effective_timeout_seconds}-second watchdog",
             )
         rss_kib = _child_rss_kib(child.pid)
         if rss_kib is not None and rss_kib >= _PROVIDER_CHILD_RSS_LIMIT_KIB:
@@ -450,10 +669,16 @@ def _run_provider_child_process(command: list[str]) -> None:
             )
         time.sleep(_PROVIDER_CHILD_POLL_SECONDS)
     _stdout, stderr = child.communicate()
+    measurement = (
+        cpu_gpu_memory_unavailable(provider_pid=child.pid)
+        if monitor is None
+        else monitor.finish()
+    )
     if child.returncode != 0:
         raise RuntimeError(
             f"provider child failed with exit code {child.returncode}:\n{stderr}"
         )
+    return measurement
 
 
 def _initial_value_and_grad(
@@ -563,15 +788,37 @@ def _run_custom(
 
     with host_transfer_audit() as transfer_audit:
         if method == "bfgs":
-            result = _minimize_bfgs_private(
-                objective,
-                x_device,
-                maxiter=maxiter,
-                gtol=_SOLVER_GTOL,
-                x_dtype=jnp.float64,
-                value_and_grad=uses_fused_value_and_grad,
-                memory_analysis_callback=record_memory_analysis,
+            incumbent_factory = (
+                fixture_case.accepted_incumbent_host_value_and_grad
             )
+            if incumbent_factory is None:
+                result = _minimize_bfgs_private(
+                    objective,
+                    x_device,
+                    maxiter=maxiter,
+                    gtol=_SOLVER_GTOL,
+                    x_dtype=jnp.float64,
+                    value_and_grad=uses_fused_value_and_grad,
+                    memory_analysis_callback=record_memory_analysis,
+                )
+            else:
+                incumbent_controller = incumbent_factory()
+                initial_parameters = np.asarray(x0, dtype=np.float64)
+                initial_value_and_gradient = incumbent_controller.value_and_grad(
+                    initial_parameters
+                )
+                result = minimize_bfgs_host_core(
+                    incumbent_controller.value_and_grad,
+                    initial_parameters,
+                    maxiter=maxiter,
+                    gtol=_SOLVER_GTOL,
+                    maxls=_SOLVER_MAXLS,
+                    initial_value_and_grad=initial_value_and_gradient,
+                    line_search_value_and_grad=(
+                        line_search_value_and_grad_more_thuente_host
+                    ),
+                    callback=incumbent_controller.accept,
+                )
         else:
             result = _minimize_lbfgs_private(
                 objective,
@@ -584,7 +831,8 @@ def _run_custom(
                 x_dtype=jnp.float64,
             )
         if method == "bfgs":
-            _result_converters._private_bfgs_result_to_optimize_result(result)
+            if fixture_case.accepted_incumbent_host_value_and_grad is None:
+                _result_converters._private_bfgs_result_to_optimize_result(result)
         else:
             _result_converters._private_lbfgs_result_to_optimize_result(result)
         transfer_summary = tuple(
@@ -951,9 +1199,14 @@ def _measurement(
     phase_rss: list[PhaseRSSMeasurement] = []
     if fixture_phase_rss is not None:
         phase_rss.append(fixture_phase_rss)
+    accepted_incumbent_bfgs = bool(
+        provider == "custom"
+        and method == "bfgs"
+        and fixture_case.accepted_incumbent_host_value_and_grad is not None
+    )
     algorithm_memory_contract = (
         _bfgs_memory_contract(fixture_case.expected_dimension, np.float64)
-        if method == "bfgs"
+        if method == "bfgs" and not accepted_incumbent_bfgs
         else None
     )
     if algorithm_memory_contract is not None:
@@ -1026,7 +1279,8 @@ def _measurement(
         ) = run_once()
         _sync(cold_result)
     phase_rss.append(cold_phase.measurement())
-    cold_seconds = preparation_seconds + time.perf_counter() - started
+    first_execution_seconds = time.perf_counter() - started
+    cold_seconds = preparation_seconds + first_execution_seconds
 
     started = time.perf_counter()
     with _RSSPhase("warm_solver") as warm_phase:
@@ -1041,7 +1295,17 @@ def _measurement(
         _sync(result)
     phase_rss.append(warm_phase.measurement())
     warm_seconds = time.perf_counter() - started
-    solver_peak_rss_kib = max(solver_start_rss_kib, _peak_rss_kib())
+    solver_phases = tuple(
+        phase
+        for phase in phase_rss
+        if phase.phase in {"preparation", "cold_solver", "warm_solver"}
+    )
+    if not solver_phases:
+        raise RuntimeError("solver execution produced no RSS phase measurements")
+    solver_peak_rss_kib = max(phase.peak_rss_kib for phase in solver_phases)
+    solver_peak_rss_delta_kib = max(
+        phase.peak_rss_kib - phase.start_rss_kib for phase in solver_phases
+    )
 
     if provider == "optax":
         params, final_value, gradient, iterations = result
@@ -1072,6 +1336,45 @@ def _measurement(
         success=success,
         finite=finite_endpoint,
     )
+    scientific_certification_started = time.perf_counter()
+    scientific_endpoint = (
+        fixture_case.native_scientific_endpoint
+        if provider == "native"
+        else fixture_case.scientific_endpoint
+    )
+    endpoint_evidence = (
+        ScientificEndpointEvidence(inner_success=True, observables=())
+        if scientific_endpoint is None
+        else scientific_endpoint(final_parameters)
+    )
+    scientific_certification_seconds = (
+        time.perf_counter() - scientific_certification_started
+    )
+    scientific_observables = {
+        key: float(value)
+        for key, value in endpoint_evidence.observables
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    parameters_finite = bool(np.all(np.isfinite(final_parameters)))
+    observables_finite = bool(
+        np.isfinite(final_objective)
+        and np.isfinite(final_gradient_inf_norm)
+        and all(np.isfinite(value) for value in scientific_observables.values())
+    )
+    endpoint_certificate = certify_optimization_endpoint(
+        provider_success=success,
+        provider_status=status,
+        iterations=iteration_count,
+        max_iterations=maxiter,
+        initial_gradient_inf_norm=float(np.max(np.abs(initial_gradient))),
+        final_gradient_inf_norm=final_gradient_inf_norm,
+        inner_success=endpoint_evidence.inner_success,
+        parameters_finite=parameters_finite,
+        observables_finite=observables_finite,
+        constraint_norm=None,
+    )
+    if endpoint_certificate.stopping_reason != stopping_reason:
+        raise RuntimeError("endpoint stopping-reason owners disagree")
 
     fixture_contract["final_certificate_fields"] = {
         "final_objective": final_objective,
@@ -1087,12 +1390,22 @@ def _measurement(
     if algorithm_memory_contract is not None and warm_memory_analysis is not None:
         algorithm_memory_contract.update(warm_memory_analysis)
 
+    transfer_calls = sum(entry.calls for entry in warm_transfer_audit)
+    transfer_leaves = sum(entry.leaves for entry in warm_transfer_audit)
+    transfer_bytes = sum(entry.bytes for entry in warm_transfer_audit)
+    advance_observations = next(
+        (entry.calls for entry in warm_transfer_audit if entry.phase == "advance"),
+        None,
+    )
+
     return Measurement(
         case=fixture_case.name,
         provider=provider,
         method=method,
         device=device,
         intent=intent,
+        solver_route=_solver_route(provider, method),
+        device_identity=_device_identity(device),
         dimension=fixture_case.expected_dimension,
         maxiter=maxiter,
         maxcor=maxcor,
@@ -1100,7 +1413,7 @@ def _measurement(
         fixture_build_peak_rss_kib=fixture_build_peak_rss_kib,
         solver_start_rss_kib=solver_start_rss_kib,
         solver_peak_rss_kib=solver_peak_rss_kib,
-        solver_peak_rss_delta_kib=max(0, solver_peak_rss_kib - solver_start_rss_kib),
+        solver_peak_rss_delta_kib=solver_peak_rss_delta_kib,
         initial_parameters=tuple(float(value) for value in x0),
         final_parameters=tuple(float(value) for value in final_parameters),
         initial_objective=initial_objective,
@@ -1112,18 +1425,55 @@ def _measurement(
         status=status,
         success=success,
         stopping_reason=stopping_reason,
+        preparation_seconds=preparation_seconds,
+        first_execution_seconds=first_execution_seconds,
         cold_seconds=cold_seconds,
         warm_seconds=warm_seconds,
         peak_rss_kib=_peak_rss_kib(),
         peak_rss_scope="provider_child_process_lifetime",
+        peak_vram_mib=None,
         process_pid=os.getpid(),
         certificate=fixture_case.certificate,
         warm_transfer_audit=warm_transfer_audit,
+        work_counters=WorkMeasurement(
+            accepted_iterations=iteration_count,
+            objective_evaluations=evaluations,
+            transfer_calls=transfer_calls,
+            transfer_leaves=transfer_leaves,
+            transfer_bytes=transfer_bytes,
+            advance_observations=advance_observations,
+        ),
+        inner_success=endpoint_evidence.inner_success,
+        parameters_finite=parameters_finite,
+        observables_finite=observables_finite,
+        constraint_norm=None,
+        endpoint_certificate=endpoint_certificate,
+        scientific_observables=scientific_observables,
+        scientific_certification_seconds=scientific_certification_seconds,
+        diagnostic_artifacts={"memory_trace": None, "trial_trace": None},
         fixture_metadata=fixture_case.metadata,
         fixture_contract=fixture_contract,
         algorithm_memory_contract=algorithm_memory_contract,
         phase_rss=tuple(phase_rss),
     )
+
+
+def _validate_monitored_gpu_identity(
+    identity: object,
+    *,
+    provider: Provider,
+    monitored_gpu_uuid: str | None,
+) -> None:
+    """Bind one child-reported device identity to the externally monitored GPU."""
+
+    if not isinstance(identity, dict):
+        raise TypeError(f"provider child {provider!r} omitted device identity")
+    reported_gpu_uuid = cast(dict[str, object], identity).get("gpu_uuid")
+    if reported_gpu_uuid != monitored_gpu_uuid:
+        raise ValueError(
+            f"provider child {provider!r} reported GPU UUID {reported_gpu_uuid!r}, "
+            f"which differs from the monitored GPU UUID {monitored_gpu_uuid!r}"
+        )
 
 
 def _run_provider_child(
@@ -1132,10 +1482,15 @@ def _run_provider_child(
     cases: str,
     device: str,
     intent: str,
+    method: Method,
     maxiter: int,
     maxcor: int,
     output: Path,
-) -> list[dict[str, object]]:
+    capture_boozer_trial_trace: bool = False,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    monitored_gpu_uuid = (
+        _selected_nvidia_smi_identity(None).uuid if device == "gpu" else None
+    )
     command = [
         sys.executable,
         __file__,
@@ -1147,6 +1502,8 @@ def _run_provider_child(
         provider,
         "--cases",
         cases,
+        "--method",
+        method,
         "--maxiter",
         str(maxiter),
         "--maxcor",
@@ -1155,12 +1512,142 @@ def _run_provider_child(
         str(output),
         "--provider-child",
     ]
-    _run_provider_child_process(command)
-    payload = json.loads((output / "measurements.json").read_text(encoding="utf-8"))
+    if capture_boozer_trial_trace:
+        command.append("--capture-boozer-trial-trace")
+    memory_measurement = _run_provider_child_process(
+        command,
+        gpu_uuid=monitored_gpu_uuid,
+        timeout_seconds=_provider_child_timeout_seconds(cases),
+    )
+    measurements_path = output / "measurements.json"
+    payload = json.loads(measurements_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"provider child {provider!r} wrote a non-object payload")
+    if payload.get("schema_version") != _RUNNER_SCHEMA_VERSION:
+        raise ValueError(f"provider child {provider!r} wrote the wrong schema")
+    if payload.get("provider_child") is not True:
+        raise ValueError(f"provider child {provider!r} omitted child provenance")
+    if capture_boozer_trial_trace:
+        if payload.get("capture_boozer_trial_trace") is not True:
+            raise ValueError(
+                f"provider child {provider!r} omitted Boozer trial capture provenance"
+            )
+    elif "capture_boozer_trial_trace" in payload:
+        raise ValueError(
+            f"provider child {provider!r} added unrequested Boozer trial capture"
+        )
+    if payload.get("requested_device") != device or payload.get("method") != method:
+        raise ValueError(f"provider child {provider!r} request contract mismatched")
+    if payload.get("runtime_environment") != _runtime_environment_payload():
+        raise ValueError(f"provider child {provider!r} runtime environment mismatched")
+    _validate_monitored_gpu_identity(
+        payload.get("device_identity"),
+        provider=provider,
+        monitored_gpu_uuid=monitored_gpu_uuid,
+    )
     measurements = payload.get("measurements")
     if not isinstance(measurements, list):
         raise TypeError(f"provider child {provider!r} wrote an invalid payload")
-    return measurements
+    if capture_boozer_trial_trace and len(measurements) != 1:
+        raise ValueError("Boozer trial capture requires exactly one measurement row")
+    memory_artifact = process_gpu_memory_artifact(memory_measurement)
+    typed_measurements: list[dict[str, object]] = []
+    for raw_measurement in measurements:
+        if not isinstance(raw_measurement, dict):
+            raise TypeError(f"provider child {provider!r} wrote a non-object row")
+        typed_measurement = cast(dict[str, object], raw_measurement)
+        if typed_measurement.get("provider") != provider:
+            raise ValueError(f"provider child {provider!r} wrote another provider")
+        _validate_monitored_gpu_identity(
+            typed_measurement.get("device_identity"),
+            provider=provider,
+            monitored_gpu_uuid=monitored_gpu_uuid,
+        )
+        diagnostic_artifacts = typed_measurement.get("diagnostic_artifacts")
+        if not isinstance(diagnostic_artifacts, dict):
+            raise TypeError(f"provider child {provider!r} omitted diagnostic artifacts")
+        trial_trace = cast(dict[str, object], diagnostic_artifacts).get("trial_trace")
+        if capture_boozer_trial_trace:
+            if typed_measurement.get("case") != "boozer":
+                raise ValueError("trial trace is attached to a non-Boozer row")
+            if trial_trace != _BOOZER_TRIAL_TRACE_ARTIFACT_NAME:
+                raise ValueError("provider child omitted the Boozer trial trace path")
+            production_route = typed_measurement.get("solver_route")
+            if not isinstance(production_route, str) or not production_route:
+                raise TypeError("Boozer trial trace row omitted its solver route")
+            expected_production_route = _solver_route(provider, method)
+            if production_route != expected_production_route:
+                raise ValueError(
+                    "Boozer trial trace row solver route differs from the request"
+                )
+            measurement_maxiter = typed_measurement.get("maxiter")
+            if not isinstance(measurement_maxiter, int) or isinstance(
+                measurement_maxiter, bool
+            ):
+                raise TypeError("Boozer trial trace row omitted maxiter")
+            if measurement_maxiter != maxiter:
+                raise ValueError(
+                    "Boozer trial trace row maxiter differs from the request"
+                )
+            validate_boozer_trial_trace(
+                output / _BOOZER_TRIAL_TRACE_ARTIFACT_NAME,
+                expected_provider=provider,
+                expected_production_route=expected_production_route,
+                expected_maxiter=maxiter,
+            )
+        elif trial_trace is not None:
+            raise ValueError("provider child emitted an unrequested trial trace")
+        typed_measurements.append(
+            {
+                **typed_measurement,
+                "peak_vram_mib": memory_artifact.peak_used_memory_mib,
+                "diagnostic_artifacts": {
+                    **cast(dict[str, object], diagnostic_artifacts),
+                    "memory_trace": _GPU_MEMORY_ARTIFACT_NAME,
+                },
+            }
+        )
+    memory_artifact_path = output / _GPU_MEMORY_ARTIFACT_NAME
+    memory_artifact_path.write_text(
+        json.dumps(asdict(memory_artifact), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    measurements_path.write_text(
+        json.dumps(
+            {**payload, "measurements": typed_measurements}, indent=2, sort_keys=True
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    git_commit = payload.get("git_commit")
+    git_clean = payload.get("git_clean")
+    if not isinstance(git_commit, str) or not git_commit:
+        raise TypeError(f"provider child {provider!r} omitted git commit")
+    if not isinstance(git_clean, bool):
+        raise TypeError(f"provider child {provider!r} omitted clean state")
+    child_provenance: dict[str, object] = {
+        "provider": provider,
+        "measurements_path": f"{provider}/measurements.json",
+        "measurements_sha256": _sha256_file(measurements_path),
+        "gpu_memory_path": f"{provider}/{_GPU_MEMORY_ARTIFACT_NAME}",
+        "gpu_memory_sha256": _sha256_file(memory_artifact_path),
+        "measurement_count": len(typed_measurements),
+        "git_commit": git_commit,
+        "git_clean": git_clean,
+        "runtime_environment": payload["runtime_environment"],
+        "requested_device": payload["requested_device"],
+        "method": payload["method"],
+        "device_identity": payload.get("device_identity"),
+    }
+    if capture_boozer_trial_trace:
+        trial_trace_path = output / _BOOZER_TRIAL_TRACE_ARTIFACT_NAME
+        child_provenance.update(
+            trial_trace_path=(
+                f"{provider}/{_BOOZER_TRIAL_TRACE_ARTIFACT_NAME}"
+            ),
+            trial_trace_sha256=_sha256_file(trial_trace_path),
+        )
+    return typed_measurements, child_provenance
 
 
 def main() -> int:
@@ -1173,38 +1660,65 @@ def main() -> int:
     parser.add_argument("--maxiter", type=int, default=20)
     parser.add_argument("--maxcor", type=int, default=10)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--capture-boozer-trial-trace", action="store_true")
     parser.add_argument("--provider-child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     _validate_intent_environment(args.device, args.intent)
-    backend = jax.default_backend()
-    devices = cast(tuple[object, ...], tuple(jax.devices()))
-    device_platforms = tuple(str(getattr(device, "platform", "")) for device in devices)
-    if args.device == "cpu":
-        if backend != "cpu" or any(platform != "cpu" for platform in device_platforms):
-            raise RuntimeError(
-                f"requested CPU execution, got backend={backend!r}, devices={devices!r}"
-            )
-    elif backend not in {"cuda", "gpu", "rocm"} or any(
-        platform not in {"cuda", "gpu", "rocm"} for platform in device_platforms
-    ):
-        raise RuntimeError(
-            f"requested strict GPU execution, got backend={backend!r}, devices={devices!r}"
-        )
-    fixture_build_started = time.perf_counter()
-    with _RSSPhase("fixture_build") as fixture_phase:
-        selected_cases = [fixture(name.strip()) for name in args.cases.split(",")]
-    fixture_phase_rss = fixture_phase.measurement()
-    fixture_build_seconds = time.perf_counter() - fixture_build_started
-    fixture_build_peak_rss_kib = _peak_rss_kib()
-    method: Method = args.method or selected_cases[0].method
-    if any(fixture_case.method != method for fixture_case in selected_cases):
+    case_names = tuple(name.strip() for name in args.cases.split(","))
+    if not case_names or any(not name for name in case_names):
+        raise ValueError("at least one nonempty fixture name is required")
+    method: Method = args.method or fixture_method(case_names[0])
+    if any(fixture_method(name) != method for name in case_names):
         raise ValueError("selected fixtures require different solver methods")
     providers = [provider.strip() for provider in args.providers.split(",")]
     invalid = set(providers).difference({"native", "custom", "optax"})
     if invalid:
         raise ValueError(f"unknown providers: {sorted(invalid)}")
+    if args.capture_boozer_trial_trace:
+        if case_names != ("boozer",):
+            raise ValueError("Boozer trial capture requires only the Boozer fixture")
+        if method != "bfgs":
+            raise ValueError("Boozer trial capture requires method='bfgs'")
+        if any(provider not in {"native", "custom"} for provider in providers):
+            raise ValueError(
+                "Boozer trial capture supports only native and custom providers"
+            )
+    selected_cases: list[Fixture] = []
+    provider_children: list[dict[str, object]] = []
     if args.provider_child:
+        if len(providers) != 1:
+            raise ValueError("provider child requires exactly one provider")
+        backend = jax.default_backend()
+        devices = cast(tuple[object, ...], tuple(jax.devices()))
+        device_platforms = tuple(
+            str(getattr(device, "platform", "")) for device in devices
+        )
+        if args.device == "cpu":
+            if backend != "cpu" or any(
+                platform != "cpu" for platform in device_platforms
+            ):
+                raise RuntimeError(
+                    f"requested CPU execution, got backend={backend!r}, "
+                    f"devices={devices!r}"
+                )
+        elif (
+            len(devices) != 1
+            or backend not in {"cuda", "gpu", "rocm"}
+            or any(
+                platform not in {"cuda", "gpu", "rocm"} for platform in device_platforms
+            )
+        ):
+            raise RuntimeError(
+                "requested strict single-GPU execution, "
+                f"got backend={backend!r}, devices={devices!r}"
+            )
+        fixture_build_started = time.perf_counter()
+        with _RSSPhase("fixture_build") as fixture_phase:
+            selected_cases = [fixture(name) for name in case_names]
+        fixture_phase_rss = fixture_phase.measurement()
+        fixture_build_seconds = time.perf_counter() - fixture_build_started
+        fixture_build_peak_rss_kib = _peak_rss_kib()
         measurements = [
             _measurement(
                 fixture_case,
@@ -1222,32 +1736,93 @@ def main() -> int:
             for fixture_case in selected_cases
         ]
     else:
+        backend = "provider-child"
+        devices = ()
         measurements = []
         for provider in providers:
             child_output = args.output / provider
-            measurements.extend(
-                _run_provider_child(
-                    provider=provider,
-                    cases=args.cases,
-                    device=args.device,
-                    intent=args.intent,
-                    maxiter=args.maxiter,
-                    maxcor=args.maxcor,
-                    output=child_output,
-                )
+            child_measurements, child_provenance = _run_provider_child(
+                provider=cast(Provider, provider),
+                cases=args.cases,
+                device=args.device,
+                intent=args.intent,
+                method=method,
+                maxiter=args.maxiter,
+                maxcor=args.maxcor,
+                output=child_output,
+                capture_boozer_trial_trace=args.capture_boozer_trial_trace,
             )
+            measurements.extend(child_measurements)
+            provider_children.append(child_provenance)
     args.output.mkdir(parents=True, exist_ok=True)
     measurement_payload = [
         asdict(measurement) if isinstance(measurement, Measurement) else measurement
         for measurement in measurements
     ]
-    git_commit, git_clean = _checkout_provenance()
+    if args.provider_child and args.capture_boozer_trial_trace:
+        if len(selected_cases) != 1 or len(measurement_payload) != 1:
+            raise RuntimeError("Boozer trial capture requires one child measurement")
+        row = measurement_payload[0]
+        if not isinstance(row, dict):
+            raise TypeError("Boozer trial capture requires an object measurement")
+        trial_trace_path = args.output / _BOOZER_TRIAL_TRACE_ARTIFACT_NAME
+        diagnostic_result = run_boozer_host_diagnostic(
+            selected_cases[0],
+            provider=cast(TrialProvider, providers[0]),
+            manifest_path=trial_trace_path,
+            maxiter=args.maxiter,
+            maxls=_SOLVER_MAXLS,
+            gtol=_SOLVER_GTOL,
+        )
+        if diagnostic_result.trial_trace != trial_trace_path:
+            raise RuntimeError("Boozer diagnostic wrote an unexpected trial path")
+        diagnostic_artifacts = row.get("diagnostic_artifacts")
+        if not isinstance(diagnostic_artifacts, dict):
+            raise TypeError("Boozer measurement omitted diagnostic artifacts")
+        measurement_payload[0] = {
+            **row,
+            "diagnostic_artifacts": {
+                **cast(dict[str, object], diagnostic_artifacts),
+                "trial_trace": _BOOZER_TRIAL_TRACE_ARTIFACT_NAME,
+            },
+        }
+    if not measurement_payload:
+        raise RuntimeError("runner produced no measurements")
+    if args.provider_child:
+        device_identity_payload = asdict(_device_identity(args.device))
+        devices_payload = [str(device) for device in devices]
+    else:
+        first_identity = measurement_payload[0].get("device_identity")
+        if not isinstance(first_identity, dict):
+            raise TypeError("provider child omitted device identity")
+        device_identity_payload = first_identity
+        backend = str(first_identity.get("backend"))
+        devices_payload = sorted(
+            {
+                str(cast(dict[str, object], row["device_identity"])["jax_device"])
+                for row in measurement_payload
+            }
+        )
+    git_commit, orchestrator_git_clean = _checkout_provenance()
+    if args.provider_child:
+        provider_children = []
+        git_clean = orchestrator_git_clean
+    else:
+        child_commits = {cast(str, child["git_commit"]) for child in provider_children}
+        if child_commits != {git_commit}:
+            raise RuntimeError(
+                "provider child commit does not match the orchestrator checkout"
+            )
+        git_clean = orchestrator_git_clean and all(
+            child["git_clean"] is True for child in provider_children
+        )
     payload = {
-        "schema_version": 6,
+        "schema_version": _RUNNER_SCHEMA_VERSION,
         "argv": list(sys.argv),
         "requested_device": args.device,
         "backend": backend,
-        "devices": [str(device) for device in devices],
+        "devices": devices_payload,
+        "device_identity": device_identity_payload,
         "python_version": platform.python_version(),
         "method": method,
         "jax_version": jax.__version__,
@@ -1258,11 +1833,16 @@ def main() -> int:
         "runtime_environment": _runtime_environment_payload(),
         "git_commit": git_commit,
         "git_clean": git_clean,
-        "provider_child_timeout_seconds": _PROVIDER_CHILD_TIMEOUT_SECONDS,
+        "orchestrator_git_clean": orchestrator_git_clean,
+        "provider_child": args.provider_child,
+        "provider_children": provider_children,
+        "provider_child_timeout_seconds": _provider_child_timeout_seconds(args.cases),
         "provider_child_rss_limit_kib": _PROVIDER_CHILD_RSS_LIMIT_KIB,
         "provider_child_term_grace_seconds": _PROVIDER_CHILD_TERM_GRACE_SECONDS,
         "measurements": measurement_payload,
     }
+    if args.capture_boozer_trial_trace:
+        payload["capture_boozer_trial_trace"] = True
     (args.output / "measurements.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
