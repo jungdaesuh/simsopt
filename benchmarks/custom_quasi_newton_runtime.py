@@ -899,7 +899,7 @@ def _stopping_reason(
     maxiter: int,
     status: int | None,
     success: bool,
-    finite: bool = True,
+    finite: bool,
 ) -> str:
     """Classify the terminal state without masking a nonfinite endpoint."""
 

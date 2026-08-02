@@ -6,6 +6,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
@@ -367,6 +368,56 @@ def test_native_measurement_resets_mutable_provider_between_runs() -> None:
     assert state["resets"] == 2
     assert state["first_evaluation_after_reset"] == [0, 0]
     assert np.isfinite(measurement.final_objective)
+
+
+def test_measurement_classifies_nonfinite_endpoint_before_iteration_limit(
+    monkeypatch,
+) -> None:
+    fixture_case = Fixture(
+        name="synthetic_nonfinite_endpoint",
+        objective=lambda x: jnp.sum(x * x),
+        initial=np.asarray([1.0], dtype=np.float64),
+        expected_dimension=1,
+        source="synthetic_nonfinite_endpoint",
+        certificate="synthetic endpoint classification contract",
+        method="lbfgs",
+    )
+    result = SimpleNamespace(
+        f_k=jnp.asarray(1.0, dtype=jnp.float64),
+        g_k=jnp.asarray([np.nan], dtype=jnp.float64),
+        k=jnp.asarray(1),
+        x_k=jnp.asarray([np.inf], dtype=jnp.float64),
+    )
+
+    monkeypatch.setattr(
+        runtime,
+        "_initial_value_and_grad",
+        lambda *_args, **_kwargs: (1.0, np.asarray([1.0], dtype=np.float64)),
+    )
+    monkeypatch.setattr(runtime, "_prepare_custom", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "_run_custom",
+        lambda *_args, **_kwargs: (result, 1, 1, False, (), None),
+    )
+
+    measurement = runtime._measurement(
+        fixture_case,
+        "custom",
+        "cpu",
+        "parity",
+        fixture_case.initial.copy(),
+        maxiter=1,
+        maxcor=3,
+        method="lbfgs",
+        fixture_build_seconds=0.0,
+        fixture_build_peak_rss_kib=0,
+    )
+
+    assert measurement.stopping_reason == "nonfinite"
+    certificate = measurement.fixture_contract["final_certificate_fields"]
+    assert isinstance(certificate, dict)
+    assert certificate["stopping_reason"] == "nonfinite"
 
 
 def test_optax_comparator_uses_a_jitted_step(monkeypatch) -> None:
