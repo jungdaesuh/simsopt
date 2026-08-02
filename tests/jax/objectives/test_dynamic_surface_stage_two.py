@@ -12,8 +12,12 @@ from simsopt.field import (
     RegularizedCoil,
     coils_via_symmetries,
 )
-from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
-from simsopt.objectives import SquaredFlux
+from simsopt.geo import (
+    MeanSquaredCurvature,
+    SurfaceRZFourier,
+    create_equally_spaced_curves,
+)
+from simsopt.objectives import QuadraticPenalty, SquaredFlux
 from simsopt_jax.objectives.dynamic_surface_stage_two import (
     SurfaceRZFourierDofContract,
     freeze_coil_dof_extraction_spec,
@@ -212,6 +216,47 @@ def test_dynamic_surface_stage_two_matches_native_local_flux_and_mixed_gradient(
     np.testing.assert_allclose(
         np.asarray(surface_gradient),
         native_surface_gradient,
+        rtol=2.0e-10,
+        atol=2.0e-12,
+    )
+
+
+def test_dynamic_surface_stage_two_matches_native_identity_msc_penalty() -> None:
+    contract, field, coil_dofs, surface_dofs, surface, coils = _problem()
+    objective = make_dynamic_surface_stage_two_objective(
+        field,
+        contract,
+        StageTwoObjectiveConfig(
+            num_base_curves=1,
+            mean_squared_curvature_threshold=10.0,
+            mean_squared_curvature_target_mode="identity",
+            mean_squared_curvature_weight=1.0e-3,
+        ),
+        definition="local",
+    )
+    value, coil_gradient = jax.jit(jax.value_and_grad(objective, argnums=0))(
+        coil_dofs,
+        surface_dofs,
+    )
+
+    native_field = BiotSavart(coils)
+    native_objective = SquaredFlux(surface, native_field, definition="local") + (
+        1.0e-3
+        * QuadraticPenalty(
+            MeanSquaredCurvature(coils[0].curve),
+            10.0,
+        )
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(value),
+        native_objective.J(),
+        rtol=2.0e-12,
+        atol=2.0e-14,
+    )
+    np.testing.assert_allclose(
+        np.asarray(coil_gradient),
+        np.asarray(native_objective.dJ(), dtype=np.float64),
         rtol=2.0e-10,
         atol=2.0e-12,
     )

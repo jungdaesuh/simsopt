@@ -270,7 +270,6 @@ def _native(bundle: InputBundle, arrays: dict[str, np.ndarray]) -> LaneObservati
         QuadraticPenalty(
             value,
             _configuration_float(bundle, "mean_squared_curvature_threshold"),
-            "max",
         )
         for value in mean_squared_curvatures
     ]
@@ -450,6 +449,7 @@ def _jax(
             bundle,
             "mean_squared_curvature_threshold",
         ),
+        mean_squared_curvature_target_mode="identity",
         mean_squared_curvature_weight=_configuration_float(
             bundle,
             "mean_squared_curvature_weight",

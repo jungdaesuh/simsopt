@@ -1,0 +1,18 @@
+Command:
+PYTHONPATH=. JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCATOR=platform JAX_ENABLE_X64=true timeout 150s .venv-qn-gpu/bin/python benchmarks/custom_quasi_newton_runtime.py --device gpu --intent fast --providers optax --cases coil47 --maxiter 20 --maxcor 10 --output /tmp/coil47-optax-gpu-maxiter20.dtsDyl
+
+Observed output:
+E0801 18:57:41.472453  625480 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0801 18:57:41.496559  625253 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+
+The provider child exceeded the runner's 120-second watchdog and exited after
+TERM. No solver payload was produced, so this receipt is incomplete evidence,
+not a result.
+
+Recorded runner error:
+RuntimeError: provider child 626195 exceeded 120-second watchdog; child exited after TERM
+stdout:
+None
+stderr:
+E0801 18:57:49.904846  626393 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)
+E0801 18:57:49.919729  626195 cuda_executor.cc:1526] Could not get kernel mode driver version: (INVALID_ARGUMENT: Version does not match the format X.Y.Z)

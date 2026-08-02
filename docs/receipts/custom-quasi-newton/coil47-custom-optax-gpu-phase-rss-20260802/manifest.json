@@ -1,0 +1,35 @@
+{
+  "archive_uri": "repo://.artifacts/custom-quasi-newton-archive/coil47-custom-optax-gpu-phase-rss-20260802",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "8acfc32a4eef3421c9b1fdc38315478d3b95d7d0127738d4bae0ab6e60030564"
+    },
+    {
+      "path": "raw/custom/measurements.json",
+      "sha256": "8b765824e28a520f4dfd9ae53e086ce5aca77613a1f28f01fcfebbc7145053ff"
+    },
+    {
+      "path": "raw/optax/measurements.json",
+      "sha256": "cc2561084d69a686c06da75718ac8bb5e82f4f5107b41ac386b1c7aec4bf4fcb"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "658b3ebef9af22e6bc6a6037ffa4da10a8b2a5c295fb3bcd7a836b8eef8b7081"
+    }
+  ],
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_gpu.txt",
+    "sha256": "fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8"
+  },
+  "kind": "custom-quasi-newton-runner",
+  "receipt_id": "coil47-custom-optax-gpu-phase-rss-20260802",
+  "schema_version": 1,
+  "source_runs": [
+    "custom",
+    "optax"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}

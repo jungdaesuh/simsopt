@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Callable, Generic, TypeVar
 
 import jax
@@ -21,7 +21,6 @@ from simsopt_jax.geo.optimizers._evaluation_provider import (
     _require_host_numeric_leaf,
 )
 from simsopt_jax.runtime.host_boundary import host_array
-
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.10.0"
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
@@ -358,7 +357,22 @@ def _prepare_optimizer_pytree_adapter(x0):
     )
 
 
-def _prepare_optimizer_callable_inputs(fun, x0, *, value_and_grad, callback):
+_OptimizerCallable = Callable[..., object]
+_PreparedOptimizerInputs = tuple[
+    _OptimizerCallable,
+    object,
+    object | None,
+    _OptimizerPytreeAdapter[object] | None,
+]
+
+
+def _prepare_optimizer_callable_inputs(
+    fun: _OptimizerCallable,
+    x0: object,
+    *,
+    value_and_grad: bool,
+    callback: object | None,
+) -> _PreparedOptimizerInputs:
     adapter = _prepare_optimizer_pytree_adapter(x0)
     if adapter is None:
         return fun, x0, callback, None

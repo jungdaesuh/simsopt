@@ -2,42 +2,47 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import NamedTuple, Protocol, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from simsopt_jax.geo.optimizer_host_lbfgs import (
+    LINE_SEARCH_FAILURE_REASON_FAILED,
+    line_search_failure_reason_to_code,
+)
 from simsopt_jax.runtime.host_boundary import (
     host_array,
-    host_bool,
     host_float,
     host_int,
+    host_transfer_phase,
+    host_value,
 )
 from simsopt_jax.runtime.jaxpr_closure import (
     closure_converted_value_and_grad,
     device_put_closure_consts,
 )
+
 from .._shared import (
     _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     _prepare_optimizer_callable_inputs,
 )
-from simsopt_jax.geo.optimizer_host_lbfgs import (
-    LINE_SEARCH_FAILURE_REASON_FAILED,
-    line_search_failure_reason_to_code,
-)
+from . import _lbfgsb_scipy as lbfgsb
 from ._common import (
     _as_jax_dtype,
     _cached_private_solver,
+    _int_scalar,
     _normalize_lbfgs_counter_limit,
     _require_private_optimizer_runtime,
     _scalar_value_and_grad,
 )
-from . import _lbfgsb_scipy as lbfgsb
 from ._types import (
     _LBFGSInvalidStepLog,
     _LBFGSResults,
 )
-
 
 _SCIPY_LBFGSB_DEFAULT_MAXITER = 15000
 _SCIPY_LBFGSB_DEFAULT_MAXFUN = 15000
@@ -60,42 +65,91 @@ _LBFGS_STEP_ENTRY_KIND_BY_CODE = {
 class _LbfgsbStepwiseHostStatus(NamedTuple):
     terminal: bool
     entry_kind: str
+    accepted_new_x: bool
+    x: np.ndarray | None = None
+    f: float | None = None
+    g: np.ndarray | None = None
+    n_iterations: int | None = None
+    nfev: int | None = None
+    njev: int | None = None
 
 
-def _lbfgsb_unconstrained_fast_path_enabled(bounds) -> bool:
+_LBFGSConsts = tuple[jax.Array, ...]
+_LBFGSValueAndGrad = Callable[
+    [jax.Array, _LBFGSConsts],
+    tuple[jax.Array, jax.Array],
+]
+_LBFGSInitialState = Callable[[jax.Array], lbfgsb.LbfgsbState]
+_LBFGSAdvance = Callable[
+    [
+        lbfgsb.LbfgsbState,
+        _LBFGSConsts,
+        jax.Array,
+        jax.Array,
+    ],
+    lbfgsb.LbfgsbMacroStepResult,
+]
+_LBFGSResultPayload = Callable[
+    [lbfgsb.LbfgsbState, jax.Array, jax.Array],
+    _LBFGSResults,
+]
+_LBFGSInitialValueAndGrad = tuple[jax.Array, jax.Array]
+_LBFGSObserver = Callable[[_LbfgsbStepwiseHostStatus], object]
+_LBFGSCallback = Callable[[np.ndarray], object]
+_LBFGSProgressCallback = Callable[[int, float, float], object]
+_LBFGSDiagnosticCallback = Callable[..., object]
+
+
+def _lbfgsb_unconstrained_fast_path_enabled(bounds: object | None) -> bool:
     return bounds is None
 
 
 # `lbfgs-ondevice` keeps the SciPy-compatible L-BFGS-B contract; only its
 # execution boundary mirrors Optax-style init/update/state/result structure.
-def _record_diagnostic_event(callback, label, **fields):
+def _record_diagnostic_event(
+    callback: Callable[..., object] | None,
+    label: str,
+    **fields: object,
+) -> None:
     if callback is not None:
         callback(label, **fields)
 
 
-def _closure_converted_lbfgs_value_and_grad(value_and_grad_fun, example_x):
-    return closure_converted_value_and_grad(value_and_grad_fun, example_x)
+def _closure_converted_lbfgs_value_and_grad(
+    value_and_grad_fun: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    example_x: jax.Array,
+) -> tuple[_LBFGSValueAndGrad, _LBFGSConsts]:
+    converted, consts = closure_converted_value_and_grad(value_and_grad_fun, example_x)
+    return converted, consts
 
 
-def _call_lbfgs_value_and_grad(value_and_grad, x, value_and_grad_consts):
+def _call_lbfgs_value_and_grad(
+    value_and_grad: _LBFGSValueAndGrad
+    | Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    x: jax.Array,
+    value_and_grad_consts: _LBFGSConsts | None,
+) -> tuple[jax.Array, jax.Array]:
     if value_and_grad_consts is None:
         return value_and_grad(x)
     return value_and_grad(x, value_and_grad_consts)
 
 
-def _device_put_lbfgs_consts(value_and_grad_consts, example_x):
+def _device_put_lbfgs_consts(
+    value_and_grad_consts: _LBFGSConsts,
+    example_x: jax.Array,
+) -> _LBFGSConsts:
     return device_put_closure_consts(value_and_grad_consts, example_x)
 
 
 def _cached_lbfgs_value_and_grad_kernel(
-    value_and_grad_fun,
+    value_and_grad_fun: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
     *,
-    cache_owner,
-    adapter,
-    objective_mode,
-    dtype,
-    example_x,
-):
+    cache_owner: object | None,
+    adapter: object | None,
+    objective_mode: str,
+    dtype: jax.typing.DTypeLike,
+    example_x: jax.Array,
+) -> tuple[_LBFGSValueAndGrad, _LBFGSConsts]:
     converted_value_and_grad, value_and_grad_consts = (
         _closure_converted_lbfgs_value_and_grad(value_and_grad_fun, example_x)
     )
@@ -108,7 +162,10 @@ def _cached_lbfgs_value_and_grad_kernel(
     )
 
     def build_kernel():
-        def lbfgs_private_value_and_grad(x, consts):
+        def lbfgs_private_value_and_grad(
+            x: jax.Array,
+            consts: _LBFGSConsts,
+        ) -> tuple[jax.Array, jax.Array]:
             value, grad = converted_value_and_grad(x, consts)
             return (
                 jnp.asarray(value, dtype=x.dtype),
@@ -127,7 +184,13 @@ def _cached_lbfgs_value_and_grad_kernel(
     return value_and_grad_kernel, value_and_grad_consts
 
 
-def _lbfgsb_cache_context(cache_owner, adapter, objective_mode, dtype, shape):
+def _lbfgsb_cache_context(
+    cache_owner: object | None,
+    adapter: object | None,
+    objective_mode: str,
+    dtype: jax.typing.DTypeLike,
+    shape: tuple[int, ...],
+) -> tuple[object | None, tuple[object, ...]]:
     structured_solver_cache_token = None
     if adapter is not None and cache_owner is not None:
         structured_solver_cache_token = getattr(
@@ -153,14 +216,14 @@ def _lbfgsb_cache_context(cache_owner, adapter, objective_mode, dtype, shape):
 
 def _lbfgsb_initial_state_kernel(
     *,
-    cache_owner=None,
-    cache_key_prefix=(),
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
     m: int,
     ftol: float,
     gtol: float,
     maxls: int,
 ):
-    def build(x0):
+    def build(x0: jax.Array) -> lbfgsb.LbfgsbState:
         return lbfgsb.lbfgsb_initial_state(
             x0,
             m=m,
@@ -186,17 +249,20 @@ def _lbfgsb_initial_state_kernel(
 
 
 def _lbfgsb_mainlb_kernel(
-    value_and_grad,
+    value_and_grad: _LBFGSValueAndGrad,
     *,
-    cache_owner=None,
-    cache_key_prefix=(),
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
     maxiter: int,
     maxfun: int,
-    accepted_step_callback=None,
-):
+    accepted_step_callback: _LBFGSObserver | None = None,
+) -> Callable[[lbfgsb.LbfgsbState, _LBFGSConsts | None], _LBFGSResults]:
     """Legacy full-solve compile wrapper kept only for explicit debug runs."""
 
-    def run(state: lbfgsb.LbfgsbState, value_and_grad_consts=None):
+    def run(
+        state: lbfgsb.LbfgsbState,
+        value_and_grad_consts: _LBFGSConsts | None = None,
+    ) -> _LBFGSResults:
         def value_and_grad_with_consts(x):
             return _call_lbfgs_value_and_grad(
                 value_and_grad,
@@ -215,8 +281,8 @@ def _lbfgsb_mainlb_kernel(
         return _lbfgsb_state_to_lbfgs_results(
             final_state,
             history=history,
-            maxiter_limit=jnp.asarray(maxiter, dtype=jnp.int32),
-            maxfun_limit=jnp.asarray(maxfun, dtype=jnp.int32),
+            maxiter_limit=_int_scalar(maxiter),
+            maxfun_limit=_int_scalar(maxfun),
         )
 
     run.__name__ = "lbfgs_private_monolithic_mainlb_solver"
@@ -233,17 +299,26 @@ def _lbfgsb_mainlb_kernel(
 
 
 def _lbfgsb_advance_to_next_observable_kernel(
-    value_and_grad,
+    value_and_grad: _LBFGSValueAndGrad,
     *,
-    cache_owner=None,
-    cache_key_prefix=(),
-    maxiter: int,
-    maxfun: int,
-    accepted_step_callback=None,
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
+    maxiter: int | None = None,
+    maxfun: int | None = None,
+    accepted_step_callback: _LBFGSObserver | None = None,
     entry_kind: str = _LBFGS_STEP_ENTRY_SEARCH,
     unconstrained_fast_path: bool = False,
-):
-    def run(state: lbfgsb.LbfgsbState, value_and_grad_consts=None):
+    dynamic_limits: bool = False,
+) -> Callable[..., lbfgsb.LbfgsbMacroStepResult]:
+    if not dynamic_limits and (maxiter is None or maxfun is None):
+        raise ValueError("static L-BFGS step kernels require maxiter and maxfun")
+
+    def run_with_limits(
+        state: lbfgsb.LbfgsbState,
+        value_and_grad_consts: _LBFGSConsts | None,
+        maxiter_limit: jax.Array,
+        maxfun_limit: jax.Array,
+    ) -> lbfgsb.LbfgsbMacroStepResult:
         def value_and_grad_with_consts(x):
             return _call_lbfgs_value_and_grad(
                 value_and_grad,
@@ -255,8 +330,8 @@ def _lbfgsb_advance_to_next_observable_kernel(
             return lbfgsb.lbfgsb_advance_from_start_to_next_observable(
                 value_and_grad_with_consts,
                 state,
-                maxiter=maxiter,
-                maxfun=maxfun,
+                maxiter=maxiter_limit,
+                maxfun=maxfun_limit,
                 accepted_step_callback=accepted_step_callback,
                 unconstrained_fast_path=unconstrained_fast_path,
             )
@@ -264,29 +339,57 @@ def _lbfgsb_advance_to_next_observable_kernel(
             return lbfgsb.lbfgsb_reenter_new_x(
                 value_and_grad_with_consts,
                 state,
-                maxiter=maxiter,
-                maxfun=maxfun,
+                maxiter=maxiter_limit,
+                maxfun=maxfun_limit,
                 accepted_step_callback=accepted_step_callback,
                 unconstrained_fast_path=unconstrained_fast_path,
             )
         return lbfgsb.lbfgsb_advance_from_search_to_next_observable(
             value_and_grad_with_consts,
             state,
-            maxiter=maxiter,
-            maxfun=maxfun,
+            maxiter=maxiter_limit,
+            maxfun=maxfun_limit,
             accepted_step_callback=accepted_step_callback,
             unconstrained_fast_path=unconstrained_fast_path,
         )
 
+    if dynamic_limits:
+
+        def run(
+            state: lbfgsb.LbfgsbState,
+            value_and_grad_consts: _LBFGSConsts,
+            maxiter_limit: jax.Array,
+            maxfun_limit: jax.Array,
+        ) -> lbfgsb.LbfgsbMacroStepResult:
+            return run_with_limits(
+                state,
+                value_and_grad_consts,
+                maxiter_limit,
+                maxfun_limit,
+            )
+
+    else:
+
+        def run(
+            state: lbfgsb.LbfgsbState,
+            value_and_grad_consts: _LBFGSConsts | None = None,
+        ) -> lbfgsb.LbfgsbMacroStepResult:
+            return run_with_limits(
+                state,
+                value_and_grad_consts,
+                _int_scalar(maxiter),
+                _int_scalar(maxfun),
+            )
+
     run.__name__ = "lbfgs_private_macro_step_solver"
+    budget_key = ("dynamic",) if dynamic_limits else (int(maxiter), int(maxfun))
     return _cached_private_solver(
         cache_owner if accepted_step_callback is None else None,
         cache_key=(
             "lbfgsb-advance-to-next-observable",
             *cache_key_prefix,
             entry_kind,
-            int(maxiter),
-            int(maxfun),
+            *budget_key,
             bool(unconstrained_fast_path),
         ),
         builder=lambda: jax.jit(run),
@@ -295,18 +398,24 @@ def _lbfgsb_advance_to_next_observable_kernel(
 
 def _lbfgsb_result_payload_kernel(
     *,
-    cache_owner=None,
-    cache_key_prefix=(),
-    maxiter: int,
-    maxfun: int,
-):
-    def run(state: lbfgsb.LbfgsbState):
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
+    maxiter: int | None = None,
+    maxfun: int | None = None,
+) -> Callable[[lbfgsb.LbfgsbState, jax.Array, jax.Array], _LBFGSResults]:
+    del maxiter, maxfun
+
+    def run(
+        state: lbfgsb.LbfgsbState,
+        maxiter: jax.Array,
+        maxfun: jax.Array,
+    ) -> _LBFGSResults:
         history = lbfgsb.lbfgsb_inverse_hessian_history(state)
         return _lbfgsb_state_to_lbfgs_results(
             state,
             history=history,
-            maxiter_limit=jnp.asarray(maxiter, dtype=jnp.int32),
-            maxfun_limit=jnp.asarray(maxfun, dtype=jnp.int32),
+            maxiter_limit=maxiter,
+            maxfun_limit=maxfun,
         )
 
     run.__name__ = "lbfgs_private_result_payload_solver"
@@ -315,8 +424,6 @@ def _lbfgsb_result_payload_kernel(
         cache_key=(
             "lbfgsb-result-payload",
             *cache_key_prefix,
-            int(maxiter),
-            int(maxfun),
         ),
         builder=lambda: jax.jit(run),
     )
@@ -324,10 +431,10 @@ def _lbfgsb_result_payload_kernel(
 
 def _lbfgsb_callback_stop_state_kernel(
     *,
-    cache_owner=None,
-    cache_key_prefix=(),
-):
-    def stop_for_callback(state: lbfgsb.LbfgsbState):
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
+) -> Callable[[lbfgsb.LbfgsbState], lbfgsb.LbfgsbState]:
+    def stop_for_callback(state: lbfgsb.LbfgsbState) -> lbfgsb.LbfgsbState:
         workspace = state.workspace._replace(
             task=lbfgsb._lbfgsb_task(lbfgsb.STOP, lbfgsb.STOP_CALLB)
         )
@@ -342,14 +449,14 @@ def _lbfgsb_callback_stop_state_kernel(
 
 def _lbfgsb_start_with_initial_value_and_grad_kernel(
     *,
-    cache_owner=None,
-    cache_key_prefix=(),
-):
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
+) -> Callable[[lbfgsb.LbfgsbState, jax.Array, jax.Array], lbfgsb.LbfgsbState]:
     def start_with_initial_value_and_grad(
         state: lbfgsb.LbfgsbState,
-        value,
-        grad,
-    ):
+        value: jax.Array,
+        grad: jax.Array,
+    ) -> lbfgsb.LbfgsbState:
         return lbfgsb.lbfgsb_start_with_initial_value_and_grad(
             state,
             value,
@@ -366,7 +473,10 @@ def _lbfgsb_start_with_initial_value_and_grad_kernel(
     )
 
 
-def _resolve_scipy_lbfgsb_limits(maxiter, maxfun):
+def _resolve_scipy_lbfgsb_limits(
+    maxiter: int | None,
+    maxfun: int | None,
+) -> tuple[np.int32, np.int32]:
     maxiter_limit = _normalize_lbfgs_counter_limit(
         _SCIPY_LBFGSB_DEFAULT_MAXITER if maxiter is None else maxiter
     )
@@ -390,10 +500,10 @@ def _check_lbfgsb_run_mode(run_mode: str) -> str:
 
 def _resolve_lbfgsb_run_mode_for_runtime(
     run_mode: str,
-    x0,
+    x0: jax.Array,
     *,
-    callback,
-    progress_callback,
+    callback: _LBFGSCallback | None,
+    progress_callback: _LBFGSProgressCallback | None,
     record_optimizer_state_trace: bool,
 ) -> str:
     if not isinstance(x0, jax.core.Tracer):
@@ -420,10 +530,10 @@ def _resolve_lbfgsb_run_mode_for_runtime(
 def _lbfgsb_workspace_bytes(
     n: int,
     maxcor: int,
-    dtype,
+    dtype: jax.typing.DTypeLike,
     *,
     record_optimizer_state_trace: bool = False,
-    maxiter_limit=None,
+    maxiter_limit: int | np.integer | jax.Array | None = None,
 ) -> int:
     float_slots = lbfgsb.lbfgsb_workspace_size(int(n), int(maxcor)) + 29
     int_slots = lbfgsb.lbfgsb_iwa_size(int(n)) + 2 + 2 + 4 + 44
@@ -441,10 +551,10 @@ def _lbfgsb_workspace_bytes(
 
 def _check_lbfgsb_trace_budget(
     d: int,
-    maxiter_limit,
+    maxiter_limit: int | np.integer | jax.Array,
     *,
     record_optimizer_state_trace: bool,
-    max_optimizer_state_trace_bytes,
+    max_optimizer_state_trace_bytes: int | None,
 ) -> None:
     if not record_optimizer_state_trace:
         return
@@ -466,11 +576,21 @@ def _check_lbfgsb_trace_budget(
         )
 
 
-def _resolve_lbfgs_history_size(maxcor, *, maxiter_limit) -> int:
-    return max(1, min(int(maxcor), int(maxiter_limit)))
+def _resolve_lbfgs_history_size(
+    maxcor: int,
+    *,
+    maxiter_limit: int | np.integer | jax.Array,
+) -> int:
+    del maxiter_limit
+    return max(1, int(maxcor))
 
 
-def _lbfgsb_public_status(state, *, maxiter_limit, maxfun_limit):
+def _lbfgsb_public_status(
+    state: lbfgsb.LbfgsbState,
+    *,
+    maxiter_limit: int | np.integer | jax.Array,
+    maxfun_limit: int | np.integer | jax.Array,
+) -> jax.Array:
     return lbfgsb.lbfgsb_public_status_from_state(
         state,
         maxiter=maxiter_limit,
@@ -524,11 +644,11 @@ def _lbfgsb_invalid_step_log(state: lbfgsb.LbfgsbState) -> _LBFGSInvalidStepLog:
 
 def _lbfgsb_state_with_initial_value_and_grad(
     state: lbfgsb.LbfgsbState,
-    initial_value_and_grad,
+    initial_value_and_grad: _LBFGSInitialValueAndGrad,
     *,
-    dtype,
-    cache_owner=None,
-    cache_key_prefix=(),
+    dtype: jax.typing.DTypeLike,
+    cache_owner: object | None = None,
+    cache_key_prefix: tuple[object, ...] = (),
 ) -> lbfgsb.LbfgsbState:
     value, grad = initial_value_and_grad
     value = _as_jax_dtype(value, dtype)
@@ -546,11 +666,11 @@ def _lbfgsb_state_with_initial_value_and_grad(
 
 def _lbfgsb_accepted_step_observer(
     *,
-    callback,
-    progress_callback,
-    optimizer_state_trace,
+    callback: _LBFGSCallback | None,
+    progress_callback: _LBFGSProgressCallback | None,
+    optimizer_state_trace: list[dict[str, object]],
     record_optimizer_state_trace: bool,
-):
+) -> _LBFGSObserver | None:
     if (
         callback is None
         and progress_callback is None
@@ -558,13 +678,32 @@ def _lbfgsb_accepted_step_observer(
     ):
         return None
 
-    def observe(iteration, x, f, g, nfev, njev):
-        x_host = host_array(x, dtype=float)
-        g_host = host_array(g, dtype=float)
-        f_host = host_float(f)
-        iteration_host = host_int(iteration)
-        nfev_host = host_int(nfev)
-        njev_host = host_int(njev)
+    def observe(*args):
+        if len(args) == 1 and isinstance(args[0], _LbfgsbStepwiseHostStatus):
+            status = args[0]
+            x_host = status.x
+            g_host = status.g
+            f_host = status.f
+            iteration_host = status.n_iterations
+            nfev_host = status.nfev
+            njev_host = status.njev
+            if (
+                x_host is None
+                or g_host is None
+                or f_host is None
+                or iteration_host is None
+                or nfev_host is None
+                or njev_host is None
+            ):
+                raise RuntimeError("incomplete packed L-BFGS observer status")
+        else:
+            iteration, x, f, g, nfev, njev = args
+            x_host = host_array(x, dtype=float)
+            g_host = host_array(g, dtype=float)
+            f_host = host_float(f)
+            iteration_host = host_int(iteration)
+            nfev_host = host_int(nfev)
+            njev_host = host_int(njev)
         if callback is not None:
             callback(x_host)
         if progress_callback is not None:
@@ -593,9 +732,9 @@ def _lbfgsb_state_to_lbfgs_results(
     state: lbfgsb.LbfgsbState,
     *,
     history: lbfgsb.LbfgsbInverseHessianHistory,
-    maxiter_limit,
-    maxfun_limit,
-    optimizer_state_trace=(),
+    maxiter_limit: int | np.integer | jax.Array,
+    maxfun_limit: int | np.integer | jax.Array,
+    optimizer_state_trace: tuple[dict[str, object], ...] = (),
 ) -> _LBFGSResults:
     status = _lbfgsb_public_status(
         state,
@@ -628,78 +767,337 @@ def _lbfgsb_state_to_lbfgs_results(
 
 def _lbfgsb_stepwise_host_status(
     step_result: lbfgsb.LbfgsbMacroStepResult,
+    *,
+    include_observation: bool = False,
 ) -> _LbfgsbStepwiseHostStatus:
-    entry_kind = _LBFGS_STEP_ENTRY_KIND_BY_CODE[host_int(step_result.entry_kind)]
+    if include_observation:
+        (
+            terminal,
+            entry_code,
+            accepted_new_x,
+            x,
+            f,
+            g,
+            n_iterations,
+            nfev,
+            njev,
+        ) = host_value(
+            (
+                step_result.terminal,
+                step_result.entry_kind,
+                step_result.accepted_new_x,
+                step_result.state.x,
+                step_result.state.f,
+                step_result.state.g,
+                step_result.state.n_iterations,
+                step_result.state.nfev,
+                step_result.state.njev,
+            )
+        )
+    else:
+        terminal, entry_code, accepted_new_x = host_value(
+            (
+                step_result.terminal,
+                step_result.entry_kind,
+                step_result.accepted_new_x,
+            )
+        )
+        x = f = g = n_iterations = nfev = njev = None
+    entry_kind = _LBFGS_STEP_ENTRY_KIND_BY_CODE[int(entry_code)]
     return _LbfgsbStepwiseHostStatus(
-        terminal=host_bool(step_result.terminal),
+        terminal=bool(terminal),
         entry_kind=entry_kind,
+        accepted_new_x=bool(accepted_new_x),
+        x=None if x is None else host_array(x, dtype=float),
+        f=None if f is None else float(f),
+        g=None if g is None else host_array(g, dtype=float),
+        n_iterations=None if n_iterations is None else int(n_iterations),
+        nfev=None if nfev is None else int(nfev),
+        njev=None if njev is None else int(njev),
     )
 
 
 def _lbfgsb_stepwise_driver(
     state: lbfgsb.LbfgsbState,
-    value_and_grad_consts,
-    advance_from_start,
-    advance_from_search,
-    reenter_new_x,
-    result_payload,
+    value_and_grad_consts: _LBFGSConsts,
+    advance_from_start: Callable[..., lbfgsb.LbfgsbMacroStepResult],
+    advance_from_search: Callable[..., lbfgsb.LbfgsbMacroStepResult],
+    reenter_new_x: Callable[..., lbfgsb.LbfgsbMacroStepResult],
+    result_payload: Callable[..., _LBFGSResults],
     *,
     initial_entry_kind: str,
-    accepted_step_callback=None,
-    callback_stop_state=None,
+    maxiter: int,
+    maxfun: int,
+    accepted_step_callback: _LBFGSObserver | None = None,
+    callback_stop_state: Callable[[lbfgsb.LbfgsbState], lbfgsb.LbfgsbState]
+    | None = None,
 ) -> _LBFGSResults:
     host_status = _LbfgsbStepwiseHostStatus(
         terminal=False,
         entry_kind=initial_entry_kind,
+        accepted_new_x=False,
     )
     while not host_status.terminal:
         if host_status.entry_kind == _LBFGS_STEP_ENTRY_START:
-            step_result = advance_from_start(state, value_and_grad_consts)
+            step_result = advance_from_start(
+                state,
+                value_and_grad_consts,
+                _int_scalar(maxiter),
+                _int_scalar(maxfun),
+            )
         elif host_status.entry_kind == _LBFGS_STEP_ENTRY_NEW_X_REENTRY:
-            step_result = reenter_new_x(state, value_and_grad_consts)
+            step_result = reenter_new_x(
+                state,
+                value_and_grad_consts,
+                _int_scalar(maxiter),
+                _int_scalar(maxfun),
+            )
         else:
-            step_result = advance_from_search(state, value_and_grad_consts)
+            step_result = advance_from_search(
+                state,
+                value_and_grad_consts,
+                _int_scalar(maxiter),
+                _int_scalar(maxfun),
+            )
         state = step_result.state
-        if accepted_step_callback is not None and host_bool(step_result.accepted_new_x):
-            try:
-                accepted_step_callback(
-                    state.n_iterations,
-                    state.x,
-                    state.f,
-                    state.g,
-                    state.nfev,
-                    state.njev,
-                )
-            except StopIteration:
-                if callback_stop_state is None:
-                    raise
-                state = callback_stop_state(state)
-                break
-        host_status = _lbfgsb_stepwise_host_status(step_result)
-    return result_payload(state)
+        transfer_phase = "callback" if accepted_step_callback is not None else "advance"
+        with host_transfer_phase(transfer_phase):
+            step_host_status = _lbfgsb_stepwise_host_status(
+                step_result,
+                include_observation=accepted_step_callback is not None,
+            )
+            if accepted_step_callback is not None and step_host_status.accepted_new_x:
+                try:
+                    accepted_step_callback(step_host_status)
+                except StopIteration:
+                    if callback_stop_state is None:
+                        raise
+                    state = callback_stop_state(state)
+                    break
+        host_status = step_host_status
+    return result_payload(
+        state,
+        _int_scalar(maxiter),
+        _int_scalar(maxfun),
+    )
+
+
+class _LoweredPreparedProgram(Protocol):
+    def compile(self) -> object: ...
+
+
+class _JittedPreparedProgram(Protocol):
+    def lower(self, *args: object) -> _LoweredPreparedProgram: ...
+
+
+def _compile_prepared_program(program: object, *args: object) -> object:
+    """Compile one fixed-shape optimizer program for a prepared run."""
+
+    return cast(_JittedPreparedProgram, program).lower(*args).compile()
+
+
+@dataclass(frozen=True)
+class PreparedLBFGS:
+    """Compiled fixed-shape L-BFGS programs with dynamic run budgets.
+
+    The object follows the same init/update/result separation as Optax while
+    retaining the in-tree SciPy-compatible L-BFGS-B state machine.  Compilation
+    happens in :func:`prepare_lbfgs_private`; :meth:`run` only creates the
+    initial state and drives already-compiled macro-step transitions.
+    """
+
+    initial_state: _LBFGSInitialState
+    value_and_grad: _LBFGSValueAndGrad
+    value_and_grad_consts: _LBFGSConsts
+    advance_from_start: _LBFGSAdvance
+    advance_from_search: _LBFGSAdvance
+    reenter_new_x: _LBFGSAdvance
+    result_payload: _LBFGSResultPayload
+    initial_value: jax.Array
+    initial_gradient: jax.Array
+    history_size: int
+
+    def run(
+        self,
+        x0: jax.Array,
+        *,
+        maxiter: int,
+        maxfun: int | None = None,
+    ) -> _LBFGSResults:
+        maxiter_limit, maxfun_limit = _resolve_scipy_lbfgsb_limits(
+            maxiter,
+            maxfun,
+        )
+        state = self.initial_state(x0)
+        return _lbfgsb_stepwise_driver(
+            state,
+            self.value_and_grad_consts,
+            self.advance_from_start,
+            self.advance_from_search,
+            self.reenter_new_x,
+            self.result_payload,
+            initial_entry_kind=_LBFGS_STEP_ENTRY_START,
+            maxiter=int(maxiter_limit),
+            maxfun=int(maxfun_limit),
+        )
+
+
+def prepare_lbfgs_private(
+    fun: Callable[[jax.Array], jax.Array],
+    x0: jax.typing.ArrayLike,
+    *,
+    cache_owner: object | None = None,
+    maxcor: int = 10,
+    ftol: float = 0.0,
+    gtol: float = 1e-5,
+    maxls: int = 20,
+    x_dtype: jax.typing.DTypeLike | None = None,
+) -> PreparedLBFGS:
+    """Prepare a scalar L-BFGS program for repeated fixed-shape runs.
+
+    ``maxiter`` and ``maxfun`` remain dynamic inputs to the compiled macro
+    steps.  This lets callers measure cold compilation once and then compare
+    warm solver execution without rebuilding the state machine.
+    """
+
+    value_and_grad_fun = _scalar_value_and_grad(fun)
+    prepared_fun, prepared_x0, _callback, adapter = _prepare_optimizer_callable_inputs(
+        value_and_grad_fun,
+        x0,
+        value_and_grad=True,
+        callback=None,
+    )
+    prepared_value_and_grad = cast(
+        Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+        prepared_fun,
+    )
+    params = _require_private_optimizer_runtime(
+        cast(jax.typing.ArrayLike, prepared_x0),
+        dtype=x_dtype,
+    )
+    value_and_grad_kernel, value_and_grad_consts = _cached_lbfgs_value_and_grad_kernel(
+        prepared_value_and_grad,
+        cache_owner=cache_owner,
+        adapter=adapter,
+        objective_mode="scalar",
+        dtype=params.dtype,
+        example_x=params,
+    )
+    solver_cache_owner, solver_cache_key_prefix = _lbfgsb_cache_context(
+        cache_owner,
+        adapter,
+        "scalar",
+        params.dtype,
+        params.shape,
+    )
+    maxiter_limit, maxfun_limit = _resolve_scipy_lbfgsb_limits(1, None)
+    history_size = _resolve_lbfgs_history_size(
+        maxcor,
+        maxiter_limit=maxiter_limit,
+    )
+    initial_state_kernel = _lbfgsb_initial_state_kernel(
+        cache_owner=solver_cache_owner,
+        cache_key_prefix=solver_cache_key_prefix,
+        m=history_size,
+        ftol=ftol,
+        gtol=gtol,
+        maxls=maxls,
+    )
+    initial_state = cast(
+        _LBFGSInitialState,
+        _compile_prepared_program(initial_state_kernel, params),
+    )
+    sample_state = initial_state(params)
+    value_and_grad = cast(
+        _LBFGSValueAndGrad,
+        _compile_prepared_program(
+            value_and_grad_kernel,
+            params,
+            value_and_grad_consts,
+        ),
+    )
+    initial_value, initial_gradient = value_and_grad(
+        params,
+        value_and_grad_consts,
+    )
+    unconstrained_fast_path = _lbfgsb_unconstrained_fast_path_enabled(
+        _LBFGSB_PRIVATE_BOUNDS
+    )
+    compiled_transitions: list[_LBFGSAdvance] = []
+    for entry_kind in (
+        _LBFGS_STEP_ENTRY_START,
+        _LBFGS_STEP_ENTRY_SEARCH,
+        _LBFGS_STEP_ENTRY_NEW_X_REENTRY,
+    ):
+        transition = _lbfgsb_advance_to_next_observable_kernel(
+            value_and_grad_kernel,
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            accepted_step_callback=None,
+            entry_kind=entry_kind,
+            unconstrained_fast_path=unconstrained_fast_path,
+            dynamic_limits=True,
+        )
+        compiled_transitions.append(
+            cast(
+                _LBFGSAdvance,
+                _compile_prepared_program(
+                    transition,
+                    sample_state,
+                    value_and_grad_consts,
+                    _int_scalar(maxiter_limit),
+                    _int_scalar(maxfun_limit),
+                ),
+            )
+        )
+    result_payload_kernel = _lbfgsb_result_payload_kernel(
+        cache_owner=solver_cache_owner,
+        cache_key_prefix=solver_cache_key_prefix,
+    )
+    result_payload = cast(
+        _LBFGSResultPayload,
+        _compile_prepared_program(
+            result_payload_kernel,
+            sample_state,
+            _int_scalar(maxiter_limit),
+            _int_scalar(maxfun_limit),
+        ),
+    )
+    return PreparedLBFGS(
+        initial_state=initial_state,
+        value_and_grad=value_and_grad,
+        value_and_grad_consts=value_and_grad_consts,
+        advance_from_start=compiled_transitions[0],
+        advance_from_search=compiled_transitions[1],
+        reenter_new_x=compiled_transitions[2],
+        result_payload=result_payload,
+        initial_value=initial_value,
+        initial_gradient=initial_gradient,
+        history_size=history_size,
+    )
 
 
 def _minimize_lbfgs_private_impl(
-    value_and_grad_fun,
-    x0,
+    value_and_grad_fun: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    x0: jax.typing.ArrayLike,
     *,
-    cache_owner=None,
-    objective_mode,
-    maxiter=None,
-    maxcor=10,
-    ftol=0.0,
-    gtol=1e-5,
-    maxfun=None,
-    maxls=20,
-    callback=None,
-    progress_callback=None,
-    initial_value_and_grad=None,
-    record_optimizer_state_trace=False,
-    max_optimizer_state_trace_bytes=None,
-    diagnostic_event_callback=None,
-    run_mode=_LBFGS_RUN_MODE_STEPWISE,
-    x_dtype=None,
-):
+    cache_owner: object | None = None,
+    objective_mode: str,
+    maxiter: int | None = None,
+    maxcor: int = 10,
+    ftol: float = 0.0,
+    gtol: float = 1e-5,
+    maxfun: int | None = None,
+    maxls: int = 20,
+    callback: _LBFGSCallback | None = None,
+    progress_callback: _LBFGSProgressCallback | None = None,
+    initial_value_and_grad: _LBFGSInitialValueAndGrad | None = None,
+    record_optimizer_state_trace: bool = False,
+    max_optimizer_state_trace_bytes: int | None = None,
+    diagnostic_event_callback: _LBFGSDiagnosticCallback | None = None,
+    run_mode: str = _LBFGS_RUN_MODE_STEPWISE,
+    x_dtype: jax.typing.DTypeLike | None = None,
+) -> _LBFGSResults:
     run_mode = _check_lbfgsb_run_mode(str(run_mode))
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
@@ -767,36 +1165,36 @@ def _minimize_lbfgs_private_impl(
         record_optimizer_state_trace=bool(record_optimizer_state_trace),
         run_mode=run_mode,
     )
-    state = _lbfgsb_initial_state_kernel(
-        cache_owner=solver_cache_owner,
-        cache_key_prefix=solver_cache_key_prefix,
-        m=history_size,
-        ftol=ftol,
-        gtol=gtol,
-        maxls=maxls,
-    )(x0)
+    with host_transfer_phase("initialization"):
+        state = _lbfgsb_initial_state_kernel(
+            cache_owner=solver_cache_owner,
+            cache_key_prefix=solver_cache_key_prefix,
+            m=history_size,
+            ftol=ftol,
+            gtol=gtol,
+            maxls=maxls,
+        )(x0)
     _record_diagnostic_event(
         diagnostic_event_callback,
         "lbfgs_initial_state_returned",
     )
-    initial_entry_kind = _LBFGS_STEP_ENTRY_START
     if initial_value_and_grad is not None:
         _record_diagnostic_event(
             diagnostic_event_callback,
             "lbfgs_initial_value_and_grad_seed_started",
         )
-        state = _lbfgsb_state_with_initial_value_and_grad(
-            state,
-            initial_value_and_grad,
-            dtype=dtype,
-            cache_owner=solver_cache_owner,
-            cache_key_prefix=solver_cache_key_prefix,
-        )
+        with host_transfer_phase("initialization"):
+            state = _lbfgsb_state_with_initial_value_and_grad(
+                state,
+                initial_value_and_grad,
+                dtype=dtype,
+                cache_owner=solver_cache_owner,
+                cache_key_prefix=solver_cache_key_prefix,
+            )
         _record_diagnostic_event(
             diagnostic_event_callback,
             "lbfgs_initial_value_and_grad_seed_returned",
         )
-        initial_entry_kind = _LBFGS_STEP_ENTRY_SEARCH
     optimizer_state_trace = []
     accepted_step_callback = _lbfgsb_accepted_step_observer(
         callback=callback,
@@ -828,37 +1226,32 @@ def _minimize_lbfgs_private_impl(
             value_and_grad_kernel,
             cache_owner=solver_cache_owner,
             cache_key_prefix=solver_cache_key_prefix,
-            maxiter=int(maxiter_limit_value),
-            maxfun=int(maxfun_limit_value),
             accepted_step_callback=None,
             entry_kind=_LBFGS_STEP_ENTRY_START,
             unconstrained_fast_path=unconstrained_fast_path,
+            dynamic_limits=True,
         )
         advance_from_search = _lbfgsb_advance_to_next_observable_kernel(
             value_and_grad_kernel,
             cache_owner=solver_cache_owner,
             cache_key_prefix=solver_cache_key_prefix,
-            maxiter=int(maxiter_limit_value),
-            maxfun=int(maxfun_limit_value),
             accepted_step_callback=None,
             entry_kind=_LBFGS_STEP_ENTRY_SEARCH,
             unconstrained_fast_path=unconstrained_fast_path,
+            dynamic_limits=True,
         )
         reenter_new_x = _lbfgsb_advance_to_next_observable_kernel(
             value_and_grad_kernel,
             cache_owner=solver_cache_owner,
             cache_key_prefix=solver_cache_key_prefix,
-            maxiter=int(maxiter_limit_value),
-            maxfun=int(maxfun_limit_value),
             accepted_step_callback=None,
             entry_kind=_LBFGS_STEP_ENTRY_NEW_X_REENTRY,
             unconstrained_fast_path=unconstrained_fast_path,
+            dynamic_limits=True,
         )
         result_payload = _lbfgsb_result_payload_kernel(
             cache_owner=solver_cache_owner,
             cache_key_prefix=solver_cache_key_prefix,
-            maxiter=int(maxiter_limit_value),
-            maxfun=int(maxfun_limit_value),
         )
         callback_stop_state = None
         if accepted_step_callback is not None:
@@ -873,7 +1266,13 @@ def _minimize_lbfgs_private_impl(
             advance_from_search,
             reenter_new_x,
             result_payload,
-            initial_entry_kind=initial_entry_kind,
+            initial_entry_kind=(
+                _LBFGS_STEP_ENTRY_SEARCH
+                if initial_value_and_grad is not None
+                else _LBFGS_STEP_ENTRY_START
+            ),
+            maxiter=int(maxiter_limit_value),
+            maxfun=int(maxfun_limit_value),
             accepted_step_callback=accepted_step_callback,
             callback_stop_state=callback_stop_state,
         )
@@ -895,23 +1294,23 @@ def _minimize_lbfgs_private_impl(
 
 
 def _minimize_lbfgs_private(
-    fun,
-    x0,
+    fun: Callable[[jax.Array], jax.Array],
+    x0: jax.typing.ArrayLike,
     *,
-    maxiter=None,
-    maxcor=10,
-    ftol=0.0,
-    gtol=1e-5,
-    maxfun=None,
-    maxls=20,
-    callback=None,
-    progress_callback=None,
-    record_optimizer_state_trace=False,
-    max_optimizer_state_trace_bytes=None,
-    diagnostic_event_callback=None,
-    run_mode=_LBFGS_RUN_MODE_STEPWISE,
-    x_dtype=None,
-):
+    maxiter: int | None = None,
+    maxcor: int = 10,
+    ftol: float = 0.0,
+    gtol: float = 1e-5,
+    maxfun: int | None = None,
+    maxls: int = 20,
+    callback: _LBFGSCallback | None = None,
+    progress_callback: _LBFGSProgressCallback | None = None,
+    record_optimizer_state_trace: bool = False,
+    max_optimizer_state_trace_bytes: int | None = None,
+    diagnostic_event_callback: _LBFGSDiagnosticCallback | None = None,
+    run_mode: str = _LBFGS_RUN_MODE_STEPWISE,
+    x_dtype: jax.typing.DTypeLike | None = None,
+) -> _LBFGSResults:
     return _minimize_lbfgs_private_impl(
         _scalar_value_and_grad(fun),
         x0,
@@ -934,24 +1333,24 @@ def _minimize_lbfgs_private(
 
 
 def _minimize_lbfgs_private_value_and_grad(
-    fun,
-    x0,
+    fun: Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+    x0: jax.typing.ArrayLike,
     *,
-    maxiter=None,
-    maxcor=10,
-    ftol=0.0,
-    gtol=1e-5,
-    maxfun=None,
-    maxls=20,
-    callback=None,
-    progress_callback=None,
-    initial_value_and_grad=None,
-    record_optimizer_state_trace=False,
-    max_optimizer_state_trace_bytes=None,
-    diagnostic_event_callback=None,
-    run_mode=_LBFGS_RUN_MODE_STEPWISE,
-    x_dtype=None,
-):
+    maxiter: int | None = None,
+    maxcor: int = 10,
+    ftol: float = 0.0,
+    gtol: float = 1e-5,
+    maxfun: int | None = None,
+    maxls: int = 20,
+    callback: _LBFGSCallback | None = None,
+    progress_callback: _LBFGSProgressCallback | None = None,
+    initial_value_and_grad: _LBFGSInitialValueAndGrad | None = None,
+    record_optimizer_state_trace: bool = False,
+    max_optimizer_state_trace_bytes: int | None = None,
+    diagnostic_event_callback: _LBFGSDiagnosticCallback | None = None,
+    run_mode: str = _LBFGS_RUN_MODE_STEPWISE,
+    x_dtype: jax.typing.DTypeLike | None = None,
+) -> _LBFGSResults:
     return _minimize_lbfgs_private_impl(
         fun,
         x0,

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "status": "runtime-contract-and-source-owned-physics-fixtures",
+  "cases": {
+    "bfgs_quadratic": {
+      "dimension": 47,
+      "source": "synthetic_contract_quadratic",
+      "certificate": "solver-runtime-only; deterministic dense-BFGS contract",
+      "method": "bfgs",
+      "dtype": "float64",
+      "seed": null
+    },
+    "coil47": {
+      "dimension": 47,
+      "source": "source_owned_fixed_surface_coil_flux",
+      "certificate": "source-owned VMEC-free coil physics; native/JAX objective parity",
+      "method": "lbfgs",
+      "dtype": "float64",
+      "seed": 0,
+      "builder": "benchmarks.fixtures.custom_quasi_newton:coil47_physics"
+    },
+    "boozer": {
+      "dimension": 65,
+      "source": "source_owned_boozer_vacuum",
+      "certificate": "source-owned VMEC-free Boozer physics; native/JAX objective parity",
+      "method": "bfgs",
+      "dtype": "float64",
+      "seed": 0,
+      "builder": "benchmarks.fixtures.custom_quasi_newton:boozer_physics"
+    },
+    "rosenbrock": {
+      "dimension": 2,
+      "source": "tests/jax/solve/test_lbfgsb_trajectory_parity.py",
+      "certificate": "accepted-step trajectory contract",
+      "method": "lbfgs",
+      "dtype": "float64",
+      "seed": null
+    }
+  }
+}

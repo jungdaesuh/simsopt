@@ -1,0 +1,46 @@
+{
+  "events": [
+    {
+      "dimension": 47,
+      "elapsed_s": 0.0006357760867103934,
+      "event": "process_started",
+      "include_legacy_kernels": true,
+      "kernel": "old_generic_step_to_next_observable",
+      "maxcor": 10,
+      "maxfun": 20,
+      "maxiter": 2,
+      "objective": "quadratic"
+    },
+    {
+      "dimension": 47,
+      "elapsed_s": 0.24087447905912995,
+      "event": "objective_ready",
+      "objective": "quadratic"
+    },
+    {
+      "elapsed_s": 0.563076752005145,
+      "event": "initial_state_ready",
+      "maxcor": 10
+    },
+    {
+      "elapsed_s": 2.0794061900814995,
+      "event": "search_state_ready"
+    },
+    {
+      "elapsed_s": 2.0802016460802406,
+      "event": "new_x_state_ready",
+      "source": "shape_compatible_initial_state"
+    },
+    {
+      "count": 1,
+      "elapsed_s": 2.0907395069953054,
+      "event": "kernel_cases_built"
+    },
+    {
+      "elapsed_s": 2.0911189070902765,
+      "event": "lower_start",
+      "label": "old_generic_step_to_next_observable"
+    }
+  ],
+  "schema_version": 1
+}

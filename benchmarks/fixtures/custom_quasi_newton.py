@@ -1,0 +1,476 @@
+"""Small, deterministic quasi-Newton fixtures.
+
+The fixtures deliberately contain no mutable input files, VMEC state, or
+randomness.  ``coil47`` and ``boozer`` are source-owned VMEC-free physics
+fixtures with both JAX and SIMSOPT-native objective callbacks.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal, TypeAlias, cast
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+ArrayObjective = Callable[[jax.Array], jax.Array]
+ValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
+NativeValueAndGrad = Callable[[np.ndarray], tuple[float, np.ndarray]]
+MetadataValue: TypeAlias = (
+    str | int | float | bool | tuple[int, ...] | tuple[float, ...]
+)
+FixtureMetadata: TypeAlias = tuple[tuple[str, MetadataValue], ...]
+
+
+@dataclass(frozen=True)
+class Fixture:
+    """A reproducible scalar objective and its initial point."""
+
+    name: str
+    objective: ArrayObjective
+    initial: np.ndarray
+    expected_dimension: int
+    source: str
+    certificate: str
+    method: Literal["bfgs", "lbfgs"]
+    value_and_grad: ValueAndGrad | None = None
+    native_value_and_grad: NativeValueAndGrad | None = None
+    metadata: FixtureMetadata = ()
+
+
+def quadratic47() -> Fixture:
+    """Return a 47-variable strictly convex quadratic contract fixture."""
+
+    dimension = 47
+    center = jnp.linspace(-0.35, 0.35, dimension, dtype=jnp.float64)
+    curvature = jnp.linspace(1.0, 3.0, dimension, dtype=jnp.float64)
+
+    def objective(x: jax.Array) -> jax.Array:
+        delta = x - center
+        return 0.5 * jnp.sum(curvature * delta * delta)
+
+    initial = np.linspace(0.75, -0.55, dimension, dtype=np.float64)
+    return Fixture(
+        name="quadratic47",
+        objective=objective,
+        initial=initial,
+        expected_dimension=dimension,
+        source="synthetic_contract_quadratic",
+        certificate="solver-runtime-only; not a coil-physics parity certificate",
+        method="lbfgs",
+    )
+
+
+def coil47_physics() -> Fixture:
+    """Return the bounded VMEC-free coil preoptimization contract.
+
+    The curve/current construction follows the single-stage example.  A fixed
+    analytic surface keeps this fixture independent of VMEC, MPI, and mutable
+    input files while retaining the full 47-DOF coil-to-flux JAX objective.
+    """
+
+    from simsopt.field import BiotSavart, Current, coils_via_symmetries
+    from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
+    from simsopt.objectives import SquaredFlux
+    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+    from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
+
+    nfp = 4
+    surface_quadpoints = 8
+    curve_count = 3
+    curve_order = 2
+    curve_quadpoints = 16
+    current_value = 1.0e5
+    quadrature = np.linspace(
+        0.0,
+        1.0,
+        surface_quadpoints,
+        endpoint=False,
+        dtype=np.float64,
+    )
+    surface = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=True,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=quadrature,
+        quadpoints_theta=quadrature,
+    )
+    surface.set_rc(0, 0, 1.0)
+    surface.set_rc(1, 0, 0.3)
+    surface.set_zs(1, 0, 0.3)
+    surface.fix_all()
+    target = np.linspace(
+        0.1,
+        0.2,
+        surface_quadpoints * surface_quadpoints,
+        dtype=np.float64,
+    ).reshape((surface_quadpoints, surface_quadpoints))
+    curves = create_equally_spaced_curves(
+        curve_count,
+        nfp,
+        stellsym=True,
+        R0=1.0,
+        R1=0.6,
+        order=curve_order,
+        numquadpoints=curve_quadpoints,
+        use_jax_curve=False,
+    )
+    currents = [Current(1.0) * current_value for _ in curves]
+    currents[0].fix_all()
+    coils = coils_via_symmetries(curves, currents, nfp, True)
+    native_field = BiotSavart(coils)
+    native_flux = SquaredFlux(surface, native_field, target=target)
+    field = BiotSavartJAX(coils)
+    objective = SquaredFluxJAX(surface, field, target=target).traceable_objective()
+    initial = np.asarray(field.x, dtype=np.float64)
+    if initial.size != 47:
+        raise RuntimeError(f"coil47 fixture expected 47 free DOFs, got {initial.size}")
+
+    def native_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        native_flux.x = np.asarray(x, dtype=np.float64)
+        return float(native_flux.J()), np.asarray(native_flux.dJ(), dtype=np.float64)
+
+    metadata: FixtureMetadata = (
+        ("source_example", "examples/jax/3_Advanced/single_stage_optimization.py"),
+        ("surface_kind", "analytic_surface_rz_fourier"),
+        ("surface_nfp", nfp),
+        ("surface_mpol", 1),
+        ("surface_ntor", 1),
+        ("surface_quadpoints", surface_quadpoints),
+        ("curve_count", curve_count),
+        ("curve_order", curve_order),
+        ("curve_quadpoints", curve_quadpoints),
+        ("current_value", current_value),
+        ("fixed_current_index", 0),
+        ("objective_definition", "quadratic flux"),
+        (
+            "native_objective_provider",
+            "simsopt.field.BiotSavart + simsopt.objectives.SquaredFlux",
+        ),
+        ("target_min", 0.1),
+        ("target_max", 0.2),
+        ("dtype", "float64"),
+        ("seed", 0),
+    )
+    return Fixture(
+        name="coil47",
+        objective=objective,
+        initial=initial,
+        expected_dimension=47,
+        source="source_owned_fixed_surface_coil_flux",
+        certificate=(
+            "source-owned VMEC-free coil physics; native/JAX objective parity"
+        ),
+        method="lbfgs",
+        native_value_and_grad=native_value_and_grad,
+        metadata=metadata,
+    )
+
+
+def boozer_physics() -> Fixture:
+    """Return the bounded VMEC-free Boozer vacuum objective contract."""
+
+    from simsopt.configs import get_data
+    from simsopt.field import BiotSavart
+    from simsopt.geo import (
+        BoozerResidual,
+        BoozerSurface,
+        CurveLength,
+        Iotas,
+        MajorRadius,
+        NonQuasiSymmetricRatio,
+        SurfaceXYZTensorFourier,
+        Volume,
+    )
+    from simsopt.objectives import QuadraticPenalty
+    from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+    from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
+    from simsopt_jax_adapters.geo.surface_objectives_traceable import (
+        make_traceable_objective_runtime_bundle,
+        make_traceable_objective_session,
+    )
+
+    base_curves, base_currents, magnetic_axis, nfp, native_field = get_data(
+        "ncsx",
+        coil_order=3,
+        magnetic_axis_order=3,
+        points_per_period=8,
+    )
+    base_currents[0].fix_all()
+    field = BiotSavartJAX(native_field.coils)
+    current_sum = nfp * sum(abs(current.get_value()) for current in base_currents)
+    g0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1.0e-7 / (2.0 * np.pi))
+    resolution = 1
+    surface = SurfaceXYZTensorFourier(
+        mpol=resolution,
+        ntor=resolution,
+        stellsym=True,
+        nfp=nfp,
+        quadpoints_phi=np.linspace(
+            0.0,
+            1.0 / nfp,
+            2 * resolution + 1,
+            endpoint=False,
+        ),
+        quadpoints_theta=np.linspace(
+            0.0,
+            1.0,
+            2 * resolution + 1,
+            endpoint=False,
+        ),
+    )
+    surface.fit_to_curve(magnetic_axis, 0.1, flip_theta=True)
+    volume_label = Volume(surface)
+    volume_target = float(volume_label.J())
+
+    boozer_surface = BoozerSurfaceJAX(
+        field,
+        surface,
+        volume_label,
+        volume_target,
+        options={
+            "optimizer_backend": "ondevice",
+            "newton_maxiter": 20,
+            "newton_tol": 1.0e-13,
+            "verbose": False,
+        },
+    )
+    surface_dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+    traceable_result = boozer_surface.run_code_traceable(
+        field.coil_set_spec(),
+        jax.device_put(surface_dofs),
+        jax.device_put(np.asarray(-0.406, dtype=np.float64)),
+        jax.device_put(np.asarray(g0, dtype=np.float64)),
+    )
+    jax.block_until_ready(traceable_result)
+    if not bool(np.asarray(jax.device_get(traceable_result["success"]))):
+        raise RuntimeError("Boozer traceable fixture route did not converge")
+    boozer_surface.install_traceable_solved_runtime_state(traceable_result)
+    iota_target = float(np.asarray(jax.device_get(traceable_result["iota"])))
+    objective_config: dict[str, object] = {
+        "non_qs_weight": 1.0,
+        "residual_weight": 1.0,
+        "iota_weight": 1.0,
+        "major_radius_weight": 1.0,
+        "length_weight": 1.0,
+        "curvature_weight": 0.0,
+        "curve_curve_weight": 0.0,
+        "curve_surface_weight": 0.0,
+        "surface_vessel_weight": 0.0,
+        "non_qs_quadpoints_phi": np.linspace(
+            0.0,
+            1.0 / nfp,
+            8,
+            endpoint=False,
+        ),
+        "non_qs_quadpoints_theta": np.linspace(0.0, 1.0, 8, endpoint=False),
+        "non_qs_axis": 0,
+        "optimized_coil_index": 0,
+        "length_coil_indices": (0, 1, 2),
+        "length_target": float(sum(CurveLength(curve).J() for curve in base_curves)),
+        "curvature_threshold": 0.0,
+        "curvature_p_norm": 2.0,
+        "major_radius_target": float(surface.major_radius()),
+        "curve_curve_threshold": 0.0,
+        "curve_surface_threshold": 0.0,
+        "vessel_gamma": np.asarray(surface.gamma(), dtype=np.float64),
+        "surface_vessel_threshold": 0.0,
+    }
+    session = make_traceable_objective_session(
+        boozer_surface,
+        field,
+        iota_target,
+        outer_objective_config=objective_config,
+    )
+    runtime_bundle = make_traceable_objective_runtime_bundle(
+        boozer_surface,
+        field,
+        iota_target,
+        outer_objective_config=objective_config,
+        session=session,
+    )
+    objective = cast(Callable[[jax.Array], jax.Array], runtime_bundle["objective"])
+    value_and_grad = cast(
+        Callable[[jax.Array], tuple[jax.Array, jax.Array]],
+        runtime_bundle["value_and_grad"],
+    )
+    native_curves, native_currents, native_axis, native_nfp, native_field = get_data(
+        "ncsx",
+        coil_order=3,
+        magnetic_axis_order=3,
+        points_per_period=8,
+    )
+    native_currents[0].fix_all()
+    native_current_sum = native_nfp * sum(
+        abs(current.get_value()) for current in native_currents
+    )
+    native_g0 = (
+        2.0 * np.pi * native_current_sum * (4.0 * np.pi * 1.0e-7 / (2.0 * np.pi))
+    )
+    native_surface = SurfaceXYZTensorFourier(
+        mpol=resolution,
+        ntor=resolution,
+        stellsym=True,
+        nfp=native_nfp,
+        quadpoints_phi=np.linspace(
+            0.0,
+            1.0 / native_nfp,
+            2 * resolution + 1,
+            endpoint=False,
+        ),
+        quadpoints_theta=np.linspace(
+            0.0,
+            1.0,
+            2 * resolution + 1,
+            endpoint=False,
+        ),
+    )
+    native_surface.fit_to_curve(native_axis, 0.1, flip_theta=True)
+    native_volume = Volume(native_surface)
+    native_solver = BoozerSurface(
+        native_field,
+        native_surface,
+        native_volume,
+        float(native_volume.J()),
+    )
+    native_initial_solution = native_solver.solve_residual_equation_exactly_newton(
+        tol=1.0e-13,
+        maxiter=20,
+        iota=-0.406,
+        G=native_g0,
+    )
+    native_iota_target = float(native_initial_solution["iota"])
+    native_major_radius = MajorRadius(native_solver)
+    native_lengths = [CurveLength(curve) for curve in native_curves]
+    native_non_qs = NonQuasiSymmetricRatio(
+        native_solver,
+        BiotSavart(native_field.coils),
+        sDIM=4,
+    )
+    native_residual = BoozerResidual(native_solver, native_field)
+    native_iota_penalty = QuadraticPenalty(
+        Iotas(native_solver),
+        native_iota_target,
+        "identity",
+    )
+    native_radius_penalty = QuadraticPenalty(
+        native_major_radius,
+        float(native_major_radius.J()),
+        "identity",
+    )
+    native_length_penalty = QuadraticPenalty(
+        sum(native_lengths),
+        float(sum(native_lengths).J()),
+        "max",
+    )
+    native_objective = (
+        native_non_qs
+        + native_residual
+        + native_iota_penalty
+        + native_radius_penalty
+        + native_length_penalty
+    )
+
+    def native_value_and_grad(x: np.ndarray) -> tuple[float, np.ndarray]:
+        previous_surface = np.asarray(native_solver.surface.x, dtype=np.float64)
+        previous_iota = float(native_solver.res["iota"])
+        previous_g = float(native_solver.res["G"])
+        native_objective.x = np.asarray(x, dtype=np.float64)
+        value = float(native_objective.J())
+        gradient = np.asarray(native_objective.dJ(), dtype=np.float64)
+        if not bool(native_solver.res["success"]):
+            native_solver.surface.x = previous_surface
+            native_solver.res["iota"] = previous_iota
+            native_solver.res["G"] = previous_g
+            return 1.0e3, gradient
+        return value, gradient
+
+    initial = np.asarray(field.x, dtype=np.float64)
+    traceable_iota = float(np.asarray(jax.device_get(traceable_result["iota"])))
+    traceable_G = float(np.asarray(jax.device_get(traceable_result["G"])))
+    metadata: FixtureMetadata = (
+        (
+            "source_example",
+            "examples/jax/3_Advanced/single_stage_boozer_vacuum_optimization.py",
+        ),
+        ("field_source", "simsopt.configs.get_data('ncsx')"),
+        ("nfp", int(nfp)),
+        ("coil_order", 3),
+        ("magnetic_axis_order", 3),
+        ("points_per_period", 8),
+        ("surface_mpol", resolution),
+        ("surface_ntor", resolution),
+        ("surface_dof_count", int(surface_dofs.size)),
+        ("newton_maxiter", 20),
+        ("bfgs_maxiter", 2),
+        ("dtype", "float64"),
+        ("seed", 0),
+        (
+            "native_objective_provider",
+            "simsopt.geo.BoozerSurface + native outer objective",
+        ),
+        ("traceable_run_code_success", True),
+        ("traceable_inner_iota", traceable_iota),
+        ("traceable_inner_G", traceable_G),
+    )
+    return Fixture(
+        name="boozer",
+        objective=objective,
+        initial=initial,
+        expected_dimension=int(initial.size),
+        source="source_owned_boozer_vacuum",
+        certificate="source-owned VMEC-free Boozer physics; native/JAX objective parity",
+        method="bfgs",
+        value_and_grad=value_and_grad,
+        native_value_and_grad=native_value_and_grad,
+        metadata=metadata,
+    )
+
+
+def rosenbrock() -> Fixture:
+    """Return the fixed two-variable Rosenbrock trajectory fixture."""
+
+    def objective(x: jax.Array) -> jax.Array:
+        return 100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2
+
+    return Fixture(
+        name="rosenbrock",
+        objective=objective,
+        initial=np.asarray((-1.2, 1.0), dtype=np.float64),
+        expected_dimension=2,
+        source="tests/jax/solve/test_lbfgsb_trajectory_parity.py",
+        certificate="accepted-step trajectory contract",
+        method="lbfgs",
+    )
+
+
+def bfgs_quadratic() -> Fixture:
+    """Return the quadratic contract with the dense-BFGS method selected."""
+
+    base = quadratic47()
+    return Fixture(
+        name="bfgs_quadratic",
+        objective=base.objective,
+        initial=base.initial,
+        expected_dimension=base.expected_dimension,
+        source=base.source,
+        certificate="solver-runtime-only; deterministic dense-BFGS contract",
+        method="bfgs",
+    )
+
+
+def fixture(name: str) -> Fixture:
+    """Resolve a named deterministic fixture without dynamic imports."""
+    builders: dict[str, Callable[[], Fixture]] = {
+        "coil47": coil47_physics,
+        "boozer": boozer_physics,
+        "bfgs_quadratic": bfgs_quadratic,
+        "rosenbrock": rosenbrock,
+    }
+    try:
+        return builders[name]()
+    except KeyError as exc:
+        raise ValueError(f"unknown custom quasi-Newton fixture: {name}") from exc

@@ -6,13 +6,13 @@ from typing import NamedTuple
 
 import jax
 
-
 # Private L-BFGS terminal status code emitted when f(x), x, or ∇f(x) is
 # non-finite at solver entry, during an attempted step, or at final
 # re-evaluation. This is repo-local; SciPy's low-level L-BFGS-B warnflag
 # contract remains 0/1/2.
 LBFGS_STATUS_NONFINITE = 6
 LBFGS_STATUS_CALLBACK_STOP = 99
+BFGS_STATUS_CALLBACK_STOP = 99
 
 
 class _BFGSResults(NamedTuple):
@@ -111,7 +111,7 @@ class _LBFGSResults(NamedTuple):
     gamma: float | jax.Array
     status: int | jax.Array
     ls_status: int | jax.Array
-    invalid_step_log: "_LBFGSInvalidStepLog"
+    invalid_step_log: _LBFGSInvalidStepLog
     optimizer_state_trace: tuple[dict[str, object], ...] = ()
     hess_inv_s: jax.Array | None = None
     hess_inv_y: jax.Array | None = None
@@ -119,25 +119,21 @@ class _LBFGSResults(NamedTuple):
     task: jax.Array | None = None
 
 
-_LBFGSInvalidStepLog = NamedTuple(
-    "_LBFGSInvalidStepLog",
-    [
-        ("count", int | jax.Array),
-        ("write_index", int | jax.Array),
-        ("iteration", jax.Array),
-        ("step_scale", jax.Array),
-        ("line_search_failed", jax.Array),
-        ("nonfinite_step", jax.Array),
-        ("stalled_step", jax.Array),
-        ("valid_curvature", jax.Array),
-        ("trial_converged", jax.Array),
-        ("ls_status", jax.Array),
-        ("requested_initial_step", jax.Array),
-        ("first_tested_alpha", jax.Array),
-        ("best_finite_alpha", jax.Array),
-        ("returned_alpha", jax.Array),
-        ("failure_reason", jax.Array),
-        ("armijo_margin", jax.Array),
-        ("curvature_margin", jax.Array),
-    ],
-)
+class _LBFGSInvalidStepLog(NamedTuple):
+    count: int | jax.Array
+    write_index: int | jax.Array
+    iteration: jax.Array
+    step_scale: jax.Array
+    line_search_failed: jax.Array
+    nonfinite_step: jax.Array
+    stalled_step: jax.Array
+    valid_curvature: jax.Array
+    trial_converged: jax.Array
+    ls_status: jax.Array
+    requested_initial_step: jax.Array
+    first_tested_alpha: jax.Array
+    best_finite_alpha: jax.Array
+    returned_alpha: jax.Array
+    failure_reason: jax.Array
+    armijo_margin: jax.Array
+    curvature_margin: jax.Array

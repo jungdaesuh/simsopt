@@ -4468,6 +4468,35 @@ def _linear_solve_status_with_relative_tolerance(
     )
 
 
+def _normalize_traceable_linear_solve_status(status, *, rhs, tolerance):
+    """Materialize optional status fields before a JAX control-flow join."""
+    tolerance_value = _optimizer_scalar(tolerance, dtype=rhs.dtype)
+    return _LinearSolveStatus(
+        success=jnp.asarray(status.success, dtype=jnp.bool_),
+        residual=jnp.asarray(status.residual, dtype=rhs.dtype),
+        residual_relative=jnp.asarray(status.residual_relative, dtype=rhs.dtype),
+        iterations=_linear_solve_status_iterations(status.iterations),
+        residual_scale=jnp.asarray(
+            _linear_solve_residual_scale(rhs)
+            if status.residual_scale is None
+            else status.residual_scale,
+            dtype=rhs.dtype,
+        ),
+        requested_tolerance=jnp.asarray(
+            tolerance_value
+            if status.requested_tolerance is None
+            else status.requested_tolerance,
+            dtype=rhs.dtype,
+        ),
+        effective_tolerance=jnp.asarray(
+            tolerance_value
+            if status.effective_tolerance is None
+            else status.effective_tolerance,
+            dtype=rhs.dtype,
+        ),
+    )
+
+
 def _eisenstat_walker_strict_cap(tol_value, *, dtype):
     # Floor/cap match the mixed dense-IR accuracy policy SSOT so Newton forcing
     # terms and certified dense-IR tolerances share one production band.
@@ -4597,6 +4626,11 @@ def _refine_traceable_newton_operator_gmres_solution(
     tol,
 ):
     """Run one bounded refinement solve for an unconverged Newton correction."""
+    status = _normalize_traceable_linear_solve_status(
+        status,
+        rhs=rhs,
+        tolerance=tol,
+    )
     residual = rhs - matvec(solution)
     correction, correction_residual, correction_info = _gmres_solve_array_system(
         matvec,
@@ -4622,10 +4656,13 @@ def _refine_traceable_newton_operator_gmres_solution(
         tolerance=tol,
         iterations=refined_iterations,
     )
+    fallback_status = status._replace(
+        iterations=_linear_solve_status_iterations(refined_iterations)
+    )
     return lax.cond(
         correction_finite,
         lambda _: (refined_solution, refined_status),
-        lambda _: (solution, status._replace(iterations=refined_iterations)),
+        lambda _: (solution, fallback_status),
         operand=None,
     )
 
@@ -6199,6 +6236,11 @@ def _build_traceable_newton_polish_runner(
                     state["grad"],
                     tol=linear_tol,
                 )
+                linear_status = _normalize_traceable_linear_solve_status(
+                    linear_status,
+                    rhs=state["grad"],
+                    tolerance=linear_tol,
+                )
                 # In the Eisenstat-Walker strict-cap region an unconverged
                 # single-pass GMRES correction gets one bounded refinement
                 # pass, so the tight final tolerance is actually achieved
@@ -6934,8 +6976,16 @@ def _build_traceable_exact_newton_runner(
             "exact Newton residual",
         )
 
-        def residual_eval(x):
-            return residual_fn(x, *fn_args)
+        # The exact Newton body differentiates the Boozer residual through
+        # repeated GMRES matvecs. Rematerializing the residual keeps the JVP
+        # intermediates out of the compiled loop's live set; this trades a
+        # bounded amount of recomputation for materially lower compile/RSS
+        # pressure on GPU backends.
+        residual_eval = jax.checkpoint(
+            jax.jit(lambda x: residual_fn(x, *fn_args)),
+            policy=jax.checkpoint_policies.nothing_saveable,
+            prevent_cse=False,
+        )
 
         def jvp_fn(x, v):
             return jax.jvp(residual_eval, (x,), (v,))[1]

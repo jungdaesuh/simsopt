@@ -1,0 +1,46 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-custom-gpu-maxiter20-current",
+  "kind": "strict-gpu-native-reference-comparison",
+  "case": "coil47",
+  "provider": "custom",
+  "device": "strict-gpu",
+  "dtype": "float64",
+  "intent": "parity",
+  "maxiter": 20,
+  "maxcor": 10,
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment": {
+    "lock_path": "benchmarks/environments/custom_quasi_newton_gpu.txt",
+    "lock_sha256": "fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8",
+    "jax_platforms": "cuda",
+    "jax_enable_x64": "true",
+    "xla_preallocate": "false",
+    "xla_allocator": "platform",
+    "transfer_guard": "not-enabled"
+  },
+  "command": "PYTHONPATH=. JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCATOR=platform JAX_ENABLE_X64=true .venv-qn-gpu/bin/python benchmarks/custom_quasi_newton_runtime.py --device gpu --intent parity --providers custom --cases coil47 --maxiter 20 --maxcor 10",
+  "reference_receipt": "../coil47-native-custom-cpu-maxiter20-current/",
+  "artifacts": [
+    {
+      "path": "raw/custom_gpu.json",
+      "sha256": "f6d98c972e17ee469fed154feefe3ee88db4fe562f71f3dbd653ebfcc90dcfa2"
+    },
+    {
+      "path": "metrics.json",
+      "sha256": "8868ec12ae818d0aa4f84e12548f6fae7c125f4fd1bfb31eebd572b5f996220e"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "1aa4f9674c4195f17d961e028bbeec35664e346377565a709c1fa913f2c73d4b"
+    }
+  ],
+  "archive_uri": "repo://docs/receipts/custom-quasi-newton/coil47-custom-gpu-maxiter20-current/",
+  "verdict": "diagnostic-pass-not-promotion",
+  "limitations": [
+    "candidate checkout was dirty",
+    "native reference ran on CPU; native GPU is not applicable",
+    "Optax GPU and A100 qualification remain open"
+  ]
+}

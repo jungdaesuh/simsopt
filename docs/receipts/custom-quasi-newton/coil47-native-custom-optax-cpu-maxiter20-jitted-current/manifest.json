@@ -1,0 +1,42 @@
+{
+  "archive_uri": "repo://.artifacts/custom-quasi-newton-archive/coil47-native-custom-optax-cpu-maxiter20-jitted-current",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "35f6f3c3b944b67b76a1b7e23453d314daacc3a63e0283aa337f7d2f8bbaa8c1"
+    },
+    {
+      "path": "raw/coil47-native-custom-optax-jitted-cpu.KCPfHg/custom/measurements.json",
+      "sha256": "b350af1665094505c1dc862ee0b7376dd2de858049566fae7a65c6b26a066adb"
+    },
+    {
+      "path": "raw/coil47-native-custom-optax-jitted-cpu.KCPfHg/measurements.json",
+      "sha256": "d4370c8b7a852945ec6150a53347e0c8cd234606637c6748dc35395deb2ba884"
+    },
+    {
+      "path": "raw/coil47-native-custom-optax-jitted-cpu.KCPfHg/native/measurements.json",
+      "sha256": "7cae45ae90e417d037dc70801a2e72cf3241915ebbed138f1d8673b852c1233c"
+    },
+    {
+      "path": "raw/coil47-native-custom-optax-jitted-cpu.KCPfHg/optax/measurements.json",
+      "sha256": "8ea3b159087ad6eda1bf6b787398a0f1ce26f00aa3ba783e53a8e2719fa30ea7"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "2464f37764380fbfa28f2fb283e3f0fb99b3ce0e1d62b2ed22b641585bd77235"
+    }
+  ],
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_cpu.lock.txt",
+    "sha256": "159e05a65796e76dfb502ea4f6a06b1f412af1c7bb147bb5ac5974b5888a6b35"
+  },
+  "kind": "custom-quasi-newton-runner",
+  "receipt_id": "coil47-native-custom-optax-cpu-maxiter20-jitted-current",
+  "schema_version": 1,
+  "source_runs": [
+    "coil47-native-custom-optax-jitted-cpu.KCPfHg"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-native-custom-optax-cpu-maxiter20-current",
+  "kind": "fixed-budget-provider-comparison",
+  "case": "coil47",
+  "device": "CPU",
+  "dtype": "float64",
+  "intent": "parity",
+  "maxiter": 20,
+  "maxcor": 10,
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment": {
+    "lock_path": "benchmarks/environments/custom_quasi_newton_cpu.txt",
+    "lock_sha256": "fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8",
+    "jax_platforms": "cpu",
+    "jax_enable_x64": "true",
+    "xla_preallocate": "false",
+    "xla_allocator": null,
+    "transfer_guard": "not-enabled"
+  },
+  "command": "PYTHONPATH=. JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_ENABLE_X64=true .venv-qn-cpu/bin/python benchmarks/custom_quasi_newton_runtime.py --device cpu --intent parity --providers native,custom,optax --cases coil47 --maxiter 20 --maxcor 10 --output /tmp/coil47-native-custom-optax-cpu-maxiter20.NY12WE",
+  "artifacts": [
+    {
+      "path": "raw/native.json",
+      "sha256": "9dfd57cc72abb1ffd14c4b6702c15c1022051fd1c9fb24e2d456c327429dc487"
+    },
+    {
+      "path": "raw/custom.json",
+      "sha256": "e2ffd62fcd5135db8434c580049eb8db4b0a7292da5e4e240774e81042db8b99"
+    },
+    {
+      "path": "raw/optax.json",
+      "sha256": "e367f28f556e46ebf4fda9f9c72a1c88d4c170a6ed4e6ae459885edb4d37573d"
+    },
+    {
+      "path": "raw/combined.json",
+      "sha256": "a76a61ce69fdb42e6878b4e48adf423867ea3a260ccc4071e919d5083e55db2d"
+    },
+    {
+      "path": "metrics.json",
+      "sha256": "61f8e3c17d4713e22f65680bfec411c2a9f4487e956da35e93ec54c0c93c6cf5"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "fadbf8b3ce942c73eeb44b7b161d7824b25a267b9313fc5e1bc5a960c271aea0"
+    }
+  ],
+  "archive_uri": "repo://docs/receipts/custom-quasi-newton/coil47-native-custom-optax-cpu-maxiter20-current/",
+  "verdict": "diagnostic-pass-not-promotion",
+  "limitations": [
+    "candidate checkout was dirty",
+    "CPU-only diagnostic; strict-GPU Optax 20-step lane timed out",
+    "Optax status and line-search evaluations are unavailable",
+    "does not claim identical provider trajectories or A100 qualification"
+  ]
+}

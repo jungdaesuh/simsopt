@@ -1,0 +1,43 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-custom-gpu-maxiter20-current",
+  "case": "coil47",
+  "provider": "custom",
+  "device": "strict-gpu",
+  "dtype": "float64",
+  "intent": "parity",
+  "maxiter": 20,
+  "maxcor": 10,
+  "candidate_head": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_dirty": true,
+  "environment_lock": "benchmarks/environments/custom_quasi_newton_gpu.txt",
+  "environment_lock_sha256": "fc724b570ca23356b18df17da87a00217066fd42e5b02de5fe26b46cf20473f8",
+  "fixture_build_seconds": 7.773195890011266,
+  "fixture_build_peak_rss_kib": 1228756,
+  "solver_start_rss_kib": 1429392,
+  "solver_peak_rss_kib": 1939356,
+  "solver_peak_rss_delta_kib": 509964,
+  "iterations": 12,
+  "evaluations": 15,
+  "status": 0,
+  "success": true,
+  "initial_objective": 0.13792118300896355,
+  "final_objective": 0.13786263284430206,
+  "initial_gradient_inf_norm": 0.0037469236744501573,
+  "final_gradient_inf_norm": 5.874340995733716e-10,
+  "cold_seconds": 75.16914468002506,
+  "warm_seconds": 0.35378466302063316,
+  "native_cpu_reference": {
+    "receipt": "../coil47-native-custom-cpu-maxiter20-current/raw/native.json",
+    "final_objective_abs_difference": 5.551115123125783e-17,
+    "final_gradient_inf_norm_abs_difference": 4.607859233063394e-18,
+    "final_parameter_max_abs_difference": 2.942091015256665e-15
+  },
+  "runtime_environment": {
+    "JAX_PLATFORMS": "cuda",
+    "JAX_ENABLE_X64": "true",
+    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    "XLA_PYTHON_CLIENT_ALLOCATOR": "platform"
+  },
+  "verdict": "diagnostic-pass-not-promotion"
+}

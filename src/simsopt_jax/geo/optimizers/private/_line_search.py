@@ -9,7 +9,9 @@ Optimization*, Section 3.5.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 
@@ -26,6 +28,13 @@ from ._common import (
     _scalar_value_and_grad,
 )
 from ._types import _LineSearchResults, _LineSearchState, _ZoomState
+
+_RestrictedValueAndGrad = Callable[
+    [jax.Array],
+    tuple[jax.Array, jax.Array, jax.Array],
+]
+_ScalarObjective = Callable[[jax.Array], jax.Array]
+_ValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
 
 
 _LINE_SEARCH_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in {
@@ -258,12 +267,12 @@ def _zoom(
             **_binary_replace(
                 hi_to_j,
                 state._asdict(),
-                dict(
-                    a_hi=a_j,
-                    phi_hi=phi_j,
-                    dphi_hi=dphi_j,
-                    g_hi=g_j,
-                ),
+                {
+                    "a_hi": a_j,
+                    "phi_hi": phi_j,
+                    "dphi_hi": dphi_j,
+                    "g_hi": g_j,
+                },
             )
         )
         state = lax.cond(
@@ -283,19 +292,19 @@ def _zoom(
             **_binary_replace(
                 star_to_j,
                 state._asdict(),
-                dict(a_star=a_j, phi_star=phi_j, dphi_star=dphi_j, g_star=g_j),
+                {"a_star": a_j, "phi_star": phi_j, "dphi_star": dphi_j, "g_star": g_j},
             ),
         )
         state = state._replace(
             **_binary_replace(
                 hi_to_lo,
                 state._asdict(),
-                dict(
-                    a_hi=state.a_lo,
-                    phi_hi=state.phi_lo,
-                    dphi_hi=state.dphi_lo,
-                    g_hi=state.g_lo,
-                ),
+                {
+                    "a_hi": state.a_lo,
+                    "phi_hi": state.phi_lo,
+                    "dphi_hi": state.dphi_lo,
+                    "g_hi": state.g_lo,
+                },
             )
         )
         state = lax.cond(
@@ -314,7 +323,7 @@ def _zoom(
             **_binary_replace(
                 lo_to_j,
                 state._asdict(),
-                dict(a_lo=a_j, phi_lo=phi_j, dphi_lo=dphi_j, g_lo=g_j),
+                {"a_lo": a_j, "phi_lo": phi_j, "dphi_lo": dphi_j, "g_lo": g_j},
             )
         )
         state = lax.cond(
@@ -393,17 +402,17 @@ def _apply_zoom_branch_result(
 
 
 def _line_search_from_restricted_func_and_grad(
-    restricted_func_and_grad,
+    restricted_func_and_grad: _RestrictedValueAndGrad,
     *,
-    pk,
-    old_fval,
-    gfk,
-    old_old_fval=None,
-    initial_step_size=None,
-    c1=1e-4,
-    c2=0.9,
-    maxiter=20,
-):
+    pk: jax.Array,
+    old_fval: jax.Array,
+    gfk: jax.Array,
+    old_old_fval: jax.Array | None = None,
+    initial_step_size: jax.Array | None = None,
+    c1: float = 1e-4,
+    c2: float = 0.9,
+    maxiter: int = 20,
+) -> _LineSearchResults:
     dtype = pk.dtype
     zero = _as_jax_dtype(0.0, dtype)
     one = _as_jax_dtype(1.0, dtype)
@@ -666,23 +675,25 @@ def _line_search_from_restricted_func_and_grad(
 
 
 def _line_search(
-    f,
-    xk,
-    pk,
-    old_fval,
-    gfk,
-    old_old_fval=None,
-    initial_step_size=None,
-    c1=1e-4,
-    c2=0.9,
-    maxiter=20,
-):
+    f: _ScalarObjective,
+    xk: jax.Array,
+    pk: jax.Array,
+    old_fval: jax.Array,
+    gfk: jax.Array,
+    old_old_fval: jax.Array | None = None,
+    initial_step_size: jax.Array | None = None,
+    c1: float = 1e-4,
+    c2: float = 0.9,
+    maxiter: int = 20,
+) -> _LineSearchResults:
     xk, pk = _promote_dtypes_inexact(xk, pk)
     old_fval = _as_jax_dtype(old_fval, pk.dtype)
     gfk = _as_jax_dtype(gfk, pk.dtype)
     scalar_value_and_grad = _scalar_value_and_grad(f)
 
-    def restricted_func_and_grad(t):
+    def restricted_func_and_grad(
+        t: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         t = _as_jax_dtype(t, pk.dtype)
         phi, g = scalar_value_and_grad(xk + t * pk)
         dphi = jnp.real(_dot(g, pk))
@@ -702,22 +713,24 @@ def _line_search(
 
 
 def _line_search_value_and_grad(
-    fun,
-    xk,
-    pk,
-    old_fval,
-    gfk,
-    old_old_fval=None,
-    initial_step_size=None,
-    c1=1e-4,
-    c2=0.9,
-    maxiter=20,
-):
+    fun: _ValueAndGrad,
+    xk: jax.Array,
+    pk: jax.Array,
+    old_fval: jax.Array,
+    gfk: jax.Array,
+    old_old_fval: jax.Array | None = None,
+    initial_step_size: jax.Array | None = None,
+    c1: float = 1e-4,
+    c2: float = 0.9,
+    maxiter: int = 20,
+) -> _LineSearchResults:
     xk, pk = _promote_dtypes_inexact(xk, pk)
     old_fval = _as_jax_dtype(old_fval, pk.dtype)
     gfk = _as_jax_dtype(gfk, pk.dtype)
 
-    def restricted_func_and_grad(t):
+    def restricted_func_and_grad(
+        t: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         t = _as_jax_dtype(t, pk.dtype)
         phi, g = fun(xk + t * pk)
         phi = _as_jax_dtype(phi, pk.dtype)

@@ -1,0 +1,42 @@
+{
+  "archive_uri": "repo://.artifacts/custom-quasi-newton-archive/rosenbrock-custom-maxcor300-gpu-20260802",
+  "artifacts": [
+    {
+      "path": "metrics.json",
+      "sha256": "4156137b0dd22c5c0b14cb9027c89d64bae2be9c250eecfe3b5ed3cf82c3a89a"
+    },
+    {
+      "path": "raw/qn-gpu-highhistory-wLtYgt/custom/measurements.json",
+      "sha256": "6a09692b4bb63dd3f942b650356283561e8599d8a7868ccb4417e7059f105890"
+    },
+    {
+      "path": "raw/qn-gpu-highhistory-wLtYgt/measurements.json",
+      "sha256": "09549c7b7d88f14165698f6526ea1a93a31cf875c8b4f2ea954e09984b33d655"
+    },
+    {
+      "path": "raw/qn-gpu-highhistory-wLtYgt/stderr.log",
+      "sha256": "b893c9779e79a658de5105936510a413a2c522e60ce14edff284846844b0ded6"
+    },
+    {
+      "path": "raw/qn-gpu-highhistory-wLtYgt/stdout.json",
+      "sha256": "09549c7b7d88f14165698f6526ea1a93a31cf875c8b4f2ea954e09984b33d655"
+    },
+    {
+      "path": "summary.md",
+      "sha256": "4e3c8aa5874e091893e30ebd940dd50e6b52754f95031767aa2812751b501688"
+    }
+  ],
+  "candidate_commit": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_clean": false,
+  "environment_lock": {
+    "path": "benchmarks/environments/custom_quasi_newton_gpu.lock.txt",
+    "sha256": "04e77f2a39bd2d5bd602e0a0596462f5dbd4f21cc2ebfc3b537fe95ec591758f"
+  },
+  "kind": "custom-quasi-newton-runner",
+  "receipt_id": "rosenbrock-custom-maxcor300-gpu-20260802",
+  "schema_version": 1,
+  "source_runs": [
+    "qn-gpu-highhistory-wLtYgt"
+  ],
+  "verdict": "diagnostic-pass-not-promotion"
+}

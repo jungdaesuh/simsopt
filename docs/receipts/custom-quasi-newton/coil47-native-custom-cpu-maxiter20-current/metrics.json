@@ -1,0 +1,50 @@
+{
+  "schema_version": 5,
+  "receipt_id": "coil47-native-custom-cpu-maxiter20-current",
+  "case": "coil47",
+  "device": "cpu",
+  "dtype": "float64",
+  "intent": "parity",
+  "maxiter": 20,
+  "maxcor": 10,
+  "candidate_head": "9c64c2ef6cee45eb7eb1989bd5a41e2adf8bfc26",
+  "candidate_worktree_dirty": true,
+  "environment_lock": "benchmarks/environments/custom_quasi_newton_cpu.txt",
+  "environment_lock_sha256": "c1916991fd549448c70fbd00dda11f4f8c2186519db4600aa02bd4d27e3ce963",
+  "providers": {
+    "native": {
+      "iterations": 12,
+      "evaluations": 15,
+      "status": 0,
+      "success": true,
+      "initial_objective": 0.1379211830089635,
+      "final_objective": 0.137862632844302,
+      "initial_gradient_inf_norm": 0.003746923674450152,
+      "final_gradient_inf_norm": 5.874341041812309e-10,
+      "cold_seconds": 4.12941390206106,
+      "warm_seconds": 1.6845736399991438,
+      "solver_peak_rss_delta_kib": 0
+    },
+    "custom": {
+      "iterations": 13,
+      "evaluations": 44,
+      "status": 0,
+      "success": true,
+      "initial_objective": 0.13792118300896353,
+      "final_objective": 0.137862632844302,
+      "initial_gradient_inf_norm": 0.003746923674450169,
+      "final_gradient_inf_norm": 5.874341081385688e-10,
+      "cold_seconds": 18.707665606983937,
+      "warm_seconds": 0.278853133902885,
+      "solver_peak_rss_delta_kib": 383736
+    }
+  },
+  "comparisons": {
+    "initial_objective_abs_difference": 2.7755575615628914e-17,
+    "initial_gradient_inf_norm_abs_difference": 1.691355389077387e-17,
+    "final_objective_abs_difference": 0.0,
+    "final_gradient_inf_norm_abs_difference": 3.957337929572091e-18,
+    "final_parameter_max_abs_difference": 8.104628079763643e-15
+  },
+  "verdict": "diagnostic-pass-not-promotion"
+}

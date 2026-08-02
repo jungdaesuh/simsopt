@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from dataclasses import asdict
 from threading import Lock
-import time
-from typing import Callable, TypeAlias, TypeVar
+from typing import Callable, TypeAlias, TypeVar, cast
 
 import jax
 import jax.numpy as jnp
@@ -17,8 +17,8 @@ from scipy.optimize import OptimizeResult
 from scipy.optimize import least_squares as scipy_least_squares
 from scipy.optimize import minimize as scipy_minimize
 
-from simsopt_jax.geo.optimizers import optimizer as legacy
 from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put_tree
+from simsopt_jax.geo.optimizers import optimizer as legacy
 from simsopt_jax.runtime.host_boundary import (
     block_until_ready,
     host_array_after_ready,
@@ -28,9 +28,10 @@ from simsopt_jax.runtime.host_boundary import (
 from .contracts import (
     Callback,
     Driver,
+    HessianInverse,
     InvalidStepEvent,
-    OptimizerResult,
     OptimizerCallbackEvent,
+    OptimizerResult,
     OptimizerStateTraceEntry,
     OptionsBase,
     ResidualFn,
@@ -46,7 +47,6 @@ from .contracts import (
     SimsoptTraceLBFGSCallbackEvent,
     ValueAndGradFn,
 )
-from .shared import LineSearchStatus
 from .driver import (
     legacy_reference_least_squares_method,
     legacy_reference_minimize_method,
@@ -55,19 +55,30 @@ from .driver import (
 )
 from .minimize_runtime import (
     block_jax_leaves as _block_jax_leaves,
+)
+from .minimize_runtime import (
     host_array as _host_array,
+)
+from .minimize_runtime import (
     host_float as _host_float,
+)
+from .minimize_runtime import (
     optimistix_result_metadata as _optimistix_result_metadata,
+)
+from .minimize_runtime import (
     run_optax_minimize as _run_optax_minimize,
+)
+from .minimize_runtime import (
     run_optimistix_minimize as _run_optimistix_minimize,
 )
+from .optax.contracts import OptaxAdamOptions, OptaxLBFGSOptions
 from .optimistix.contracts import (
     LinearSolver,
     OptimistixLBFGSOptions,
     OptimistixLMOptions,
 )
-from .optax.contracts import OptaxAdamOptions, OptaxLBFGSOptions
 from .scipy.contracts import ScipyBFGSOptions, ScipyLBFGSBOptions, ScipyLMOptions
+from .shared import LineSearchStatus
 from .simsopt.contracts import (
     SimsoptAdamHostOptions,
     SimsoptAdamOptions,
@@ -216,6 +227,7 @@ def _public_result(
     options_used: OptionsBase,
     wallclock_s: float,
 ) -> OptimizerResult:
+    hess_inv = cast(HessianInverse | None, getattr(result, "hess_inv", None))
     return OptimizerResult(
         x=_host_array(result.x),
         fun=_host_float(result.fun),
@@ -234,6 +246,7 @@ def _public_result(
             getattr(result, "residual_jacobian", None)
         ),
         hessian=_host_optional_array(getattr(result, "hessian", None)),
+        hess_inv=hess_inv,
         invalid_step_log=_invalid_step_events(result),
         optimizer_state_trace=_optimizer_state_trace(result),
         optimistix_result=getattr(result, "optimistix_result", None),

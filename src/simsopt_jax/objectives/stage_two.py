@@ -57,6 +57,7 @@ class StageTwoObjectiveConfig:
     curvature_threshold: float = 5.0
     curvature_weight: float = 0.0
     mean_squared_curvature_threshold: float = 5.0
+    mean_squared_curvature_target_mode: Literal["max", "identity"] = "max"
     mean_squared_curvature_weight: float = 0.0
     arclength_variation_weight: float = 0.0
     linking_number_weight: float = 0.0
@@ -162,10 +163,9 @@ def stage_two_geometric_penalty(
                 base_kappa * base_kappa * base_speed,
                 axis=1,
             ) / jnp.sum(base_speed, axis=1)
-            excess = jnp.maximum(
-                mean_squared_curvature - config.mean_squared_curvature_threshold,
-                0.0,
-            )
+            excess = mean_squared_curvature - config.mean_squared_curvature_threshold
+            if config.mean_squared_curvature_target_mode == "max":
+                excess = jnp.maximum(excess, 0.0)
             result = result + (
                 0.5 * config.mean_squared_curvature_weight * jnp.sum(excess * excess)
             )
