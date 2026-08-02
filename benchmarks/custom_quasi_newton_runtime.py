@@ -899,9 +899,12 @@ def _stopping_reason(
     maxiter: int,
     status: int | None,
     success: bool,
+    finite: bool = True,
 ) -> str:
-    """Classify the terminal state without treating finite decrease as success."""
+    """Classify the terminal state without masking a nonfinite endpoint."""
 
+    if not finite:
+        return "nonfinite"
     if success:
         return "converged"
     if status == 99:
@@ -1057,11 +1060,17 @@ def _measurement(
         iteration_count = int(np.asarray(result.k))
         final_parameters = np.asarray(result.x_k, dtype=np.float64)
 
+    finite_endpoint = bool(
+        np.isfinite(final_objective)
+        and np.isfinite(final_gradient_inf_norm)
+        and np.all(np.isfinite(final_parameters))
+    )
     stopping_reason = _stopping_reason(
         iterations=iteration_count,
         maxiter=maxiter,
         status=status,
         success=success,
+        finite=finite_endpoint,
     )
 
     fixture_contract["final_certificate_fields"] = {

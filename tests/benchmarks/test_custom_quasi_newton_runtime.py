@@ -71,14 +71,15 @@ def test_provider_child_discards_unbounded_stdout(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("iterations", "maxiter", "status", "success", "expected"),
+    ("iterations", "maxiter", "status", "success", "finite", "expected"),
     [
-        (4, 20, 0, True, "converged"),
-        (20, 20, 1, False, "iteration-limit"),
-        (3, 20, 2, False, "line-search-failed"),
-        (3, 20, 6, False, "nonfinite"),
-        (3, 20, 99, False, "callback-stopped"),
-        (3, 20, None, False, "failed"),
+        (4, 20, 0, True, True, "converged"),
+        (20, 20, 1, False, True, "iteration-limit"),
+        (3, 20, 2, False, True, "line-search-failed"),
+        (3, 20, 6, False, True, "nonfinite"),
+        (3, 20, 99, False, True, "callback-stopped"),
+        (3, 20, None, False, True, "failed"),
+        (3, 20, 1, False, False, "nonfinite"),
     ],
 )
 def test_stopping_reason_labels_terminal_state(
@@ -86,6 +87,7 @@ def test_stopping_reason_labels_terminal_state(
     maxiter: int,
     status: int | None,
     success: bool,
+    finite: bool,
     expected: str,
 ) -> None:
     assert (
@@ -94,6 +96,7 @@ def test_stopping_reason_labels_terminal_state(
             maxiter=maxiter,
             status=status,
             success=success,
+            finite=finite,
         )
         == expected
     )
