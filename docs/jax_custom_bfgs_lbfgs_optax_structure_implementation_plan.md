@@ -342,6 +342,14 @@ explicit comparator rather than a custom-solver parity oracle.
   accepted-step progress event, then timed out at 120.60 s with 1,762,368 KiB
   RSS. This is a runtime/history-size finding, not a compile failure; the
   receipt is incomplete by contract and is not promoted.
+- Green clean design-B matrix: the four completed cheap/coil cells were
+  rerun from clean commit `975f6b722`. Coil47 lowering was
+  `1,571,730/1,572,317` StableHLO bytes for `maxcor=10/300`; the warm coil
+  cell used `1,024,812 KiB` RSS, reached 11 iterations, and did not recompile
+  across repeated calls. Raw evidence is
+  `docs/receipts/custom-quasi-newton/compile-matrix-clean-20260802/`.
+  The legacy design-A timeout remains the reason the full A/B promotion gate
+  is open.
 - Historical pre-fix probes remain diagnostic only: the unbounded combined
   attempt reached 6.1 GiB RSS, and the old general-branch compile reached
   9,420,664 KiB RSS before interruption. Legacy kernels remain explicit opt-in.
