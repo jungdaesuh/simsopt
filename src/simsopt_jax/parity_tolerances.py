@@ -170,6 +170,8 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "rtol": 2e-8,
         "atol": 2e-10,
     },
+    "mirror_single_stage_terminal_gradient": {"rtol": 0.0, "atol": 1e-7},
+    "mirror_single_stage_terminal_constraint": {"rtol": 0.0, "atol": 1e-10},
     "mirror_optimization_5e2": {"rtol": 5e-2, "atol": 1e-9},
     "mirror_optimization_3e2": {"rtol": 3e-2, "atol": 1e-9},
     "mirror_optimization_2e2": {"rtol": 2e-2, "atol": 1e-9},
